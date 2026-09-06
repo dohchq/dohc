@@ -1,16 +1,19 @@
+import { createWorkspaceFilesIpc } from "./ipc/workspaceFilesIpc";
+import { registerWorkspaceGraphIpcHandlers } from "./ipc/workspaceGraphIpc";
+import { registerNativeMenusIpcHandlers } from "./ipc/nativeMenusIpc";
+import {
+  createWorkspaceRootApproval,
+  registerWorkspaceRegistryIpcHandlers,
+  registerOpenWorkspaceIpcHandler,
+} from "./ipc/workspaceRegistryIpc";
 import { createAppLifecycle } from "./appLifecycle";
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
 import {
   databaseOpLogPath,
-  defaultWorkspaceRoot,
-  isSharedWithMePath,
   normalizeAbsolutePath,
   preferredBuildOutput,
-  validateUserReadPath,
   validateUserWritePath,
-  validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
-import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import { randomUUID } from "node:crypto";
 import {
@@ -42,21 +45,8 @@ import {
 } from "electron";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, readdir, realpath } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import {
-  AttachWorkspaceFolderPayload,
-  CreateLocalWorkspacePayload,
-  ExportWorkspaceZipPayload,
-  ExportWorkspaceZipResult,
-  ExportDocumentFilePayload,
-  ExportDocumentFileResult,
-  ShowExplorerMenuPayload,
-  ShowExplorerMenuResult,
-  ShowWorkbenchMenuPayload,
-  ShowWorkbenchMenuResult,
-  type ExplorerMenuCommand,
-  type WorkbenchMenuCommand,
-  DefaultWorkspaceRootResult,
   ApplyDatabaseEditPayload,
   CloudEnableSyncPayload,
   CloudJoinWorkspacePayload,
@@ -101,8 +91,6 @@ import {
   DatabaseSnapshotResult,
   ImportToDatabasePayload,
   ImportToDatabaseResult,
-  ImportWorkspaceFilesPayload,
-  ImportWorkspaceFilesResult,
   GetSitePreviewLogsPayload,
   GetSitePreviewLogsResult,
   StopSitePreviewPayload,
@@ -118,8 +106,6 @@ import {
   GetCollectionResult,
   QueryCollectionRecordsPayload,
   QueryCollectionRecordsResult,
-  ListWorkspaceFilesPayload,
-  ListWorkspaceFilesResult,
   WorkspaceIdPayload,
   ListWorkspaceVersionsResult,
   CreateWorkspaceVersionPayload,
@@ -196,8 +182,6 @@ import {
   type PresenceScopeInput,
   ChatThreadRecord,
   ChatMessageRecord,
-  OpenFileExternallyPayload,
-  OpenWorkspaceRequestPayload,
   ReloadRendererRequestPayload,
   AgentRunPayload,
   EndAgentRunPayload,
@@ -213,12 +197,6 @@ import {
   RunnerSelfTestPayload,
   RunnerSelfTestResult,
   DesktopUserSettingsResult,
-  PickWorkspaceRootResult,
-  ReadWorkspaceGraphPayload,
-  GetBacklinksPayload,
-  GetBacklinksResult,
-  ListWorkspaceHeadingsPayload,
-  ListWorkspaceHeadingsResult,
   ListChatFileMentionsPayload,
   ListChatFileMentionsResult,
   ListChatBookmarksPayload,
@@ -229,12 +207,6 @@ import {
   ArchiveChatBookmarkResult,
   type ChatFileReferenceInput,
   ReadWorkspaceDatabasePayload,
-  ReadWorkspaceTextPayload,
-  ReadWorkspaceTextResult,
-  MAX_PICKED_IMAGES,
-  PickImageFilesPayload,
-  PickImageFilesResult,
-  WRITE_ASSET_MAX_BYTES,
   SetTitlebarThemePayload,
   StepWindowZoomPayload,
   SetUserSettingsPayload,
@@ -247,9 +219,7 @@ import {
   SyncStatusResult,
   RebuildEngineStorePayload,
   RebuildEngineStoreResult,
-  WorkspaceRegistryResult,
   WorkspaceSummary,
-  WorkspaceGraphResult,
   UpdateActionResult,
   UpdateCheckResult,
   UpdateStateEvent,
@@ -452,7 +422,6 @@ import {
   type CloudLogin,
 } from "./workspaces/cloudLogin";
 import { createJoinedWorkspaceRunner } from "./workspaces/createJoinedWorkspace";
-import { popupNativeMenu } from "./window/popupNativeMenu";
 import { registerRelaySharesIpcHandlers } from "./ipc/relaySharesIpc";
 import {
   credentialScopedOperation,
@@ -494,16 +463,11 @@ import {
   assertRealMountRoot,
   mountStoreWorkspaceIdFor,
   overlayCanonicalShareMountFiles,
-  refuseImportIntoShareProjection,
   resolveShareMountPath,
   shareViewFilesMountProjection,
   shareMountRecordsForId,
-  usableShareMountRecord,
 } from "./workspaces/shareMounts";
 import { createShareMountCommands } from "./workspaces/shareMountCommands";
-import {
-  collectOwnedWorkspaceZipEntries,
-} from "./workspaces/ownedWorkspaceZip";
 import { prepareOwnedStaticSitePreview } from "./workspaces/ownedStaticSiteFileSource";
 import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
 import {
@@ -682,7 +646,6 @@ import {
 } from "./plugins/pluginSurfaces";
 import type { DohcPluginManifest } from "./plugins/pluginManifestSchema";
 import {
-  mediaTypeForExtension,
   prepareWorkspaceFileRead,
   readWorkspaceText,
   resolveWorkspaceFile,
@@ -692,7 +655,6 @@ import {
 import {
   createShareViewFiles,
   ShareViewFilesState,
-  type ShareViewFileChangeOutcome,
   type ShareViewFiles,
   type ShareViewFilesTarget,
 } from "./workspaces/shareViewFiles";
@@ -700,7 +662,6 @@ import {
   resolveRegisteredShareViewFilesTarget,
   shareMountRegistryIsPresent,
   storedShareMounts,
-  workspaceHasReceivedShareState,
 } from "./workspaces/shareViewFilesTarget";
 import { createOwnedProjectionRepairer } from "./workspaces/ownedProjectionRepair";
 import { createOwnedWorkspaceFileReader } from "./workspaces/ownedWorkspaceFileReader";
@@ -715,9 +676,7 @@ import { WorkspaceGraphIndex } from "./workspaces/workspaceGraph";
 import {
   extractWorkspaceHeadings,
   findWorkspaceHeading,
-  workspaceHeadingRecords,
 } from "./workspaces/workspaceHeadings";
-import { addChatMentionsToWorkspaceGraph } from "./workspaces/chatMentionGraphOverlay";
 import {
   resolveChatFileMentionPath,
   resolveTrackedChatFilePath,
@@ -727,16 +686,7 @@ import {
   archiveChatBookmarkProjection,
   writeChatBookmarkProjection,
 } from "./workspaces/chatBookmarkProjectionWrite";
-import {
-  copyIntoWorkspace,
-  importDroppedPaths,
-  listFiles,
-  MAX_ZIP_ENTRIES,
-  MAX_ZIP_TOTAL_BYTES,
-  ZIP_TOO_LARGE_REFUSAL,
-} from "./workspaces/workspaceFiles";
-import { explorerMenuEntries } from "./workspaces/explorerMenu";
-import { buildStoreZip, type ZipEntry } from "./workspaces/zipWriter";
+import { listFiles } from "./workspaces/workspaceFiles";
 import { readUiStateFile, writeUiStateFile } from "./workspaces/workspaceUiState";
 import {
   DEFAULT_USER_SETTINGS,
@@ -1400,44 +1350,6 @@ async function executePreviewForSite(input: SitePreviewExecutionInput) {
       ...(build ? { build } : {}),
     },
   };
-}
-
-// Native dialogs cannot be driven by Playwright, so every dialog-backed IPC
-// gets one seam of the same shape: a DOHC_TEST_* env var holding a JSON array
-// of absolute paths, honored only in an unpackaged test build. Shared so the
-// import and image-picker seams cannot drift apart in their validation.
-function testAbsolutePaths(envName: string, maxEntries: number): string[] | null {
-  if (process.env.DOHC_DESKTOP_TEST !== "1" || app.isPackaged) return null;
-  const raw = process.env[envName];
-  if (!raw) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error(`${envName} must be a JSON array of absolute paths`);
-  }
-  if (!Array.isArray(parsed) || parsed.length > maxEntries) {
-    throw new Error(
-      `${envName} must be an array with at most ${maxEntries} paths`,
-    );
-  }
-  const paths: string[] = [];
-  for (const entry of parsed) {
-    if (
-      typeof entry !== "string" ||
-      entry.length === 0 ||
-      entry.length > 4096 ||
-      !isAbsolute(entry)
-    ) {
-      throw new Error(`${envName} entries must be absolute paths`);
-    }
-    paths.push(entry);
-  }
-  return paths;
-}
-
-function testImportPaths(): string[] | null {
-  return testAbsolutePaths("DOHC_TEST_IMPORT_PATHS", 100);
 }
 
 // Lazy: safeStorage and userData are only safe to touch after app ready, and
@@ -5923,110 +5835,6 @@ const ownedSiteCatalog = createOwnedSiteCatalog({
   reads: ownedWorkspaceReadsFor,
 });
 
-function ownedWorkspaceGraphSource(
-  workspace: RegistryEntry & { readonly attachmentId: symbol },
-) {
-  const hasShareState = workspaceHasReceivedShareState(workspace);
-  return {
-    // Ordinary workspaces share the Explorer's complete listing. Received
-    // shares still list per request so authority changes are intersected before
-    // resolution; their parsed bodies remain reusable by content identity.
-    list: () =>
-      hasShareState
-        ? listOwnedWorkspaceFilesFor(workspace)
-        : workspaceFileListings.list({
-            workspaceId: workspace.workspaceId,
-            attachmentId: workspace.attachmentId,
-            allowCached: true,
-            load: () => listOwnedWorkspaceFilesFor(workspace),
-          }),
-    ...(hasShareState
-      ? {
-          readText: (path: string) => readOwnedWorkspaceTextFor(workspace, path),
-        }
-      : {}),
-  };
-}
-
-async function collectShareTargetZipEntries(input: {
-  target: ShareViewFilesTarget;
-  rootName: string;
-  relativePath?: string;
-}): Promise<{ entries: ZipEntry[]; baseName: string }> {
-  const listed = await shareViewFiles.list(input.target);
-  let selectedPath: string | undefined;
-  if (input.relativePath !== undefined) {
-    const validated = validateUserReadPath(input.relativePath);
-    if (!validated.ok) {
-      throw new Error(
-        `Invalid export path (${validated.reason}): ${input.relativePath}`,
-      );
-    }
-    selectedPath = validated.normalized;
-    if (classifyEngineFilePathForRead(selectedPath).kind === "secret") {
-      throw new Error(
-        `Secret files never leave the workspace in an export: ${selectedPath}`,
-      );
-    }
-  }
-  const selected = listed.files.filter(
-    (file) =>
-      selectedPath === undefined ||
-      file.path === selectedPath ||
-      file.path.startsWith(`${selectedPath}/`),
-  );
-  if (
-    selectedPath !== undefined &&
-    selected.length === 0 &&
-    !(listed.folders ?? []).includes(selectedPath)
-  ) {
-    throw new Error(`Export path does not exist: ${selectedPath}`);
-  }
-  const entries: ZipEntry[] = [];
-  let totalBytes = 0;
-  for (const file of selected) {
-    if (classifyEngineFilePathForRead(file.path).kind === "secret") continue;
-    const read = await shareViewFiles.read(input.target, {
-      kind: "asset",
-      path: file.path,
-    });
-    if (read.kind !== "asset") {
-      throw new Error("Shared export read returned an invalid result.");
-    }
-    totalBytes += read.bytes.byteLength;
-    if (
-      entries.length >= MAX_ZIP_ENTRIES ||
-      totalBytes > MAX_ZIP_TOTAL_BYTES
-    ) {
-      throw new Error(ZIP_TOO_LARGE_REFUSAL);
-    }
-    const archivePath =
-      selectedPath === undefined
-        ? file.path
-        : file.path === selectedPath
-          ? basename(selectedPath)
-          : `${basename(selectedPath)}/${file.path.slice(selectedPath.length + 1)}`;
-    entries.push({ path: archivePath, data: read.bytes });
-  }
-  const name =
-    selectedPath === undefined ? input.rootName : basename(selectedPath);
-  return {
-    entries,
-    baseName: name.replace(/\.[^.]+$/, "") || name,
-  };
-}
-
-async function collectOwnedZipEntries(
-  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
-  relativePath?: string,
-): Promise<{ entries: ZipEntry[]; baseName: string }> {
-  return collectOwnedWorkspaceZipEntries({
-    workspace,
-    ...(relativePath === undefined ? {} : { relativePath }),
-    collectShare: collectShareTargetZipEntries,
-  });
-}
-
 async function ensureOwnedProjectionCurrent(
   workspace: { workspaceId: string },
   relativePath: string,
@@ -6061,39 +5869,6 @@ async function syncStatusWithOwnedProjection(
         ? { state: "current" }
         : projection,
   };
-}
-
-function shareViewImportResult(
-  workspaceId: string,
-  outcome: ShareViewFileChangeOutcome,
-): { imported: string[]; skipped: number; interrupted?: true } {
-  if (outcome.status === "committed") {
-    if (outcome.projection === "pending") notifyRenderer({ workspaceId });
-    if (
-      typeof outcome.value !== "object" ||
-      outcome.value === null ||
-      !("imported" in outcome.value) ||
-      !("skipped" in outcome.value)
-    ) {
-      throw new Error("Shared file import returned an invalid result.");
-    }
-    return outcome.value as { imported: string[]; skipped: number };
-  }
-  notifyRenderer({ workspaceId });
-  console.error("[desktop] shared file import did not finish cleanly", outcome);
-  if (outcome.status === "partial") {
-    const imported = outcome.effects
-      .filter((effect) => effect.before === "absent" && effect.after === "present")
-      .map((effect) => effect.path);
-    return {
-      imported,
-      skipped: 0,
-      interrupted: true,
-    };
-  }
-  throw new Error(
-    "dohc could not confirm which shared files were imported. Do not retry the whole import. Refresh the shared view, then choose only files that are still missing.",
-  );
 }
 
 async function closeRelayTransportWorkspace(
@@ -6273,29 +6048,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
   },
 });
 
-// Workspace roots the main process itself produced — the default suggestion
-// and any folder the user chose through the real OS dialog. A renderer cannot
-// invent a path (e.g. ~/.ssh) it was never handed; create/attach roots must
-// be one of these or a descendant. Populated by getDefaultWorkspaceRoot and
-// pickWorkspaceRoot before the renderer can create/attach.
-const approvedRoots = new Set<string>();
-
-function approveRoot(rootPath: string): void {
-  approvedRoots.add(normalizeAbsolutePath(rootPath));
-}
-
-function isApprovedRoot(normalized: string): boolean {
-  for (const approved of approvedRoots) {
-    // This is an exact capability-spelling check, not filesystem containment:
-    // the approved root or requested workspace may not exist yet. The create
-    // path realpath-checks its existing parent before it writes.
-    const prefix = approved.endsWith("/") ? approved : `${approved}/`;
-    if (normalized === approved || normalized.startsWith(prefix)) {
-      return true;
-    }
-  }
-  return false;
-}
+const workspaceRootApproval = createWorkspaceRootApproval(effectiveHome);
 
 function nearestWorkspaceRoot(startPath: string): string | null {
   let current = startPath;
@@ -6512,113 +6265,47 @@ function registerIpcHandlers(
     if (accepted && !sender.isDestroyed()) sender.reload();
   });
 
-  ipcMain.handle(CHANNELS.pickWorkspaceRoot, async (event) => {
-    assertTrustedSender(event);
-    // Test seam: native dialogs cannot be driven by Playwright.
-    const testPick = process.env.DOHC_TEST_PICK_PATH;
-    if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged && testPick) {
-      approveRoot(testPick);
-      return PickWorkspaceRootResult.parse(testPick);
-    }
-    const result = await dialog.showOpenDialog({
-      properties: ["openDirectory", "createDirectory"],
-    });
-    const picked = result.canceled ? null : (result.filePaths[0] ?? null);
-    if (picked) approveRoot(picked);
-    return PickWorkspaceRootResult.parse(picked);
+  const { usableRoot } = workspaceRootApproval;
+  registerWorkspaceRegistryIpcHandlers<IpcMainInvokeEvent>({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender,
+    app,
+    dialog,
+    roots: workspaceRootApproval,
+    effectiveHome,
+    workspaceSummaries,
+    prioritizePreferredWorkspace,
+    createWorkspaceFolder,
+    registerPhysicalWorkspace,
+    refreshNativeWorkspaceSurfaces,
+    desktopMarks,
   });
 
-  ipcMain.handle(CHANNELS.getWorkspaceRegistry, (event) => {
-    assertTrustedSender(event);
-    return WorkspaceRegistryResult.parse({
-      workspaces: prioritizePreferredWorkspace(workspaceSummaries()),
-    });
+  const workspaceFilesIpc = createWorkspaceFilesIpc<
+    WebContents,
+    IpcMainInvokeEvent,
+    DesktopRendererWorkspaceOperation["workspace"],
+    DesktopRendererWorkspaceOperation,
+  >({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender,
+    app,
+    dialog,
+    shell,
+    withRendererWorkspaceOperation,
+    exactRendererWorkspaceReferences,
+    workspaceFileListings,
+    workspaceFileMutations,
+    listOwnedWorkspaceFilesFor,
+    readOwnedWorkspaceTextFor,
+    assertWritableWorkspace,
+    shareViewFiles,
+    listWorkspaces,
+    ensureOwnedProjectionCurrent,
+    renderHtmlToPdf,
+    notifyRenderer,
   });
-
-  ipcMain.handle(CHANNELS.getDefaultWorkspaceRoot, (event) => {
-    assertTrustedSender(event);
-    const root = defaultWorkspaceRoot(effectiveHome());
-    approveRoot(root);
-    return DefaultWorkspaceRootResult.parse(root);
-  });
-
-  // Validates, canonicalizes, and confirms the root traces to a main-process
-  // suggestion or dialog pick — a renderer cannot scope fs ops to a path it
-  // invented. All downstream ops use the normalized root.
-  function usableRoot(rootPath: string): string {
-    const check = validateWorkspaceRootChoice(rootPath, effectiveHome());
-    if (!check.ok) throw new Error(check.reason);
-    if (!isApprovedRoot(check.normalized)) {
-      throw new Error(
-        "Workspace root must be chosen through dohc (the default location or the folder picker).",
-      );
-    }
-    return check.normalized;
-  }
-
-  ipcMain.handle(CHANNELS.createLocalWorkspace, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = CreateLocalWorkspacePayload.parse(payload);
-    desktopMarks.mark("workspace-create-start");
-    const created = await createWorkspaceFolder({
-      rootPath: usableRoot(input.rootPath),
-      kind: input.kind,
-    });
-    desktopMarks.measureSince("workspace-create", "workspace-create-start");
-    // Parse before register: a summary that fails the contract must never be
-    // persisted into the registry, or every later registry read would throw
-    // and the app would launch to a permanent blank window.
-    const summary = WorkspaceSummary.parse(created);
-    registerPhysicalWorkspace(created);
-    refreshNativeWorkspaceSurfaces();
-    return summary;
-  });
-
-  ipcMain.handle(CHANNELS.attachWorkspaceFolder, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = AttachWorkspaceFolderPayload.parse(payload);
-    // Adopts an existing dohc workspace (manifest identity preserved) or
-    // turns the folder into a fresh personal workspace in place.
-    const attached = await createWorkspaceFolder({
-      rootPath: usableRoot(input.rootPath),
-      kind: "personal",
-    });
-    // Parse-then-register (see createLocalWorkspace): a foreign manifest's
-    // workspaceId is untrusted input — an oversized or non-hostname-safe id
-    // must fail the attach with a visible error, not brick the registry.
-    const summary = WorkspaceSummary.parse(attached);
-    registerPhysicalWorkspace(attached);
-    refreshNativeWorkspaceSurfaces();
-    return summary;
-  });
-
-  ipcMain.handle(CHANNELS.listWorkspaceFiles, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListWorkspaceFilesPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "File listing stopped because this window changed workspaces.",
-      async (operation) => {
-        const workspace = operation.workspace;
-        const listing = await workspaceFileListings.list({
-          workspaceId: workspace.workspaceId,
-          attachmentId: workspace.attachmentId,
-          allowCached: input.allowCached === true,
-          load: async () => await listOwnedWorkspaceFilesFor(workspace),
-        });
-        return ListWorkspaceFilesResult.parse(listing);
-      },
-    );
-  });
-
-  ipcMain.handle(CHANNELS.createWorkspaceFile, workspaceFileMutations.createFile);
-  ipcMain.handle(
-    CHANNELS.createWorkspaceFolder,
-    workspaceFileMutations.createFolder,
-  );
-  ipcMain.handle(CHANNELS.moveWorkspacePath, workspaceFileMutations.movePath);
-  ipcMain.handle(CHANNELS.deleteWorkspacePath, workspaceFileMutations.deletePath);
+  workspaceFilesIpc.registerListing();
 
   // Collections: read-only engine index queries. list answers
   // "no collections" when the daemon has no sessions, so a shared view stays
@@ -6679,741 +6366,44 @@ function registerIpcHandlers(
     );
   });
 
-  ipcMain.handle(CHANNELS.exportWorkspaceZip, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ExportWorkspaceZipPayload.parse(payload);
-    const inactiveMessage =
-      "Export stopped because this window changed workspaces.";
-    const workspaceReference = await exactRendererWorkspaceReferences.capture(
-      event.sender,
-      input.workspaceId,
-      inactiveMessage,
-    );
-    // Gather + bound before asking where to save: an over-limit export
-    // refuses without ever showing a dialog.
-    const { entries, baseName } = await exactRendererWorkspaceReferences.withReference(
-      event.sender,
-      workspaceReference,
-      inactiveMessage,
-      (operation) =>
-        collectOwnedZipEntries(operation.workspace, input.relativePath),
-    );
-    // Test seam (DOHC_TEST_PICK_PATH precedent): native save dialogs cannot
-    // be driven by Playwright. Read per-invoke so a spec can repoint it.
-    const testSave = process.env.DOHC_TEST_SAVE_PATH;
-    let target: string | null;
-    if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged && testSave) {
-      target = testSave;
-    } else {
-      const result = await dialog.showSaveDialog({
-        title: "Export as zip",
-        defaultPath: `${baseName}.zip`,
-        filters: [{ name: "Zip archive", extensions: ["zip"] }],
-      });
-      target = result.canceled ? null : (result.filePath ?? null);
-    }
-    return exactRendererWorkspaceReferences.withReference(
-      event.sender,
-      workspaceReference,
-      inactiveMessage,
-      async (operation) => {
-        if (target === null) {
-          return ExportWorkspaceZipResult.parse({ path: null });
-        }
-        const { writeFile } = await import("node:fs/promises");
-        operation.assertCurrent();
-        await writeFile(target, buildStoreZip(entries));
-        operation.assertCurrent();
-        return ExportWorkspaceZipResult.parse({ path: target });
-      },
-    );
+  workspaceFilesIpc.registerExports();
+
+  registerNativeMenusIpcHandlers<
+    WebContents,
+    IpcMainInvokeEvent,
+    DesktopRendererWorkspaceOperation["workspace"],
+    DesktopRendererWorkspaceOperation,
+  >({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender,
+    app,
+    exactRendererWorkspaceReferences,
+    sharedViewOf,
+    windowForSender: (sender) => BrowserWindow.fromWebContents(sender) ?? undefined,
+    buildFromTemplate: (template) => Menu.buildFromTemplate(template),
+    currentUpdateState,
+    ensureOwnedProjectionCurrent,
+    shell,
   });
 
-  // "Copy as Markdown" / "Export as HTML" / "Export as PDF" (ViewHeader's
-  // document menu). The renderer always sends the same self-contained HTML
-  // (documentExport.ts); this handler only decides where the bytes land
-  // (.html verbatim, .pdf via the hidden offscreen window) — see
-  // documentPdfExport.ts for the "only one export in flight" guard.
-  ipcMain.handle(CHANNELS.exportDocumentFile, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ExportDocumentFilePayload.parse(payload);
-    const inactiveMessage =
-      "Export stopped because this window changed workspaces.";
-    // workspaceId authorizes the caller (a real, currently-open workspace) —
-    // the save target itself is intentionally outside any workspace, same as
-    // exportWorkspaceZip above.
-    const workspaceReference = await exactRendererWorkspaceReferences.capture(
-      event.sender,
-      input.workspaceId,
-      inactiveMessage,
-    );
+  workspaceFilesIpc.registerAccess();
 
-    const exportKinds: Record<
-      typeof input.kind,
-      { extension: string; title: string; filter: Electron.FileFilter }
-    > = {
-      markdown: {
-        extension: "md",
-        title: "Export as Markdown",
-        filter: { name: "Markdown document", extensions: ["md"] },
-      },
-      html: {
-        extension: "html",
-        title: "Export as HTML",
-        filter: { name: "HTML document", extensions: ["html"] },
-      },
-      pdf: {
-        extension: "pdf",
-        title: "Export as PDF",
-        filter: { name: "PDF document", extensions: ["pdf"] },
-      },
-    };
-    const exportKind = exportKinds[input.kind];
-    const testSave = process.env.DOHC_TEST_SAVE_PATH;
-    let target: string | null;
-    if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged && testSave) {
-      target = testSave;
-    } else {
-      const result = await dialog.showSaveDialog({
-        title: exportKind.title,
-        defaultPath: `${input.suggestedName}.${exportKind.extension}`,
-        filters: [exportKind.filter],
-      });
-      target = result.canceled ? null : (result.filePath ?? null);
-    }
-    return exactRendererWorkspaceReferences.withReference(
-      event.sender,
-      workspaceReference,
-      inactiveMessage,
-      async (operation) => {
-        if (target === null) {
-          return ExportDocumentFileResult.parse({ path: null });
-        }
-        const { writeFile } = await import("node:fs/promises");
-        operation.assertCurrent();
-        if (input.kind === "pdf") {
-          const pdf = await renderHtmlToPdf(input.content);
-          operation.assertCurrent();
-          await writeFile(target, pdf);
-        } else {
-          // Markdown and HTML both arrive as the exact text to persist —
-          // markdown is the raw document source, HTML the self-contained render.
-          await writeFile(target, input.content, "utf8");
-        }
-        operation.assertCurrent();
-        return ExportDocumentFileResult.parse({ path: target });
-      },
-    );
-  });
-
-  // Native explorer context menu over the closed EXPLORER_MENU_COMMANDS set:
-  // main owns every label and the item structure (the renderer only names
-  // what was right-clicked), and the chosen id resolves the same invoke —
-  // null on dismiss. "Reveal in file manager" is performed here (containment
-  // first) so no broader open-path IPC needs to exist for it.
-  ipcMain.handle(CHANNELS.showExplorerMenu, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ShowExplorerMenuPayload.parse(payload);
-    const inactiveMessage =
-      "Explorer action stopped because this window changed workspaces.";
-    const workspaceReference = await exactRendererWorkspaceReferences.capture(
-      event.sender,
-      input.workspaceId,
-      inactiveMessage,
-    );
-    const menuContext = await exactRendererWorkspaceReferences.withReference(
-      event.sender,
-      workspaceReference,
-      inactiveMessage,
-      async (operation) => {
-        const registryEntry = operation.workspace;
-        const shareView = sharedViewOf(registryEntry.workspaceId);
-        const isSharedView = shareView !== null;
-        const isMountPath =
-          !isSharedView && !!input.path && isSharedWithMePath(input.path);
-        const mountForPath = isMountPath
-          ? (() => {
-              const mounts = storedShareMounts(registryEntry);
-              return mounts
-                .filter((mount) => usableShareMountRecord(mounts, mount))
-                .find((mount) => input.path === `shared-with-me/${mount.label}`);
-            })()
-          : undefined;
-        return {
-          shareView,
-          isMountPath,
-          hasMountRecord: mountForPath !== undefined,
-          canShare:
-            !isSharedView &&
-            !isMountPath &&
-            !!registryEntry.remote &&
-            input.kind !== "root",
-        };
-      },
-    );
-
-    const chosen = await (() => {
-      // Test seam (DOHC_TEST_PICK_PATH precedent): a NATIVE menu cannot be
-      // driven by Playwright. Read per-invoke so a spec can repoint it via
-      // electronApp.evaluate between right-clicks; values outside the closed
-      // tuple resolve null exactly like a dismissed menu.
-      if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged) {
-        const choice = process.env.DOHC_TEST_EXPLORER_MENU_CHOICE;
-        if (choice !== undefined) {
-          const parsed = ShowExplorerMenuResult.safeParse(choice);
-          return parsed.success ? parsed.data : null;
-        }
-      }
-      return popupNativeMenu<ExplorerMenuCommand>({
-        window: BrowserWindow.fromWebContents(event.sender) ?? undefined,
-        buildFromTemplate: (template) => Menu.buildFromTemplate(template),
-        template: (item) => {
-          // The menu's shape is decided by `explorerMenuEntries`, where it can be
-          // driven at every level; main owns only the Electron plumbing. main
-          // still owns the MENU, so a renderer cannot add an item back.
-          // Share-mount paths (shared-with-me/…) are a read-only projection of
-          // someone else's files. The mount root itself (shared-with-me/<label>
-          // with a matching mount record) additionally offers refresh and removal.
-          return explorerMenuEntries({
-            kind: input.kind,
-            pinned: input.pinned === true,
-            isMountPath: menuContext.isMountPath,
-            hasMountRecord: menuContext.hasMountRecord,
-            // Sharing onward is offered nowhere in a share view or a mount:
-            // someone else's files are not this account's to grant, and a share
-            // needs a relay-side workspace to grant from.
-            canShare: menuContext.canShare,
-            shareView: menuContext.shareView,
-          }).map((entry) =>
-            entry.kind === "separator"
-              ? { type: "separator" as const }
-              : item(entry.label, entry.id),
-          );
-        },
-      });
-    })();
-
-    return exactRendererWorkspaceReferences.withReference(
-      event.sender,
-      workspaceReference,
-      inactiveMessage,
-      async (operation) => {
-        if (chosen === "open-externally" && input.path) {
-          // Containment before the OS sees the path (resolveWorkspaceFile:
-          // validate + realpath + inside-root), same rule as openFileExternally.
-          await ensureOwnedProjectionCurrent(operation.workspace, input.path!);
-          const { realTarget } = await resolveWorkspaceFile(
-            operation.workspace.rootPath,
-            input.path!,
-            "read",
-          );
-          operation.assertCurrent();
-          shell.showItemInFolder(realTarget);
-        }
-        return ShowExplorerMenuResult.parse(chosen);
-      },
-    );
-  });
-
-  ipcMain.handle(CHANNELS.showWorkbenchMenu, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ShowWorkbenchMenuPayload.parse(payload);
-    const inactiveMessage =
-      "Workbench menu stopped because this window changed workspaces.";
-    const workspaceReference = await exactRendererWorkspaceReferences.capture(
-      event.sender,
-      input.workspaceId,
-      inactiveMessage,
-    );
-
-    const chosen = await (() => {
-      if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged) {
-        const choice = process.env.DOHC_TEST_WORKBENCH_MENU_CHOICE;
-        if (choice !== undefined) {
-          const parsed = ShowWorkbenchMenuResult.safeParse(choice);
-          return parsed.success ? parsed.data : null;
-        }
-      }
-      return popupNativeMenu<WorkbenchMenuCommand>({
-        window: BrowserWindow.fromWebContents(event.sender) ?? undefined,
-        buildFromTemplate: (template) => Menu.buildFromTemplate(template),
-        template: (item) => {
-          const separator = { type: "separator" as const };
-          const editRoles: Electron.MenuItemConstructorOptions[] = [
-            { role: "undo" },
-            { role: "redo" },
-            separator,
-            { role: "cut" },
-            { role: "copy" },
-            { role: "paste" },
-            { role: "selectAll" },
-          ];
-          return input.context === "tab"
-            ? [
-                item("Move into New Group", "move-tab-to-new-group"),
-                item("Close Editor Group", "close-editor-group", {
-                  enabled: input.canCloseEditorGroup === true,
-                }),
-                separator,
-                item("Close Tab", "close-tab"),
-                item("Close Other Tabs", "close-other-tabs"),
-                separator,
-                item("Copy Path", "copy-path"),
-                item("Show in Explorer", "show-in-explorer"),
-              ]
-            : input.context === "status"
-              ? [
-                  item("Open History", "open-history"),
-                  separator,
-                  item("Connect dohc Cloud", "connect-cloud"),
-                  item("Settings", "settings"),
-                  separator,
-                  item("Check for Updates…", "check-updates"),
-                  item("Update and Restart", "install-update", {
-                    enabled: currentUpdateState().canInstall === true,
-                  }),
-                  separator,
-                  item("Toggle Theme", "toggle-theme"),
-                ]
-              : [...editRoles];
-        },
-      });
-    })();
-
-    return exactRendererWorkspaceReferences.withReference(
-      event.sender,
-      workspaceReference,
-      inactiveMessage,
-      () => ShowWorkbenchMenuResult.parse(chosen),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.importWorkspaceFiles, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ImportWorkspaceFilesPayload.parse(payload);
-    const importInto = (
-      operation: DesktopRendererWorkspaceOperation,
-      absolutePaths: string[],
-      screenAgainstRoots: string[] | null,
-    ) => {
-      const workspace = operation.workspace;
-      return withStaleSensitiveWorkspaceOperation(
-        workspace.rootPath,
-        async (lease) => {
-          const currentWorkspace = operation.workspace;
-          const isShareView = shareViewIsPresent(currentWorkspace.shareView);
-          if (!isShareView) {
-            assertWritableWorkspace(currentWorkspace);
-            await refuseImportIntoShareProjection(
-              workspace.rootPath,
-              input.targetDir,
-              storedShareMounts(currentWorkspace),
-              shareMountRegistryIsPresent(currentWorkspace),
-            );
-            return screenAgainstRoots === null
-              ? copyIntoWorkspace(
-                  workspace.rootPath,
-                  absolutePaths,
-                  input.targetDir,
-                )
-              : importDroppedPaths(
-                  workspace.rootPath,
-                  absolutePaths,
-                  screenAgainstRoots,
-                  input.targetDir,
-                );
-          }
-          return shareViewImportResult(
-            workspace.workspaceId,
-            await shareViewFiles.change(
-              lease,
-              { kind: "standalone", workspaceId: workspace.workspaceId },
-              {
-                kind: "import",
-                absolutePaths,
-                screenAgainstRoots,
-                targetDir: input.targetDir,
-              },
-            ),
-          );
-        },
-      );
-    };
-    // OS drag-in path: renderer-supplied absolute paths (see the trust-delta
-    // note on the payload) re-validated by the drag-in screen — regular
-    // files only, never any registered workspace's .dohc metadata. The
-    // renderer-supplied targetDir is re-validated inside the import path
-    // (resolveImportDestination) before any copy.
-    const droppedPaths = input.droppedPaths;
-    if (droppedPaths !== undefined) {
-      return withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "File import stopped because this window changed workspaces.",
-        async (operation) =>
-          ImportWorkspaceFilesResult.parse(
-            await importInto(
-              operation,
-              droppedPaths,
-              listWorkspaces().map((ws) => ws.rootPath),
-            ),
-          ),
-      );
-    }
-    const inactiveMessage =
-      "File import stopped because this window changed workspaces.";
-    const workspaceReference = await exactRendererWorkspaceReferences.capture(
-      event.sender,
-      input.workspaceId,
-      inactiveMessage,
-    );
-    const picked = testImportPaths();
-    const result =
-      picked === null
-        ? await dialog.showOpenDialog({
-            properties: ["openFile", "multiSelections"],
-            title: "Import files into workspace",
-          })
-        : { canceled: false, filePaths: picked };
-    return exactRendererWorkspaceReferences.withReference(
-      event.sender,
-      workspaceReference,
-      inactiveMessage,
-      async (operation) =>
-        result.canceled
-          ? ImportWorkspaceFilesResult.parse({ imported: [], skipped: 0 })
-          : ImportWorkspaceFilesResult.parse(
-              await importInto(operation, result.filePaths, null),
-            ),
-    );
-  });
-
-  // Plugin SDK reads use the combined helper to make the main-process
-  // workspace authorization boundary explicit. Older workspace handlers keep
-  // the equivalent assertTrustedSender + requireWorkspace steps separate.
-  ipcMain.handle(CHANNELS.readWorkspaceText, async (event, payload) => {
-    const input = ReadWorkspaceTextPayload.parse(payload);
-    assertTrustedSender(event);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "File read stopped because this window changed workspaces.",
-      async (operation) =>
-        ReadWorkspaceTextResult.parse(
-          await readOwnedWorkspaceTextFor(
-            operation.workspace,
-            input.relativePath,
-          ),
-        ),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.writeWorkspaceText, workspaceFileMutations.writeText);
-  ipcMain.handle(CHANNELS.writeWorkspaceAsset, workspaceFileMutations.writeAsset);
-
-  // `/image`: a native open dialog that starts AT THE WORKSPACE ROOT (a
-  // renderer <input type="file"> cannot set a starting directory), then reads
-  // the picks here and hands the renderer their bytes — one round trip into
-  // the same write+insert path paste and drop already use. The picked files
-  // are deliberately allowed to live anywhere on disk: this is a user-directed
-  // pick, and the bytes are copied INTO the workspace by writeWorkspaceAsset,
-  // which re-validates containment. The renderer never sees an absolute path.
-  ipcMain.handle(CHANNELS.pickImageFiles, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = PickImageFilesPayload.parse(payload);
-    const inactiveMessage =
-      "Image selection stopped because this window changed workspaces.";
-    const workspaceReference = await exactRendererWorkspaceReferences.capture(
-      event.sender,
-      input.workspaceId,
-      inactiveMessage,
-    );
-    await exactRendererWorkspaceReferences.withReference(
-      event.sender,
-      workspaceReference,
-      inactiveMessage,
-      (operation) => assertWritableWorkspace(operation.workspace),
-    );
-
-    const seam = testAbsolutePaths("DOHC_TEST_PICK_IMAGE_PATHS", MAX_PICKED_IMAGES);
-    let picked: string[];
-    if (seam) {
-      picked = seam;
-    } else {
-      const result = await dialog.showOpenDialog({
-        title: "Insert image",
-        // The workspace directory — where a user's own images live — instead
-        // of wherever the OS last happened to leave the dialog.
-        defaultPath: workspaceReference.canonicalRootPath,
-        properties: ["openFile", "multiSelections"],
-        filters: [
-          {
-            name: "Images",
-            extensions: ["png", "jpg", "jpeg", "webp", "gif", "svg", "avif", "bmp"],
-          },
-        ],
-      });
-      picked = result.canceled ? [] : result.filePaths;
-    }
-
-    return exactRendererWorkspaceReferences.withReference(
-      event.sender,
-      workspaceReference,
-      inactiveMessage,
-      async (operation) => {
-        assertWritableWorkspace(operation.workspace);
-        const { readFile, stat } = await import("node:fs/promises");
-        const files: PickImageFilesResult["files"] = [];
-        for (const path of picked.slice(0, MAX_PICKED_IMAGES)) {
-          try {
-            const info = await stat(path);
-            // Oversize picks are refused the same quiet way paste refuses them:
-            // skipped with a warning, never a thrown dialog in the user's face.
-            if (
-              !info.isFile() ||
-              info.size === 0 ||
-              info.size > WRITE_ASSET_MAX_BYTES
-            ) {
-              console.warn(
-                `[desktop] skipping picked image "${path}" (${info.size} bytes; max ${WRITE_ASSET_MAX_BYTES}).`,
-              );
-              continue;
-            }
-            files.push({
-              name: basename(path),
-              mediaType: mediaTypeForExtension(path),
-              bytes: new Uint8Array(await readFile(path)),
-            });
-          } catch (error) {
-            console.warn(`[desktop] could not read picked image "${path}":`, error);
-          }
-        }
-        return PickImageFilesResult.parse({ files });
-      },
-    );
-  });
-
-  ipcMain.handle(CHANNELS.openFileExternally, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = OpenFileExternallyPayload.parse(payload);
-    await withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "External file open stopped because this window changed workspaces.",
-      async (operation) => {
-        // Resolve+contain first: only a real file inside the workspace can be
-        // handed to the OS opener — never an arbitrary path or URL. window.open
-        // remains fully denied; this is the only sanctioned external-open path.
-        await ensureOwnedProjectionCurrent(
-          operation.workspace,
-          input.relativePath,
-        );
-        const { realTarget } = await resolveWorkspaceFile(
-          operation.workspace.rootPath,
-          input.relativePath,
-          "read",
-        );
-        operation.assertCurrent();
-        const error = await shell.openPath(realTarget);
-        if (error) throw new Error(error);
-      },
-    );
-  });
-
-  ipcMain.handle(CHANNELS.readWorkspaceGraph, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ReadWorkspaceGraphPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Workspace graph read stopped because this window changed workspaces.",
-      async (operation) => {
-        const workspace = operation.workspace;
-        const graph = await operation.state.workspaceGraph.readGraph(
-          workspace.rootPath,
-          ownedWorkspaceGraphSource(workspace),
-        );
-        if (!input.includeChatMentions) return WorkspaceGraphResult.parse(graph);
-        const { workspace: engineWorkspace } = await requireEngineCapture(
-          workspace.workspaceId,
-          "Chat mentions",
-        );
-    const rowsUncovered = await syncWorkspaceSharedChannels(
-      engineWorkspace.workspaceId,
-    );
-    const store = linkedChatStoreFor(engineWorkspace);
-    const threads = await store.listThreads({ workspaceId: engineWorkspace.workspaceId });
-    const graphChannelRows = await store.listChannels({
-      workspaceId: engineWorkspace.workspaceId,
-    });
-    const graphChannels = new Map(
-      graphChannelRows.map(
-        (channel) => [channel.id, channel] as const,
-      ),
-    );
-    const graphChannelWireIds = new Map(
-      await Promise.all(
-        graphChannelRows.map(async (channel) => [
-          channel.id,
-          await store.getChannelWireId({
-            workspaceId: engineWorkspace.workspaceId,
-            channelId: channel.id,
-          }),
-        ] as const),
-      ),
-    );
-    const activeFiles = await activeEngineFileIndex(engineWorkspace);
-    const authorizedMentions = (
-      await Promise.all(
-        threads.map(async (thread) => {
-          const attachments = await store.listThreadAttachments(
-            engineWorkspace.workspaceId,
-            thread.id,
-          );
-          return attachments.flatMap((attachment) => {
-            // Stable object identity owns path resolution. A hint is usable
-            // only for legacy/opaque rows where no object identity exists; an
-            // object that disappeared from the active version fails closed.
-            const filePath = attachment.objectId
-              ? activeFiles.pathByObjectId.get(attachment.objectId)
-              : attachment.pathHint;
-            const fileObjectId =
-              attachment.objectId ??
-              (filePath ? activeFiles.objectIdByPath.get(filePath) : undefined);
-            return filePath && fileObjectId
-              ? [{
-                    threadId: thread.id,
-                    threadTitle: thread.title,
-                    messageId: attachment.messageId,
-                    fileObjectId,
-                    filePath,
-                    ...(thread.channelId && graphChannels.get(thread.channelId)
-                      ? {
-                          channel: {
-                            id: graphChannels.get(thread.channelId)!.id,
-                            ...(graphChannelWireIds.get(thread.channelId)
-                              ? { wireId: graphChannelWireIds.get(thread.channelId)! }
-                              : {}),
-                            name: graphChannels.get(thread.channelId)!.name,
-                            slug: graphChannels.get(thread.channelId)!.slug,
-                            kind: graphChannels.get(thread.channelId)!.kind,
-                          },
-                        }
-                      : {}),
-                    ...(attachment.headingAnchor && attachment.headingText
-                      ? {
-                          heading: {
-                            anchor: attachment.headingAnchor,
-                            text: attachment.headingText,
-                            occurrence: attachment.headingOccurrence ?? 0,
-                          },
-                        }
-                      : {}),
-                  }]
-              : [];
-          });
-        }),
-      )
-    ).flat();
-    const overlaid = addChatMentionsToWorkspaceGraph(
-      graph,
-      authorizedMentions,
-      true,
-      activeFiles.objectIdByPath,
-    );
-    const filePathsById = new Map(
-      overlaid.nodes
-        .filter((node) => node.kind === "file")
-        .map((node) => [node.id, node.path] as const),
-    );
-        return WorkspaceGraphResult.parse({
-      ...(rowsUncovered > 0 ? { sharedChannelRowsUncovered: rowsUncovered } : {}),
-      ...overlaid,
-      nodes: overlaid.nodes.map((node) =>
-        node.kind === "file"
-          ? {
-              path: node.path,
-              kind: "file" as const,
-              filePath: node.path,
-              title: node.title,
-              incoming: node.incoming,
-              outgoing: node.outgoing,
-            }
-          : node.kind === "chat-thread"
-            ? {
-                path: node.id,
-                kind: "chat-thread" as const,
-                threadId: node.threadId,
-                ...(node.channel
-                  ? {
-                      channelId: node.channel.id,
-                      ...(node.channel.wireId
-                        ? { channelWireId: node.channel.wireId }
-                        : {}),
-                      channelName: node.channel.name,
-                      channelSlug: node.channel.slug,
-                      channelKind: node.channel.kind,
-                    }
-                  : {}),
-                title: node.title.slice(0, 120),
-                incoming: node.incoming,
-                outgoing: node.outgoing,
-              }
-            : {
-                path: node.id,
-                kind: "heading" as const,
-                filePath: node.filePath,
-                headingAnchor: node.anchor,
-                title: `#${node.title.slice(0, 119)}`,
-                incoming: node.incoming,
-                outgoing: node.outgoing,
-              },
-      ),
-      edges: overlaid.edges.map((edge) => ({
-        source: filePathsById.get(edge.source) ?? edge.source,
-        target: filePathsById.get(edge.target) ?? edge.target,
-        kind: edge.kind,
-      })),
-        });
-      },
-    );
-  });
-
-  ipcMain.handle(CHANNELS.getBacklinks, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = GetBacklinksPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Backlink read stopped because this window changed workspaces.",
-      async (operation) =>
-        GetBacklinksResult.parse({
-          sources: await operation.state.workspaceGraph.readBacklinks(
-            operation.workspace.rootPath,
-            input.path,
-            ownedWorkspaceGraphSource(operation.workspace),
-          ),
-        }),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.listWorkspaceHeadings, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListWorkspaceHeadingsPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Heading read stopped because this window changed workspaces.",
-      async (operation) => {
-        const source = await readOwnedWorkspaceTextFor(
-          operation.workspace,
-          input.path,
-        );
-        return ListWorkspaceHeadingsResult.parse({
-          headings: workspaceHeadingRecords(extractWorkspaceHeadings(source.text)),
-        });
-      },
-    );
+  registerWorkspaceGraphIpcHandlers<
+    WebContents,
+    IpcMainInvokeEvent,
+    DesktopRendererWorkspaceOperation["workspace"],
+    DesktopRendererWorkspaceOperation,
+  >({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender,
+    withRendererWorkspaceOperation,
+    workspaceFileListings,
+    listOwnedWorkspaceFilesFor,
+    readOwnedWorkspaceTextFor,
+    requireEngineCapture,
+    syncWorkspaceSharedChannels,
+    linkedChatStoreFor,
+    activeEngineFileIndex,
   });
 
   // The only path from renderer to the OS browser (window.open is a pure
@@ -9300,52 +8290,23 @@ function registerIpcHandlers(
     },
   });
 
-  ipcMain.handle(CHANNELS.openWorkspace, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = OpenWorkspaceRequestPayload.parse(payload);
-    return withPhysicalWorkspaceOperation(input.workspaceId, async (operation) => {
-      const workspace = operation.workspace;
-      const rendererSession = await rendererWorkspaceSessions.open(
-        event.sender,
-        workspace,
-        input.rendererDocumentId,
-      );
-      preferredWorkspaceId = workspace.workspaceId;
-      const status = SyncStatusResult.parse(
-        await syncStatusWithOwnedProjection(
-          workspace,
-          await openWorkspaceActivityForOperation(
-            operation,
-            {},
-            ensureWorkspaceActivityOpen,
-          ),
-        ),
-      );
-      operation.assertCurrent();
-      if (!rendererSession.isCurrent()) {
-        throw new Error(
-          "Workspace open stopped because this window changed workspaces.",
-        );
-      }
-      if (!sharedViewOf(workspace.workspaceId)) {
-        // A plugin-pipeline start failure must not fail the whole handler —
-        // the workspace itself already opened. listPlugins and friends
-        // separately convert a failed plugin runtime warmup into a structured
-        // pluginIpcError; this is best-effort warmup, and the renderer's file
-        // tree must not wait on it (fire-and-forget, like the dispatch scan in
-        // openWorkspaceActivityWith).
-        void withPhysicalWorkspaceOperation(workspace.workspaceId, (warmup) => {
-          if (warmup.workspace.attachmentId !== workspace.attachmentId) return;
-          return warmup.state.pluginRuntimes.ensure(warmup.workspace);
-        }).catch((error: unknown) => {
-          console.error(
-            `[desktop] plugin pipeline warmup failed for ${workspace.workspaceId}:`,
-            error,
-          );
-        });
-      }
-      return status;
-    });
+  registerOpenWorkspaceIpcHandler<
+    WebContents,
+    IpcMainInvokeEvent,
+    DesktopWorkspaceOperation["workspace"],
+    DesktopWorkspaceOperation,
+  >({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender,
+    withPhysicalWorkspaceOperation,
+    rendererWorkspaceSessions,
+    setPreferredWorkspaceId: (workspaceId) => {
+      preferredWorkspaceId = workspaceId;
+    },
+    syncStatusWithOwnedProjection,
+    openWorkspaceActivity: (operation) =>
+      openWorkspaceActivityForOperation(operation, {}, ensureWorkspaceActivityOpen),
+    sharedViewOf,
   });
 
   // Named versions. Every handler resolves the workspace through
