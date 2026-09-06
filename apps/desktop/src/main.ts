@@ -4221,11 +4221,14 @@ function broadcastUpdateState(state: PublicUpdateState): void {
   }
 }
 
-const { refreshDispatchTray, refreshSystemThemeDesktopIcons } = createDesktopTray({
+const { refreshDispatchTray, refreshSystemThemeDesktopIcons } = createDesktopTray<
+  ReturnType<typeof nativeImage.createFromPath>,
+  ReturnType<typeof Menu.buildFromTemplate>
+>({
   app, process, Menu, nativeImage, nativeTheme, Tray, BrowserWindow,
   moduleDirectory: import.meta.dirname,
   readCachedUserSettingsFile, stateDir, chatDispatchService, showOrCreateMainWindow,
-  get appLifecycle() { return appLifecycle; },
+  get appLifecycle(): { isQuitting(): boolean } { return appLifecycle; },
 });
 
 async function showOrCreateMainWindow(): Promise<BrowserWindow> {
