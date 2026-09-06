@@ -64,7 +64,6 @@ pub struct EngineService {
     session_epoch: String,
     self_writes: SelfWriteSuppression,
     events: EngineEvents,
-    #[cfg(feature = "harness")]
     capture_apply_probe: Option<capture_driver::CaptureApplyProbe>,
     #[cfg(test)]
     open_install_probe: Option<(
@@ -168,7 +167,6 @@ impl EngineService {
                 GLOBAL_SELF_WRITES.clone()
             },
             events: EngineEvents::default(),
-            #[cfg(feature = "harness")]
             capture_apply_probe: None,
             #[cfg(test)]
             open_install_probe: None,
