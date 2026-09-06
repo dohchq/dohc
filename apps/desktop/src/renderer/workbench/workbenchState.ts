@@ -75,7 +75,7 @@ export const GRAPH_TAB_PATH = "dohc://graph";
 export const HISTORY_TAB_PATH = "dohc://history";
 // Chats expanded to a full editor tab (singleton, graph/history precedent).
 export const CHATS_TAB_PATH = "dohc://chats";
-const SITE_TAB_PREFIX = "dohc://site/";
+const APP_TAB_PREFIX = "dohc://app/";
 const PLUGIN_PANEL_TAB_PREFIX = "dohc://plugin-panel/";
 const PLUGIN_WEB_APP_TAB_PREFIX = "dohc://plugin-web/";
 // One details page per plugin, keyed by the plugin id (version-compare
@@ -131,7 +131,7 @@ export function parseMomentDiffTabPath(path: string | null): string | null {
 }
 
 export function siteTabPath(siteRoot: string): string {
-  return `${SITE_TAB_PREFIX}${encodeURIComponent(siteRoot)}`;
+  return `${APP_TAB_PREFIX}${encodeURIComponent(siteRoot)}`;
 }
 
 export function pluginPanelTabPath(pluginId: string, panelId: string): string {
@@ -201,7 +201,7 @@ export function isChatsTabPath(path: string | null): boolean {
 }
 
 export function isSiteTabPath(path: string | null): boolean {
-  return typeof path === "string" && path.startsWith(SITE_TAB_PREFIX);
+  return typeof path === "string" && path.startsWith(APP_TAB_PREFIX);
 }
 
 export function isPluginPanelTabPath(path: string | null): boolean {
@@ -236,7 +236,7 @@ export function canonicalSingletonEditorTabPath(path: string | null): string | n
 export function parseSiteTabPath(path: string | null): string | null {
   if (typeof path !== "string" || !isSiteTabPath(path)) return null;
   try {
-    const siteRoot = decodeURIComponent(path.slice(SITE_TAB_PREFIX.length));
+    const siteRoot = decodeURIComponent(path.slice(APP_TAB_PREFIX.length));
     return siteRoot.length > 0 ? siteRoot : null;
   } catch {
     return null;

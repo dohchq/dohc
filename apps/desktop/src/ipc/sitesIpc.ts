@@ -51,7 +51,7 @@ export function createSitesIpcHandlers<
       const result = await dependencies.authority.withActiveWorkspace(
         sender,
         payload.workspaceId,
-        "sites request",
+        "apps request",
         (workspace) => input.run(workspace, payload),
       );
       return input.validate(result);

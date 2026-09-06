@@ -83,13 +83,13 @@ function validatedPackageManagerRun(
   if (!run) return null;
   if (!site.packagePath) {
     throw new Error(
-      `Site has no package.json to run ${run.script} via ${run.manager}: ${site.root}`,
+      `App has no package.json to run ${run.script} via ${run.manager}: ${site.root}`,
     );
   }
   const scriptBody = site.scripts[run.script];
   if (!scriptBody) {
     throw new Error(
-      `Site has no ${run.script} script to run via ${run.manager}: ${site.root}`,
+      `App has no ${run.script} script to run via ${run.manager}: ${site.root}`,
     );
   }
   const validated = packageManagerValidatedScriptCommand(
@@ -150,13 +150,13 @@ export function commandForSiteScript(
     // `npm run dev --if-present` before this fix) execute unvalidated.
     if (KNOWN_PACKAGE_MANAGER_COMMANDS.has(parsed.command)) {
       throw new Error(
-        `This site's configured ${script} command invokes ${parsed.command} in a shape dohc does not recognize as a script-run wrapper: ${configuredCommand}`,
+        `This app's configured ${script} command invokes ${parsed.command} in a shape dohc does not recognize as a script-run wrapper: ${configuredCommand}`,
       );
     }
     return validatedLiteralCommand(parsed);
   }
   const configured = site.scripts[script];
-  if (!configured) throw new Error(`Site has no ${script} script: ${site.root}`);
+  if (!configured) throw new Error(`App has no ${script} script: ${site.root}`);
   if (site.packagePath) {
     // dev/start/build all validate the same way — a package.json build
     // script (or its pre/post hooks) is exactly as capable of binding
