@@ -1151,15 +1151,13 @@ export function createShareWebApplication({
           method: request.method,
           headers: {
             authorization: `LinkCapability ${capabilityToken}`,
-            ...(isActivity
-              ? { "x-dohc-link-profile-secret": profileSecret }
-              : request.method === "POST"
+            "x-dohc-link-profile-secret": profileSecret,
+            ...(request.method === "POST"
               ? {
                   "content-type": "application/json",
-                  "x-dohc-link-profile-secret": profileSecret,
                   "x-dohc-relay-exchange-key": relayExchangeKey!,
                 }
-              : { "x-dohc-link-profile-secret": profileSecret }),
+              : {}),
           },
           ...(appendBody === null ? {} : { body: appendBody }),
         },
