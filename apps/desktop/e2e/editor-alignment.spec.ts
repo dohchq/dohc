@@ -5,7 +5,6 @@ import {
   createTempWorkspace,
   explorerRow,
   openWorkspaceFromFirstRun,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -124,9 +123,6 @@ test("every block type's text sits on one shared left content edge", async () =>
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await writeWorkspaceFiles(temp, [{ path: "notes/alignment.md", contents: ALIGNMENT_DOC }]);
 
     desktop = await launchDesktopApp({ workspace: temp });

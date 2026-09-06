@@ -17,7 +17,6 @@ import {
   explorerRow,
   openWorkspaceFromFirstRun,
   revealExplorerPath,
-  seedWorkspaceSettings,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
@@ -214,9 +213,6 @@ test("@ui-audit capture baseline screenshots", async () => {
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await writeWorkspaceFiles(temp, [
       { path: "README.md", contents: "# workspace\n\nWelcome to dohc.\n" },
       { path: "notes/product-plan.md", contents: RICH_DOC },

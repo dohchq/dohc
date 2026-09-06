@@ -403,14 +403,11 @@ export function chatsNavigationChangesDestination(
   );
 }
 
-// What the history-off placeholder may claim. The placeholder renders
-// whenever the renderer's own capability read says the surface does not
-// exist, but that read must not speak: whether changes are recorded is
-// main's answer (syncStatus, from the one open-time read that decided the
-// recorder), and a cause is named only when that status established it. The
-// renderer's read failing — or not having answered yet — proves nothing:
-// main's read may have started the recorder, and "not being recorded" would
-// then be a false privacy assurance (the second failure mode).
+// What the history-off placeholder may claim. Whether changes are recorded
+// is main's answer (syncStatus, from the open that decided the recorder),
+// and a cause is named only when that status established it. A status that
+// has not landed proves nothing: main may be recording, and "not being
+// recorded" would then be a false privacy assurance.
 // Each cause is one line, per the empty-state recipe (copy.md): what is
 // missing, then the next step its surface really has.
 function historyOffPlaceholderCopy(
@@ -418,7 +415,7 @@ function historyOffPlaceholderCopy(
   share: { ended: boolean; granterEmail: string | null } | null,
 ): string {
   if (share) {
-    // A capability, not an opt-out and not a failure: a shared view is fed
+    // A capability, not a failure: a shared view is fed
     // by the share's pull and records no history here. The next step matches
     // the surface — Refresh exists only while the share is live, so an ended
     // share must not name it — and the ended line names who acted, as the
@@ -427,17 +424,9 @@ function historyOffPlaceholderCopy(
       ? `A shared view records no history. ${share.granterEmail ?? "The person who shared it"} ended this share. You can still open the files it shared.`
       : "A shared view records no history. Refresh the shared view to get the latest shared changes.";
   }
-  // The warning already names the unreadable file and the fix.
-  if (syncStatus?.settingsWarning) return syncStatus.settingsWarning;
   if (syncStatus?.historyRecordingUnavailable) {
     // A failure, not a decision — same copy as the notice center.
     return "dohc could not start recording history for this workspace. Your files still save normally. Restart dohc to try again.";
-  }
-  if (syncStatus?.historyRecordingOff) {
-    // The real opt-out: main read the file and the flag is off. Restart, not
-    // reopen — see `chatsOffCopy` below for why reopening the workspace
-    // re-reads the flag nowhere.
-    return "History is off for this workspace. The workspace engine is turned off in Settings → Advanced, so changes are not being recorded. Turn it on. Then restart dohc to record history.";
   }
   // Main has not said recording is off. It may be recording right now, so
   // no cause and no "not recorded" — only what dohc could not do, plus the
@@ -456,21 +445,12 @@ function historyOffPlaceholderCopy(
 // not established. Every line here says what dohc cannot do now, and none of
 // them says what does not exist.
 export function versionCompareOffCopy(syncStatus: SyncStatusResult | null): string {
-  // The warning already names the unreadable file and the fix, and the
-  // opt-out line below would blame a Settings toggle nobody touched.
-  if (syncStatus?.settingsWarning) return syncStatus.settingsWarning;
   if (syncStatus?.historyRecordingUnavailable) {
     // A failure, not a decision, and not an emptiness.
     return "dohc could not open versions for this workspace. Your files still save normally. Restart dohc to try again.";
   }
-  if (syncStatus?.historyRecordingOff) {
-    // The real opt-out. The engine is off, so versions cannot be opened here
-    // — which is not the same as there being none. Restart, not reopen
-    //  — see `chatsOffCopy` below for why reopening re-reads nothing.
-    return "Versions are off for this workspace. The workspace engine is turned off in Settings → Advanced. Turn it on. Then restart dohc to compare versions.";
-  }
-  // Main has not said anything is wrong, so the renderer's own read failing
-  // is all this surface knows. No cause, and no claim about what exists.
+  // Main has not said anything is wrong, so the version read failing is
+  // all this surface knows. No cause, and no claim about what exists.
   return "Versions are unavailable. dohc could not confirm whether this workspace has versions. Close this tab to go back to your files.";
 }
 
@@ -483,25 +463,12 @@ export function versionCompareOffCopy(syncStatus: SyncStatusResult | null): stri
 // both: the panel has no tab to close, and restarting is what re-runs the
 // capture build either way.
 export function chatsOffCopy(syncStatus: SyncStatusResult | null): string {
-  // The warning already names the unreadable file and the fix.
-  if (syncStatus?.settingsWarning) return syncStatus.settingsWarning;
   if (syncStatus?.historyRecordingUnavailable) {
     // A failure, not a decision, and not an emptiness.
     return "dohc could not open chats for this workspace. Your files still save normally. Restart dohc to try again.";
   }
-  if (syncStatus?.historyRecordingOff) {
-    // The real opt-out. The engine is off, so chats cannot be opened here —
-    // which is not the same as there being none.
-    //
-    // Restart, not reopen: main decides the recorder once per workspace per
-    // app session — `openWorkspaceActivity` retains every workspace it opens
-    // and `workspaceActivity.open` no-ops for one it already watches — so
-    // leaving the workspace and coming back re-reads the flag nowhere. Same
-    // instruction the settings warning gives, for the same reason.
-    return "Chats are off for this workspace. The workspace engine is turned off in Settings → Advanced. Turn it on. Then restart dohc to use chats.";
-  }
-  // Main has not said anything is wrong, so the renderer's own read failing
-  // is all this surface knows. No cause, and no claim about what exists.
+  // Main has not said anything is wrong, so the chat read failing is all
+  // this surface knows. No cause, and no claim about what exists.
   return "Chats are unavailable. dohc could not confirm whether this workspace has chats. Restart dohc to try again.";
 }
 
@@ -864,7 +831,7 @@ function hasEditorFocus(state: WorkbenchState, focus: EditorFocus): boolean {
   return current.groupId === focus.groupId && current.tab === focus.tab;
 }
 
-// Engine history diff page (PR 0M-5, flagged workspaces): one MOMENT's
+// Engine history diff page: one MOMENT's
 // before/after through the shared unified-diff rendering, with engine-routed
 // restore. Restore returns the file to its state before this moment and
 // records a forward "Restored <file>" moment; undo restores to before that
@@ -1561,12 +1528,11 @@ export function DesktopWorkspaceShell(props: {
   const [filesRevalidated, setFilesRevalidated] = useState(false);
   const [folders, setFolders] = useState<string[]>([]);
   // Main's single answer to "does anything record here": when the
-  // open-time decision produced no recorder — opt-out, unreadable settings,
-  // or a failed capture build — every engine-history call can only error,
-  // whatever the renderer's own capability read said.
+  // open-time decision produced no recorder (a shared view or a failed
+  // capture build), every engine-history call can only error.
   const statusSaysNoRecorder = (status: SyncStatusResult | null) =>
     Boolean(
-      status?.historyRecordingOff ||
+      status?.historyShareView ||
         status?.historyRecordingUnavailable ||
         status?.engineStoreRefused,
     );
@@ -2817,31 +2783,11 @@ export function DesktopWorkspaceShell(props: {
     );
   }, [refreshFiles, reportShellError]);
 
-  // Workspace-engine alpha (PR 0M-4/0M-5): versions surface, ENGINE history
-  // source, and the linked Chats rail all key off this one per-workspace
-  // capability, read once from the existing settings IPC below — never a
-  // second settings read.
-  //
-  // The answer is kept with the workspace it answered for, so "no answer yet"
-  // and "answered off" are never the same state — a bare `false` cannot say
-  // which, and the surfaces below must not state a capability from a read
-  // that has not happened. A read for another workspace is discarded here
-  // rather than retracted by an effect, so switching away and back cannot
-  // leave the previous workspace's answer standing over a pending one.
-  const [engineRead, setEngineRead] = useState<{
-    workspaceId: string;
-    enabled: boolean;
-  } | null>(null);
-  const engineReadForWorkspace =
-    engineRead?.workspaceId === workspaceId ? engineRead : null;
-  const engineEnabled = engineReadForWorkspace?.enabled ?? false;
-  // A shared view has no engine history surface regardless of that read:
-  // it materializes no settings file, so the default flag reads ON —
-  // but the share's open deliberately installed no capture, and every
-  // engine-moments call could only error. Capability identity comes from
-  // main's registry summary. This gates the HISTORY surface and, below, the
-  // versions surface and CHATS, for the same reason and from
-  // the same fact.
+  // A shared view has no engine history surface: the share's open installs
+  // no capture, and every engine-moments call could only error. Capability
+  // identity comes from main's registry summary. This gates the history
+  // surface and, below, the versions surface and collections, from the same
+  // fact.
   const isShareView = Boolean(props.workspace.shareView);
   // Collection folders: the engine's collections.list result,
   // cached as the set of folder paths so the Explorer can route a click on a
@@ -2866,15 +2812,15 @@ export function DesktopWorkspaceShell(props: {
     }
   }, [workspaceId]);
   useEffect(() => {
-    if (!workspaceIsReady || !engineEnabled || isShareView) return;
+    if (!workspaceIsReady || isShareView) return;
     // First load; afterwards the list rides the files+history activity
     // coalescer below. listCollections is one cheap index read, so no path
     // filter: a new collection appears through collection.yaml writes, a
     // rename or delete arrives as ordinary path activity, and a scope-free
     // event (no paths) must refresh too.
     void refreshCollections();
-  }, [workspaceIsReady, engineEnabled, isShareView, refreshCollections]);
-  // Engine history page state (flagged workspaces): newest-first moments,
+  }, [workspaceIsReady, isShareView, refreshCollections]);
+  // Engine history page state: newest-first moments,
   // the keyset cursor for older pages, and the monotonic latest order used
   // as the open-file refresh key.
   const [engineHistory, setEngineHistory] = useState<{
@@ -3107,7 +3053,7 @@ export function DesktopWorkspaceShell(props: {
     // says engine-on, and every listEngineMoments call would error.
     const token = ++engineHistoryToken.current;
     newestHistoryRefresh.current = token;
-    if (engineEnabled && !isShareView && !statusSaysNoRecorder(syncStatusLane.latest())) {
+    if (!isShareView && !statusSaysNoRecorder(syncStatusLane.latest())) {
       // Latest-COMMITTED-wins: each request advances the token, and an answer
       // displays only if it is newer than the answer already displayed, so an
       // older response can never overwrite newer moments or move
@@ -3246,8 +3192,7 @@ export function DesktopWorkspaceShell(props: {
       commit();
       return "ready" as const;
     }
-    // Opted-out workspace (retirement Phase C): no history source exists —
-    // only status and agent state refresh. They ride the same issue order as
+    // No history source exists: only status and agent state refresh. They ride the same issue order as
     // the engine branch's reads: this refresh answers the very lanes the
     // settings panel and a second refresh also write, and an untimed write
     // ranked by arrival undid both — a run the user had just started, and a
@@ -3280,7 +3225,6 @@ export function DesktopWorkspaceShell(props: {
     return "ready" as const;
   }, [
     agentActiveLane,
-    engineEnabled,
     isShareView,
     markCurrentSwitchPhase,
     readAgentStatusForHistory,
@@ -3378,28 +3322,23 @@ export function DesktopWorkspaceShell(props: {
     }
   }, [engineHistory, engineHistoryLoadingMore, reportShellError, workspaceId]);
 
-  // Whether this workspace has engine-backed surfaces AT ALL — history,
-  // versions and chats (PR 0M-4). Unflagged workspaces render none of them,
-  // and neither does a shared view: it materializes no
-  // settings file, so the read below returns the default ON while its open
-  // deliberately installed no capture. Both halves are synchronous registry
-  // facts, so this value never waits on anything.
-  const engineSurfacesExist = engineEnabled && !isShareView;
-  // Chats is the one exception. A share view still installs no
-  // capture, so history and versions stay gone — but main now answers chat
-  // from the SHARE scope instead of a capture, so the Chats panel opens. Only
-  // its "This file" tab: the per-file surface answers for a file the share
-  // already served, and a workspace-wide listing would be a superset to
-  // filter (decision 5, and the shape that produced #627).
-  const chatsSurfaceExists = engineEnabled || isShareView;
+  // Whether this workspace has engine-backed surfaces at all: history and
+  // versions. A shared view renders neither: its open deliberately installed
+  // no capture. A registry fact, so this value never waits on anything.
+  //
+  // Chats is the exception. A share view still installs no capture, so
+  // history and versions stay gone, but main answers chat from the SHARE
+  // scope instead of a capture, so the Chats panel opens everywhere. Only
+  // its "This file" tab there: the per-file surface answers for a file the
+  // share already served, and a workspace-wide listing would be a superset
+  // to filter (decision 5, and the shape that produced #627).
   // Whether main's capture will SERVE those surfaces. Main's status is the
-  // single answer to "does anything record here", and it overrides the
-  // renderer's own engine read: after a failed capture build that read still
-  // says engine-on for a perfectly normal workspace, and every version, chat
-  // and moment call is refused. It can only override it
-  // once main has decided, which is what `captureDecided` carries — a status
-  // that has not been decided sits at its "nothing is wrong" defaults, and
-  // reading those as an answer is how this gate was wrong twice.
+  // single answer to "does anything record here": after a failed capture
+  // build every version, chat and moment call is refused. It can only
+  // answer once main has decided, which is what `captureDecided` carries. A
+  // status that has not been decided sits at its "nothing is wrong"
+  // defaults, and reading those as an answer is how this gate was wrong
+  // twice.
   //
   // The capture capability. Everything that calls through
   // `requireEngineCapture` reads this one value — the version selector, the
@@ -3409,66 +3348,15 @@ export function DesktopWorkspaceShell(props: {
   // decided once. A surface that re-derives it drifts, which is exactly how
   // the compare tab kept mounting after #614 gated the selector.
   //
-  // Both reads, because a surface that states a capability must have both
-  // answers. Main's open resolves immediately for a workspace it already
-  // retains, so a healthy workspace re-entered mid-session reaches the
-  // decision while the settings read is still in flight — `engineEnabled`
-  // still holds its "no answer" false, and every branch below would state an
-  // unavailability that main never reported.
-  const captureDecided =
-    captureDecidedFor === workspaceId && engineReadForWorkspace !== null;
+  const captureDecided = captureDecidedFor === workspaceId;
   const captureAvailable =
-    engineSurfacesExist && captureDecided && !statusSaysNoRecorder(syncStatus);
-  // An unreadable settings file reads as opted out, so the workspace records
-  // nothing. That must never be silent — but the notice says so from MAIN's
-  // open-time read (syncStatus.settingsWarning), the read that decided
-  // whether anything is recorded. This read only drives which engine
-  // surfaces the shell offers (versions and chats).
-  useAsyncResponseEffect(
-    async () => {
-      try {
-        return await bridge().getWorkspaceSettings({ workspaceId });
-      } catch (error) {
-        await workspaceAdmission.promise;
-        if (workspaceAdmission.superseded) throw error;
-        return bridge().getWorkspaceSettings({ workspaceId });
-      }
-    },
-    {
-      onSuccess: (result) => {
-        setEngineRead({
-          workspaceId,
-          enabled: result.settings.experimental.workspaceEngineAlpha,
-        });
-      },
-      onError: () => {
-        // Settings unavailable reads as flag off — never a broken shell.
-        // Capability only, fail-closed: the surface hides, but what
-        // the placeholder then says comes from main's status. This failure
-        // must never be translated into an asserted opt-out.
-        //
-        // It is still an ANSWER. Recording it is what releases the surfaces
-        // below from their load state; a failure held as "pending" would
-        // leave a persisted tab spinning for the rest of the session.
-        setEngineRead({ workspaceId, enabled: false });
-      },
-    },
-    [workspaceAdmission, workspaceId, workspaceSelectionGeneration],
-  );
-  // History needs both main's capture decision and the renderer's settings
-  // answer. This used to happen accidentally because the settings answer
-  // changed `refreshHistory` and re-ran the whole workspace-open effect.
+    !isShareView && captureDecided && !statusSaysNoRecorder(syncStatus);
   useEffect(() => {
-    if (!workspaceIsReady || engineReadForWorkspace === null) return;
+    if (!workspaceIsReady) return;
     void refreshHistory().catch((error) =>
       reportShellError("Could not refresh history.", error),
     );
-  }, [
-    engineReadForWorkspace,
-    refreshHistory,
-    reportShellError,
-    workspaceIsReady,
-  ]);
+  }, [refreshHistory, reportShellError, workspaceIsReady]);
   // Conflict review (0P-C): opened from the notice center's conflict notice.
   // Lists every open conflict — two machines editing apart, or a merge left
   // with "Finish later" — with the same side-by-side cards as the merge flow.
@@ -3522,7 +3410,6 @@ export function DesktopWorkspaceShell(props: {
         // version surface on screen. Not asking leaves the previous statement
         // standing — what the catch below already does. Same clauses as
         // `captureAvailable`, so the fetch cannot outlive the render gate.
-        engineEnabled &&
         !isShareView &&
         captureDecidedRef.current === workspaceId &&
         !statusSaysNoRecorder(syncStatusLane.latest())
@@ -3563,7 +3450,6 @@ export function DesktopWorkspaceShell(props: {
     },
     [
       dropContradictedEngineHistory,
-      engineEnabled,
       isShareView,
       noteActiveEngineVersion,
       refreshFiles,
@@ -4013,7 +3899,7 @@ export function DesktopWorkspaceShell(props: {
     },
     [openCanonicalDmInTab, openChatThreadInPanel, openChatsNavInTab, openChatsTab],
   );
-  // Engine history diff (flagged workspaces): one tab per moment.
+  // Engine history diff: one tab per moment.
   const openMomentDiffTab = useCallback(
     (momentId: string, filePath: string) => {
       const targetGroupId = wbRef.current.activeEditorGroup;
@@ -5126,7 +5012,7 @@ export function DesktopWorkspaceShell(props: {
       void refreshHistory().catch((error) =>
         reportShellError("Could not refresh history.", error),
       );
-      if (engineEnabled && !isShareView) void refreshCollections();
+      if (!isShareView) void refreshCollections();
     });
     const unsubscribe = bridge().onWorkspaceActivity(
       (event: WorkspaceActivityEvent) => {
@@ -5153,7 +5039,6 @@ export function DesktopWorkspaceShell(props: {
     refreshFiles,
     refreshHistory,
     reportShellError,
-    engineEnabled,
     isShareView,
     refreshCollections,
   ]);
@@ -5212,11 +5097,8 @@ export function DesktopWorkspaceShell(props: {
         setQuickOpenOpen((open) => !open);
       } else if (secondarySidebarKey) {
         // CommandOrControl+Alt+B mirrors VS Code's secondary-sidebar toggle.
-        // It is a no-op when the workspace has no Chats panel.
-        if (chatsSurfaceExists) {
-          event.preventDefault();
-          mutateWb(toggleChats);
-        }
+        event.preventDefault();
+        mutateWb(toggleChats);
       } else if (key === "b") {
         event.preventDefault();
         mutateWb(toggleSidebar);
@@ -5233,7 +5115,6 @@ export function DesktopWorkspaceShell(props: {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
-    chatsSurfaceExists,
     closeActiveTab,
     openEditorGroupRight,
     mutateWb,
@@ -5272,10 +5153,9 @@ export function DesktopWorkspaceShell(props: {
         run: () => requestExplorerCreate("folder"),
       },
       // Creating a collection writes collection.yaml and immediately opens
-      // an engine-backed surface. Shared views and engine-disabled
-      // workspaces therefore get neither the application-menu action nor the
-      // palette entry.
-      ...(!engineEnabled || props.workspace.shareView
+      // an engine-backed surface. Shared views therefore get neither the
+      // application-menu action nor the palette entry.
+      ...(props.workspace.shareView
         ? []
         : [
             {
@@ -5335,19 +5215,14 @@ export function DesktopWorkspaceShell(props: {
             },
           ]
         : []),
-      // The Chats panel exists for workspace-engine-flagged workspaces and
-      // for shared views — no surface, no command. A workspace
-      // whose capture cannot serve chats keeps the command: the panel is
-      // still there, stating what dohc cannot do.
-      ...(chatsSurfaceExists
-        ? [
-            {
-              id: "toggle-chats",
-              label: "Toggle chats panel",
-              run: () => mutateWb(toggleChats),
-            },
-          ]
-        : []),
+      // Every workspace has the Chats panel, shared views included. A
+      // workspace whose capture cannot serve chats keeps the command: the
+      // panel is still there, stating what dohc cannot do.
+      {
+        id: "toggle-chats",
+        label: "Toggle chats panel",
+        run: () => mutateWb(toggleChats),
+      },
       ...VIEW_IDS.map((view) => ({
         id: `show-${view}`,
         label: `View: ${activityViewLabel(view)}`,
@@ -5468,12 +5343,10 @@ export function DesktopWorkspaceShell(props: {
       requestExplorerCreate,
       checkForDesktopUpdates,
       installDesktopUpdate,
-      chatsSurfaceExists,
       openEditorGroupRight,
       openSettings,
       reportShellError,
       workspaceId,
-      engineEnabled,
       props.workspace.shareView,
     ],
   );
@@ -5852,7 +5725,7 @@ export function DesktopWorkspaceShell(props: {
   // no page to show, which is already a load state. Adding the clause here
   // would render the same thing from a second place.
   const historyTimeline =
-    engineSurfacesExist && !statusSaysNoRecorder(syncStatus) ? (
+    !isShareView && !statusSaysNoRecorder(syncStatus) ? (
     // The timeline renders only when a read ANSWERED. Flattening a
     // null page into an empty list told the user a workspace with real
     // history had no changes, whenever a read was in flight or had failed.
@@ -5918,18 +5791,18 @@ export function DesktopWorkspaceShell(props: {
   // Open-file refresh: history growth re-reads the active file. The floor
   // keeps the counter monotonic within the session even when the timeline is
   // dropped and re-fetched — a cache-buster that revisits a value can
-  // suppress a needed re-read. Opted-out workspaces have no history growth
-  // to react to. (Max-tracking a ref during render is idempotent, so a
+  // suppress a needed re-read. A shared view has no history growth to
+  // react to. (Max-tracking a ref during render is idempotent, so a
   // repeated render commits the same value.)
   const historyRefreshFloor = useRef(0);
   historyRefreshFloor.current = Math.max(
     historyRefreshFloor.current,
     engineHistory ? engineHistory.latestMomentOrder + 1 : 0,
   );
-  const historyRefreshCounter = engineEnabled ? historyRefreshFloor.current : 0;
-  const graphKey = engineEnabled
-    ? `${graphRefreshKey}\0${engineHistory?.latestMomentOrder ?? -1}`
-    : graphRefreshKey;
+  const historyRefreshCounter = isShareView ? 0 : historyRefreshFloor.current;
+  const graphKey = isShareView
+    ? graphRefreshKey
+    : `${graphRefreshKey}\0${engineHistory?.latestMomentOrder ?? -1}`;
 
   const explorerView = (
     <>
@@ -6078,14 +5951,10 @@ export function DesktopWorkspaceShell(props: {
           visible: wb.sidebarVisible,
           onToggle: () => mutateWb(toggleSidebar),
         }}
-        {...(chatsSurfaceExists
-          ? {
-              chatsSidebar: {
-                visible: wb.chatsVisible,
-                onToggle: () => mutateWb(toggleChats),
-              },
-            }
-          : {})}
+        chatsSidebar={{
+          visible: wb.chatsVisible,
+          onToggle: () => mutateWb(toggleChats),
+        }}
       />
       {shellError ? (
         <div
@@ -6514,8 +6383,8 @@ export function DesktopWorkspaceShell(props: {
             </div>
           ) : null}
           {/* "Try it in a version" (PR 0N-2): honest run status while the
-              agent works, then the review card when the run ends. Flagged
-              workspaces only (tryState never exists otherwise). */}
+              agent works, then the review card when the run ends. Never a
+              shared view (tryState never exists there). */}
           {captureAvailable && tryState?.status === "running" ? (
             <TryInVersionBanner task={tryState.task} versionName={tryState.versionName} />
           ) : null}
@@ -6970,12 +6839,12 @@ export function DesktopWorkspaceShell(props: {
           />
         </main>
 
-        {/* Chats panel — the right-hand secondary sidebar (flagged
-            workspaces, and shared views with their file tab only). Hidden
+        {/* Chats panel — the right-hand secondary sidebar (every
+            workspace; shared views with their file tab only). Hidden
             entirely while collapsed; the titlebar Chats button, Ctrl+Alt+B,
             or the toggle-chats command bring it back. History lives in the
             left History view and the history tab — never here. */}
-        {chatsSurfaceExists && wb.chatsVisible ? (
+        {wb.chatsVisible ? (
           <ChatsPanel
             width={wb.chatsWidth}
             onWidthChange={(width) => mutateWb((state) => setChatsWidth(state, width))}
@@ -7272,7 +7141,7 @@ export function DesktopWorkspaceShell(props: {
           }}
         />
       ) : null}
-      {newCollectionFolder !== null && engineEnabled && !isShareView ? (
+      {newCollectionFolder !== null && !isShareView ? (
         <NewCollectionDialog
           workspaceId={props.workspace.workspaceId}
           {...(newCollectionFolder !== ""
@@ -7334,7 +7203,7 @@ export function DesktopWorkspaceShell(props: {
             sharedView={isShareView}
             // Main's own decision, not the renderer's settings read:
             // only main knows whether a recorder exists for this session, and
-            // a failed capture build is as recorder-less as the opt-out.
+            // a failed capture build leaves none.
             sessionRecorderOn={
               syncStatus ? !statusSaysNoRecorder(syncStatus) : undefined
             }

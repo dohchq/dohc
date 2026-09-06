@@ -337,6 +337,11 @@ test("desktop release workflow keeps unsigned package smoke reliable in CI", asy
     "desktop release simulation must run on PRs that touch desktop code",
   );
   assert.match(
+    pullRequestSection,
+    /^ {4}paths:\n(?: {6}- .*\n)* {6}- "scripts\/verification\/\*\*"/m,
+    "release engine builds import the shared verification runner",
+  );
+  assert.match(
     workflow,
     /if \[\[ "\$\{GITHUB_EVENT_NAME\}" == "pull_request" \]\]; then\s+echo "dry_run=true"/,
     "pull requests must be forced into dry-run mode",
@@ -385,6 +390,8 @@ test("desktop release stages the Rust engine built for the packaged architecture
   );
   const copiedScript = join(scriptDir, "build-workspace-engine.mjs");
   await writeFile(copiedScript, await readFile(sourceScript, "utf8"));
+  await mkdir(join(root, "scripts/verification"), { recursive: true });
+  await writeFile(join(root, "scripts/verification/process.mjs"), await readFile(join(process.cwd(), "scripts/verification/process.mjs"), "utf8"));
 
   const buildModule = await import(
     `${pathToFileURL(copiedScript).href}?test=${Date.now()}`
@@ -396,7 +403,7 @@ test("desktop release stages the Rust engine built for the packaged architecture
       ? "x86_64-apple-darwin"
       : "aarch64-apple-darwin";
   const cargoCalls = [];
-  buildModule.buildWorkspaceEngine({
+  await buildModule.buildWorkspaceEngine({
     repoRoot: root,
     desktopDir: join(root, "apps/desktop"),
     platform: "darwin",
@@ -412,7 +419,7 @@ test("desktop release stages the Rust engine built for the packaged architecture
       );
       mkdirSync(join(root, "target", target, "release"), { recursive: true });
       writeFileSync(output, "target fixture");
-      return { status: 0, stdout: "", stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
     },
   });
 
@@ -443,7 +450,7 @@ test("desktop release stages the Rust engine built for the packaged architecture
 
   const mismatchRepoRoot = join(root, "mismatch");
   const mismatchDesktopDir = join(mismatchRepoRoot, "apps/desktop");
-  assert.throws(
+  await assert.rejects(
     () =>
       buildModule.buildWorkspaceEngine({
         repoRoot: mismatchRepoRoot,
@@ -461,7 +468,7 @@ test("desktop release stages the Rust engine built for the packaged architecture
             recursive: true,
           });
           writeFileSync(hostOutput, "host fixture");
-          return { status: 0, stdout: "", stderr: "" };
+          return { code: 0, stdout: "", stderr: "" };
         },
       }),
     new RegExp(`for target ${target} is missing`),

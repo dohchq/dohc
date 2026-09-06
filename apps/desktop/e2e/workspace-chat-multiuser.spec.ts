@@ -15,7 +15,6 @@ import {
   seedCloudCredentials,
   seedWorkspaceManifest,
   seedWorkspaceRegistry,
-  seedWorkspaceSettings,
 } from "./helpers/workspace";
 import { fetchSharedChannelInfo } from "../src/workspaces/sharedChannelInfo";
 
@@ -147,7 +146,6 @@ test("owner + participant chat and co-presence converge in the real app", async 
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, { experimental: { workspaceEngineAlpha: true } });
 
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });

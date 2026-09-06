@@ -475,7 +475,7 @@ fn authenticate(envelope: Envelope, auth_token: &str) -> Result<HelloAck, WireEr
     }
     let negotiated = capabilities
         .into_iter()
-        .filter(|capability| capability == "shadow-r13" || capability == "blobs")
+        .filter(|capability| capability == "blobs")
         .collect();
     // A client may lower its receive limit; the engine clamps the request
     // into the negotiable range and echoes the effective value, which sizes

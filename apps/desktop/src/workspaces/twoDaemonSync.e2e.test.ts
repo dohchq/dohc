@@ -41,7 +41,6 @@ async function openLiveDaemonCapture(input: {
   const capture = createWorkspaceEngineCapture({
     ...workspace.workspace,
     rustEngineSessions: workspace.sessions,
-    daemonOwnsCapture: true,
   });
   const relay = workspace.relay.bind({
     ...workspace.workspace,
@@ -94,7 +93,6 @@ async function openJoinedDaemonCapture(input: {
   const capture = createWorkspaceEngineCapture({
     ...workspace.workspace,
     rustEngineSessions: workspace.sessions,
-    daemonOwnsCapture: true,
   });
   return {
     capture,
@@ -183,12 +181,9 @@ async function expectTwoDaemonFileSync(input: {
   rejoin?: boolean;
 }): Promise<void> {
   const token = `test:${input.workspaceId}`;
-  // Both roots are opened exclusively through EngineWorkspaceSessions (via
-  // openLiveDaemonWorkspace/openLiveDaemonCapture), which writes each root's
-  // `.dohc/engine/SHADOW_CLONE` marker itself before the first RPC touches it
-  // (engineWorkspaceSessions.ts's `prepareWorkspace`). Unlike suites that talk
-  // to the engine outside that path, this harness never needs to seed the
-  // marker by hand.
+  // Both roots are opened through EngineWorkspaceSessions (via
+  // openLiveDaemonWorkspace/openLiveDaemonCapture); the daemon binds each
+  // root to its database on first open.
   const rootA = await createTestScratch("dohc-two-daemon-a-");
   const rootB = await createTestScratch("dohc-two-daemon-b-");
   const rootC = await createTestScratch("dohc-two-daemon-c-");

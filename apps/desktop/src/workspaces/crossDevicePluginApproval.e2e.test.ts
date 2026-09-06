@@ -223,7 +223,6 @@ async function openDaemon(
   const capture = createWorkspaceEngineCapture({
     ...workspace.workspace,
     rustEngineSessions: workspace.sessions,
-    daemonOwnsCapture: true,
   });
   return {
     capture,

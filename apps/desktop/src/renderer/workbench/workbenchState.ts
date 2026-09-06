@@ -83,8 +83,8 @@ const PLUGIN_WEB_APP_TAB_PREFIX = "dohc://plugin-web/";
 // refuse to split, and this page only reads.
 const PLUGIN_DETAILS_TAB_PREFIX = "dohc://plugin-details/";
 const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
-// Engine moment diff (PR 0M-5): flagged workspaces open history diffs by
-// MOMENT id, not legacy change-set id. The id alone is the tab identity: it
+// Engine moment diff (PR 0M-5): history diffs open by MOMENT id, not
+// legacy change-set id. The id alone is the tab identity: it
 // is contract-bounded, while a percent-encoded valid workspace path can
 // exceed the UI-state path bound. The moment record supplies its display path.
 const MOMENT_DIFF_TAB_PREFIX = "dohc://moment-diff/";
@@ -359,8 +359,7 @@ export interface WorkbenchState {
   editorGroups: EditorGroup[];
   activeEditorGroup: string;
   // The right-hand Chats panel (VS Code's secondary sidebar: toggleable,
-  // resizable, hidden by default). Independent of the left panel entirely,
-  // and only rendered for workspace-engine-flagged workspaces.
+  // resizable, hidden by default). Independent of the left panel entirely.
   chatsVisible: boolean;
   chatsWidth: number;
   // Max height of the explorer's Open Editors list (VS Code-style resizable

@@ -8,13 +8,12 @@ import {
   createTempWorkspace,
   openHistoryView,
   openWorkspaceFromFirstRun,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
 // SECRET-BACKED FILES, THE MARQUEE CLAIM AS A TEST: dohc can version
-// `.env` safely, which git cannot. A flagged workspace with a .env gets a
+// `.env` safely, which git cannot. A workspace with a .env gets a
 // protected history moment (lock, "Contents are protected", no diff), the
 // secret follows a version switch on disk, search finds nothing, and the
 // persisted engine.db never contains the plaintext.
@@ -123,9 +122,6 @@ test("a .env is versioned protected: locked history, versions carry it, search f
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await writeWorkspaceFiles(temp, [
       { path: "notes.md", contents: "ordinary findable prose\n" },
     ]);

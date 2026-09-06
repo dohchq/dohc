@@ -80,7 +80,6 @@ test("a drag's field write on one device moves the card on the other device's op
     capture = createWorkspaceEngineCapture({
       ...deviceA.workspace,
       rustEngineSessions: deviceA.sessions,
-      daemonOwnsCapture: true,
     });
     const deviceARelay = deviceA.relay.bind({
       ...deviceA.workspace,

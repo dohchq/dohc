@@ -583,7 +583,6 @@ const demoBridge = {
         agents: { mcpAutoStart: false, defaultDriverId: null, defaultModel: null },
         sites: { defaultPreviewMode: "auto" as const },
         privacy: { confirmExternalLinks: true },
-        experimental: { workspaceEngineAlpha: true },
         files: { attachmentLocation: "per-document" as const, attachmentFolderName: "assets" },
       },
       source: "default" as const,

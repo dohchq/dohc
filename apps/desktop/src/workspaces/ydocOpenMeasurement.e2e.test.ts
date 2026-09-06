@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
@@ -119,12 +119,6 @@ it.skipIf(engine.missing)(
   "measures healthy ydoc.open against the real daemon and stays well inside the bound",
   async () => {
     const root = await createTestScratch("dohc-ydoc-open-measurement-");
-    await mkdir(join(root, ".dohc", "engine"), { recursive: true });
-    await writeFile(
-      join(root, ".dohc", "engine", "SHADOW_CLONE"),
-      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "utf8",
-    );
     const measured: { case: string; ms: number }[] = [];
     let lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
@@ -141,7 +135,6 @@ it.skipIf(engine.missing)(
     let capture = createWorkspaceEngineCapture({
       ...workspace,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
     try {
       // 47 KiB: just under the 48 KiB in-band cap the daemon refuses a seeded
@@ -242,7 +235,6 @@ it.skipIf(engine.missing)(
       capture = createWorkspaceEngineCapture({
         ...workspace,
         rustEngineSessions: sessions,
-        daemonOwnsCapture: true,
       });
       await measure(
         `resurrected lineage, ${appends} unsettled appends`,

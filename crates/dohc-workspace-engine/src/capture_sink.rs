@@ -4326,6 +4326,31 @@ mod tests {
     }
 
     #[test]
+    fn binary_ingest_dedupes_equal_bytes() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), "logo.png", &[0, 1, 2, 255]);
+
+        assert!(matches!(
+            ingest_as(&mut sink, "logo.png", "image/png").expect("first ingest"),
+            IngestOutcome::Captured { .. }
+        ));
+        assert!(matches!(
+            ingest_as(&mut sink, "logo.png", "image/png").expect("equal ingest"),
+            IngestOutcome::Captured { .. }
+        ));
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(
+            binary_head(&db, "logo.png").as_deref(),
+            Some(sha256_hex(&[0, 1, 2, 255]).as_str())
+        );
+        assert_eq!(moment_count(&db, "logo.png"), 1);
+    }
+
+    #[test]
     fn retire_removes_the_version_head() {
         let scratch = ScratchDir::new().expect("scratch");
         let supervisor = WorkspaceSupervisor::new();

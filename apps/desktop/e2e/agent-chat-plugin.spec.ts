@@ -7,7 +7,6 @@ import {
   openWorkspaceFromFirstRun,
   seedPluginSource,
   seedWorkspaceManifest,
-  seedWorkspaceSettings,
 } from "./helpers/workspace";
 
 const pluginSource = fileURLToPath(new URL("../plugins/agent-chat/", import.meta.url));
@@ -108,9 +107,6 @@ async function openChat(
   title: string,
 ): Promise<Desktop> {
   await seedWorkspaceManifest(temp, "agent-chat-plugin-e2e");
-  await seedWorkspaceSettings(temp, {
-    experimental: { workspaceEngineAlpha: true },
-  });
   await seedPluginSource(temp, { fixtureRoot: pluginSource, pluginId: "agent-chat" });
 
   const desktop = await launchDesktopApp({ workspace: temp, env });

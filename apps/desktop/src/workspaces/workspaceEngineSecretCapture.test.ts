@@ -19,7 +19,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mockLiveSessions } from "../testing/liveEngineSessions";
+import { mockDaemonSessions, mockLiveSessions } from "../testing/liveEngineSessions";
 import {
   createWorkspaceEngineCapture,
   type WorkspaceEngineCapture,
@@ -58,11 +58,12 @@ function daemonCapture(
   loopback: VersionedLoopbackEngine,
   requests?: Request[],
 ): WorkspaceEngineCapture {
+  const workspaceId = "engine-secret-test";
   return createWorkspaceEngineCapture({
-    workspaceId: "engine-secret-test",
+    workspaceId,
     rootPath: root,
     attachmentId: Symbol("test-workspace-attachment"),
-    rustEngineSessions: mockLiveSessions(loopback, requests),
+    rustEngineSessions: mockDaemonSessions({ rootPath: root, workspaceId, loopback, requests }),
   });
 }
 
@@ -113,11 +114,14 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     engine.start();
     await engine.flush();
 
-    // The legacy in-process engine never opens a daemon workspace or writes
-    // the secret over the wire.
+    // The chain opens the daemon workspace; the daemon writes the secret
+    // into its own store, never the chain.
     const methods = requests.map((request) => request.method);
     expect(methods).toContain("workspace.open");
-    expect(methods).toContain(VERSIONED_METHOD.secretsWrite);
+    expect(methods).not.toContain(VERSIONED_METHOD.secretsWrite);
+    expect(loopback.requests.map((request) => request.method)).toContain(
+      VERSIONED_METHOD.secretsWrite,
+    );
 
     // Same content again: no second moment (content-equality no-op).
     engine.captureBatch([{ path: ".env", operation: "update" }]);
@@ -152,7 +156,7 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     expect(protectedMoments).toHaveLength(3);
     expect(protectedMoments[0].operation).toBe("delete");
     expect(protectedMoments[0].metadata.summary).toBe("Deleted .env");
-    expect(requests.map((request) => request.method)).toContain(
+    expect(loopback.requests.map((request) => request.method)).toContain(
       VERSIONED_METHOD.secretsDelete,
     );
     await engine.stop();
@@ -224,54 +228,21 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
 });
 
 describe("the stand-down marker cleanup must never touch secret paths", () => {
-  it("an engine-owned removal of a secret path does not record a spurious protected delete", async () => {
-    // #681 round 5, CodeRabbit Major (real). The round-4 hoist consumed the
-    // expected-delete token for every event, before the secret floor gate —
-    // stealing it from `captureSecretPath`'s own `consumeExpectedEvent`
-    // check (workspaceEngineCapture.ts). An engine-owned removal — a
-    // version switch whose target omits the file, a relay fast-forward
-    // delete — registers this same token via `registerExpectedEngineEvents`
-    // before the disk delete, exactly like `materialize()` does for a
-    // text-file delete operation. With the token stolen, the removal read
-    // as EXTERNAL and recorded a spurious "Deleted .env" protected moment
-    // on every version switch that drops a secret file.
-    const root = await createTestScratch("dohc-engine-secret-");
-    await write(root, ".env", ENV_A);
-    const loopback = new VersionedLoopbackEngine();
-    const engine = daemonCapture(root, loopback);
-    engine.start();
-    await engine.flush();
-
-    let page = await engine.listMoments();
-    expect(page.moments.filter((moment) => moment.protected)).toHaveLength(1);
-
-    engine.registerExpectedEngineEvents([{ path: ".env", operation: "delete" }]);
-    await rm(join(root, ".env"));
-    engine.captureBatch([{ path: ".env", operation: "delete" }]);
-    await engine.flush();
-
-    // RED before the fix: the hoist consumed the token first, so this
-    // recorded a spurious second "Deleted .env" protected moment.
-    page = await engine.listMoments();
-    const protectedMoments = page.moments.filter((moment) => moment.protected);
-    expect(protectedMoments).toHaveLength(1);
-    await engine.stop();
-  });
-
   it("a secret path's watcher event never reaches the plaintext reader", async () => {
-    // #681 round 5, CodeRabbit security trivial (real, security-significant
-    // despite the tag). The round-4 hoist called the plaintext reader
-    // (readDiskTextState) unconditionally, before the secret floor —
-    // reading secret bytes through the reader with no secret-store
-    // awareness, and charging a redundant disk read to every secret event.
-    // Both readers ultimately call node:fs/promises readFile on the same
-    // absolute path, so a stray plaintext-reader call shows up as a second
-    // readFile call for .env — readDiskSecretState's own read, inside
-    // captureSecretPath, is the only legitimate one.
+    // The stand-down cleanup once called the plaintext reader
+    // (readDiskTextState) for every event, before the secret floor, reading
+    // secret bytes through a reader with no secret-store awareness. The
+    // daemon reads the file for capture; the chain has no reason to. The
+    // sessions here carry no daemon disk side, so every readFile of .env
+    // after the flush is the chain's own.
     const root = await createTestScratch("dohc-engine-secret-");
     await write(root, ".env", ENV_A);
-    const loopback = new VersionedLoopbackEngine();
-    const engine = daemonCapture(root, loopback);
+    const engine = createWorkspaceEngineCapture({
+      workspaceId: "engine-secret-test",
+      rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment"),
+      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
+    });
     engine.start();
     await engine.flush();
 
@@ -285,9 +256,7 @@ describe("the stand-down marker cleanup must never touch secret paths", () => {
     const envReads = trackedReadFile.mock.calls.filter(
       (call) => call[0] === envAbsolute,
     );
-    // RED before the fix: readDiskTextState's own extra read of .env's
-    // bytes, ahead of the secret floor, doubled this count.
-    expect(envReads).toHaveLength(1);
+    expect(envReads).toHaveLength(0);
     await engine.stop();
   });
 });

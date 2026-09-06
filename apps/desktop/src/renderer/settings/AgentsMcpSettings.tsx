@@ -37,7 +37,6 @@ export function AgentsMcpSettings(props: {
   preferredName?: string;
   onPreferredNameChange: (preferredName: string | undefined) => Promise<void>;
   runner: RunnerSettings;
-  engineEnabled: boolean;
   sharedView?: boolean;
   sessionRecorderOn: boolean | undefined;
   onRunnerChange: (runner: RunnerSettings) => Promise<void>;
@@ -57,7 +56,6 @@ export function AgentsMcpSettings(props: {
     preferredName,
     onPreferredNameChange,
     runner,
-    engineEnabled,
     sharedView,
     sessionRecorderOn,
     onRunnerChange,
@@ -350,7 +348,6 @@ export function AgentsMcpSettings(props: {
       <RunnerSettingsCard
         workspaceId={workspaceId}
         runner={runner}
-        engineEnabled={engineEnabled}
         sharedView={sharedView}
         sessionRecorderOn={sessionRecorderOn}
         onRunnerChange={onRunnerChange}

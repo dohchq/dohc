@@ -41,12 +41,6 @@ export const WorkspaceSettings = z
         confirmExternalLinks: z.boolean(),
       })
       .strict(),
-    experimental: z
-      .object({
-        workspaceEngineAlpha: z.boolean(),
-      })
-      .strict()
-      .default(WORKSPACE_SETTINGS_DEFAULTS.experimental),
     files: z
       .object({
         attachmentLocation: z.enum(ATTACHMENT_LOCATIONS),
@@ -80,7 +74,6 @@ export const WorkspaceSettingsPatch = z.object({
   agents: WorkspaceSettings.shape.agents.partial().optional(),
   sites: WorkspaceSettings.shape.sites.partial().optional(),
   privacy: WorkspaceSettings.shape.privacy.partial().optional(),
-  experimental: WorkspaceSettings.shape.experimental.removeDefault().partial().optional(),
   files: WorkspaceSettings.shape.files.removeDefault().partial().optional(),
 }).strict();
 export type WorkspaceSettingsPatch = z.infer<typeof WorkspaceSettingsPatch>;
@@ -100,7 +93,6 @@ export function mergeWorkspaceSettings(
     agents: { ...current.agents, ...patch.agents },
     sites: { ...current.sites, ...patch.sites },
     privacy: { ...current.privacy, ...patch.privacy },
-    experimental: { ...current.experimental, ...patch.experimental },
     files: { ...current.files, ...patch.files },
   });
 }

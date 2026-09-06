@@ -12,7 +12,7 @@ use dohc_engine_protocol::{
     wire::{BlobStart, Envelope, Request, WorkspaceHandle, decode_control, encode_control},
 };
 use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
@@ -37,7 +37,7 @@ async fn fixture(
     WorkspaceHandle,
 ) {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
@@ -67,7 +67,7 @@ async fn fixture_with_service(
     WorkspaceHandle,
 ) {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let opened = transport
@@ -3186,7 +3186,7 @@ async fn secret_write_beneath_symlinked_workspace_root_succeeds() {
         );
     }
 
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let workspace = "ws-rpcd-secret-symlinked-root";
     let opened = transport
@@ -4488,12 +4488,12 @@ async fn rollback_rejects_sync_record_only_moment() {
     use dohc_engine_storage::EngineStore;
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db_path = scratch.path().join(".dohc/engine/engine.db");
     std::fs::create_dir_all(db_path.parent().expect("engine dir")).expect("engine dir");
     {
         let mut store = EngineStore::open(&db_path, 1).expect("store");
-        store.bind_shadow_clone_token(TOKEN).expect("bind token");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
         let faults = NoFaults;
         let mut versioned = VersionedTextStore::new(&mut store);
         versioned
@@ -5159,10 +5159,9 @@ fn seed_versions(root: &Path, workspace_id: &str) {
 
     std::fs::create_dir_all(root.join(".dohc/engine")).expect("engine dir");
     let mut store = EngineStore::open(&root.join(".dohc/engine/engine.db"), 1).expect("store");
-    // The seed creates the engine db, so the shadow token must bind here —
-    // a pre-existing unbound db is exactly what the fence refuses at
-    // workspace.open.
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    // The seed creates the engine db, so the binding token must bind here:
+    // a pre-existing unbound db is exactly what workspace.open refuses.
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     let faults = NoFaults;
     let mut versioned = VersionedTextStore::new(&mut store);
     versioned
@@ -5243,7 +5242,7 @@ fn seed_versions(root: &Path, workspace_id: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_classifies_and_never_inlines_the_merged_body() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport.call(RequestContext::unbounded(), request(1, "workspace.open", None, json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "ws-rpcd-merge" }))).await.expect("open");
@@ -5273,7 +5272,7 @@ async fn merge_classifies_and_never_inlines_the_merged_body() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_conflict_returns_the_exact_created_conflict_id() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge-conflict-id");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
@@ -5354,7 +5353,7 @@ async fn merge_conflict_returns_the_exact_created_conflict_id() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compare_and_merge_carry_a_binary_head_through_the_wire() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-binary-merge-wire");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
@@ -5484,7 +5483,7 @@ async fn compare_and_merge_carry_a_binary_head_through_the_wire() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_request_id_replay_after_target_moves_returns_recorded_outcome() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge-request-id");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport.call(RequestContext::unbounded(), request(1, "workspace.open", None, json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "ws-rpcd-merge-request-id" }))).await.expect("open");
@@ -5529,7 +5528,7 @@ async fn merge_request_id_replay_after_target_moves_returns_recorded_outcome() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_rejects_a_request_id_recorded_by_a_text_write() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge-cross-kind");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
@@ -5581,7 +5580,7 @@ async fn merge_rejects_a_request_id_recorded_by_a_text_write() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_on_a_leased_target_is_refused() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge-lease");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
@@ -5640,7 +5639,7 @@ async fn merge_on_a_leased_target_is_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compare_files_is_paged_and_binary_entry_shape_is_exact() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-compare");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport.call(RequestContext::unbounded(), request(1, "workspace.open", None, json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "ws-rpcd-compare" }))).await.expect("open");
@@ -5684,12 +5683,12 @@ async fn compare_files_pages_via_db_keyset_not_full_vector() {
     use dohc_engine_storage::EngineStore;
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     std::fs::create_dir_all(scratch.path().join(".dohc/engine")).expect("engine dir");
     let db = scratch.path().join(".dohc/engine/engine.db");
     let expected = {
         let mut store = EngineStore::open(&db, 1).expect("store");
-        store.bind_shadow_clone_token(TOKEN).expect("bind token");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
         let faults = NoFaults;
         let mut versioned = VersionedTextStore::new(&mut store);
         versioned
@@ -5950,7 +5949,7 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
     use dohc_engine_storage::EngineStore;
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let workspace = "ws-rpcd-text-blob";
     let other_workspace = "ws-rpcd-text-blob-other";
     let db_path = scratch.path().join(".dohc/engine/engine.db");
@@ -5961,7 +5960,7 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
     let other_sha = dohc_engine_storage::hex_sha256(other_text.as_bytes());
     {
         let mut store = EngineStore::open(&db_path, 1).expect("store");
-        store.bind_shadow_clone_token(TOKEN).expect("bind token");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
         let faults = NoFaults;
         let mut versioned = VersionedTextStore::new(&mut store);
         versioned
@@ -6779,7 +6778,7 @@ async fn unversioned_conflict_resolve_rpc_is_rejected_before_import_bookkeeping(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_resolved_binary_removal_reports_its_preimage_as_bytes() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let workspace_id = "ws-rpcd-binary-removal";
     seed_binary_before_fork(scratch.path(), workspace_id);
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -6870,7 +6869,7 @@ fn seed_binary_before_fork(root: &Path, workspace_id: &str) {
 
     std::fs::create_dir_all(root.join(".dohc/engine")).expect("engine dir");
     let mut store = EngineStore::open(&root.join(".dohc/engine/engine.db"), 1).expect("store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     let faults = NoFaults;
     let mut versioned = VersionedTextStore::new(&mut store);
     versioned

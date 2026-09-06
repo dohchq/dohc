@@ -385,43 +385,25 @@ export function NoticeCenter(props: {
       });
     }
 
-    // Persistent while true: no engine capture means no history recorder.
-    // Three causes end in no recorder and only the last is the user's Settings
-    // choice, so each earlier cause claims the notice first. The causes come
-    // from main's one read at workspace open; a second read here could name a
-    // cause that never happened. A shared view leads the cascade and takes no
-    // notice: at view and comment it gets no recorder by design, at edit it
-    // gets one, and the share banner already says what the surface is.
+    // Persistent while true: no engine capture means no history recorder
+    // exists at all. Never spammy: the flags change only at workspace open,
+    // and the cause comes from main's own open-time decision, riding the
+    // status the renderer already consumes.
+    //
+    // A shared view takes no notice at all: at view and comment it gets no
+    // recorder by design, a capability, not a failure; at edit it
+    // does get one. The share banner already says what the surface is.
     if (props.syncStatus?.historyShareView) {
       // Nothing to warn about.
-    } else if (props.syncStatus?.settingsWarning) {
-      next.push({
-        id: "workspace-settings-unreadable",
-        tone: "warning",
-        title: "History is off for this workspace",
-        body: props.syncStatus.settingsWarning,
-        action: { label: "Open Settings", onClick: props.onOpenSettings },
-        Icon: AlertTriangle,
-      });
     } else if (props.syncStatus?.historyRecordingUnavailable) {
-      // The recorder could not be built at open. Nothing records, so
-      // historyRecordingOff is true as well — but that branch names Settings
-      // as the cause, and the user changed no setting. State the failure and
-      // the one step that retries it: main builds the recorder once per
-      // workspace per app session, so reopening the workspace re-reads nothing.
+      // The recorder could not be built at open. Main builds the
+      // recorder once per workspace per app session, so reopening the
+      // workspace re-reads nothing; a restart is the step that retries it.
       next.push({
         id: "history-recording-unavailable",
         tone: "warning",
         title: "History is off for this workspace",
         body: "dohc could not start recording history for this workspace. Your files still save normally. Restart dohc to try again.",
-        Icon: AlertTriangle,
-      });
-    } else if (props.syncStatus?.historyRecordingOff) {
-      next.push({
-        id: "history-recording-off",
-        tone: "warning",
-        title: "History is off for this workspace",
-        body: "The workspace engine is turned off in Settings, so changes are not being recorded. Your files still save normally.",
         Icon: AlertTriangle,
       });
     }

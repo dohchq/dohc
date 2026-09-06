@@ -1862,7 +1862,7 @@ describe("Rust engine daemon lifecycle", () => {
       });
       try {
         await lifecycle.start();
-        // A fresh shadow database currently has no active version. The null
+        // A fresh database has no active version yet. The null
         // result is still a successful, decoded versions.active round-trip.
         await expect(runEngineDaemonStartupSmoke(lifecycle)).resolves.toBeNull();
       } finally {

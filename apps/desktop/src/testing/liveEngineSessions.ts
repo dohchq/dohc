@@ -8,6 +8,7 @@ import {
   type WatcherStatusResult,
 } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import { createFakeDaemonCapture } from "./fakeDaemonCapture";
 
 // A type alias, not an interface: only aliases get an implicit index signature,
 // which is what makes this assignable to the wire's `JsonValue`.
@@ -23,6 +24,36 @@ const READY_WATCHER_STATUS = {
   terminal: false,
   phase: "ready",
 } satisfies WatcherStatusResult;
+
+/**
+ * The daemon capture lifecycle the loopback has no concept of: flush,
+ * reconcile, author, watcher status, and pending adoptions. A fake transport
+ * that forwards everything else to a `VersionedLoopbackEngine` answers these
+ * first so `capture.start()`, `flush()`, and `stop()` behave as they do
+ * against the daemon. Returns null for every other method.
+ */
+export function daemonCaptureLifecycleAnswer(
+  request: Request,
+  captureFlushResult: () => CaptureFlushResult = () => ({
+    settled: true,
+    running: true,
+    degraded: false,
+  }),
+): Response | null {
+  switch (request.method) {
+    case "capture.flush":
+    case "capture.reconcile":
+      return { id: request.id, result: captureFlushResult() };
+    case "capture.setAuthor":
+      return { id: request.id, result: { updated: true } };
+    case "watcher.status":
+      return { id: request.id, result: READY_WATCHER_STATUS };
+    case "collections.listPendingAdoptions":
+      return { id: request.id, result: { adoptions: [], nextCursor: null } };
+    default:
+      return null;
+  }
+}
 
 /**
  * Daemon-shaped `EngineWorkspaceSessions` backed by a real
@@ -53,6 +84,39 @@ export function mockLiveSessions(
   }),
   beforeRequest?: (request: Request) => void | Promise<void>,
 ): EngineWorkspaceSessions {
+  return loopbackSessions(loopback, { requests, captureFlushResult, beforeRequest });
+}
+
+/**
+ * `mockLiveSessions` plus the daemon's disk side (`createFakeDaemonCapture`):
+ * `capture.flush` ingests the workspace folder and `versions.setActive`
+ * rewrites it. For suites whose subject is chain-side state that depends on
+ * capture having happened: restore, version switch, secret materialization.
+ */
+export function mockDaemonSessions(input: {
+  rootPath: string;
+  workspaceId: string;
+  loopback: VersionedLoopbackEngine;
+  requests?: Request[];
+}): EngineWorkspaceSessions {
+  const disk = createFakeDaemonCapture(input);
+  return loopbackSessions(input.loopback, {
+    requests: input.requests,
+    answer: (request) => disk.sendRequest(request),
+  });
+}
+
+function loopbackSessions(
+  loopback: VersionedLoopbackEngine,
+  options: {
+    requests?: Request[];
+    captureFlushResult?: () => CaptureFlushResult;
+    beforeRequest?: (request: Request) => void | Promise<void>;
+    // Answers ahead of the lifecycle defaults; null falls through.
+    answer?: (request: Request) => Promise<Response | null>;
+  },
+): EngineWorkspaceSessions {
+  const { requests, captureFlushResult, beforeRequest, answer } = options;
   const blobHandlers = new Set<(blob: CompletedDaemonBlob) => void>();
   const client = {
     close: () => undefined,
@@ -82,27 +146,10 @@ export function mockLiveSessions(
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
-      if (request.method === "capture.flush") {
-        return { id: request.id, result: captureFlushResult() };
-      }
-      if (request.method === "capture.reconcile") {
-        return { id: request.id, result: captureFlushResult() };
-      }
-      if (request.method === "capture.setAuthor") {
-        return { id: request.id, result: { updated: true } };
-      }
-      if (request.method === "watcher.status") {
-        return {
-          id: request.id,
-          result: READY_WATCHER_STATUS,
-        };
-      }
-      if (request.method === "collections.listPendingAdoptions") {
-        return {
-          id: request.id,
-          result: { adoptions: [], nextCursor: null },
-        };
-      }
+      const answered = answer ? await answer(request) : null;
+      if (answered) return answered;
+      const lifecycle = daemonCaptureLifecycleAnswer(request, captureFlushResult);
+      if (lifecycle) return lifecycle;
       const response = await loopback.sendRequest(request);
       if (request.method === VERSIONED_METHOD.textReadBlob) {
         deliverWithheldBlob(loopback, request, response, blobHandlers);

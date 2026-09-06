@@ -8,11 +8,9 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::{ScratchDir, harness::write_fingerprint_db};
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_workspace_engine::{EngineService, root_binding::read_root_binding};
 use serde_json::{Value, json};
 use std::sync::Arc;
-
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
     Request {
@@ -29,7 +27,7 @@ fn root_string(scratch: &ScratchDir) -> String {
     scratch.path().to_string_lossy().into_owned()
 }
 
-async fn open_shadow(
+async fn open_bound_root(
     transport: &InProcessTransport<EngineService>,
     scratch: &ScratchDir,
     request_id: u64,
@@ -50,9 +48,8 @@ async fn open_shadow(
 }
 
 #[tokio::test]
-async fn clone_marked_shadow_replay_composes_real_domains_end_to_end() {
+async fn root_bound_replay_composes_real_domains_end_to_end() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
 
     let opened = transport
@@ -205,7 +202,7 @@ async fn clone_marked_shadow_replay_composes_real_domains_end_to_end() {
     let db_path = scratch.engine_db_path().expect("db path");
     let mut store = EngineStore::open(&db_path, 103).expect("reopen after actor close");
     assert!(!store.was_freshly_created());
-    let shadow_token: String = store
+    let bound_token: String = store
         .read_with(|conn| {
             conn.query_row(
                 "SELECT token FROM shadow_clone WHERE rowid_guard = 1",
@@ -213,8 +210,12 @@ async fn clone_marked_shadow_replay_composes_real_domains_end_to_end() {
                 |row| row.get(0),
             )
         })
-        .expect("shadow token");
-    assert_eq!(shadow_token, TOKEN);
+        .expect("bound token");
+    // The daemon minted the binding on first open and stamped the store with it.
+    assert_eq!(
+        read_root_binding(scratch.path()).expect("root binding"),
+        Some(bound_token)
+    );
     let snapshot = VersionedTextStore::new(&mut store)
         .read_text("ws-shadow", "main", "notes/hello.md")
         .expect("disk read")
@@ -237,9 +238,8 @@ async fn clone_marked_shadow_replay_composes_real_domains_end_to_end() {
 #[tokio::test]
 async fn local_conflict_open_rejects_snapshot_hash_mismatch_without_persistence() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let handle = open_shadow(&transport, &scratch, 1).await;
+    let handle = open_bound_root(&transport, &scratch, 1).await;
     let error = transport
         .call(
             RequestContext::unbounded(),
@@ -307,29 +307,8 @@ async fn local_conflict_open_rejects_snapshot_hash_mismatch_without_persistence(
 }
 
 #[tokio::test]
-async fn shadow_replay_without_marker_is_refused_before_workspace_open() {
+async fn a_ts_v1_fingerprint_is_refused_before_binding() {
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let error = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({ "rootDir": root_string(&scratch), "workspaceId": "ws-shadow" }),
-            ),
-        )
-        .await
-        .expect_err("missing marker must fail");
-    assert_eq!(error.code, ErrorCode::InvalidParams);
-    assert!(!scratch.join(".dohc/engine/engine.db").exists());
-}
-
-#[tokio::test]
-async fn clone_marker_cannot_bypass_ts_v1_fingerprint_refusal() {
-    let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let db_path = scratch.engine_db_path().expect("db path");
     write_fingerprint_db(&db_path, 1).expect("foreign v1 fixture");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -349,7 +328,7 @@ async fn clone_marker_cannot_bypass_ts_v1_fingerprint_refusal() {
 }
 
 #[tokio::test]
-async fn valid_marker_cannot_claim_an_unstamped_existing_v2_store() {
+async fn an_existing_store_under_an_unbound_root_is_refused() {
     let scratch = ScratchDir::new().expect("scratch");
     let db_path = scratch.engine_db_path().expect("db path");
     let initial = {
@@ -388,7 +367,6 @@ async fn valid_marker_cannot_claim_an_unstamped_existing_v2_store() {
     };
     assert_eq!(initial.1, 0);
     assert_eq!(initial.2, 0);
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let error = transport
@@ -402,8 +380,9 @@ async fn valid_marker_cannot_claim_an_unstamped_existing_v2_store() {
             ),
         )
         .await
-        .expect_err("unstamped existing v2 store must be refused");
+        .expect_err("an existing store under an unbound root must be refused");
     assert_eq!(error.code, ErrorCode::InvalidParams);
+    assert_eq!(error.message, "engine database is bound to another root");
 
     let store = EngineStore::open(&db_path, 60).expect("reopen refused store");
     assert!(!store.was_freshly_created());
@@ -441,4 +420,138 @@ async fn valid_marker_cannot_claim_an_unstamped_existing_v2_store() {
         store.table_row_count("shadow_clone").expect("shadow rows"),
         0
     );
+}
+
+/// A workspace's engine.db copied under another root is refused, whether the
+/// other root has no binding or its own.
+#[tokio::test]
+async fn an_engine_db_copied_to_another_root_is_refused() {
+    let source = ScratchDir::new().expect("source");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_bound_root(&transport, &source, 1).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close source");
+    let source_db = source.engine_db_path().expect("source db");
+
+    let unbound = ScratchDir::new().expect("unbound root");
+    std::fs::copy(&source_db, unbound.engine_db_path().expect("unbound db")).expect("copy db");
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                3,
+                "workspace.open",
+                None,
+                json!({ "rootDir": root_string(&unbound), "workspaceId": "ws-shadow" }),
+            ),
+        )
+        .await
+        .expect_err("a copied database under an unbound root must be refused");
+    assert_eq!(error.message, "engine database is bound to another root");
+
+    let other = ScratchDir::new().expect("other root");
+    let other_handle = open_bound_root(&transport, &other, 4).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(5, "workspace.close", Some(other_handle), json!({})),
+        )
+        .await
+        .expect("close other");
+    std::fs::copy(&source_db, other.engine_db_path().expect("other db")).expect("overwrite db");
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                6,
+                "workspace.open",
+                None,
+                json!({ "rootDir": root_string(&other), "workspaceId": "ws-shadow" }),
+            ),
+        )
+        .await
+        .expect_err("a copied database under another root's binding must be refused");
+    assert_eq!(error.message, "engine database is bound to another root");
+}
+
+async fn open_error(
+    transport: &InProcessTransport<EngineService>,
+    scratch: &ScratchDir,
+    request_id: u64,
+    read_only: bool,
+) -> dohc_engine_protocol::error::WireError {
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                request_id,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": root_string(scratch),
+                    "workspaceId": "ws-shadow",
+                    "skipStartupMaintenance": read_only,
+                }),
+            ),
+        )
+        .await
+        .expect_err("open must be refused")
+}
+
+fn engine_files(scratch: &ScratchDir) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(scratch.join(".dohc/engine"))
+        .map(|entries| {
+            entries
+                .map(|entry| {
+                    entry
+                        .expect("entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// A fresh root whose binding is malformed refuses with the binding's
+/// cause, both times, and leaves no engine.db behind to turn the second
+/// open into a mismatch.
+#[tokio::test]
+async fn a_fresh_root_with_a_malformed_binding_refuses_twice_and_keeps_no_store() {
+    let scratch = ScratchDir::new().expect("scratch");
+    std::fs::create_dir_all(scratch.join(".dohc/engine")).expect("engine dir");
+    std::fs::write(scratch.join(".dohc/engine/ROOT_BINDING"), "0123456789").expect("planted");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+
+    for id in [1, 2] {
+        let error = open_error(&transport, &scratch, id, false).await;
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(error.message, "workspace root binding is malformed");
+        assert_eq!(engine_files(&scratch), vec!["ROOT_BINDING".to_owned()]);
+    }
+}
+
+/// A read-only open never binds. Under an unbound root with an existing
+/// store it refuses, writes no binding, and leaves the store's bytes alone.
+#[tokio::test]
+async fn a_read_only_open_of_an_unbound_root_with_a_store_is_refused_untouched() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db_path = scratch.engine_db_path().expect("db path");
+    drop(EngineStore::open(&db_path, 50).expect("create store"));
+    let before = std::fs::read(&db_path).expect("store bytes");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let error = open_error(&transport, &scratch, 1, true).await;
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+    assert_eq!(error.message, "engine database is bound to another root");
+    assert_eq!(read_root_binding(scratch.path()).expect("read"), None);
+    assert_eq!(std::fs::read(&db_path).expect("store bytes"), before);
 }
