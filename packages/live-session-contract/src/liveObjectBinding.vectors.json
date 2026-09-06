@@ -1,0 +1,634 @@
+{
+  "accepted": [
+    {
+      "name": "canonical-binding",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      },
+      "normalized": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "normalizes-sorts-utf8-and-deduplicates-selector-paths",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes//./owner.md",
+        "selectorPaths": [
+          "z/𐀀.md",
+          "notes\\owner.md",
+          "z/.md",
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      },
+      "normalized": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md",
+          "z/.md",
+          "z/𐀀.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "normalizes-backslash-path",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes\\owner.md",
+        "selectorPaths": [
+          "notes\\owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      },
+      "normalized": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "accepts-non-segment-double-dot-path",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/v1..draft.md",
+        "selectorPaths": [
+          "notes/v1..draft.md"
+        ],
+        "restoreFenceGeneration": 7
+      },
+      "normalized": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/v1..draft.md",
+        "selectorPaths": [
+          "notes/v1..draft.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "accepts-relative-colon-at-byte-one",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "a:b.md",
+        "selectorPaths": [
+          "a:b.md"
+        ],
+        "restoreFenceGeneration": 7
+      },
+      "normalized": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "a:b.md",
+        "selectorPaths": [
+          "a:b.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "accepts-512-byte-identifier",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      },
+      "normalized": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "accepts-1024-byte-multibyte-path",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé.mda",
+        "selectorPaths": [
+          "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé.mda"
+        ],
+        "restoreFenceGeneration": 7
+      },
+      "normalized": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé.mda",
+        "selectorPaths": [
+          "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé.mda"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "accepts-zero-fence-generation",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 0
+      },
+      "normalized": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 0
+      }
+    },
+    {
+      "name": "accepts-maximum-safe-fence-generation",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 9007199254740991
+      },
+      "normalized": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 9007199254740991
+      }
+    }
+  ],
+  "refused": [
+    {
+      "name": "refuses-non-object",
+      "input": null
+    },
+    {
+      "name": "refuses-missing-field",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "refuses-unknown-field",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7,
+        "unexpected": "value"
+      }
+    },
+    {
+      "name": "refuses-authority-shaped-grant-field",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7,
+        "grant": "edit"
+      }
+    },
+    {
+      "name": "refuses-empty-identifier",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "refuses-control-bearing-identifier",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object\u0000id",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "refuses-513-byte-identifier",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "refuses-multibyte-identifier-overrun",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "refuses-empty-selector-list",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "refuses-raw-101-entry-duplicate-selector-list",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md",
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "refuses-non-string-selector-entry",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md",
+          7
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "refuses-secret-current-path",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": ".env",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "refuses-reserved-current-path",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": ".dohc/state.json",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "refuses-ignored-selector-path",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          ".git/config"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "refuses-absolute-current-path",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "/etc/passwd",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "refuses-traversal-selector-path",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/../owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "refuses-control-bearing-path",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/\u0001owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "refuses-over-1024-byte-path",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "refuses-over-1024-utf8-bytes-within-1024-utf16-code-units",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 7
+      }
+    },
+    {
+      "name": "refuses-negative-fence-generation",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": -1
+      }
+    },
+    {
+      "name": "refuses-fractional-fence-generation",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 1.5
+      }
+    },
+    {
+      "name": "refuses-greater-than-safe-fence-generation",
+      "input": {
+        "workspaceId": "workspace-1",
+        "mainVersionId": "main",
+        "objectId": "object-1",
+        "lineageClaimId": "lineage-1",
+        "currentPath": "notes/owner.md",
+        "selectorPaths": [
+          "notes/owner.md"
+        ],
+        "restoreFenceGeneration": 9007199254740992
+      }
+    }
+  ]
+}

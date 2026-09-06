@@ -1,4 +1,5 @@
 import { canonicalRelayUrl } from "@dohc/workspace-contracts/relay-values";
+import type { AccountAuthConfig } from "./accountAuth";
 
 export interface ShareWebConfig {
   relayUrl: string;
@@ -9,6 +10,7 @@ export interface ShareWebConfig {
   port: number;
   bind: string;
   devMode: boolean;
+  accountAuth?: AccountAuthConfig;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -89,6 +91,30 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     throw new Error("DOHC_SHARE_WEB_DEV=1 requires NODE_ENV=development or test.");
   }
 
+  let accountAuth: AccountAuthConfig | undefined;
+  const authUpstream = env.DOHC_SHARE_WEB_AUTH_URL;
+  if (authUpstream !== undefined) {
+    const publicOrigin = required(env, "DOHC_SHARE_WEB_PUBLIC_ORIGIN");
+    let origin: URL;
+    let upstream: URL;
+    try {
+      origin = new URL(publicOrigin);
+      upstream = new URL(authUpstream);
+    } catch {
+      throw new Error("Account authentication requires valid public and upstream URLs.");
+    }
+    if (origin.protocol !== "https:" || publicOrigin !== origin.origin ||
+        !hosts.includes(origin.host)) {
+      throw new Error("DOHC_SHARE_WEB_PUBLIC_ORIGIN must be a canonical HTTPS origin with an exact configured public Host.");
+    }
+    if ((upstream.protocol !== "http:" && upstream.protocol !== "https:") ||
+        upstream.username || upstream.password || upstream.pathname !== "/" ||
+        upstream.search || upstream.hash) {
+      throw new Error("DOHC_SHARE_WEB_AUTH_URL must be an HTTP or HTTPS origin without credentials, path, query, or fragment.");
+    }
+    accountAuth = { upstreamUrl: upstream.origin, publicOrigin };
+  }
+
   return {
     relayUrl: relayUrl.href,
     publicRelayUrl,
@@ -98,5 +124,6 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     port,
     bind: env.DOHC_SHARE_WEB_BIND ?? (devMode ? "127.0.0.1" : "0.0.0.0"),
     devMode,
+    ...(accountAuth ? { accountAuth } : {}),
   };
 }

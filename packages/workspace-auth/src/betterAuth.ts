@@ -14,6 +14,8 @@ interface WorkspaceAuthOptions {
   pool: Pool;
   baseURL: string;
   secret: string;
+  // share-web forwards its validated viewer Origin when proxying browser auth.
+  trustedOrigins?: string[];
   // Dev/self-host email delivery is console logging; production providers
   // plug in here later without touching callers.
   sendEmail?: (to: string, subject: string, body: string) => Promise<void>;
@@ -37,6 +39,7 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
         await sendEmail(user.email, "Verify your dohc email", url);
       },
     },
+    ...(options.trustedOrigins ? { trustedOrigins: options.trustedOrigins } : {}),
     plugins: [
       // The desktop authenticates API calls with `Authorization: Bearer
       // <session token>` (the device flow's access_token IS a session token).
