@@ -67,7 +67,7 @@
 <main id="top">
 
   <!-- ============ hero ============ -->
-  <section class="hero">
+  <section class="hero hero-with-engine">
     <div class="hero-copy">
       <h1 class="reveal d1">Put work in <em class="underlined">plain sight.<svg class="hand-underline" viewBox="0 0 220 22" preserveAspectRatio="none" aria-hidden="true"><path d="M6 14 C 60 4, 140 20, 214 9" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/></svg></em></h1>
       <p class="hero-sub reveal d2">
@@ -83,6 +83,15 @@
         </div>
       </div>
     </div>
+    <figure class="hero-engine">
+      <div class="hero-engine-view" data-engine-host role="group" aria-label="Interactive V8 engine model">
+        <img class="hero-engine-poster" src="/v8-engine.png" alt="Detailed V8 engine with a ribbed intake, twin valve covers, polished headers and belt-driven accessories." />
+      </div>
+      <div class="engine-actions" hidden>
+        <button type="button" data-engine-play>Pause rotation</button>
+        <button type="button" data-engine-reset>Reset view</button>
+      </div>
+    </figure>
   </section>
 
   <!-- ============ interactive desktop demo ============ -->
@@ -436,5 +445,6 @@
 
 <script type="module" src="/src/main.tsx"></script>
 <script type="module" src="site.js"></script>
+<script type="module" src="/src/hero-engine.ts"></script>
 </body>
 </html>

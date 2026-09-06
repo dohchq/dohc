@@ -323,6 +323,36 @@ body {
 
 /* ---------- sections ---------- */
 
+.hero-with-engine {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 32px;
+  text-align: left;
+}
+.hero-with-engine .hero-copy { min-width: 0; }
+.hero-with-engine h1 { margin: 0; font-size: clamp(50px, 6.5vw, 88px); }
+.hero-with-engine .hero-sub { margin-inline: 0; max-width: 38ch; }
+.hero-with-engine .hero-cta { justify-content: flex-start; }
+.hero-engine { min-width: 0; position: relative; }
+.hero-engine-view { position: relative; width: 100%; height: 510px; }
+.hero-engine-view canvas, .hero-engine-poster { display: block; width: 100%; height: 100%; object-fit: contain; }
+.hero-engine-view canvas { position: absolute; inset: 0; cursor: grab; }
+.hero-engine-view canvas:active { cursor: grabbing; }
+.hero-engine-view canvas:focus-visible { outline: 1px solid var(--muted); outline-offset: 3px; border-radius: 8px; }
+.engine-loaded .hero-engine-poster { visibility: hidden; }
+.engine-actions { display: flex; justify-content: center; gap: 20px; margin-top: 8px; }
+.engine-actions[hidden] { display: none; }
+.engine-actions button { border: 0; padding: 5px 0; background: transparent; color: var(--subtle); font: 400 11px/1.6 var(--font-mono); cursor: pointer; }
+.engine-actions button:hover { color: var(--ink); }
+@media (max-width: 780px) {
+  .hero-with-engine { grid-template-columns: 1fr; text-align: center; gap: 28px; }
+  .hero-with-engine h1 { margin-inline: auto; }
+  .hero-with-engine .hero-sub { margin-inline: auto; }
+  .hero-with-engine .hero-cta { justify-content: center; }
+  .hero-engine-view { height: auto; aspect-ratio: 1 / 1; }
+}
+
 .section {
   max-width: 1060px;
   margin: 0 auto;
