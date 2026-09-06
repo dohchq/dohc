@@ -6,7 +6,9 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Client, Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { createShareWebHandler } from "./server";
+import { createShareWebApplication } from "./server";
+import { createNamedLiveBrowserResolver } from "../../sync-relay/src/namedLiveBrowserAuth";
+import { closeTestStorages, testStorage } from "../../sync-relay/src/testing";
 
 const connectionString = process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc";
 const probe = new Client({ connectionString, connectionTimeoutMillis: 2000 });
@@ -47,6 +49,7 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
   });
 
   afterAll(async () => {
+    await closeTestStorages();
     await pool?.end();
     if (schemaCreated) await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
     await admin?.end();
@@ -55,7 +58,7 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
   it("signs in on the viewer host, resolves real accounts server-side, and invalidates sign-out", async () => {
     const alice = await auth.api.signUpEmail({ body: { email: "alice@example.test", password, name: "Alice" } });
     const bob = await auth.api.signUpEmail({ body: { email: "bob@example.test", password, name: "Bob" } });
-    const serve = createShareWebHandler({
+    const { handle: serve } = createShareWebApplication({
       relayUrl: "http://relay:1788", publicRelayUrl: "https://relay.example.test", publicHosts: new Set(["share.example.test"]),
       accountAuth: { upstreamUrl: "http://workspace-api:1786", publicOrigin: origin },
       fetchAuth: (request) => auth.handler(request),
@@ -87,6 +90,26 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
     }
     const aliceCookie = await signIn("alice@example.test", { id: alice.user.id, name: "Alice" });
     const bobCookie = await signIn("bob@example.test", { id: bob.user.id, name: "Bob" });
+    const storage = await testStorage();
+    storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1 });
+    const scopes = [alice.user, bob.user].map((user) => {
+      const scope = { workspaceId: "workspace", shareId: `share-${user.id}`, grantId: `grant-${user.id}` };
+      storage.createShare({
+        share: {
+          shareId: scope.shareId, workspaceId: scope.workspaceId, granterUserId: "owner",
+          selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }), createdAtMs: 1,
+        },
+        grant: {
+          grantId: scope.grantId, shareId: scope.shareId, principalKind: "user",
+          principalUserId: user.id, principalEmail: null, access: "edit", generation: 1,
+          status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null,
+        },
+      });
+      return scope;
+    });
+    const aliceScope = scopes[0]!;
+    const bobScope = scopes[1]!;
+    const resolveBrowser = createNamedLiveBrowserResolver({ storage, resolveActor: resolve });
     const projected = await serve(browserRequest("session", undefined, `${aliceCookie}; dohc_share_link=link-secret; dohc_profile=profile-secret`));
     expect(await projected.json()).toEqual({ user: { id: alice.user.id, name: "Alice" } });
 
@@ -95,6 +118,11 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
     });
     expect(await resolve(actorRequest(aliceCookie), "workspace")).toEqual({ userId: alice.user.id, workspaceId: "workspace" });
     expect(await resolve(actorRequest(bobCookie), "workspace")).toEqual({ userId: bob.user.id, workspaceId: "workspace" });
+    expect(await resolveBrowser(actorRequest(aliceCookie), aliceScope)).toEqual({ userId: alice.user.id, ...aliceScope });
+    expect(await resolveBrowser(actorRequest(bobCookie), bobScope)).toEqual({ userId: bob.user.id, ...bobScope });
+    expect(await resolveBrowser(actorRequest(aliceCookie), bobScope)).toBeNull();
+    expect(await resolveBrowser(actorRequest(bobCookie), aliceScope)).toBeNull();
+    expect(await resolveBrowser(actorRequest("dohc_share_link=link-secret; dohc_profile=profile-secret"), aliceScope)).toBeNull();
     await expect(resolve(actorRequest("dohc_share_link=link-secret; dohc_profile=profile-secret"), "workspace")).rejects.toBeInstanceOf(UnauthorizedError);
 
     const signOut = await serve(browserRequest("sign-out", {}, aliceCookie));
@@ -102,6 +130,10 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
     expect(await signOut.json()).toEqual({ ok: true });
     expect(signOut.headers.getSetCookie().every((line) => !line.includes("dohc_"))).toBe(true);
     await expect(resolve(actorRequest(aliceCookie), "workspace")).rejects.toBeInstanceOf(UnauthorizedError);
+    expect(await resolveBrowser(actorRequest(aliceCookie), aliceScope)).toBeNull();
+    expect(await resolveBrowser(actorRequest(bobCookie), bobScope)).toEqual({ userId: bob.user.id, ...bobScope });
+    expect(storage.revokeShareGrant({ shareId: bobScope.shareId, grantId: bobScope.grantId, revokedAtMs: 2 }).ok).toBe(true);
+    expect(await resolveBrowser(actorRequest(bobCookie), bobScope)).toBeNull();
     expect(await resolve(actorRequest(bobCookie), "workspace")).toEqual({ userId: bob.user.id, workspaceId: "workspace" });
     expect(await (await serve(browserRequest("session", undefined, aliceCookie))).json()).toEqual({ user: null });
   });
@@ -111,7 +143,7 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
     const limitedAuth = betterAuth({ ...auth.options, rateLimit: { enabled: true } });
     expect((await limitedAuth.$context).rateLimit.enabled).toBe(true);
     await limitedAuth.api.signUpEmail({ body: { email: "limited@example.test", password, name: "Limited" } });
-    const serve = createShareWebHandler({
+    const { handle: serve } = createShareWebApplication({
       relayUrl: "http://relay:1788", publicRelayUrl: "https://relay.example.test", publicHosts: new Set(["share.example.test"]),
       accountAuth: { upstreamUrl: "http://workspace-api:1786", publicOrigin: origin },
       fetchAuth: (request) => limitedAuth.handler(request),
