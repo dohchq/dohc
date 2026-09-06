@@ -336,11 +336,15 @@ describe("registered workspace settings and UI state", () => {
       const result = await realRead(root); reached.resolve(); await release.promise; return result;
     });
     const result = h.invoke(CHANNELS.getWorkspaceSettings, workspacePayload);
-    await reached.promise;
-    const retirement = owner === "renderer" ? h.open(h.first, "workspace-b") : h.authorities.invalidate("workspace-a");
-    if (owner === "renderer") await retirement;
     const rejection = expect(result).rejects.toThrow();
-    release.resolve();
+    let retirement: Promise<unknown> | undefined;
+    try {
+      await reached.promise;
+      retirement = owner === "renderer" ? h.open(h.first, "workspace-b") : h.authorities.invalidate("workspace-a");
+      if (owner === "renderer") await retirement;
+    } finally {
+      release.resolve();
+    }
     await rejection;
     await retirement;
   });
@@ -353,10 +357,13 @@ describe("registered workspace settings and UI state", () => {
       const result = await realSave(root, patch); reached.resolve(); await release.promise; return result;
     });
     const result = h.invoke(CHANNELS.setWorkspaceSettings, patchPayload);
-    await reached.promise;
-    await h.open(h.first, "workspace-b");
     const rejection = expect(result).rejects.toThrow("this window changed workspaces");
-    release.resolve();
+    try {
+      await reached.promise;
+      await h.open(h.first, "workspace-b");
+    } finally {
+      release.resolve();
+    }
     await rejection;
     await expect(workspaceSettingsFile.readWorkspaceSettingsFile(h.root)).resolves.toMatchObject({ settings: { agents: { mcpAutoStart: false } } });
   });
@@ -395,10 +402,13 @@ describe("registered workspace settings and UI state", () => {
       await realWrite(root, value); reached.resolve(); await release.promise;
     });
     const result = h.invoke(kind === "read" ? CHANNELS.getWorkspaceUiState : CHANNELS.setWorkspaceUiState, kind === "read" ? workspacePayload : uiPayload);
-    await reached.promise;
-    await h.sessions.retireAfterCrash(h.first);
     const rejection = expect(result).rejects.toThrow("this window changed workspaces");
-    release.resolve();
+    try {
+      await reached.promise;
+      await h.sessions.retireAfterCrash(h.first);
+    } finally {
+      release.resolve();
+    }
     await rejection;
   });
 });
