@@ -2021,9 +2021,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       try {
         await options.setRunAttribution(test.workspace, null);
       } catch {
-        // dohc is quitting. The quit-run persistence above is reported because
-        // a stranded run row outlives the process; a stale attribution row is
-        // rewritten by the next run and is not worth a report during quit.
+        // Ignore an attribution cleanup failure during quit; the next run
+        // overwrites it.
       }
       test.resolve({
         ok: false,

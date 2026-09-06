@@ -297,53 +297,35 @@ describe("installPluginDependencies", () => {
     expect(escaped.error.message).toContain("node_modules");
   });
 
-  it("rejects an install that reported success and wrote no dependency tree", async () => {
-    const fixture = await createInstallFixture({ pluginId: "truncated-plugin" });
-    // Exactly what the pnpm-runner wrapper used to do: exit 0 with the
-    // snapshot untouched. pnpm writes node_modules/.modules.yaml when an
-    // install completes, so its absence beside a declared dependency is what
-    // makes a truncated install unreportable as success.
-    await writeFile(
-      join(fixture.snapshotRoot, "package.json"),
-      `${JSON.stringify({ name: "truncated", dependencies: { zod: "4.4.3" } })}\n`,
-    );
-    const child = new FakeInstallProcess();
-    const forkProcess = vi.fn<PluginInstallFork>(() => {
-      queueMicrotask(() => child.exit(0));
-      return child;
-    });
-
-    const failed = requireFailure(await installPluginDependencies({
-      ...fixture.input,
-      forkProcess,
-    }));
-
-    expect(failed.error.code).toBe("install-not-materialized");
-    expect(failed.error.message).toContain(".modules.yaml");
-    expect(failed.error.message).toContain("declared dependencies: 1");
-  });
-
-  it("counts a peer-only manifest as declaring a dependency", async () => {
-    const fixture = await createInstallFixture({ pluginId: "peer-only-plugin" });
-    await writeFile(
-      join(fixture.snapshotRoot, "package.json"),
-      `${JSON.stringify({ name: "peer-only", peerDependencies: { zod: "4.4.3" } })}
+  it.each(["dependencies", "peerDependencies"] as const)(
+    "rejects an install that reported success and wrote no tree for a %s entry",
+    async (field) => {
+      const fixture = await createInstallFixture({ pluginId: "truncated-plugin" });
+      // Exactly what the pnpm-runner wrapper used to do: exit 0 with the
+      // snapshot untouched. pnpm writes node_modules/.modules.yaml when an
+      // install completes, so its absence beside a declared dependency is what
+      // makes a truncated install unreportable as success.
+      await writeFile(
+        join(fixture.snapshotRoot, "package.json"),
+        `${JSON.stringify({ name: "truncated", [field]: { zod: "4.4.3" } })}
 `,
-    );
-    const child = new FakeInstallProcess();
-    const forkProcess = vi.fn<PluginInstallFork>(() => {
-      queueMicrotask(() => child.exit(0));
-      return child;
-    });
+      );
+      const child = new FakeInstallProcess();
+      const forkProcess = vi.fn<PluginInstallFork>(() => {
+        queueMicrotask(() => child.exit(0));
+        return child;
+      });
 
-    const failed = requireFailure(await installPluginDependencies({
-      ...fixture.input,
-      forkProcess,
-    }));
+      const failed = requireFailure(await installPluginDependencies({
+        ...fixture.input,
+        forkProcess,
+      }));
 
-    expect(failed.error.code).toBe("install-not-materialized");
-    expect(failed.error.message).toContain("declared dependencies: 1");
-  });
+      expect(failed.error.code).toBe("install-not-materialized");
+      expect(failed.error.message).toContain(".modules.yaml");
+      expect(failed.error.message).toContain("declared dependencies: 1");
+    },
+  );
 
   it("accepts a completed install of a snapshot that declares no dependencies", async () => {
     const fixture = await createInstallFixture({ pluginId: "no-deps-plugin" });
