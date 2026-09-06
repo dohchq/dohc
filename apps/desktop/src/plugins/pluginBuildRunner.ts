@@ -39,7 +39,7 @@ import {
 
 const BUILD_STOP_SETTLE_MS = 250;
 
-export type PluginBuildFailureCode =
+type PluginBuildFailureCode =
   | "invalid-manifest"
   | "invalid-plugin-id"
   | "invalid-snapshot"
@@ -51,12 +51,12 @@ export type PluginBuildFailureCode =
   | "output-locked"
   | "output-io";
 
-export interface PluginBuildDiagnostics {
+interface PluginBuildDiagnostics {
   errors: Message[];
   warnings: Message[];
 }
 
-export interface PluginBuildFailure {
+interface PluginBuildFailure {
   code: PluginBuildFailureCode;
   message: string;
   path: string | null;

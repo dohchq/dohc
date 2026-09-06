@@ -7,7 +7,6 @@ import {
   createTempWorkspace,
   openWorkspaceFromFirstRun,
   seedWorkspaceManifest,
-  seedWorkspaceSettings,
 } from "./helpers/workspace";
 
 // The Phase 2 collections gate walkthrough (docs/plans/collections.md),
@@ -198,9 +197,6 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
 
   try {
     await seedWorkspaceManifest(temp, "collections-walkthrough-e2e");
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);

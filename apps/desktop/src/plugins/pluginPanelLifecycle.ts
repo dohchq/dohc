@@ -4,7 +4,7 @@ export interface PluginPanelPreview {
   releaseOrigin(): void;
 }
 
-export type ClearPluginPanelStorage = (options: {
+type ClearPluginPanelStorage = (options: {
   origin: string;
 }) => Promise<void>;
 

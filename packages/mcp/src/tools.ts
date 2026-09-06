@@ -55,7 +55,6 @@ import {
 import type { z } from "zod";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
-import { workspaceEngineSetting } from "@dohc/workspace-contracts/workspace-settings";
 import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
 // The resolved-path rule lives in one place for every surface that decides
 // authority from a path. This surface owns only its wording.
@@ -80,9 +79,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import type { Stats } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
-import { hasLegacyAppImport } from "./sourceScanner";
 
 export interface ToolContext {
   // Workspace root the server is scoped to (the --workspace arg). All file
@@ -252,149 +249,12 @@ async function readFileWindowWithDigest(
   }
 }
 
-// Is this workspace on the workspace engine? MCP reads the same
-// per-workspace settings file the desktop reads (.dohc/settings.local.json,
-// workspaceSettingsFile.ts) THROUGH THE SAME SCHEMA — the shared contract, not
-// a copy of it, because a hand-mirrored rule is how the two answers drift.
-// WS-H1 flag flip: the engine is the DEFAULT — an absent group or a missing
-// file resolves ON; only an explicit `workspaceEngineAlpha: false` opts the
-// workspace out. Cheap enough to read per mutating call — the flag can flip
-// between desktop opens.
-//
-// A file that exists but cannot be trusted resolves unknown, not off —
-// the three-state contract at the top of workspaceSettings.ts. Unknown never
-// names a recorder, so the read still fails closed.
-const MAX_WORKSPACE_SETTINGS_FILE_BYTES = 256 * 1024;
-const WORKSPACE_SETTINGS_PATH = ".dohc/settings.local.json";
-
-// Workspace-relative throughout: the agent named a workspace, not a host, and
-// an absolute host path is a fact it cannot act on.
-const CANNOT_READ_SETTINGS =
-  `dohc could not tell whether this workspace records history: it could not read ${WORKSPACE_SETTINGS_PATH}.`;
-
-type HistoryRecordingRead =
-  | { state: "on" }
-  | { state: "off" }
-  | { state: "unknown"; cause: string };
-
-function historyUnknown(detail: string): HistoryRecordingRead {
-  return { state: "unknown", cause: `${CANNOT_READ_SETTINGS} ${detail}` };
-}
-
-// The noun the reader can see at the path, so the instruction says what to
-// look for. "item" covers the rest (a socket, a device node).
-function settingsSquatterNoun(stats: Stats): string {
-  if (stats.isSymbolicLink()) return "link";
-  return stats.isDirectory() ? "folder" : "item";
-}
-
-// Why the resolver could not place the settings file. Only one of these is an
-// escape; the rest are checks that did not finish. Collapsing them to "that
-// path leads outside this workspace" would tell an agent to remove a file over
-// an escape dohc never established -- the same defect this fix exists to
-// remove, one layer down. Each cause names its own next step.
-function settingsPathDetail(target: Extract<RealTarget, { ok: false }>): string {
-  switch (target.reason) {
-    case "escapes-workspace":
-      return "That path leads outside this workspace, and it must stay inside. Remove or rename it. Then retry.";
-    case "unreadable-root":
-      return (
-        `dohc could not resolve the workspace folder (${target.code}). The workspace ` +
-        `folder failed, not this file. Check that the workspace folder is present and ` +
-        `readable. Then retry.`
-      );
-    case "dangling-symlink":
-      return (
-        "A link on that path has no target, so dohc cannot tell where the path leads. " +
-        "Create the target, or remove the link. Then retry."
-      );
-    case "unresolvable-symlink":
-      return (
-        `A link on that path cannot be resolved (${target.code}), so dohc cannot tell ` +
-        `where the path leads. Remove the link. Then retry.`
-      );
-    case "unreadable-path":
-      return (
-        `dohc could not check where that path leads (${target.code}). Fix that error on ` +
-        `the path, or remove it. Then retry.`
-      );
-  }
-}
-
-export async function readHistoryRecording(ctx: ToolContext): Promise<HistoryRecordingRead> {
-  const path = join(ctx.root, ".dohc", "settings.local.json");
-  let stats: Stats;
-  try {
-    stats = await lstat(path);
-  } catch (error) {
-    // Only an absent file reads as the default: a new workspace must not be
-    // born opted out, and must not be born unknown either.
-    if (errnoCode(error) === "ENOENT") return { state: "on" };
-    return historyUnknown(
-      `The read failed (${errnoCode(error) ?? "no errno"}). Check that dohc can read that file. Then retry.`,
-    );
-  }
-  if (stats.isSymbolicLink() || !stats.isFile()) {
-    const noun = settingsSquatterNoun(stats);
-    return historyUnknown(
-      `A ${noun} is at that path, which must be a regular file. Remove or rename that ${noun}. Then retry.`,
-    );
-  }
-  if (stats.size > MAX_WORKSPACE_SETTINGS_FILE_BYTES) {
-    return historyUnknown(
-      `The file is ${stats.size} bytes and the limit is ${MAX_WORKSPACE_SETTINGS_FILE_BYTES} bytes. Shrink it below the limit. Then retry.`,
-    );
-  }
-  const target = await realRelativeInRoot(ctx.root, path);
-  if (!target.ok) return historyUnknown(settingsPathDetail(target));
-  let body: unknown;
-  try {
-    body = JSON.parse(await readFile(path, "utf8"));
-  } catch (error) {
-    const code = errnoCode(error);
-    return historyUnknown(
-      code === null
-        ? "The file is not valid JSON. Repair the file. Then retry."
-        : `The read failed (${code}). Check that dohc can read that file. Then retry.`,
-    );
-  }
-  const setting = workspaceEngineSetting(body);
-  return setting.state === "untrusted"
-    ? historyUnknown(
-        `The file does not match the settings schema (${setting.cause}). Repair the file. Then retry.`,
-      )
-    : { state: setting.state };
-}
-
-// MCP writes NO legacy change sets. For an engine
-// workspace (the default) the desktop watcher captures MCP's physical writes
-// into engine moments (agent-attributed when a dohc-tracked run is active; an
-// external MCP client without a dohc-tracked run yields actor-neutral engine
-// capture — honest per the actor-neutral principle). Caveat a standalone MCP
-// client should know: that capture happens via the desktop watcher when the
-// app is open — a write made while the desktop is closed is picked up by the
-// next startup reconciliation. A workspace that explicitly opted out of the
-// engine has NO recorder at all; naming a recorder there would be a lie, so
-// mutating tools report `historyRecording: "off"` instead. Legacy.
-// Dohc/history left by pre-flip versions is no longer read (the relic reader
-// retired with @dohc/workspace-history); the read tools below list engine
-// moments only.
-//
-// `historyRecording: "unknown"` is the third arm: dohc could not read
-// the settings file, so it can name neither a recorder nor an opt-out. It
-// carries the cause, because "unknown" alone tells an agent nothing it can act
-// on.
-type RecordedChangeFields =
-  | { recordedBy: "workspace-engine" }
-  | { historyRecording: "off" }
-  | { historyRecording: "unknown"; historyRecordingUnavailable: string };
-
-async function recordedChangeFields(ctx: ToolContext): Promise<RecordedChangeFields> {
-  const history = await readHistoryRecording(ctx);
-  if (history.state === "on") return { recordedBy: "workspace-engine" };
-  if (history.state === "off") return { historyRecording: "off" };
-  return { historyRecording: "unknown", historyRecordingUnavailable: history.cause };
-}
+// MCP writes no history of its own. The desktop watcher captures MCP's
+// physical writes into engine moments (agent-attributed when a dohc-tracked
+// run is active; an external MCP client without one yields actor-neutral
+// capture). That capture happens while the app is open; a write made while
+// the desktop is closed is picked up on the next open.
+const RECORDED_BY_ENGINE = { recordedBy: "workspace-engine" } as const;
 
 function failureReason(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
@@ -1130,7 +990,7 @@ export async function writeWorkspaceFile(
     path: resolved.normalized,
     bytes: bytes.byteLength,
     sha256: sha256(bytes),
-    ...(await recordedChangeFields(ctx)),
+    ...RECORDED_BY_ENGINE,
   };
 }
 
@@ -1169,7 +1029,7 @@ export async function createWorkspaceDirectory(
   return {
     ok: true as const,
     path: resolved.normalized,
-    ...(await recordedChangeFields(ctx)),
+    ...RECORDED_BY_ENGINE,
   };
 }
 
@@ -1202,7 +1062,7 @@ export async function moveWorkspacePath(
       ok: true as const,
       fromPath: from.normalized,
       toPath: to.normalized,
-      ...(await recordedChangeFields(ctx)),
+      ...RECORDED_BY_ENGINE,
     };
   } catch (error) {
     return {
@@ -1348,7 +1208,7 @@ export async function deleteWorkspacePath(
     ok: true as const,
     path: resolved.normalized,
     trashed: true,
-    ...(await recordedChangeFields(ctx)),
+    ...RECORDED_BY_ENGINE,
   };
 }
 
@@ -1567,8 +1427,8 @@ export async function workspaceStatus(ctx: ToolContext) {
 
 // --- dohc_list_changes / dohc_read_change ----------------------------------
 
-// The workspace engine is the sole recorder of history, but desktop main is
-// the sole owner of its database. These tools read moments through the CLI
+// The workspace engine records history, and desktop main is the sole owner
+// of its database. These tools read moments through the CLI
 // transport. The pre-flip legacy `.dohc/history` change-set relic was retired;
 // a moment carries path/operation/versionId (the legacy kind,
 // boundaryCrossings, and provenance fields no longer exist and are never
@@ -1604,7 +1464,6 @@ type SiteCheck = {
   path?: string;
 };
 
-const LEGACY_APPS_SEGMENT = `.${"apps"}`;
 const SITE_SCAN_IGNORED_NAMES = new Set([
   ".cache",
   ".dohc",
@@ -1620,20 +1479,6 @@ const SITE_SCAN_IGNORED_NAMES = new Set([
   "node_modules",
 ]);
 const SITE_BUILD_OUTPUT_NAMES = ["dist", "build", "out"];
-const SITE_SOURCE_EXTENSIONS = new Set([
-  ".html",
-  ".js",
-  ".jsx",
-  ".mjs",
-  ".cjs",
-  ".mts",
-  ".cts",
-  ".ts",
-  ".tsx",
-  ".css",
-]);
-const MAX_SITE_TEST_BYTES = 2 * 1024 * 1024;
-const MAX_SITE_SCAN_DEPTH = 100;
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1642,23 +1487,9 @@ function relativeJoin(prefix: string, name: string): string {
   return prefix && prefix !== "." ? `${prefix}/${name}` : name;
 }
 
-function hasLegacyAppsSegment(path: string): boolean {
-  return path
-    .split(/[\\/]+/)
-    .filter(Boolean)
-    .some((segment) => segment.toLowerCase() === LEGACY_APPS_SEGMENT);
-}
-
-function sitePathAllowed(path: string): { ok: true } | { ok: false; reason: string } {
-  if (hasLegacyAppsSegment(path)) {
-    return { ok: false, reason: `site tools do not operate on legacy ${LEGACY_APPS_SEGMENT} paths` };
-  }
-  return { ok: true };
-}
-
 function isIgnoredSitePath(path: string): boolean {
   if (!path) return false;
-  if (hasIgnoredSegment(path) || hasLegacyAppsSegment(path)) return true;
+  if (hasIgnoredSegment(path)) return true;
   return path
     .split("/")
     .filter(Boolean)
@@ -2065,10 +1896,6 @@ export async function detectSites(
       ? await safeResolve(ctx, args.path, "read")
       : { ok: true as const, absolute: ctx.root, normalized: "", realRelative: "" };
   if (!start.ok) return { ok: false as const, reason: start.reason };
-  // Where the scan really lands decides the rule: `sites ->.apps`
-  // spells an ordinary folder and reads the legacy tree site tools disown.
-  const allowed = sitePathAllowed(start.realRelative);
-  if (!allowed.ok) return allowed;
 
   const info = await lstat(start.absolute).catch(() => null);
   if (!info) return { ok: false as const, reason: `path not found: ${args.path ?? "."}` };
@@ -2134,8 +1961,6 @@ export async function createSite(
   const root = await safeResolve(ctx, args.path);
   if (!root.ok) return { ok: false as const, reason: root.reason };
   if (!root.normalized) return { ok: false as const, reason: "site path must name a folder" };
-  const allowed = sitePathAllowed(root.realRelative);
-  if (!allowed.ok) return allowed;
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
 
@@ -2285,8 +2110,6 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
   for (const file of files) {
     const resolved = await safeResolve(ctx, file.path);
     if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-    const fileAllowed = sitePathAllowed(resolved.realRelative);
-    if (!fileAllowed.ok) return fileAllowed;
     if (
       resolved.normalized !== root.normalized &&
       !resolved.normalized.startsWith(`${root.normalized}/`)
@@ -2322,7 +2145,7 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
     ok: true as const,
     siteRoot: root.normalized,
     files: resolvedFiles.map((file) => file.normalized),
-    ...(await recordedChangeFields(ctx)),
+    ...RECORDED_BY_ENGINE,
   };
 }
 
@@ -2354,8 +2177,6 @@ async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
       reason: `site root is a mounted share (read-only): ${siteRoot} — copy it into your own files to run it`,
     };
   }
-  const allowed = sitePathAllowed(root.realRelative);
-  if (!allowed.ok) return allowed;
   const info = await lstat(root.absolute).catch(() => null);
   if (!info) return { ok: false as const, reason: `site root not found: ${siteRoot}` };
   if (!info.isDirectory()) return { ok: false as const, reason: `site root is not a directory: ${siteRoot}` };
@@ -2403,74 +2224,8 @@ export async function testSite(ctx: ToolContext, args: { siteRoot: string }) {
     });
   }
 
-  const legacyImport = await findLegacyAppImport(root.absolute, root.normalized);
-  checks.push(
-    legacyImport
-      ? {
-          name: "no-legacy-sdk-import",
-          ok: false,
-          path: legacyImport.path,
-          message:
-            legacyImport.reason === "too-large"
-              ? "Site source is too large for MCP static validation."
-              : "Sites must use normal web files or @dohc/sdk, not the legacy app SDK.",
-        }
-      : {
-          name: "no-legacy-sdk-import",
-          ok: true,
-          message: "No legacy app SDK import found in scanned site source.",
-        },
-  );
-
   const ok = checks.every((check) => check.ok);
   return { ok, site, checks };
-}
-
-async function findLegacyAppImport(
-  absolute: string,
-  root: string,
-): Promise<{ path: string; reason: "legacy-import" | "too-large" } | null> {
-  let totalBytes = 0;
-  async function walk(
-    currentAbsolute: string,
-    currentRoot: string,
-    depth: number,
-  ): Promise<{ path: string; reason: "legacy-import" | "too-large" } | null> {
-    if (depth > MAX_SITE_SCAN_DEPTH) return null;
-    if (isIgnoredSitePath(currentRoot)) return null;
-    let dirents;
-    try {
-      dirents = await readdir(currentAbsolute, { withFileTypes: true });
-    } catch {
-      return null;
-    }
-    for (const dirent of dirents) {
-      const rel = relativeJoin(currentRoot, dirent.name);
-      if (dirent.isSymbolicLink() || isIgnoredSitePath(rel)) continue;
-      const child = join(currentAbsolute, dirent.name);
-      if (dirent.isDirectory()) {
-        const found = await walk(child, rel, depth + 1);
-        if (found) return found;
-        continue;
-      }
-      if (!dirent.isFile() || !SITE_SOURCE_EXTENSIONS.has(fileExtension(dirent.name))) continue;
-      const info = await stat(child);
-      if (totalBytes + info.size > MAX_SITE_TEST_BYTES) {
-        return { path: rel, reason: "too-large" };
-      }
-      totalBytes += info.size;
-      if (hasLegacyAppImport(await readFile(child, "utf8"))) {
-        return { path: rel, reason: "legacy-import" };
-      }
-    }
-    return null;
-  }
-  return walk(absolute, root, 0);
-}
-
-function fileExtension(path: string): string {
-  const index = path.lastIndexOf(".");
-  return index >= 0 ? path.slice(index).toLowerCase() : "";
 }
 
 export async function buildSite(ctx: ToolContext, args: { siteRoot: string }) {
@@ -2619,7 +2374,7 @@ export async function importData(
     path: dbRel.normalized,
     tableName: result.tableName,
     rowCount: result.rowCount,
-    ...(await recordedChangeFields(ctx)),
+    ...RECORDED_BY_ENGINE,
   };
 }
 

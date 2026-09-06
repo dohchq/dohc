@@ -116,8 +116,8 @@ function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
 // a mirror Y.Doc to the format editor. Solo editing runs through the engine; a
 // co-editor's edit arrives as a forwarded remote delta on the same channel.
 //
-// available:false and opening:false => the doc is not engine-backed (unflagged
-// workspace, secret path, or already live) — the caller stays on the plain
+// available:false and opening:false => the doc is not engine-backed (shared
+// view, secret path, or already live) — the caller stays on the plain
 // local autosave editor showing the real on-disk content. While opening:true
 // the answer is not known yet and the caller must stay read-only. Named refusal
 // outcomes also block the writable fallback when main cannot prove it is safe.

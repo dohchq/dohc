@@ -1128,34 +1128,13 @@ const SYNC_STATUS_BASE_FIELDS = {
   // one does. Fed from the sync-engine snapshot in workspaceActivity —
   // optional so older producers/fixtures keep parsing.
   conflictCount: z.number().int().nonnegative().optional(),
-  // Additive (WS-H1 retirement Phase C): true when this workspace records NO
-  // history at all — the engine is explicitly opted out and the legacy
-  // recorder no longer exists. Drives the persistent "History is off"
-  // notice. Optional so older producers/fixtures keep parsing.
-  historyRecordingOff: z.boolean().optional(),
-  // Why main's open-time settings read could not trust the
-  // file, when it could not. The notice states this cause instead of blaming
-  // the Settings toggle. Bounded like the settings warning it carries: the
-  // sentence names a full path. Optional so older producers/fixtures keep
-  // parsing.
-  settingsWarning: z.string().min(1).max(4600).optional(),
-  // True when the recorder could not be built at workspace open — a
-  // failure, not a decision. `historyRecordingOff` is true as well (nothing
-  // records either way), so the notice must read this first: the opt-out copy
-  // names Settings, which nobody touched here.
-  //
-  // Required where its neighbours above are optional, and deliberately so. An
-  // omitted boolean reads as false, and false here does not mean "unknown" —
-  // it asserts the user chose this, which is the false cause #505 is about. A
-  // producer that cannot say which cause it means must not compile.
+  // True when the recorder could not be built at workspace open. Required:
+  // an omitted boolean reads as false, and a producer that cannot say which
+  // cause it means must not compile.
   historyRecordingUnavailable: z.boolean(),
-  // True when this workspace is a shared view — fed by the share's
-  // pull, never a recorder of its own. A capability, not an opt-out and not
-  // a failure, so the notice must not blame the Settings toggle.
-  //
-  // Required for the same reason as its neighbour: an omitted boolean reads
-  // as false, and false asserts "not a shared view", which routes the notice
-  // to the opt-out's copy — a cause nobody chose.
+  // True when this workspace is a shared view, fed by the share's pull
+  // and never a recorder of its own. A capability, not a failure. Required
+  // for the same reason as its neighbour.
   historyShareView: z.boolean(),
   // Additive (0P-B relay sync): true after repeated non-auth sync failures.
   // Local changes remain safe and the engine keeps retrying with backoff.
@@ -1248,10 +1227,8 @@ export const RebuildEngineStoreResult = z.object({
 });
 export type RebuildEngineStoreResult = z.infer<typeof RebuildEngineStoreResult>;
 
-// Engine history (PR 0M-5, workspace-engine alpha): flagged workspaces read
-// their timeline from ENGINE moments instead of legacy change sets. Every
-// handler is gated in main on the workspace's engine capture — unflagged
-// workspaces reject.
+// Engine history: the timeline reads engine moments. Every handler is gated
+// in main on the workspace's engine capture.
 const MOMENT_ID = z.string().min(1).max(200);
 
 const MOMENT_TEXT = engineStoredText("moment body");
@@ -1367,7 +1344,7 @@ export type RestoreEngineMomentFileResult = z.infer<
   typeof RestoreEngineMomentFileResult
 >;
 
-// Linked Chats (PR 0M-5, workspace-engine alpha): per-file Chats stored in
+// Linked Chats (PR 0M-5): per-file Chats stored in
 // the engine, linked to the file's stable engine object id so the link
 // survives renames. The renderer never supplies identity — main derives the
 // author for every sent message.
@@ -1753,7 +1730,7 @@ export type ChatReactionRecord = z.infer<typeof ChatReactionRecord>;
 
 // Chats channels (PR 12/13, WS-E): workspace-wide Chats organized in
 // channels, plus per-thread monotonic read cursors. Same gate as the file
-// rail — every handler rejects for unflagged workspaces.
+// rail: every handler needs the workspace's engine capture.
 const CHAT_CHANNEL_ID = z.string().min(1).max(200);
 const CHAT_CHANNEL_NAME_MAX = 80;
 
@@ -2251,10 +2228,10 @@ export const PresenceResult = z.discriminatedUnion("ok", [
 ]);
 export type PresenceResult = z.infer<typeof PresenceResult>;
 
-// Named versions (PR 0M-4, workspace-engine alpha). Product vocabulary only:
+// Named versions (PR 0M-4). Product vocabulary only:
 // a Version is a live parallel line of work; Main is the default one. All of
 // these handlers are gated in main on the workspace's engine capture being
-// attached (flag on) — for unflagged workspaces they reject.
+// attached.
 const VERSION_ID = z.string().min(1).max(200);
 const WORKSPACE_VERSION_NAME_MAX = 80;
 // Conflict and compare sides are the same hydrated stored bodies the timeline
@@ -2460,7 +2437,7 @@ export type ResolveWorkspaceVersionConflictResult = z.infer<
 
 // "Try it in a version" (PR 0N-2): one gesture — fork a version named after
 // the task, switch into it, start a dohc-tracked agent run. Gated in main on
-// the workspace-engine alpha capture like every version operation.
+// the workspace's engine capture like every version operation.
 const TRY_IN_VERSION_TASK_MAX = 2000;
 
 // How a driver is named wherever a payload or a result carries one. Every
@@ -5263,7 +5240,7 @@ const AgentSessionSnapshotSchema = z.object({
 });
 
 export const AgentPanelSnapshotResult = z.object({
-  // dohc's own drivers plus this workspace's plugin drivers. The registry
+  // This workspace's plugin drivers. The registry
   // refuses a plugin driver past MAX_WORKSPACE_PLUGIN_DRIVERS, which keeps the
   // merged list inside this bound instead of failing the whole list here.
   drivers: z.array(AgentDriverProbeSchema).max(20),
@@ -6137,8 +6114,7 @@ export interface DohcDesktopBridge {
   ): Promise<RefreshShareMountsResult>;
   unmountShare(payload: UnmountSharePayload): Promise<UnmountShareResult>;
   openWorkspace(payload: OpenWorkspacePayload): Promise<SyncStatusResult>;
-  // Named versions (PR 0M-4). Gated in main on the workspace-engine alpha
-  // flag: for unflagged workspaces every call rejects.
+  // Named versions. Gated in main on the workspace's engine capture.
   listWorkspaceVersions(
     payload: WorkspaceIdPayload,
   ): Promise<ListWorkspaceVersionsResult>;
@@ -6169,8 +6145,8 @@ export interface DohcDesktopBridge {
     payload: WorkspaceIdPayload,
   ): Promise<TryInVersionStateResult>;
   dismissTryInVersionReview(payload: WorkspaceIdPayload): Promise<void>;
-  // Engine history + linked Chats (PR 0M-5). Gated in main on the
-  // workspace-engine alpha flag: for unflagged workspaces every call rejects.
+  // Engine history + linked Chats. Gated in main on the workspace's engine
+  // capture.
   listEngineMoments(
     payload: ListEngineMomentsPayload,
   ): Promise<ListEngineMomentsResponse>;
@@ -6369,7 +6345,7 @@ export interface DohcDesktopBridge {
   // opens a live engine Y.Doc session for a supported live file; main constructs the
   // node-only session through the workspace's engine capture (reusing its
   // store). available:false => not engine-backed
-  // (unflagged workspace, secret path, missing file, or already live) — the
+  // (shared view, secret path, missing file, or already live) — the
   // caller falls back to the plain local autosave editor. On success
   // initialUpdate seeds the renderer's mirror doc.
   openEngineYDocSession(

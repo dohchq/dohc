@@ -201,7 +201,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_write_file",
     {
       description:
-        "Write any visible workspace file. History: the desktop watcher captures the write as a workspace-engine moment while the app is open (a standalone MCP write is captured on the next desktop open); engine-opted-out workspaces record nothing (historyRecording: off); when dohc cannot read the workspace settings it reports historyRecording: unknown with the cause in historyRecordingUnavailable.",
+        "Write any visible workspace file. History: the desktop watcher captures the write as a workspace-engine moment while the app is open (a standalone MCP write is captured on the next desktop open).",
       inputSchema: {
         path: z.string().min(1).max(4096),
         content: z.string(),
@@ -217,7 +217,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_create_directory",
     {
       description:
-        "Create a visible workspace directory. Files later written inside it are captured as engine moments by the desktop watcher; opted-out workspaces record nothing.",
+        "Create a visible workspace directory. Files later written inside it are captured as engine moments by the desktop watcher.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         summary: z.string().max(500).optional(),
@@ -230,7 +230,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_move_path",
     {
       description:
-        "Move or rename a visible workspace file/folder. The desktop watcher captures the change as engine moments while the app is open; opted-out workspaces record nothing.",
+        "Move or rename a visible workspace file/folder. The desktop watcher captures the change as engine moments while the app is open.",
       inputSchema: {
         fromPath: z.string().min(1).max(4096),
         toPath: z.string().min(1).max(4096),
@@ -245,7 +245,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_delete_path",
     {
       description:
-        "Delete a visible workspace file/folder by moving it to dohc's recoverable trash. The desktop watcher captures the delete as an engine moment while the app is open; opted-out workspaces record nothing.",
+        "Delete a visible workspace file/folder by moving it to dohc's recoverable trash. The desktop watcher captures the delete as an engine moment while the app is open.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         summary: z.string().max(500).optional(),
@@ -285,7 +285,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_test_site",
     {
       description:
-        "Run bounded static validation for a normal website folder: detector diagnostics, entry presence, and no legacy app SDK import.",
+        "Run bounded static validation for a normal website folder: detector diagnostics and entry presence.",
       inputSchema: {
         siteRoot: z.string().min(1).max(4096),
       },

@@ -6,7 +6,7 @@ export const CHAT_AGENT_PRESENCE_TOPIC = "chat:agent";
 
 export type AgentPresenceActivity = "working" | "idle";
 
-export interface AgentPresencePeer {
+interface AgentPresencePeer {
   clientId: string;
   state: unknown;
 }

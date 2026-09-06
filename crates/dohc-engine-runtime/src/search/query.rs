@@ -15,8 +15,8 @@
 //! [`path_is_search_indexed`] against the freshly-read policy before returning a
 //! row — which fails closed (returns nothing) while degraded. Any new reader of
 //! `engine_search_files_fts` Must apply the same re-check, or it will serve
-//! frozen rows a broken policy is supposed to hide. `query_search_index` is
-//! currently the sole reader and does this; keep it that way.
+//! frozen rows a broken policy is supposed to hide. `query_search_index_keyset`
+//! is currently the sole reader and does this; keep it that way.
 
 use crate::search::policy::{path_is_search_indexed, read_engine_search_policy};
 use crate::search::{
@@ -150,61 +150,17 @@ fn fetch_size(limit: usize, multiplier: usize) -> i64 {
     i64::try_from(raw).unwrap_or(i64::MAX)
 }
 
-/// Query the FTS index for `query`, returning policy-filtered candidates capped
-/// at `limit`. Ports `querySearchIndex`.
+/// Query the FTS index for `query`, returning policy-filtered candidates as a
+/// keyset page capped at `limit`. Ports `querySearchIndex`.
 ///
-/// Returns `None` Only when the query is too short for the trigram index and the
-/// FILE policy is healthy — the caller may then fall back to a linear scan.
-/// Under a broken FILE policy a too-short query returns `Some(empty)` instead,
-/// suppressing that fallback (which would fail open). An OVER-long query always
-/// returns `Some(empty)` (fail closed — never the fallback sentinel, so a
-/// pathological query cannot become a linear scan). A well-formed query always
-/// returns `Some`, with the file half empty while the policy is degraded and the
-/// chat half unaffected.
-pub fn query_search_index(
-    conn: &Connection,
-    root_dir: &Path,
-    workspace_id: &str,
-    version_id: &str,
-    query: &str,
-    limit: i64,
-) -> Result<Option<Vec<SearchCandidate>>, SearchError> {
-    match classify_query(query) {
-        QueryTerm::TooShort => {
-            return Ok(if read_engine_search_policy(root_dir).is_degraded() {
-                Some(Vec::new())
-            } else {
-                None
-            });
-        }
-        QueryTerm::TooLong => return Ok(Some(Vec::new())),
-        QueryTerm::Match(_) => {}
-    }
-    let mut candidates = query_search_index_keyset(
-        conn,
-        root_dir,
-        workspace_id,
-        version_id,
-        query,
-        limit,
-        None,
-        usize::MAX,
-        usize::MAX,
-        usize::MAX,
-    )?
-    .map(|batch| batch.candidates);
-    if let (Some(candidates), Some(limit)) = (&mut candidates, clamp_limit(limit, MAX_RESULT_LIMIT))
-    {
-        candidates.truncate(limit);
-    }
-    Ok(candidates)
-}
-
-/// Keyset form of [`query_search_index`] used by the bounded daemon page.
-///
-/// Queries under the trigram minimum use the legacy linear fallback over the
-/// stored FTS content. That fallback inspects candidate byte lengths before
-/// materializing text and stops at both a per-row and per-page budget.
+/// Queries under the trigram minimum are served by a bounded linear scan over
+/// the stored FTS content: candidate byte lengths are inspected before text is
+/// materialized, and the scan stops at both a per-row and a per-page budget.
+/// Under a broken FILE policy a too-short query answers `Some(empty)` instead,
+/// so the scan cannot fail open. An over-long query always answers
+/// `Some(empty)`. A well-formed query answers `Some`, with the file half empty
+/// while the policy is degraded and the chat half unaffected. `None` is only
+/// the non-positive-limit answer under a healthy policy.
 #[allow(clippy::too_many_arguments)]
 pub fn query_search_index_keyset(
     conn: &Connection,
@@ -562,16 +518,8 @@ pub fn query_search_index_keyset(
 /// `[]` for a too-short OR over-long query or a non-positive limit; maps the
 /// sentinel header message id to `None`. Independent of the FILE policy — chat
 /// search survives a broken file policy.
-pub fn query_chat_messages_granular(
-    conn: &Connection,
-    workspace_id: &str,
-    query: &str,
-    limit: i64,
-) -> Result<Vec<GranularChatMessageSearchResult>, SearchError> {
-    Ok(query_chat_messages_granular_bounded(conn, workspace_id, query, limit, usize::MAX)?.results)
-}
-
-/// The daemon-facing granular reader. SQLite byte lengths are inspected before
+///
+/// SQLite byte lengths are inspected before
 /// any matching text is copied into an owned `String`, so a broad query cannot
 /// accumulate an unbounded actor message before the wire layer applies its
 /// exact serialized-byte cut.

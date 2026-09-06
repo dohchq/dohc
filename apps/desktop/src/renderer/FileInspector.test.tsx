@@ -2374,7 +2374,7 @@ describe("markdown editor unmount flush", () => {
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
-  it("navigates a legacy collided occurrence target to the repeated base heading", async () => {
+  it("navigates an allocated-suffix occurrence target to the repeated base heading", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "# Foo\nfirst\n# Foo-1\nliteral\n# Foo\nthird\n",
       truncated: false,
@@ -10094,7 +10094,7 @@ describe("markdown document opening state", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("markdown-open-state");
 
-    // "Opening" is not "not engine-backed": an unflagged workspace answers
+    // "Opening" is not "not engine-backed": a workspace without a capture answers
     // immediately and keeps its local autosave editor, undiminished.
     // Wait for the call that creates `settle` (see the note above): the open
     // state renders one commit before the bridge is asked.

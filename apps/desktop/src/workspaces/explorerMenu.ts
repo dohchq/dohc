@@ -27,8 +27,6 @@ export interface ExplorerMenuScope {
   hasMountRecord: boolean;
   // Sharing onward is offered only from a synced workspace this account owns.
   canShare: boolean;
-  // Collection creation requires the workspace engine.
-  engineEnabled: boolean;
   // The share view this workspace IS, or null for an ordinary workspace.
   shareView: ShareViewWriteScope | null;
 }
@@ -54,7 +52,6 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
   const canCreateFolder = canWrite && !isSharedView;
   // A collection is a folder with a schema file, plus an engine-backed
   // surface. It needs both the folder write and the workspace engine.
-  const canCreateCollection = canCreateFolder && scope.engineEnabled;
 
   if (scope.isMountPath) {
     return [
@@ -80,7 +77,7 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
             ...(canCreateFolder
               ? [
                   item("New Folder", "new-folder"),
-                  ...(canCreateCollection
+                  ...(canCreateFolder
                     ? [item("New Collection…", "new-collection")]
                     : []),
                 ]
@@ -104,7 +101,7 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
           ...(canCreateFolder
             ? [
                 item("New Folder", "new-folder"),
-                ...(canCreateCollection
+                ...(canCreateFolder
                   ? [item("New Collection…", "new-collection")]
                   : []),
               ]

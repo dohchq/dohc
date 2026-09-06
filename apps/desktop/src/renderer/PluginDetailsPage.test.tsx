@@ -397,41 +397,41 @@ describe("PluginDetailsPage", () => {
     bridgeMock.listPlugins.mockResolvedValue({
       ok: true,
       plugins: [
-        plugin("codex", { directoryName: "codex-a", displayName: "Codex A" }),
-        plugin("codex", { directoryName: "codex-b", displayName: "Codex B" }),
+        plugin("agent-chat", { directoryName: "chat-a", displayName: "Chat A" }),
+        plugin("agent-chat", { directoryName: "chat-b", displayName: "Chat B" }),
       ],
     });
     bridgeMock.uninstallPlugin.mockResolvedValue({
       ok: true,
-      plugin: plugin("codex", {
-        directoryName: "codex-a",
-        displayName: "Codex A",
+      plugin: plugin("agent-chat", {
+        directoryName: "chat-a",
+        displayName: "Chat A",
         status: "disabled",
         disabledReason: "user",
         runtimeStatus: null,
       }),
     });
 
-    renderPage("codex", "ws-1", "codex-a");
-    expect(await screen.findByText("Codex A")).toBeTruthy();
+    renderPage("agent-chat", "ws-1", "chat-a");
+    expect(await screen.findByText("Chat A")).toBeTruthy();
 
     await userEvent.click(await screen.findByTestId("plugin-uninstall"));
     await userEvent.click(await screen.findByTestId("plugin-uninstall-confirm"));
     expect(bridgeMock.uninstallPlugin).toHaveBeenCalledWith({
       workspaceId: "ws-1",
-      pluginId: "codex",
-      directoryName: "codex-a",
+      pluginId: "agent-chat",
+      directoryName: "chat-a",
       confirmationToken: "00000000-0000-4000-8000-000000000001",
     });
 
-    // codex-b survives (round 15's own scoped removal), but this tab
-    // opened for codex-a specifically and must never silently show a
+    // chat-b survives (round 15's own scoped removal), but this tab
+    // opened for chat-a specifically and must never silently show a
     // different plugin's page in its place.
     await waitFor(() =>
       expect(screen.getByTestId("plugin-details-missing")).toBeTruthy(),
     );
-    expect(screen.getByText("codex is not in this workspace.")).toBeTruthy();
-    expect(screen.queryByText("Codex B")).toBeNull();
+    expect(screen.getByText("agent-chat is not in this workspace.")).toBeTruthy();
+    expect(screen.queryByText("Chat B")).toBeNull();
   });
 
   // The details tab used to infer a rename from an id-only heuristic
@@ -589,7 +589,7 @@ describe("PluginDetailsPage", () => {
     // What Add's own result looks like: discovered, never approved.
     // isInstalled (approvedHash !== null) is false, so Uninstall never
     // shows — before this fix, undoing an add had no control at all.
-    const added = plugin("codex", {
+    const added = plugin("agent-chat", {
       status: "discovered",
       runtimeStatus: null,
       sourceHash: null,
@@ -601,24 +601,24 @@ describe("PluginDetailsPage", () => {
     bridgeMock.pluginUninstallPreflight.mockResolvedValue({
       ok: true,
       confirmationToken: "00000000-0000-4000-8000-000000000001",
-      preflight: { ...cleanPreflight, packagedDisplayName: "Codex" },
+      preflight: { ...cleanPreflight, packagedDisplayName: "Agent chat" },
     });
 
-    renderPage("codex");
+    renderPage("agent-chat");
 
     expect(screen.queryByTestId("plugin-uninstall")).toBeNull();
     const removeButton = await screen.findByTestId("plugin-remove");
     await userEvent.click(removeButton);
 
     const dialog = await screen.findByTestId("plugin-uninstall-dialog");
-    expect(within(dialog).getByText("Remove codex?")).toBeTruthy();
+    expect(within(dialog).getByText("Remove agent-chat?")).toBeTruthy();
     // The true consequence, stated: this copy's own files are deleted, and
     // Add restores dohc's packaged plugin — never a promise that Add
-    // restores whatever this specific copy held. Named "Codex" (the
+    // restores whatever this specific copy held. Named "Agent chat" (the
     // packaged manifest's own name), not derived from this copy's title.
     expect(
       within(dialog).getByText(
-        "This deletes plugins/codex's files from this workspace. Add restores dohc's packaged Codex plugin, not this copy.",
+        "This deletes plugins/agent-chat's files from this workspace. Add restores dohc's packaged Agent chat plugin, not this copy.",
       ),
     ).toBeTruthy();
     expect(within(dialog).getByTestId("plugin-uninstall-confirm").textContent).toBe(
@@ -629,8 +629,8 @@ describe("PluginDetailsPage", () => {
 
     expect(bridgeMock.uninstallPlugin).toHaveBeenCalledWith({
       workspaceId: "ws-1",
-      pluginId: "codex",
-      directoryName: "codex",
+      pluginId: "agent-chat",
+      directoryName: "agent-chat",
       confirmationToken: "00000000-0000-4000-8000-000000000001",
     });
     // The directory this page showed is gone.
@@ -707,7 +707,7 @@ describe("PluginDetailsPage", () => {
   // read at all. The dialog must name the packaged plugin Add actually
   // restores, never whatever title this specific copy happens to carry.
   it("names the packaged plugin, not this copy's own display name, for a built-in directory", async () => {
-    const renamedCopy = plugin("codex", {
+    const renamedCopy = plugin("agent-chat", {
       status: "discovered",
       runtimeStatus: null,
       sourceHash: null,
@@ -722,16 +722,16 @@ describe("PluginDetailsPage", () => {
     bridgeMock.pluginUninstallPreflight.mockResolvedValue({
       ok: true,
       confirmationToken: "00000000-0000-4000-8000-000000000001",
-      preflight: { ...cleanPreflight, packagedDisplayName: "Codex" },
+      preflight: { ...cleanPreflight, packagedDisplayName: "Agent chat" },
     });
 
-    renderPage("codex");
+    renderPage("agent-chat");
     await userEvent.click(await screen.findByTestId("plugin-remove"));
 
     const dialog = await screen.findByTestId("plugin-uninstall-dialog");
     expect(
       within(dialog).getByText(
-        "This deletes plugins/codex's files from this workspace. Add restores dohc's packaged Codex plugin, not this copy.",
+        "This deletes plugins/agent-chat's files from this workspace. Add restores dohc's packaged Agent chat plugin, not this copy.",
       ),
     ).toBeTruthy();
     expect(within(dialog).queryByText(/Someone's Fork/)).toBeNull();
@@ -765,7 +765,7 @@ describe("PluginDetailsPage", () => {
   });
 
   it("closes the Remove confirmation instead of deleting under a stale claim once the plugin gets installed", async () => {
-    const added = plugin("codex", {
+    const added = plugin("agent-chat", {
       status: "discovered",
       runtimeStatus: null,
       sourceHash: null,
@@ -774,7 +774,7 @@ describe("PluginDetailsPage", () => {
     });
     bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [added] });
 
-    renderPage("codex");
+    renderPage("agent-chat");
     await userEvent.click(await screen.findByTestId("plugin-remove"));
     expect(await screen.findByTestId("plugin-uninstall-dialog")).toBeTruthy();
 
@@ -784,7 +784,7 @@ describe("PluginDetailsPage", () => {
       statusListener?.({
         kind: "changed",
         workspaceId: "ws-1",
-        plugin: plugin("codex"), // default status "ready", approved
+        plugin: plugin("agent-chat"), // default status "ready", approved
       });
     });
 
@@ -801,7 +801,7 @@ describe("PluginDetailsPage", () => {
   // on. The preflight response must not install a dialog built from a
   // snapshot that stopped being true before it ever arrived.
   it("never opens the Remove confirmation when the plugin was installed while its preflight was in flight", async () => {
-    const added = plugin("codex", {
+    const added = plugin("agent-chat", {
       status: "discovered",
       runtimeStatus: null,
       sourceHash: null,
@@ -816,7 +816,7 @@ describe("PluginDetailsPage", () => {
     }>();
     bridgeMock.pluginUninstallPreflight.mockImplementation(() => slowPreflight.promise);
 
-    renderPage("codex");
+    renderPage("agent-chat");
     await userEvent.click(await screen.findByTestId("plugin-remove"));
     // Nothing to show yet — the preflight request is still pending.
     expect(screen.queryByTestId("plugin-uninstall-dialog")).toBeNull();
@@ -828,7 +828,7 @@ describe("PluginDetailsPage", () => {
       statusListener?.({
         kind: "changed",
         workspaceId: "ws-1",
-        plugin: plugin("codex"), // default status "ready", approved
+        plugin: plugin("agent-chat"), // default status "ready", approved
       });
     });
 
@@ -852,16 +852,16 @@ describe("PluginDetailsPage", () => {
   // to open this row's Remove confirmation for a transition that never
   // happened to it.
   it("still opens the Remove confirmation when an unrelated, id-colliding row installs while preflight is in flight", async () => {
-    const removingRow = plugin("codex", {
-      directoryName: "codex-a",
+    const removingRow = plugin("agent-chat", {
+      directoryName: "chat-a",
       status: "discovered",
       runtimeStatus: null,
       sourceHash: null,
       approvedHash: null,
       installedBaselineHash: null,
     });
-    const collidingRow = plugin("codex", {
-      directoryName: "codex-b",
+    const collidingRow = plugin("agent-chat", {
+      directoryName: "chat-b",
       status: "discovered",
       runtimeStatus: null,
       sourceHash: null,
@@ -879,17 +879,17 @@ describe("PluginDetailsPage", () => {
     }>();
     bridgeMock.pluginUninstallPreflight.mockImplementation(() => slowPreflight.promise);
 
-    renderPage("codex", "ws-1", "codex-a");
+    renderPage("agent-chat", "ws-1", "chat-a");
     await userEvent.click(await screen.findByTestId("plugin-remove"));
     expect(screen.queryByTestId("plugin-uninstall-dialog")).toBeNull();
 
-    // codex-b's own, unrelated install completing — this dialog is about
-    // codex-a and must not react to it.
+    // chat-b's own, unrelated install completing — this dialog is about
+    // chat-a and must not react to it.
     act(() => {
       statusListener?.({
         kind: "changed",
         workspaceId: "ws-1",
-        plugin: plugin("codex", { directoryName: "codex-b" }),
+        plugin: plugin("agent-chat", { directoryName: "chat-b" }),
       });
     });
 
@@ -1944,8 +1944,8 @@ describe("PluginDetailsPage", () => {
       bridgeMock.listPlugins.mockResolvedValue({
         ok: true,
         plugins: [
-          plugin("codex", { directoryName: "codex-a", settings: declared }),
-          plugin("codex", { directoryName: "codex-b", settings: declared }),
+          plugin("agent-chat", { directoryName: "chat-a", settings: declared }),
+          plugin("agent-chat", { directoryName: "chat-b", settings: declared }),
         ],
       });
       bridgeMock.getPluginSettings.mockResolvedValue({ ok: true, values: defaults });
@@ -1955,20 +1955,20 @@ describe("PluginDetailsPage", () => {
       });
 
       render(
-        <PluginDetailsPage workspaceId="ws-1" pluginId="codex" directoryName="codex-a" />,
+        <PluginDetailsPage workspaceId="ws-1" pluginId="agent-chat" directoryName="chat-a" />,
       );
       await screen.findByTestId("plugin-setting-input-greeting");
       expect(bridgeMock.getPluginSettings).toHaveBeenCalledWith({
         workspaceId: "ws-1",
-        pluginId: "codex",
-        directoryName: "codex-a",
+        pluginId: "agent-chat",
+        directoryName: "chat-a",
       });
 
       await userEvent.click(screen.getByRole("switch", { name: "Shout" }));
       expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
         workspaceId: "ws-1",
-        pluginId: "codex",
-        directoryName: "codex-a",
+        pluginId: "agent-chat",
+        directoryName: "chat-a",
         values: { shout: true },
       });
     });

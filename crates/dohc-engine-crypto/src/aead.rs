@@ -404,7 +404,7 @@ mod tests {
     // in tests/) because it needs `seal_with_iv`, which is gated behind
     // `test-util`/`cfg(test)` so production consumers cannot reuse a nonce. The
     // integration test (`tests/cross_engine_parity.rs`) covers the public-API
-    // decrypt/AAD/envelope parity.
+    // decrypt/AAD parity.
     #[test]
     fn reencrypt_matches_ts_fixture_byte_exact() {
         let raw = std::fs::read_to_string(concat!(

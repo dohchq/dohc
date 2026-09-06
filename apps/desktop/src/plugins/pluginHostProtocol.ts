@@ -99,7 +99,7 @@ export interface PluginDriverStartedSessionResult {
   supports: { setModel: boolean; answerUserInput: boolean };
 }
 
-export interface PluginDriverRejectedSessionResult {
+interface PluginDriverRejectedSessionResult {
   rejected: true;
   message: string;
 }

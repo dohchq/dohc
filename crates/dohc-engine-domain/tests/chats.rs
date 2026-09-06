@@ -2414,6 +2414,36 @@ fn start_thread_after_commit_before_ack_retry_replays_exactly_once() {
     assert_eq!(counts, (1, 1));
 }
 
+#[test]
+fn idempotency_hash_frames_fields_so_an_embedded_nul_cannot_collide() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .expect("gen");
+    // `normalize_body` admits NUL. Moving the boundary between two adjacent
+    // hashed fields across a NUL yields the same NUL-joined byte string, so a
+    // NUL-separated hash would replay the first payload for the second.
+    let mut first = start_thread("gen-1", "t1", "m0", "world\0body", ChatActorKind::Human, 20);
+    first.title = Some("hello".to_owned());
+    first.request_id = Some("req-nul".to_owned());
+    chats
+        .start_channel_thread(&first, &NO_FAULTS)
+        .expect("first");
+    let mut second = start_thread("gen-1", "t1", "m0", "body", ChatActorKind::Human, 20);
+    second.title = Some("hello\0world".to_owned());
+    second.request_id = Some("req-nul".to_owned());
+    assert_eq!(
+        chats
+            .start_channel_thread(&second, &NO_FAULTS)
+            .unwrap_err()
+            .code(),
+        "idempotency-key-reuse-mismatch"
+    );
+}
+
 // ---------------------------------------------- write-side fail-closed CHECK
 
 #[test]

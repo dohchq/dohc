@@ -14,13 +14,12 @@ import {
   createTempWorkspace,
   explorerRow,
   openWorkspaceFromFirstRun,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// WS-G2-C-2 editor-on-engine round trip. A rich markdown file on an engine-
-// flagged workspace edits through the engine Y.Doc provider (recordUpdate +
+// WS-G2-C-2 editor-on-engine round trip. A rich markdown file edits
+// through the engine Y.Doc provider (recordUpdate +
 // debounced settle). The load-bearing proof: a
 // live edit journals only as ydoc.update — not a duplicate moment.append that
 // would collide (P0D) with the ydoc.update stream on a shared workspace — and
@@ -50,9 +49,6 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
   const sentinel = "Engine-journaled sentence, no double capture.";
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await writeWorkspaceFiles(temp, [
       { path: "notes/rich.md", contents: "# Rich\n\nBase paragraph.\n" },
     ]);
@@ -157,9 +153,6 @@ test("an external edit to a live engine doc is captured (moment.append), not sil
   const external = "External agent wrote this straight to disk while the editor was open.";
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await writeWorkspaceFiles(temp, [
       { path: "notes/rich.md", contents: "# Rich\n\nBase paragraph.\n" },
     ]);
@@ -209,9 +202,6 @@ test("creating a version while a rich doc is live flushes + closes the session (
   const sentinel = "Edit that a version op must flush before switching.";
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await writeWorkspaceFiles(temp, [
       { path: "notes/rich.md", contents: "# Rich\n\nBase paragraph.\n" },
     ]);

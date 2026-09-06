@@ -1,0 +1,20 @@
+version = 1
+name = "dohc"
+
+[setup]
+script = "node scripts/verification/setup.mjs"
+
+[[actions]]
+name = "Check setup"
+icon = "tool"
+command = "node scripts/verification/doctor.mjs"
+
+[[actions]]
+name = "Verify desktop"
+icon = "test"
+command = "node scripts/verification/verify.mjs smoke"
+
+[[actions]]
+name = "Debug isolated desktop"
+icon = "debug"
+command = "node scripts/verification/debug.mjs"

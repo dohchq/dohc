@@ -11,7 +11,6 @@ import {
   openWorkspaceFromFirstRun,
   seedPluginSource,
   seedWorkspaceManifest,
-  seedWorkspaceSettings,
 } from "./helpers/workspace";
 
 const requireModule = createRequire(import.meta.url);
@@ -81,9 +80,6 @@ test("a view-placed panel starts without a tab ever registering its plugin", asy
 
   try {
     await seedWorkspaceManifest(temp, "plugin-view-e2e");
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await seedPluginSource(temp, { fixtureRoot, pluginId: "hello-plugin" });
 
     desktop = await launchDesktopApp({ workspace: temp });
@@ -156,9 +152,6 @@ test("plugin panel crosses the utility process, iframe SDK, and attributed write
 
   try {
     await seedWorkspaceManifest(temp, "plugin-panel-e2e");
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await seedPluginSource(temp, { fixtureRoot, pluginId: "hello-plugin" });
 
     desktop = await launchDesktopApp({ workspace: temp });

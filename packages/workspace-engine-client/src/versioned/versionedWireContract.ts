@@ -2,7 +2,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import * as Struct from "effect/Struct";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
+import type { JsonValue } from "../protocol";
 
 export const VERSIONED_METHOD = {
   textWrite: "versionedText.write",
@@ -65,9 +65,7 @@ export type AgentAuthor = JsonObject & {
 type MutationMetadata = JsonObject & {
   workspaceId?: string;
   origin?: VersionedOrigin;
-  metadataOrigin?: VersionedOrigin | "agent";
   author?: AgentAuthor;
-  authorJson?: string;
   requestId?: string;
   nowMs?: number;
   summary?: string;

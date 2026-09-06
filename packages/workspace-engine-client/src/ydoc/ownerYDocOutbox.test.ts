@@ -3,9 +3,7 @@ import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import { describe, expect, it } from "vitest";
 import type { DaemonRequesterClient } from "../live/daemonLiveAdapter";
-import type { Request } from "./generated/Request";
-import type { Response } from "./generated/Response";
-import type { WorkspaceHandle } from "./generated/WorkspaceHandle";
+import type { Request, Response, WorkspaceHandle } from "../protocol";
 import { OwnerYDocOutbox, OwnerYDocOutboxReadChangedError } from "./ownerYDocOutbox.js";
 
 const WORKSPACE = "owner-outbox-receipt-test" as WorkspaceHandle;

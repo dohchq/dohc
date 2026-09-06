@@ -83,8 +83,8 @@ const PLUGIN_WEB_APP_TAB_PREFIX = "dohc://plugin-web/";
 // refuse to split, and this page only reads.
 const PLUGIN_DETAILS_TAB_PREFIX = "dohc://plugin-details/";
 const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
-// Engine moment diff (PR 0M-5): flagged workspaces open history diffs by
-// MOMENT id, not legacy change-set id. The id alone is the tab identity: it
+// Engine moment diff (PR 0M-5): history diffs open by MOMENT id, not
+// legacy change-set id. The id alone is the tab identity: it
 // is contract-bounded, while a percent-encoded valid workspace path can
 // exceed the UI-state path bound. The moment record supplies its display path.
 const MOMENT_DIFF_TAB_PREFIX = "dohc://moment-diff/";
@@ -359,8 +359,7 @@ export interface WorkbenchState {
   editorGroups: EditorGroup[];
   activeEditorGroup: string;
   // The right-hand Chats panel (VS Code's secondary sidebar: toggleable,
-  // resizable, hidden by default). Independent of the left panel entirely,
-  // and only rendered for workspace-engine-flagged workspaces.
+  // resizable, hidden by default). Independent of the left panel entirely.
   chatsVisible: boolean;
   chatsWidth: number;
   // Max height of the explorer's Open Editors list (VS Code-style resizable
@@ -992,16 +991,28 @@ export function togglePinned(state: WorkbenchState, path: string): WorkbenchStat
 
 // Rename/move/delete remap: every path-keyed slice re-projects through one
 // projection. Tab collisions are removed within each group.
+//
+// The projection speaks filesystem paths. A collection tab encodes its folder
+// path behind dohc://collection/, so the tab projects the DECODED folder and
+// re-encodes the result — projecting the tab path itself matches no rename,
+// and the tab would keep naming the folder the move vacated.
 export function remapWorkbenchPaths(
   state: WorkbenchState,
   project: (path: string) => string | null,
 ): WorkbenchState {
+  const projectTab = (path: string): string | null => {
+    const collectionPath = parseCollectionTabPath(path);
+    if (collectionPath === null) return project(path);
+    const next = project(collectionPath);
+    if (next === null) return null;
+    return next === collectionPath ? path : collectionTabPath(next);
+  };
   const projected = new Map<string, string | null>();
   const editorGroups = state.editorGroups.map((group) => {
     const seen = new Set<string>();
     const tabs: WorkbenchTab[] = [];
     for (const tab of group.tabs) {
-      const next = project(tab.path);
+      const next = projectTab(tab.path);
       projected.set(tab.path, next);
       if (next === null || seen.has(next)) continue;
       seen.add(next);

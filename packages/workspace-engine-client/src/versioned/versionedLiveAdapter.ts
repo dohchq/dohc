@@ -6,7 +6,7 @@ import {
   WorkspaceDaemonRequester,
   type MinimalDaemonClient,
 } from "../live/daemonLiveAdapter";
-import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
+import type { JsonValue, WorkspaceHandle } from "../protocol";
 import {
   WORKSPACE_METHOD,
   collectionResultExpectsBlob,
@@ -39,15 +39,12 @@ import {
   type ConflictRecord,
   type ConflictResolveParams,
   type ConflictResolveResult,
-  type SearchQueryParams,
-  type SearchResult,
   type WatcherStatusResult,
   type WorkspaceMethod,
   type WorkspaceMethodParamsMap,
   type WorkspaceMethodResultMap,
   type WorkspaceOpenParams,
 } from "../workspace/workspaceWireContract";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 import {
   VERSIONED_METHOD,
   decodeVersionedResult,
@@ -1001,10 +998,6 @@ export class VersionedLiveAdapter {
   }): Promise<void> {
     this.assertWorkspace(input.workspaceId);
     await this.request(VERSIONED_METHOD.searchEnsureIndex, input);
-  }
-
-  async querySearch(input: SearchQueryParams): Promise<SearchResult[]> {
-    return this.workspaceRequest(WORKSPACE_METHOD.searchQuery, input);
   }
 
   /**

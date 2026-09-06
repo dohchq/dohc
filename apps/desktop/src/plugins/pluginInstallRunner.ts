@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { killProcessTreePosix } from "../process/posixSpawn";
 import { killProcessTreeWin32 } from "../process/windowsSpawn";
 import {
+  DEPENDENCY_FIELDS,
   PINNED_PLUGIN_PACKAGE_MANAGER,
   PLUGIN_INSTALL_TIMEOUT_MS,
   type PluginPnpmPaths,
@@ -117,9 +118,9 @@ export const PLUGIN_INSTALL_ARGS = [
   "--virtual-store-dir=node_modules/.pnpm",
 ] as const;
 
-export type PluginInstallLogStream = "stdout" | "stderr" | "system";
+type PluginInstallLogStream = "stdout" | "stderr" | "system";
 
-export interface PluginInstallLogEntry {
+interface PluginInstallLogEntry {
   stream: PluginInstallLogStream;
   text: string;
   at: number;
@@ -155,7 +156,7 @@ export type PluginInstallFork = (
   options: PluginInstallForkOptions,
 ) => PluginInstallProcessHandle | Promise<PluginInstallProcessHandle>;
 
-export type PluginInstallFailureCode =
+type PluginInstallFailureCode =
   | "missing-lockfile"
   | "unreadable-lockfile"
   | "lockfile-mismatch"
@@ -166,7 +167,7 @@ export type PluginInstallFailureCode =
   | "aborted"
   | "spawn-failed";
 
-export interface PluginInstallFailure {
+interface PluginInstallFailure {
   code: PluginInstallFailureCode;
   message: string;
   exitCode: number | null;
@@ -374,12 +375,6 @@ async function inspectLockfile(
     );
   }
 }
-
-const DEPENDENCY_FIELDS = [
-  "dependencies",
-  "devDependencies",
-  "optionalDependencies",
-] as const;
 
 /**
  * How many dependencies the snapshot's package.json declares. The snapshot

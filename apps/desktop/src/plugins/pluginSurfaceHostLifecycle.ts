@@ -29,7 +29,7 @@ interface PluginSurfaceHost {
   } | undefined;
 }
 
-export interface PluginSurfaceHostLifecycleOptions {
+interface PluginSurfaceHostLifecycleOptions {
   workspaceId: string;
   host: PluginSurfaceHost;
   surfaces: PluginSurfaceLifecycle;

@@ -1,15 +1,11 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, win32 } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { CompletedDaemonBlob } from "../live/daemonLiveAdapter";
-import type { Event } from "../ydoc/generated/Event";
-import type { Request } from "../ydoc/generated/Request";
-import type { Response } from "../ydoc/generated/Response";
-import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
+import type { Event, JsonValue, Request, Response, WorkspaceHandle } from "../protocol";
 import {
   createEngineClient,
   type EngineClientSpawnOptions,
@@ -145,6 +141,9 @@ export interface EngineDaemonLifecycleOptions {
   maxPingExpiries?: number;
   maxConsecutiveWedges?: number;
   onFailure?: (error: Error, terminal: boolean) => void;
+  // Retire work owned by the previous daemon before callers can open workspaces
+  // on its replacement. This barrier must not request the unpublished client.
+  beforePublish?: () => void | Promise<void>;
   // Fires once per launched daemon generation (the first launch and every
   // restart). The first generation is only handshaked when this fires — its
   // startup smoke still runs behind it; restart generations have passed the
@@ -655,6 +654,24 @@ export class EngineDaemonLifecycle {
           );
         }
       }
+      let onAbort!: () => void;
+      const cancelled = new Promise<void>((resolve) => { onAbort = resolve; });
+      signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        if (signal.aborted) onAbort();
+        // Shutdown stops waiting; the race still observes a later retirement
+        // rejection, and the publication check below rejects a cancelled launch.
+        await Promise.race([this.options.beforePublish?.(), cancelled]);
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+      }
+      if (this.stopping || signal.aborted || this.exitedGenerations.has(generation)) {
+        await this.closeClient(client);
+        if (this.stopping || signal.aborted) return;
+        throw new EngineDaemonUnavailableError(
+          "Rust engine exited while retiring the previous generation's work.",
+        );
+      }
       this.client = client;
       this.running = true;
       this.scheduleHealthyReset(generation);
@@ -997,13 +1014,6 @@ async function runEngineDaemonSmoke(
 ): Promise<JsonValue> {
   const rootDir = await mkdtemp(join(tmpdir(), "dohc-rust-engine-smoke-"));
   try {
-    const markerDirectory = join(rootDir, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(
-      join(markerDirectory, "SHADOW_CLONE"),
-      randomBytes(32).toString("hex"),
-      { encoding: "utf8", flag: "wx", mode: 0o600 },
-    );
     // Unique per invocation: the background startup smoke can overlap an
     // explicit smoke (tests, restarts) in the same process, and two live
     // opens must never share one workspaceId.

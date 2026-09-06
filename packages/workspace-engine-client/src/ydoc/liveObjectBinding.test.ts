@@ -7,7 +7,7 @@ import {
   parseLiveObjectBinding as workspaceEngineClientParseLiveObjectBinding,
 } from "../index.js";
 import type { DaemonRequesterClient } from "../live/daemonLiveAdapter.js";
-import type { Request } from "./generated/Request.js";
+import type { Request } from "../protocol.js";
 import { OwnerYDocOutbox } from "./ownerYDocOutbox.js";
 import vectors from "../../../live-session-contract/src/liveObjectBinding.vectors.json";
 

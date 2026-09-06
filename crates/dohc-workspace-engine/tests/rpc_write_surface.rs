@@ -12,7 +12,7 @@ use dohc_engine_protocol::{
     wire::{BlobStart, Envelope, Request, WorkspaceHandle, decode_control, encode_control},
 };
 use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
@@ -37,7 +37,7 @@ async fn fixture(
     WorkspaceHandle,
 ) {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
@@ -67,7 +67,7 @@ async fn fixture_with_service(
     WorkspaceHandle,
 ) {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let opened = transport
@@ -104,6 +104,24 @@ async fn call(
         .await
         .unwrap_or_else(|error| panic!("{method}: {error:?}"))
         .result
+}
+
+/// The first `search.queryPage` page for the active version.
+async fn search(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id: u64,
+    query: &str,
+) -> Value {
+    let mut page = call(
+        transport,
+        handle,
+        id,
+        "search.queryPage",
+        json!({ "query": query }),
+    )
+    .await;
+    page["results"].take()
 }
 
 async fn write(
@@ -3168,7 +3186,7 @@ async fn secret_write_beneath_symlinked_workspace_root_succeeds() {
         );
     }
 
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let workspace = "ws-rpcd-secret-symlinked-root";
     let opened = transport
@@ -4470,12 +4488,12 @@ async fn rollback_rejects_sync_record_only_moment() {
     use dohc_engine_storage::EngineStore;
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db_path = scratch.path().join(".dohc/engine/engine.db");
     std::fs::create_dir_all(db_path.parent().expect("engine dir")).expect("engine dir");
     {
         let mut store = EngineStore::open(&db_path, 1).expect("store");
-        store.bind_shadow_clone_token(TOKEN).expect("bind token");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
         let faults = NoFaults;
         let mut versioned = VersionedTextStore::new(&mut store);
         versioned
@@ -4730,44 +4748,16 @@ async fn fts_is_maintained_in_each_mutation_transaction() {
         "fts-write",
     )
     .await;
-    let hit = call(
-        &transport,
-        &handle,
-        3,
-        "search.query",
-        json!({ "versionId": "main", "query": "uniqueterm" }),
-    )
-    .await;
+    let hit = search(&transport, &handle, 3, "uniqueterm").await;
     assert!(!hit.as_array().expect("results").is_empty());
     call(&transport, &handle, 4, "versionedText.rename", json!({ "versionId": "main", "fromPath": "alpha.md", "toPath": "beta.md", "origin": "api", "requestId": "fts-rename" })).await;
-    let renamed = call(
-        &transport,
-        &handle,
-        5,
-        "search.query",
-        json!({ "versionId": "main", "query": "uniqueterm" }),
-    )
-    .await;
+    let renamed = search(&transport, &handle, 5, "uniqueterm").await;
     assert_eq!(renamed[0]["path"], "beta.md");
     let deleted = call(&transport, &handle, 6, "versionedText.delete", json!({ "versionId": "main", "path": "beta.md", "origin": "api", "requestId": "fts-delete" })).await;
-    let gone = call(
-        &transport,
-        &handle,
-        7,
-        "search.query",
-        json!({ "versionId": "main", "query": "uniqueterm" }),
-    )
-    .await;
+    let gone = search(&transport, &handle, 7, "uniqueterm").await;
     assert!(gone.as_array().expect("results").is_empty());
     call(&transport, &handle, 8, "versionedText.rollback", json!({ "versionId": "main", "path": "beta.md", "mutationMomentId": deleted["moment"]["momentId"], "origin": "restore" })).await;
-    let restored = call(
-        &transport,
-        &handle,
-        9,
-        "search.query",
-        json!({ "versionId": "main", "query": "uniqueterm" }),
-    )
-    .await;
+    let restored = search(&transport, &handle, 9, "uniqueterm").await;
     assert_eq!(restored[0]["path"], "beta.md");
     std::fs::write(scratch.path().join("beta.md"), b"uniqueterm").expect("matching preimage");
     call(
@@ -4778,14 +4768,7 @@ async fn fts_is_maintained_in_each_mutation_transaction() {
         json!({ "versionId": "main", "path": "beta.md", "bytes": [0, 255], "origin": "api" }),
     )
     .await;
-    let binary_gone = call(
-        &transport,
-        &handle,
-        11,
-        "search.query",
-        json!({ "versionId": "main", "query": "uniqueterm" }),
-    )
-    .await;
+    let binary_gone = search(&transport, &handle, 11, "uniqueterm").await;
     assert!(binary_gone.as_array().expect("results").is_empty());
 }
 
@@ -4831,14 +4814,7 @@ async fn degraded_policy_write_invalidates_healthy_state_and_rebuilds_after_rest
         json!({ "workspaceId": workspace_id, "versionId": "main" }),
     )
     .await;
-    let results = call(
-        &transport,
-        &handle,
-        6,
-        "search.query",
-        json!({ "versionId": "main", "query": "degraded-window-needle" }),
-    )
-    .await;
+    let results = search(&transport, &handle, 6, "degraded-window-needle").await;
     assert!(
         results
             .as_array()
@@ -5049,14 +5025,7 @@ async fn deduped_text_write_does_not_resurrect_a_moved_fts_row() {
     .await;
     let replay = call(&transport, &handle, 4, "versionedText.write", params).await;
     assert_eq!(replay["deduped"], true);
-    let results = call(
-        &transport,
-        &handle,
-        5,
-        "search.query",
-        json!({ "versionId": "main", "query": "unique-replay-term" }),
-    )
-    .await;
+    let results = search(&transport, &handle, 5, "unique-replay-term").await;
     let paths: Vec<&str> = results
         .as_array()
         .expect("results")
@@ -5100,14 +5069,7 @@ async fn replayed_binary_write_does_not_delete_live_text_fts_row() {
         }),
     )
     .await;
-    let before = call(
-        &transport,
-        &handle,
-        4,
-        "search.query",
-        json!({ "versionId": "main", "query": "live-text-search-needle" }),
-    )
-    .await;
+    let before = search(&transport, &handle, 4, "live-text-search-needle").await;
     assert_eq!(before[0]["path"], "replayed.md");
 
     let replay = call(
@@ -5119,14 +5081,7 @@ async fn replayed_binary_write_does_not_delete_live_text_fts_row() {
     )
     .await;
     assert_eq!(replay["deduped"], true);
-    let after = call(
-        &transport,
-        &handle,
-        6,
-        "search.query",
-        json!({ "versionId": "main", "query": "live-text-search-needle" }),
-    )
-    .await;
+    let after = search(&transport, &handle, 6, "live-text-search-needle").await;
     assert_eq!(after[0]["path"], "replayed.md");
 }
 
@@ -5156,14 +5111,7 @@ async fn search_ensure_index_is_idempotent() {
         .await;
         assert_eq!(ensured, json!({}));
     }
-    let results = call(
-        &transport,
-        &handle,
-        5,
-        "search.query",
-        json!({ "versionId": "main", "query": "explicit-rebuild" }),
-    )
-    .await;
+    let results = search(&transport, &handle, 5, "explicit-rebuild").await;
     assert!(
         results
             .as_array()
@@ -5211,10 +5159,9 @@ fn seed_versions(root: &Path, workspace_id: &str) {
 
     std::fs::create_dir_all(root.join(".dohc/engine")).expect("engine dir");
     let mut store = EngineStore::open(&root.join(".dohc/engine/engine.db"), 1).expect("store");
-    // The seed creates the engine db, so the shadow token must bind here —
-    // a pre-existing unbound db is exactly what the fence refuses at
-    // workspace.open.
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    // The seed creates the engine db, so the binding token must bind here:
+    // a pre-existing unbound db is exactly what workspace.open refuses.
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     let faults = NoFaults;
     let mut versioned = VersionedTextStore::new(&mut store);
     versioned
@@ -5295,7 +5242,7 @@ fn seed_versions(root: &Path, workspace_id: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_classifies_and_never_inlines_the_merged_body() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport.call(RequestContext::unbounded(), request(1, "workspace.open", None, json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "ws-rpcd-merge" }))).await.expect("open");
@@ -5318,21 +5265,14 @@ async fn merge_classifies_and_never_inlines_the_merged_body() {
     assert_eq!(merged["status"], "merged");
     assert!(merged["snapshot"].get("text").is_none());
     assert!(merged["moment"]["momentId"].is_string());
-    let indexed = call(
-        &transport,
-        &handle,
-        4,
-        "search.query",
-        json!({ "versionId": "main", "query": "incoming" }),
-    )
-    .await;
+    let indexed = search(&transport, &handle, 4, "incoming").await;
     assert_eq!(indexed[0]["path"], "merge.md");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_conflict_returns_the_exact_created_conflict_id() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge-conflict-id");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
@@ -5413,7 +5353,7 @@ async fn merge_conflict_returns_the_exact_created_conflict_id() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compare_and_merge_carry_a_binary_head_through_the_wire() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-binary-merge-wire");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
@@ -5543,7 +5483,7 @@ async fn compare_and_merge_carry_a_binary_head_through_the_wire() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_request_id_replay_after_target_moves_returns_recorded_outcome() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge-request-id");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport.call(RequestContext::unbounded(), request(1, "workspace.open", None, json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "ws-rpcd-merge-request-id" }))).await.expect("open");
@@ -5588,7 +5528,7 @@ async fn merge_request_id_replay_after_target_moves_returns_recorded_outcome() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_rejects_a_request_id_recorded_by_a_text_write() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge-cross-kind");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
@@ -5640,7 +5580,7 @@ async fn merge_rejects_a_request_id_recorded_by_a_text_write() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_on_a_leased_target_is_refused() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge-lease");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
@@ -5699,7 +5639,7 @@ async fn merge_on_a_leased_target_is_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compare_files_is_paged_and_binary_entry_shape_is_exact() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-compare");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport.call(RequestContext::unbounded(), request(1, "workspace.open", None, json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "ws-rpcd-compare" }))).await.expect("open");
@@ -5743,12 +5683,12 @@ async fn compare_files_pages_via_db_keyset_not_full_vector() {
     use dohc_engine_storage::EngineStore;
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     std::fs::create_dir_all(scratch.path().join(".dohc/engine")).expect("engine dir");
     let db = scratch.path().join(".dohc/engine/engine.db");
     let expected = {
         let mut store = EngineStore::open(&db, 1).expect("store");
-        store.bind_shadow_clone_token(TOKEN).expect("bind token");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
         let faults = NoFaults;
         let mut versioned = VersionedTextStore::new(&mut store);
         versioned
@@ -6009,7 +5949,7 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
     use dohc_engine_storage::EngineStore;
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let workspace = "ws-rpcd-text-blob";
     let other_workspace = "ws-rpcd-text-blob-other";
     let db_path = scratch.path().join(".dohc/engine/engine.db");
@@ -6020,7 +5960,7 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
     let other_sha = dohc_engine_storage::hex_sha256(other_text.as_bytes());
     {
         let mut store = EngineStore::open(&db_path, 1).expect("store");
-        store.bind_shadow_clone_token(TOKEN).expect("bind token");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
         let faults = NoFaults;
         let mut versioned = VersionedTextStore::new(&mut store);
         versioned
@@ -6838,7 +6778,7 @@ async fn unversioned_conflict_resolve_rpc_is_rejected_before_import_bookkeeping(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_resolved_binary_removal_reports_its_preimage_as_bytes() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let workspace_id = "ws-rpcd-binary-removal";
     seed_binary_before_fork(scratch.path(), workspace_id);
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -6929,7 +6869,7 @@ fn seed_binary_before_fork(root: &Path, workspace_id: &str) {
 
     std::fs::create_dir_all(root.join(".dohc/engine")).expect("engine dir");
     let mut store = EngineStore::open(&root.join(".dohc/engine/engine.db"), 1).expect("store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     let faults = NoFaults;
     let mut versioned = VersionedTextStore::new(&mut store);
     versioned

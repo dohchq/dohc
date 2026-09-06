@@ -167,7 +167,7 @@ const validPayloads: Record<string, unknown> = {
   [CHANNELS.listOfferedPlugins]: { workspaceId: "workspace-1" },
   [CHANNELS.addOfferedPlugin]: {
     workspaceId: "workspace-1",
-    directoryName: "codex",
+    directoryName: "agent-chat",
   },
   [CHANNELS.installPlugin]: baseActionPayload,
   [CHANNELS.disablePlugin]: baseActionPayload,
@@ -523,7 +523,7 @@ beforeEach(() => {
   });
   directOperations.listOffers.mockReset().mockResolvedValue([]);
   directOperations.readBuiltinOfferManifest.mockReset().mockImplementation(
-    async (directoryName: "codex" | "claude-code") => ({
+    async (directoryName: "agent-chat") => ({
       directoryName,
       pluginId: directoryName,
       displayName: directoryName,
@@ -545,9 +545,9 @@ describe("plugin IPC handlers", () => {
         _builtinRoot: string,
         _workspaceRoot: string,
         _existingPluginIds: ReadonlySet<string>,
-        readBuiltinManifest: (directoryName: "codex") => Promise<unknown>,
+        readBuiltinManifest: (directoryName: "agent-chat") => Promise<unknown>,
       ) => {
-        await readBuiltinManifest("codex");
+        await readBuiltinManifest("agent-chat");
         return [];
       },
     );

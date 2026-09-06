@@ -1,9 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDesktopAgentDrivers } from "./AgentProcessDrivers";
 import {
-  BUILT_IN_AGENT_DRIVER_IDS,
   createAgentDriverRegistry,
-  selectPermissionOption,
   type AgentDriver,
   type AgentProbe,
 } from "./AgentDriver";
@@ -32,26 +29,16 @@ function driver(id: string, probe: AgentDriver["probe"] = async () => authentica
   };
 }
 
-describe("the drivers dohc ships", () => {
-  it("are exactly the ids a plugin may not take", () => {
-    // The plugin driver registry refuses these ids by name, so a driver added
-    // to the app without joining this list would be one a plugin could
-    // shadow.
-    expect(createDesktopAgentDrivers({}).map((driver) => driver.id).sort())
-      .toEqual([...BUILT_IN_AGENT_DRIVER_IDS].sort());
-  });
-});
-
 describe("AgentDriverRegistry", () => {
   it("keeps drivers lookup-only and rejects duplicate ids", () => {
-    const one = driver("generic-acp");
-    const two = driver("claude-acp");
+    const one = driver("plugin-a");
+    const two = driver("plugin-b");
     const registry = createAgentDriverRegistry([one, two]);
 
     expect(registry.list()).toEqual([one, two]);
-    expect(registry.get("generic-acp")).toBe(one);
+    expect(registry.get("plugin-a")).toBe(one);
     expect(registry.get("missing")).toBeNull();
-    expect(() => createAgentDriverRegistry([one, driver("generic-acp")])).toThrow(
+    expect(() => createAgentDriverRegistry([one, driver("plugin-a")])).toThrow(
       /Duplicate agent driver id/,
     );
   });
@@ -62,8 +49,8 @@ describe("AgentDriverRegistry", () => {
     const brokenProbe = vi.fn(async () => {
       throw new Error("claude not found");
     });
-    const ok = driver("generic-acp", okProbe);
-    const broken = driver("claude-acp", brokenProbe);
+    const ok = driver("plugin-a", okProbe);
+    const broken = driver("plugin-b", brokenProbe);
     const registry = createAgentDriverRegistry([ok, broken]);
 
     await expect(registry.probeAll(env)).resolves.toEqual([
@@ -83,18 +70,3 @@ describe("AgentDriverRegistry", () => {
   });
 });
 
-describe("selectPermissionOption", () => {
-  const options = [
-    { optionId: "agent-random-1", name: "Reject once", kind: "reject_once" as const },
-    { optionId: "agent-random-2", name: "Allow always", kind: "allow_always" as const },
-    { optionId: "agent-random-3", name: "Allow once", kind: "allow_once" as const },
-  ];
-
-  it("selects by ACP option kind rather than hardcoded option ids", () => {
-    expect(selectPermissionOption(options, "allow_once")?.optionId).toBe("agent-random-3");
-    expect(selectPermissionOption(options, "allow_always")?.optionId).toBe("agent-random-2");
-    expect(selectPermissionOption(options, "reject_once")?.optionId).toBe("agent-random-1");
-    expect(selectPermissionOption(options, "reject_always")).toBeNull();
-    expect(selectPermissionOption(options, "cancel")).toBeNull();
-  });
-});

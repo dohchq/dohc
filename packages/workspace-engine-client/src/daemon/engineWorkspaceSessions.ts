@@ -15,7 +15,7 @@ import {
   WORKSPACE_METHOD,
   decodeWorkspaceResult,
 } from "../workspace/workspaceWireContract";
-import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
+import type { WorkspaceHandle } from "../protocol";
 import { YdocOpenTimedOutError } from "../ydoc/ydocLiveAdapter";
 import {
   DOHC_ENGINE_GUARD,
@@ -25,8 +25,7 @@ import {
   type DohcPathGuard,
 } from "@dohc/workspace-core";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomBytes } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { lstat, mkdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   EngineDaemonUnavailableError,
@@ -112,17 +111,7 @@ const TRANSPORT_REBIND_INITIAL_BACKOFF_MS = 100;
 // Exported so a caller deriving a retry budget can size whole recovery
 // windows (open deadline + worst-case backoff) instead of restating numbers.
 export const TRANSPORT_REBIND_MAX_BACKOFF_MS = 1_000;
-const SHADOW_CLONE_TOKEN = /^[0-9a-f]{64}$/;
 export const WORKSPACE_OPEN_DEADLINE_MS = 2_000;
-
-function isAlreadyExists(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    error.code === "EEXIST"
-  );
-}
 
 export class EngineWorkspaceRebindError extends Error {
   readonly workspaceId: string;
@@ -1051,31 +1040,12 @@ export class EngineWorkspaceSessions {
         }
         const realRoot = await realpath(workspaceRoot);
         const dohcDirectory = join(workspaceRoot, ".dohc");
-        const markerDirectory = join(dohcDirectory, "engine");
-        const markerPath = join(markerDirectory, "SHADOW_CLONE");
+        const engineDirectory = join(dohcDirectory, "engine");
+        // The daemon binds the root to its database on first open; this only
+        // makes sure the directories it writes into are real folders inside
+        // the workspace.
         await this.ensureRealDirectory(dohcDirectory, realRoot, DOHC_METADATA_GUARD);
-        await this.ensureRealDirectory(markerDirectory, realRoot, DOHC_ENGINE_GUARD);
-        try {
-          await writeFile(markerPath, randomBytes(32).toString("hex"), {
-            encoding: "utf8",
-            flag: "wx",
-            mode: 0o600,
-          });
-        } catch (error) {
-          if (!isAlreadyExists(error)) throw error;
-          const markerInfo = await lstat(markerPath);
-          if (!markerInfo.isFile() || markerInfo.isSymbolicLink()) {
-            throw new Error(
-              `Rust engine shadow marker must be a real file: ${markerPath}.`,
-            );
-          }
-          const token = await readFile(markerPath, "utf8");
-          if (!SHADOW_CLONE_TOKEN.test(token)) {
-            throw new Error(
-              `Rust engine shadow marker is invalid for ${rootPath}.`,
-            );
-          }
-        }
+        await this.ensureRealDirectory(engineDirectory, realRoot, DOHC_ENGINE_GUARD);
       })();
       this.preparations.set(rootPath, preparation);
       const release = () => {
@@ -1094,8 +1064,7 @@ export class EngineWorkspaceSessions {
   // user.
   //
   // Presence-keyed, not errno-keyed: EEXIST is what a file squat raises, but a
-  // dangling symlink squat raises ENOENT, which the old isAlreadyExists
-  // allowlist rethrew as a bare errno. When something is at the path, the
+  // dangling symlink squat raises ENOENT. When something is at the path, the
   // checks below name it; when nothing is, the mkdir itself failed.
   private async ensureRealDirectory(
     directory: string,

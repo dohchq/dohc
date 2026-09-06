@@ -4,6 +4,9 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { withBuildBudget } from "../../../scripts/verification/build.mjs";
+import { run as runProcess } from "../../../scripts/verification/process.mjs";
+import { cancellationScope } from "../../../scripts/verification/cancellation.mjs";
 
 const require = createRequire(import.meta.url);
 const repoRoot = resolve(import.meta.dirname, "../../..");
@@ -136,40 +139,32 @@ function runRequired(command, args, options, action) {
   }
 }
 
-function buildWorkspaceEngine() {
-  const result = spawnSync("cargo", workspaceEngineBuildArguments(repoRoot), {
+async function buildWorkspaceEngine(environment, runCargo) {
+  const result = await runCargo("cargo", workspaceEngineBuildArguments(repoRoot), {
     cwd: repoRoot,
-    encoding: "utf8",
-    env: workspaceEngineBuildEnvironment(process.env),
-    maxBuffer: Infinity,
-    stdio: ["inherit", "pipe", "inherit"],
+    env: workspaceEngineBuildEnvironment(environment),
+    quietStdout: true,
   });
-  if (result.error) fail("build the Rust workspace engine", result.error);
-
-  const output = result.stdout ?? "";
-  const exitCode = foregroundExitCode(result);
-  if (result.status !== 0) {
-    if (exitCode !== 0) {
-      const outcome = result.signal
-        ? `was terminated by ${result.signal}`
-        : result.status === null
-          ? "terminated without an exit code"
-          : `exited with code ${result.status}`;
-      console.error(
-        `Desktop development could not build the Rust workspace engine. cargo ${outcome}.`,
-      );
-    }
-    process.exit(exitCode);
-  }
-
-  try {
-    validateWorkspaceEngineBuild(output, repoRoot);
-  } catch (error) {
-    fail("build the Rust workspace engine in the path Electron loads", error);
-  }
+  validateWorkspaceEngineBuild(result.stdout, repoRoot);
 }
 
-function run() {
+export async function buildThenStartDesktop({
+  runCargo = runProcess,
+  startDev = () => spawnSync(
+    process.execPath,
+    [electronViteCliPath(), "dev", ...process.argv.slice(2)],
+    electronViteSpawnOptions(process.env),
+  ),
+} = {}) {
+  const cancellation = cancellationScope("Desktop build");
+  let interrupted;
+  try { await withBuildBudget((environment) => buildWorkspaceEngine(environment, runCargo)); }
+  finally { interrupted = await cancellation.dispose(); }
+  if (interrupted) throw interrupted;
+  return startDev();
+}
+
+async function run() {
   runRequired(
     process.execPath,
     [join(import.meta.dirname, "ensure-electron-installed.mjs")],
@@ -188,13 +183,7 @@ function run() {
     "stage the plugin install/build tools",
   );
 
-  buildWorkspaceEngine();
-
-  const devServer = spawnSync(
-    process.execPath,
-    [electronViteCliPath(), "dev", ...process.argv.slice(2)],
-    electronViteSpawnOptions(process.env),
-  );
+  const devServer = await buildThenStartDesktop();
   if (devServer.error) fail("start electron-vite", devServer.error);
   process.exit(foregroundExitCode(devServer));
 }
@@ -204,5 +193,5 @@ const isMain =
   resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (isMain) {
-  run();
+  run().catch((error) => fail("start the development session", error));
 }

@@ -77,9 +77,9 @@ import {
 
 export { PLUGIN_PIPELINE_ERROR_STAGES, PLUGIN_PIPELINE_STATUSES };
 
-export type PluginPipelineStatus = typeof PLUGIN_PIPELINE_STATUSES[number];
+type PluginPipelineStatus = typeof PLUGIN_PIPELINE_STATUSES[number];
 
-export type PluginPipelineErrorStage =
+type PluginPipelineErrorStage =
   typeof PLUGIN_PIPELINE_ERROR_STAGES[number];
 
 export interface PluginPipelineError {
@@ -94,7 +94,7 @@ export interface PluginPipelineError {
  * surface falls back on its own: the id names an unnamed plugin, and the
  * glyph tile stands in for a missing icon.
  */
-export interface PluginMetadata {
+interface PluginMetadata {
   displayName: string | null;
   description: string | null;
   publisher: string | null;
@@ -112,13 +112,13 @@ export interface PluginMetadata {
  * directory holds no files, which is the honest answer for a plugin that was
  * never installed or never wrote any data.
  */
-export interface PluginPipelineSizes {
+interface PluginPipelineSizes {
   installedBytes: number | null;
   dataBytes: number | null;
 }
 
 /** One declared panel, and where the workbench shows it. */
-export interface PluginPanelContribution {
+interface PluginPanelContribution {
   id: string;
   title: string;
   placement: "editor" | "view";
@@ -127,7 +127,7 @@ export interface PluginPanelContribution {
   icon: string | null;
 }
 
-export interface PluginCommandContribution {
+interface PluginCommandContribution {
   id: string;
   title: string;
 }
@@ -197,7 +197,7 @@ export type PluginPipelineStatusEvent =
   // on this fact directly instead.
   | { kind: "renamed"; pluginId: string; from: string; to: string };
 
-export type PluginPipelineActionResult =
+type PluginPipelineActionResult =
   | { ok: true; plugin: PluginPipelinePluginStatus }
   | {
     ok: false;
@@ -220,7 +220,7 @@ export type PluginPipelineUninstallResult =
   })
   | PluginPipelineActionFailure;
 
-export type PluginPipelineUninstallPreflightResult =
+type PluginPipelineUninstallPreflightResult =
   | {
     ok: true;
     confirmationToken: string;
@@ -228,7 +228,7 @@ export type PluginPipelineUninstallPreflightResult =
   }
   | { ok: false; error: PluginPipelineError };
 
-export interface PluginPipelineRuntimeStopHooks {
+interface PluginPipelineRuntimeStopHooks {
   /** Revokes authority immediately before this pipeline stops a proven runtime. */
   onWillStopRuntime?: (pluginId: string) => void;
 }
@@ -249,7 +249,7 @@ interface PluginPipelineOperations {
   readFile: typeof readFile;
 }
 
-export interface PluginPipelineOptions {
+interface PluginPipelineOptions {
   workspaceRoot: string;
   stateDir: string;
   hostOwnership: PluginHostOwnership<PluginHost>;

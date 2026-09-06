@@ -38,7 +38,6 @@ import {
   testSite,
   writeWorkspaceFile,
   workspaceStatus,
-  readHistoryRecording,
   type ToolContext,
 } from "./tools";
 import {
@@ -157,12 +156,6 @@ function refusalReason(result: { ok: true } | { ok: false; reason: string }): st
   if (result.ok) throw new Error("expected a refusal, got a successful result");
   return result.reason;
 }
-
-// Keep these split so siteNoLegacyAppModel.test.ts does not flag this
-// compatibility regression fixture as active legacy guidance.
-const LEGACY_APPS_SEGMENT = `.${"apps"}`;
-const LEGACY_SDK_PACKAGE = `@dohc/${"app"}`;
-const importLegacySdk = `import "${LEGACY_SDK_PACKAGE}";\n`;
 
 const emptyDesktopHistoryRequest: NonNullable<ToolContext["request"]> = async (request) => {
   if (request.verb === "moments") {
@@ -311,14 +304,10 @@ describe("mcp tool path containment", () => {
     });
   });
 
-  it("create_site refuses traversal, .dohc, and legacy app folders", async () => {
+  it("create_site refuses traversal and .dohc", async () => {
     await withWorkspace(async (ctx) => {
       await expect(createSite(ctx, { path: "../x" })).resolves.toMatchObject({ ok: false });
       await expect(createSite(ctx, { path: ".dohc/x" })).resolves.toMatchObject({ ok: false });
-      await expect(createSite(ctx, { path: `finance/${LEGACY_APPS_SEGMENT}/x` })).resolves.toMatchObject({
-        ok: false,
-        reason: expect.stringContaining(`legacy ${LEGACY_APPS_SEGMENT}`),
-      });
     });
   });
 
@@ -1479,7 +1468,6 @@ describe("mcp tools operate on allowed paths", () => {
       const packageJson = JSON.parse(await readFile(join(ctx.root, "finance/ledger/package.json"), "utf8"));
       const config = JSON.parse(await readFile(join(ctx.root, "finance/ledger/dohc.json"), "utf8"));
       expect(html).toContain("<title>Ledger</title>");
-      expect(html).not.toContain(LEGACY_SDK_PACKAGE);
       expect(packageJson).toMatchObject({
         private: true,
         type: "module",
@@ -2005,50 +1993,6 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("test_site validates entries and refuses legacy app SDK imports", async () => {
-    await withWorkspace(async (ctx) => {
-      await createSite(ctx, { path: "todo" });
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
-
-      await writeFile(join(ctx.root, "todo/script.js"), `// ${importLegacySdk}`);
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
-
-      await writeFile(join(ctx.root, "todo/script.js"), `const marker = "/* ${LEGACY_SDK_PACKAGE} */";\n`);
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
-
-      await writeFile(
-        join(ctx.root, "todo/script.js"),
-        `const slashOrStar = /[/*]/;\n${importLegacySdk}`,
-      );
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
-        ok: false,
-        checks: expect.arrayContaining([
-          expect.objectContaining({ name: "no-legacy-sdk-import", ok: false }),
-        ]),
-      });
-
-      await writeFile(join(ctx.root, "todo/script.js"), importLegacySdk);
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
-        ok: false,
-        checks: expect.arrayContaining([
-          expect.objectContaining({ name: "no-legacy-sdk-import", ok: false }),
-        ]),
-      });
-
-      await writeFile(join(ctx.root, "todo/script.js"), "x".repeat(2 * 1024 * 1024 + 1));
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
-        ok: false,
-        checks: expect.arrayContaining([
-          expect.objectContaining({
-            name: "no-legacy-sdk-import",
-            ok: false,
-            message: "Site source is too large for MCP static validation.",
-          }),
-        ]),
-      });
-    });
-  });
-
   it("build_site returns the detected build plan without executing it", async () => {
     await withWorkspace(async (ctx) => {
       await createSite(ctx, { path: "todo", title: "Todo" });
@@ -2222,191 +2166,7 @@ function expectWorkspaceRelative(text: string, ctx: ToolContext): void {
   expect(text, "a POSIX absolute path reached the agent").not.toMatch(/(^|\s)\/\w/);
 }
 
-// AUDIT-OPTOUT: MCP resolves the settings file through the same schema the
-// desktop uses (@dohc/workspace-contracts/workspace-settings).
-//
-// A file that exists but cannot be trusted resolves unknown, not OFF.
-// Both fail closed, so neither names a recorder — but off says the user chose
-// this, and a read that failed established no such thing. The desktop split
-// these in #483 and #505; this suite holds MCP to the same split.
-describe("workspace engine flag", () => {
-  const settingsPath = (root: string) => join(root, ".dohc", "settings.local.json");
-  const validSettings = (workspaceEngineAlpha: boolean) =>
-    JSON.stringify({
-      ...DEFAULT_WORKSPACE_SETTINGS,
-      experimental: { workspaceEngineAlpha },
-    });
-
-  it("reads an absent file as on and an explicit opt-out as off", async () => {
-    await withWorkspace(async (ctx) => {
-      await expect(readHistoryRecording(ctx)).resolves.toEqual({ state: "on" });
-
-      await mkdir(join(ctx.root, ".dohc"), { recursive: true });
-      await writeFile(settingsPath(ctx.root), validSettings(true));
-      await expect(readHistoryRecording(ctx)).resolves.toEqual({ state: "on" });
-
-      await writeFile(settingsPath(ctx.root), validSettings(false));
-      await expect(readHistoryRecording(ctx)).resolves.toEqual({ state: "off" });
-      await expect(
-        writeWorkspaceFile(ctx, { path: "notes.md", content: "draft\n" }),
-      ).resolves.toMatchObject({ ok: true, historyRecording: "off" });
-    });
-  });
-
-  // A hand-mirrored rule once answered ON for the schema-invalid bodies, which
-  // is why both readers share one schema. The schema's verdict is three-valued
-  // now: a body it rejects may hold an opt-out dohc cannot read, and saying so
-  // is not the same as saying the opt-out is there.
-  it("reads every unparseable and schema-invalid body as could-not-determine", async () => {
-    const bodies = [
-      "{not json",
-      JSON.stringify({ version: 2 }),
-      JSON.stringify({ experimental: { workspaceEngineAlpha: "false" } }),
-      JSON.stringify({}),
-      JSON.stringify([]),
-      JSON.stringify(null),
-    ];
-    for (const body of bodies) {
-      await withWorkspace(async (ctx) => {
-        await mkdir(join(ctx.root, ".dohc"), { recursive: true });
-        await writeFile(settingsPath(ctx.root), body);
-        const read = await readHistoryRecording(ctx);
-        expect(read.state, body).toBe("unknown");
-        if (read.state !== "unknown") throw new Error("unreachable");
-        expect(read.cause, body).toContain(".dohc/settings.local.json");
-        expectWorkspaceRelative(read.cause, ctx);
-      });
-    }
-  });
-
-  it("reads a non-regular, symlinked, or oversized settings file as could-not-determine", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(settingsPath(ctx.root), { recursive: true });
-      await expect(readHistoryRecording(ctx)).resolves.toMatchObject({
-        state: "unknown",
-        cause: expect.stringContaining("A folder is at that path"),
-      });
-      await rm(settingsPath(ctx.root), { recursive: true });
-
-      const outside = join(ctx.home, "settings.local.json");
-      await writeFile(outside, validSettings(true));
-      await symlink(outside, settingsPath(ctx.root));
-      await expect(readHistoryRecording(ctx)).resolves.toMatchObject({
-        state: "unknown",
-        cause: expect.stringContaining("A link is at that path"),
-      });
-      await rm(settingsPath(ctx.root));
-
-      await writeFile(
-        settingsPath(ctx.root),
-        JSON.stringify({
-          ...JSON.parse(validSettings(true)),
-          padding: "x".repeat(256 * 1024),
-        }),
-      );
-      // The limit that rejected the read, with its unit and the observed size.
-      await expect(readHistoryRecording(ctx)).resolves.toMatchObject({
-        state: "unknown",
-        cause: expect.stringContaining("the limit is 262144 bytes"),
-      });
-    });
-  });
-
-  it("reads a settings file that escapes the workspace as could-not-determine", async () => {
-    await withWorkspace(async (ctx) => {
-      const outside = join(ctx.home, "dohc-meta");
-      await mkdir(outside, { recursive: true });
-      await writeFile(join(outside, "settings.local.json"), validSettings(true));
-      await symlink(outside, join(ctx.root, ".dohc"), "dir");
-
-      await expect(readHistoryRecording(ctx)).resolves.toMatchObject({
-        state: "unknown",
-        cause: expect.stringContaining("leads outside this workspace"),
-      });
-    });
-  });
-
-  // Only one resolver failure is an escape. The others are checks that did not
-  // finish, and calling them an escape tells an agent to remove a settings file
-  // over a fact dohc never established -- this PR's own defect, one layer down.
-  // Consume the resolver's boolean instead of its reason and both cases here
-  // report the escape wording, so both fail.
-  describe("a resolver failure that is not an escape", () => {
-    const armRealpathErrno = (path: string, code: string) => {
-      realpathOverride.path = path;
-      realpathOverride.error = errnoError(code);
-    };
-    const disarm = () => {
-      realpathOverride.path = null;
-      realpathOverride.error = null;
-    };
-
-    it("reports an unreadable path as a check that failed, not as an escape", async () => {
-      await withWorkspace(async (ctx) => {
-        await mkdir(join(ctx.root, ".dohc"), { recursive: true });
-        await writeFile(settingsPath(ctx.root), validSettings(true));
-        armRealpathErrno(settingsPath(ctx.root), "EACCES");
-        try {
-          const read = await readHistoryRecording(ctx);
-          expect(read.state).toBe("unknown");
-          if (read.state !== "unknown") throw new Error("unreachable");
-          expect(read.cause).toContain("could not check where that path leads (EACCES)");
-          // The claim never established.
-          expect(read.cause).not.toContain("leads outside this workspace");
-          expectWorkspaceRelative(read.cause, ctx);
-        } finally {
-          disarm();
-        }
-      });
-    });
-
-    it("reports an unreadable workspace folder as the folder's failure, not this file's", async () => {
-      await withWorkspace(async (ctx) => {
-        await mkdir(join(ctx.root, ".dohc"), { recursive: true });
-        await writeFile(settingsPath(ctx.root), validSettings(true));
-        armRealpathErrno(ctx.root, "EACCES");
-        try {
-          const read = await readHistoryRecording(ctx);
-          expect(read.state).toBe("unknown");
-          if (read.state !== "unknown") throw new Error("unreachable");
-          expect(read.cause).toContain("could not resolve the workspace folder (EACCES)");
-          expect(read.cause).not.toContain("leads outside this workspace");
-          expectWorkspaceRelative(read.cause, ctx);
-        } finally {
-          disarm();
-        }
-      });
-    });
-  });
-
-  // #641, the whole point: what the agent reads. A settings file dohc cannot
-  // trust used to report `historyRecording: "off"` -- the opt-out's copy, on
-  // no evidence. Revert the fix and this fails: the report becomes "off".
-  it("reports an unreadable settings file as unknown, never as the opt-out", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(settingsPath(ctx.root), { recursive: true });
-
-      const written = await writeWorkspaceFile(ctx, { path: "notes.md", content: "draft\n" });
-      expect(written).toMatchObject({ ok: true, historyRecording: "unknown" });
-      if (!written.ok || !("historyRecordingUnavailable" in written)) {
-        throw new Error("expected the unknown arm to carry its cause");
-      }
-      // The state, the file, and the way out -- not a claim about a choice.
-      expect(written.historyRecordingUnavailable).toContain(
-        "dohc could not tell whether this workspace records history",
-      );
-      expect(written.historyRecordingUnavailable).toContain(".dohc/settings.local.json");
-      expect(written.historyRecordingUnavailable).toContain("Then retry.");
-      expectWorkspaceRelative(written.historyRecordingUnavailable, ctx);
-
-      // The write itself still happened, and the opt-out's word is nowhere.
-      expect(await readFile(join(ctx.root, "notes.md"), "utf8")).toBe("draft\n");
-      expect(JSON.stringify(written)).not.toContain('"off"');
-    });
-  });
-});
-
-// safeMetadataDir prepares.dohc with mkdir + lstat, and every errno
+// safeMetadataDir prepares .dohc with mkdir + lstat, and every errno
 // from those used to reach the agent whole -- `EPERM: operation not
 // permitted, lstat 'C:\Users\...\ws\.dohc'`. Seven mutating tools refuse
 // through this one catch, so all seven said it.
@@ -2594,27 +2354,25 @@ describe("a refused recordability boundary leaves the filesystem alone", () => {
 // The reserved rule used to read the path as spelled, and containment
 // was proved only INTO the root -- never out of.dohc. So an in-workspace
 // symlink named anything but `.dohc` carried every mutating tool straight into
-// the workspace's control plane: the probe on the issue wrote
-// `experimental.workspaceEngineAlpha: false` through one, and a delete through
-// the same alias moved the settings file to trash, silently dropping the
-// workspace's engine opt-out.
+// the workspace's control plane: the probe on the issue rewrote the settings
+// file through one, and a delete through the same alias moved it to trash.
 //
 // Every case below is decided on the resolved path, which is what makes the
 // spelling irrelevant. Revert safeResolve to the lexical check alone and each
 // one fails.
 describe("a symlink cannot alias a reserved area", () => {
   const settingsPath = (root: string) => join(root, ".dohc", "settings.local.json");
-  const OPTED_OUT = JSON.stringify({
+  const SETTINGS = JSON.stringify({
     ...DEFAULT_WORKSPACE_SETTINGS,
-    experimental: { workspaceEngineAlpha: false },
+    privacy: { confirmExternalLinks: false },
   });
 
-  // A workspace holding a real `.dohc` with an engine opt-out in it, plus
+  // A workspace holding a real `.dohc` with a settings file in it, plus
   // `meta -> .dohc`: an ordinary-looking folder whose real path is reserved.
   async function withDohcAlias<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
     return withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, ".dohc"), { recursive: true });
-      await writeFile(settingsPath(ctx.root), OPTED_OUT);
+      await writeFile(settingsPath(ctx.root), SETTINGS);
       await symlink(join(ctx.root, ".dohc"), join(ctx.root, "meta"), "dir");
       return fn(ctx);
     });
@@ -2639,20 +2397,16 @@ describe("a symlink cannot alias a reserved area", () => {
     });
   });
 
-  it("refuses the write, and the engine opt-out still reads off", async () => {
+  it("refuses the write, and the settings file is untouched", async () => {
     await withDohcAlias(async (ctx) => {
       const written = await writeWorkspaceFile(ctx, {
         path: "meta/settings.local.json",
-        content: JSON.stringify({
-          ...DEFAULT_WORKSPACE_SETTINGS,
-          experimental: { workspaceEngineAlpha: true },
-        }),
+        content: JSON.stringify(DEFAULT_WORKSPACE_SETTINGS),
       });
       expect(written.ok).toBe(false);
       expectsReservedRefusal(refusalReason(written));
 
-      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
-      await expect(readHistoryRecording(ctx)).resolves.toEqual({ state: "off" });
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(SETTINGS);
     });
   });
 
@@ -2662,8 +2416,7 @@ describe("a symlink cannot alias a reserved area", () => {
       expect(deleted.ok).toBe(false);
       expectsReservedRefusal(refusalReason(deleted));
 
-      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
-      await expect(readHistoryRecording(ctx)).resolves.toEqual({ state: "off" });
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(SETTINGS);
     });
   });
 
@@ -2685,7 +2438,7 @@ describe("a symlink cannot alias a reserved area", () => {
       expect(into.ok).toBe(false);
       expectsReservedRefusal(refusalReason(into));
 
-      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(SETTINGS);
       expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("visible");
       await expect(stat(join(ctx.root, "stolen.json"))).rejects.toThrow();
     });
@@ -2718,8 +2471,7 @@ describe("a symlink cannot alias a reserved area", () => {
         trashed: true,
       });
       await expect(lstat(join(ctx.root, "meta"))).rejects.toThrow();
-      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
-      await expect(readHistoryRecording(ctx)).resolves.toEqual({ state: "off" });
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(SETTINGS);
     });
   });
 
@@ -2734,7 +2486,7 @@ describe("a symlink cannot alias a reserved area", () => {
       expectsReservedRefusal(
         refusalReason(await readWorkspaceFile(ctx, { path: "old-meta/settings.local.json" })),
       );
-      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(SETTINGS);
     });
   });
 
@@ -2862,7 +2614,7 @@ describe("a symlink cannot alias a reserved area", () => {
       await withDanglingAlias(async (ctx) => {
         const written = await writeWorkspaceFile(ctx, {
           path: "meta/settings.local.json",
-          content: OPTED_OUT,
+          content: SETTINGS,
         });
         expect(refusalReason(written)).toMatch(/no target|reserved/i);
         await expect(stat(join(ctx.root, ".dohc", "settings.local.json"))).rejects.toThrow();
@@ -3043,35 +2795,6 @@ describe("a guard that decides authority reads the resolved path", () => {
     },
     10_000,
   );
-
-  it("refuses a site scan whose folder really is the legacy one", async () => {
-    await withWorkspace(async (ctx) => {
-      const legacy = join(ctx.root, LEGACY_APPS_SEGMENT, "portal");
-      await mkdir(legacy, { recursive: true });
-      await writeFile(join(legacy, "index.html"), "<h1>legacy</h1>");
-      await symlink(join(ctx.root, LEGACY_APPS_SEGMENT), join(ctx.root, "shortcut"), "dir");
-
-      const scanned = await detectSites(ctx, { path: "shortcut/portal" });
-      expect(scanned).toMatchObject({
-        ok: false,
-        reason: expect.stringContaining(LEGACY_APPS_SEGMENT),
-      });
-    });
-  });
-
-  it("refuses to create a site whose folder really is the legacy one", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, LEGACY_APPS_SEGMENT), { recursive: true });
-      await symlink(join(ctx.root, LEGACY_APPS_SEGMENT), join(ctx.root, "shortcut"), "dir");
-
-      const created = await createSite(ctx, { path: "shortcut/fresh" });
-      expect(created).toMatchObject({
-        ok: false,
-        reason: expect.stringContaining(LEGACY_APPS_SEGMENT),
-      });
-      await expect(stat(join(ctx.root, LEGACY_APPS_SEGMENT, "fresh"))).rejects.toThrow();
-    });
-  });
 
   // Climbing past a component realpath cannot resolve is safe only when
   // nothing is there. A permission error answers neither question, and reading

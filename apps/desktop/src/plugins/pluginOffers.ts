@@ -12,7 +12,7 @@ import {
 } from "./pluginShared";
 import { EXCLUDED_SOURCE_NAMES, hashPluginSourceFiles } from "./pluginSourceSnapshot";
 
-export interface OfferedPluginSource {
+interface OfferedPluginSource {
   directoryName: (typeof BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES)[number];
   displayName: string | null;
   description: string | null;
@@ -49,8 +49,8 @@ async function pathExists(path: string): Promise<boolean> {
 /**
  * @param existingPluginIds The manifest ids the workspace's plugin pipeline
  * already knows about — identity is the manifest id, not the directory a
- * plugin happens to live in, so `codex` copied to `plugins/my-codex` still
- * suppresses the Codex offer: adding a second `codex` would only degrade to
+ * plugin happens to live in, so `agent-chat` copied to `plugins/my-chat` still
+ * suppresses the offer: adding a second `agent-chat` would only degrade to
  * discovery's existing duplicate-id handling, never a clean install.
  */
 export async function listOfferedPlugins(
@@ -444,7 +444,7 @@ export async function addOfferedPlugin(params: {
 
 /** Device + inode: the filesystem's own answer to "is this the same
  * directory entry", independent of what the path currently resolves to. */
-export interface OfferedPluginIdentity {
+interface OfferedPluginIdentity {
   dev: bigint;
   ino: bigint;
 }

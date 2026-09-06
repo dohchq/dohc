@@ -5,7 +5,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./daemon": "./src/daemon/index.ts",
-    "./limits": "./src/versioned/engineTextLimits.ts"
+    "./limits": "./src/versioned/engineTextLimits.ts",
+    "./testing": "./src/testing/index.ts"
   },
   "scripts": {
     "test": "vitest run",

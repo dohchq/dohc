@@ -399,59 +399,7 @@ describe("notice center", () => {
     );
   });
 
-  // AUDIT-OPTOUT: an unreadable settings file reads as opted out, so nothing is
-  // recorded. The flip must never be silent, and it must not claim the user
-  // turned the engine off in Settings.
-  it("names the unreadable settings file instead of blaming the engine setting", async () => {
-    const onOpenSettings = vi.fn();
-    renderBar({
-      onOpenSettings,
-      syncStatus: {
-        state: "synced",
-        pendingChangeCount: 0,
-        lastSyncedAtMs: null,
-        liveSessionsGeneration: 0,
-        historyRecordingUnavailable: false,
-        historyShareView: false,
-        historyRecordingOff: true,
-        // The cause rides main's open-time read, on the same status
-        // that decided history is off. One read answers both.
-        settingsWarning:
-          "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.",
-      },
-    });
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    const notice = screen.getByTestId("notice-workspace-settings-unreadable");
-    expect(notice.textContent).toContain("History is off for this workspace");
-    expect(notice.textContent).toContain("/ws/.dohc/settings.local.json");
-    expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
-    // The notice owes a Next the user can act on, as a control.
-    await userEvent.click(within(notice).getByRole("button", { name: "Open Settings" }));
-    expect(onOpenSettings).toHaveBeenCalledOnce();
-  });
-
-  it("blames the engine setting when the settings file reads normally", async () => {
-    renderBar({
-      syncStatus: {
-        state: "synced",
-        pendingChangeCount: 0,
-        lastSyncedAtMs: null,
-        liveSessionsGeneration: 0,
-        historyRecordingUnavailable: false,
-        historyShareView: false,
-        historyRecordingOff: true,
-      },
-    });
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    expect(
-      screen.getByTestId("notice-history-recording-off").textContent,
-    ).toContain("The workspace engine is turned off in Settings");
-    expect(screen.queryByTestId("notice-history-recording-unavailable")).toBeNull();
-  });
-
-  // The recorder failed to build. Nothing records, exactly as for the
-  // opt-out — so the two states arrive at this surface together and only the
-  // cause separates them. The failure must not wear the opt-out's copy.
+  // The recorder failed to build, so nothing records.
   it("names the failure when the recorder could not be built", async () => {
     renderBar({
       syncStatus: {
@@ -459,7 +407,6 @@ describe("notice center", () => {
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         liveSessionsGeneration: 0,
-        historyRecordingOff: true,
         historyRecordingUnavailable: true,
         historyShareView: false,
       },
@@ -473,15 +420,10 @@ describe("notice center", () => {
     // The Next: main builds the recorder once per app session, so a reopen
     // retries nothing.
     expect(notice.textContent).toContain("Restart dohc to try again.");
-    // Never the opt-out's cause, and never both notices at once.
-    expect(notice.textContent).not.toContain("turned off in Settings");
-    expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
   });
 
-  // A shared view records no history BY DESIGN — a capability, not an
-  // opt-out and not a failure. Every history-off notice states a cause that
-  // is false for a shared view, so the share banner speaks and this surface
-  // stays quiet.
+  // A shared view records no history by design, a capability, not a
+  // failure. The share banner speaks and this surface stays quiet.
   it("raises no history-off notice for a shared view", async () => {
     renderBar({
       syncStatus: {
@@ -489,7 +431,6 @@ describe("notice center", () => {
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         liveSessionsGeneration: 0,
-        historyRecordingOff: true,
         historyRecordingUnavailable: false,
         historyShareView: true,
       },
@@ -498,10 +439,7 @@ describe("notice center", () => {
     // The panel opened, so a missing notice means no notice — not a missed
     // render.
     expect(screen.getByTestId("notice-center")).toBeTruthy();
-    // The opt-out's copy would blame a Settings toggle nobody touched.
-    expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
     expect(screen.queryByTestId("notice-history-recording-unavailable")).toBeNull();
-    expect(screen.queryByTestId("notice-workspace-settings-unreadable")).toBeNull();
   });
 
   it("shows all clear when there are no notices", async () => {

@@ -15,12 +15,11 @@ use dohc_engine_protocol::{
     wire::{Request, WorkspaceHandle},
 };
 use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_workspace_engine::EngineService;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const FIXTURES: &str = include_str!("../../../tools/rust-engine-program/ydoc-replay-fixtures.json");
 const GOLDENS: &str = include_str!("../../../tools/rust-engine-program/ydoc-replay-goldens.json");
 
@@ -166,7 +165,6 @@ async fn replay_through_engine(scenario: &Scenario, ordinal: usize, force_cold: 
     );
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
     let service = Arc::new(EngineService::with_session_epoch_for_harness(format!(
         "replay-parity-{ordinal}"
     )));

@@ -91,12 +91,12 @@ export interface PluginChildProcessHandle {
  * `code` is null for a child a signal ended, which is how a POSIX command
  * child reports being killed.
  */
-export interface PluginChildProcessLifecycle {
+interface PluginChildProcessLifecycle {
   onExit(code: number | null): void;
   onError(message: string): void;
 }
 
-export interface PluginChildProcessBrokerOptions {
+interface PluginChildProcessBrokerOptions {
   /** The app's userData-resident plugin-data root for this workspace
    * (PluginPipeline's dohcDir) — never a workspace-relative path (CERT779).
    * A brokered child's cwd/modulePath must resolve inside
@@ -404,7 +404,7 @@ function environmentPath(env: NodeJS.ProcessEnv): string | undefined {
  * that single line itself under its own quoting rules, which refuse any
  * argument cmd.exe could reparse.
  */
-export async function spawnCommandChildProcess(
+async function spawnCommandChildProcess(
   command: string,
   args: string[],
   options: PluginCommandSpawnOptions,

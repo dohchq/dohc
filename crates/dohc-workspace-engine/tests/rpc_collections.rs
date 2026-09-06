@@ -23,8 +23,7 @@ use dohc_engine_sync::{
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{
     AUTOMATION_CLAIMED_EVENT, EngineEventNotice, EngineService, RECORD_CREATED_EVENT,
-    RECORD_FIELD_CHANGED_EVENT, RECORD_UPDATED_EVENT,
-    shadow_fence::write_shadow_marker_for_harness,
+    RECORD_FIELD_CHANGED_EVENT, RECORD_UPDATED_EVENT, root_binding::write_root_binding,
 };
 use serde_json::{Value, json};
 use std::{fmt::Write as _, sync::Arc};
@@ -57,7 +56,7 @@ fn seed_text(store: &mut EngineStore, path: &str, text: &str, sequence: i64) {
 fn seed_collection_state(scratch: &ScratchDir) {
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -80,7 +79,7 @@ fn seed_collection_state(scratch: &ScratchDir) {
 fn seed_schema(scratch: &ScratchDir, schema: &str) {
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -163,7 +162,7 @@ async fn reconcile_capture(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_collection_request_answers_for_a_degraded_schema() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_collection_state(&scratch);
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
@@ -281,7 +280,7 @@ async fn every_collection_request_answers_for_a_degraded_schema() {
 async fn collections_get_caps_schema_arrays_at_the_wire_collection_limit() {
     const SCHEMA_LIMIT: usize = WireLimits::SPIKE_DEFAULTS.max_collection_len as usize;
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let mut schema = String::from("fields:\n");
     for index in 0..=SCHEMA_LIMIT {
         writeln!(schema, "  field{index:05}:\n    type: text").expect("append field");
@@ -361,7 +360,7 @@ async fn collections_get_caps_schema_arrays_at_the_wire_collection_limit() {
 async fn get_record_pages_all_history_past_the_per_request_limit() {
     const SEEDED_HISTORY: usize = 501;
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_collection_state(&scratch);
 
     let db = scratch.engine_db_path().expect("engine db path");
@@ -453,7 +452,7 @@ async fn get_record_pages_all_history_past_the_per_request_limit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
@@ -616,7 +615,7 @@ async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
 async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
     const EDITED_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
@@ -624,7 +623,7 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
     let markdown = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
     store
         .write_with(&NoFaults, |tx| {
@@ -862,14 +861,14 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
 
     for device in ["a", "b"] {
         let scratch = ScratchDir::new().expect("scratch");
-        write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+        write_root_binding(scratch.path(), TOKEN).expect("root binding");
         seed_schema(
             &scratch,
             "name: Tasks\nfields:\n  status:\n    type: text\n",
         );
         let db = scratch.engine_db_path().expect("engine db path");
         let mut store = EngineStore::open(&db, 1).expect("open store");
-        store.bind_shadow_clone_token(TOKEN).expect("bind token");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
         seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
         store
             .write_with(&NoFaults, |tx| {
@@ -1094,7 +1093,7 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_adopts_whitespace_delimited_frontmatter_without_losing_fields() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
         &scratch,
         "name: Tasks\nfields:\n  done:\n    type: checkbox\n  priority:\n    type: number\n  status:\n    type: text\n",
@@ -1152,7 +1151,7 @@ async fn capture_adopts_whitespace_delimited_frontmatter_without_losing_fields()
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_adopts_uppercase_markdown_extension_without_rewriting_structure() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
         &scratch,
         "name: Tasks\nfields:\n  done:\n    type: checkbox\n  priority:\n    type: number\n  status:\n    type: text\n",
@@ -1215,7 +1214,7 @@ async fn capture_adopts_uppercase_markdown_extension_without_rewriting_structure
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_adoption_leaves_rich_markdown_unmodified_until_shared_import() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
@@ -1296,10 +1295,10 @@ async fn collection_larger_than_frame_cap_pages_completely_in_sorted_order() {
     );
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -1395,10 +1394,10 @@ async fn overdepth_sort_values_page_without_gaps_or_duplicates() {
     ];
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -1545,10 +1544,10 @@ async fn big_collection_numbers_cross_every_request_and_response_surface() {
         },
     ];
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -1784,10 +1783,10 @@ async fn big_collection_numbers_cross_every_request_and_response_surface() {
 async fn near_limit_record_round_trips_via_query_and_get_record_blob_egress() {
     const LARGE_FIELD_BYTES: usize = dohc_engine_domain::MAX_TEXT_BYTES - 1024;
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -1928,10 +1927,10 @@ async fn collection_get_uses_blob_egress_only_above_inband_limit() {
     assert!(over_schema.len() < dohc_engine_domain::MAX_TEXT_BYTES);
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -2041,7 +2040,7 @@ async fn collection_get_uses_blob_egress_only_above_inband_limit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn collection_query_refuses_a_ninth_sort_clause() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(&scratch, "fields:\n  title:\n    type: text\n");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
@@ -2093,14 +2092,14 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
     let edited = format!("---\nid: {RECORD_ID}\nstatus: remote\n---\n\nAlpha\n");
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
     );
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
     store
         .write_with(&NoFaults, |tx| {
@@ -2261,14 +2260,14 @@ async fn remote_moment_append_without_frontmatter_clears_the_collection_index() 
     let edited = "Alpha without frontmatter\n".to_owned();
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
     );
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
     store
         .write_with(&NoFaults, |tx| {
@@ -2420,14 +2419,14 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
 
     let markdown = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n");
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
     );
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
     store
         .write_with(&NoFaults, |tx| {
@@ -2936,7 +2935,7 @@ async fn get_record_history_pages_cut_by_bytes_and_continue_from_the_cursor() {
     const SEEDED_HISTORY: usize = 32;
     const VALUE_BYTES: usize = 32 * 1024;
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_collection_state(&scratch);
 
     let db = scratch.engine_db_path().expect("engine db path");
@@ -3055,10 +3054,10 @@ async fn get_record_history_pages_cut_by_bytes_and_continue_from_the_cursor() {
 async fn collections_list_pages_with_the_exclusive_cursor() {
     const COLLECTIONS: [&str; 3] = ["alpha", "beta", "gamma"];
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -3159,10 +3158,10 @@ async fn collections_list_byte_bounds_degradation_reasons_and_the_page() {
     const COLLECTIONS: [&str; 6] = ["alpha", "beta", "delta", "epsilon", "gamma", "zeta"];
     const REASONS_PER_COLLECTION: usize = 700;
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -3297,10 +3296,10 @@ async fn collection_responses_honor_a_negotiated_frame_limit_below_the_default()
     const LARGE_FIELD_BYTES: usize = 2 * 1024 * 1024;
     const NEGOTIATED: u32 = dohc_engine_protocol::limits::MIN_NEGOTIABLE_FRAME_BYTES;
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");

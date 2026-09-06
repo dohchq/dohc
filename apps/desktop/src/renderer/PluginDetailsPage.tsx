@@ -1059,7 +1059,7 @@ function PluginUninstallDialog(props: {
   const installed = isInstalled(confirmation.plugin);
   // A directoryName matching a built-in only means Add can offer this slot
   // again — it says nothing about what's actually IN the folder right now.
-  // A user or an agent can put anything at plugins/codex; Add always
+  // A user or an agent can put anything at plugins/agent-chat; Add always
   // restores dohc's own packaged source, never whatever this specific copy
   // held. Anything else has no such path at all, and dohc's own delete here
   // is permanent either way (PluginPipeline.uninstall removes the source

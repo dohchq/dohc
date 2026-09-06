@@ -650,9 +650,6 @@ importers:
 
   packages/workspace-fs:
     dependencies:
-      '@dohc/workspace-contracts':
-        specifier: workspace:*
-        version: link:../workspace-contracts
       '@dohc/workspace-core':
         specifier: workspace:*
         version: link:../workspace-core

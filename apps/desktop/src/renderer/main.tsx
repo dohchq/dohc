@@ -1,4 +1,5 @@
 import { createRoot } from "react-dom/client";
+import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { DesktopRoot } from "./DesktopRoot";
 import { AppErrorBoundary, installGlobalErrorReporters } from "./ErrorBoundary";
 import { RecoveryCloseGuard } from "./RecoveryCloseGuard";
@@ -25,8 +26,13 @@ if (container) {
   // reload must not destroy the set-aside drafts storage could not keep
   //  unannounced, and a guard inside the crashed tree would unmount
   // with it.
+  // CollectionFieldWriteHost sits beside the guard for the same reason: it
+  // lands accepted collection cell edits from a queue in renderer memory, and
+  // the guard's drain-before-unload depends on it outliving a crashed or
+  // remounting workspace shell.
   createRoot(container).render(
     <RecoveryCloseGuard>
+      <CollectionFieldWriteHost />
       <AppErrorBoundary>
         <DesktopRoot />
       </AppErrorBoundary>

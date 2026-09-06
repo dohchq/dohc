@@ -8,7 +8,7 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -31,7 +31,7 @@ async fn open_workspace(
     id: u64,
     workspace_id: &str,
 ) -> WorkspaceHandle {
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -92,14 +92,14 @@ async fn write(
 }
 
 fn seed_short_query_scan_rows(scratch: &ScratchDir, workspace_id: &str, nonmatching_rows: usize) {
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let faults = NoFaults;
     let mut store = EngineStore::open(&db, 1).expect("seed store");
     assert!(
         store
-            .bind_shadow_clone_token(TOKEN)
-            .expect("bind shadow token")
+            .bind_root_token(TOKEN, &NoFaults)
+            .expect("bind root token")
     );
     VersionedTextStore::new(&mut store)
         .ensure_main_version(workspace_id, "main", 1, &faults)

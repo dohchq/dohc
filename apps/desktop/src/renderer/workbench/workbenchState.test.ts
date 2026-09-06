@@ -1571,6 +1571,68 @@ describe("remapWorkbenchPaths (rename/move/delete projection)", () => {
       "renamed.md",
     ]);
   });
+
+  // A collection tab's path encodes the folder path behind dohc://collection/.
+  // The projection speaks filesystem paths, so the tab must project the
+  // DECODED folder and re-encode the result — treating the whole tab path as
+  // a filesystem path matches no rename and strands the tab.
+  it("a collection tab follows its folder's rename, view preference included", () => {
+    let state = withTabs(collectionTabPath("tasks"), "readme.md");
+    state = setCollectionActiveView(state, "tasks", "Board");
+    const remapped = remapWorkbenchPaths(state, (path) =>
+      path === "tasks" ? "org tasks" : path.startsWith("tasks/") ? `org tasks/${path.slice("tasks/".length)}` : path,
+    );
+    expect(allTabs(remapped).map((tab) => tab.path)).toEqual([
+      collectionTabPath("org tasks"),
+      "readme.md",
+    ]);
+    expect(remapped.collectionViews).toEqual({ "org tasks": "Board" });
+  });
+
+  it("a collection tab follows an ancestor folder's move in every split group", () => {
+    let state = createEditorGroupRight(
+      withTabs(collectionTabPath("team/tasks")),
+      DEFAULT_EDITOR_GROUP_ID,
+      "right",
+    );
+    state = setCollectionActiveView(state, "team/tasks", "Calendar");
+    const remapped = remapWorkbenchPaths(state, (path) =>
+      path === "team" ? "org/team" : path.startsWith("team/") ? `org/${path}` : path,
+    );
+    expect(
+      remapped.editorGroups.map((group) => group.tabs.map((tab) => tab.path)),
+    ).toEqual([
+      [collectionTabPath("org/team/tasks")],
+      [collectionTabPath("org/team/tasks")],
+    ]);
+    expect(remapped.editorGroups.map((group) => group.activeTab)).toEqual([
+      collectionTabPath("org/team/tasks"),
+      collectionTabPath("org/team/tasks"),
+    ]);
+    expect(remapped.collectionViews).toEqual({ "org/team/tasks": "Calendar" });
+  });
+
+  it("a deleted collection folder closes its tab and the neighbor takes over", () => {
+    const state = withTabs("readme.md", collectionTabPath("tasks"));
+    const remapped = remapWorkbenchPaths(state, (path) =>
+      path === "tasks" || path.startsWith("tasks/") ? null : path,
+    );
+    expect(allTabs(remapped).map((tab) => tab.path)).toEqual(["readme.md"]);
+    expect(activeTabPath(remapped)).toBe("readme.md");
+  });
+
+  it("a move that collides two collection tabs onto one folder dedupes them", () => {
+    const state = withTabs(
+      collectionTabPath("tasks"),
+      collectionTabPath("org/tasks"),
+    );
+    const remapped = remapWorkbenchPaths(state, (path) =>
+      path === "tasks" ? "org/tasks" : path.startsWith("tasks/") ? `org/${path}` : path,
+    );
+    expect(allTabs(remapped).map((tab) => tab.path)).toEqual([
+      collectionTabPath("org/tasks"),
+    ]);
+  });
 });
 
 describe("pruneMissingRestoredTabs (restored tabs whose file is gone)", () => {

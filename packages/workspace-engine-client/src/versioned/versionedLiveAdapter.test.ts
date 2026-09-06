@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { EngineRequestError } from "../daemon/engineClient";
-import type { Request } from "../ydoc/generated/Request";
-import type { Response } from "../ydoc/generated/Response";
+import type { Request, Response } from "../protocol";
 import {
   DaemonProtocolError,
   DaemonRefusalError,
@@ -27,7 +26,7 @@ import {
   VersionedAdapterCapabilityError,
   VersionedLiveAdapter,
 } from "./versionedLiveAdapter";
-import { VersionedLoopbackEngine } from "./versionedLoopbackEngine";
+import { VersionedLoopbackEngine } from "../testing/versionedLoopbackEngine";
 
 const WORKSPACE = "workspace";
 const SENTINEL = new Error("captured");
@@ -188,10 +187,6 @@ const WORKSPACE_REQUEST_CASES: WorkspaceRequestCase[] = [
   { method: WORKSPACE_METHOD.conflictsList, params: {} },
   { method: WORKSPACE_METHOD.conflictsOpen, params: { conflict: {} } },
   { method: WORKSPACE_METHOD.conflictsResolve, params: { local: {} } },
-  {
-    method: WORKSPACE_METHOD.searchQuery,
-    params: { versionId: "main", query: "hello" },
-  },
   { method: WORKSPACE_METHOD.watcherStatus, params: {} },
   { method: WORKSPACE_METHOD.captureFlush, params: {} },
   { method: WORKSPACE_METHOD.captureSetAuthor, params: { author: null } },
@@ -361,7 +356,6 @@ const WORKSPACE_DECODER_CASES: Array<{
       nextBeforeHistoryId: null,
     },
   },
-  { method: WORKSPACE_METHOD.searchQuery, valid: [] },
   {
     method: WORKSPACE_METHOD.watcherStatus,
     valid: { running: true, degraded: false, terminal: false, phase: "ready" },

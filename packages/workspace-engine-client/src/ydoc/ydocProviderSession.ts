@@ -12,7 +12,6 @@ import {
   type YdocAdapterSession,
 } from "./ydocLiveAdapter";
 import type {
-  YdocApplyExternalMarkdownEditResult,
   YdocContentKind,
   ArtifactAssetDescriptor,
   YdocSettleResult,
@@ -134,9 +133,6 @@ export interface EngineYdocProviderSession {
     options?: ApplyLocalUpdateOptions,
   ): Promise<void>;
   settleNow(options?: { summary?: string }): Promise<YdocSettleResult>;
-  applyExternalMarkdownEdit(
-    markdown: string,
-  ): Promise<YdocApplyExternalMarkdownEditResult>;
   // `settle: false` alone does not promise the file will be left alone: a
   // release the daemon refuses as unsettled escalates to a settling close, so
   // pending edits survive a transient failure. A caller that must never
@@ -423,22 +419,6 @@ export async function openEngineYdocProviderSession(
         scheduleTransientSettleRetry(error);
       });
       return operation;
-    },
-
-    async applyExternalMarkdownEdit(markdown) {
-      // The adapter flushes its record chain before merging, so the engine
-      // merges against fully-recorded state rather than a stale doc. That
-      // flush cannot see what a TRANSIENT refusal left unsent: the chain is
-      // neutralized after one, so awaiting it succeeds while the engine is
-      // still missing this session's text — and the merge would then run
-      // against a document without it, reordering or dropping the user's
-      // edit inside the canonical Y.Doc.
-      //
-      // Send it first, exactly as a settle does, and for the same reason: no
-      // operation that reads durable state may run while durable state is
-      // known to be behind.
-      await session.resendMissingState();
-      return await session.applyExternalMarkdownEdit(markdown);
     },
 
     async close(closeOptions) {

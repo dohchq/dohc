@@ -7,7 +7,6 @@ import type { LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import {
   OwnerYDocOutbox,
-  type DaemonRequesterClient,
   type LiveObjectBinding,
   type Request,
   type Response,
@@ -27,6 +26,7 @@ import {
 import { createTestScratch } from "./testTemp";
 
 const engine = requireEngineBinaryOrSkip();
+type DaemonRequesterClient = ConstructorParameters<typeof OwnerYDocOutbox>[0];
 const WORKSPACE_ID = "owner-ydoc-outbox-restart";
 const LIMITS = {
   maxPendingBytes: 1_000_000,
@@ -180,7 +180,7 @@ it.skipIf(engine.missing)("reads an owner queue larger than a daemon control fra
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
   const workspace = { workspaceId: "owner-outbox-frame", rootPath: root, attachmentId: Symbol("owner-pages") };
   const capture = createWorkspaceEngineCapture({
-    ...workspace, rustEngineSessions: sessions, daemonOwnsCapture: true,
+    ...workspace, rustEngineSessions: sessions,
   });
   try {
     await lifecycle.start();
@@ -323,7 +323,7 @@ it.skipIf(engine.missing)("acknowledges an in-flight receipt after a concurrent 
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
   const workspace = { workspaceId: "owner-outbox-sealed-receipt", rootPath: root, attachmentId: Symbol("owner-receipt") };
   const capture = createWorkspaceEngineCapture({
-    ...workspace, rustEngineSessions: sessions, daemonOwnsCapture: true,
+    ...workspace, rustEngineSessions: sessions,
   });
   try {
     await lifecycle.start();
@@ -432,7 +432,6 @@ it.skipIf(engine.missing)(
     let capture = createWorkspaceEngineCapture({
       ...workspace,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
 
     try {
@@ -494,7 +493,6 @@ it.skipIf(engine.missing)(
       capture = createWorkspaceEngineCapture({
         ...workspace,
         rustEngineSessions: sessions,
-        daemonOwnsCapture: true,
       });
 
       await sessions.run(workspace, async (engineBinding) => {

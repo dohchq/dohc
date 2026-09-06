@@ -115,15 +115,9 @@ afterEach(() => {
 describe("PluginsView", () => {
   const offers: OfferedPluginRecord[] = [
     {
-      directoryName: "codex",
-      displayName: "Codex",
-      description: "Runs the Codex CLI on this workspace as a dohc agent.",
-      publisher: "dohc",
-    },
-    {
-      directoryName: "claude-code",
-      displayName: "Claude Code",
-      description: "Runs the Claude Code CLI on this workspace as a dohc agent.",
+      directoryName: "agent-chat",
+      displayName: "Agent chat",
+      description: "Runs the Claude Code and Codex CLIs on this workspace as dohc agents.",
       publisher: "dohc",
     },
   ];
@@ -154,15 +148,14 @@ describe("PluginsView", () => {
     expect(screen.queryByTestId("plugins-empty")).toBeNull();
   });
 
-  it("shows both offered driver plugins when the workspace has no plugins", async () => {
+  it("shows the offered driver plugin when the workspace has no plugins", async () => {
     bridgeMock.listOfferedPlugins.mockResolvedValue({ ok: true, offers });
 
     renderList();
 
     const section = await screen.findByTestId("plugins-section-offered");
-    expect(within(section).getAllByTestId("plugin-offer-row")).toHaveLength(2);
-    expect(within(section).getByText("Codex")).toBeTruthy();
-    expect(within(section).getByText("Claude Code")).toBeTruthy();
+    expect(within(section).getAllByTestId("plugin-offer-row")).toHaveLength(1);
+    expect(within(section).getByText("Agent chat")).toBeTruthy();
   });
 
   it("drops a stale offer list after switching workspaces", async () => {
@@ -182,45 +175,45 @@ describe("PluginsView", () => {
     // loading offers state with the workspaceId it was fetched for and
     // checks that tag on every render, so a workspace switch can never
     // paint a still-pending or still-resolving fetch's stale data.
-    expect(screen.queryByText("Codex")).toBeNull();
-    expect(screen.queryByText("Claude Code")).toBeNull();
+    expect(screen.queryByText("Agent chat")).toBeNull();
 
     await act(async () => {
-      newList.resolve({ ok: true, offers: [offers[1]] });
+      newList.resolve({ ok: true, offers: [] });
       await newList.promise;
     });
-    expect(await screen.findByText("Claude Code")).toBeTruthy();
+    expect(screen.queryByTestId("plugin-offer-row")).toBeNull();
 
     await act(async () => {
       oldList.resolve({ ok: true, offers: [offers[0]] });
       await oldList.promise;
     });
-    expect(screen.queryByText("Codex")).toBeNull();
-    expect(screen.getByText("Claude Code")).toBeTruthy();
+    expect(screen.queryByText("Agent chat")).toBeNull();
+    expect(screen.queryByTestId("plugin-offer-row")).toBeNull();
   });
 
   it("does not offer a driver plugin already present in the workspace", async () => {
     bridgeMock.listPlugins.mockResolvedValue({
       ok: true,
-      plugins: [plugin("codex")],
+      plugins: [plugin("agent-chat")],
     });
     bridgeMock.listOfferedPlugins.mockResolvedValue({
       ok: true,
-      offers: [offers[1]],
+      offers: [],
     });
 
     renderList();
 
-    const section = await screen.findByTestId("plugins-section-offered");
-    expect(within(section).queryByText("Codex")).toBeNull();
-    expect(within(section).getByText("Claude Code")).toBeTruthy();
+    const rows = await screen.findAllByTestId("plugin-row");
+    expect(rows.map((row) => row.getAttribute("data-plugin-id"))).toEqual(["agent-chat"]);
+    expect(screen.queryByTestId("plugins-section-offered")).toBeNull();
+    expect(screen.queryByTestId("plugin-offer-row")).toBeNull();
   });
 
   it("adds an offered plugin and removes its row without reloading offers", async () => {
     bridgeMock.listOfferedPlugins.mockResolvedValue({ ok: true, offers });
     bridgeMock.addOfferedPlugin.mockResolvedValue({
       ok: true,
-      plugin: plugin("codex", {
+      plugin: plugin("agent-chat", {
         status: "discovered",
         runtimeStatus: null,
         sourceHash: null,
@@ -230,22 +223,18 @@ describe("PluginsView", () => {
     });
 
     renderList();
-    const codexRow = (await screen.findAllByTestId("plugin-offer-row")).find(
-      (row) => row.getAttribute("data-plugin-directory") === "codex",
+    const chatRow = (await screen.findAllByTestId("plugin-offer-row")).find(
+      (row) => row.getAttribute("data-plugin-directory") === "agent-chat",
     );
-    expect(codexRow).toBeTruthy();
+    expect(chatRow).toBeTruthy();
 
-    await userEvent.click(within(codexRow!).getByTestId("plugin-offer-add"));
+    await userEvent.click(within(chatRow!).getByTestId("plugin-offer-add"));
 
     expect(bridgeMock.addOfferedPlugin).toHaveBeenCalledWith({
       workspaceId: "ws-1",
-      directoryName: "codex",
+      directoryName: "agent-chat",
     });
-    await waitFor(() =>
-      expect(
-        screen.queryByTestId("plugin-offer-row")?.getAttribute("data-plugin-directory"),
-      ).toBe("claude-code"),
-    );
+    await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
     expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(1);
   });
 
@@ -255,7 +244,7 @@ describe("PluginsView", () => {
       .mockResolvedValueOnce({ ok: true, offers: [offers[0]] });
     bridgeMock.addOfferedPlugin.mockResolvedValue({
       ok: true,
-      plugin: plugin("codex", {
+      plugin: plugin("agent-chat", {
         status: "discovered",
         runtimeStatus: null,
         sourceHash: null,
@@ -272,13 +261,13 @@ describe("PluginsView", () => {
       statusListener?.({
         kind: "removed",
         workspaceId: "ws-1",
-        pluginId: "codex",
-        directoryName: "codex",
+        pluginId: "agent-chat",
+        directoryName: "agent-chat",
       });
     });
 
     expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
-    expect(screen.getByText("Codex")).toBeTruthy();
+    expect(screen.getByText("Agent chat")).toBeTruthy();
     expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(2);
   });
 
@@ -291,13 +280,13 @@ describe("PluginsView", () => {
     expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
 
     act(() => {
-      // Something other than this hook's own Add discovered "codex" under a
+      // Something other than this hook's own Add discovered "agent-chat" under a
       // renamed directory — an agent's own copy, a second client. The
       // catalog does not know why, only that the identity now exists.
       statusListener?.({
         kind: "changed",
         workspaceId: "ws-1",
-        plugin: plugin("codex", { directoryName: "my-codex" }),
+        plugin: plugin("agent-chat", { directoryName: "my-chat" }),
       });
     });
 
@@ -308,7 +297,7 @@ describe("PluginsView", () => {
   // Round 23 finding 3: an invalid, never-installed candidate (a broken
   // manifest, or none at all) gets no status entry of its own, so its own
   // arrival or departure names no pluginId a "changed"/"removed" event
-  // could carry — creating or deleting plugins/codex with a broken
+  // could carry — creating or deleting plugins/agent-chat with a broken
   // manifest never fires either kind. discovery-changed is the honest
   // signal instead: discovery itself moved, so offers re-check.
   it("hides an offer once an invalid directory occupies it, and returns it once that directory is gone", async () => {
@@ -321,7 +310,7 @@ describe("PluginsView", () => {
     expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
 
     act(() => {
-      // A broken manifest just landed at plugins/codex — invalid, so
+      // A broken manifest just landed at plugins/agent-chat — invalid, so
       // discovery never seeds a status for it, and no "changed"/"removed"
       // event names it either.
       statusListener?.({ kind: "discovery-changed", workspaceId: "ws-1" });
@@ -365,12 +354,11 @@ describe("PluginsView", () => {
     expect(within(row).getByTestId("plugin-offer-add")).toBeTruthy();
 
     await act(async () => {
-      refresh.resolve({ ok: true, offers: [offers[1]] });
+      refresh.resolve({ ok: true, offers: [] });
       await refresh.promise;
     });
 
-    expect(await screen.findByText("Claude Code")).toBeTruthy();
-    expect(screen.queryByText("Codex")).toBeNull();
+    await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
   });
 
   it("clears a refused Add's error once the offer leaves the list, instead of leaking onto an installed row", async () => {
@@ -383,7 +371,7 @@ describe("PluginsView", () => {
       error: {
         stage: "state",
         code: "pipeline-unavailable",
-        message: 'Another plugin already claims the id "codex" in this workspace.',
+        message: 'Another plugin already claims the id "agent-chat" in this workspace.',
       },
     });
 
@@ -403,27 +391,27 @@ describe("PluginsView", () => {
     await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
     expect(screen.queryByTestId("plugin-action-error")).toBeNull();
 
-    // "codex" now shows as an installed row — a separate identity entirely
+    // "agent-chat" now shows as an installed row — a separate identity entirely
     // from the offer that used to occupy this directoryName — and must not
     // inherit the stale Add error. "some-other-plugin" (from the refresh
-    // trigger above) is already a row too, so this looks up "codex" by id
+    // trigger above) is already a row too, so this looks up "agent-chat" by id
     // rather than assuming it is the only row on screen.
     act(() => {
       statusListener?.({
         kind: "changed",
         workspaceId: "ws-1",
-        plugin: plugin("codex"),
+        plugin: plugin("agent-chat"),
       });
     });
 
-    const codexRow = await waitFor(() => {
+    const chatRow = await waitFor(() => {
       const found = screen
         .getAllByTestId("plugin-row")
-        .find((row) => row.getAttribute("data-plugin-id") === "codex");
-      if (!found) throw new Error("codex row not rendered yet");
+        .find((row) => row.getAttribute("data-plugin-id") === "agent-chat");
+      if (!found) throw new Error("agent-chat row not rendered yet");
       return found;
     });
-    expect(codexRow).toBeTruthy();
+    expect(chatRow).toBeTruthy();
     expect(screen.queryByTestId("plugin-action-error")).toBeNull();
   });
 
@@ -451,14 +439,14 @@ describe("PluginsView", () => {
         error: {
           stage: "state",
           code: "pipeline-unavailable",
-          message: "plugins/codex already exists in this workspace.",
+          message: "plugins/agent-chat already exists in this workspace.",
         },
       });
       await addResult.promise;
     });
 
     expect((await screen.findByTestId("plugin-action-error")).textContent).toBe(
-      "dohc could not add Codex. plugins/codex already exists in this workspace.",
+      "dohc could not add Agent chat. plugins/agent-chat already exists in this workspace.",
     );
     expect(addButton.textContent).toBe("Add");
   });
@@ -490,7 +478,7 @@ describe("PluginsView", () => {
       statusListener?.({
         kind: "changed",
         workspaceId: "ws-1",
-        plugin: plugin("codex", { directoryName: "my-codex" }),
+        plugin: plugin("agent-chat", { directoryName: "my-chat" }),
       });
     });
     await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
@@ -502,7 +490,7 @@ describe("PluginsView", () => {
         error: {
           stage: "state",
           code: "pipeline-unavailable",
-          message: "plugins/codex already exists in this workspace.",
+          message: "plugins/agent-chat already exists in this workspace.",
         },
       });
       await addResult.promise;
@@ -1160,25 +1148,25 @@ describe("PluginsView", () => {
       .mockResolvedValueOnce({
         ok: true,
         plugins: [
-          plugin("codex", { directoryName: "codex-a", displayName: "Codex A" }),
-          plugin("codex", { directoryName: "codex-b", displayName: "Codex B" }),
+          plugin("agent-chat", { directoryName: "chat-a", displayName: "Chat A" }),
+          plugin("agent-chat", { directoryName: "chat-b", displayName: "Chat B" }),
         ],
       })
       .mockResolvedValueOnce({
         ok: true,
-        plugins: [plugin("codex", { directoryName: "codex-b", displayName: "Codex B" })],
+        plugins: [plugin("agent-chat", { directoryName: "chat-b", displayName: "Chat B" })],
       });
 
     renderList();
-    await screen.findByText("Codex A");
+    await screen.findByText("Chat A");
     expect(screen.getAllByTestId("plugin-row")).toHaveLength(2);
 
     act(() => {
       statusListener?.({
         kind: "removed",
         workspaceId: "ws-1",
-        pluginId: "codex",
-        directoryName: "codex-a",
+        pluginId: "agent-chat",
+        directoryName: "chat-a",
       });
     });
 
@@ -1187,13 +1175,13 @@ describe("PluginsView", () => {
     // as they were. Never a bare loading state either: the whole point is
     // that nothing already on screen disappears while this settles.
     expect(screen.getAllByTestId("plugin-row")).toHaveLength(2);
-    expect(screen.getByText("Codex A")).toBeTruthy();
-    expect(screen.getByText("Codex B")).toBeTruthy();
+    expect(screen.getByText("Chat A")).toBeTruthy();
+    expect(screen.getByText("Chat B")).toBeTruthy();
 
     // The reload it triggers reconciles for real, without a manual refresh.
     await waitFor(() => expect(screen.getAllByTestId("plugin-row")).toHaveLength(1));
-    expect(screen.getByText("Codex B")).toBeTruthy();
-    expect(screen.queryByText("Codex A")).toBeNull();
+    expect(screen.getByText("Chat B")).toBeTruthy();
+    expect(screen.queryByText("Chat A")).toBeNull();
     expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(2);
   });
 
@@ -1208,25 +1196,25 @@ describe("PluginsView", () => {
     bridgeMock.listPlugins.mockResolvedValue({
       ok: true,
       plugins: [
-        plugin("codex", { directoryName: "codex-a", displayName: "Codex A" }),
-        plugin("codex", { directoryName: "codex-b", displayName: "Codex B" }),
+        plugin("agent-chat", { directoryName: "chat-a", displayName: "Chat A" }),
+        plugin("agent-chat", { directoryName: "chat-b", displayName: "Chat B" }),
       ],
     });
 
     renderList();
-    await screen.findByText("Codex A");
+    await screen.findByText("Chat A");
     expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(1);
 
     act(() => {
       statusListener?.({
         kind: "changed",
         workspaceId: "ws-1",
-        plugin: plugin("codex", { directoryName: "codex-a", displayName: "Codex A, updated" }),
+        plugin: plugin("agent-chat", { directoryName: "chat-a", displayName: "Chat A, updated" }),
       });
     });
 
-    await screen.findByText("Codex A, updated");
-    expect(screen.getByText("Codex B")).toBeTruthy();
+    await screen.findByText("Chat A, updated");
+    expect(screen.getByText("Chat B")).toBeTruthy();
     expect(screen.getAllByTestId("plugin-row")).toHaveLength(2);
     // No reload — the local merge already applied it correctly, and this is
     // the case upsertPlugin was never going to get wrong.
@@ -1249,7 +1237,7 @@ describe("PluginsView", () => {
       .mockReturnValueOnce(initialLoad.promise)
       .mockResolvedValueOnce({
         ok: true,
-        plugins: [plugin("codex", { directoryName: "codex-b", displayName: "Codex B" })],
+        plugins: [plugin("agent-chat", { directoryName: "chat-b", displayName: "Chat B" })],
       });
 
     renderList();
@@ -1260,8 +1248,8 @@ describe("PluginsView", () => {
       statusListener?.({
         kind: "removed",
         workspaceId: "ws-1",
-        pluginId: "codex",
-        directoryName: "codex-a",
+        pluginId: "agent-chat",
+        directoryName: "chat-a",
       });
     });
 
@@ -1271,13 +1259,13 @@ describe("PluginsView", () => {
     await act(async () => {
       initialLoad.resolve({
         ok: true,
-        plugins: [plugin("codex", { directoryName: "codex-b", displayName: "Codex B" })],
+        plugins: [plugin("agent-chat", { directoryName: "chat-b", displayName: "Chat B" })],
       });
       await initialLoad.promise;
     });
 
     await waitFor(() => expect(screen.getAllByTestId("plugin-row")).toHaveLength(1));
-    expect(screen.getByText("Codex B")).toBeTruthy();
+    expect(screen.getByText("Chat B")).toBeTruthy();
     // The unconditional reload this pins: a second request, issued after
     // the removed event was recorded, whose own newerEvents excludes it —
     // its fetch is trusted as-is instead of re-filtered.

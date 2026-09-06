@@ -1,8 +1,8 @@
 import {
-  ChatsLoopbackEngine,
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import {
   type LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";

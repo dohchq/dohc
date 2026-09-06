@@ -10,6 +10,8 @@ on:
       - "packages/**"
       - "services/**"
       - "scripts/desktop-release-scripts.test.mjs"
+      - "scripts/verification/**"
+      - "tools/rust-engine-program/build-slot.mjs"
       - "scripts/merge-update-manifests.mjs"
       - "scripts/mock-update-server.mjs"
       - "scripts/release-smoke.mjs"

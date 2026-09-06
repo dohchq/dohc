@@ -625,7 +625,6 @@ export function SettingsDialog(props: {
                 })
               }
               runner={userSettings.runner}
-              engineEnabled={workspaceSettings.experimental.workspaceEngineAlpha}
               sharedView={props.sharedView}
               sessionRecorderOn={props.sessionRecorderOn}
               onRunnerChange={(runner) =>
@@ -863,57 +862,6 @@ export function SettingsDialog(props: {
       case "advanced":
         return (
           <div data-testid="settings-section-advanced">
-            {props.sharedView ? (
-              // A shared view materializes no settings file, so this
-              // read returns the schema default — ON — for a workspace whose
-              // open deliberately installed no capture. Rendering the toggle
-              // there asserts both a choice nobody made and a recording that
-              // never happens. State the capability instead.
-              <SettingRow
-                title="Workspace engine"
-                description="This workspace is a shared view. Its files come from the share, so dohc records nothing here."
-                testId="settings-row-workspace-engine-alpha"
-              >
-                <span
-                  data-testid="settings-workspace-engine-share-view"
-                  className="text-[11px] text-muted"
-                >
-                  Shared view — no recording
-                </span>
-              </SettingRow>
-            ) : (
-              <SettingRow
-                title="Use the workspace engine (default on)"
-                // Restart, not the next workspace open: main decides
-                // the recorder once per workspace per app session, and
-                // `openWorkspaceActivity` retains every workspace it opens, so
-                // reopening the workspace re-reads this flag nowhere. The last
-                // line is what keeps the one above it true — the retained
-                // capture keeps recording after a mid-session turn-off.
-                description="The workspace engine records this workspace's history, versions, and chats. Restart dohc after you change this setting. Until you restart, recording does not change."
-                modified={isModified(
-                  workspaceSettings.experimental.workspaceEngineAlpha,
-                  DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha,
-                )}
-                onReset={() =>
-                  void saveWorkspaceSettings({
-                    experimental: {
-                      workspaceEngineAlpha:
-                        DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha,
-                    },
-                  })
-                }
-                testId="settings-row-workspace-engine-alpha"
-              >
-                <SwitchControl
-                  label="Use the workspace engine (default on)"
-                  checked={workspaceSettings.experimental.workspaceEngineAlpha}
-                  onChange={(workspaceEngineAlpha) =>
-                    void saveWorkspaceSettings({ experimental: { workspaceEngineAlpha } })
-                  }
-                />
-              </SettingRow>
-            )}
             <SettingRow
               title="Reset user settings"
               description="Restore local user settings for this desktop install to defaults."

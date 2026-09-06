@@ -9,7 +9,7 @@ use dohc_engine_protocol::{
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError};
 use dohc_engine_sync::{ReplicationEnvelope, apply_chat_envelope};
 use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ async fn open_workspace(
     id: u64,
     workspace_id: &str,
 ) -> WorkspaceHandle {
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -831,10 +831,10 @@ async fn attachments_and_file_threads_keep_their_wire_contracts() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db_path = scratch.engine_db_path().expect("db path");
     let mut store = EngineStore::open(&db_path, 1).expect("store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     store
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -936,10 +936,10 @@ async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mentions_backfill_marker_makes_second_open_a_noop() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db_path = scratch.engine_db_path().expect("db path");
     let mut store = EngineStore::open(&db_path, 1).expect("store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     store
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -1067,10 +1067,10 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn synced_negative_agent_read_cursor_round_trips_over_the_wire() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db_path = scratch.engine_db_path().expect("db path");
     let mut store = EngineStore::open(&db_path, 1).expect("store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     store
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -1819,12 +1819,21 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     assert_eq!(reserved_message.code, ErrorCode::InvalidParams);
     // Prime the durable search state. The next stable-policy query will not run
     // the repair rebuild, so only write-time indexing can expose the new message.
+    // `search.queryPage` reads the active version, so bootstrap main first.
     call(
         &transport,
         &first_handle,
         &mut id,
-        "search.query",
-        json!({ "versionId": "main", "query": "search seed", "nowMs": 1002 }),
+        "versions.ensureMain",
+        json!({ "workspaceId": "rpc-chat-first" }),
+    )
+    .await;
+    call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "search.queryPage",
+        json!({ "query": "search seed", "nowMs": 1002 }),
     )
     .await;
     call(
@@ -1846,14 +1855,14 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &transport,
         &first_handle,
         &mut id,
-        "search.query",
-        json!({ "versionId": "main", "query": "r2indexsentinel", "nowMs": 1004 }),
+        "search.queryPage",
+        json!({ "query": "r2indexsentinel", "nowMs": 1004 }),
     )
     .await;
     // Mutation guard: removing the send-message FTS upsert must make this fail;
     // no policy transition occurs between the priming and asserting queries.
     assert!(
-        write_time_search
+        write_time_search["results"]
             .as_array()
             .expect("search results")
             .iter()

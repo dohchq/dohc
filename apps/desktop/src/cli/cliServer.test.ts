@@ -17,10 +17,10 @@ import type {
 } from "@dohc/workspace-contracts/engine";
 import {
   CHATS_METHOD,
-  ChatsLoopbackEngine,
   DaemonRefusalError,
   type Request,
 } from "@dohc/workspace-engine-client";
+import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
@@ -363,6 +363,12 @@ describe("CLI socket server", () => {
       store,
       dispatchStore,
       readOnly: false,
+      daemonReads: {
+        async queryChatMessagesGranular() {
+          return { results: [], saturated: true };
+        },
+        listUnreadFileThreads,
+      },
       async fileObjectIdForPath(path) {
         return path === "tracked.md" ? "object_tracked" : null;
       },
@@ -2904,12 +2910,6 @@ describe("CLI socket server", () => {
   });
 
   it("returns unread agent DMs, agent mentions, and human unread threads", async () => {
-    context.daemonReads = {
-      async queryChatMessagesGranular() {
-        return { results: [], saturated: true };
-      },
-      listUnreadFileThreads,
-    };
     const agentDm = await post({
       actor: "human",
       channel: "my-agent",
@@ -3133,6 +3133,7 @@ describe("CLI socket server", () => {
 
     let saturated = false;
     let daemonCalls = 0;
+    const defaultDaemonReads = context.daemonReads;
     context.daemonReads = {
       async queryChatMessagesGranular() {
         daemonCalls += 1;
@@ -3209,7 +3210,7 @@ describe("CLI socket server", () => {
       ]);
     } finally {
       store.listMessages = originalListMessages;
-      delete context.daemonReads;
+      context.daemonReads = defaultDaemonReads;
     }
   });
 
@@ -3226,6 +3227,7 @@ describe("CLI socket server", () => {
       body: "Nothing relevant in this thread",
     });
     let daemonCalls = 0;
+    const defaultDaemonReads = context.daemonReads;
     context.daemonReads = {
       async queryChatMessagesGranular() {
         daemonCalls += 1;
@@ -3250,7 +3252,7 @@ describe("CLI socket server", () => {
         .toEqual([matching.threadId]);
       expect(daemonCalls).toBe(0);
     } finally {
-      delete context.daemonReads;
+      context.daemonReads = defaultDaemonReads;
     }
   });
 
@@ -3269,6 +3271,7 @@ describe("CLI socket server", () => {
     });
     let unread = true;
     let unreadCalls = 0;
+    const defaultDaemonReads = context.daemonReads;
     context.daemonReads = {
       async queryChatMessagesGranular() {
         return { results: [], saturated: false };
@@ -3303,7 +3306,7 @@ describe("CLI socket server", () => {
       })).threads.map((thread) => thread.id)).not.toContain(cliThreadId(fileThread.id));
       expect(unreadCalls).toBe(3);
     } finally {
-      delete context.daemonReads;
+      context.daemonReads = defaultDaemonReads;
     }
   });
 

@@ -15,23 +15,17 @@ import {
   WorkspaceDaemonRequester,
   type DaemonRequesterClient,
 } from "../live/daemonLiveAdapter";
-import type { Event } from "./generated/Event";
-import type { Request } from "./generated/Request";
-import type { Response } from "./generated/Response";
-import type { WorkspaceHandle } from "./generated/WorkspaceHandle";
+import type { Event, Request, Response, WorkspaceHandle } from "../protocol";
 import {
   YDOC_EVENT,
   YDOC_METHOD,
   decodeYdocCloseResult,
   decodeYdocEvictResult,
-  decodeYdocExternalEditResult,
   decodeYdocOpenResult,
   decodeYdocRecordUpdateResult,
   decodeYdocRemoteUpdatePayload,
   decodeYdocResyncResult,
   decodeYdocSettleResult,
-  type YdocApplyExternalMarkdownEditParams,
-  type YdocApplyExternalMarkdownEditResult,
   type ChangeAttributionWire,
   type YdocCloseParams,
   type YdocContentKind,
@@ -986,32 +980,6 @@ export class YdocAdapterSession {
     const result = decodeYdocSettleResult(raw as Parameters<typeof decodeYdocSettleResult>[0]);
     this.lastSettledSha = result.sha256;
     return result;
-  }
-
-  async applyExternalMarkdownEdit(
-    markdown: string,
-  ): Promise<YdocApplyExternalMarkdownEditResult> {
-    this.assertOpen();
-    // Guard the JSON/Rust boundary with the same well-formedness check local
-    // edits get: a lone surrogate cannot cross cleanly and would fail the
-    // transport instead of rejecting locally (bot #3601684258).
-    if (!isWellFormedUtf16(markdown)) throw new IllFormedUtf16EditError();
-    // Flush pending local journals first so the engine merges the external
-    // edit against the fully-recorded state, never a stale doc that a later
-    // in-flight recordUpdate then reorders behind it (bot #3601684273).
-    await this.recordChain;
-    this.assertOpen();
-    const params: YdocApplyExternalMarkdownEditParams = {
-      sessionId: this.sessionId,
-      markdown,
-    };
-    return decodeYdocExternalEditResult(
-      await this.adapter.request(
-        this.workspace,
-        YDOC_METHOD.applyExternalMarkdownEdit,
-        params,
-      ),
-    );
   }
 
   isSelfMaterializedSha(sha256: string): boolean {

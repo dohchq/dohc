@@ -4,7 +4,6 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  BUILT_IN_AGENT_DRIVER_IDS,
   type AgentDriver,
   type AgentEvent,
   type AgentSession,
@@ -28,9 +27,9 @@ import { readPluginManifestFile } from "./pluginManifest";
  * that chain would certify the double instead of the driver.
  */
 
-const codexPluginSource = fileURLToPath(new URL("../../plugins/codex", import.meta.url));
+const pluginSource = fileURLToPath(new URL("../../plugins/agent-chat", import.meta.url));
 const fakeCodex = fileURLToPath(
-  new URL("../../plugins/codex/test/fakeCodexAppServer.mjs", import.meta.url),
+  new URL("../../plugins/agent-chat/test/fakeCodexAppServer.mjs", import.meta.url),
 );
 const pluginHostProcessPath = fileURLToPath(new URL("./pluginHostProcess.ts", import.meta.url));
 
@@ -67,8 +66,8 @@ async function startCodexPlugin(
   scratchRoots.push(root);
   const workspaceRoot = join(root, "workspace");
   await mkdir(join(workspaceRoot, "notes"), { recursive: true });
-  const pluginRoot = join(root, "plugins", "codex");
-  await cp(codexPluginSource, pluginRoot, { recursive: true });
+  const pluginRoot = join(root, "plugins", "agent-chat");
+  await cp(pluginSource, pluginRoot, { recursive: true });
 
   const broker = new PluginChildProcessBroker({ dohcDir: root, workspaceRoot });
   liveBrokers.push(broker);
@@ -85,10 +84,6 @@ async function startCodexPlugin(
         return host.stopDriverSpawn(pluginId, spawnId);
       },
     },
-    // The real list. A driver id dohc still ships is one this plugin could
-    // not take, so the plugin's registration is only proof while this is
-    // honest.
-    reservedDriverIds: BUILT_IN_AGENT_DRIVER_IDS,
   });
 
   const spawnTransport: PluginHostOptions["spawnTransport"] = (params) => {
@@ -149,10 +144,10 @@ async function startCodexPlugin(
     target: "node22",
     logLevel: "silent",
   });
-  await host.start(pluginRoot, "codex", { ...manifest.manifest, entry: "bundle.mjs" });
+  await host.start(pluginRoot, "agent-chat", { ...manifest.manifest, entry: "bundle.mjs" });
   await until(
-    () => (host?.getStatus("codex") === "ready" ? true : undefined),
-    `the codex plugin to activate (${host.getStderrLog("codex").join(" | ")})`,
+    () => (host?.getStatus("agent-chat") === "ready" ? true : undefined),
+    `the agent-chat plugin to activate (${host.getStderrLog("agent-chat").join(" | ")})`,
     20_000,
   );
 
@@ -160,13 +155,13 @@ async function startCodexPlugin(
     drivers,
     host,
     workspaceRoot,
-    pluginStderr: () => host?.getStderrLog("codex") ?? [],
+    pluginStderr: () => host?.getStderrLog("agent-chat") ?? [],
   };
 }
 
 function codexDriver(fixture: CodexFixture): AgentDriver {
-  const driver = fixture.drivers.list()[0];
-  if (!driver) throw new Error("The codex plugin registered no driver.");
+  const driver = fixture.drivers.list().find((candidate) => candidate.id === "codex");
+  if (!driver) throw new Error("The agent-chat plugin registered no codex driver.");
   return driver;
 }
 
@@ -201,29 +196,8 @@ describe("dohc's Codex driver, as a plugin", () => {
   it("is a plugin driver, not one dohc ships", async () => {
     const fixture = await startCodexPlugin();
 
-    expect(fixture.drivers.list().map((driver) => driver.id)).toEqual(["codex"]);
+    expect(fixture.drivers.list().map((driver) => driver.id)).toEqual(["claude-code", "codex"]);
     expect(codexDriver(fixture).displayName).toBe("Codex");
-    // Nothing in the app reserves this id any more, which is the only reason
-    // the registration above can succeed.
-    expect([...BUILT_IN_AGENT_DRIVER_IDS]).not.toContain("codex");
-    expect([...BUILT_IN_AGENT_DRIVER_IDS]).not.toContain("codex-app-server");
-  });
-
-  it("ships what installing it needs", async () => {
-    // dohc installs every plugin's dependencies before it runs one, and that
-    // step reads pnpm-lock.yaml whether or not the plugin declares any
-    // (pluginInstallRunner.ts). A driver should have no dependencies — but a
-    // plugin without the lockfile does not install at all.
-    const manifest = JSON.parse(
-      await readFile(join(codexPluginSource, "dohc-plugin.json"), "utf8"),
-    ) as { drivers?: Array<{ id: string }> };
-    expect(manifest.drivers).toEqual([{ id: "codex", displayName: "Codex" }]);
-    await expect(readFile(join(codexPluginSource, "pnpm-lock.yaml"), "utf8")).resolves
-      .toContain("lockfileVersion");
-    const pkg = JSON.parse(
-      await readFile(join(codexPluginSource, "package.json"), "utf8"),
-    ) as { dependencies?: Record<string, string> };
-    expect(pkg.dependencies ?? {}).toEqual({});
   });
 
   it("reports the Codex it found on this machine", async () => {

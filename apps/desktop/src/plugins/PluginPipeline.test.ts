@@ -36,7 +36,6 @@ import {
   type DoorWrittenDelta,
   overlayDoorWrittenSourceDeltas,
   PluginPipeline,
-  type PluginPipelineRuntimeStopHooks,
   type PluginPipelineStatusEvent,
 } from "./PluginPipeline";
 import {
@@ -95,7 +94,7 @@ interface PluginPipelineQueueInternals {
     cleanupIds: ReadonlyArray<string>,
     primaryPluginId: string,
     reservations: ReadonlyMap<string, unknown>,
-    hooks: PluginPipelineRuntimeStopHooks,
+    hooks: Parameters<PluginPipeline["disable"]>[1],
   ): TestUninstallQueueClaim[];
 }
 
@@ -651,7 +650,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   it("discovers an added offer unapproved and installs it through the ordinary pipeline", async () => {
     const sourceFixture = await createPluginWorkspace();
     const builtinPluginsRoot = join(sourceFixture.root, "builtin-plugins");
-    await cp(sourceFixture.pluginRoot, join(builtinPluginsRoot, "codex"), {
+    await cp(sourceFixture.pluginRoot, join(builtinPluginsRoot, "agent-chat"), {
       recursive: true,
     });
 
@@ -669,7 +668,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     await addOfferedPlugin({
       builtinPluginsRoot,
       workspaceRoot,
-      directoryName: "codex",
+      directoryName: "agent-chat",
       existingPluginIds: new Set(),
     });
 
@@ -701,7 +700,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(pipeline.list()).toEqual([
         expect.objectContaining({
           id: "example-plugin",
-          directoryName: "codex",
+          directoryName: "agent-chat",
           status: "discovered",
           valid: true,
           approvedHash: null,
@@ -716,7 +715,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       );
       expect(pipeline.list()[0]).toMatchObject({
         id: "example-plugin",
-        directoryName: "codex",
+        directoryName: "agent-chat",
         status: "ready",
       });
       expect(pipeline.list()[0]?.approvedHash).toMatch(/^[0-9a-f]{64}$/);
@@ -734,13 +733,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     await mkdir(stateDir, { recursive: true });
 
     const builtinPluginsRoot = join(targetRoot, "builtin-plugins");
-    const builtinCodexRoot = join(builtinPluginsRoot, "codex");
-    await mkdir(join(builtinCodexRoot, "src"), { recursive: true });
+    const builtinChatRoot = join(builtinPluginsRoot, "agent-chat");
+    await mkdir(join(builtinChatRoot, "src"), { recursive: true });
     await writeFile(
-      join(builtinCodexRoot, "dohc-plugin.json"),
-      `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+      join(builtinChatRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "agent-chat", entry: "src/main.ts" }, null, 2)}\n`,
     );
-    await writeFile(join(builtinCodexRoot, "src", "main.ts"), "export default {};\n");
+    await writeFile(join(builtinChatRoot, "src", "main.ts"), "export default {};\n");
 
     let pipeline: PluginPipeline;
     const host = new PluginHost({
@@ -770,14 +769,14 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(pipeline.list()).toEqual([]);
 
       // Something other than this pipeline's own watcher — an agent, a
-      // second client — created a directory claiming id "codex" under a
+      // second client — created a directory claiming id "agent-chat" under a
       // different name. The bytes are on disk, but this pipeline's own
       // discovery has not rescanned yet: pipeline.list() is stale.
-      const renamedRoot = join(workspaceRoot, "plugins", "my-codex");
+      const renamedRoot = join(workspaceRoot, "plugins", "my-chat");
       await mkdir(join(renamedRoot, "src"), { recursive: true });
       await writeFile(
         join(renamedRoot, "dohc-plugin.json"),
-        `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+        `${JSON.stringify({ version: 1, name: "agent-chat", entry: "src/main.ts" }, null, 2)}\n`,
       );
       await writeFile(join(renamedRoot, "src", "main.ts"), "export default {};\n");
       expect(pipeline.list()).toEqual([]);
@@ -786,20 +785,20 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // sampling ids, not only after the copy.
       await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
       const existingPluginIds = new Set(pipeline.list().map((entry) => entry.id));
-      expect(existingPluginIds).toEqual(new Set(["codex"]));
+      expect(existingPluginIds).toEqual(new Set(["agent-chat"]));
 
       await expect(
         addOfferedPlugin({
           builtinPluginsRoot,
           workspaceRoot,
-          directoryName: "codex",
+          directoryName: "agent-chat",
           existingPluginIds,
         }),
       ).rejects.toBeInstanceOf(OfferedPluginAddError);
 
       // Nothing copied.
       await expect(
-        lstat(join(workspaceRoot, "plugins", "codex")),
+        lstat(join(workspaceRoot, "plugins", "agent-chat")),
       ).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await pipeline.dispose();
@@ -815,13 +814,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     await mkdir(stateDir, { recursive: true });
 
     const builtinPluginsRoot = join(targetRoot, "builtin-plugins");
-    const builtinCodexRoot = join(builtinPluginsRoot, "codex");
-    await mkdir(join(builtinCodexRoot, "src"), { recursive: true });
+    const builtinChatRoot = join(builtinPluginsRoot, "agent-chat");
+    await mkdir(join(builtinChatRoot, "src"), { recursive: true });
     await writeFile(
-      join(builtinCodexRoot, "dohc-plugin.json"),
-      `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+      join(builtinChatRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "agent-chat", entry: "src/main.ts" }, null, 2)}\n`,
     );
-    await writeFile(join(builtinCodexRoot, "src", "main.ts"), "export default {};\n");
+    await writeFile(join(builtinChatRoot, "src", "main.ts"), "export default {};\n");
 
     let pipeline: PluginPipeline;
     const host = new PluginHost({
@@ -849,7 +848,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.start();
       expect(pipeline.list()).toEqual([]);
 
-      // The fixed handler's pre-copy rescan: nothing claims "codex" yet.
+      // The fixed handler's pre-copy rescan: nothing claims "agent-chat" yet.
       await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
       const existingPluginIds = new Set(pipeline.list().map((entry) => entry.id));
       expect(existingPluginIds.size).toBe(0);
@@ -857,42 +856,42 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const added = await addOfferedPlugin({
         builtinPluginsRoot,
         workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         existingPluginIds,
       });
 
       // Injected between the copy and the post-copy rescan — sorts before
-      // "codex" lexically, so discovery's own tie-break hands the id to it
+      // "agent-chat" lexically, so discovery's own tie-break hands the id to it
       // and demotes the copy this request just made.
-      const concurrentRoot = join(workspaceRoot, "plugins", "aaa-codex");
+      const concurrentRoot = join(workspaceRoot, "plugins", "aaa-chat");
       await mkdir(join(concurrentRoot, "src"), { recursive: true });
       await writeFile(
         join(concurrentRoot, "dohc-plugin.json"),
-        `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+        `${JSON.stringify({ version: 1, name: "agent-chat", entry: "src/main.ts" }, null, 2)}\n`,
       );
       await writeFile(join(concurrentRoot, "src", "main.ts"), "export default {};\n");
 
       // The fixed handler's post-copy rescan, then its own validity check:
       // the copy this request made lost the id it raced for.
-      await pipeline.handleWatcherEvents([{ operation: "create", path: "plugins/codex" }]);
-      const copied = pipeline.list().find((entry) => entry.directoryName === "codex");
+      await pipeline.handleWatcherEvents([{ operation: "create", path: "plugins/agent-chat" }]);
+      const copied = pipeline.list().find((entry) => entry.directoryName === "agent-chat");
       expect(copied?.valid).toBe(false);
 
       // The handler's cleanup on that conflict: remove what this request
       // wrote and rescan so the surviving side recovers.
       await removeAddedOfferedPlugin({
         workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         identity: added.identity,
         contentHash: added.contentHash,
       });
       await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
 
       await expect(
-        lstat(join(workspaceRoot, "plugins", "codex")),
+        lstat(join(workspaceRoot, "plugins", "agent-chat")),
       ).rejects.toMatchObject({ code: "ENOENT" });
-      const survivor = pipeline.list().find((entry) => entry.directoryName === "aaa-codex");
-      expect(survivor).toMatchObject({ id: "codex", valid: true });
+      const survivor = pipeline.list().find((entry) => entry.directoryName === "aaa-chat");
+      expect(survivor).toMatchObject({ id: "agent-chat", valid: true });
     } finally {
       await pipeline.dispose();
     }
@@ -914,42 +913,29 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     await mkdir(stateDir, { recursive: true });
 
     const builtinPluginsRoot = join(targetRoot, "builtin-plugins");
-    const builtinCodexRoot = join(builtinPluginsRoot, "codex");
-    await mkdir(join(builtinCodexRoot, "src"), { recursive: true });
+    const builtinChatRoot = join(builtinPluginsRoot, "agent-chat");
+    await mkdir(join(builtinChatRoot, "src"), { recursive: true });
     await writeFile(
-      join(builtinCodexRoot, "dohc-plugin.json"),
+      join(builtinChatRoot, "dohc-plugin.json"),
       `${JSON.stringify({
         version: 1,
-        name: "codex",
-        displayName: "Codex",
+        name: "agent-chat",
+        displayName: "Agent chat",
         entry: "src/main.ts",
       }, null, 2)}\n`,
     );
-    await writeFile(join(builtinCodexRoot, "src", "main.ts"), "export default {};\n");
-    // listOfferedPlugins reads every built-in's manifest, not only codex's.
-    const builtinClaudeCodeRoot = join(builtinPluginsRoot, "claude-code");
-    await mkdir(join(builtinClaudeCodeRoot, "src"), { recursive: true });
-    await writeFile(
-      join(builtinClaudeCodeRoot, "dohc-plugin.json"),
-      `${JSON.stringify({
-        version: 1,
-        name: "claude-code",
-        displayName: "Claude Code",
-        entry: "src/main.ts",
-      }, null, 2)}\n`,
-    );
-    await writeFile(join(builtinClaudeCodeRoot, "src", "main.ts"), "export default {};\n");
+    await writeFile(join(builtinChatRoot, "src", "main.ts"), "export default {};\n");
 
     await addOfferedPlugin({
       builtinPluginsRoot,
       workspaceRoot,
-      directoryName: "codex",
+      directoryName: "agent-chat",
       existingPluginIds: new Set(),
     });
     // Broken before the pipeline ever discovers it — the offer landed a
     // real copy, but it never becomes a valid, installable plugin.
     await writeFile(
-      join(workspaceRoot, "plugins", "codex", "dohc-plugin.json"),
+      join(workspaceRoot, "plugins", "agent-chat", "dohc-plugin.json"),
       "{ this is not valid JSON\n",
     );
 
@@ -979,7 +965,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.start();
       const row = pipeline.list()[0];
       expect(row).toMatchObject({
-        directoryName: "codex",
+        directoryName: "agent-chat",
         valid: false,
         status: "invalid",
         approvedHash: null,
@@ -994,26 +980,26 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(removed.ok).toBe(true);
 
       await expect(
-        lstat(join(workspaceRoot, "plugins", "codex")),
+        lstat(join(workspaceRoot, "plugins", "agent-chat")),
       ).rejects.toMatchObject({ code: "ENOENT" });
       expect(pipeline.list()).toEqual([]);
 
-      // The offer is restored now that nothing occupies plugins/codex.
+      // The offer is restored now that nothing occupies plugins/agent-chat.
       const offers = await listOfferedPlugins(builtinPluginsRoot, workspaceRoot, new Set());
-      expect(offers.map((offer) => offer.directoryName)).toContain("codex");
+      expect(offers.map((offer) => offer.directoryName)).toContain("agent-chat");
     } finally {
       await pipeline.dispose();
     }
   }, 60_000);
 
-  // Round 9 finding 3: a directory installed as "codex" whose install never
+  // Round 9 finding 3: a directory installed as "agent-chat" whose install never
   // finished (no approvedHash) can still have left state and plugin data
-  // filed under "codex" before its manifest broke. A broken manifest gives
-  // discovery a directory-derived fallback id — "my-codex-copy" here, never
-  // "codex" — and uninstall used to derive every cleanup path from that id
+  // filed under "agent-chat" before its manifest broke. A broken manifest gives
+  // discovery a directory-derived fallback id — "my-chat-copy" here, never
+  // "agent-chat" — and uninstall used to derive every cleanup path from that id
   // alone: it deleted the source correctly (the candidate's rootPath is
   // resolved by directory) but found nothing to delete under the fallback
-  // key, silently stranding the real state and data under "codex" forever.
+  // key, silently stranding the real state and data under "agent-chat" forever.
 
   it("clears source and the originally-keyed state when a never-approved install's manifest breaks under a different directory name", async () => {
     const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-stranded-state-"));
@@ -1023,27 +1009,27 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     await mkdir(workspaceRoot, { recursive: true });
     await mkdir(stateDir, { recursive: true });
 
-    const pluginRoot = join(workspaceRoot, "plugins", "my-codex-copy");
+    const pluginRoot = join(workspaceRoot, "plugins", "my-chat-copy");
     await mkdir(join(pluginRoot, "src"), { recursive: true });
     await writeFile(
       join(pluginRoot, "dohc-plugin.json"),
-      `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+      `${JSON.stringify({ version: 1, name: "agent-chat", entry: "src/main.ts" }, null, 2)}\n`,
     );
     await writeFile(join(pluginRoot, "src", "main.ts"), "export default {};\n");
 
-    // A partial install left state under the manifest id "codex" —
+    // A partial install left state under the manifest id "agent-chat" —
     // directoryName is the join #779 round 9 B3 already relies on to find
     // it again once the manifest breaks — but approval never completed.
-    await mutatePluginRecord(stateDir, workspaceRoot, "codex", () => ({
-      directoryName: "my-codex-copy",
+    await mutatePluginRecord(stateDir, workspaceRoot, "agent-chat", () => ({
+      directoryName: "my-chat-copy",
     }));
     const dohcDir = pluginDataDir(stateDir, workspaceRoot);
-    const strandedStateRoot = pluginStateRoot(dohcDir, "codex");
+    const strandedStateRoot = pluginStateRoot(dohcDir, "agent-chat");
     await mkdir(strandedStateRoot, { recursive: true });
     await writeFile(join(strandedStateRoot, "session.json"), "{}");
 
     // Broken before the pipeline ever discovers it — id falls back to the
-    // directory name, which does not match the "codex" key above.
+    // directory name, which does not match the "agent-chat" key above.
     await writeFile(join(pluginRoot, "dohc-plugin.json"), "{ this is not valid JSON\n");
 
     let pipeline: PluginPipeline;
@@ -1072,8 +1058,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.start();
       const row = pipeline.list()[0];
       expect(row).toMatchObject({
-        directoryName: "my-codex-copy",
-        id: "my-codex-copy",
+        directoryName: "my-chat-copy",
+        id: "my-chat-copy",
         valid: false,
         approvedHash: null,
       });
@@ -1098,13 +1084,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       // The source directory is gone.
       await expect(lstat(pluginRoot)).rejects.toMatchObject({ code: "ENOENT" });
-      // The state stranded under the original "codex" key is gone too, not
+      // The state stranded under the original "agent-chat" key is gone too, not
       // silently left behind under a key nothing will ever visit again.
       await expect(lstat(strandedStateRoot)).rejects.toMatchObject({ code: "ENOENT" });
       const state = await readPluginLocalState(stateDir, workspaceRoot);
       if (!state.ok) throw new Error(state.warning);
-      expect(state.state.plugins["codex"]).toBeUndefined();
-      expect(state.state.plugins["my-codex-copy"]).toBeUndefined();
+      expect(state.state.plugins["agent-chat"]).toBeUndefined();
+      expect(state.state.plugins["my-chat-copy"]).toBeUndefined();
     } finally {
       await pipeline.dispose();
     }
@@ -2436,13 +2422,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     await mkdir(stateDir, { recursive: true });
 
     const builtinPluginsRoot = join(targetRoot, "builtin-plugins");
-    const builtinCodexRoot = join(builtinPluginsRoot, "codex");
-    await mkdir(join(builtinCodexRoot, "src"), { recursive: true });
+    const builtinChatRoot = join(builtinPluginsRoot, "agent-chat");
+    await mkdir(join(builtinChatRoot, "src"), { recursive: true });
     await writeFile(
-      join(builtinCodexRoot, "dohc-plugin.json"),
-      `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+      join(builtinChatRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "agent-chat", entry: "src/main.ts" }, null, 2)}\n`,
     );
-    await writeFile(join(builtinCodexRoot, "src", "main.ts"), "export default {};\n");
+    await writeFile(join(builtinChatRoot, "src", "main.ts"), "export default {};\n");
 
     let pipeline: PluginPipeline;
     const host = new PluginHost({
@@ -2476,23 +2462,23 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const added = await addOfferedPlugin({
         builtinPluginsRoot,
         workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         existingPluginIds,
       });
 
       // Injected between the copy and the post-copy rescan — sorts after
-      // "codex" lexically this time, so discovery's tie-break hands the id
+      // "agent-chat" lexically this time, so discovery's tie-break hands the id
       // to the copy this request just made instead.
-      const concurrentRoot = join(workspaceRoot, "plugins", "z-codex");
+      const concurrentRoot = join(workspaceRoot, "plugins", "z-chat");
       await mkdir(join(concurrentRoot, "src"), { recursive: true });
       await writeFile(
         join(concurrentRoot, "dohc-plugin.json"),
-        `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+        `${JSON.stringify({ version: 1, name: "agent-chat", entry: "src/main.ts" }, null, 2)}\n`,
       );
       await writeFile(join(concurrentRoot, "src", "main.ts"), "export default {};\n");
 
-      await pipeline.handleWatcherEvents([{ operation: "create", path: "plugins/codex" }]);
-      const copied = pipeline.list().find((entry) => entry.directoryName === "codex");
+      await pipeline.handleWatcherEvents([{ operation: "create", path: "plugins/agent-chat" }]);
+      const copied = pipeline.list().find((entry) => entry.directoryName === "agent-chat");
       // This request's own copy won — its record alone would read as a
       // clean, successful add.
       expect(copied?.valid).toBe(true);
@@ -2501,32 +2487,32 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // supersededPluginId marker, never diagnostic prose (that text is
       // bounded and re-worded for display, not a stable machine-checked
       // signal — #779-offers round 8 finding 5).
-      const displaced = pipeline.findDirectorySupersededBy("codex");
-      expect(displaced).toBe("z-codex");
+      const displaced = pipeline.findDirectorySupersededBy("agent-chat");
+      expect(displaced).toBe("z-chat");
 
       // The handler's cleanup fires on that signal alone, even though
       // copied.valid was true.
       await removeAddedOfferedPlugin({
         workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         identity: added.identity,
         contentHash: added.contentHash,
       });
       await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
 
       await expect(
-        lstat(join(workspaceRoot, "plugins", "codex")),
+        lstat(join(workspaceRoot, "plugins", "agent-chat")),
       ).rejects.toMatchObject({ code: "ENOENT" });
       // The departed identity's cleanup and the surviving replacement's own
       // reconciliation are both queued work, not synchronous with the
       // rescan settling — the same asynchronous reseed every other real-
       // lifecycle test in this file waits out.
       await waitFor(
-        () => pipeline.list().some((entry) => entry.directoryName === "z-codex"),
-        "z-codex did not recover the id after the conflicting copy was removed.",
+        () => pipeline.list().some((entry) => entry.directoryName === "z-chat"),
+        "z-chat did not recover the id after the conflicting copy was removed.",
       );
-      const survivor = pipeline.list().find((entry) => entry.directoryName === "z-codex");
-      expect(survivor).toMatchObject({ id: "codex", valid: true });
+      const survivor = pipeline.list().find((entry) => entry.directoryName === "z-chat");
+      expect(survivor).toMatchObject({ id: "agent-chat", valid: true });
     } finally {
       await pipeline.dispose();
     }
@@ -2548,13 +2534,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     await mkdir(stateDir, { recursive: true });
 
     const builtinPluginsRoot = join(targetRoot, "builtin-plugins");
-    const builtinCodexRoot = join(builtinPluginsRoot, "codex");
-    await mkdir(join(builtinCodexRoot, "src"), { recursive: true });
+    const builtinChatRoot = join(builtinPluginsRoot, "agent-chat");
+    await mkdir(join(builtinChatRoot, "src"), { recursive: true });
     await writeFile(
-      join(builtinCodexRoot, "dohc-plugin.json"),
-      `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+      join(builtinChatRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "agent-chat", entry: "src/main.ts" }, null, 2)}\n`,
     );
-    await writeFile(join(builtinCodexRoot, "src", "main.ts"), "export default {};\n");
+    await writeFile(join(builtinChatRoot, "src", "main.ts"), "export default {};\n");
 
     let pipeline: PluginPipeline;
     const host = new PluginHost({
@@ -2586,31 +2572,31 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const added = await addOfferedPlugin({
         builtinPluginsRoot,
         workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         existingPluginIds,
       });
 
       // The conflict this rollback is about to act on.
-      const concurrentRoot = join(workspaceRoot, "plugins", "z-codex");
+      const concurrentRoot = join(workspaceRoot, "plugins", "z-chat");
       await mkdir(join(concurrentRoot, "src"), { recursive: true });
       await writeFile(
         join(concurrentRoot, "dohc-plugin.json"),
-        `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+        `${JSON.stringify({ version: 1, name: "agent-chat", entry: "src/main.ts" }, null, 2)}\n`,
       );
       await writeFile(join(concurrentRoot, "src", "main.ts"), "export default {};\n");
 
       // Real work landing in the copy's own directory before the conflict
       // is even detected — its identity is untouched by this.
-      const target = join(workspaceRoot, "plugins", "codex");
+      const target = join(workspaceRoot, "plugins", "agent-chat");
       await writeFile(join(target, "NOTES.md"), "left before the conflict was seen");
 
-      await pipeline.handleWatcherEvents([{ operation: "create", path: "plugins/codex" }]);
-      expect(pipeline.findDirectorySupersededBy("codex")).toBe("z-codex");
+      await pipeline.handleWatcherEvents([{ operation: "create", path: "plugins/agent-chat" }]);
+      expect(pipeline.findDirectorySupersededBy("agent-chat")).toBe("z-chat");
 
       await expect(
         removeAddedOfferedPlugin({
           workspaceRoot,
-          directoryName: "codex",
+          directoryName: "agent-chat",
           identity: added.identity,
           contentHash: added.contentHash,
         }),
@@ -2642,13 +2628,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     await mkdir(stateDir, { recursive: true });
 
     const builtinPluginsRoot = join(targetRoot, "builtin-plugins");
-    const builtinCodexRoot = join(builtinPluginsRoot, "codex");
-    await mkdir(join(builtinCodexRoot, "src"), { recursive: true });
+    const builtinChatRoot = join(builtinPluginsRoot, "agent-chat");
+    await mkdir(join(builtinChatRoot, "src"), { recursive: true });
     await writeFile(
-      join(builtinCodexRoot, "dohc-plugin.json"),
-      `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+      join(builtinChatRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "agent-chat", entry: "src/main.ts" }, null, 2)}\n`,
     );
-    await writeFile(join(builtinCodexRoot, "src", "main.ts"), "export default {};\n");
+    await writeFile(join(builtinChatRoot, "src", "main.ts"), "export default {};\n");
 
     let pipeline: PluginPipeline;
     const host = new PluginHost({
@@ -2680,26 +2666,26 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const added = await addOfferedPlugin({
         builtinPluginsRoot,
         workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         existingPluginIds,
       });
 
       // Simulates the rescan finding nothing: skip it entirely, so
       // discovery never picks up the new directory the copy just wrote.
-      const plugin = pipeline.list().find((entry) => entry.directoryName === "codex");
+      const plugin = pipeline.list().find((entry) => entry.directoryName === "agent-chat");
       expect(plugin).toBeUndefined();
 
       // The fixed handler's cleanup for exactly this case.
       await removeAddedOfferedPlugin({
         workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         identity: added.identity,
         contentHash: added.contentHash,
       });
       await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
 
       await expect(
-        lstat(join(workspaceRoot, "plugins", "codex")),
+        lstat(join(workspaceRoot, "plugins", "agent-chat")),
       ).rejects.toMatchObject({ code: "ENOENT" });
       // The offer's own existence check would pass again — a retry is
       // genuinely possible, not stuck behind a stranded copy.
@@ -3320,26 +3306,26 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     await mkdir(workspaceRoot, { recursive: true });
     await mkdir(stateDir, { recursive: true });
 
-    const pluginRoot = join(workspaceRoot, "plugins", "my-codex-copy");
+    const pluginRoot = join(workspaceRoot, "plugins", "my-chat-copy");
     await mkdir(join(pluginRoot, "src"), { recursive: true });
     await writeFile(
       join(pluginRoot, "dohc-plugin.json"),
-      `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+      `${JSON.stringify({ version: 1, name: "agent-chat", entry: "src/main.ts" }, null, 2)}\n`,
     );
     await writeFile(join(pluginRoot, "src", "main.ts"), "export default {};\n");
 
-    await mutatePluginRecord(stateDir, workspaceRoot, "codex", () => ({
-      directoryName: "my-codex-copy",
+    await mutatePluginRecord(stateDir, workspaceRoot, "agent-chat", () => ({
+      directoryName: "my-chat-copy",
     }));
     const dohcDir = pluginDataDir(stateDir, workspaceRoot);
-    const strandedStateRoot = pluginStateRoot(dohcDir, "codex");
+    const strandedStateRoot = pluginStateRoot(dohcDir, "agent-chat");
     await mkdir(strandedStateRoot, { recursive: true });
     await writeFile(join(strandedStateRoot, "session.json"), "{}");
 
     await writeFile(join(pluginRoot, "dohc-plugin.json"), "{ this is not valid JSON\n");
 
     let pipeline: PluginPipeline;
-    let failCodexDataRemoval = false;
+    let failChatDataRemoval = false;
     const stoppedRuntimeIds: string[] = [];
     const host = new PluginHost({
       stateDir,
@@ -3363,7 +3349,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
         removePath: async (path, options) => {
-          if (failCodexDataRemoval && String(path).startsWith(strandedStateRoot)) {
+          if (failChatDataRemoval && String(path).startsWith(strandedStateRoot)) {
             throw new Error("simulated data delete failure");
           }
           await rm(path, options);
@@ -3374,11 +3360,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     try {
       await pipeline.start();
       const pluginId = pipeline.list()[0]!.id;
-      expect(pluginId).toBe("my-codex-copy");
+      expect(pluginId).toBe("my-chat-copy");
 
-      failCodexDataRemoval = true;
+      failChatDataRemoval = true;
       const staleAliasPreflight = await pipeline.uninstallPreflight(
-        "codex",
+        "agent-chat",
         pluginId,
       );
       if (!staleAliasPreflight.ok) {
@@ -3395,37 +3381,37 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await expect(lstat(strandedStateRoot)).resolves.toBeDefined();
       const midState = await readPluginLocalState(stateDir, workspaceRoot);
       if (!midState.ok) throw new Error(midState.warning);
-      expect(midState.state.plugins["codex"]).toBeDefined();
+      expect(midState.state.plugins["agent-chat"]).toBeDefined();
 
       // The watcher observes the deleted root: discovery has no candidate
       // left, and only the status row (and the record-by-directory join)
       // still name this installation.
-      pipeline.handleWatcherEvents([{ path: "plugins/my-codex-copy", operation: "delete" }]);
+      pipeline.handleWatcherEvents([{ path: "plugins/my-chat-copy", operation: "delete" }]);
       await waitFor(
         () => pipeline.list().length === 1,
         "The watcher sweep never reconciled the deleted root.",
       );
 
       // The retry is the same action from the same row, and it finishes —
-      // clearing the original "codex" key's state and record too, not only
+      // clearing the original "agent-chat" key's state and record too, not only
       // pluginId's own (which never had anything under it to begin with).
-      failCodexDataRemoval = false;
+      failChatDataRemoval = false;
       const retryPreflight = await pipeline.uninstallPreflight(pluginId, pluginId);
       if (!retryPreflight.ok) throw new Error(retryPreflight.error.message);
       // Round 11 finding 1: this retry's own preflight — the sourceless
       // path, with no discovery candidate left at all — must still name
-      // the original "codex" key's data before the user confirms deleting
+      // the original "agent-chat" key's data before the user confirms deleting
       // it, not only report on pluginId's own (empty) state.
       expect(retryPreflight.preflight.stateData).toMatchObject({ fileCount: 1 });
       expect(retryPreflight.preflight.stateData?.path).toContain(strandedStateRoot);
       const transient = transientStateOf(pipeline);
       const trackedStatus = pipeline.list()[0];
       expect(trackedStatus).toBeDefined();
-      transient.statuses.set("codex", trackedStatus!);
+      transient.statuses.set("agent-chat", trackedStatus!);
       doorWrittenDeltasOf(pipeline).set(pluginId, new Map());
-      doorWrittenDeltasOf(pipeline).set("codex", new Map());
+      doorWrittenDeltasOf(pipeline).set("agent-chat", new Map());
       transient.lastApprovedAttemptHash.set(pluginId, "a".repeat(64));
-      transient.lastApprovedAttemptHash.set("codex", "b".repeat(64));
+      transient.lastApprovedAttemptHash.set("agent-chat", "b".repeat(64));
       stoppedRuntimeIds.length = 0;
       const finished = await pipeline.uninstall(
         pluginId,
@@ -3435,22 +3421,22 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(finished.ok).toBe(true);
       if (!finished.ok) throw new Error(finished.error.message);
       expect(finished.identity).toBe("released");
-      expect(stoppedRuntimeIds.toSorted()).toEqual(["codex", "my-codex-copy"]);
+      expect(stoppedRuntimeIds.toSorted()).toEqual(["agent-chat", "my-chat-copy"]);
 
       await expect(lstat(strandedStateRoot)).rejects.toMatchObject({ code: "ENOENT" });
       const finalState = await readPluginLocalState(stateDir, workspaceRoot);
       if (!finalState.ok) throw new Error(finalState.warning);
-      expect(finalState.state.plugins["codex"]).toBeUndefined();
-      expect(finalState.state.plugins["my-codex-copy"]).toBeUndefined();
+      expect(finalState.state.plugins["agent-chat"]).toBeUndefined();
+      expect(finalState.state.plugins["my-chat-copy"]).toBeUndefined();
       expect(transient.statuses.has(pluginId)).toBe(false);
-      expect(transient.statuses.has("codex")).toBe(false);
+      expect(transient.statuses.has("agent-chat")).toBe(false);
       expect(doorWrittenDeltasOf(pipeline).has(pluginId)).toBe(false);
-      expect(doorWrittenDeltasOf(pipeline).has("codex")).toBe(false);
+      expect(doorWrittenDeltasOf(pipeline).has("agent-chat")).toBe(false);
       expect(transient.lastApprovedAttemptHash.has(pluginId)).toBe(false);
-      expect(transient.lastApprovedAttemptHash.has("codex")).toBe(false);
+      expect(transient.lastApprovedAttemptHash.has("agent-chat")).toBe(false);
       expect(pipeline.list()).toEqual([]);
       const staleAliasRemoval = await pipeline.uninstall(
-        "codex",
+        "agent-chat",
         pluginId,
         staleAliasPreflight.confirmationToken,
       );

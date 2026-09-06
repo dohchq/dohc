@@ -15,7 +15,7 @@ import {
   type CollectionQueryResult as CollectionQueryContractResult,
   type CollectionValue,
 } from "@dohc/workspace-contracts/collection";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
+import type { JsonValue } from "../protocol";
 
 export const WORKSPACE_METHOD = {
   open: "workspace.open",
@@ -28,7 +28,6 @@ export const WORKSPACE_METHOD = {
   collectionsGet: "collections.get",
   collectionsQuery: "collections.query",
   collectionsGetRecord: "collections.getRecord",
-  searchQuery: "search.query",
   searchQueryPage: "search.queryPage",
   searchQueryChatMessagesGranular: "search.queryChatMessagesGranular",
   watcherStatus: "watcher.status",
@@ -87,12 +86,6 @@ export type ConflictOpenParams = WorkspaceJsonObject & {
 export type ConflictResolveParams = WorkspaceJsonObject & {
   local?: WorkspaceJsonObject;
   envelope?: WorkspaceJsonObject;
-};
-export type SearchQueryParams = WorkspaceJsonObject & {
-  versionId: string;
-  query: string;
-  limit?: number;
-  nowMs?: number;
 };
 export type SearchQueryPageParams = WorkspaceJsonObject & {
   query: string;
@@ -377,7 +370,6 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.collectionsGet]: CollectionGetParams;
   [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryParams;
   [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordParams;
-  [WORKSPACE_METHOD.searchQuery]: SearchQueryParams;
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageParams;
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: SearchQueryChatMessagesGranularParams;
   [WORKSPACE_METHOD.watcherStatus]: WorkspaceEmptyParams;
@@ -402,7 +394,6 @@ export type WorkspaceMethodResultMap = {
   [WORKSPACE_METHOD.collectionsGet]: CollectionGetResult;
   [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryResult;
   [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordResult;
-  [WORKSPACE_METHOD.searchQuery]: SearchResult[];
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageResult;
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: GranularChatMessageSearchResponse;
   [WORKSPACE_METHOD.watcherStatus]: WatcherStatusResult;
@@ -992,7 +983,6 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.collectionsGet]: CollectionDetailsSchema,
   [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryResultSchema,
   [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordResultSchema,
-  [WORKSPACE_METHOD.searchQuery]: Schema.mutable(Schema.Array(SearchResultSchema)),
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageResultSchema,
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]:
     GranularChatMessageSearchResponseSchema,
@@ -1171,10 +1161,8 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
     schema,
     value,
     `${method} result`,
-    // searchQuery answers with an array; claimNext answers null when no
-    // pending claim remains.
-    method !== WORKSPACE_METHOD.searchQuery &&
-      method !== WORKSPACE_METHOD.automationsClaimNext,
+    // claimNext answers null when no pending claim remains.
+    method !== WORKSPACE_METHOD.automationsClaimNext,
   ) as WorkspaceMethodResultMap[M];
   if (method === WORKSPACE_METHOD.collectionsQuery) {
     return decodeCollectionQueryResultValues(

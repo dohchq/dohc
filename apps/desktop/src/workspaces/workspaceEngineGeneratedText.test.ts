@@ -1,10 +1,12 @@
 import {
   CHATS_METHOD,
-  ChatsLoopbackEngine,
   VERSIONED_METHOD,
-  VersionedLoopbackEngine,
   type Request,
 } from "@dohc/workspace-engine-client";
+import {
+  ChatsLoopbackEngine,
+  VersionedLoopbackEngine,
+} from "@dohc/workspace-engine-client/testing";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";

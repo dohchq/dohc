@@ -622,9 +622,9 @@ import {
   type WorkspaceActivityScope,
 } from "./ipc/workspaceActivityBroadcast";
 import { WorkspaceFileListingCache } from "./workspaces/workspaceFileListingCache";
+import { probeRelayWorkspace } from "./workspaces/relayWorkspaceProbe";
 import {
   EngineRelayClient,
-  probeWorkspaceRelay,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
   type EngineRelayWorkspaceClient,
@@ -649,13 +649,9 @@ import {
   type DesktopLinkedChatStore,
 } from "./workspaces/liveLinkedChatStore";
 import {
-  captureForFlaggedWorkspace,
-  createDispatchRunRelease,
-  dispatchScanEligible,
+  captureForWorkspace,
+  captureRefusal,
   type EngineFeature,
-  engineOffRefusal,
-  releaseAndRefuseWithoutCapture,
-  workspaceEngineEnabled,
 } from "./workspaces/engineCaptureGate";
 import {
   AgentIntegrationState,
@@ -717,7 +713,6 @@ import { PluginWorkspaceEvents } from "./plugins/pluginWorkspaceEvents";
 import { createPluginPanelSdkEventEmitter } from "./plugins/pluginPanelSdkEvent";
 import { PluginSurfaceHostLifecycle } from "./plugins/pluginSurfaceHostLifecycle";
 import { createPluginAgentDrivers } from "./plugins/pluginAgentDrivers";
-import { BUILT_IN_AGENT_DRIVER_IDS } from "./agents/AgentDriver";
 import { pluginDataDir } from "./plugins/pluginLocalState";
 import { pluginIdToSafePath } from "./plugins/pluginSourceSnapshot";
 import type { RegisteredPlugin } from "./plugins/pluginPanelRegistration";
@@ -1041,8 +1036,8 @@ function createPluginWorkspaceRuntimeParts(
     workspaceRoot: workspace.rootPath,
   });
   // This workspace's plugin-contributed agent drivers. They join the driver
-  // registry the agent session manager builds, so a plugin driver is chosen,
-  // probed, and stopped exactly like one dohc ships.
+  // registry the agent session manager builds, which chooses, probes, and
+  // stops them.
   let pluginHostRef: PluginHost | null = null;
   const pluginDrivers = createPluginAgentDrivers({
     host: {
@@ -1057,7 +1052,6 @@ function createPluginWorkspaceRuntimeParts(
         return pluginHostRef.stopDriverSpawn(pluginId, spawnId);
       },
     },
-    reservedDriverIds: BUILT_IN_AGENT_DRIVER_IDS,
   });
   // This workspace's plugin file subscriptions, fed by the settled watcher
   // batch (see onWatcherBatch) — the same feed the pipeline reads.
@@ -1113,6 +1107,9 @@ function createPluginWorkspaceRuntimeParts(
                 currentPipeline.ensureStarted(pluginId, commandAuthority),
               ),
           );
+          if (!automations.activeRun({ claimId: params.claimId, pluginId })) {
+            return { ok: true as const };
+          }
           await host.runAutomation(pluginId, params);
           return { ok: true as const };
         },
@@ -3136,13 +3133,11 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
     };
   },
   engineFor: engineForWorkspace,
-  // The flag-gated engine capture (see engineCaptureGate.ts — shared with the
-  // arc-gate QA harness so the harness asserts against the real gate). The
-  // gate also owns the shared-view rule: main only states whether the
-  // workspace is one, and the decision carries the cause so the null capture
-  // never wears the Settings opt-out's copy.
-  captureFor: async (workspace, hooks) =>
-    captureForFlaggedWorkspace(
+  // The engine capture gate (engineCaptureGate.ts) owns the shared-view rule:
+  // main only states whether the workspace is one, and the decision
+  // carries the cause.
+  captureFor: (workspace, hooks) =>
+    captureForWorkspace(
       {
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
@@ -3382,7 +3377,7 @@ const agentIntegration = createAgentIntegration({
 // — fork-and-switch on the engine capture chain, then a dohc-tracked run —
 // and a review state when the run ends. Resolution of the capture mirrors
 // requireEngineCapture (workspace identity from the registry, engine flag
-// gate); unflagged workspaces reject with the same product message.
+// gate); a workspace without a capture rejects with the same product message.
 function createTryInVersionSessionsFor(
   binding: WorkspaceAuthorityBinding<RegistryEntry>,
 ) {
@@ -3395,13 +3390,7 @@ function createTryInVersionSessionsFor(
       lease.assertCurrent();
       const capture = workspaceActivity.engineCaptureFor(lease.state.activity);
       if (!capture) {
-        throw new Error(
-          engineOffRefusal(
-            workspaceActivity.getStatus(workspace, lease.state.activity),
-            "Versions",
-            "restart",
-          ),
-        );
+        throw new Error(captureRefusal("Versions"));
       }
       desktopMarks.measureSince(
         "try-in-version-ops",
@@ -3496,15 +3485,8 @@ async function workspaceAgentDefaults(
 let cachedAgentSessions: AgentSessionManager | null = null;
 async function agentSessionManager(): Promise<AgentSessionManager> {
   if (!cachedAgentSessions) {
-    const [{ createAgentDriverRegistry }, { createDesktopAgentDrivers }, { createAgentSessionManager }] =
-      await Promise.all([
-        import("./agents/AgentDriver"),
-        import("./agents/AgentProcessDrivers"),
-        import("./agents/AgentSessionManager"),
-      ]);
+    const { createAgentSessionManager } = await import("./agents/AgentSessionManager");
     cachedAgentSessions = createAgentSessionManager({
-      registry: createAgentDriverRegistry(createDesktopAgentDrivers(process.env)),
-      // A workspace's plugin drivers join its registry beside the built-ins.
       pluginDriversFor: (workspaceId) =>
         pluginWorkspaceRuntimes.current(workspaceId)?.agentDrivers.list() ?? [],
       agentDefaultsFor: workspaceAgentDefaults,
@@ -3911,16 +3893,13 @@ async function syncWorkspaceForDispatch(
               activity.engineCaptureFor(workspaceId, workspace.rootPath) !== null
             );
           }
-          const { capture } = await captureForFlaggedWorkspace(
+          const { capture } = captureForWorkspace(
             {
               ...workspace,
               // Guarded above: a shared view already returned false.
               shareView: false,
             },
-            {
-              activeAgentRun: () => null,
-              onCaptureOutcome: () => undefined,
-            },
+            { onCaptureOutcome: () => undefined },
             requireEngineSessions(),
           );
           if (!capture) return false;
@@ -4095,9 +4074,13 @@ async function closeDispatchRunActivity(
   );
 }
 
+// The release closes a TRANSIENT open (background dispatch, runner self-test)
+// and leaves a workspace that was already open, or that a renderer/CLI
+// retained during the run, alone. Decided from the post-run state, not from
+// the open itself: a retention can land while the run is in flight.
 async function acquireDispatchRunActivity(
   workspace: CreatedWorkspace & { attachmentId?: symbol },
-): Promise<() => Promise<boolean>> {
+): Promise<() => Promise<void>> {
   return withWorkspaceAttachmentAsync(workspace, async (lease) => {
     const current = canonicalWorkspaceFor(lease);
     const alreadyOpen = workspaceActivity.isOpen(lease.state.activity);
@@ -4105,13 +4088,17 @@ async function acquireDispatchRunActivity(
       current,
       () => ensureWorkspaceActivityOpen(current),
     );
-    return createDispatchRunRelease({
-      alreadyOpen,
-      isRetained: () =>
+    let released = false;
+    return async () => {
+      if (released) return;
+      released = true;
+      if (alreadyOpen) return;
+      const retained =
         withWorkspaceAttachment(current, (held) => held.state.retainedActivity) ??
-        false,
-      close: () => closeDispatchRunActivity(current),
-    });
+        false;
+      if (retained) return;
+      await closeDispatchRunActivity(current);
+    };
   });
 }
 
@@ -4231,14 +4218,6 @@ const chatDispatchService = createChatDispatchService({
   resourcesPath: () =>
     (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
   queueSync: syncWorkspaceForDispatch,
-  // An opted-out workspace must record nothing: without this gate the
-  // workspace-open scan reaches dispatchStoreFor/chatStoreFor, whose daemon
-  // workspace.open creates .dohc/engine/engine.db. Open sessions answer from
-  // their capture snapshot (the flag applies at the next open).
-  scanEligible: (workspace) =>
-    withWorkspaceAttachmentAsync(workspace, () =>
-      dispatchScanEligible(workspace, activity),
-    ),
   prepareRunWorkspace: async (workspace) => {
     const { registered, release } = await withWorkspaceAttachmentAsync(
       workspace,
@@ -4250,27 +4229,11 @@ const chatDispatchService = createChatDispatchService({
         };
       },
     );
-    // The helper owns both orders: cause read before the release,
-    // recovery derived from what the release actually did.
-    await releaseAndRefuseWithoutCapture({
-      capture: activity.engineCaptureFor(workspace.workspaceId),
-      // A retention that landed during our close reopens the workspace; its
-      // capture builds after the release resolves. Settling joins (or, for
-      // an already-retained workspace, starts — the retainer will reuse it)
-      // that open, so the capture read judges a formed state.
-      settleKeptOpen: () =>
-        ensureWorkspaceActivityOpen(registered).then(
-          () => undefined,
-          () => undefined,
-        ),
-      currentCapture: () => activity.engineCaptureFor(workspace.workspaceId),
-      status: () => activity.getStatus(workspace.workspaceId),
-      release,
-      feature: "Chats",
-    });
-    return async () => {
+    if (!activity.engineCaptureFor(registered.workspaceId, registered.rootPath)) {
       await release();
-    };
+      throw new Error(captureRefusal("Chats"));
+    }
+    return release;
   },
   authorizeServiceNote: (workspace, threadId, verifiedUserId) =>
     withWorkspaceAttachmentAsync(workspace, async (lease) => {
@@ -4673,13 +4636,7 @@ async function requirePluginEngineCaptureForOperation(
   const workspace = operation.workspace;
   const capture = activity.engineCaptureFor(workspace.workspaceId);
   if (!capture) {
-    throw new Error(
-      engineOffRefusal(
-        activity.getStatus(workspace.workspaceId),
-        "Plugins",
-        "restart",
-      ),
-    );
+    throw new Error(captureRefusal("Plugins"));
   }
   return { workspace, capture };
 }
@@ -4979,18 +4936,11 @@ async function openCliWorkspace(
   await openWorkspaceActivity(workspace);
   const capture = activity.engineCaptureFor(workspace.workspaceId);
   if (!capture) {
-    throw new Error(
-      engineOffRefusal(
-        activity.getStatus(workspace.workspaceId),
-        "Chats",
-        // openWorkspaceActivity retained this session: only a restart
-        // re-runs the capture decision.
-        "restart",
-      ),
-    );
+    throw new Error(captureRefusal("Chats"));
   }
   const store = linkedChatStoreFor(workspace);
   const daemon = rustEngineDaemon;
+  if (!daemon) throw new Error("The workspace engine is not running.");
   // The CLI's collection writes ride the same seam plugin SDK edits take,
   // resolved per write under the physical workspace's authority, so a
   // retired-and-reattached workspace refuses instead of falling through to
@@ -5008,38 +4958,31 @@ async function openCliWorkspace(
     dispatchStore: agentDispatchStoreHandleFor(workspace).store,
     readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
     fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
-    ...(daemon
-      ? {
-          daemonReads: {
-            async queryChatMessagesGranular(input: {
-              query: string;
-              limit: number;
-            }) {
-              return decodeGranularChatMessageSearchResponse(
-                await daemon.requestWorkspace(
-                  workspace.rootPath,
-                  workspace.workspaceId,
-                  WORKSPACE_METHOD.searchQueryChatMessagesGranular,
-                  input,
-                ),
-              );
-            },
-            async listUnreadFileThreads(input: {
-              pageLimit: number;
-              afterThreadId?: string;
-            }) {
-              return decodeUnreadFileThreads(
-                await daemon.requestWorkspace(
-                  workspace.rootPath,
-                  workspace.workspaceId,
-                  CHATS_METHOD.readStateListUnreadFileThreads,
-                  input,
-                ),
-              );
-            },
-          },
-        }
-      : {}),
+    daemonReads: {
+      async queryChatMessagesGranular(input: { query: string; limit: number }) {
+        return decodeGranularChatMessageSearchResponse(
+          await daemon.requestWorkspace(
+            workspace.rootPath,
+            workspace.workspaceId,
+            WORKSPACE_METHOD.searchQueryChatMessagesGranular,
+            input,
+          ),
+        );
+      },
+      async listUnreadFileThreads(input: {
+        pageLimit: number;
+        afterThreadId?: string;
+      }) {
+        return decodeUnreadFileThreads(
+          await daemon.requestWorkspace(
+            workspace.rootPath,
+            workspace.workspaceId,
+            CHATS_METHOD.readStateListUnreadFileThreads,
+            input,
+          ),
+        );
+      },
+    },
     // Engine-backed collection reads and writes for the CLI/MCP verbs.
     // withEngineAdapter derives the attachment (and share-view session mode)
     // from the registered workspace itself — the renderer collection routes'
@@ -6015,7 +5958,7 @@ function ownedWorkspaceReadsFor(
     ...(databaseReader ? { databaseReader } : {}),
     listFiles: () => listOwnedWorkspaceFilesFor(workspace),
     collections: {
-      // "No collections" is the honest empty answer while the engine is off;
+      // "No collections" is the honest empty answer without a capture;
       // the addressed reads below must name the missing capability instead.
       list: async () =>
         (await withEngineAdapter(
@@ -6803,8 +6746,8 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.deleteWorkspacePath, workspaceFileMutations.deletePath);
 
   // Collections: read-only engine index queries. list answers
-  // "no collections" when the daemon has no sessions, so unflagged workspaces
-  // stay quiet; get/query name the missing capability instead, because their
+  // "no collections" when the daemon has no sessions, so a shared view stays
+  // quiet; get/query name the missing capability instead, because their
   // caller is an open collection tab that must show a cause.
   ipcMain.handle(CHANNELS.listCollections, async (event, payload) => {
     assertTrustedSender(event);
@@ -7011,9 +6954,6 @@ function registerIpcHandlers(
         const registryEntry = operation.workspace;
         const shareView = sharedViewOf(registryEntry.workspaceId);
         const isSharedView = shareView !== null;
-        const engineEnabled = isSharedView
-          ? false
-          : await workspaceEngineEnabled(registryEntry.rootPath);
         const isMountPath =
           !isSharedView && !!input.path && isSharedWithMePath(input.path);
         const mountForPath = isMountPath
@@ -7030,7 +6970,6 @@ function registerIpcHandlers(
           shareView,
           isMountPath,
           hasMountRecord: mountForPath !== undefined,
-          engineEnabled,
           canShare:
             !isSharedView &&
             !isMountPath &&
@@ -7078,7 +7017,6 @@ function registerIpcHandlers(
         // someone else's files are not this account's to grant, and a share
         // needs a relay-side workspace to grant from.
         canShare: menuContext.canShare,
-        engineEnabled: menuContext.engineEnabled,
         shareView: menuContext.shareView,
       }).map((entry) =>
         entry.kind === "separator" ? { type: "separator" as const } : item(entry.label, entry.id),
@@ -7893,7 +7831,7 @@ function registerIpcHandlers(
     let probe: RelayWorkspaceBootstrapResult;
     let authorityBinding: DesktopWorkspaceAuthorityBinding | null = null;
     try {
-      probe = await probeWorkspaceRelay(relayTransportRoutes, {
+      probe = await probeRelayWorkspace({
         workspaceId: parsed.workspaceId,
         relay,
       });
@@ -10569,10 +10507,9 @@ function registerIpcHandlers(
     });
   });
 
-  // Named versions (PR 0M-4). Every handler resolves the workspace through
+  // Named versions. Every handler resolves the workspace through
   // requireWorkspace (renderer identity is never trusted) and is gated on the
-  // workspace-engine alpha capture being attached — for unflagged workspaces
-  // the calls reject.
+  // engine capture being attached.
   async function requireEngineCapture(
     workspaceOrId: string | RegistryEntry,
     feature: EngineFeature,
@@ -10586,11 +10523,7 @@ function registerIpcHandlers(
     await openWorkspaceActivity(workspace);
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     if (!capture) {
-      // The feature's "not enabled" copy holds only for the real
-      // opt-out — after a failed capture build the refusal names the failure.
-      throw new Error(
-        engineOffRefusal(activity.getStatus(workspace.workspaceId), feature, "restart"),
-      );
+      throw new Error(captureRefusal(feature));
     }
     return { workspace, capture };
   }
@@ -10842,9 +10775,9 @@ function registerIpcHandlers(
     },
   );
 
-  // "Try it in a version" (PR 0N-2). The gesture handler double-gates on the
-  // engine flag (requireVersionOperations here, and the manager's own
-  // operationsFor) so an unflagged workspace rejects before anything runs.
+  // "Try it in a version". The gesture handler double-gates on the engine
+  // capture (requireVersionOperations here, and the manager's own
+  // operationsFor) so a workspace without one rejects before anything runs.
   ipcMain.handle(CHANNELS.tryInWorkspaceVersion, async (event, payload) => {
     assertTrustedSender(event);
     const input = TryInWorkspaceVersionPayload.parse(payload);
@@ -10877,7 +10810,7 @@ function registerIpcHandlers(
     tryInVersionSessions.dismiss(input.workspaceId);
   });
 
-  // Engine history + linked Chats (PR 0M-5). Flagged workspaces read their
+  // Engine history + linked Chats (PR 0M-5). Workspaces read their
   // timeline from engine moments; every handler resolves the workspace via
   // requireWorkspace and rejects when the engine capture is not attached.
   // The moment/conflict record mappers live in ./ipc/engineHistoryIpc (pure,
@@ -13141,7 +13074,13 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.probeAgentDrivers, async (event, payload) => {
     assertTrustedSender(event);
     const input = AgentRunPayload.parse(payload);
-    requireWorkspace(input.workspaceId);
+    const workspace = requireWorkspace(input.workspaceId);
+    // Every driver is plugin-contributed, and workspace open only warms the
+    // plugin runtime in the background. A probe that ran ahead of it would
+    // answer "no drivers" and the caller would cache that for its lifetime.
+    if (!sharedViewOf(workspace.workspaceId)) {
+      await pluginWorkspaceRuntimes.ensure(workspace);
+    }
     const sessions = await agentSessionManager();
     await sessions.probeDrivers(input.workspaceId);
     return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));
@@ -13604,6 +13543,7 @@ function testEngineRestartOverrides(): {
 }
 
 async function startRustEngineDaemon(): Promise<boolean> {
+  const restartingPluginRuntimes = new Set<PluginWorkspaceRuntimes<CreatedWorkspace>>();
   // Everything, including resolving the binary path, runs inside the try: a
   // throw while building the options would otherwise reject this whenReady
   // callback and leave the user with no dialog, on the one path whose job is
@@ -13617,6 +13557,11 @@ async function startRustEngineDaemon(): Promise<boolean> {
         resourcesPath: process.resourcesPath,
       }),
       onFailure: (error, terminal) => {
+        if (terminal) {
+          for (const runtimes of restartingPluginRuntimes) {
+            runtimes.failEngineRestart(error);
+          }
+        }
         // The supervisor's diagnostic is for us: it names engine.ping, probe
         // counts and wedge budgets, which tell a developer or an agent exactly
         // which limit was hit. It goes to the log in full.
@@ -13639,12 +13584,27 @@ async function startRustEngineDaemon(): Promise<boolean> {
           );
         }
       },
+      beforePublish: async () => {
+        await Promise.all(workspaceAuthorities.workspaceIds().map((workspaceId) =>
+          workspaceAuthorities.withAuthority(workspaceId, (lease) => {
+            const runtimes = lease.state.pluginRuntimes;
+            restartingPluginRuntimes.add(runtimes);
+            return runtimes.prepareForEngineRestart();
+          }),
+        ));
+      },
       // A capture event can die with the previous daemon's transport after its
       // moment committed; the replacement never re-emits it (its baseline finds
       // disk and manifest agreeing). One repaint per healthy launch closes that
       // staleness window. Scope-free: the lost event could have belonged to
       // any open workspace.
-      onLaunch: () => notifyRenderer(),
+      onLaunch: () => {
+        for (const runtimes of restartingPluginRuntimes) {
+          runtimes.resumeAfterEngineRestart();
+        }
+        restartingPluginRuntimes.clear();
+        notifyRenderer();
+      },
     });
     await rustEngineDaemon.start();
     // The daemon owns capture: its capture.momentRecorded events are the only
@@ -13692,6 +13652,9 @@ async function startRustEngineDaemon(): Promise<boolean> {
     logLaunchMarksOnce();
     return true;
   } catch (error) {
+    for (const runtimes of restartingPluginRuntimes) {
+      runtimes.failEngineRestart(error);
+    }
     const message =
       error instanceof Error ? error.message : "Unknown Rust engine startup error.";
     console.error("[desktop] Rust engine daemon failed to start:", error);

@@ -27,10 +27,9 @@ import {
 } from "./conflictPane";
 import { UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "./unifiedDiff";
 
-// Named versions surface (PR 0M-4, workspace-engine alpha). Product
-// vocabulary only: Version, Main, compare, merge, keep — never git terms.
-// The whole surface is flag-gated by the shell (unflagged workspaces never
-// mount it), and every async response is gated by a liveness token before it
+// Named versions surface. Product vocabulary only: Version, Main, compare,
+// merge, keep — never git terms. The shell mounts it only for a workspace
+// with a capture, and every async response is gated by a liveness token before it
 // touches state (plan-level non-negotiable: a slow response for one
 // workspace must never repaint another).
 
@@ -78,7 +77,12 @@ function isWorkspaceUpdatingInvokeError(error: unknown): boolean {
 export function VersionMenu(props: {
   workspaceId: string;
   activeTabDirty: boolean;
-  flushActiveDraft: () => Promise<void>;
+  // Settles drafts and queued collection writes, and pauses new cell edits
+  // until the returned release runs. Each operation holds the release across
+  // its version IPCs so no cell edit lands between the drain and the
+  // lineage change; a rejection means an unresolved write refused the
+  // operation, with the user-facing line as the error message.
+  beginLineageOperation: () => Promise<() => void>;
   onOpenCompare: (versionId: string) => void;
   // Fired after any operation that may have changed disk or history state so
   // the shell refreshes files/history and reloads open editors.
@@ -87,7 +91,7 @@ export function VersionMenu(props: {
   // and a lookup it has to await is a window those answers slip through.
   // Omit it only when the operation did not change the active version, or
   // when it failed and nobody knows what stuck.
-  onWorkspaceStateChanged: (activeVersionId?: string) => void;
+  onWorkspaceStateChanged: (activeVersionId?: string, lineageChanged?: boolean) => void;
   onError: (message: string) => void;
   // Bumped by the shell when another surface switched versions (PR 0N-2's
   // review card switches back to Main) so the selector re-reads the active
@@ -220,9 +224,10 @@ export function VersionMenu(props: {
       let announced = false;
       setBusy("switch");
       setInlineError(null);
+      let releaseOperation: (() => void) | null = null;
       try {
-        await props.flushActiveDraft();
-        // Re-check liveness after every awaited step: the flush (or the
+        releaseOperation = await props.beginLineageOperation();
+        // Re-check liveness after every awaited step: the begin (or the
         // switch) may resolve after this panel was unmounted or superseded,
         // and a stale continuation must not mutate or repaint.
         if (token !== operationToken.current) return;
@@ -263,8 +268,12 @@ export function VersionMenu(props: {
         ) {
           return;
         }
-        props.onWorkspaceStateChanged(recovered?.activeVersionId);
+        props.onWorkspaceStateChanged(
+          recovered?.activeVersionId,
+          recovered === null ? switchIssued : recovered.activeVersionId !== before,
+        );
       } finally {
+        releaseOperation?.();
         if (token === operationToken.current) setBusy(null);
       }
     },
@@ -299,8 +308,9 @@ export function VersionMenu(props: {
       const token = beginOperation();
       setBusy("create");
       setInlineError(null);
+      let releaseOperation: (() => void) | null = null;
       try {
-        await props.flushActiveDraft();
+        releaseOperation = await props.beginLineageOperation();
         if (token !== operationToken.current) return;
         const result = await bridge().createWorkspaceVersion({
           workspaceId,
@@ -315,6 +325,7 @@ export function VersionMenu(props: {
         if (token !== operationToken.current) return;
         setInlineError(ipcErrorMessage(error, "Could not create that version."));
       } finally {
+        releaseOperation?.();
         if (token === operationToken.current) setBusy(null);
       }
     },
@@ -640,7 +651,7 @@ export function VersionMenu(props: {
           workspaceId={workspaceId}
           source={mergeSource}
           activeTabDirty={props.activeTabDirty}
-          flushActiveDraft={props.flushActiveDraft}
+          beginLineageOperation={props.beginLineageOperation}
           onWorkspaceStateChanged={props.onWorkspaceStateChanged}
           onClose={() => {
             setMergeSource(null);
@@ -653,7 +664,7 @@ export function VersionMenu(props: {
         <TryTaskDialog
           workspaceId={workspaceId}
           activeTabDirty={props.activeTabDirty}
-          flushActiveDraft={props.flushActiveDraft}
+          beginLineageOperation={props.beginLineageOperation}
           onStarted={(activeVersionId) => {
             setTryOpen(false);
             // The gesture switched into the new version; refresh the selector
@@ -678,7 +689,8 @@ export function VersionMenu(props: {
 export function TryTaskDialog(props: {
   workspaceId: string;
   activeTabDirty: boolean;
-  flushActiveDraft: () => Promise<void>;
+  // VersionMenu's contract: drain writes, hold the release across the IPC.
+  beginLineageOperation: () => Promise<() => void>;
   /** The version the gesture created and switched into. */
   onStarted: (activeVersionId: string) => void;
   onClose: () => void;
@@ -737,8 +749,9 @@ export function TryTaskDialog(props: {
     const token = ++liveToken.current;
     setBusy(true);
     setError(null);
+    let releaseOperation: (() => void) | null = null;
     try {
-      await props.flushActiveDraft();
+      releaseOperation = await props.beginLineageOperation();
       if (token !== liveToken.current) return;
       const started = await bridge().tryInWorkspaceVersion({
         workspaceId,
@@ -751,6 +764,8 @@ export function TryTaskDialog(props: {
       if (token !== liveToken.current) return;
       setError(ipcErrorMessage(caught, "Could not start trying this."));
       setBusy(false);
+    } finally {
+      releaseOperation?.();
     }
   }, [busy, helper, props, task, workspaceId]);
 
@@ -861,7 +876,8 @@ export function VersionMergeDialog(props: {
   workspaceId: string;
   source: WorkspaceVersionRecord;
   activeTabDirty: boolean;
-  flushActiveDraft: () => Promise<void>;
+  // VersionMenu's contract: drain writes, hold the release across the IPC.
+  beginLineageOperation: () => Promise<() => void>;
   // Pass the version that is active now when this operation set it. The
   // shell needs the boundary before it can judge answers still in flight,
   // and a lookup it has to await is a window those answers slip through.
@@ -893,8 +909,9 @@ export function VersionMergeDialog(props: {
   const runMerge = useCallback(async () => {
     const token = ++liveToken.current;
     setStage({ stage: "running" });
+    let releaseOperation: (() => void) | null = null;
     try {
-      await props.flushActiveDraft();
+      releaseOperation = await props.beginLineageOperation();
       if (token !== liveToken.current) return;
       const result = await bridge().mergeWorkspaceVersion({
         workspaceId,
@@ -930,12 +947,13 @@ export function VersionMergeDialog(props: {
         stage: "error",
         message: ipcErrorMessage(error, "Could not merge this version into Main."),
       });
+    } finally {
+      releaseOperation?.();
     }
   }, [props, source.id, workspaceId]);
 
   const onResolved = useCallback(
     (remaining: ResolveWorkspaceVersionConflictResult) => {
-      props.onWorkspaceStateChanged();
       windowGeneration.current += 1;
       setStage(
         remaining.conflicts.length > 0 || remaining.nextAfterConflictId !== null
@@ -947,7 +965,7 @@ export function VersionMergeDialog(props: {
           : { stage: "resolved-all" },
       );
     },
-    [props],
+    [],
   );
 
   const loadMoreConflicts = useCallback(async () => {
@@ -1076,6 +1094,8 @@ export function VersionMergeDialog(props: {
               <div className="mt-3">
                 <ConflictList
                   workspaceId={workspaceId}
+                  beginLineageOperation={props.beginLineageOperation}
+                  onWorkspaceStateChanged={props.onWorkspaceStateChanged}
                   conflicts={stage.conflicts}
                   hasMore={stage.nextAfterConflictId !== null}
                   onLoadMore={loadMoreConflicts}
@@ -1302,6 +1322,8 @@ function chooseCombineSeed(candidates: SeedCandidate[]): CombineSeed {
 // hand-written combined copy survives being collapsed.
 function ConflictResolver(props: {
   workspaceId: string;
+  beginLineageOperation: () => Promise<() => void>;
+  onWorkspaceStateChanged: () => void;
   conflict: WorkspaceVersionConflict;
   sourceName: string;
   expanded: boolean;
@@ -1363,7 +1385,7 @@ function ConflictResolver(props: {
     () => () => {
       liveToken.current += 1;
     },
-    [],
+    [workspaceId, conflict.conflictId],
   );
 
   // The combined copy in state is never over the apply cap: every value it can
@@ -1397,18 +1419,24 @@ function ConflictResolver(props: {
       const token = ++liveToken.current;
       setBusy(true);
       setError(null);
+      let releaseOperation: (() => void) | null = null;
       try {
+        releaseOperation = await props.beginLineageOperation();
+        if (token !== liveToken.current) return;
         const result = await bridge().resolveWorkspaceVersionConflict({
           workspaceId,
           conflictId: conflict.conflictId,
           resolution,
         });
+        props.onWorkspaceStateChanged();
         if (token !== liveToken.current) return;
         props.onResolved(result);
       } catch (caught) {
         if (token !== liveToken.current) return;
         setError(ipcErrorMessage(caught, "Could not apply that choice."));
         setBusy(false);
+      } finally {
+        releaseOperation?.();
       }
     },
     [conflict.conflictId, props, workspaceId],
@@ -1601,6 +1629,8 @@ function ConflictResolver(props: {
 // the window with the first page of what remains.
 function ConflictList(props: {
   workspaceId: string;
+  beginLineageOperation: () => Promise<() => void>;
+  onWorkspaceStateChanged: () => void;
   conflicts: WorkspaceVersionConflict[];
   // Whether a continuation exists past the loaded window.
   hasMore: boolean;
@@ -1649,6 +1679,8 @@ function ConflictList(props: {
         <ConflictResolver
           key={conflict.conflictId}
           workspaceId={props.workspaceId}
+          beginLineageOperation={props.beginLineageOperation}
+          onWorkspaceStateChanged={props.onWorkspaceStateChanged}
           conflict={conflict}
           sourceName={props.sourceNameFor(conflict)}
           expanded={conflict.conflictId === openId}
@@ -1984,6 +2016,7 @@ export function VersionComparePage(props: {
 // looks the same everywhere.
 export function ConflictReviewDialog(props: {
   workspaceId: string;
+  beginLineageOperation: () => Promise<() => void>;
   // Pass the version that is active now when this operation set it. The
   // shell needs the boundary before it can judge answers still in flight,
   // and a lookup it has to await is a window those answers slip through.
@@ -2053,7 +2086,6 @@ export function ConflictReviewDialog(props: {
 
   const onResolved = useCallback(
     (remaining: ResolveWorkspaceVersionConflictResult) => {
-      props.onWorkspaceStateChanged();
       windowGeneration.current += 1;
       setState({
         status: "ready",
@@ -2062,7 +2094,7 @@ export function ConflictReviewDialog(props: {
         resolvedAny: true,
       });
     },
-    [props],
+    [],
   );
 
   const loadMoreConflicts = useCallback(async () => {
@@ -2146,6 +2178,8 @@ export function ConflictReviewDialog(props: {
           {state.status === "ready" && conflicts.length > 0 ? (
             <ConflictList
               workspaceId={workspaceId}
+              beginLineageOperation={props.beginLineageOperation}
+              onWorkspaceStateChanged={props.onWorkspaceStateChanged}
               conflicts={conflicts}
               hasMore={hasMoreConflicts}
               onLoadMore={loadMoreConflicts}

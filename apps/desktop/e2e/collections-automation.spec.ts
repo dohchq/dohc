@@ -318,7 +318,6 @@ test("a record change runs its automation on the origin device exactly once, loo
     capture = createWorkspaceEngineCapture({
       ...deviceA.workspace,
       rustEngineSessions: deviceA.sessions,
-      daemonOwnsCapture: true,
     });
     const deviceARelay = deviceA.relay.bind({
       ...deviceA.workspace,

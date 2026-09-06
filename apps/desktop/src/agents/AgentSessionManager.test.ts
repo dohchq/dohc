@@ -5,7 +5,6 @@ import type {
   AgentSession,
   AgentSessionStartInput,
 } from "./AgentDriver";
-import { createAgentDriverRegistry } from "./AgentDriver";
 import type { AgentIntegration } from "./AgentIntegration";
 import {
   createAgentSessionManager,
@@ -80,11 +79,10 @@ function harness(
     },
   };
   const manager = createAgentSessionManager({
-    registry: createAgentDriverRegistry([recordingDriver]),
-    ...(options.pluginDrivers
-      ? { pluginDriversFor: (workspaceId: string) =>
-          workspaceId === "workspace-1" ? options.pluginDrivers ?? [] : [] }
-      : {}),
+    pluginDriversFor: (workspaceId: string) => [
+      recordingDriver,
+      ...(workspaceId === "workspace-1" ? options.pluginDrivers ?? [] : []),
+    ],
     ...(options.agentDefaults
       ? { agentDefaultsFor: () => options.agentDefaults as AgentWorkspaceDefaults }
       : {}),
@@ -522,7 +520,7 @@ describe("the workspace's own agent settings", () => {
     startSession: async () => new FakeSession(),
   });
 
-  it("lists a workspace's plugin drivers beside the drivers dohc ships", async () => {
+  it("lists a workspace's plugin drivers", async () => {
     const { manager } = harness({ pluginDrivers: [pluginDriver("fixture-harness")] });
 
     const drivers = await manager.probeDrivers("workspace-1");

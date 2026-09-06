@@ -2,9 +2,10 @@
 
 #![forbid(unsafe_code)]
 
+mod automation_recovery;
 pub(crate) mod capture_driver;
 pub mod capture_sink;
-pub mod shadow_fence;
+pub mod root_binding;
 
 #[cfg(feature = "harness")]
 pub use capture_driver::{CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES};
@@ -44,10 +45,10 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_runtime::actor::YdocSeedMaterialization;
 use dohc_engine_runtime::{
-    ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, LifecycleState, NoFaults,
-    PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
-    RuntimeError, SearchError, SearchPageDisposition, SearchResultKey, SearchSurface,
-    WorkspaceSupervisor,
+    ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, FaultInjector,
+    LifecycleState, NoFaults, PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation,
+    RelayOperationOutcome, RuntimeError, SearchError, SearchPageDisposition, SearchResultKey,
+    SearchSurface, WorkspaceSupervisor,
 };
 use dohc_engine_sync::{
     RelayCursor, RelayError, ReplicationEnvelope, ShareCursor, SyncError, SyncPassOutcome,
@@ -66,7 +67,7 @@ const MAX_OPEN_HANDLES: usize = 64;
 const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 const AUTOMATION_CLAIM_MAX_ATTEMPTS: i64 = 2;
 
-/// The startup reaper only reclaims a running automation claim idle at least
+/// Startup recovery only reclaims a running automation claim idle at least
 /// this long. A desktop that outlives a daemon rebind may still be running
 /// its handler; a claim younger than this bound is presumed alive and left
 /// running rather than double-fired.
@@ -908,9 +909,10 @@ struct OpenWorkspace {
     handle_kind: WorkspaceHandleKind,
     relay: Option<RelayConfiguration>,
     /// The autonomous capture driver (files actor + watcher + reconcile
-    /// loop), spawned only after the shadow binding succeeded. Shared so the
+    /// loop), spawned only after the root binding succeeded. Shared so the
     /// teardown paths can take it exactly once.
     capture: Arc<Mutex<Option<capture_driver::CaptureDriver>>>,
+    automation_recovery: Arc<Mutex<Option<automation_recovery::AutomationRecovery>>>,
     /// Held by every capture reconcile+apply and by versions.setActive across
     /// its forced full scan plus switch transaction. This drains an in-flight
     /// apply and prevents a new one from resolving the destination version
@@ -993,29 +995,36 @@ impl OpenWorkspace {
         }
     }
 
-    /// Signal the capture loop to stop without removing its handle. A version
+    /// Signal the background tasks to stop without removing their handles. A version
     /// fence that already owns the apply gate can still finish against the
     /// driver; teardown takes the handle only after acquiring that gate.
     fn request_capture_shutdown(&self) {
+        if let Some(recovery) = lock(&self.automation_recovery).as_ref() {
+            recovery.request_shutdown();
+        }
         if let Some(driver) = lock(&self.capture).as_ref() {
             driver.request_shutdown();
         }
     }
 
-    /// Take the driver and cancel it synchronously (no await point, so an
-    /// aborted RPC future can never leave a driver un-cancelled), returning
-    /// the join handle for callers that must await the full drain.
-    fn begin_capture_shutdown(&self) -> Option<tokio::task::JoinHandle<()>> {
-        lock(&self.capture)
+    /// Take and cancel the background tasks without an await point, so an
+    /// aborted RPC future cannot leave them running. Return
+    /// the join handles for callers that must await the full drain.
+    fn begin_capture_shutdown(&self) -> [Option<tokio::task::JoinHandle<()>>; 2] {
+        let capture = lock(&self.capture)
             .take()
-            .and_then(capture_driver::CaptureDriver::begin_shutdown)
+            .and_then(capture_driver::CaptureDriver::begin_shutdown);
+        let recovery = lock(&self.automation_recovery)
+            .take()
+            .and_then(automation_recovery::AutomationRecovery::begin_shutdown);
+        [capture, recovery]
     }
 
-    /// Cancel and await the capture driver's full drain (idempotent).
+    /// Cancel and await capture and automation recovery (idempotent).
     /// Strictly before the store-actor close: the driver may be mid-apply
     /// against the actor.
     async fn shutdown_capture(&self) {
-        if let Some(task) = self.begin_capture_shutdown() {
+        for task in self.begin_capture_shutdown().into_iter().flatten() {
             let _ = task.await;
         }
     }
@@ -1079,6 +1088,9 @@ pub struct EngineService {
         Arc<tokio::sync::Notify>,
         Arc<std::sync::atomic::AtomicBool>,
     )>,
+    /// Faults for the root-binding stamp a fresh open writes.
+    #[cfg(test)]
+    bind_root_faults: Option<Arc<dyn FaultInjector>>,
     /// PER-EngineService by design. Production runs exactly one EngineService per
     /// daemon process (the stdio host constructs a single service), so the
     /// `BLOB_EGRESS_BYTE_BUDGET` resident-memory ceiling is per-process there.
@@ -1291,6 +1303,8 @@ impl EngineService {
             open_install_probe: None,
             #[cfg(test)]
             owner_outbox_append_probe: None,
+            #[cfg(test)]
+            bind_root_faults: None,
             blob_egress_budget: BlobEgressBudget::new(BLOB_EGRESS_BYTE_BUDGET),
         }
     }
@@ -1495,10 +1509,6 @@ impl EngineService {
                 self.ydoc_settle(&ctx, request.workspace, request.params)
                     .await?
             }
-            "ydoc.applyExternalMarkdownEdit" => {
-                self.ydoc_apply_external_markdown_edit(&ctx, request.workspace, request.params)
-                    .await?
-            }
             "ydoc.close" => {
                 self.ydoc_close(&ctx, request.workspace, request.params)
                     .await?
@@ -1525,10 +1535,6 @@ impl EngineService {
                     request.idempotency_key,
                 )
                 .await?
-            }
-            "search.query" => {
-                self.search_query(&ctx, request.workspace, request.params)
-                    .await?
             }
             "search.queryPage" => {
                 self.search_query_page(&ctx, request.workspace, request.params)
@@ -2049,7 +2055,7 @@ impl EngineService {
             .is_some_and(|object| object.contains_key("captureAuthor"));
         let params: WorkspaceOpenParams = parse(params)?;
         let capture_author_json = if capture_author_supplied {
-            Some(validated_author(params.capture_author.as_ref(), None)?)
+            Some(validated_author(params.capture_author.as_ref())?)
         } else {
             None
         };
@@ -2068,10 +2074,8 @@ impl EngineService {
             }
             serial = Arc::clone(&self.open_lock).lock_owned() => serial,
         };
-        let validated =
-            shadow_fence::validate_shadow_root(PathBuf::from(&params.root_dir).as_path())
-                .map_err(map_shadow_fence)?;
-        let root = validated.root;
+        let root = root_binding::canonical_root(PathBuf::from(&params.root_dir).as_path())
+            .map_err(map_root_binding)?;
         let requested_mode = if params.skip_startup_maintenance {
             WorkspaceOpenMode::ReadOnly
         } else {
@@ -2208,7 +2212,14 @@ impl EngineService {
         let now_ms = now_ms()?;
         #[cfg(test)]
         let open_install_probe = self.open_install_probe.clone();
-        let shadow_token = validated.token.clone();
+        #[cfg(test)]
+        let bind_root_faults: Arc<dyn FaultInjector> = self
+            .bind_root_faults
+            .clone()
+            .unwrap_or_else(|| Arc::new(NoFaults));
+        #[cfg(not(test))]
+        let bind_root_faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
+        let binding_root = root.clone();
         let mut opening = tokio::task::spawn_blocking(move || {
             let opened = match requested_mode {
                 WorkspaceOpenMode::Full => supervisor.open(&actor_path, now_ms),
@@ -2226,20 +2237,49 @@ impl EngineService {
                     .and_then(|open| open.created_actor.then_some(actor_path)),
                 _open_serial,
             };
-            // The shadow bind runs here, inside the task no cancellation can
+            // The root binding runs here, inside the task no cancellation can
             // interrupt, not as the first await after it. The first open of a
             // workspace creates and migrates engine.db; a request dropped
             // between that commit and the bind left the store migrated but
             // unbound, and every later open then refused it as a mismatch,
             // permanently. Now the store is either bound or the actor
             // is closed before the request can observe either.
-            let opened = opened.and_then(|open| {
+            //
+            // A root with no binding yet gets a fresh token only when the
+            // store is fresh too: an existing engine.db under an unbound root
+            // was copied or moved here, and adopting it would let one
+            // database serve two roots.
+            //
+            // A fresh store whose binding cannot be read, written, or
+            // stamped is deleted again before the refusal returns. Leaving it
+            // would make the next open find an existing engine.db under a
+            // bound root it never recorded and refuse it as a mismatch, for
+            // good. So the stamp's storage failure lands in the same `bound`
+            // error as the marker's, not in the open's own error.
+            let opened = opened.map(|open| {
                 if !open.created_actor {
-                    return Ok((open, None));
+                    return (open, Ok(()));
                 }
-                let bound = tokio::runtime::Handle::current()
-                    .block_on(open.actor.bind_shadow_clone(shadow_token))?;
-                Ok((open, Some(bound)))
+                let bound = (|| {
+                    let token = match root_binding::read_root_binding(&binding_root)? {
+                        Some(token) => token,
+                        None if open.store_freshly_created => {
+                            root_binding::write_new_root_binding(&binding_root)?
+                        }
+                        None => return Err(root_binding::RootBindingError::DatabaseMismatch),
+                    };
+                    match tokio::runtime::Handle::current()
+                        .block_on(open.actor.bind_root(token, bind_root_faults))
+                    {
+                        Ok(true) => Ok(()),
+                        Ok(false) => Err(root_binding::RootBindingError::DatabaseMismatch),
+                        Err(error) => {
+                            eprintln!("engine: root binding stamp failed: {error}");
+                            Err(root_binding::RootBindingError::Unstamped)
+                        }
+                    }
+                })();
+                (open, bound)
             });
             #[cfg(test)]
             if open_guard.db_path.is_some()
@@ -2278,10 +2318,33 @@ impl EngineService {
             ));
         }
         let actor = actor_open.actor;
-        if bound != Some(true) {
-            return Err(map_shadow_fence(
-                shadow_fence::ShadowFenceError::DatabaseTokenMismatch,
-            ));
+        if let Err(error) = bound {
+            if actor_open.store_freshly_created {
+                // The guard's close finishes on a blocking task; the delete
+                // has to wait for it, or SQLite still holds the file.
+                drop(actor);
+                let removed = supervisor.begin_close(&db_path);
+                if let Ok(Some(closing)) = removed {
+                    let _ = tokio::task::spawn_blocking(move || closing.finish()).await;
+                }
+                open_guard.disarm();
+                // A delete that fails leaves the store the next open refuses
+                // as a mismatch. The refusal stands; the path says why.
+                for suffix in ["", "-wal", "-shm"] {
+                    let mut path = db_path.clone().into_os_string();
+                    path.push(suffix);
+                    let path = std::path::PathBuf::from(path);
+                    if let Err(error) = std::fs::remove_file(&path)
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        eprintln!(
+                            "engine: could not delete the orphaned store file {}: {error}",
+                            path.display()
+                        );
+                    }
+                }
+            }
+            return Err(map_root_binding(error));
         }
         let sequence = self
             .next_handle
@@ -2311,9 +2374,9 @@ impl EngineService {
                 .materialize_replay_pending(root.clone(), params.workspace_id.clone(), now_ms)
                 .await
                 .map_err(map_runtime)?;
-            // The files layer spawns only here — after the shadow binding
-            // succeeded — so an unmarked or mismatched root can never grow a
-            // watcher or files actor (the shadow-scope dormancy invariant).
+            // The files layer spawns only here, after the root binding
+            // succeeded, so an unbound or mismatched root can never grow a
+            // watcher or files actor.
             let capture = capture_enabled.then(|| {
                 capture_driver::CaptureDriver::spawn(
                     root.clone(),
@@ -2370,6 +2433,7 @@ impl EngineService {
                     "workspace.open (automation reclaim)",
                     actor.automation_reclaim_running(
                         params.workspace_id.clone(),
+                        None,
                         AUTOMATION_CLAIM_MAX_ATTEMPTS,
                         now_ms - AUTOMATION_CLAIM_REAP_IDLE_MS,
                         now_ms,
@@ -2384,6 +2448,24 @@ impl EngineService {
             }
             capture
         };
+        let automation_recovery = if requested_mode == WorkspaceOpenMode::Full {
+            let attempts = Self::read_under_ctx(
+                &cancellation,
+                "workspace.open (automation recovery snapshot)",
+                actor.automation_running_attempts(params.workspace_id.clone()),
+            )
+            .await?;
+            (!attempts.is_empty()).then(|| {
+                automation_recovery::AutomationRecovery::spawn(
+                    actor.clone(),
+                    params.workspace_id.clone(),
+                    attempts,
+                    self.events.clone(),
+                )
+            })
+        } else {
+            None
+        };
         lock(&self.handles).insert(
             handle.clone(),
             OpenWorkspace {
@@ -2397,6 +2479,7 @@ impl EngineService {
                     .relay
                     .map(|configuration| configuration.configuration()),
                 capture: Arc::new(Mutex::new(capture)),
+                automation_recovery: Arc::new(Mutex::new(automation_recovery)),
                 capture_apply_gate,
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
             },
@@ -2525,7 +2608,7 @@ impl EngineService {
             lock(&sessions).retain(|_, session| {
                 session.workspace != handle && !attached_handles.contains(&session.workspace)
             });
-            if let Some(drain) = capture_drain {
+            for drain in capture_drain.into_iter().flatten() {
                 let _ = drain.await;
             }
             clear_suppression.0.clear_workspace(&clear_suppression.1);
@@ -3180,9 +3263,9 @@ impl EngineService {
         if text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
         }
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedText.write (queued)")
@@ -3250,9 +3333,9 @@ impl EngineService {
         if bytes.len() > MAX_INBAND_CONTENT_BYTES {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
         }
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedBinary.write (queued)")
@@ -3329,9 +3412,9 @@ impl EngineService {
         }
         let sha256 = params.sha256.to_ascii_lowercase();
         let path = params.path.clone();
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let bytes = match params.bytes_base64 {
             Some(encoded) => {
@@ -3437,9 +3520,9 @@ impl EngineService {
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let from_path = params.from_path.clone();
         let to_path = params.to_path.clone();
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedText.rename (queued)")
@@ -3506,9 +3589,9 @@ impl EngineService {
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = params.path.clone();
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedText.delete (queued)")
@@ -3566,8 +3649,8 @@ impl EngineService {
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = validate_addressable_plaintext_path(&params.path)
             .map_err(|error| map_runtime(RuntimeError::Domain(error)))?;
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedText.rollback (queued)")
@@ -3662,9 +3745,9 @@ impl EngineService {
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = params.path.clone();
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versions.merge (queued)")
@@ -4541,7 +4624,7 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: CaptureSetAuthorParams = parse(params)?;
-        let author_json = validated_author(params.author.as_ref(), None)?;
+        let author_json = validated_author(params.author.as_ref())?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let _apply = tokio::select! {
@@ -5364,7 +5447,7 @@ impl EngineService {
         if text.len() > dohc_engine_domain::MAX_SECRET_FILE_BYTES {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
         }
-        let origin = validated_origin(Some(&params.origin), None)?;
+        let origin = validated_origin(Some(&params.origin))?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         // Prove the version reference and secret-floor routing keylessly before
@@ -5419,7 +5502,7 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let path = params.path.clone();
-        let origin = validated_origin(Some(&params.origin), None)?;
+        let origin = validated_origin(Some(&params.origin))?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let moment = open
@@ -5653,7 +5736,7 @@ impl EngineService {
         }
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
-        let origin = validated_origin(Some(&params.origin), None)?;
+        let origin = validated_origin(Some(&params.origin))?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let path = params.path.clone();
         let cancellation = OperationCancellation::new(ctx);
@@ -5737,7 +5820,7 @@ impl EngineService {
         let params: SecretsRestoreParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
-        let origin = validated_origin(Some(&params.origin), None)?;
+        let origin = validated_origin(Some(&params.origin))?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let path = params.path.clone();
         let cancellation = OperationCancellation::new(ctx);
@@ -8979,30 +9062,6 @@ impl EngineService {
         .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
     }
 
-    async fn ydoc_apply_external_markdown_edit(
-        &self,
-        ctx: &RequestContext,
-        handle: Option<WorkspaceHandle>,
-        params: Value,
-    ) -> Result<Value, WireError> {
-        let params: YdocApplyExternalMarkdownEditParams = parse(params)?;
-        let cancellation = OperationCancellation::new(ctx);
-        let open = self.open(handle.as_ref())?;
-        let _serial = tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption("ydoc.applyExternalMarkdownEdit (queued)"));
-            }
-            serial = open.session_ops.lock() => serial,
-        };
-        let _ = self.ydoc_session(handle.as_ref(), &params.session_id)?;
-        let _ = params.markdown;
-        Err(wire(
-            ErrorCode::InvalidParams,
-            "external-edit-unsupported-live",
-        ))
-    }
-
     async fn ydoc_close(
         &self,
         ctx: &RequestContext,
@@ -9485,7 +9544,7 @@ impl EngineService {
             local.metadata_summary.as_deref(),
             local.metadata_correlation_id.as_deref(),
         )?;
-        let metadata_origin = validated_origin(Some(&local.metadata_origin), None)?;
+        let metadata_origin = validated_origin(Some(&local.metadata_origin))?;
         // The answer is built after the mutation commits. Withholding (below)
         // takes out every body, never the strings beside them, so an answer
         // whose withheld form still passes the frame cannot be sent at all —
@@ -9621,48 +9680,6 @@ impl EngineService {
             withhold_all_resolve_answer_texts(&mut answer);
         }
         Ok(answer)
-    }
-
-    async fn search_query(
-        &self,
-        ctx: &RequestContext,
-        handle: Option<WorkspaceHandle>,
-        params: Value,
-    ) -> Result<Value, WireError> {
-        let params: SearchParams = parse(params)?;
-        let open = self.open(handle.as_ref())?;
-        let cancellation = OperationCancellation::new(ctx);
-        let results = open
-            .actor
-            .search(
-                open.root,
-                open.workspace_id,
-                params.version_id,
-                params.query,
-                params.limit,
-                params.now_ms.unwrap_or(now_ms()?),
-                cancellation.token(),
-            )
-            .await
-            .map_err(map_runtime)?;
-        Ok(Value::Array(
-            results
-                .into_iter()
-                .map(|result| {
-                    json!({
-                        "surface": match result.surface { SearchSurface::File => "file", SearchSurface::Chat => "chat" },
-                        "path": result.path,
-                        "title": result.title,
-                        "line": result.line,
-                        "preview": result.preview,
-                        "matchStart": result.match_start,
-                        "matchEnd": result.match_end,
-                        "threadId": result.thread_id,
-                        "objectId": result.object_id
-                    })
-                })
-                .collect(),
-        ))
     }
 
     async fn search_query_page(
@@ -10447,15 +10464,11 @@ struct VersionedTextWriteParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
@@ -10478,15 +10491,11 @@ struct VersionedBinaryWriteParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     moment_id: Option<String>,
     #[serde(default)]
@@ -10510,15 +10519,11 @@ struct VersionedBinaryWriteBlobParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     moment_id: Option<String>,
     #[serde(default)]
@@ -10538,15 +10543,11 @@ struct VersionedTextRenameParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
@@ -10563,15 +10564,11 @@ struct VersionedTextDeleteParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
@@ -10589,11 +10586,7 @@ struct VersionedTextRollbackParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     request_id: Option<String>,
 }
@@ -10619,15 +10612,11 @@ struct VersionedTextMergeParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
@@ -11017,25 +11006,6 @@ struct YdocSettleResult {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct YdocApplyExternalMarkdownEditParams {
-    session_id: String,
-    markdown: String,
-}
-
-#[allow(dead_code, reason = "C1 refuses this method before producing a result")]
-#[derive(Serialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-enum YdocApplyExternalMarkdownEditResult {
-    Merged { markdown: String },
-    Conflict { conflict_path: String },
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct YdocCloseParams {
     session_id: String,
     #[serde(default)]
@@ -11111,15 +11081,6 @@ struct LocalResolveDto {
     metadata_summary: Option<String>,
     metadata_correlation_id: Option<String>,
     author_json: Option<String>,
-    now_ms: Option<i64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SearchParams {
-    version_id: String,
-    query: String,
-    limit: Option<i64>,
     now_ms: Option<i64>,
 }
 
@@ -13310,37 +13271,18 @@ fn validate_metadata_fields(
     Ok(())
 }
 
-fn validated_origin(
-    origin: Option<&str>,
-    legacy_origin: Option<&str>,
-) -> Result<String, WireError> {
-    let value = origin
-        .or(legacy_origin)
-        .ok_or_else(|| wire(ErrorCode::InvalidParams, "invalid-metadata"))?;
-    match value {
-        "api" | "local-file" | "restore" | "sync" | "unknown" => Ok(value.to_owned()),
-        // Compatibility for pre-RPC-D callers. The new `origin` field remains
-        // the closed five-set; legacy `metadataOrigin: agent` represented an
-        // API write before author attribution became a separate field.
-        "agent" if origin.is_none() => Ok("api".to_owned()),
+fn validated_origin(origin: Option<&str>) -> Result<String, WireError> {
+    match origin {
+        Some(value @ ("api" | "local-file" | "restore" | "sync" | "unknown")) => {
+            Ok(value.to_owned())
+        }
         _ => Err(wire(ErrorCode::InvalidParams, "invalid-metadata")),
     }
 }
 
-fn validated_author(
-    author: Option<&Value>,
-    legacy_author_json: Option<&str>,
-) -> Result<Option<String>, WireError> {
-    if author.is_some() && legacy_author_json.is_some() {
-        return Err(wire(ErrorCode::InvalidParams, "invalid-metadata"));
-    }
-    let value = match author {
-        Some(value) => value.clone(),
-        None => match legacy_author_json {
-            Some(raw) => serde_json::from_str(raw)
-                .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-metadata"))?,
-            None => return Ok(None),
-        },
+fn validated_author(author: Option<&Value>) -> Result<Option<String>, WireError> {
+    let Some(value) = author else {
+        return Ok(None);
     };
     let object = value
         .as_object()
@@ -13653,8 +13595,7 @@ fn map_runtime(error: RuntimeError) -> WireError {
                     | dohc_engine_crypto::CryptoError::InvalidBase64 => ErrorCode::InvalidParams,
                     dohc_engine_crypto::CryptoError::DecryptFailed
                     | dohc_engine_crypto::CryptoError::InvalidKeyLength
-                    | dohc_engine_crypto::CryptoError::KeyFileMalformed
-                    | dohc_engine_crypto::CryptoError::EnvelopeUnwrapFailed => ErrorCode::Internal,
+                    | dohc_engine_crypto::CryptoError::KeyFileMalformed => ErrorCode::Internal,
                 },
                 _ => ErrorCode::InvalidParams,
             };
@@ -13753,8 +13694,7 @@ fn map_domain_code(error: DomainError) -> ErrorCode {
             | dohc_engine_crypto::CryptoError::InvalidBase64 => ErrorCode::InvalidParams,
             dohc_engine_crypto::CryptoError::DecryptFailed
             | dohc_engine_crypto::CryptoError::InvalidKeyLength
-            | dohc_engine_crypto::CryptoError::KeyFileMalformed
-            | dohc_engine_crypto::CryptoError::EnvelopeUnwrapFailed => ErrorCode::Internal,
+            | dohc_engine_crypto::CryptoError::KeyFileMalformed => ErrorCode::Internal,
         },
         DomainError::PayloadTooLarge { .. } => ErrorCode::PayloadTooLarge,
         DomainError::WorkspaceNotFound
@@ -13853,8 +13793,8 @@ fn map_search_code(error: SearchError) -> ErrorCode {
     }
 }
 
-fn map_shadow_fence(_error: shadow_fence::ShadowFenceError) -> WireError {
-    wire(ErrorCode::InvalidParams, "shadow workspace refused")
+fn map_root_binding(error: root_binding::RootBindingError) -> WireError {
+    WireError::new(ErrorCode::InvalidParams, error.to_string())
 }
 
 fn method_requires_initial_capture_ready(method: &str) -> bool {
@@ -13956,12 +13896,12 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dohc_engine_runtime::{FaultInjector, FaultPoint, LifecycleState};
+    use dohc_engine_runtime::{FaultPoint, LifecycleState};
     use dohc_engine_sync::ObservedBytes;
-    use dohc_engine_testkit::{GateFaults, ScratchDir};
+    use dohc_engine_testkit::{GateFaults, ScratchDir, ScriptedFaults};
     use std::time::Duration;
 
-    const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const BINDING_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     fn owner_outbox_append_params(workspace_id: &str, append_key: &str) -> Value {
         let vectors: Value = serde_json::from_str(include_str!(
@@ -14512,8 +14452,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn opening_a_workspace_over_a_foreign_engine_db_names_the_refusal() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let engine_dir = scratch.path().join(".dohc").join("engine");
         std::fs::create_dir_all(&engine_dir).expect("engine dir");
         {
@@ -14703,7 +14641,6 @@ mod tests {
             "moments.get",
             "moments.list",
             "search.ensureIndex",
-            "search.query",
             "search.queryChatMessagesGranular",
             "search.queryPage",
             "secrets.apply",
@@ -14751,7 +14688,6 @@ mod tests {
             "watcher.status",
             "workspace.close",
             "workspace.open",
-            "ydoc.applyExternalMarkdownEdit",
             "ydoc.close",
             "ydoc.evict",
             "ydoc.open",
@@ -14887,8 +14823,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn workspace_rebind_preserves_a_runner_owned_by_the_desktop() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let first_service = EngineService::with_supervisor(supervisor);
@@ -14988,18 +14922,95 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn automation_recovery_follows_full_workspace_lifetime_without_requiring_capture() {
+        let scratch = ScratchDir::new().expect("scratch");
+        root_binding::write_root_binding(scratch.path(), BINDING_TOKEN).expect("root binding");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+        let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
+        store
+            .bind_root_token(BINDING_TOKEN, &NoFaults)
+            .expect("bind root token");
+        drop(store);
+        for (capture_enabled, read_only, seed_claim) in [
+            (false, false, true),
+            (false, true, true),
+            (true, false, true),
+            (false, false, false),
+        ] {
+            let conn = rusqlite::Connection::open(&db_path).expect("seed connection");
+            conn.execute("DELETE FROM automation_claims", [])
+                .expect("reset claims");
+            if seed_claim {
+                conn.execute(
+                    "INSERT INTO automation_claims \
+                     (workspace_id,claim_id,automation_id,trigger_history_id,record_id,collection_path, \
+                      depth,state,attempts,created_at_ms,updated_at_ms) \
+                     VALUES ('automation-recovery-lifetime','interrupted','automation',1,'record','tasks', \
+                             0,'running',2,?1,?1)",
+                    [now_ms().expect("current time")],
+                ).expect("seed interrupted claim");
+            }
+            drop(conn);
+            let mut params = json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": "automation-recovery-lifetime",
+                "recoverRunningDispatches": false,
+                "skipStartupMaintenance": read_only,
+            });
+            if !capture_enabled {
+                params["captureMode"] = json!("none");
+            }
+            let opened = service
+                .workspace_open(&RequestContext::unbounded(), params)
+                .await
+                .expect("open workspace");
+            let handle: WorkspaceHandle =
+                serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+            let open = service.open(Some(&handle)).expect("open state");
+            assert_eq!(lock(&open.capture).is_some(), capture_enabled);
+            assert_eq!(
+                lock(&open.automation_recovery).is_some(),
+                seed_claim && !read_only
+            );
+
+            // The synchronous cleanup fallback has no Tokio runtime. Taking
+            // both tasks must cancel them there without spawning a join task.
+            let tasks = std::thread::spawn(move || open.begin_capture_shutdown())
+                .join()
+                .expect("background cancellation needs no runtime");
+            assert_eq!(
+                tasks.iter().flatten().count(),
+                usize::from(capture_enabled) + usize::from(seed_claim && !read_only),
+            );
+            for task in tasks.into_iter().flatten() {
+                task.await
+                    .expect("background task joins after cancellation");
+            }
+            let open = service.open(Some(&handle)).expect("binding still open");
+            assert!(lock(&open.capture).is_none());
+            assert!(lock(&open.automation_recovery).is_none());
+            service
+                .workspace_close(Some(handle))
+                .await
+                .expect("close workspace after drain");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn maintenance_free_open_does_not_apply_pending_migrations() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
+        root_binding::write_root_binding(scratch.path(), BINDING_TOKEN).expect("root binding");
         let db_path = scratch.path().join(".dohc/engine/engine.db");
         std::fs::create_dir_all(db_path.parent().expect("engine parent"))
             .expect("engine directory");
         let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
         assert!(
             store
-                .bind_shadow_clone_token(SHADOW_TOKEN)
-                .expect("bind shadow token")
+                .bind_root_token(BINDING_TOKEN, &NoFaults)
+                .expect("bind root token")
         );
         drop(store);
 
@@ -15048,16 +15059,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn maintenance_free_handle_is_not_reused_for_full_open() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
+        root_binding::write_root_binding(scratch.path(), BINDING_TOKEN).expect("root binding");
         let db_path = scratch.path().join(".dohc/engine/engine.db");
         std::fs::create_dir_all(db_path.parent().expect("engine parent"))
             .expect("engine directory");
         let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
         assert!(
             store
-                .bind_shadow_clone_token(SHADOW_TOKEN)
-                .expect("bind shadow token")
+                .bind_root_token(BINDING_TOKEN, &NoFaults)
+                .expect("bind root token")
         );
         drop(store);
 
@@ -15121,8 +15131,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn capture_mode_none_preserves_disk_drift_while_full_open_reconciles_it() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = EngineService::with_supervisor(supervisor);
@@ -15917,8 +15925,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn binary_write_records_suppression_in_the_root_scoped_registry() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let service = EngineService::new();
         let workspace_id = "binary-root-scoped-suppression";
         let opened = service
@@ -16016,17 +16022,61 @@ mod tests {
         drop(held);
     }
 
+    /// A fresh store whose root-binding stamp fails is deleted with the
+    /// refusal, so the next open mints again instead of finding an engine.db
+    /// that never recorded the marker and refusing it as a mismatch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fresh_store_whose_stamp_fails_is_deleted_and_the_next_open_binds() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let mut service = EngineService::with_supervisor(supervisor);
+        // One-shot: the first stamp's transaction rolls back as a
+        // `PersistFailed`; the second open's stamp commits.
+        service.bind_root_faults = Some(ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist));
+        let params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "stamp-fails",
+            "captureMode": "none"
+        });
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+
+        let refused = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await
+            .expect_err("a stamp that fails refuses the open");
+        assert_eq!(refused.code, ErrorCode::InvalidParams);
+        assert_eq!(
+            refused.message,
+            "engine database could not record its root binding"
+        );
+        assert!(!db_path.exists(), "the unstamped store is deleted");
+        assert!(
+            root_binding::read_root_binding(scratch.path())
+                .expect("read")
+                .is_some(),
+            "the marker the open minted stays"
+        );
+
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .expect("the next open binds the fresh store to the marker");
+        let _handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        assert!(db_path.exists());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_workspace_open_releases_actor_before_immediate_reopen() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
+        root_binding::write_root_binding(scratch.path(), BINDING_TOKEN).expect("root binding");
         let db_path = scratch.path().join(".dohc/engine/engine.db");
         let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
         assert!(
             store
-                .bind_shadow_clone_token(SHADOW_TOKEN)
-                .expect("bind shadow token")
+                .bind_root_token(BINDING_TOKEN, &NoFaults)
+                .expect("bind root token")
         );
         drop(store);
         let supervisor: &'static WorkspaceSupervisor =
@@ -16098,8 +16148,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mutation_write_waits_for_session_ops_before_lease_check_and_commit() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = Arc::new(EngineService::with_supervisor(supervisor));
@@ -16530,8 +16578,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_workspace_close_keeps_reopen_serialized_until_actor_is_closed() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = Arc::new(EngineService::with_supervisor(supervisor));
@@ -16646,8 +16692,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn aborted_workspace_close_cannot_retain_a_cancelled_capture_driver() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         std::fs::write(scratch.path().join("seed.md"), "captured before close").expect("seed file");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
@@ -16740,8 +16784,6 @@ mod tests {
     #[tokio::test]
     async fn two_services_share_close_reopen_serialization_for_one_root() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service_a = Arc::new(EngineService::with_supervisor(supervisor));
@@ -16805,8 +16847,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn capture_driver_status_tracks_the_workspace_lifecycle() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = Arc::new(EngineService::with_supervisor(supervisor));
@@ -16852,8 +16892,6 @@ mod tests {
     #[tokio::test]
     async fn interleaved_workspace_reopens_return_live_actors_without_leaks() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         // Isolated supervisor so the actor-count baseline can't race other tests
         // sharing the process-global one.
         let supervisor: &'static WorkspaceSupervisor =
@@ -16931,8 +16969,6 @@ mod tests {
     #[tokio::test]
     async fn evicting_a_dead_binding_drops_its_pending_cursors() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = Arc::new(EngineService::with_supervisor(supervisor));

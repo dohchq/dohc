@@ -57,7 +57,6 @@ const VERSIONED_TEXT_STORE_ERROR_CODES = [
   "file-too-large",
   "file-not-found",
   "fork-base-not-found",
-  "invalid-generated-id",
   "invalid-input",
   "invalid-metadata",
   "invalid-object",
@@ -74,7 +73,6 @@ const VERSIONED_TEXT_STORE_ERROR_CODES = [
   "version-name-conflict",
   "version-not-found",
   "workspace-mismatch",
-  "write-lane-reentry",
 ] as const satisfies readonly VersionedTextStoreErrorCode[];
 
 // A new domain code must be listed above, or this stops compiling.

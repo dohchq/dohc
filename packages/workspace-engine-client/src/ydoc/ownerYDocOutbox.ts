@@ -5,8 +5,7 @@ import { parseLiveUpdateReceipt } from "@dohc/live-session-contract/live-update-
 import type { LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import type { DaemonRequesterClient } from "../live/daemonLiveAdapter";
 import { WorkspaceDaemonRequester } from "../live/daemonLiveAdapter";
-import type { WorkspaceHandle } from "./generated/WorkspaceHandle";
-import type { JsonValue } from "./generated/serde_json/JsonValue";
+import type { JsonValue, WorkspaceHandle } from "../protocol";
 
 export { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 export type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";

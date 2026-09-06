@@ -5,14 +5,7 @@ import { cpus } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  MAX_DESKTOP_CAPTURE_TEXT_BYTES,
-  RESOLVE_REQUEST_FRAME_BYTES,
   VERSIONED_METHOD,
-  VersionedLoopbackEngine,
-  conflictListRowForWire,
-  jsonStringEncodedLength,
-  settledConflictForWire,
-  settledSnapshotForWire,
   type ConflictRecord,
   type JsonObject,
   type JsonValue,
@@ -21,24 +14,30 @@ import {
   type Response,
 } from "@dohc/workspace-engine-client";
 import {
+  MAX_DESKTOP_CAPTURE_TEXT_BYTES,
+  RESOLVE_REQUEST_FRAME_BYTES,
+  jsonStringEncodedLength,
+} from "@dohc/workspace-engine-client/limits";
+import {
+  VersionedLoopbackEngine,
+  conflictListRowForWire,
+  settledConflictForWire,
+  settledSnapshotForWire,
+} from "@dohc/workspace-engine-client/testing";
+import {
   encodedEnvelopeBytes,
   requestEnvelope,
   type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
-import { mockLiveSessions } from "../testing/liveEngineSessions";
+import { mockDaemonSessions } from "../testing/liveEngineSessions";
 import {
   createWorkspaceEngineCapture,
-  type EngineDiskWriter,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
-import {
-  createCaptureLiveStores,
-  type CaptureVersionedTextStore,
-} from "./workspaceEngineCaptureLiveStore";
 
 import { createTestScratch } from "./testTemp";
-// PR 0M-4 named-version desktop orchestration: active-version capture routing,
-// switch recovery, merge/conflict handling, restore, and scale. The stateful
+// Named-version desktop orchestration: active-version capture routing,
+// merge/conflict handling, restore, and scale. The stateful
 // loopback uses the daemon RPC adapters and real sha256 values, but capture and
 // materialization stay desktop-owned because the loopback has no filesystem
 // watcher. Production daemon-owned capture and materialization run through the
@@ -551,19 +550,17 @@ async function readText(root: string, path: string): Promise<string> {
   return readFile(join(root, path), "utf8");
 }
 
-async function readBytes(root: string, path: string): Promise<Buffer> {
-  return readFile(join(root, path));
-}
-
 function sha256Utf8(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+async function readBytes(root: string, path: string): Promise<Buffer> {
+  return readFile(join(root, path));
 }
 
 function desktopOwnedLoopbackCapture(root: string, options: {
   attachmentId?: symbol;
   onError?: (context: string, error: unknown) => void;
-  diskWriter?: EngineDiskWriter;
-  store?: CaptureVersionedTextStore;
   rustEngineSessions?: EngineWorkspaceSessions;
 } = {}): WorkspaceEngineCapture {
   const {
@@ -576,7 +573,12 @@ function desktopOwnedLoopbackCapture(root: string, options: {
     rootPath: root,
     attachmentId,
     rustEngineSessions:
-      rustEngineSessions ?? mockLiveSessions(new VersionedLoopbackEngine()),
+      rustEngineSessions ??
+      mockDaemonSessions({
+        rootPath: root,
+        workspaceId: WORKSPACE_ID,
+        loopback: new VersionedLoopbackEngine(),
+      }),
     ...rest,
   });
 }
@@ -589,7 +591,12 @@ function desktopOwnedVersionLoopbackCapture(
   requests?: Request[],
 ): WorkspaceEngineCapture {
   return desktopOwnedLoopbackCapture(root, {
-    rustEngineSessions: mockLiveSessions(loopback, requests),
+    rustEngineSessions: mockDaemonSessions({
+      rootPath: root,
+      workspaceId: WORKSPACE_ID,
+      loopback,
+      requests,
+    }),
   });
 }
 
@@ -653,13 +660,12 @@ describe("active-version capture routing", () => {
     engine.captureBatch([{ path: "plan.md", operation: "update" }]);
     await engine.stop();
 
-    // Positive proof of the backend, not of the outcome: a silent relapse to
-    // the legacy in-process store would never open a daemon workspace, never
-    // create a version over the wire, and never write text over it.
+    // The chain opens the daemon workspace and creates the version over the
+    // wire; the daemon writes the captured text into its own store.
     const methods = requests.map((request) => request.method);
     expect(methods).toContain("workspace.open");
     expect(methods).toContain(VERSIONED_METHOD.versionsCreateNamed);
-    expect(methods).toContain(VERSIONED_METHOD.textWrite);
+    expect(methods).not.toContain(VERSIONED_METHOD.textWrite);
 
     const draftWrites = (await readDaemonMoments(loopback)).filter(
       (moment) => moment.path === "plan.md" && moment.text === "draft text\n",
@@ -771,67 +777,6 @@ describe("switchVersion", () => {
     await engine.stop();
   });
 
-  it("suppresses engine re-capture of its own switch writes via expected events", async () => {
-    const root = await createTestScratch("dohc-version-ops-");
-    await write(root, "plan.md", "v1 text\n");
-    // Boundary signal for suppression: after the switch, processing the
-    // simulated watcher event must never touch the engine store for the
-    // path at all. "No new moments" alone would pass vacuously (the disk
-    // content equals the engine tip, so an unsuppressed capture records
-    // nothing either) — the read counter is what fails when suppression
-    // breaks.
-    //
-    // The counted store wraps the DAEMON store, not a legacy one. Injecting a
-    // store used to force the legacy engine, which made this counter and the
-    // daemon mutually exclusive. Required Rust sessions now fix the engine
-    // choice, so this read is a real `versionedText.read` over the wire.
-    const loopback = new VersionedLoopbackEngine();
-    const sessions = mockLiveSessions(loopback);
-    const attachmentId = Symbol("test-workspace-attachment");
-    const store = createCaptureLiveStores(
-      {
-        workspaceId: WORKSPACE_ID,
-        rootPath: root,
-        attachmentId,
-      },
-      sessions,
-    ).store;
-    let planReads = 0;
-    const countingStore: CaptureVersionedTextStore = {
-      ...store,
-      async readTextFile(input) {
-        if (input.path === "plan.md") planReads += 1;
-        return store.readTextFile(input);
-      },
-    };
-    const engine = desktopOwnedLoopbackCapture(root, {
-      attachmentId,
-      store: countingStore,
-      rustEngineSessions: sessions,
-    });
-    engine.start();
-    await engine.flush();
-    await engine.createVersion("Draft");
-    await write(root, "plan.md", "draft text\n");
-    await engine.switchVersion("main");
-    // The counter is only a suppression signal if the un-suppressed path does
-    // read: a wrapper that never sees a read would report zero for any reason.
-    expect(planReads).toBeGreaterThan(0);
-
-    const momentsBefore = (await readDaemonMoments(loopback)).length;
-    planReads = 0;
-    // Simulate the watcher observing the switch's disk writes: the expected
-    // event registrations must swallow them — zero new engine moments and
-    // zero engine reads for the suppressed path.
-    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
-    await engine.stop();
-    expect(planReads).toBe(0);
-    expect(await readDaemonMoments(loopback)).toHaveLength(momentsBefore);
-    expect(
-      sha256Utf8(await readText(root, "plan.md")),
-    ).toBe(sha256Utf8("v1 text\n"));
-  });
-
   it("is a no-op when switching to the already-active version", async () => {
     const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "v1 text\n");
@@ -863,91 +808,6 @@ describe("switchVersion", () => {
     await engine.stop();
   });
 
-  it("recovers honestly from a mid-switch disk failure", async () => {
-    const root = await createTestScratch("dohc-version-ops-");
-    await write(root, "a.md", "main a\n");
-    await write(root, "b.md", "main b\n");
-    const failures: string[] = [];
-    let failOn: string | null = null;
-    const diskWriter: EngineDiskWriter = {
-      async writeTextFile(absolutePath, text) {
-        if (failOn && absolutePath.endsWith(failOn)) {
-          throw new Error("injected disk failure");
-        }
-        await mkdir(dirname(absolutePath), { recursive: true });
-        await writeFile(absolutePath, text, "utf8");
-      },
-      async writeBinaryFile(absolutePath, bytes) {
-        if (failOn && absolutePath.endsWith(failOn)) {
-          throw new Error("injected disk failure");
-        }
-        await mkdir(dirname(absolutePath), { recursive: true });
-        await writeFile(absolutePath, bytes);
-      },
-      async deletePath(absolutePath) {
-        await rm(absolutePath, { force: true });
-      },
-    };
-    const loopback = new VersionedLoopbackEngine();
-    const engine = desktopOwnedLoopbackCapture(root, {
-      diskWriter,
-      rustEngineSessions: mockLiveSessions(loopback),
-      onError: (context) => {
-        failures.push(context);
-      },
-    });
-    engine.start();
-    await engine.flush();
-    await engine.createVersion("Draft");
-    await write(root, "a.md", "draft a\n");
-    await write(root, "b.md", "draft b\n");
-    engine.captureBatch([
-      { path: "a.md", operation: "update" },
-      { path: "b.md", operation: "update" },
-    ]);
-    await engine.flush();
-
-    // Fail the second file's write while switching back to Main.
-    failOn = "b.md";
-    await expect(engine.switchVersion("main")).rejects.toThrow(
-      /Could not update b\.md/,
-    );
-    await engine.flush();
-
-    // The crash-honest invariant: Main is recorded active, and Main's engine
-    // tip mirrors the actual (partial) disk state — a.md switched, b.md not.
-    const { activeVersionId } = await engine.listVersions();
-    expect(activeVersionId).toBe("main");
-    expect(await readText(root, "a.md")).toBe("main a\n");
-    expect(await readText(root, "b.md")).toBe("draft b\n");
-    const mainTipForB = (await readDaemonMoments(loopback))
-      .filter((moment) => moment.versionId === "main" && moment.path === "b.md")
-      .at(-1);
-    expect(mainTipForB?.text).toBe("draft b\n");
-
-    // Nothing was lost: Draft still holds both edits, and switching remains
-    // functional once the disk recovers.
-    failOn = null;
-    const draftId = await versionIdByName(engine, "Draft");
-    await engine.switchVersion(draftId);
-    expect(await readText(root, "a.md")).toBe("draft a\n");
-    expect(await readText(root, "b.md")).toBe("draft b\n");
-    // The interrupted switch honestly recorded the partial disk state as
-    // Main's new tip (b.md = "draft b"), so switching back shows that tip —
-    // while the pre-failure content stays recoverable in Main's history.
-    await engine.switchVersion("main");
-    expect(await readText(root, "a.md")).toBe("main a\n");
-    expect(await readText(root, "b.md")).toBe("draft b\n");
-    expect(
-      (await readDaemonMoments(loopback)).some(
-        (moment) =>
-          moment.versionId === "main" &&
-          moment.path === "b.md" &&
-          moment.text === "main b\n",
-      ),
-    ).toBe(true);
-    await engine.stop();
-  });
 });
 
 describe("compareVersions", () => {

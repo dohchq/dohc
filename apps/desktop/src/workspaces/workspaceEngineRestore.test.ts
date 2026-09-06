@@ -4,10 +4,10 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   VERSIONED_METHOD,
-  VersionedLoopbackEngine,
   type Request,
 } from "@dohc/workspace-engine-client";
-import { mockLiveSessions } from "../testing/liveEngineSessions";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
+import { mockDaemonSessions } from "../testing/liveEngineSessions";
 import {
   createWorkspaceEngineCapture,
   type WorkspaceEngineCapture,
@@ -29,20 +29,21 @@ async function readText(root: string, path: string): Promise<string> {
   return readFile(join(root, path), "utf8");
 }
 
-// Every test here runs on the daemon path: `rustEngineSessions` selects the
-// Rust engine, and the loopback behind it holds real state and real sha256, so
-// the history these tests read back is recorded state rather than a canned
-// responder. Passing `requests` is what lets a test prove the path it took.
+// The loopback holds real state and real sha256, and the fake daemon in
+// front of it ingests the folder on `capture.flush`, so the history these
+// tests read back is recorded state rather than a canned responder. Passing
+// `requests` is what lets a test prove the path it took.
 function capture(
   root: string,
   loopback: VersionedLoopbackEngine,
   requests?: Request[],
 ): WorkspaceEngineCapture {
+  const workspaceId = "engine-restore-test";
   return createWorkspaceEngineCapture({
-    workspaceId: "engine-restore-test",
+    workspaceId,
     rootPath: root,
     attachmentId: Symbol("test-workspace-attachment"),
-    rustEngineSessions: mockLiveSessions(loopback, requests),
+    rustEngineSessions: mockDaemonSessions({ rootPath: root, workspaceId, loopback, requests }),
   });
 }
 
@@ -60,14 +61,15 @@ describe("engine history reads", () => {
     await engine.flush();
 
     const page = await engine.listMoments();
-    // Positive proof of the path: a relapse to the legacy in-process engine
-    // never opens a daemon workspace, never writes text over the wire, and
-    // never asks the daemon for the timeline. Assert all three, so the suite
-    // cannot go quietly green on the engine it is being migrated off.
+    // The chain opens the daemon workspace and asks it for the timeline; the
+    // daemon, not the chain, writes the captured text into its store.
     const methods = requests.map((request) => request.method);
     expect(methods).toContain("workspace.open");
-    expect(methods).toContain(VERSIONED_METHOD.textWrite);
+    expect(methods).not.toContain(VERSIONED_METHOD.textWrite);
     expect(methods).toContain(VERSIONED_METHOD.historyPage);
+    expect(loopback.requests.map((request) => request.method)).toContain(
+      VERSIONED_METHOD.textWrite,
+    );
     expect(page.activeVersionId).toBe("main");
     expect(page.moments).toHaveLength(2);
     expect(page.moments[0].recordedAtMs).toBeGreaterThanOrEqual(
@@ -159,10 +161,14 @@ describe("engine restore", () => {
 
     expect(await readText(root, "doc.md")).toBe("original\n");
     const moments = (await engine.listMoments()).moments;
-    // Newest first: restore moment, then the pre-restore save.
+    // Newest first: the restore moment, then the daemon's capture of the
+    // unsaved edit, which the restore flushed before it read the file.
     expect(moments[0].metadata.summary).toBe("Restored doc.md");
-    expect(moments[1].metadata.summary).toBe("Saved latest edits");
-    expect(moments[0].metadata.correlationId).toBe(moments[1].metadata.correlationId);
+    expect(moments[0].metadata.origin).toBe("restore");
+    // The daemon does not group this capture with the restore. A shared
+    // correlationId and a "Saved latest edits" summary were the deleted JS
+    // path's own minting.
+    expect(moments[1].metadata.origin).toBe("local-file");
     const saved = await engine.readMoment(moments[1].id);
     const savedPayload = saved?.protected === false ? saved.moment.payload : undefined;
     expect(savedPayload?.after.text).toBe("uncaptured newest\n");

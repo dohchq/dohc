@@ -29,9 +29,9 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
-import { encodeFixtureBigInts } from "../../../../packages/workspace-engine-client/src/workspace/collectionFieldPipeline.testSupport";
+import { encodeFixtureBigInts } from "@dohc/workspace-engine-client/testing";
 import { decodeCollectionValue } from "../../../../packages/workspace-engine-client/src/workspace/workspaceWireContract";
-import type { JsonValue } from "../../../../packages/workspace-engine-client/src/ydoc/generated/serde_json/JsonValue";
+import type { JsonValue } from "@dohc/workspace-engine-client";
 
 function createWorkspaceEngineCapture(
   options: Omit<WorkspaceEngineCaptureOptions, "attachmentId">,
@@ -133,7 +133,6 @@ it.skipIf(engine.missing)(
     const capture = createAttachedWorkspaceEngineCapture({
       ...workspace,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
     try {
       // `capture.flush()` drains changes the OS watcher has already observed;
@@ -211,7 +210,6 @@ it.skipIf(engine.missing)(
     const capture = createAttachedWorkspaceEngineCapture({
       ...workspace,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
     const queryRecords = async () =>
       await sessions.run(
@@ -320,13 +318,6 @@ it.skipIf(engine.missing)(
   "drives watcher-batch capture, readback, and version-switch materialization through the real daemon",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-e2e-");
-    const markerDirectory = join(root, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(
-      join(markerDirectory, "SHADOW_CLONE"),
-      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "utf8",
-    );
     const lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
@@ -337,7 +328,6 @@ it.skipIf(engine.missing)(
       workspaceId: "capture-rust-e2e",
       rootPath: root,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
     try {
       const mainText = `main\n${"m".repeat(64 * 1024)}`;
@@ -412,13 +402,6 @@ it.skipIf(engine.missing)(
   "keeps an edit made outside dohc when the open document closes",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-drift-");
-    const markerDirectory = join(root, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(
-      join(markerDirectory, "SHADOW_CLONE"),
-      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "utf8",
-    );
     const lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
@@ -429,7 +412,6 @@ it.skipIf(engine.missing)(
       workspaceId: "capture-rust-drift",
       rootPath: root,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
     const outside = "written outside dohc\n";
     try {
@@ -508,7 +490,6 @@ it.skipIf(engine.missing)(
           workspaceId: openedWorkspace.workspaceId,
           rootPath: openedWorkspace.rootPath,
           rustEngineSessions: firstSessions,
-          daemonOwnsCapture: true,
         });
         openedState.capture = capture;
         return { capture, shareView: false };
@@ -552,7 +533,6 @@ it.skipIf(engine.missing)(
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
         rustEngineSessions: secondSessions,
-        daemonOwnsCapture: true,
       });
       try {
         const moments = await waitForPathMoments(reopened, "final.md", 1);
@@ -596,7 +576,6 @@ it.skipIf(engine.missing)(
       workspaceId: "capture-rust-codes",
       rootPath: root,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
     try {
       await capture.createVersion("Draft");
@@ -623,13 +602,6 @@ it.skipIf(engine.missing)(
   "closes clean, then captures an outside edit deferred by its live lease",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-race-");
-    const markerDirectory = join(root, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(
-      join(markerDirectory, "SHADOW_CLONE"),
-      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "utf8",
-    );
     const lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
@@ -645,7 +617,6 @@ it.skipIf(engine.missing)(
     const capture = createAttachedWorkspaceEngineCapture({
       ...workspace,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
       onError: (context) => errors.push(context),
     });
     const outside = "written outside dohc\n";
@@ -759,13 +730,6 @@ it.skipIf(engine.missing || process.platform !== "win32")(
   "surfaces a locked save and lands it by itself once the lock releases",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-lock-");
-    const markerDirectory = join(root, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(
-      join(markerDirectory, "SHADOW_CLONE"),
-      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "utf8",
-    );
     const lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
@@ -777,7 +741,6 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       workspaceId: "capture-rust-lock",
       rootPath: root,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
       onError: (context) => errors.push(context),
     });
     const absolute = join(root, "note.md");
@@ -871,13 +834,6 @@ it.skipIf(engine.missing)(
   "keeps the close loud when unsettled edits meet a deferred outside edit",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-loud-");
-    const markerDirectory = join(root, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(
-      join(markerDirectory, "SHADOW_CLONE"),
-      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "utf8",
-    );
     const lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
@@ -893,7 +849,6 @@ it.skipIf(engine.missing)(
     const capture = createAttachedWorkspaceEngineCapture({
       ...workspace,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
       onError: (context) => errors.push(context),
     });
     const outside = "written outside dohc\n";
@@ -1000,7 +955,6 @@ it.skipIf(engine.missing)(
       workspaceId: "capture-rust-absent-head",
       rootPath: root,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
     try {
       // Nothing in the version, nothing on disk: the path is not here.
@@ -1074,13 +1028,6 @@ it.skipIf(engine.missing)(
   "a no-edit open and close of a plugin README feeds the watcher nothing; a real edit still does",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-815-");
-    const markerDirectory = join(root, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(
-      join(markerDirectory, "SHADOW_CLONE"),
-      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "utf8",
-    );
     const lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
@@ -1091,7 +1038,6 @@ it.skipIf(engine.missing)(
       workspaceId: "capture-rust-815",
       rootPath: root,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
     const workspace: CreatedWorkspace = {
       workspaceId: "capture-rust-815",

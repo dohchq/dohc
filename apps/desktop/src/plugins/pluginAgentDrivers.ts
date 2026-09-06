@@ -23,17 +23,16 @@ import {
   type PluginDriverStartSessionParams,
 } from "./pluginHostProtocol";
 import { errorMessage, raceWithTimeout } from "./pluginShared";
+import type { PluginJsonValue } from "@dohc/sdk/node";
 
 /**
  * How many plugin-contributed drivers one workspace may register.
  *
- * dohc ships two drivers, and the BYOAI plan is one plugin per harness: a
- * person connecting Codex, Claude Code, and one harness of their own
- * registers three. Sixteen is several times that, and it is the number that
- * keeps the merged list inside the bound the agent panel's IPC contract
- * already carries (20 rows, two of them dohc's own). Registering past it
- * refuses the plugin rather than break the list every other driver is shown
- * in.
+ * The BYOAI plan is one plugin per harness: a person connecting Codex, Claude
+ * Code, and one harness of their own registers three. Sixteen is several
+ * times that, and it keeps the list inside the bound the agent panel's IPC
+ * contract already carries (20 rows). Registering past it refuses the plugin
+ * rather than break the list every other driver is shown in.
  */
 export const MAX_WORKSPACE_PLUGIN_DRIVERS = 16;
 
@@ -67,7 +66,7 @@ function clamp(value: string | undefined, max: number): string | undefined {
   return value.length <= max ? value : value.slice(0, max);
 }
 
-const JsonValue: z.ZodType<unknown> = z.lazy(() =>
+const JsonValue: z.ZodType<PluginJsonValue> = z.lazy(() =>
   z.union([
     z.string(),
     z.number(),
@@ -355,7 +354,7 @@ function normalizeProbe(value: unknown): AgentProbe {
 }
 
 /** What this module needs from PluginHost, and nothing more. */
-export interface PluginDriverRequestHost {
+interface PluginDriverRequestHost {
   requestDriver<T = unknown>(
     pluginId: string,
     spawnId: string,
@@ -365,10 +364,8 @@ export interface PluginDriverRequestHost {
   stopDriverSpawn(pluginId: string, spawnId: string): Promise<void>;
 }
 
-export interface PluginAgentDriversOptions {
+interface PluginAgentDriversOptions {
   host: PluginDriverRequestHost;
-  /** The ids dohc's own drivers hold. No plugin may take one. */
-  reservedDriverIds: readonly string[];
   /** Where a boundary refusal is reported. Defaults to the main-process log. */
   onWarning?: (message: string) => void;
 }
@@ -403,7 +400,6 @@ interface DriverRegistration {
 export function createPluginAgentDrivers(options: PluginAgentDriversOptions) {
   const registrations = new Map<string, DriverRegistration>();
   const sessions = new Map<string, DriverSessionState>();
-  const reserved = new Set(options.reservedDriverIds);
   const warn = options.onWarning ??
     ((message: string) => console.error(`[desktop] ${message}`));
 
@@ -637,11 +633,6 @@ export function createPluginAgentDrivers(options: PluginAgentDriversOptions) {
         );
       }
       for (const driver of drivers) {
-        if (reserved.has(driver.id)) {
-          throw new Error(
-            `Driver id "${driver.id}" is one dohc ships. Rename this plugin's driver.`,
-          );
-        }
         const owner = ownerOf(driver.id);
         if (owner !== undefined && owner !== pluginId) {
           throw new Error(
@@ -702,8 +693,8 @@ export function createPluginAgentDrivers(options: PluginAgentDriversOptions) {
         return;
       }
       // The permission policy stays in this process — the plugin never sees
-      // it. A policy that decides answers the driver straight away, exactly
-      // as a built-in driver answers its own harness; a policy that declines
+      // it. A policy that decides answers the driver straight away; a policy
+      // that declines
       // to decide leaves the request for the person to answer.
       const decision = state.permissionPolicy?.(event) ?? null;
       state.onEvent(event);
