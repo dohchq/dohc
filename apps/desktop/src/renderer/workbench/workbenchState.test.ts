@@ -342,7 +342,7 @@ describe("tabs", () => {
   });
 
   it.each([
-    ["site preview", siteTabPath("client-portal"), "dohc://site/%63lient-portal"],
+    ["site preview", siteTabPath("client-portal"), "dohc://app/%63lient-portal"],
     [
       "plugin panel",
       pluginPanelTabPath("hello-plugin", "main"),
@@ -621,7 +621,7 @@ describe("tabs", () => {
     expect(isSiteTabPath(path)).toBe(true);
     expect(isVirtualTabPath(path)).toBe(true);
     expect(parseSiteTabPath(path)).toBe("clients/acme website");
-    expect(parseSiteTabPath("dohc://site/")).toBeNull();
+    expect(parseSiteTabPath("dohc://app/")).toBeNull();
     expect(parseSiteTabPath(null)).toBeNull();
     expect(parseSiteTabPath("not-a-site-path")).toBeNull();
 
@@ -1025,7 +1025,7 @@ describe("rail widths", () => {
 });
 
 describe("ui-state persistence round-trip", () => {
-  it("restores Sites tabs and drops tabs from genuinely removed surfaces", () => {
+  it("restores Apps tabs and drops tabs from genuinely removed surfaces", () => {
     const sitePath = siteTabPath("client-portal");
     const removedPath = "dohc://retired-dashboard/client-portal";
     const restored = parseUiState({
@@ -1048,11 +1048,11 @@ describe("ui-state persistence round-trip", () => {
     expect(isRemovedVirtualTabPath(sitePath)).toBe(false);
     expect(isRemovedVirtualTabPath(removedPath)).toBe(true);
     expect(isRemovedVirtualTabPath(GRAPH_TAB_PATH)).toBe(false);
-    expect(isRemovedVirtualTabPath("notes/dohc://site/a.md")).toBe(false);
+    expect(isRemovedVirtualTabPath("notes/dohc://app/a.md")).toBe(false);
     expect(isRemovedVirtualTabPath("notes/a.md")).toBe(false);
   });
 
-  it("restores the built-in Sites view", () => {
+  it("restores the built-in Apps view", () => {
     expect(
       parseUiState({
         ...serializeUiState(defaultWorkbenchState()),
@@ -1189,7 +1189,7 @@ describe("ui-state persistence round-trip", () => {
   });
 
   it.each([
-    ["site preview", siteTabPath("client-portal"), "dohc://site/%63lient-portal"],
+    ["site preview", siteTabPath("client-portal"), "dohc://app/%63lient-portal"],
     [
       "plugin panel",
       pluginPanelTabPath("hello-plugin", "main"),

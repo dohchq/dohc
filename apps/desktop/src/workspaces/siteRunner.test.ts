@@ -217,7 +217,7 @@ describe("startStaticSitePreview", () => {
       authority: workspaceAuthority,
       entry: "../index.html",
     })).rejects.toThrow(
-      /Invalid site entry/,
+      /Invalid app entry/,
     );
   });
 

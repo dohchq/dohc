@@ -28,7 +28,7 @@ export function createOwnedStaticSiteFileSource(input: {
     contains: (path) => ownerPaths.has(path),
     read: async (path) => {
       const ownerPath = ownerPaths.get(path);
-      if (!ownerPath) throw new Error("Shared site file is unavailable.");
+      if (!ownerPath) throw new Error("Shared app file is unavailable.");
       return input.read(input.target, ownerPath);
     },
   };
@@ -59,19 +59,19 @@ export async function prepareOwnedStaticSitePreview(input: {
 
   if (!entry) {
     throw new Error(
-      "This shared site does not include a built artifact. Ask the owner to build and share it again.",
+      "This shared app has no build output. Ask the owner to build and share it again.",
     );
   }
   const ownerFiles = staticPreviewOwnerFiles(input.site, target);
   if (!ownerFiles.has(entry)) {
     throw new Error(
-      "This shared site is missing its entry file. Ask the owner to share it again.",
+      "This shared app is missing its entry file. Ask the owner to share it again.",
     );
   }
   const ownerRoot = await input.resolveOwner(target.root);
   if (ownerRoot === null) {
     throw new Error(
-      "This shared site changed before the preview started. Refresh the workspace.",
+      "This shared app changed before the preview started. Refresh the workspace.",
     );
   }
   return {

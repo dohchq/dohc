@@ -3,11 +3,11 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
-import { SitesView } from "./SitesView";
+import { AppsView } from "./AppsView";
 import { siteTabPath } from "./workbenchState";
 import { deferred } from "../../testing/deferred";
 
-const site: SitePackageInfo = {
+const app: SitePackageInfo = {
   root: "client-portal",
   title: "Client Portal",
   kind: "package",
@@ -29,14 +29,14 @@ const site: SitePackageInfo = {
 
 const bridgeMock = {
   listSites: vi.fn(async (_input: { workspaceId: string }) => ({
-    sites: [site],
+    sites: [app],
   })),
 };
 
-describe("SitesView", () => {
+describe("AppsView", () => {
   beforeEach(() => {
     bridgeMock.listSites.mockReset();
-    bridgeMock.listSites.mockResolvedValue({ sites: [site] });
+    bridgeMock.listSites.mockResolvedValue({ sites: [app] });
     vi.stubGlobal("dohcDesktop", bridgeMock);
   });
 
@@ -46,15 +46,15 @@ describe("SitesView", () => {
     vi.clearAllMocks();
   });
 
-  it("lists detected sites and opens site preview tabs", async () => {
+  it("lists detected apps and opens app preview tabs", async () => {
     const onOpenPath = vi.fn();
     const user = userEvent.setup();
     render(
-      <SitesView
-        workspaceId="ws-sites"
+      <AppsView
+        workspaceId="ws-apps"
         filesSettledRevision={0}
         onOpenPath={onOpenPath}
-        onCreateFirstSite={vi.fn()}
+        onCreateFirstApp={vi.fn()}
       />,
     );
 
@@ -64,51 +64,51 @@ describe("SitesView", () => {
     expect(onOpenPath).toHaveBeenCalledWith(siteTabPath("client-portal"));
   });
 
-  it("reloads detected sites when the settled files revision bumps, including a content-only edit", async () => {
+  it("reloads detected apps when the settled files revision bumps, including a content-only edit", async () => {
     // filesSettledRevision bumps on every settled workspace file listing,
     // including a content-only edit to an existing file (e.g. dohc.json) —
     // not just an add/remove. A structural path/kind/icon hash would
     // produce the same value for that case and never rerun this effect.
     const view = render(
-      <SitesView
-        workspaceId="ws-sites"
+      <AppsView
+        workspaceId="ws-apps"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
-        onCreateFirstSite={vi.fn()}
+        onCreateFirstApp={vi.fn()}
       />,
     );
     await screen.findByText("Client Portal");
     expect(bridgeMock.listSites).toHaveBeenCalledTimes(1);
 
     view.rerender(
-      <SitesView
-        workspaceId="ws-sites"
+      <AppsView
+        workspaceId="ws-apps"
         filesSettledRevision={1}
         onOpenPath={vi.fn()}
-        onCreateFirstSite={vi.fn()}
+        onCreateFirstApp={vi.fn()}
       />,
     );
 
     await vi.waitFor(() => expect(bridgeMock.listSites).toHaveBeenCalledTimes(2));
   });
 
-  it("does not reload detected sites for an unchanged settled files revision", async () => {
+  it("does not reload detected apps for an unchanged settled files revision", async () => {
     const view = render(
-      <SitesView
-        workspaceId="ws-sites"
+      <AppsView
+        workspaceId="ws-apps"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
-        onCreateFirstSite={vi.fn()}
+        onCreateFirstApp={vi.fn()}
       />,
     );
     await screen.findByText("Client Portal");
 
     view.rerender(
-      <SitesView
-        workspaceId="ws-sites"
+      <AppsView
+        workspaceId="ws-apps"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
-        onCreateFirstSite={vi.fn()}
+        onCreateFirstApp={vi.fn()}
       />,
     );
     await Promise.resolve();
@@ -116,7 +116,7 @@ describe("SitesView", () => {
     expect(bridgeMock.listSites).toHaveBeenCalledTimes(1);
   });
 
-  it("does not let a late workspace response replace the current sites", async () => {
+  it("does not let a late workspace response replace the current apps", async () => {
     const workspaceA = deferred<{ sites: SitePackageInfo[] }>();
     const workspaceB = deferred<{ sites: SitePackageInfo[] }>();
     bridgeMock.listSites.mockImplementation((input: { workspaceId: string }) =>
@@ -125,130 +125,130 @@ describe("SitesView", () => {
         : workspaceB.promise,
     );
     const view = render(
-      <SitesView
+      <AppsView
         workspaceId="workspace-a"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
-        onCreateFirstSite={vi.fn()}
+        onCreateFirstApp={vi.fn()}
       />,
     );
 
     view.rerender(
-      <SitesView
+      <AppsView
         workspaceId="workspace-b"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
-        onCreateFirstSite={vi.fn()}
+        onCreateFirstApp={vi.fn()}
       />,
     );
     await act(async () => {
-      workspaceB.resolve({ sites: [{ ...site, title: "Current Site" }] });
+      workspaceB.resolve({ sites: [{ ...app, title: "Current App" }] });
       await workspaceB.promise;
     });
-    expect(await screen.findByText("Current Site")).toBeTruthy();
+    expect(await screen.findByText("Current App")).toBeTruthy();
 
     await act(async () => {
-      workspaceA.resolve({ sites: [{ ...site, title: "Stale Site" }] });
+      workspaceA.resolve({ sites: [{ ...app, title: "Stale App" }] });
       await workspaceA.promise;
     });
-    expect(screen.getByText("Current Site")).toBeTruthy();
-    expect(screen.queryByText("Stale Site")).toBeNull();
+    expect(screen.getByText("Current App")).toBeTruthy();
+    expect(screen.queryByText("Stale App")).toBeNull();
   });
 
-  it("does not fabricate sites from files while IPC is loading", () => {
+  it("does not fabricate apps from files while IPC is loading", () => {
     bridgeMock.listSites.mockImplementationOnce(() => new Promise(() => undefined));
     render(
-      <SitesView
-        workspaceId="ws-sites"
+      <AppsView
+        workspaceId="ws-apps"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
-        onCreateFirstSite={vi.fn()}
+        onCreateFirstApp={vi.fn()}
       />,
     );
 
     expect(screen.queryByText("Report")).toBeNull();
     expect(screen.queryByTestId("sites-row")).toBeNull();
-    expect(screen.getByTestId("sites-count").textContent).toContain("0 sites");
+    expect(screen.getByTestId("sites-count").textContent).toContain("0 apps");
   });
 
   it("renders the IPC error state", async () => {
-    bridgeMock.listSites.mockRejectedValueOnce(new Error("Site scan failed"));
+    bridgeMock.listSites.mockRejectedValueOnce(new Error("App scan failed"));
     render(
-      <SitesView
-        workspaceId="ws-sites"
+      <AppsView
+        workspaceId="ws-apps"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
-        onCreateFirstSite={vi.fn()}
+        onCreateFirstApp={vi.fn()}
       />,
     );
 
-    expect(await screen.findByText("Site scan failed")).toBeTruthy();
-    expect(screen.getByTestId("sites-count").textContent).toContain("0 sites");
+    expect(await screen.findByText("App scan failed")).toBeTruthy();
+    expect(screen.getByTestId("sites-count").textContent).toContain("0 apps");
   });
 
-  it("offers a keyboard-accessible first-site action when no sites are detected", async () => {
+  it("offers a keyboard-accessible first-app action when no apps are detected", async () => {
     bridgeMock.listSites.mockResolvedValueOnce({ sites: [] });
-    const onCreateFirstSite = vi.fn(async () => undefined);
+    const onCreateFirstApp = vi.fn(async () => undefined);
     const user = userEvent.setup();
     render(
-      <SitesView
-        workspaceId="ws-sites"
+      <AppsView
+        workspaceId="ws-apps"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
-        onCreateFirstSite={onCreateFirstSite}
+        onCreateFirstApp={onCreateFirstApp}
       />,
     );
 
-    expect(await screen.findByText("No sites yet")).toBeTruthy();
+    expect(await screen.findByText("No apps yet")).toBeTruthy();
     expect(
       screen.getByText("Start with one editable HTML file in your workspace."),
     ).toBeTruthy();
-    expect(screen.getByTestId("sites-count").textContent).toContain("0 sites");
-    const create = screen.getByRole("button", { name: "Create site" });
+    expect(screen.getByTestId("sites-count").textContent).toContain("0 apps");
+    const create = screen.getByRole("button", { name: "Create app" });
     create.focus();
     await user.keyboard("{Enter}");
-    expect(onCreateFirstSite).toHaveBeenCalledTimes(1);
+    expect(onCreateFirstApp).toHaveBeenCalledTimes(1);
   });
 
   it("does not offer file creation in an empty received share workspace", async () => {
     bridgeMock.listSites.mockResolvedValueOnce({ sites: [] });
-    const onCreateFirstSite = vi.fn(async () => undefined);
+    const onCreateFirstApp = vi.fn(async () => undefined);
     render(
-      <SitesView
+      <AppsView
         workspaceId="ws-received-share"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
-        onCreateFirstSite={onCreateFirstSite}
+        onCreateFirstApp={onCreateFirstApp}
         receivedShareWorkspace
       />,
     );
 
     expect(
       await screen.findByText(
-        "This shared view cannot create a site. Ask the workspace owner to add one.",
+        "This shared view cannot create an app. Ask the workspace owner to add one.",
       ),
     ).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Create site" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create app" })).toBeNull();
     expect(screen.queryByTestId("sites-create-first")).toBeNull();
-    expect(onCreateFirstSite).not.toHaveBeenCalled();
+    expect(onCreateFirstApp).not.toHaveBeenCalled();
   });
 
-  it("labels sites opened from a mounted share", async () => {
+  it("labels apps opened from a mounted share", async () => {
     bridgeMock.listSites.mockResolvedValueOnce({
       sites: [
         {
-          ...site,
+          ...app,
           root: "shared-with-me/alex/client-portal",
           authority: { kind: "share", mountRoot: "shared-with-me/alex" },
         },
       ],
     });
     render(
-      <SitesView
-        workspaceId="ws-sites"
+      <AppsView
+        workspaceId="ws-apps"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
-        onCreateFirstSite={vi.fn()}
+        onCreateFirstApp={vi.fn()}
       />,
     );
 
@@ -256,11 +256,11 @@ describe("SitesView", () => {
     expect(screen.getByTestId("sites-shared-label").textContent).toBe("Shared");
   });
 
-  it("surfaces site diagnostics", async () => {
+  it("surfaces app diagnostics", async () => {
     bridgeMock.listSites.mockResolvedValueOnce({
       sites: [
         {
-          ...site,
+          ...app,
           diagnostics: [
             {
               path: "client-portal/dohc.json",
@@ -273,11 +273,11 @@ describe("SitesView", () => {
       ],
     });
     render(
-      <SitesView
-        workspaceId="ws-sites"
+      <AppsView
+        workspaceId="ws-apps"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
-        onCreateFirstSite={vi.fn()}
+        onCreateFirstApp={vi.fn()}
       />,
     );
 
@@ -288,16 +288,16 @@ describe("SitesView", () => {
     );
   });
 
-  it("marks low-confidence site detections", async () => {
+  it("marks low-confidence app detections", async () => {
     bridgeMock.listSites.mockResolvedValueOnce({
-      sites: [{ ...site, confidence: "low" }],
+      sites: [{ ...app, confidence: "low" }],
     });
     render(
-      <SitesView
-        workspaceId="ws-sites"
+      <AppsView
+        workspaceId="ws-apps"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
-        onCreateFirstSite={vi.fn()}
+        onCreateFirstApp={vi.fn()}
       />,
     );
 
