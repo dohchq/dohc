@@ -1072,18 +1072,10 @@ function makeShareBridge(
   return bridge;
 }
 
-// The non-vacuity probe for a shared view. The capture-backed surfaces
-// are hidden there — the version selector, the history timeline, the graph's
-// chat mentions — so no rendered control proves the renderer's capability read
-// resolved engine-ON, and a no-call pin asserted before that read lands would
-// pass for the wrong reason. The read itself carries the proof: wait until the
-// shell asked, confirm the answer is engine-ON, then flush the state update
-// that answer commits. (The Chats panel and its titlebar button render for a
-// shared view since #646 PR2, but they render off `isShareView`, not off this
-// read, so they still prove nothing about it.)
-async function settleEngineOnRead(bridge: ReturnType<typeof makeEngineBridge>) {
-  await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalled());
-  await bridge.getWorkspaceSettings();
+// Flushes the shell's mount effects for a shared view, whose capture-backed
+// surfaces are hidden, so a no-call pin below is asserted after the shell
+// had its chance to call.
+async function settleShareView() {
   await act(async () => {});
 }
 
@@ -3505,7 +3497,7 @@ describe("editor groups", () => {
       }));
       const user = userEvent.setup();
       renderShell(bridge);
-      await settleEngineOnRead(bridge);
+      await settleShareView();
 
       const left = await screen.findByRole("region", {
         name: "Editor group 1",
@@ -4278,20 +4270,6 @@ describe("workspace switch admission", () => {
         ? storedStateWithTabs(["b.md"], "b.md")
         : null;
     });
-    bridge.getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => {
-      if (admittedWorkspaceId !== selectedWorkspace.workspaceId) {
-        rejectedReads.push(`settings:${selectedWorkspace.workspaceId}`);
-        throw new Error(
-          "Workspace settings read stopped because this window changed workspaces.",
-        );
-      }
-      return {
-        settings: {
-          ...DEFAULT_WORKSPACE_SETTINGS,
-        },
-        source: "stored",
-      };
-    });
     bridge.openWorkspace = vi.fn(async () => {
       admittedWorkspaceId = selectedWorkspace.workspaceId;
       return SYNC_STATUS;
@@ -4311,7 +4289,6 @@ describe("workspace switch admission", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
     bridge.getWorkspaceUiState.mockClear();
-    bridge.getWorkspaceSettings.mockClear();
     bridge.openWorkspace.mockClear();
 
     selectedWorkspace = OTHER_WORKSPACE;
@@ -4325,12 +4302,8 @@ describe("workspace switch admission", () => {
     await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
     await act(async () => {});
 
-    expect(rejectedReads).toEqual([
-      `ui-state:${OTHER_WORKSPACE.workspaceId}`,
-      `settings:${OTHER_WORKSPACE.workspaceId}`,
-    ]);
+    expect(rejectedReads).toEqual([`ui-state:${OTHER_WORKSPACE.workspaceId}`]);
     expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2);
-    expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(2);
     expect(bridge.openWorkspace).toHaveBeenCalledOnce();
   });
 });
@@ -9662,7 +9635,7 @@ describe("shared view with an unreadable grant", () => {
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge, damaged);
 
-    await settleEngineOnRead(bridge);
+    await settleShareView();
     await screen.findByTestId("chats-panel");
     expect(
       (await screen.findByTestId("linked-chat-readonly-note")).textContent,
@@ -10622,38 +10595,11 @@ describe("graph view", () => {
 });
 
 describe("history page", () => {
-  // The renderer's own settings read failed, and main has not said
-  // recording is off — it may be recording right now. The placeholder must
-  // not blame Settings, and must not promise "not recorded": either would be
-  // a cause the renderer's silently-caught read invented.
-  it("claims neither a Settings cause nor 'not recorded' when its own read failed", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getWorkspaceSettings = vi.fn(async () => {
-      throw new Error("transient read failure");
-    });
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(screen.getByTestId("activity-history"));
-    const placeholder = await screen.findByTestId("history-off-placeholder");
-    expect(placeholder.textContent).toContain("History is unavailable");
-    expect(placeholder.textContent).toContain(
-      "dohc could not confirm whether this workspace records history.",
-    );
-    // The Next this state owes: the one action that re-runs
-    // both reads — no lighter re-read is wired on this surface.
-    expect(placeholder.textContent).toContain("Restart dohc to try again.");
-    // The false cause and the false privacy assurance this pins against.
-    expect(placeholder.textContent).not.toContain("Settings");
-    expect(placeholder.textContent).not.toContain("not being recorded");
-  });
-
-  // The masked vector: the recorder failed to build on an
-  // engine-ENABLED workspace. The renderer's own read still says engine-on,
-  // and without the status override the shell mounts the engine timeline —
-  // whose every listEngineMoments call can only error. Main's status must
-  // override the renderer capability, and the engine fetch must never fire.
-  it("lets the status failure override the renderer's engine-on read", async () => {
+  // The recorder failed to build. Without the status override the shell
+  // mounts the engine timeline, whose every listEngineMoments call can only
+  // error. Main's status gates the surface, and the engine fetch must never
+  // fire.
+  it("lets the status failure gate the history surface", async () => {
     const bridge = makeEngineBridge(Promise.resolve(null));
     const failedStatus = {
       ...SYNC_STATUS,
@@ -10664,9 +10610,8 @@ describe("history page", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
-    // Prove the renderer's settings read landed before anything is asserted:
-    // this engine-only control exists only once it resolved. Without this the
-    // pins below pass vacuously in the pre-read window.
+    // Wait for the shell's engine surfaces to mount before anything is
+    // asserted, so the pins below cannot pass vacuously.
     await screen.findByTestId("titlebar-chats-sidebar");
 
     await user.click(screen.getByTestId("activity-history"));
@@ -10959,7 +10904,7 @@ describe("history page", () => {
     });
     const user = userEvent.setup();
     renderShell(bridge);
-    await settleEngineOnRead(bridge);
+    await settleShareView();
 
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-moment-open"));
@@ -11043,7 +10988,7 @@ describe("history page", () => {
     }));
     const user = userEvent.setup();
     renderShell(bridge);
-    await settleEngineOnRead(bridge);
+    await settleShareView();
 
     await user.click(screen.getByTestId("activity-history"));
 
@@ -11082,7 +11027,7 @@ describe("history page", () => {
     bridge.writeWorkspaceText = vi.fn(() => save.promise);
     const user = userEvent.setup();
     renderShell(bridge);
-    await settleEngineOnRead(bridge);
+    await settleShareView();
 
     const left = await screen.findByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
@@ -11145,7 +11090,7 @@ describe("history page", () => {
     bridge.writeWorkspaceText = vi.fn(() => save.promise);
     const user = userEvent.setup();
     renderShell(bridge);
-    await settleEngineOnRead(bridge);
+    await settleShareView();
 
     const group = await screen.findByRole("region", { name: "Editor group 1" });
     const content = (await within(group).findByTestId("view-text-editor"))
@@ -11206,7 +11151,7 @@ describe("history page", () => {
     bridge.writeWorkspaceText = vi.fn(() => save.promise);
     const user = userEvent.setup();
     renderShell(bridge);
-    await settleEngineOnRead(bridge);
+    await settleShareView();
 
     const left = await screen.findByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
@@ -14029,35 +13974,10 @@ describe("history page", () => {
     );
   });
 
-  it("does not reopen the workspace when the engine setting enables history", async () => {
-    const settings = deferred<WorkspaceSettingsResult>();
-    const bridge = makeEngineBridge(Promise.resolve(null));
-    bridge.getWorkspaceSettings = vi.fn(() => settings.promise);
-    renderShell(bridge);
-
-    await waitFor(() =>
-      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
-    );
-    expect(bridge.openWorkspace).toHaveBeenCalledOnce();
-
-    await act(async () => {
-      settings.resolve({
-        settings: {
-          ...DEFAULT_WORKSPACE_SETTINGS,
-        },
-        source: "stored",
-      });
-      await settings.promise;
-    });
-
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
-    expect(bridge.openWorkspace).toHaveBeenCalledOnce();
-  });
 });
 
-// A shared view materializes no settings file, so the renderer's
-// capability read comes back with the schema default ON — but its open
-// deliberately installed no capture, and main refuses every version call.
+// A shared view's open deliberately installed no capture, and main refuses
+// every version call.
 // The selector retried five times and then raised a danger-tone shell error
 // naming a Settings toggle nobody touched, and it came back on every share
 // refresh (the selector re-keys on versionEpoch).
@@ -14076,9 +13996,9 @@ describe("shared view versions surface", () => {
     const user = userEvent.setup();
     renderShell(bridge, SHARE_VIEW);
 
-    // Prove the renderer's read really said engine-ON first. Without it the
-    // pins below pass vacuously in the pre-read window.
-    await settleEngineOnRead(bridge);
+    // Let the shell's mount effects run first, so the pins below cannot pass
+    // vacuously.
+    await settleShareView();
     // The selector is the surface that made the call, and it carries the
     // Try-in-version and compare entry points inside its menu — all three go
     // with it.
@@ -14120,7 +14040,7 @@ describe("shared view versions surface", () => {
     bridge.getSyncStatus = vi.fn(() => status.promise);
     renderShell(bridge, SHARE_VIEW);
 
-    await settleEngineOnRead(bridge);
+    await settleShareView();
     // The premise: no status has answered, so the shell knows nothing about
     // the recorder yet.
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
@@ -14471,7 +14391,7 @@ describe("shared view chats surface", () => {
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge, SHARE_VIEW);
 
-    await settleEngineOnRead(bridge);
+    await settleShareView();
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
     expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
 
@@ -14507,7 +14427,7 @@ describe("shared view chats surface", () => {
     const user = userEvent.setup();
     renderShell(bridge, SHARE_VIEW);
 
-    await settleEngineOnRead(bridge);
+    await settleShareView();
     await screen.findByTestId("chats-panel");
 
     await user.keyboard("{Control>}{Alt>}b{/Alt}{/Control}");
@@ -14570,7 +14490,7 @@ describe("shared view chats surface", () => {
     const user = userEvent.setup();
     renderShell(bridge, SHARE_VIEW);
 
-    await settleEngineOnRead(bridge);
+    await settleShareView();
     await user.click(screen.getByTestId("activity-graph"));
 
     // The graph itself still works — that is the point.
@@ -14592,7 +14512,7 @@ describe("shared view chats surface", () => {
   it("claims Ctrl+Alt+B on a shared view", async () => {
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge, SHARE_VIEW);
-    await settleEngineOnRead(bridge);
+    await settleShareView();
 
     // A fresh event per attempt: the handler re-registers in a passive
     // effect, and a stale event carries the previous attempt's verdict.
@@ -14607,25 +14527,6 @@ describe("shared view chats surface", () => {
       window.dispatchEvent(event);
       expect(event.defaultPrevented).toBe(true);
     });
-  });
-
-  // The gate's other half, and the reason it is not simply deleted: a
-  // workspace with the engine flag off still has no Chats panel and must not
-  // claim the chord.
-  it("does not claim Ctrl+Alt+B when the engine flag is off", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    renderShell(bridge);
-    await screen.findByTestId("file-tree");
-
-    const event = new KeyboardEvent("keydown", {
-      key: "b",
-      ctrlKey: true,
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    window.dispatchEvent(event);
-    expect(event.defaultPrevented).toBe(false);
   });
 
   it.each([
@@ -15005,72 +14906,6 @@ describe("moment-diff tab after a failed capture build", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  // The other ordering, which the tests above cannot reach because their open
-  // is the slow one. Main decides the recorder once per app
-  // session and retains the workspace, so re-entering a healthy workspace
-  // mid-session resolves `openWorkspace` off that retained entry — before the
-  // renderer's own settings read, which is a real file read, has answered.
-  // `engineEnabled` still holds its "no answer" false in that window, so the
-  // tab took the unavailable branch and stated a restart main never asked for,
-  // then flipped to the diff.
-  it("states nothing while the settings read is still in flight", async () => {
-    const settings = deferred<WorkspaceSettingsResult>();
-    const bridge = makeEngineBridge(
-      Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
-    );
-    bridge.getWorkspaceSettings = vi.fn(() => settings.promise);
-    renderShell(bridge);
-
-    // The premise: main's decision has landed, and it says a recorder exists.
-    await waitFor(() =>
-      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
-    );
-    expect(screen.queryByTestId("moment-diff-off"), "read the capture decision alone -> 'History is unavailable. dohc could not confirm…', on a workspace whose history is fine.").toBeNull();
-    expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
-    expect(bridge.readEngineMoment).not.toHaveBeenCalled();
-
-    await act(async () => {
-      settings.resolve({
-        settings: {
-          ...DEFAULT_WORKSPACE_SETTINGS,
-        },
-        source: "stored",
-      });
-      await settings.promise;
-    });
-
-    // Both answers are in, and they agree: the real page, asking main for the
-    // moment the tab was opened on.
-    await waitFor(() =>
-      expect(bridge.readEngineMoment).toHaveBeenCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        momentId: "m-1",
-      }),
-    );
-    expect(screen.queryByTestId("moment-diff-off")).toBeNull();
-  });
-
-  // The half that keeps the wait from becoming a forever-load: the settings
-  // read can fail, and a failure is an answer. Held as "pending" it would
-  // leave this tab spinning for the rest of the session.
-  it("states the capability once the settings read fails", async () => {
-    const bridge = makeEngineBridge(
-      Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
-    );
-    bridge.getWorkspaceSettings = vi.fn(async (): Promise<never> => {
-      throw new Error("transient read failure");
-    });
-    renderShell(bridge);
-
-    // The renderer's read failed and main said nothing was wrong, so this
-    // surface knows only what IT could not do — no cause, no claim about what
-    // the workspace has.
-    const placeholder = await screen.findByTestId("moment-diff-off");
-    expect(placeholder.textContent).toContain("History is unavailable.");
-    expect(placeholder.textContent).not.toContain("Settings");
-    expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
-    expect(bridge.readEngineMoment).not.toHaveBeenCalled();
-  });
 });
 
 describe("workbench resize commits", () => {
