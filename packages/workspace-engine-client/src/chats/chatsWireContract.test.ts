@@ -1,8 +1,8 @@
+import { ProtocolShapeError } from "../wireSchema";
 import { describe, expect, it } from "vitest";
 import type { JsonValue } from "../protocol";
 import {
   CHATS_METHOD,
-  ChatsProtocolShapeError,
   decodeChatAttachment,
   decodeChatDecision,
   decodeChatMessage,
@@ -44,7 +44,6 @@ describe("chats result decoder rejection", () => {
     expect(decoded.runs["__proto__"]?.runId).toBe("run-prototype-key");
     expect(decoded.runs["constructor"]?.runId).toBe("run-prototype-key");
   });
-
 
   it("accepts daemon-emitted negative imported timestamps", () => {
     expect(
@@ -230,8 +229,8 @@ describe("chats result decoder rejection", () => {
         attachments: [],
       }),
     ).toThrowError(
-      expect.objectContaining<Partial<ChatsProtocolShapeError>>({
-        name: "ChatsProtocolShapeError",
+      expect.objectContaining<Partial<ProtocolShapeError>>({
+        name: "ProtocolShapeError",
         message: expect.stringContaining("chat message.createdAtMs"),
       }),
     );
@@ -246,7 +245,7 @@ describe("chats result decoder rejection", () => {
         text: "x",
         surprise: true,
       }),
-    ).toThrow(ChatsProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
     expect(() =>
       decodeChatsResult(CHATS_METHOD.reactionSet, {
         reactionId: "r",
@@ -257,7 +256,7 @@ describe("chats result decoder rejection", () => {
         state: "added",
         atMs: 1,
       }),
-    ).toThrow(ChatsProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it("rejects unknown fields in nested result objects", () => {
@@ -271,6 +270,6 @@ describe("chats result decoder rejection", () => {
         createdAtMs: 1,
         attachments: [],
       }),
-    ).toThrow(ChatsProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 });

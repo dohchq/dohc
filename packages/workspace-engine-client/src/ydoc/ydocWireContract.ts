@@ -1,7 +1,7 @@
+import { ProtocolShapeError, mutableStruct } from "../wireSchema";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
-import * as Struct from "effect/Struct";
 import type { JsonValue } from "../protocol";
 
 export const YDOC_METHOD = {
@@ -105,7 +105,7 @@ export type YdocSettleParams = JsonObject & {
   summary?: string;
 };
 
-export type YdocProjectionProvenance = JsonObject & {
+type YdocProjectionProvenance = JsonObject & {
   contentKind: YdocContentKind;
   sourceStateVectorSha256: string;
   destructive: boolean;
@@ -149,17 +149,6 @@ export type YdocRemoteUpdatePayload = JsonObject & {
   updateBase64: string;
 };
 
-export class YdocProtocolShapeError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "YdocProtocolShapeError";
-  }
-}
-
-function mutableStruct<const Fields extends Schema.Struct.Fields>(fields: Fields) {
-  return Schema.Struct(fields).mapFields(Struct.map(Schema.mutableKey));
-}
-
 function decodeYdocSchema<S extends Schema.ConstraintDecoder<unknown>>(
   schema: S,
   value: JsonValue,
@@ -173,7 +162,7 @@ function decodeYdocSchema<S extends Schema.ConstraintDecoder<unknown>>(
     const path = issue?.path?.map((part) =>
       typeof part === "number" ? `[${part}]` : `.${String(part)}`,
     ).join("") ?? "";
-    throw new YdocProtocolShapeError(
+    throw new ProtocolShapeError(
       `${label}${path}: ${issue?.message ?? decoded.failure.message}`,
     );
   }
@@ -248,7 +237,7 @@ export function decodeYdocOpenResult(value: JsonValue): YdocOpenResult {
       !isNormalizedWorkspaceRef(asset.ref) ||
       !/^[0-9a-f]{64}$/.test(asset.sha256)
     ) {
-      throw new YdocProtocolShapeError(
+      throw new ProtocolShapeError(
         `ydoc.open result.artifactAssets[${index}] is not a valid asset descriptor.`,
       );
     }

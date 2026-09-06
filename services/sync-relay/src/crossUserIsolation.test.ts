@@ -1,21 +1,29 @@
-import { createRequire } from "node:module";
-import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { afterEach, describe, expect, it } from "vitest";
 import { PresenceHub } from "./presence";
-import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
-import { type SyncRelayStorage } from "./storage";
+import type { SyncRelayHandler } from "./server";
+import type { SyncRelayStorage } from "./storage";
 import {
+  appendLog,
+  chatChannelCreate as channelCreate,
+  chatMessageAppend,
+  chatThreadCreate as threadCreate,
   claimWorkspace as claim,
   closeTestStorages,
   createShare as mint,
+  denialBytes,
+  inspectDatabase,
+  interceptStorage,
   json,
   jsonBody,
+  putBlob as upload,
   request,
   sha256,
   storagePath,
+  testHandler,
   testStorage,
-} from "./linkTestHelpers";
+  type ChatOp as RawOp,
+} from "./testing";
 
 // MU-C5 — the consolidated cross-user isolation sweep. The per-lane suites
 // (MU-C0 authorship, MU-C1 presence, MU-C2 reactions, MU-C3 DMs, MU-C4 shared
@@ -43,34 +51,10 @@ import {
 
 afterEach(closeTestStorages);
 
-// The relay's test-auth seam: identity from the bearer token, emails resolvable
-// as "<userId>@dohc.test". A shared PresenceHub can be injected so a test can
-// assert the hub holds the ephemeral state the durable tables never see.
+// A shared PresenceHub can be injected so a test can assert the hub holds the
+// ephemeral state the durable tables never see.
 function handler(storage: SyncRelayStorage, presence?: PresenceHub): SyncRelayHandler {
-  const resolveActor: ResolveActor = (request, workspaceId) => {
-    const auth = request.headers.get("authorization") ?? "";
-    if (!auth.startsWith("Bearer user:")) throw new UnauthorizedError();
-    return { userId: auth.slice("Bearer user:".length), workspaceId };
-  };
-  let nextShare = 0;
-  return createSyncRelayHandler({
-    storage,
-    resolveActor,
-    presence,
-    nowMs: () => 4242,
-    resolveUserIdByEmail: (email) =>
-      email.endsWith("@dohc.test") ? email.slice(0, -"@dohc.test".length) : null,
-    lookupUserEmail: (userId) => `${userId}@dohc.test`,
-    newShareId: () => `share-${nextShare++}`,
-  });
-}
-
-// A denial captured as comparable bytes: an unauthorized probe of any kind must
-// be indistinguishable from a share that never existed. Diffing these strings is
-// the whole proof of the byte-identical invariant.
-async function denialBytes(response: Response): Promise<string> {
-  expect(response.status).toBe(404);
-  return `${response.status}:${await response.text()}`;
+  return testHandler(storage, { presence, nowMs: () => 4242 });
 }
 
 const OWNER = "owner";
@@ -90,17 +74,7 @@ async function createShare(h: SyncRelayHandler, body: Record<string, unknown>): 
 }
 
 async function putBlob(h: SyncRelayHandler, content: string): Promise<string> {
-  const sha = sha256(content);
-  const response = await h(
-    request(OWNER, `/sync/${WORKSPACE}/blobs/${sha}`, { method: "PUT", body: content }),
-  );
-  expect(response.status).toBe(200);
-  return sha;
-}
-
-interface RawOp {
-  opKind: string;
-  payload: Record<string, unknown>;
+  return upload(h, OWNER, WORKSPACE, content);
 }
 
 // Owner appends a contiguous batch (originSeq 0..N) under one origin. Every
@@ -112,10 +86,7 @@ async function appendOwner(h: SyncRelayHandler, rawOps: RawOp[]): Promise<void> 
     payload: raw.payload,
     recordedAtMs: 1000 + index,
   }));
-  const response = await h(
-    request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({ originId: "origin-owner", ops })),
-  );
-  expect(response.status).toBe(200);
+  await appendLog(h, OWNER, WORKSPACE, ops, { originId: "origin-owner" });
 }
 
 // A member-append op: client-sequenced originSeq, relay namespaces the origin.
@@ -878,18 +849,7 @@ describe("MU-C5 · presence is never journaled to any durable table", () => {
 
     // Exhaustive: scan every durable table for the presence sentinel. Presence
     // is purely ephemeral, so it must appear in none of them.
-    const requireModule = createRequire(import.meta.url);
-    interface RawStatement {
-      all(...params: unknown[]): Array<Record<string, unknown>>;
-    }
-    interface RawDb {
-      prepare(sql: string): RawStatement;
-      close(): void;
-    }
-    const { DatabaseSync } = requireModule("node:sqlite") as {
-      DatabaseSync: new (path: string) => RawDb;
-    };
-    const raw = new DatabaseSync(dbPath);
+    const raw = inspectDatabase(dbPath, { readOnly: true });
     try {
       const tables = raw
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
@@ -926,16 +886,10 @@ describe("MU-C5 · in-request revoke race is closed by the in-transaction guard"
     // after every route-level check, immediately before the transactional
     // insert. Only appendLogBatch's in-transaction guard (under begin
     // IMMEDIATE, the same write lock revokeShare takes) can still stop it.
-    const raced = new Proxy(storage, {
-      get(target, prop, receiver) {
-        if (prop === "appendLogBatch") {
-          return (input: Parameters<SyncRelayStorage["appendLogBatch"]>[0]) => {
-            target.revokeShare("share-0", 6000);
-            return target.appendLogBatch(input);
-          };
-        }
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
+    const raced = interceptStorage(storage, {
+      appendLogBatch: (target, input) => {
+        target.revokeShare("share-0", 6000);
+        return target.appendLogBatch(input);
       },
     });
     const h = handler(raced);
@@ -972,41 +926,12 @@ describe("MU-C5 · in-request revoke race is closed by the in-transaction guard"
 
 // --- chat op builders (shared across the sentinel + gate tests) --------------
 
-function chatChannelCreate(
-  wireId: string,
-  kind: string,
-  extra: Record<string, unknown> = {},
-): RawOp {
-  return {
-    opKind: "chat.channel.create",
-    payload: {
-      channelId: `channel-${wireId}`,
-      name: `name-${wireId}`,
-      slug: `slug-${wireId}`,
-      kind,
-      createdAtMs: 1,
-      wireId,
-      ...extra,
-    },
-  };
+function chatChannelCreate(wireId: string, kind: string, extra: Record<string, unknown> = {}): RawOp {
+  return channelCreate(wireId, { kind, ...extra });
 }
 
-function chatThreadCreate(
-  wireId: string,
-  threadId: string,
-  extra: Record<string, unknown> = {},
-): RawOp {
-  return {
-    opKind: "chat.thread.create",
-    payload: {
-      threadId,
-      title: "",
-      createdAtMs: 2,
-      channelSlug: `slug-${wireId}`,
-      channelWireId: wireId,
-      ...extra,
-    },
-  };
+function chatThreadCreate(wireId: string, threadId: string, extra: Record<string, unknown> = {}): RawOp {
+  return threadCreate(threadId, wireId, extra);
 }
 
 function chatMessage(
@@ -1016,17 +941,5 @@ function chatMessage(
   authorUserId: string,
   extra: Record<string, unknown> = {},
 ): RawOp {
-  return {
-    opKind: "chat.message.append",
-    payload: {
-      messageId,
-      threadId,
-      authorKind: "human",
-      authorDisplayName: "Owner",
-      authorUserId,
-      body,
-      createdAtMs: 3,
-      ...extra,
-    },
-  };
+  return chatMessageAppend(messageId, threadId, body, { authorUserId, authorDisplayName: "Owner", ...extra });
 }
