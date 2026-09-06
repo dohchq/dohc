@@ -1,4 +1,11 @@
 // @vitest-environment jsdom
+import {
+  jsonResponse,
+  heldJsonResponse,
+  requestPath,
+  settle,
+  setControlValue,
+} from "./testing";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,7 +14,6 @@ import { CommentsPanel } from "./CommentsPanel";
 const FIRST_SESSION = "abcdefghijkl";
 const SECOND_SESSION = "mnopqrstuvwx";
 const THIRD_SESSION = "zyxwvutsrqpo";
-const SETTLE_TURN_LIMIT = 200;
 
 const NAMED_MESSAGE = {
   messageId: "message-named",
@@ -33,39 +39,6 @@ const TOMBSTONE = {
   deleted: true as const,
 };
 
-function withActivityProfileName(value: unknown): unknown {
-  if (
-    value &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    "composerState" in value &&
-    "latestRevision" in value &&
-    !("profileName" in value)
-  ) {
-    return { ...value, profileName: null };
-  }
-  if (
-    value &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    "ok" in value &&
-    value.ok === false &&
-    "state" in value &&
-    (value.state === "blocked" || value.state === "paused") &&
-    !("activityRevision" in value)
-  ) {
-    return { ...value, activityRevision: 7 };
-  }
-  return value;
-}
-
-function jsonResponse(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(withActivityProfileName(value)), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
 function failedBodyResponse(): Response {
   return new Response(
     new ReadableStream<Uint8Array>({
@@ -78,30 +51,6 @@ function failedBodyResponse(): Response {
       headers: { "content-type": "application/json" },
     },
   );
-}
-
-function heldJsonResponse(status: number): {
-  bodyStarted: () => boolean;
-  release: (value: unknown) => void;
-  response: Response;
-} {
-  let bodyStarted = false;
-  let releaseBody: (value: unknown) => void = () => {
-    throw new Error("held response body is not ready");
-  };
-  const body = new Promise<unknown>((resolve) => {
-    releaseBody = resolve;
-  });
-  const response = new Response(null, { status });
-  vi.spyOn(response, "json").mockImplementation(() => {
-    bodyStarted = true;
-    return body as ReturnType<Response["json"]>;
-  });
-  return {
-    bodyStarted: () => bodyStarted,
-    release: (value) => releaseBody(withActivityProfileName(value)),
-    response,
-  };
 }
 
 function discussionPage(
@@ -133,6 +82,7 @@ function discussionPageAt(
 
 function availableActivityAt(activityRevision: number): Response {
   return jsonResponse({
+    profileName: null,
     ok: true,
     access: "comment",
     latestRevision: activityRevision,
@@ -143,37 +93,8 @@ function availableActivityAt(activityRevision: number): Response {
   });
 }
 
-function requestPath(input: RequestInfo | URL): string {
-  if (typeof input === "string") return input;
-  if (input instanceof URL) return `${input.pathname}${input.search}`;
-  const url = new URL(input.url);
-  return `${url.pathname}${url.search}`;
-}
-
 function requestSession(init: RequestInit | undefined): string | null {
   return new Headers(init?.headers).get("x-dohc-link-session");
-}
-
-async function settle(condition: () => boolean): Promise<void> {
-  for (let turn = 0; turn < SETTLE_TURN_LIMIT; turn += 1) {
-    await act(async () => {
-      await Promise.resolve();
-    });
-    if (condition()) return;
-  }
-  throw new Error("Condition did not settle");
-}
-
-function setControlValue(control: HTMLInputElement | HTMLTextAreaElement, value: string): void {
-  const prototype = control instanceof HTMLTextAreaElement
-    ? HTMLTextAreaElement.prototype
-    : HTMLInputElement.prototype;
-  const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-  if (!setter) throw new Error("control value setter is missing");
-  act(() => {
-    setter.call(control, value);
-    control.dispatchEvent(new Event("input", { bubbles: true }));
-  });
 }
 
 describe("CommentsPanel", () => {
@@ -797,7 +718,7 @@ describe("CommentsPanel", () => {
               body: "Retry draft",
             },
           }
-        : { ok: false, state: outcome });
+        : { ok: false, state: outcome, activityRevision: 7 });
       if (outcome === "success") {
         await settle(() => container.textContent?.includes("Retry draft") === true);
         expect(container.textContent).not.toContain("The comment didn't post. Try again.");
@@ -869,6 +790,7 @@ describe("CommentsPanel", () => {
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         return jsonResponse({
+          profileName: null,
           ok: true,
           access: "comment",
           latestRevision: 7,
@@ -895,6 +817,7 @@ describe("CommentsPanel", () => {
     await settle(heldPost.bodyStarted);
 
     heldDeletion.release({
+      profileName: null,
       ok: true,
       access: "comment",
       latestRevision: 8,
@@ -943,6 +866,7 @@ describe("CommentsPanel", () => {
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         return jsonResponse({
+          profileName: null,
           ok: true,
           access: "comment",
           latestRevision: 7,
@@ -971,6 +895,7 @@ describe("CommentsPanel", () => {
     );
 
     heldDeletion.release({
+      profileName: null,
       ok: true,
       access: "comment",
       latestRevision: 8,
@@ -998,7 +923,7 @@ describe("CommentsPanel", () => {
     ["paused", "The owner paused comments. You can still read everything."],
   ] as const)("learns %s only from POST and keeps the timeline", async (state, copy) => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      if (init?.method === "POST") return jsonResponse({ ok: false, state }, 403);
+      if (init?.method === "POST") return jsonResponse({ ok: false, state, activityRevision: 7 }, 403);
       const path = requestPath(input);
       if (path.includes("/activity?")) {
         if (path.includes("hold=0")) return availableActivityAt(7);
@@ -1073,6 +998,7 @@ describe("CommentsPanel", () => {
       expect(posts).toBe(1);
 
       heldActivity.release({
+        profileName: null,
         ok: true,
         access: "comment",
         latestRevision: 8,
@@ -1132,6 +1058,7 @@ describe("CommentsPanel", () => {
         path === "/api/view/discussion/activity?since=20&hold=0&limit=100"
       ) {
         return jsonResponse({
+          profileName: null,
           ok: true,
           access: "comment",
           latestRevision: 20,
@@ -1179,12 +1106,12 @@ describe("CommentsPanel", () => {
   });
 
   it.each([
-    [403, "limit-reached"],
-    [413, "blocked"],
-    [413, "paused"],
+    [403, "limit-reached", { ok: false, state: "limit-reached" }],
+    [413, "blocked", { ok: false, state: "blocked", activityRevision: 7 }],
+    [413, "paused", { ok: false, state: "paused", activityRevision: 7 }],
   ] as const)(
     "keeps the %i and %s write-state cross-pair retryable",
-    async (status, state) => {
+    async (status, _state, refusal) => {
       let posts = 0;
       vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
         if (init?.method !== "POST") {
@@ -1196,7 +1123,7 @@ describe("CommentsPanel", () => {
           return discussionPage([NAMED_MESSAGE]);
         }
         posts += 1;
-        return jsonResponse({ ok: false, state }, status);
+        return jsonResponse(refusal, status);
       }));
 
       await render("comment");
@@ -1273,6 +1200,7 @@ describe("CommentsPanel", () => {
       ]);
 
     initialActivity.release({
+      profileName: null,
       ok: true,
       access: "comment",
       latestRevision: 7,
@@ -1348,6 +1276,7 @@ describe("CommentsPanel", () => {
     await settle(earlierPage.bodyStarted);
 
     activity.release({
+      profileName: null,
       ok: true,
       access: "view",
       latestRevision: 8,
@@ -1413,6 +1342,7 @@ describe("CommentsPanel", () => {
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         return jsonResponse({
+          profileName: null,
           ok: true,
           access: "view",
           latestRevision: 8,
@@ -1521,6 +1451,7 @@ describe("CommentsPanel", () => {
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         return jsonResponse({
+          profileName: null,
           ok: true,
           access: "view",
           latestRevision: 8,
@@ -1733,6 +1664,7 @@ describe("CommentsPanel", () => {
     expect([...container.querySelectorAll(".comment-body")]
       .filter((row) => row.textContent === "External body")).toHaveLength(1);
     appendDelta.release({
+      profileName: null,
       ok: true,
       access: "comment",
       latestRevision: 8,
@@ -1745,6 +1677,7 @@ describe("CommentsPanel", () => {
     expect([...container.querySelectorAll(".comment-body")]
       .filter((row) => row.textContent === "External body")).toHaveLength(1);
     deleteDelta.release({
+      profileName: null,
       ok: true,
       access: "comment",
       latestRevision: 9,
@@ -1760,6 +1693,7 @@ describe("CommentsPanel", () => {
     await settle(pausedDelta.bodyStarted);
     expect(bodyInput().disabled).toBe(true);
     pausedDelta.release({
+      profileName: null,
       ok: true,
       access: "comment",
       latestRevision: 11,
@@ -1775,6 +1709,7 @@ describe("CommentsPanel", () => {
     await settle(availableDelta.bodyStarted);
     expect(bodyInput().disabled).toBe(true);
     availableDelta.release({
+      profileName: null,
       ok: true,
       access: "comment",
       latestRevision: 11,
@@ -1786,6 +1721,7 @@ describe("CommentsPanel", () => {
     await settle(() => bodyInput().disabled === false);
     await settle(timeoutDelta.bodyStarted);
     timeoutDelta.release({
+      profileName: null,
       ok: true,
       access: "comment",
       latestRevision: 11,
@@ -1828,6 +1764,7 @@ describe("CommentsPanel", () => {
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         return jsonResponse({
+          profileName: null,
           ok: true,
           access: "comment",
           latestRevision: 7,
@@ -1890,6 +1827,7 @@ describe("CommentsPanel", () => {
       expect(submitButton().disabled).toBe(true);
 
       firstActivity.release({
+        profileName: null,
         ok: true,
         access: "comment",
         latestRevision: 7,
@@ -1931,6 +1869,7 @@ describe("CommentsPanel", () => {
         path === "/api/view/discussion/activity?since=7&hold=0&limit=100"
       ) {
         return jsonResponse({
+          profileName: null,
           ok: true,
           access: "comment",
           latestRevision: 7,
@@ -1979,6 +1918,7 @@ describe("CommentsPanel", () => {
     expect(submitButton().disabled).toBe(true);
 
     replacementActivity.release({
+      profileName: null,
       ok: true,
       access: "comment",
       latestRevision: 20,
@@ -2035,6 +1975,7 @@ describe("CommentsPanel", () => {
     expect(bodyInput().disabled).toBe(true);
 
     availableActivity.release({
+      profileName: null,
       ok: true,
       access: "comment",
       latestRevision: 7,
@@ -2056,6 +1997,7 @@ describe("CommentsPanel", () => {
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         return jsonResponse({
+          profileName: null,
           ok: true,
           access: "view",
           latestRevision: 7,
@@ -2157,6 +2099,7 @@ describe("CommentsPanel", () => {
         return activityAttempts === 1
           ? failedBodyResponse()
           : jsonResponse({
+              profileName: null,
               ok: true,
               access: "view",
               latestRevision: 8,
@@ -2211,6 +2154,7 @@ describe("CommentsPanel", () => {
     [
       "schema-invalid JSON",
       () => jsonResponse({
+        profileName: null,
         ok: true,
         access: "comment",
         latestRevision: 7,
@@ -2224,6 +2168,7 @@ describe("CommentsPanel", () => {
     [
       "regressed cursor",
       () => jsonResponse({
+        profileName: null,
         ok: true,
         access: "comment",
         latestRevision: 7,
@@ -2236,6 +2181,7 @@ describe("CommentsPanel", () => {
     [
       "refused message merge",
       () => jsonResponse({
+        profileName: null,
         ok: true,
         access: "comment",
         latestRevision: 8,
@@ -2362,6 +2308,7 @@ describe("CommentsPanel", () => {
         path === "/api/view/discussion/activity?since=20&hold=0&limit=100"
       ) {
         return jsonResponse({
+          profileName: null,
           ok: true,
           access: "comment",
           latestRevision: 20,
@@ -2420,6 +2367,7 @@ describe("CommentsPanel", () => {
         return activityAttempts === 1
           ? new Response(null, { status: 409 })
           : jsonResponse({
+              profileName: null,
               ok: true,
               access: "comment",
               latestRevision: 8,
@@ -2593,7 +2541,7 @@ describe("CommentsPanel", () => {
             ok: true,
             message: { ...LINK_MESSAGE, body: "Old committed body" },
           })
-        : jsonResponse({ ok: false, state: "blocked" }, 403));
+        : jsonResponse({ activityRevision: 7, ok: false, state: "blocked" }, 403));
       await settle(() => oldSignal?.aborted === true);
       await act(async () => {
         await Promise.resolve();
@@ -2644,7 +2592,7 @@ describe("CommentsPanel", () => {
             ok: true,
             message: { ...LINK_MESSAGE, body: "Old committed body" },
           }
-        : { ok: false, state: outcome });
+        : { ok: false, state: outcome, activityRevision: 7 });
       await settle(() => oldSignal?.aborted === true);
       await act(async () => {
         await Promise.resolve();

@@ -5892,8 +5892,12 @@ describe("ui-state merge-on-load", () => {
       folders: string[];
     }>();
     let issued = 0;
+    // Keep Chats closed so the subscribers are notifications and listing refresh.
     const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["b.md", "gone.md"], "b.md")),
+      Promise.resolve({
+        ...storedStateWithTabs(["b.md", "gone.md"], "b.md"),
+        chatsVisible: false,
+      }),
     );
     bridge.listWorkspaceFiles = vi.fn(() => {
       issued += 1;
@@ -5901,7 +5905,11 @@ describe("ui-state merge-on-load", () => {
     });
     renderShell(bridge);
 
-    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+      expect(screen.getByTestId("tab-gone.md")).toBeTruthy();
+    });
     act(() => {
       bridge.emitWorkspaceActivity();
     });
