@@ -1,13 +1,39 @@
+import { PostCard, BookmarkAction, ThreadMessages, type FeedPostData } from "./ChatPosts";
+import { usePersonalChatFeed } from "./usePersonalChatFeed";
+import {
+  AgentPresenceHint,
+  UnreadPill,
+  ShareReadFailureNotice,
+  BackHeader,
+  joinedChannelLabel,
+  ComposerNotice,
+  AddressedToMe,
+  type ShareReadFailure,
+} from "./ChatsControls";
+import {
+  AcceptDmDialog,
+  DmRequestListItem,
+  LeaveDmDialog,
+  type DmWorkspaceOption,
+} from "./DmPlacement";
+import {
+  answerCreatedChannel,
+  answerLocally,
+  emptyJoinedLaneOrder,
+  mergeShareLanes,
+  planJoinedCommit,
+  shownChannelWireIds,
+  type JoinedCommit,
+  type JoinedLaneOrder,
+  type ShareListing,
+} from "./chatShareLanes";
 import { SectionLabel } from "../ui/controls";
 import { formatChatTime } from "../time";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
 import {
-  ArrowLeft,
   AtSign,
-  Bookmark,
   Bot,
-  Copy,
   FileText,
   Hash,
   MessagesSquare,
@@ -18,9 +44,6 @@ import {
   X,
 } from "lucide-react";
 import {
-  memo,
-  type ReactNode,
-  type RefObject,
   useCallback,
   useEffect,
   useMemo,
@@ -32,12 +55,10 @@ import type {
   ChatAttachmentRecord,
   ChatChannelRecord,
   ChatChannelShareGrantRow,
-  ChatChannelShareReceivedRow,
   ChatDecisionRecord,
   ChatDispatchStateForThreadResult,
   ChatMessageRecord,
   ChatBookmarkRecord,
-  ChatFeedItemRecord,
   ChatReactionRecord,
   ChatRunRecord,
   DmRequestRow,
@@ -49,11 +70,9 @@ import type {
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import { Overlay } from "../Overlay";
 import type { AgentNotification } from "./agentNotifications";
 import {
   ChatMessageList,
-  MessageReactions,
   MentionText,
   chatAuthorLabel,
   runReactionToggle,
@@ -73,7 +92,6 @@ import {
   CHAT_AGENT_PRESENCE_TOPIC,
   agentPresenceClientId,
   resolveAgentPresenceActivity,
-  type AgentPresenceActivity,
 } from "../../collab/agentPresence";
 
 // Multi-user chat presence (MU-C1) is opt-in: only under collaboration
@@ -133,244 +151,6 @@ type OverviewState =
 // carries its own commit watermark (see commitTicket).
 type CommitLane = "overview" | "joinedShares" | "relayShares" | "relayReach";
 
-// What the view keeps: the flat merged share listing. This is not the contract
-// result — that one may answer "the relay was unreachable", which is not
-// storable as rows. commitShareListing translates, lane by lane. The relay
-// rows carry the session they were read under, because they are
-// account-scoped: preservation through an outage may only ever keep the same
-// session's rows.
-interface ShareListing {
-  granted: ChatChannelShareGrantRow[];
-  received: ChatChannelShareReceivedRow[];
-  // One answer per channel the read covered. A channel the read did not cover
-  // is absent, which is unknown, and unknown locks it — see channelIsLocked.
-  joined: JoinedChannelAnswer[];
-  sessionKey: string | null;
-}
-
-// What this surface is showing, and therefore the only channels it may ask
-// the joined lane about: the channels in the list, plus the invitations under
-// "Shared with you" (each one needs to know whether this workspace already
-// joined that channel). The response is one answer per name, so it is bounded
-// by the view and not by how many channels the account has ever joined.
-function shownChannelWireIds(
-  channels: readonly ChatChannelRecord[],
-  received: readonly ChatChannelShareReceivedRow[],
-): string[] {
-  const ids = new Set<string>();
-  for (const channel of channels) {
-    if (channel.wireId) ids.add(channel.wireId);
-  }
-  for (const row of received) ids.add(row.channelWireId);
-  return [...ids];
-}
-
-// Why a committed share read carried no rows. "unreachable" covers both a
-// relay that did not answer and a listing the IPC rejected outright: dohc
-// could not read it, and a retry is the honest next step. "over-limit" is the
-// answer that did arrive and that dohc cannot list — retrying repeats it
-// exactly, so the surface owes the count and the limit instead of a button.
-type ShareReadFailure =
-  | { kind: "unreachable" }
-  | {
-      kind: "over-limit";
-      lanes: ReadonlyArray<{ lane: "granted" | "received"; rows: number }>;
-      limit: number;
-    };
-
-// A share listing answers two independent questions. The joined rows come from
-// the local registry, so any reader that got a listing at all has the true
-// answer. The granted/received rows come from the relay — a reader that is not
-// authoritative for them must leave them exactly as they were.
-// The joined lane is a set of PER-CHANNEL facts, so a read replaces the
-// channels it named and leaves the rest alone. Replacing the whole array threw
-// away answers the new read never spoke to — a read issued before a channel
-// was created landing after it dropped that channel's answer, and the composer
-// vanished under the user.
-//
-// Ordering is unaffected: claimLanes still decides who may write at all, and a
-// claim now writes only what it answered.
-// Two different questions, and they must not be confused:
-//
-//  - Merging is answer-driven. A read writes the channels it answered and
-//    leaves the rest, so a read that never named a channel cannot drop it.
-//  - Eviction is view-driven. The newest read also discards answers for
-//    channels the view no longer shows — an invitation that was revoked or
-//    claimed by another workspace would otherwise sit in the map forever, and
-//    a cache that grows with history is the growth this whole change removes.
-//
-// `keep` is the newest read's view: its own scope plus anything answered
-// locally since it was issued. Older reads pass null and evict nothing — they
-// are not entitled to say what the view shows.
-function applyJoinedAnswers(
-  current: readonly JoinedChannelAnswer[],
-  answers: readonly JoinedChannelAnswer[],
-  keep: ReadonlySet<string> | null,
-): JoinedChannelAnswer[] {
-  const byWire = new Map(current.map((answer) => [answer.channelWireId, answer]));
-  for (const answer of answers) byWire.set(answer.channelWireId, answer);
-  const merged = [...byWire.values()];
-  return keep === null ? merged : merged.filter((a) => keep.has(a.channelWireId));
-}
-
-// What a response may do to the joined lane, or null when it may do nothing.
-type JoinedCommit = {
-  // Writes this response's answers into the cached lane. It takes the cached
-  // answers because only the updater knows them.
-  write: (current: readonly JoinedChannelAnswer[]) => JoinedChannelAnswer[];
-  // This response is the newest for the lane. Only it may evict, and only it
-  // may establish a lane that does not exist yet: seeding is a whole-lane act,
-  // and a response that owns a few wires must not put itself — and its own
-  // relay rows — over an unknown a newer read established on purpose.
-  ownsLane: boolean;
-};
-
-// What the joined lane remembers between reads.
-type JoinedLaneOrder = {
-  // The workspace these entries are about. They are cleared when it changes,
-  // and the state carries the identity rather than a caller remembering to
-  // reset it: `local` is eviction-immune until a read NAMES its wire, and no
-  // read in another workspace ever will, so a channel created and abandoned
-  // in one workspace would sit in every later workspace's `keep` forever.
-  workspaceId: string | null;
-  // The highest ticket that has answered each wire id. The lane orders per
-  // WIRE, not per lane: one watermark for the whole lane let a newer read
-  // outrank an older one for channels the newer read never mentioned. A
-  // refreshShares issuing from a stale overview took the watermark, and the
-  // overview response that alone knew about a freshly imported channel was
-  // then barred whole — leaving that channel unanswered, and therefore
-  // locked, until some later refresh. A newer claim outranks only what it
-  // answered.
-  answeredAt: Map<string, number>;
-  // Wire ids this surface answered itself — see answerLocally.
-  local: Set<string>;
-};
-
-export function emptyJoinedLaneOrder(): JoinedLaneOrder {
-  return { workspaceId: null, answeredAt: new Map(), local: new Set() };
-}
-
-function adoptWorkspace(order: JoinedLaneOrder, workspaceId: string): void {
-  if (order.workspaceId === workspaceId) return;
-  order.workspaceId = workspaceId;
-  order.answeredAt.clear();
-  order.local.clear();
-}
-
-// A channel this surface answered itself, with no read behind it. It survives
-// eviction until a read names it, because every read now in flight was issued
-// before the channel existed.
-export function answerLocally(
-  order: JoinedLaneOrder,
-  workspaceId: string,
-  channelWireId: string,
-): void {
-  adoptWorkspace(order, workspaceId);
-  order.local.add(channelWireId);
-}
-
-// The one decision the joined lane makes: what this response may write, and
-// what the cache may still hold once it has.
-//
-// Exported with its state because the property this change exists for — a
-// cache bounded by the view rather than by history — is a property of these
-// two collections and of nothing on screen.
-export function planJoinedCommit(
-  order: JoinedLaneOrder,
-  input: {
-    // The workspace this response is about. The order forgets any other.
-    workspaceId: string;
-    ticket: number;
-    answers: readonly JoinedChannelAnswer[];
-    // The lane claim. Only the newest response may evict.
-    newestForLane: boolean;
-    // What the surface shows now, or null while it cannot say. A response's
-    // own scope is not the view: a read issued from an older render answers
-    // less than the surface has since put on screen, so evicting to its scope
-    // would drop the answer for a channel the user is looking at — and an
-    // unanswered channel locks.
-    shown: readonly string[] | null;
-  },
-): JoinedCommit | null {
-  const { workspaceId, ticket, answers, newestForLane, shown } = input;
-  adoptWorkspace(order, workspaceId);
-  const writable = answers.filter(
-    (answer) => ticket > (order.answeredAt.get(answer.channelWireId) ?? 0),
-  );
-  for (const answer of writable) order.answeredAt.set(answer.channelWireId, ticket);
-  let keep: Set<string> | null = null;
-  if (newestForLane) {
-    // A channel this read named is answered by a read from now on.
-    for (const answer of answers) order.local.delete(answer.channelWireId);
-    if (shown !== null) {
-      keep = new Set([
-        ...answers.map((answer) => answer.channelWireId),
-        ...shown,
-        ...order.local,
-      ]);
-      // The watermarks are the same cache. Ordering kept for a channel the
-      // view no longer shows would grow exactly what evicting the answers
-      // stopped growing.
-      for (const wire of order.answeredAt.keys()) {
-        if (!keep.has(wire)) order.answeredAt.delete(wire);
-      }
-    }
-  }
-  // Authority, not payload. A response that owns the lane always commits, even
-  // with nothing to write: an answer covering no channel is still the lane's
-  // answer, and it is what seeds the listing on a solo workspace.
-  if (writable.length === 0 && !newestForLane) return null;
-  return {
-    write: (current) => applyJoinedAnswers(current, writable, keep),
-    ownsLane: newestForLane,
-  };
-}
-
-// Merges into a listing that EXISTS. Establishing one is a different question
-// and each reader answers it for itself: only a reader that speaks for the
-// relay lanes can, and only while it owns the joined lane.
-function mergeShareLanes(
-  current: ShareListing,
-  next: ShareListing,
-  lanes: { joined: JoinedCommit | null; relay: boolean },
-): ShareListing {
-  return {
-    joined: lanes.joined ? lanes.joined.write(current.joined) : current.joined,
-    granted: lanes.relay ? next.granted : current.granted,
-    received: lanes.relay ? next.received : current.received,
-    sessionKey: lanes.relay ? next.sessionKey : current.sessionKey,
-  };
-}
-
-// A channel this workspace just created answers itself. main mints the new
-// channel's wire id from its own local id, so no grant can exist for it — and
-// the caller could not have named it in the read that is already on screen.
-// Without this the new channel is unanswered, and unanswered locks: the user
-// creates a channel and lands in it with no composer.
-//
-// It writes one key, and applyJoinedAnswers is what keeps it: a read issued
-// before the create never named this channel, so when it lands it replaces the
-// channels it did name and leaves this entry alone. refreshShares is
-// deliberately not liveToken-guarded, so a token bump would not have been
-// enough on its own.
-function answerCreatedChannel(
-  current: ShareListing | null,
-  channel: ChatChannelRecord,
-): ShareListing | null {
-  // Nothing has vouched for the lane yet, and one local fact does not make it
-  // an answer. channelIsLocked keeps failing closed until a read settles it.
-  if (current === null) return current;
-  if (!channel.wireId) return current;
-  const wireId = channel.wireId;
-  return {
-    ...current,
-    joined: [
-      ...current.joined.filter((answer) => answer.channelWireId !== wireId),
-      { channelWireId: wireId, joined: null },
-    ],
-  };
-}
-
 // Exported for the shell's expand-to-tab seam: the panel reports where it is
 // (onNavChange) and a freshly expanded tab starts there (initialNav).
 export type ChatsNav =
@@ -388,8 +168,6 @@ export type ChatsNav =
   | { level: "dm"; dm: DmRecord; focusMessageId?: string }
   | { level: "dm-new" };
 
-type Nav = ChatsNav;
-
 // Unsent input, one field per composer surface, plus the composer's MODE
 // (replying to a message / resolving a decision) — without the mode a reply
 // drafted in the panel would post as a top-level comment after expanding.
@@ -403,17 +181,6 @@ export interface ChatsDrafts {
   dmDraft: string;
   replyTarget: ChatsComposerReplyTarget | null;
   resolveTargetMessageId: string | null;
-}
-
-type FeedOpeningMessage = Omit<
-  NonNullable<ChannelThreadRecord["openingMessage"]>,
-  "reactions"
->;
-
-interface FeedPostData {
-  openingMessage: FeedOpeningMessage | null;
-  reactions: ChatReactionRecord[];
-  viewerAuthorId: string;
 }
 
 interface ThreadSnapshot {
@@ -480,50 +247,6 @@ interface ChannelSnapshot {
   feedPosts: Record<string, FeedPostData>;
 }
 
-interface ThreadCommentNode {
-  message: ChatMessageRecord;
-  replies: ThreadCommentNode[];
-}
-
-// The store keeps the true parent id for every reply. Turn the chronological
-// message stream into a display tree without trusting malformed relationships:
-// missing parents, self-links, and cycles stay visible as top-level comments.
-function buildThreadCommentTree(
-  openingMessageId: string,
-  comments: readonly ChatMessageRecord[],
-): ThreadCommentNode[] {
-  const nodes: ThreadCommentNode[] = comments.map((message) => ({
-    message,
-    replies: [],
-  }));
-  const byId = new Map(nodes.map((node) => [node.message.id, node]));
-  const roots: ThreadCommentNode[] = [];
-
-  const createsCycle = (messageId: string, parentId: string): boolean => {
-    const seen = new Set([messageId]);
-    let cursor: string | undefined = parentId;
-    while (cursor && cursor !== openingMessageId) {
-      if (seen.has(cursor)) return true;
-      seen.add(cursor);
-      cursor = byId.get(cursor)?.message.parentMessageId;
-    }
-    return false;
-  };
-
-  for (const node of nodes) {
-    const parentId = node.message.parentMessageId;
-    const parent =
-      parentId && parentId !== openingMessageId ? byId.get(parentId) : undefined;
-    if (parent && !createsCycle(node.message.id, parentId!)) {
-      parent.replies.push(node);
-    } else {
-      roots.push(node);
-    }
-  }
-
-  return roots;
-}
-
 const IDLE_DISPATCH_STATE: ChatDispatchStateForThreadResult = {
   liveRunId: null,
   pendingCount: 0,
@@ -539,475 +262,6 @@ interface ChatsComposerReplyTarget {
 
 type ComposerReplyTarget = ChatsComposerReplyTarget;
 
-function pathBasename(pathHint: string | undefined): string {
-  if (!pathHint) return "attachment";
-  return basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment";
-}
-
-function AgentBadge(props: { testIdPrefix: string }) {
-  return (
-    <span
-      data-testid={`${props.testIdPrefix}-agent-badge`}
-      className="rounded border border-agent/40 px-1 font-mono text-[10px] text-agent"
-    >
-      agent
-    </span>
-  );
-}
-
-function AgentPresenceHint(props: {
-  activity: AgentPresenceActivity | null;
-  testId: string;
-}) {
-  if (props.activity === null) return null;
-  const working = props.activity === "working";
-  return (
-    <span
-      data-testid={props.testId}
-      aria-label={`Agent is ${props.activity}`}
-      title={`Agent is ${props.activity}`}
-      className="inline-flex shrink-0 items-center gap-1 font-mono text-[10px] text-subtle"
-    >
-      <span
-        aria-hidden
-        className={`size-1.5 rounded-full ${
-          working ? "bg-agent" : "border border-agent/60 bg-transparent"
-        }`}
-      />
-      {props.activity}
-    </span>
-  );
-}
-
-function DecisionStatus(props: {
-  decision: ChatDecisionRecord;
-  onResolve?: () => void;
-  testIdPrefix: string;
-}) {
-  if (props.decision.state === "resolved") {
-    return (
-      <span
-        data-testid={`${props.testIdPrefix}-decision-resolved`}
-        className="rounded-md border border-success/40 bg-success/10 px-1.5 py-0.5 font-mono text-[10px] text-success"
-      >
-        resolved
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex flex-wrap items-center gap-1.5">
-      <span
-        data-testid={`${props.testIdPrefix}-decision-open`}
-        className="rounded-md border border-warning/40 bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning"
-      >
-        needs decision
-      </span>
-      {props.onResolve ? (
-        <button
-          type="button"
-          data-testid={`${props.testIdPrefix}-decision-resolve`}
-          onClick={props.onResolve}
-          className="rounded px-1 py-0.5 font-mono text-[10px] text-subtle hover:text-ink dohc-focus-visible"
-        >
-          Resolve
-        </button>
-      ) : null}
-    </span>
-  );
-}
-
-function AttachmentChip(props: {
-  attachment: ChatAttachmentRecord;
-  onOpenPath?: (path: string, headingAnchor?: string) => void;
-}) {
-  const label = pathBasename(props.attachment.pathHint);
-  const title = `${props.attachment.pathHint ?? label}${
-    props.attachment.headingText ? `#${props.attachment.headingText}` : ""
-  }`;
-  const className =
-    "inline-flex items-center gap-1 rounded-full border border-line bg-panel-2 px-2 py-0.5 font-mono text-[10px] text-muted";
-  const content = (
-    <>
-      <FileText size={11} aria-hidden className="shrink-0" />
-      <span className="max-w-56 truncate">{label}</span>
-      {props.attachment.headingText ? (
-        <span className="max-w-48 truncate text-subtle">
-          #{props.attachment.headingText}
-        </span>
-      ) : null}
-    </>
-  );
-  if (props.attachment.pathHint && props.onOpenPath) {
-    return (
-      <button
-        type="button"
-        data-testid="chats-attachment-chip"
-        title={title}
-        onClick={() => {
-          const path = props.attachment.pathHint ?? "";
-          if (props.attachment.headingAnchor) {
-            props.onOpenPath?.(path, props.attachment.headingAnchor);
-          } else {
-            props.onOpenPath?.(path);
-          }
-        }}
-        className={`${className} cursor-pointer hover:border-muted/50 hover:text-ink dohc-focus-visible`}
-      >
-        {content}
-      </button>
-    );
-  }
-  return (
-    <span
-      data-testid="chats-attachment-chip"
-      className={className}
-    >
-      {content}
-    </span>
-  );
-}
-
-function RunChip(props: { run: ChatRunRecord }) {
-  const [open, setOpen] = useState(false);
-  const containerRef = useRef<HTMLSpanElement | null>(null);
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    function onPointerDown(event: PointerEvent) {
-      if (!containerRef.current?.contains(event.target as Node)) setOpen(false);
-    }
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setOpen(false);
-        triggerRef.current?.focus();
-      }
-    }
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
-
-  const started = formatChatTime(props.run.startedAtMs);
-  return (
-    <span
-      ref={containerRef}
-      data-chat-escape-local="true"
-      className="relative inline-flex"
-    >
-      <button
-        ref={triggerRef}
-        type="button"
-        data-testid="chats-run-chip"
-        aria-expanded={open}
-        aria-haspopup="dialog"
-        onClick={() => setOpen((current) => !current)}
-        className="rounded border border-line px-1.5 font-mono text-[10px] text-subtle hover:text-ink dohc-focus-visible"
-      >
-        run {props.run.runId.slice(0, 7)}
-      </button>
-      {open ? (
-        <span
-          role="dialog"
-          aria-label={`Run ${props.run.runId}`}
-          data-testid="chats-run-popover"
-          className="dohc-popover dohc-pop-in absolute left-0 top-full z-30 mt-1 grid w-72 max-w-[calc(100vw-2rem)] gap-2 rounded-lg border border-line bg-panel p-3 text-left"
-        >
-          <span className="grid gap-0.5">
-            <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">Command</span>
-            <code data-testid="chats-run-command" className="break-words text-[11px] text-ink">
-              {props.run.command}
-            </code>
-          </span>
-          <span className="grid grid-cols-2 gap-2">
-            <span className="grid gap-0.5">
-              <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">Started</span>
-              <time
-                data-testid="chats-run-started"
-                dateTime={started.iso}
-                className="font-mono text-[10px] text-muted"
-              >
-                {started.label}
-              </time>
-            </span>
-            <span className="grid gap-0.5">
-              <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">Exit code</span>
-              <span data-testid="chats-run-exit-code" className="font-mono text-[10px] text-muted">
-                {props.run.exitCode ?? "—"}
-              </span>
-            </span>
-          </span>
-          <span className="grid gap-0.5">
-            <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">Log</span>
-            <span className="flex min-w-0 items-center gap-1.5">
-              <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[10px] text-muted">
-                {props.run.logPath ?? "No log path"}
-              </code>
-              {props.run.logPath ? (
-                <button
-                  type="button"
-                  data-testid="chats-run-copy-log"
-                  aria-label="Copy log path"
-                  title="Copy log path"
-                  onClick={() => {
-                    void bridge()
-                      .writeClipboardText({ text: props.run.logPath ?? "" })
-                      .catch(() => undefined);
-                  }}
-                  className="grid size-6 shrink-0 place-items-center rounded border border-line text-subtle hover:text-ink dohc-focus-visible"
-                >
-                  <Copy size={11} aria-hidden />
-                </button>
-              ) : null}
-            </span>
-          </span>
-        </span>
-      ) : null}
-    </span>
-  );
-}
-
-// A derived title repeats the body's first line; the card already shows it
-// in serif, so the excerpt starts after it.
-function postExcerpt(title: string, body: string): string {
-  const newline = body.indexOf("\n");
-  const firstLine = (newline === -1 ? body : body.slice(0, newline)).trim();
-  if (firstLine !== title.trim()) return body;
-  return newline === -1 ? "" : body.slice(newline + 1).trim();
-}
-
-function PostCard(props: {
-  thread: ChannelThreadRecord;
-  data: FeedPostData;
-  reactionControls: ChatReactionControls;
-  onOpen: () => void;
-  bookmark?: ChatBookmarkRecord;
-  bookmarkBusy?: boolean;
-  onToggleBookmark?: (mode: "live" | "snapshot") => void;
-  onOpenBookmark?: () => void;
-}) {
-  const message = props.data.openingMessage;
-  const isAgent = message?.authorKind === "agent";
-  const time = formatChatTime(message?.createdAtMs ?? props.thread.createdAtMs);
-  const commentCount = Math.max(0, props.thread.messageCount - 1);
-  const excerpt = message ? postExcerpt(props.thread.title, message.bodySnippet) : "";
-  return (
-    <li
-      data-testid="chats-post-card"
-      data-thread-id={props.thread.id}
-      data-author-kind={message?.authorKind ?? "unknown"}
-      role="button"
-      tabIndex={0}
-      onClick={props.onOpen}
-      onKeyDown={(event) => {
-        if (event.target !== event.currentTarget) return;
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          props.onOpen();
-        }
-      }}
-      style={
-        isAgent
-          ? { borderLeftColor: "color-mix(in oklab, var(--dohc-agent) 55%, var(--dohc-line))" }
-          : undefined
-      }
-      className={`group cursor-pointer rounded-xl border border-line bg-panel px-4 py-3 text-left transition-[border-color,transform] hover:-translate-y-px hover:border-muted/50 dohc-focus-visible ${
-        isAgent ? "border-l-2" : ""
-      }`}
-    >
-      {/* Compatibility target retained for existing navigation/e2e drivers;
-          the card itself is the new semantic button. */}
-      <div data-testid="chats-thread" data-thread-id={props.thread.id}>
-        <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
-          <span
-            data-testid="chats-post-author"
-            className={`text-[13px] font-medium ${isAgent ? "text-agent" : "text-ink"}`}
-          >
-            {message ? chatAuthorLabel(message) : "Unknown author"}
-          </span>
-          {isAgent ? <AgentBadge testIdPrefix="chats-post" /> : null}
-          <time
-            data-testid="chats-post-time"
-            dateTime={time.iso}
-            title={time.iso}
-            className="font-mono text-[10px] text-subtle"
-          >
-            {time.label}
-          </time>
-          <span className="ml-auto">
-            <UnreadPill count={props.thread.unreadCount} testId="chats-thread-unread" />
-          </span>
-        </span>
-        <span
-          data-testid="chats-post-title"
-          className="mt-1.5 block text-balance font-serif text-[17px] font-semibold leading-snug text-ink"
-        >
-          {props.thread.title}
-        </span>
-        {excerpt ? (
-          <span
-            data-testid="chats-post-excerpt"
-            className="mt-1 line-clamp-2 whitespace-pre-wrap break-words text-[13px] text-muted"
-          >
-            {excerpt}
-          </span>
-        ) : null}
-      </div>
-      <div
-        data-testid="chats-post-footer"
-        className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-line pt-2.5"
-      >
-        {message ? (
-          <MessageReactions
-            testIdPrefix="chats-post"
-            messageId={message.id}
-            records={props.data.reactions.filter((reaction) => reaction.messageId === message.id)}
-            controls={props.reactionControls}
-            flush
-          />
-        ) : null}
-        {(props.thread.openDecisionCount ?? 0) > 0 ? (
-          <span
-            data-testid="chats-post-decision-open"
-            className="rounded-md border border-warning/40 bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning"
-          >
-            needs decision
-          </span>
-        ) : null}
-        <span className="min-w-2 flex-1" />
-        {props.onToggleBookmark || (props.bookmark && props.onOpenBookmark) ? (
-          <BookmarkAction
-            active={Boolean(props.bookmark)}
-            busy={props.bookmarkBusy}
-            destinationPath={props.bookmark?.destinationPath}
-            onToggle={props.onToggleBookmark}
-            onOpen={props.onOpenBookmark}
-            testId="chats-post-bookmark"
-          />
-        ) : null}
-        <span
-          data-testid="chats-post-comment-count"
-          className="font-mono text-[11px] text-subtle"
-        >
-          {commentCount} {commentCount === 1 ? "comment" : "comments"}
-        </span>
-      </div>
-    </li>
-  );
-}
-
-function BookmarkAction(props: {
-  active: boolean;
-  busy?: boolean;
-  destinationPath?: string;
-  onToggle?: (mode: "live" | "snapshot") => void;
-  onOpen?: () => void;
-  testId: string;
-}) {
-  return (
-    <span className="inline-flex items-center gap-1">
-      {props.active && props.onOpen ? (
-        <button
-          type="button"
-          data-testid={`${props.testId}-open`}
-          aria-label="Open bookmarked chat file"
-          title={props.destinationPath ?? "Open bookmarked chat file"}
-          onClick={(event) => {
-            event.stopPropagation();
-            props.onOpen?.();
-          }}
-          className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink dohc-focus-visible"
-        >
-          <FileText size={12} aria-hidden />
-        </button>
-      ) : null}
-      {props.onToggle ? (
-        <>
-          <button
-            type="button"
-            data-testid={props.testId}
-            aria-pressed={props.active}
-            aria-label={props.active ? "Remove chat bookmark" : "Bookmark chat as live file"}
-            title={
-              props.active
-                ? "Remove bookmark (the Markdown file moves to Archived)"
-                : "Bookmark as a live Markdown file"
-            }
-            disabled={props.busy}
-            onClick={(event) => {
-              event.stopPropagation();
-              props.onToggle?.("live");
-            }}
-            className={`grid size-6 place-items-center rounded dohc-focus-visible disabled:opacity-50 ${
-              props.active
-                ? "text-accent hover:bg-line/50"
-                : "text-subtle hover:bg-line/50 hover:text-ink"
-            }`}
-          >
-            <Bookmark size={12} fill={props.active ? "currentColor" : "none"} aria-hidden />
-          </button>
-          {!props.active ? (
-            <button
-              type="button"
-              data-testid={`${props.testId}-snapshot`}
-              aria-label="Bookmark chat as snapshot"
-              title="Bookmark as a static Markdown snapshot"
-              disabled={props.busy}
-              onClick={(event) => {
-                event.stopPropagation();
-                props.onToggle?.("snapshot");
-              }}
-              className="rounded px-1.5 py-1 font-mono text-[9px] text-subtle hover:bg-line/50 hover:text-ink dohc-focus-visible disabled:opacity-50"
-            >
-              snapshot
-            </button>
-          ) : null}
-        </>
-      ) : null}
-    </span>
-  );
-}
-
-function UnreadPill(props: { count: number; testId: string }) {
-  if (props.count <= 0) return null;
-  return (
-    <span
-      data-testid={props.testId}
-      aria-label={`${props.count} unread`}
-      className="min-w-4 shrink-0 rounded-full bg-ink px-1 text-center text-[10px] font-semibold leading-4 text-bg"
-    >
-      {props.count > 99 ? "99+" : props.count}
-    </span>
-  );
-}
-
-// One sentence per over-limit lane, counting what the lane actually holds.
-//
-// The unit is SHARES, not channels. A relay lane carries one row per grant and
-// nothing deduplicates the channel — mapRelayShareListing keeps every row,
-// because each carries its own recipient — so one channel shared with 4097
-// people is 4097 rows. Saying "you share 4097 channels" names the wrong thing
-// and sends the user to reduce channels when the excess is grants on a single
-// channel they own. It is the same unit slip that made the deleted account
-// fixture wrong, arriving at the surface.
-//
-// The joined lane counts the other unit — mergeJoinedChannel matches on
-// channelWireId as well as shareId, so those rows really are one per channel —
-// and it has no limit to report at all now that it is read per channel.
-function overLimitSentences(failure: {
-  lanes: ReadonlyArray<{ lane: "granted" | "received"; rows: number }>;
-  limit: number;
-}): string[] {
-  return failure.lanes.map(({ lane, rows }) =>
-    lane === "granted"
-      ? `You have ${rows} shares of your channels; the limit is ${failure.limit}.`
-      : `You have ${rows} shares from other people; the limit is ${failure.limit}.`,
-  );
-}
-
 // Whether a new outgoing grant would deepen the over-limit state. Only the
 // granted lane can: an outgoing share adds a row there and nowhere else. A
 // full received lane is an inbound backlog the user did not create and cannot
@@ -1019,812 +273,6 @@ function grantedLaneIsOverLimit(failure: ShareReadFailure | null): boolean {
     failure.lanes.some((entry) => entry.lane === "granted")
   );
 }
-
-// What the sharing surface says when a committed share read carried no rows.
-// Without it the surface renders an empty list, which reads as "you have no
-// shares".
-//
-// The two reasons owe different things. An outage owes a retry, because the
-// next request can answer. A listing over dohc's own cap owes the count and
-// the limit and NO retry: the same request answers the same way forever, and a
-// button that cannot work is the defect this notice exists to remove.
-function ShareReadFailureNotice(props: {
-  testId: string;
-  failure: ShareReadFailure;
-  // True when rows are still on screen from an earlier read: they are real,
-  // they are just older than this failure.
-  stale: boolean;
-  onRetry: () => void;
-}) {
-  const staleLine = props.stale ? " This list may be out of date." : "";
-  return (
-    <div
-      data-testid={props.testId}
-      data-failure={props.failure.kind}
-      className="flex items-start gap-1.5 border-b border-line px-3 py-2"
-    >
-      <span className="min-w-0 flex-1 text-[11px] leading-4 text-muted">
-        {props.failure.kind === "unreachable"
-          ? `dohc could not read your shares.${staleLine}`
-          : `dohc cannot list this many shares. ${overLimitSentences(
-              props.failure,
-            ).join(" ")}${staleLine}`}
-      </span>
-      {props.failure.kind === "unreachable" ? (
-        <button
-          type="button"
-          data-testid={`${props.testId}-retry`}
-          onClick={props.onRetry}
-          className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
-        >
-          Try again
-        </button>
-      ) : null}
-    </div>
-  );
-}
-
-function BackHeader(props: {
-  label: string;
-  testId: string;
-  onBack: () => void;
-  icon?: React.ReactNode;
-  // Optional calm trailing slot (e.g. presence faces of who else is here).
-  trailing?: React.ReactNode;
-  action?: React.ReactNode;
-}) {
-  return (
-    <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-line px-2">
-      <button
-        type="button"
-        data-testid={`${props.testId}-back`}
-        aria-label="Back"
-        title="Back"
-        onClick={props.onBack}
-        className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
-      >
-        <ArrowLeft size={13} aria-hidden />
-      </button>
-      {props.icon}
-      <span
-        data-testid={`${props.testId}-title`}
-        className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink"
-      >
-        {props.label}
-      </span>
-      {props.action}
-      {props.trailing}
-    </div>
-  );
-}
-
-// One line describing who a joined channel came from — calm, not a banner.
-function joinedChannelLabel(joined: JoinedSharedChannelRow): string {
-  const from = joined.granterEmail ?? "someone else";
-  const suffix = joined.ended
-    ? " — no longer shared"
-    : joined.access === "read-only"
-      ? " — read-only"
-      : "";
-  return `Shared by ${from}${suffix}`;
-}
-
-// The read-only / ended composer replacement: honest and quiet.
-function ComposerNotice(props: { testId: string; children: React.ReactNode }) {
-  return (
-    <p
-      data-testid={props.testId}
-      className="m-0 shrink-0 border-t border-line px-3 py-2 text-[11px] text-subtle"
-    >
-      {props.children}
-    </p>
-  );
-}
-
-// "Addressed to me" inbox: the calm, in-context list of things the agent is
-// waiting on the user for (asks + needs-input). It reuses the agent
-// notification model rather than a heavy new surface, and stays hidden when
-// there's nothing to answer.
-//
-// The rows are informational, and a notification is why: it carries a
-// workspace, a run, and copy — never a conversation or a message. The user
-// acts where the run does: a blocked run raises its own permission card, and
-// the History rail says what it did.
-function AddressedToMe(props: { notifications: readonly AgentNotification[] }) {
-  const waiting = props.notifications.filter(
-    (notification) => notification.kind === "asked" || notification.kind === "needs-input",
-  );
-  if (waiting.length === 0) return null;
-  return (
-    <section
-      data-testid="chats-addressed-to-me"
-      aria-label="Addressed to me"
-      className="border-b border-line bg-panel-2/40"
-    >
-      <SectionLabel as="p" className="mb-0 px-3 pt-2">
-        Addressed to me
-      </SectionLabel>
-      <ul className="m-0 list-none p-0">
-        {waiting.map((notification) => (
-          <li key={notification.id}>
-            <div
-              data-testid="chats-addressed-item"
-              className="flex w-full items-start gap-1.5 px-3 py-2 text-left"
-            >
-              <Bot size={13} aria-hidden className="mt-0.5 shrink-0 text-accent" />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[12px] font-medium text-ink">
-                  {notification.title}
-                </span>
-                <span className="block truncate text-[11px] text-muted">{notification.body}</span>
-              </span>
-            </div>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-type DmWorkspaceOption = { workspaceId: string; label: string };
-
-function AcceptDmDialog(props: {
-  request: DmRequestRow;
-  currentWorkspaceId: string;
-  workspaces: readonly DmWorkspaceOption[];
-  onAccept: (workspaceId: string) => Promise<void>;
-  onClose: () => void;
-}) {
-  const defaultWorkspaceId = props.workspaces.some(
-    (workspace) => workspace.workspaceId === props.currentWorkspaceId,
-  )
-    ? props.currentWorkspaceId
-    : (props.workspaces[0]?.workspaceId ?? "");
-  const [workspaceId, setWorkspaceId] = useState(defaultWorkspaceId);
-  const [busy, setBusy] = useState(false);
-  const busyRef = useRef(false);
-  const chosen = props.workspaces.find(
-    (workspace) => workspace.workspaceId === workspaceId,
-  );
-  const title = props.request.granterEmail
-    ? `Add your conversation with ${props.request.granterEmail} to a workspace`
-    : "Add this conversation to a workspace";
-
-  async function accept() {
-    if (!chosen || busyRef.current) return;
-    busyRef.current = true;
-    setBusy(true);
-    try {
-      await props.onAccept(chosen.workspaceId);
-    } finally {
-      busyRef.current = false;
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Overlay
-      onClose={() => {
-        if (!busyRef.current) props.onClose();
-      }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="chats-accept-dm-title"
-        data-testid="chats-accept-dm-dialog"
-        className="dohc-elevated flex w-105 max-w-[80vw] flex-col gap-3 rounded-xl border border-line bg-panel p-5"
-      >
-        <div className="flex flex-col gap-1">
-          <h2
-            id="chats-accept-dm-title"
-            className="m-0 text-sm font-semibold text-ink"
-          >
-            {title}
-          </h2>
-          <p className="m-0 text-xs text-muted">
-            The conversation stays in the workspace you pick.
-          </p>
-        </div>
-        <fieldset className="m-0 grid gap-1 border-0 p-0" disabled={busy}>
-          <legend className="sr-only">Workspace</legend>
-          {props.workspaces.map((workspace) => (
-            <label
-              key={workspace.workspaceId}
-              data-testid="chats-accept-dm-workspace-option"
-              data-workspace-id={workspace.workspaceId}
-              className="flex cursor-pointer items-center gap-2 rounded-md border border-line px-3 py-2 text-xs text-ink hover:bg-panel-2"
-            >
-              <input
-                type="radio"
-                name="chats-accept-dm-workspace"
-                value={workspace.workspaceId}
-                checked={workspaceId === workspace.workspaceId}
-                onChange={() => setWorkspaceId(workspace.workspaceId)}
-              />
-              <span className="truncate">{workspace.label}</span>
-            </label>
-          ))}
-        </fieldset>
-        <div className="flex justify-end gap-2">
-          <button
-            type="button"
-            data-testid="chats-accept-dm-cancel"
-            disabled={busy}
-            onClick={props.onClose}
-            className="rounded border border-line px-3 py-1.5 text-xs text-muted hover:text-ink disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            data-testid="chats-accept-dm-confirm"
-            disabled={!chosen || busy}
-            onClick={() => void accept()}
-            className="rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50"
-          >
-            {chosen ? `Add to ${chosen.label}` : "Choose a workspace"}
-          </button>
-        </div>
-      </div>
-    </Overlay>
-  );
-}
-
-// The DM placement reverse path's confirmation: reversible but
-// disruptive, so it states what happens before it runs (product invariant).
-function LeaveDmDialog(props: {
-  dm: DmRecord;
-  workspaceLabel: string;
-  // A send composed for this conversation, still in
-  // flight when Leave ends the row, would have its own revalidation reject
-  // after the row is gone — and goBack's context change then
-  // suppresses that rejection, so the message vanishes with no warning.
-  // Disabling confirm until the send settles means the user always sees
-  // either the message land or the existing "Could not send" error, never
-  // silence.
-  sendInFlight: boolean;
-  onConfirm: () => Promise<void>;
-  onClose: () => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const busyRef = useRef(false);
-
-  async function confirm() {
-    if (busyRef.current || props.sendInFlight) return;
-    busyRef.current = true;
-    setBusy(true);
-    try {
-      await props.onConfirm();
-    } finally {
-      busyRef.current = false;
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Overlay
-      onClose={() => {
-        if (!busyRef.current) props.onClose();
-      }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="chats-leave-dm-title"
-        data-testid="chats-leave-dm-dialog"
-        // This dialog owns Escape. Without the marker, the Chats
-        // root's own Escape handler (onKeyDownCapture, capture phase — it
-        // runs before this) walks the DM view back before this dialog ever
-        // sees the key, leaving it open over whatever conversation goBack
-        // lands on next.
-        data-chat-escape-local="true"
-        onKeyDown={(event) => {
-          if (event.key !== "Escape") return;
-          event.stopPropagation();
-          if (!busyRef.current) props.onClose();
-        }}
-        className="dohc-elevated flex w-105 max-w-[80vw] flex-col gap-3 rounded-xl border border-line bg-panel p-5"
-      >
-        <div className="flex flex-col gap-1">
-          <h2
-            id="chats-leave-dm-title"
-            className="m-0 text-sm font-semibold text-ink"
-          >
-            {`Leave your conversation with ${props.dm.peerLabel}?`}
-          </h2>
-          <p className="m-0 text-xs text-muted">
-            {`The conversation leaves ${props.workspaceLabel}. It appears again as a message request, so you can add it to a workspace later. Your messages are kept.`}
-          </p>
-        </div>
-        <div className="flex justify-end gap-2">
-          <button
-            type="button"
-            data-testid="chats-leave-dm-cancel"
-            autoFocus
-            disabled={busy}
-            onClick={props.onClose}
-            className="rounded border border-line px-3 py-1.5 text-xs text-muted hover:text-ink disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            data-testid="chats-leave-dm-confirm"
-            disabled={busy || props.sendInFlight}
-            onClick={() => void confirm()}
-            className="rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50"
-          >
-            Leave conversation
-          </button>
-        </div>
-      </div>
-    </Overlay>
-  );
-}
-
-function DmRequestListItem(props: {
-  request: DmRequestRow;
-  state: "pending" | "declined";
-  busy: boolean;
-  onAccept?: () => void;
-  onDecline?: () => void;
-  onRequestAgain?: () => void;
-}) {
-  const pending = props.state === "pending";
-  return (
-    <li
-      data-testid={pending ? "chats-dm-request-item" : "chats-dm-declined-item"}
-      className="border-b border-line"
-    >
-      <div className="flex items-center gap-1.5 px-3 py-2">
-        <AtSign size={13} aria-hidden className="shrink-0 text-subtle" />
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-[12px] font-medium text-ink">
-            {props.request.granterEmail ?? "A teammate"}
-          </span>
-          <span className="block text-[10px] text-subtle">
-            {pending ? "Wants to message you" : "Declined"}
-          </span>
-        </span>
-        {pending ? (
-          <>
-            {props.onAccept ? (
-              <button
-                type="button"
-                data-testid="chats-dm-request-accept"
-                onClick={props.onAccept}
-                className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
-              >
-                Accept
-              </button>
-            ) : null}
-            {props.onDecline ? (
-              <button
-                type="button"
-                data-testid="chats-dm-request-decline"
-                disabled={props.busy}
-                onClick={props.onDecline}
-                className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
-              >
-                Decline
-              </button>
-            ) : null}
-          </>
-        ) : props.onRequestAgain ? (
-          <button
-            type="button"
-            data-testid="chats-dm-request-again"
-            disabled={props.busy}
-            onClick={props.onRequestAgain}
-            className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
-          >
-            Move back to requests
-          </button>
-        ) : null}
-      </div>
-    </li>
-  );
-}
-
-// The thread transcript: opening post plus the recursive comment tree.
-// Memoized because ChatsView keeps composer drafts as its own state, so
-// without this boundary every keystroke re-rendered — and re-ran the
-// mention/file-token scans for — every message in the conversation. ChatsView
-// keeps each prop referentially stable across draft and typing renders; the
-// transcript re-renders only when the conversation data itself changes.
-const ThreadMessages = memo(function ThreadMessages(props: {
-  nav: Extract<Nav, { level: "thread" }>;
-  messages: ChatMessageRecord[];
-  messagesLoading: boolean;
-  threadLocked: boolean;
-  flashMessageId: string | null;
-  runRecords: Record<string, ChatRunRecord>;
-  reactionsByMessage: Map<string, ChatReactionRecord[]>;
-  decisionsByMessage: Map<string, ChatDecisionRecord>;
-  attachmentsByMessage: Map<string, ChatAttachmentRecord[]>;
-  reactionControls: ChatReactionControls;
-  mentionCandidates: readonly MentionCandidate[];
-  bookmarkFor: (
-    targetKind: "message" | "thread",
-    targetId: string,
-  ) => ChatBookmarkRecord | undefined;
-  bookmarkBusy: Set<string>;
-  toggleBookmark: (input: {
-    target:
-      | { kind: "thread"; threadId: string }
-      | { kind: "message"; threadId: string; messageId: string };
-    mode: "live" | "snapshot";
-  }) => Promise<void>;
-  beginReply: (message: ChatMessageRecord) => void;
-  beginResolve: (message: ChatMessageRecord) => void;
-  scrollToMessage: (messageId: string) => void;
-  onOpenPath?: (path: string, headingAnchor?: string) => void;
-  onNavCommand?: (nav: ChatsNav) => void;
-  setMessageNode: (messageId: string, element: HTMLElement | null) => void;
-  messagesEndRef: RefObject<HTMLDivElement | null>;
-}) {
-  const {
-    nav,
-    messages,
-    messagesLoading,
-    threadLocked,
-    flashMessageId,
-    runRecords,
-    reactionsByMessage,
-    decisionsByMessage,
-    attachmentsByMessage,
-    reactionControls,
-    mentionCandidates,
-    bookmarkFor,
-    bookmarkBusy,
-    toggleBookmark,
-    beginReply,
-    beginResolve,
-    scrollToMessage,
-    setMessageNode,
-    messagesEndRef,
-  } = props;
-  if (messagesLoading) {
-    return (
-      <p className="m-0 pt-4 text-center text-[11px] text-subtle">Loading...</p>
-    );
-  }
-  const openingMessage = messages[0] ?? null;
-  if (openingMessage === null) {
-    return (
-      <p className="m-0 pt-4 text-center text-[11px] text-subtle">
-        No messages yet.
-      </p>
-    );
-  }
-  const commentTree = buildThreadCommentTree(openingMessage.id, messages.slice(1));
-  const openingTime = formatChatTime(openingMessage.createdAtMs);
-  const openingAttachments = attachmentsByMessage.get(openingMessage.id) ?? [];
-  const openingDecision = decisionsByMessage.get(openingMessage.id);
-  const openingBookmark = bookmarkFor("message", openingMessage.id);
-  const renderThreadComment = (
-    node: ThreadCommentNode,
-    depth: number,
-    parent: ChatMessageRecord | null,
-  ): ReactNode => {
-    const comment = node.message;
-    const commentTime = formatChatTime(comment.createdAtMs);
-    const commentDecision = decisionsByMessage.get(comment.id);
-    const commentAttachments = attachmentsByMessage.get(comment.id) ?? [];
-    const isAgent = comment.authorKind === "agent";
-    const replyCount = node.replies.length;
-    const commentBookmark = bookmarkFor("message", comment.id);
-    const commentBookmarkKey = `message:${comment.id}`;
-    return (
-      <li
-        key={comment.id}
-        ref={(element) => setMessageNode(comment.id, element)}
-        data-testid="chats-message"
-        data-message-id={comment.id}
-        data-parent-message-id={comment.parentMessageId}
-        data-thread-depth={depth}
-        data-author-kind={comment.authorKind}
-        className={`group flex min-w-0 flex-col transition-shadow ${
-          flashMessageId === comment.id
-            ? "rounded-xl ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
-            : ""
-        }`}
-      >
-        {parent ? (
-          <button
-            type="button"
-            data-testid="chats-reply-context"
-            // The jump writes no navigation, so nothing else here cancels
-            // the pending cross-surface DM lookup — and a jump is still the
-            // user commanding this conversation. Report it as one, before
-            // the scroll, or the DM answers late and replaces the message
-            // they just jumped to.
-            onClick={() => {
-              props.onNavCommand?.(nav);
-              scrollToMessage(parent.id);
-            }}
-            className="mb-1 w-fit rounded px-2 text-left font-mono text-[10px] text-subtle hover:text-ink dohc-focus-visible"
-          >
-            ↳ replying to {chatAuthorLabel(parent)}
-          </button>
-        ) : null}
-        <div
-          data-testid="chats-comment-bubble"
-          style={
-            isAgent
-              ? {
-                  borderLeftColor:
-                    "color-mix(in oklab, var(--dohc-agent) 55%, var(--dohc-line))",
-                }
-              : undefined
-          }
-          className={`w-fit max-w-[92%] rounded-xl border border-line bg-panel-2 px-3.5 py-2 ${
-            isAgent ? "border-l-2" : ""
-          }`}
-        >
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span
-              data-testid="chats-message-author"
-              data-author-kind={comment.authorKind}
-              className={`text-[13px] font-semibold ${
-                isAgent ? "text-agent" : "text-ink"
-              }`}
-            >
-              {chatAuthorLabel(comment)}
-            </span>
-            {isAgent ? <AgentBadge testIdPrefix="chats-comment" /> : null}
-          </div>
-          <p
-            data-testid="chats-message-body"
-            className="mb-0 mt-0.5 select-text cursor-text whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink"
-          >
-            <MentionText
-              body={comment.body}
-              candidates={mentionCandidates}
-              attachments={commentAttachments}
-              testId="chats-message-body"
-              onOpenPath={props.onOpenPath}
-            />
-          </p>
-          {commentAttachments.length > 0 ? (
-            <div className="mt-2 flex flex-wrap items-center gap-1.5">
-              {commentAttachments.map((attachment) => (
-                <AttachmentChip
-                  key={attachment.attachmentId}
-                  attachment={attachment}
-                  onOpenPath={props.onOpenPath}
-                />
-              ))}
-            </div>
-          ) : null}
-          {commentDecision ? (
-            <div className="mt-2">
-              <DecisionStatus
-                decision={commentDecision}
-                onResolve={
-                  !threadLocked && commentDecision.state === "open"
-                    ? () => beginResolve(comment)
-                    : undefined
-                }
-                testIdPrefix="chats-comment"
-              />
-            </div>
-          ) : null}
-        </div>
-        <div className="flex flex-wrap items-center gap-3 px-2 pt-1 font-mono text-[11px] text-subtle">
-          <MessageReactions
-            testIdPrefix="chats"
-            messageId={comment.id}
-            records={reactionsByMessage.get(comment.id) ?? []}
-            controls={reactionControls}
-            flush
-          />
-          {!threadLocked ? (
-            <button
-              type="button"
-              data-testid="chats-comment-reply"
-              onClick={() => beginReply(comment)}
-              className="rounded hover:text-ink dohc-focus-visible"
-            >
-              Reply
-            </button>
-          ) : null}
-          <BookmarkAction
-            active={Boolean(commentBookmark)}
-            busy={bookmarkBusy.has(commentBookmarkKey)}
-            destinationPath={commentBookmark?.destinationPath}
-            onToggle={
-              threadLocked
-                ? undefined
-                : (mode) =>
-                    void toggleBookmark({
-                      target: {
-                        kind: "message",
-                        threadId: nav.thread.id,
-                        messageId: comment.id,
-                      },
-                      mode,
-                    })
-            }
-            onOpen={
-              commentBookmark && props.onOpenPath
-                ? () => props.onOpenPath?.(commentBookmark.destinationPath)
-                : undefined
-            }
-            testId="chats-message-bookmark"
-          />
-          {replyCount > 0 ? (
-            <span data-testid="chats-reply-count">
-              {replyCount} {replyCount === 1 ? "reply" : "replies"}
-            </span>
-          ) : null}
-          {runRecords[comment.id] ? <RunChip run={runRecords[comment.id]} /> : null}
-          <time
-            data-testid="chats-message-time"
-            dateTime={commentTime.iso}
-            title={commentTime.iso}
-          >
-            {commentTime.label}
-          </time>
-        </div>
-        {replyCount > 0 ? (
-          <ol
-            data-testid="chats-replies"
-            aria-label={`Replies to ${chatAuthorLabel(comment)}`}
-            className={`relative mt-3 list-none space-y-3 border-l border-line/80 p-0 pl-3 sm:pl-4 ${
-              depth < 3 ? "ml-3 sm:ml-5" : "ml-0"
-            }`}
-          >
-            {node.replies.map((reply) =>
-              renderThreadComment(reply, depth + 1, comment),
-            )}
-          </ol>
-        ) : null}
-      </li>
-    );
-  };
-  return (
-    <>
-      <article
-        ref={(node) => setMessageNode(openingMessage.id, node)}
-        data-testid="chats-message"
-        data-message-id={openingMessage.id}
-        data-author-kind={openingMessage.authorKind}
-        className={`group pt-5 transition-shadow ${
-          flashMessageId === openingMessage.id
-            ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
-            : ""
-        }`}
-      >
-        <p
-          data-testid="chats-thread-eyebrow"
-          className="m-0 font-mono text-[10px] uppercase tracking-wide text-subtle"
-        >
-          {nav.channel.kind === "agent"
-            ? "My agent · thread"
-            : `#${nav.channel.name} · thread`}
-        </p>
-        <h1
-          data-testid="chats-thread-post-title"
-          className="mb-0 mt-2 text-balance font-serif text-[22px] font-semibold leading-tight text-ink"
-        >
-          {nav.thread.title}
-        </h1>
-        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          <span
-            data-testid="chats-message-author"
-            data-author-kind={openingMessage.authorKind}
-            className={`text-[13px] font-medium ${
-              openingMessage.authorKind === "agent" ? "text-agent" : "text-ink"
-            }`}
-          >
-            {chatAuthorLabel(openingMessage)}
-          </span>
-          {openingMessage.authorKind === "agent" ? (
-            <AgentBadge testIdPrefix="chats-message" />
-          ) : null}
-          <time
-            data-testid="chats-message-time"
-            dateTime={openingTime.iso}
-            title={openingTime.iso}
-            className="font-mono text-[10px] text-subtle"
-          >
-            {openingTime.label}
-          </time>
-        </div>
-        <p
-          data-testid="chats-message-body"
-          className="mb-0 mt-3 select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink"
-        >
-          <MentionText
-            body={openingMessage.body}
-            candidates={mentionCandidates}
-            attachments={openingAttachments}
-            testId="chats-message-body"
-            onOpenPath={props.onOpenPath}
-          />
-        </p>
-        {openingAttachments.length > 0 ? (
-          <div
-            data-testid="chats-message-attachments"
-            className="mt-3 flex flex-wrap items-center gap-1.5"
-          >
-            {openingAttachments.map((attachment) => (
-              <AttachmentChip
-                key={attachment.attachmentId}
-                attachment={attachment}
-                onOpenPath={props.onOpenPath}
-              />
-            ))}
-          </div>
-        ) : null}
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <MessageReactions
-            testIdPrefix="chats"
-            messageId={openingMessage.id}
-            records={reactionsByMessage.get(openingMessage.id) ?? []}
-            controls={reactionControls}
-            flush
-          />
-          {openingDecision ? (
-            <DecisionStatus
-              decision={openingDecision}
-              onResolve={
-                !threadLocked && openingDecision.state === "open"
-                  ? () => beginResolve(openingMessage)
-                  : undefined
-              }
-              testIdPrefix="chats-message"
-            />
-          ) : null}
-          {runRecords[openingMessage.id] ? (
-            <RunChip run={runRecords[openingMessage.id]} />
-          ) : null}
-          <BookmarkAction
-            active={Boolean(openingBookmark)}
-            busy={bookmarkBusy.has(`message:${openingMessage.id}`)}
-            destinationPath={openingBookmark?.destinationPath}
-            onToggle={
-              threadLocked
-                ? undefined
-                : (mode) =>
-                    void toggleBookmark({
-                      target: {
-                        kind: "message",
-                        threadId: nav.thread.id,
-                        messageId: openingMessage.id,
-                      },
-                      mode,
-                    })
-            }
-            onOpen={
-              openingBookmark && props.onOpenPath
-                ? () => props.onOpenPath?.(openingBookmark.destinationPath)
-                : undefined
-            }
-            testId="chats-message-bookmark"
-          />
-        </div>
-      </article>
-
-      <div
-        data-testid="chats-comments-divider"
-        className="mb-1 mt-5 flex items-center gap-2"
-      >
-        <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">
-          Comments
-        </span>
-        <span aria-hidden className="h-px flex-1 bg-line" />
-      </div>
-
-      <ol data-testid="chats-comments" className="m-0 list-none space-y-3 p-0 pt-2">
-        {commentTree.map((node) => renderThreadComment(node, 0, null))}
-      </ol>
-      <div ref={messagesEndRef} />
-    </>
-  );
-});
 
 export function ChatsView(props: {
   workspaceId: string;
@@ -1924,12 +372,9 @@ export function ChatsView(props: {
   // Page variant: cap the list-like surfaces at the thread column's width.
   const pageColumn = variant === "page" ? "mx-auto w-full max-w-[640px]" : "";
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
-  const [nav, setNav] = useState<Nav>({ level: "channels" });
+  const [nav, setNav] = useState<ChatsNav>({ level: "channels" });
   const [channelThreads, setChannelThreads] = useState<ChannelThreadRecord[]>([]);
   const [feedPosts, setFeedPosts] = useState<Record<string, FeedPostData>>({});
-  const [personalFeed, setPersonalFeed] = useState<ChatFeedItemRecord[]>([]);
-  const [personalFeedLoading, setPersonalFeedLoading] = useState(false);
-  const [personalFeedNextCursor, setPersonalFeedNextCursor] = useState<string | undefined>();
   const [bookmarks, setBookmarks] = useState<ChatBookmarkRecord[]>([]);
   const [bookmarkBusy, setBookmarkBusy] = useState<Set<string>>(() => new Set());
   // Bookmark list reads and mutations are independent request streams. A
@@ -2023,12 +468,21 @@ export function ChatsView(props: {
   const inFlightSendByContext = useRef(new Map<string, number>());
   const startingThreadRef = useRef(false);
   const liveToken = useRef(0);
+  const {
+    personalFeed,
+    personalFeedLoading,
+    personalFeedNextCursor,
+    loadPersonalFeed,
+    resetForWorkspace,
+    prepareOpen,
+    clearRows,
+    invalidate,
+  } = usePersonalChatFeed({ workspaceId, liveToken, onError: props.onError });
   // A live thread can refresh repeatedly without changing navigation. Keep a
   // request sequence separate from the workspace/navigation liveness token so
   // an older activity response can never overwrite a newer one.
   const threadRefreshSeq = useRef(0);
   const channelRefreshSeq = useRef(0);
-  const feedRefreshSeq = useRef(0);
   const dmRefreshSeq = useRef(0);
   const paintedDmRevision = useRef<{
     workspaceId: string;
@@ -2629,7 +1083,7 @@ export function ChatsView(props: {
     liveToken.current += 1;
     dmRefreshSeq.current += 1;
     paintedDmRevision.current = null;
-    feedRefreshSeq.current += 1;
+    resetForWorkspace();
     bookmarkWorkspaceGeneration.current += 1;
     bookmarkListGeneration.current += 1;
     bookmarkMutationGeneration.current += 1;
@@ -2637,9 +1091,6 @@ export function ChatsView(props: {
     setNav({ level: "channels" });
     setChannelThreads([]);
     setFeedPosts({});
-    setPersonalFeed([]);
-    setPersonalFeedLoading(false);
-    setPersonalFeedNextCursor(undefined);
     setMessages([]);
     setReactions([]);
     setDecisions([]);
@@ -2692,14 +1143,14 @@ export function ChatsView(props: {
     void refreshFollows();
     return () => {
       liveToken.current += 1;
-      feedRefreshSeq.current += 1;
+      invalidate();
       bookmarkWorkspaceGeneration.current += 1;
       bookmarkListGeneration.current += 1;
       bookmarkMutationGeneration.current += 1;
       bookmarkMutationByKey.current.clear();
       followRequest.current += 1;
     };
-  }, [refreshBookmarks, refreshDms, refreshFollows, refreshOverview]);
+  }, [invalidate, refreshBookmarks, refreshDms, refreshFollows, refreshOverview, resetForWorkspace]);
 
   const bookmarkFor = useCallback(
     (targetKind: "message" | "thread", targetId: string) =>
@@ -3175,43 +1626,6 @@ export function ChatsView(props: {
     [applyThreadSnapshot, channelIsLocked, loadThreadSnapshot, props.onError],
   );
 
-  const loadPersonalFeed = useCallback(
-    async (cursor?: string) => {
-      const token = liveToken.current;
-      const refreshSeq = ++feedRefreshSeq.current;
-      const requestIsCurrent = () =>
-        token === liveToken.current && refreshSeq === feedRefreshSeq.current;
-      setPersonalFeedLoading(true);
-      try {
-        const page = await bridge().listPersonalChatFeed({
-          workspaceId,
-          ...(cursor ? { cursor } : {}),
-          limit: 30,
-        });
-        if (!requestIsCurrent()) return;
-        setPersonalFeed((current) => (cursor ? [...current, ...page.items] : page.items));
-        setPersonalFeedNextCursor(page.nextCursor);
-        if (!cursor && page.headCursor) {
-          void bridge()
-            .markPersonalChatFeedSeen({
-              workspaceId,
-              headCursor: page.headCursor,
-            })
-            .catch(() => {
-              // Best-effort cursor: the next Feed open can retry.
-            });
-        }
-      } catch (error) {
-        if (requestIsCurrent()) {
-          props.onError(ipcErrorMessage(error, "Could not load your Feed."));
-        }
-      } finally {
-        if (requestIsCurrent()) setPersonalFeedLoading(false);
-      }
-    },
-    [props.onError, workspaceId],
-  );
-
   // Main emits workspaceActivity for CLI writes, follow mutations, runner
   // reports/failures, and run-record completion. Treat it as an invalidation
   // for every mounted Chats surface. Every response carries the follow request
@@ -3670,11 +2084,9 @@ export function ChatsView(props: {
       return;
     }
     liveToken.current += 1;
-    feedRefreshSeq.current += 1;
+    prepareOpen();
     setNav(target);
-    setPersonalFeed([]);
-    setPersonalFeedNextCursor(undefined);
-  }, [props.onOpenInTab, variant]);
+  }, [prepareOpen, props.onOpenInTab, variant]);
 
   useEffect(() => {
     if (nav.level === "feed") void loadPersonalFeed();
@@ -4471,7 +2883,7 @@ export function ChatsView(props: {
       setNav({ level: "channels" });
       setChannelThreads([]);
       setFeedPosts({});
-      setPersonalFeed([]);
+      clearRows();
       void refreshOverview();
     } else if (nav.level === "dm" || nav.level === "dm-new") {
       setNav({ level: "channels" });
@@ -4483,7 +2895,7 @@ export function ChatsView(props: {
       setDmDraft("");
       void refreshDms();
     }
-  }, [nav, openChannel, props.onNavCommand, refreshDms, refreshOverview]);
+  }, [clearRows, nav, openChannel, props.onNavCommand, refreshDms, refreshOverview]);
 
   // Ends the DM's registry row through the exact leaveSharedChannel mechanism.
   // The conversation drops out of `dms` immediately; the next
