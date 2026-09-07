@@ -44,3 +44,33 @@ export function goneMountProjections(input: {
       }),
     );
 }
+
+// The one closing line a manual "Refresh shares" leaves behind.
+//
+// One line, because a second call replaces the first: damage reported before
+// the summary was overwritten by it, and the user saw only "Shares
+// refreshed", which is exactly the wrong half. Damage is carried INTO the
+// summary, and the instruction that fixes it survives.
+export function shareRefreshSummary(
+  results: ReadonlyArray<{
+    label: string;
+    status: "updated" | "unchanged" | "ended" | "damaged";
+    changedPaths: number;
+  }>,
+): string {
+  if (results.length === 0) return "No shares are added to this workspace.";
+  const changed = results.reduce((sum, row) => sum + row.changedPaths, 0);
+  const ended = results.filter((row) => row.status === "ended");
+  const damaged = results.filter((row) => row.status === "damaged");
+  const refreshed = `Shares refreshed — ${changed} ${
+    changed === 1 ? "file" : "files"
+  } updated${
+    ended.length > 0 ? `; ${ended.map((row) => row.label).join(", ")} ended` : ""
+  }.`;
+  if (damaged.length === 0) return refreshed;
+  return `${refreshed} dohc can't read what ${damaged
+    .map((row) => row.label)
+    .join(", ")} ${damaged.length === 1 ? "grants" : "grant"}. Remove ${
+    damaged.length === 1 ? "it" : "them"
+  } and add ${damaged.length === 1 ? "the share" : "those shares"} again.`;
+}

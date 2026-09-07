@@ -94,7 +94,6 @@ import { rendererMarks } from "../performance/rendererMarks";
 import {
   DesktopWorkspaceShell,
   pendingHeadingTargetForOpen,
-  shareRefreshSummary,
   WORKBENCH_PERSIST_DELAY_MS,
   type Workspace,
 } from "./DesktopWorkspaceShell";
@@ -8242,61 +8241,11 @@ describe("active file sharing", () => {
   });
 });
 
-// The banner states the level's real rights. PR2 opens chat at comment
-// and edit; edit's document writes land in PR3, so edit reads the comment
-// sentence until then — a banner promising editing now would be a lie.
+// The banner distinguishes document edits submitted for acceptance from
+// read-only access and conversations that continue in the browser.
 // Removing a mount reprojects path-keyed UI state only when the folder
 // actually went. Record-only cleanup leaves the files exactly where they
 // were, so their tabs, pins and drafts must survive it.
-// The closing line a manual refresh leaves behind. Damage has to reach it:
-// reporting damage in a separate notice meant the summary replaced it, and
-// the user was left with "Shares refreshed" — the wrong half.
-describe("share refresh summary", () => {
-  const row = (over: Partial<{ label: string; status: string; changedPaths: number }>) => ({
-    label: "alex",
-    status: "updated" as const,
-    changedPaths: 0,
-    ...over,
-  }) as Parameters<typeof shareRefreshSummary>[0][number];
-
-  it("states damage and how to fix it, alongside the refresh result", () => {
-    const summary = shareRefreshSummary([
-      row({ label: "kim", changedPaths: 2 }),
-      row({ label: "alex", status: "damaged" }),
-    ]);
-    expect(summary).toContain("Shares refreshed — 2 files updated.");
-    expect(
-      summary,
-      "the summary replaces the damage notice and the fix is lost",
-    ).toContain("dohc can't read what alex grants. Remove it and add the share again.");
-    expect(summary).not.toContain("grant.");
-  });
-
-  it("says nothing about damage when every mount is healthy", () => {
-    const summary = shareRefreshSummary([row({ changedPaths: 1 })]);
-    expect(summary).toBe("Shares refreshed — 1 file updated.");
-    expect(summary).not.toContain("can't read");
-  });
-
-  it("keeps the ended report when damage is present too", () => {
-    const summary = shareRefreshSummary([
-      row({ label: "kim", status: "ended" }),
-      row({ label: "alex", status: "damaged" }),
-      row({ label: "sam", status: "damaged" }),
-    ]);
-    expect(summary).toContain("kim ended");
-    // Plural subjects take the plural verb; the singular case keeps "grants".
-    expect(
-      summary,
-      "two shares reading as one — \"what alex, sam grants\"",
-    ).toContain("what alex, sam grant. Remove them and add those shares again.");
-  });
-
-  it("says so when there is nothing to refresh", () => {
-    expect(shareRefreshSummary([])).toBe("No shares are added to this workspace.");
-  });
-});
-
 describe("shared view banner", () => {
   it("does not offer app creation in a received share workspace", async () => {
     const user = userEvent.setup();
@@ -9736,7 +9685,7 @@ describe("explorer destructive change flush boundaries", () => {
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toBe(lateDraft),
     );
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Removing the tab awaited draft settlement; recovery now holds the late text.
     expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2);
   });
 
@@ -15170,16 +15119,6 @@ describe("settings entry points", () => {
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
   });
 
-  it("opens settings from the status bar context menu", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.showWorkbenchMenu.mockResolvedValue("settings");
-    renderShell(bridge);
-
-    fireEvent.contextMenu(await screen.findByTestId("status-workspace"));
-
-    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
-  });
-
   it("opens settings from the command palette and menu command", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
@@ -15662,6 +15601,7 @@ describe("set-aside draft recovery", () => {
     );
     let switched = false;
     let refreshFailed = false;
+    const recovery = deferred();
     bridge.listWorkspaceVersions = vi.fn(async () => {
       // The switch's OWN refresh fails; the catch path's recovery read then
       // succeeds and reports the version the switch already announced. That
@@ -15670,6 +15610,7 @@ describe("set-aside draft recovery", () => {
         refreshFailed = true;
         throw new Error("selector refresh failed");
       }
+      if (switched) await recovery.promise;
       return {
         versions: [
           {
@@ -15705,24 +15646,42 @@ describe("set-aside draft recovery", () => {
       onEngineYDocSaveState,
       onEngineYDocLineageReplacement,
     });
-    renderShell(bridge);
-    await screen.findByTestId("view-markdown");
-    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
+    try {
+      renderShell(bridge);
+      await screen.findByTestId("view-markdown");
+      await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
 
-    await user.click(await screen.findByTestId("version-menu-button"));
-    const item = (await screen.findAllByTestId("version-item")).find(
-      (candidate) => candidate.dataset.versionId === "v2",
-    );
-    await user.click(item!);
-    await waitFor(() =>
-      expect(bridge.switchWorkspaceVersion).toHaveBeenCalled(),
-    );
+      await user.click(await screen.findByTestId("version-menu-button"));
+      const item = (await screen.findAllByTestId("version-item")).find(
+        (candidate) => candidate.dataset.versionId === "v2",
+      );
+      await user.click(item!);
+      await waitFor(() =>
+        expect(bridge.switchWorkspaceVersion).toHaveBeenCalled(),
+      );
 
-    // The switch landed, so the reopen it announced is the right one.
-    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
-
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // The switch landed, so the reopen it announced is the right one.
+      await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
+      await waitFor(() => {
+        expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+          "selector refresh failed",
+        );
+        expect(
+          (screen.getByTestId("version-menu-button") as HTMLButtonElement).disabled,
+        ).toBe(true);
+      });
+    } finally {
+      await act(async () => {
+        recovery.resolve();
+        await recovery.promise;
+      });
+    }
+    // Recovery has finished when the selector leaves its busy state.
+    await waitFor(() => {
+      expect(
+        (screen.getByTestId("version-menu-button") as HTMLButtonElement).disabled,
+      ).toBe(false);
+      expect(screen.getByTestId("version-menu-active").textContent).toBe("Draft two");
     });
     expect(openEngineYDocSession).toHaveBeenCalledTimes(2);
   });

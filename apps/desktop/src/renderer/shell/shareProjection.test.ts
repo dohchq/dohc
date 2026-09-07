@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { goneMountProjections, shareUnmountProjection } from "./shareProjection";
+import {
+  goneMountProjections,
+  shareRefreshSummary,
+  shareUnmountProjection,
+} from "./shareProjection";
 
 describe("share unmount projection", () => {
   it("reprojects like a folder delete when the folder went", () => {
@@ -63,5 +67,54 @@ describe("share unmount projection", () => {
       }),
       "deleting path-keyed state for files that are still on disk",
     ).toEqual([]);
+  });
+});
+
+// The closing line a manual refresh leaves behind. Damage has to reach it:
+// reporting damage in a separate notice meant the summary replaced it, and
+// the user was left with "Shares refreshed" — the wrong half.
+describe("share refresh summary", () => {
+  const row = (over: Partial<{ label: string; status: string; changedPaths: number }>) => ({
+    label: "alex",
+    status: "updated" as const,
+    changedPaths: 0,
+    ...over,
+  }) as Parameters<typeof shareRefreshSummary>[0][number];
+
+  it("states damage and how to fix it, alongside the refresh result", () => {
+    const summary = shareRefreshSummary([
+      row({ label: "kim", changedPaths: 2 }),
+      row({ label: "alex", status: "damaged" }),
+    ]);
+    expect(summary).toContain("Shares refreshed — 2 files updated.");
+    expect(
+      summary,
+      "the summary replaces the damage notice and the fix is lost",
+    ).toContain("dohc can't read what alex grants. Remove it and add the share again.");
+    expect(summary).not.toContain("grant.");
+  });
+
+  it("says nothing about damage when every mount is healthy", () => {
+    const summary = shareRefreshSummary([row({ changedPaths: 1 })]);
+    expect(summary).toBe("Shares refreshed — 1 file updated.");
+    expect(summary).not.toContain("can't read");
+  });
+
+  it("keeps the ended report when damage is present too", () => {
+    const summary = shareRefreshSummary([
+      row({ label: "kim", status: "ended" }),
+      row({ label: "alex", status: "damaged" }),
+      row({ label: "sam", status: "damaged" }),
+    ]);
+    expect(summary).toContain("kim ended");
+    // Plural subjects take the plural verb; the singular case keeps "grants".
+    expect(
+      summary,
+      "two shares reading as one — \"what alex, sam grants\"",
+    ).toContain("what alex, sam grant. Remove them and add those shares again.");
+  });
+
+  it("says so when there is nothing to refresh", () => {
+    expect(shareRefreshSummary([])).toBe("No shares are added to this workspace.");
   });
 });
