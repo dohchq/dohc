@@ -222,6 +222,8 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
     try {
       const authUrl = await listen(request => auth.handler(request));
       const relayUrl = await listen(createSyncRelayHandler({ storage, resolveActor, ...verifiedEmails,
+        lookupUserEmail: async userId => (await pool.query<{ email: string }>(
+          'SELECT email FROM "user" WHERE id = $1 LIMIT 1', [userId])).rows[0]?.email ?? null,
         relayExchangeKey: exchangeKey, shareWebOrigin: origin,
         namedBrowserSessionLimits: { ...limits, maxSessions: 4, retentionMs: 60000 } }));
       const web = createShareWebApplication({ relayUrl, publicRelayUrl: "https://relay.example.test", relayExchangeKey: exchangeKey,
@@ -261,12 +263,24 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
       expect(ownerSignIn.status).toBe(200);
       const ownerCookie = ownerSignIn.headers.getSetCookie().find(value => value.startsWith(`${getCookies({ baseURL: origin }).sessionToken.name}=`))!.split(";", 1)[0]!;
       await ownerSignIn.body?.cancel();
-      const createInvite = async (recipient: { recipientEmail: string } | { recipientUserId: string }) => {
-        const response = await fetch(`${relayUrl}/sync/route-workspace/shares`, { method: "POST",
+      const requestInvite = (recipient: { recipientEmail: string } | { recipientUserId: string }) =>
+        fetch(`${relayUrl}/sync/route-workspace/shares`, { method: "POST",
           headers: { cookie: ownerCookie, "content-type": "application/json" },
           body: JSON.stringify({ ...recipient, paths: ["docs"], access: "edit" }) });
+      const createInvite = async (recipient: { recipientEmail: string } | { recipientUserId: string }) => {
+        const response = await requestInvite(recipient);
         expect(response.status).toBe(200);
         return response.json() as Promise<{ shareId: string; grantId: string }>;
+      };
+      const refuseSelfInvites = async () => {
+        const before = storage.listSharesGrantedBy(owner.user.id);
+        for (const recipient of [{ recipientEmail: "route-owner@example.test" },
+          { recipientEmail: "ROUTE-OWNER@EXAMPLE.TEST" }, { recipientUserId: owner.user.id }]) {
+          const response = await requestInvite(recipient);
+          expect(response.status).toBe(400);
+          expect(await response.json()).toMatchObject({ code: "self_share" });
+        }
+        expect(storage.listSharesGrantedBy(owner.user.id)).toEqual(before);
       };
       const verifyEmail = async (email: string) => {
         const url = verificationLinks.get(email);
@@ -276,6 +290,12 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
         expect(response.headers.get("location")).toBe(new URL(url!).searchParams.get("callbackURL"));
         await response.body?.cancel();
       };
+      expect(owner.user.emailVerified).toBe(false);
+      expect(await verifiedEmails.resolveUserIdByEmail("route-owner@example.test")).toBeNull();
+      await refuseSelfInvites();
+      await verifyEmail("route-owner@example.test");
+      expect(await verifiedEmails.resolveUserIdByEmail("route-owner@example.test")).toBe(owner.user.id);
+      await refuseSelfInvites();
       // Sign-up issues a real session before mailbox verification. The production lookups must still refuse its address.
       expect(users[0]!.user.emailVerified).toBe(false);
       expect(await verifiedEmails.resolveUserIdByEmail("route-alice@example.test")).toBeNull();

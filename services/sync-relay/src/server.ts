@@ -3998,6 +3998,8 @@ export function createSyncRelayHandler({
         if (!resolveUserIdByEmail) {
           throw badRequest("recipient email lookup is not available on this relay");
         }
+        const granterEmail = await lookupUserEmail?.(actor.userId);
+        if (granterEmail?.trim().toLowerCase() === email.trim().toLowerCase()) throw relayError("self_share");
         const resolved = await resolveUserIdByEmail(email);
         if (resolved === actor.userId) throw relayError("self_share");
         // Re-check after the asynchronous account lookup: a pre-provisioned
