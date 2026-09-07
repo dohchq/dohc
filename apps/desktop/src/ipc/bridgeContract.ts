@@ -61,20 +61,18 @@ import {
   MENU_COMMANDS,
   ENGINE_YDOC_SESSION_ID_MAX_CHARS,
   ENGINE_YDOC_UPDATE_MAX_BYTES,
+  SEARCH_EVENT_MAX_ENTRIES,
   SEARCH_EVENT_MAX_ID_CHARS,
+  SEARCH_EVENT_MAX_NOTICE_CHARS,
+  SEARCH_EVENT_MAX_PREVIEW_CHARS,
   BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES,
   PLUGIN_PIPELINE_ERROR_STAGES,
   PLUGIN_PIPELINE_STATUSES,
   PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT,
-  UPDATE_CHANNELS,
-  UPDATE_STATUSES,
   WORKBENCH_MENU_COMMANDS,
   ENGINE_YDOC_SAVE_STATES,
-  type EngineYDocRemoteUpdateEvent,
-  type EngineYDocLineageReplacementEvent,
-  type EngineYDocSaveStateEvent,
-  type SearchResultsEvent,
 } from "./channels";
+import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
 // The manifest schema is plain zod, which the sandboxed preload already
 // bundles, so the contract shares the settings declaration rather than keeping
 // a second copy of it. A copy that drifts would fail the whole plugin list's
@@ -137,6 +135,21 @@ const WORKSPACE_ID = z
   .max(200)
   .regex(/^[a-z0-9][a-z0-9-]*$/, "workspace id must be lowercase alphanumeric/hyphens");
 const PATH_STRING = z.string().min(1).max(4096);
+// Lexically safe workspace-relative path: forward-slashed, no null bytes, no
+// backslashes, no empty/dot/dot-dot segments, not absolute. Main validates
+// containment before sending; this is the closed gate the preload re-applies
+// to every path that crosses main→renderer.
+export function isSafeRelativePath(value: string): boolean {
+  if (value.includes("\0") || value.includes("\\")) return false;
+  if (value.startsWith("/") || /^[A-Za-z]:/.test(value)) return false;
+  return value
+    .split("/")
+    .every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
+const SAFE_RELATIVE_PATH = PATH_STRING.refine(
+  isSafeRelativePath,
+  "path must be a safe workspace-relative path",
+);
 const WORKSPACE_EDITOR_TEXT = z.string().superRefine((text, ctx) => {
   const observedBytes = utf8ByteLength(text);
   if (observedBytes <= WORKSPACE_TEXT_EDITOR_MAX_BYTES) return;
@@ -686,7 +699,7 @@ export type ExportDocumentFileResult = z.infer<typeof ExportDocumentFileResult>;
 
 // Explorer context menu: the renderer names what was right-clicked, main
 // builds the native Menu from main-owned labels over the closed
-// EXPLORER_MENU_COMMANDS tuple (channels.ts) and resolves the same invoke
+// EXPLORER_MENU_COMMANDS tuple and resolves the same invoke
 // with the chosen id (null = dismissed). No event channel needed.
 export const ShowExplorerMenuPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -5351,18 +5364,14 @@ export const StepWindowZoomPayload = z.object({
 }).strict();
 export type StepWindowZoomPayload = z.infer<typeof StepWindowZoomPayload>;
 
-// Application-menu commands. One closed set (channels.ts owns the tuple; the
-// sandboxed preload validates against it as a plain value): the menu sends
-// these names and the shell routes them through the same command registry the
-// palette uses — menu items never grow their own action definitions.
+// Application-menu commands. The menu sends these names and the shell routes
+// them through the same command registry the palette uses — menu items never
+// grow their own action definitions.
 export const MenuCommand = z.enum(MENU_COMMANDS);
 export type MenuCommand = z.infer<typeof MenuCommand>;
 
-// Main→renderer auto-update event (Phase E2 status bar toast). channels.ts
-// owns the closed status tuple and the dependency-free preload check
-// (parseUpdateStateEvent) — this schema derives from the same tuple so the
-// two can never drift. Only public status/action metadata crosses the boundary;
-// feed URLs and updater configuration stay main-process-only.
+// Main→renderer auto-update event. Only public status/action metadata crosses
+// the boundary; feed URLs and updater configuration stay main-process-only.
 export const UpdateStateEvent = z.object({
   status: z.enum(UPDATE_STATUSES),
   message: z.string().min(1).max(500),
@@ -5576,10 +5585,39 @@ export type SetWorkspaceUiStatePayload = z.infer<typeof SetWorkspaceUiStatePaylo
 
 // Workspace content search. The renderer mints a bounded
 // searchId per search; main spawns ripgrep rooted at the real workspace root
-// and STREAMS batches back over the desktop:search-results event channel
-// (closed shape, validated before send and again in the dependency-free
-// preload by the single parseSearchResultsEvent implementation).
+// and STREAMS batches back over the desktop:search-results event channel.
+// SearchResultsEvent is parsed before send and again in the preload.
 const SEARCH_ID = z.string().min(1).max(SEARCH_EVENT_MAX_ID_CHARS);
+
+export const SearchResultsEventEntry = z
+  .object({
+    path: SAFE_RELATIVE_PATH,
+    line: z.number().int().min(1),
+    column: z.number().int().min(1),
+    preview: z.string().max(SEARCH_EVENT_MAX_PREVIEW_CHARS),
+    matchStart: z.number().int().nonnegative(),
+    matchEnd: z.number().int().nonnegative(),
+    surface: z.enum(["file", "chat"]).optional(),
+    threadId: z.string().min(1).max(200).optional(),
+    objectId: z.string().min(1).max(200).optional(),
+    title: z.string().min(1).max(500).optional(),
+  })
+  .refine(
+    (entry) => entry.matchEnd >= entry.matchStart && entry.matchEnd <= entry.preview.length,
+    "match offsets must be ordered and inside the preview",
+  );
+export type SearchResultsEventEntry = z.infer<typeof SearchResultsEventEntry>;
+
+export const SearchResultsEvent = z.object({
+  searchId: SEARCH_ID,
+  entries: z.array(SearchResultsEventEntry).max(SEARCH_EVENT_MAX_ENTRIES),
+  done: z.boolean(),
+  limitHit: z.boolean(),
+  // A search that is fail-closed by a broken policy file (or otherwise paused)
+  // carries a short notice so the panel can explain the empty result.
+  notice: z.string().min(1).max(SEARCH_EVENT_MAX_NOTICE_CHARS).optional(),
+});
+export type SearchResultsEvent = z.infer<typeof SearchResultsEvent>;
 
 export const WorkspaceSearchPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -5621,8 +5659,7 @@ export type CancelWorkspaceSearchPayload = z.infer<
 // per open; main constructs the node-only live session (through the workspace's
 // engine capture, reusing its store) and STREAMS remote CRDT deltas back over
 // the desktop:engine-ydoc-remote-update event channel. Updates cross IPC as raw
-// Uint8Array (structured clone). These zod schemas are the main-side mirror of
-// the dependency-free preload parseEngineYDocRemoteUpdateEvent bounds.
+// Uint8Array (structured clone).
 const ENGINE_YDOC_SESSION_ID = z.string().min(1).max(ENGINE_YDOC_SESSION_ID_MAX_CHARS);
 // z.custom (not z.instanceof) so the inferred type is a plain `Uint8Array`
 // (ArrayBufferLike) — matching yjs's update type and the transport — rather than
@@ -5657,7 +5694,7 @@ const ARTIFACT_ASSET_DESCRIPTOR: z.ZodType<ArtifactAssetDescriptor> = z.object({
   id: z.string().min(1),
   mimeType: z.string().min(1),
   created: z.number().int().nonnegative(),
-  ref: PATH_STRING,
+  ref: SAFE_RELATIVE_PATH,
   sha256: z.string().regex(/^[0-9a-f]{64}$/),
   lastRetrieved: z.number().int().nonnegative().optional(),
   version: z.number().int().nonnegative().optional(),
@@ -5793,28 +5830,34 @@ export const CloseEngineYDocSessionPayload = z.object({
 });
 export type CloseEngineYDocSessionPayload = z.infer<typeof CloseEngineYDocSessionPayload>;
 
-export const EngineYDocRemoteUpdateEventSchema = z.object({
+export const EngineYDocRemoteUpdateEvent = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
   update: ENGINE_YDOC_UPDATE,
   lineageGeneration: z.number().int().positive(),
 });
+export type EngineYDocRemoteUpdateEvent = z.infer<typeof EngineYDocRemoteUpdateEvent>;
 
-export const EngineYDocLineageReplacementEventSchema = z.object({
+export const EngineYDocLineageReplacementEvent = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
   update: ENGINE_YDOC_UPDATE,
-  recoveredPaths: z.array(PATH_STRING),
+  recoveredPaths: z.array(SAFE_RELATIVE_PATH),
   artifactAssets: z.array(ARTIFACT_ASSET_DESCRIPTOR),
   lineageGeneration: z.number().int().positive(),
 });
+export type EngineYDocLineageReplacementEvent = z.infer<
+  typeof EngineYDocLineageReplacementEvent
+>;
 
-export const EngineYDocSaveStateEventSchema = z.object({
+// seq is the highest applyLocalUpdate seq main had journaled when this settle
+// STARTED. The renderer clears to "saved" only once this covers its latest
+// local edit — otherwise an in-flight settle's success would claim edits it
+// never carried.
+export const EngineYDocSaveStateEvent = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
   state: z.enum(ENGINE_YDOC_SAVE_STATES),
   seq: z.number().int().nonnegative(),
 });
-export type EngineYDocRemoteUpdateEventSchema = z.infer<
-  typeof EngineYDocRemoteUpdateEventSchema
->;
+export type EngineYDocSaveStateEvent = z.infer<typeof EngineYDocSaveStateEvent>;
 
 // Test-only snapshot of the main-process mark/measure recorder:
 // named marks as wall-clock epochs, measures as durations between marks.
@@ -5873,7 +5916,7 @@ export interface DohcDesktopBridge {
     payload: ExportDocumentFilePayload,
   ): Promise<ExportDocumentFileResult>;
   // Native explorer context menu; resolves with the chosen closed-tuple
-  // command (validated in the preload via isExplorerMenuCommand) or null.
+  // command (validated in the preload against ExplorerMenuCommand) or null.
   showExplorerMenu(
     payload: ShowExplorerMenuPayload,
   ): Promise<ShowExplorerMenuResult>;
@@ -6305,9 +6348,8 @@ export interface DohcDesktopBridge {
   // workspace summary; the preload strips and validates it before the root
   // swaps workspaces.
   onWorkspaceActivated(listener: (workspace: WorkspaceSummary) => void): () => void;
-  // Auto-update state pushes from main, validated against the closed
-  // UPDATE_STATUSES tuple in the preload (parseUpdateStateEvent) before they
-  // reach renderer code. Returns an unsubscribe function.
+  // Auto-update state pushes from main, validated against UpdateStateEvent in
+  // the preload before they reach renderer code. Returns an unsubscribe function.
   onUpdateState(listener: (state: UpdateStateEvent) => void): () => void;
   // Explicit update actions. The renderer can ask main to check or install;
   // it cannot set feed URLs or mutate update channels.
@@ -6336,9 +6378,8 @@ export interface DohcDesktopBridge {
     payload: WorkspaceSearchPayload,
   ): Promise<WorkspaceSearchStartResult>;
   cancelWorkspaceSearch(payload: CancelWorkspaceSearchPayload): Promise<void>;
-  // Streamed result batches, validated batch-by-batch in the preload via the
-  // closed dependency-free parseSearchResultsEvent check. Returns an
-  // unsubscribe function. The searchId round-trips so the renderer drops
+  // Streamed result batches, validated batch-by-batch in the preload. Returns
+  // an unsubscribe function. The searchId round-trips so the renderer drops
   // batches that belong to a superseded search.
   onSearchResults(listener: (batch: SearchResultsEvent) => void): () => void;
   // WS-G2-C-2 engine Y.Doc editor binding. The renderer mints a sessionId and
@@ -6369,8 +6410,8 @@ export interface DohcDesktopBridge {
   // reservation so the same object can reopen on a version/file switch).
   closeEngineYDocSession(payload: CloseEngineYDocSessionPayload): Promise<void>;
   // Remote CRDT deltas main forwards (a co-editor's edit routed through the
-  // engine), validated in the preload via parseEngineYDocRemoteUpdateEvent.
-  // The sessionId round-trips so the renderer applies only deltas for the
+  // engine), validated in the preload. The sessionId round-trips so the
+  // renderer applies only deltas for the
   // session currently bound. Returns an unsubscribe function.
   onEngineYDocRemoteUpdate(
     listener: (event: EngineYDocRemoteUpdateEvent) => void,

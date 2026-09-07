@@ -1,3 +1,4 @@
+import { SectionLabel } from "./ui/controls";
 import { DohcMark } from "@dohc/brand";
 import { ArrowDown, ArrowUp, Database, Search, Share2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -317,9 +318,9 @@ export function DatabaseStudioView(props: {
           data-testid="db-table-list"
         >
           <div className="border-b border-line px-3 py-2.5">
-            <div className="text-[10px] font-semibold uppercase tracking-wide text-subtle">
+            <SectionLabel as="div" >
               Tables
-            </div>
+            </SectionLabel>
             <div className="mt-0.5 text-[12px] text-muted">
               {snapshot.tables.length} table
               {snapshot.tables.length === 1 ? "" : "s"} loaded

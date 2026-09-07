@@ -1,3 +1,4 @@
+import { useRequestSequence } from "./useRequestSequence";
 import { AlertTriangle, Plug } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
@@ -42,7 +43,7 @@ export function PluginWebAppPage(props: {
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [load, setLoad] = useState<LoadState>({ status: "starting" });
-  const startRequestRef = useRef(0);
+  const startRequestRef = useRequestSequence();
   // Held in a ref so a new callback identity never restarts the app, and
   // written after the commit: a ref written while rendering keeps the value
   // of a render React discarded.
@@ -56,9 +57,9 @@ export function PluginWebAppPage(props: {
     // The request token is the whole guard. This effect re-runs for every
     // context change and its cleanup raises the token, so a response from
     // the previous context can never pass.
-    const request = ++startRequestRef.current;
+    const request = startRequestRef.next();
     setLoad({ status: "starting" });
-    const isCurrent = () => request === startRequestRef.current;
+    const isCurrent = () => startRequestRef.isCurrent(request);
 
     void bridge()
       .startPluginWebApp({
@@ -93,7 +94,7 @@ export function PluginWebAppPage(props: {
       });
 
     return () => {
-      startRequestRef.current += 1;
+      startRequestRef.next();
       void bridge()
         .stopPluginWebApp({
           workspaceId: props.workspaceId,
@@ -141,12 +142,12 @@ export function PluginWebAppPage(props: {
   // makes the frame queryable, so main always has a bounds report first.
   useLayoutEffect(() => {
     if (!ready) return;
-    const request = startRequestRef.current;
+    const request = startRequestRef.current();
     let frame: number | null = null;
 
     const report = (): void => {
       frame = null;
-      if (request !== startRequestRef.current) return;
+      if (!startRequestRef.isCurrent(request)) return;
       const element = containerRef.current;
       if (!element) return;
       const rect = element.getBoundingClientRect();

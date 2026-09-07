@@ -1,3 +1,4 @@
+import { CopyButton } from "./ui/CopyButton";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import type { BinaryFileData } from "@excalidraw/excalidraw/types";
 import {
@@ -693,49 +694,6 @@ function ViewHeader(props: {
   );
 }
 
-// The source view's explicit copy affordance ("view source" implies "grab the
-// text"): quiet inline "Copied" confirmation, same swap-and-restore rhythm as
-// DocumentMenu / the code-block copy button (FEEDBACK_MS there is 1200 too).
-function CopySourceButton(props: {
-  // A promise for callers whose text has to be resolved at the click — the
-  // recovery notice decodes its snapshot there.
-  getSource: () => string | Promise<string> | null;
-  // The default is pinned by e2e; the orphaned-draft notice renders its
-  // own copy control beside a possible source view, so it needs its own name.
-  testId?: string;
-}) {
-  const [label, setLabel] = useState<"Copy" | "Copied" | "Couldn't copy">("Copy");
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(
-    () => () => {
-      if (timer.current) clearTimeout(timer.current);
-    },
-    [],
-  );
-  return (
-    <button
-      type="button"
-      data-testid={props.testId ?? "markdown-source-copy"}
-      onClick={() => {
-        const source = props.getSource();
-        const clipboard = navigator.clipboard;
-        if (source === null || !clipboard) return;
-        void Promise.resolve(source)
-          .then((text) => clipboard.writeText(text))
-          .then(() => setLabel("Copied"))
-          .catch(() => setLabel("Couldn't copy"))
-          .then(() => {
-            if (timer.current) clearTimeout(timer.current);
-            timer.current = setTimeout(() => setLabel("Copy"), 1200);
-          });
-      }}
-      className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
-    >
-      {label}
-    </button>
-  );
-}
-
 // The restore half of the cancel-and-restore: one row per set-aside
 // draft, oldest first, because a second reopen must not cost the first draft
 // its row. Self-contained on the module store, so every
@@ -769,9 +727,9 @@ function OrphanedDraftNotices(props: {
             {/* Same rule as the recovery list's Copy: a draft the projection
                 never refined carries the document inside an encoded comment,
                 and the decode runs at the click. */}
-            <CopySourceButton
+            <CopyButton
               testId="orphaned-draft-copy"
-              getSource={() => restoreRecoveryDraftText(draft.text)}
+              getText={() => restoreRecoveryDraftText(draft.text)}
             />
             {/* Deleting the only copy needs the explicit confirm step (#579
                 review, r6) — the same control the recovery list uses. */}
@@ -3284,7 +3242,7 @@ function MarkdownView(props: {
           <div data-testid="view-markdown-source" className="flex min-h-0 flex-1 flex-col">
             <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px] text-subtle">
               <span>Read-only markdown source — switch back to Editor to make changes.</span>
-              <CopySourceButton getSource={() => sourceMarkdown} />
+              <CopyButton testId="markdown-source-copy" getText={() => sourceMarkdown} />
             </div>
             {sourceMarkdown === null ? (
               <div className="flex flex-1 items-center justify-center text-xs text-subtle">

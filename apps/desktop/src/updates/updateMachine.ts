@@ -2,6 +2,9 @@
 // events arrive as plain UpdateEvent values (electronUpdater.ts owns that
 // wiring), so this module and its tests never touch Electron.
 
+export const UPDATE_CHANNELS = ["latest", "nightly"] as const;
+export type UpdateChannel = (typeof UPDATE_CHANNELS)[number];
+
 export type UpdateState =
   | { status: "idle"; message: string }
   | { status: "checking"; message: string }
@@ -12,6 +15,22 @@ export type UpdateState =
   | { status: "ready"; version: string; deferred: boolean; message: string }
   | { status: "offline"; message: string }
   | { status: "error"; message: string };
+
+// The closed status set the IPC contract admits. `satisfies` proves every
+// member is a real status; the check below proves every status is a member.
+export const UPDATE_STATUSES = [
+  "idle",
+  "checking",
+  "up-to-date",
+  "available",
+  "downloading",
+  "ready",
+  "offline",
+  "error",
+] as const satisfies readonly UpdateState["status"][];
+const _everyStatusListed: (typeof UPDATE_STATUSES)[number] =
+  null as unknown as UpdateState["status"];
+void _everyStatusListed;
 
 export type UpdateEvent =
   | { type: "check" }

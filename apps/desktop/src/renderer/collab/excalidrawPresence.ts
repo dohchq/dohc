@@ -1,3 +1,4 @@
+import { presenceColorHash } from "./presenceColorHash";
 import type {
   Collaborator,
   ExcalidrawImperativeAPI,
@@ -97,18 +98,8 @@ export function excalidrawPresenceTopic(input: {
   ])}`;
 }
 
-function hash(value: string | number): number {
-  const text = String(value);
-  let result = 2166136261;
-  for (let index = 0; index < text.length; index += 1) {
-    result ^= text.charCodeAt(index);
-    result = Math.imul(result, 16777619);
-  }
-  return result >>> 0;
-}
-
 function colorFor(value: string | number): (typeof COLORS)[number] {
-  return COLORS[hash(value) % COLORS.length]!;
+  return COLORS[presenceColorHash(value) % COLORS.length]!;
 }
 
 function cleanName(value: unknown): string {

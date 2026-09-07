@@ -1,3 +1,4 @@
+import { bytesToBase64, base64ToBytes } from "../base64";
 import type * as Y from "yjs";
 import {
   Awareness,
@@ -55,22 +56,6 @@ interface DocPresenceOptions {
   onPeers: (names: string[]) => void;
 }
 
-function toBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return typeof btoa === "function" ? btoa(binary) : Buffer.from(bytes).toString("base64");
-}
-
-function fromBase64(value: string): Uint8Array {
-  if (typeof atob === "function") {
-    const binary = atob(value);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-    return bytes;
-  }
-  return new Uint8Array(Buffer.from(value, "base64"));
-}
-
 // y-protocols' applyAwarenessUpdate trusts whatever clientIDs are embedded in
 // the update — it does not validate ownership, so a hostile co-editor could
 // craft an update that overwrites another peer's awareness entry (or ours).
@@ -119,7 +104,7 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
   const localState = (): DocPresenceState => ({
     user: options.user,
     yc: awareness.clientID,
-    update: toBase64(encodeAwarenessUpdate(awareness, [awareness.clientID])),
+    update: bytesToBase64(encodeAwarenessUpdate(awareness, [awareness.clientID])),
   });
 
   // Yjs clientIDs of remote peers we've applied, so we can prune the ones that
@@ -146,7 +131,7 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
       const owner = ycOwners.get(state.yc);
       if (owner !== undefined && owner !== ownerKey) continue;
       try {
-        const update = fromBase64(state.update);
+        const update = base64ToBytes(state.update);
         // The update must touch exactly the claimed slot — an update smuggling
         // extra clientIDs (another peer's, or ours) is rejected wholesale.
         const embedded = awarenessUpdateClientIds(update);
