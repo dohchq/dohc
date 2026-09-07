@@ -114,4 +114,3 @@ export function parseWorkspaceId(value: unknown): string {
   if (workspaceId === "shares") throw badRequest("workspaceId is reserved");
   return workspaceId;
 }
-
