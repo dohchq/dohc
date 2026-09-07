@@ -1,3 +1,4 @@
+import { errorMessage } from "./workspaceError";
 import { spawn, type ChildProcess } from "node:child_process";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import { constants } from "node:fs";
@@ -806,7 +807,7 @@ function assertLoopbackOnlyDevServerCommandAtDepth(
     try {
       parsed = splitCommandLine(statement);
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = errorMessage(error);
       throw new Error(
         "App dev server command could not statically validate the nested shell command " +
         "for the loopback-only constraint: " +
