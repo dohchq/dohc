@@ -25,7 +25,6 @@ import {
   useState,
 } from "react";
 import type {
-  AutomationFailureNotice,
   ChatFileMentionRecord,
   ChatThreadRecord,
   DesktopUserSettingsResult,
@@ -78,7 +77,9 @@ import {
   versionCompareOffCopy,
 } from "./shell/capabilityOffCopy";
 import { useAgentSetup } from "./shell/useAgentSetup";
+import { useAutomationFailures } from "./shell/useAutomationFailures";
 import { useCloudPresence } from "./shell/useCloudPresence";
+import { useCollectionFolders } from "./shell/useCollectionFolders";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useShellError } from "./shell/useShellError";
 import { useShellNotice } from "./shell/useShellNotice";
@@ -353,10 +354,6 @@ function waitForHistoryRetry(delayMs: number): Promise<void> {
 // a recipient's mounts, and a granter's waiting changes. Slow on purpose —
 // neither is urgent, and both cost a relay round trip per workspace.
 const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
-
-// Stable empty set: the Explorer is memoized, so the "no collections"
-// default must not be a fresh identity per render.
-const EMPTY_COLLECTION_FOLDERS: ReadonlySet<string> = new Set();
 
 export const WORKBENCH_PERSIST_DELAY_MS = 500;
 
@@ -1323,37 +1320,11 @@ export function DesktopWorkspaceShell(props: {
   // surface and, below, the versions surface and collections, from the same
   // fact.
   const isShareView = Boolean(props.workspace.shareView);
-  // Collection folders: the engine's collections.list result,
-  // cached as the set of folder paths so the Explorer can route a click on a
-  // collection folder to its views. Latest-wins request watermark, same as
-  // the file listing; a failure quietly keeps the last known set — the engine
-  // may simply not be running, and every activity batch retries.
-  const [collectionFolders, setCollectionFolders] = useState<
-    ReadonlySet<string>
-  >(EMPTY_COLLECTION_FOLDERS);
-  const collectionsRequest = useRef(0);
-  const refreshCollections = useCallback(async () => {
-    const request = ++collectionsRequest.current;
-    try {
-      const result = await bridge().listCollections({ workspaceId });
-      if (request !== collectionsRequest.current) return;
-      setCollectionFolders(
-        new Set(result.collections.map((collection) => collection.path)),
-      );
-    } catch {
-      // Collections are an engine capability; without it the explorer keeps
-      // plain folder behavior. Nothing to repaint, nothing to report.
-    }
-  }, [workspaceId]);
-  useEffect(() => {
-    if (!workspaceIsReady || isShareView) return;
-    // First load; afterwards the list rides the files+history activity
-    // coalescer below. listCollections is one cheap index read, so no path
-    // filter: a new collection appears through collection.yaml writes, a
-    // rename or delete arrives as ordinary path activity, and a scope-free
-    // event (no paths) must refresh too.
-    void refreshCollections();
-  }, [workspaceIsReady, isShareView, refreshCollections]);
+  const { collectionFolders, refreshCollections } = useCollectionFolders(
+    workspaceId,
+    workspaceIsReady,
+    isShareView,
+  );
   // Engine history page state: newest-first moments,
   // the keyset cursor for older pages, and the monotonic latest order used
   // as the open-file refresh key.
@@ -3950,42 +3921,10 @@ export function DesktopWorkspaceShell(props: {
     // record's presence.
     setShareSkipped(hasUnacknowledgedShareSkips(skipped) ? skipped : null);
   }, [props.refreshWorkspaceRegistry, workspaceId]);
-  // ---- Automation failure notices (ADR 0008, Phase 4) ----
-  // The engine's failed claim rows are the durable record; this state holds
-  // only the rows the owner has not acknowledged, as main serves them. Read
-  // once the workspace is ready and again on every failure poke; a dismiss
-  // re-reads either way, so a stale acknowledgment clears nothing and a
-  // newer failure comes back. Latest-wins token, the same guard
-  // reloadShareSkipped uses: an answer for one workspace must never repaint
-  // another.
-  const [automationFailures, setAutomationFailures] = useState<
-    AutomationFailureNotice[]
-  >([]);
-  const automationFailuresToken = useRef(0);
-  const reloadAutomationFailures = useCallback(async () => {
-    const token = ++automationFailuresToken.current;
-    const result = await bridge().listAutomationFailures({ workspaceId });
-    if (token !== automationFailuresToken.current) return;
-    setAutomationFailures(result.failures);
-  }, [workspaceId]);
-  useEffect(() => {
-    if (!workspaceIsReady) return;
-    void reloadAutomationFailures().catch(() => undefined);
-    return bridge().onAutomationFailuresChanged((event) => {
-      if (event.workspaceId !== workspaceId) return;
-      void reloadAutomationFailures().catch(() => undefined);
-    });
-  }, [workspaceId, workspaceIsReady, reloadAutomationFailures]);
-  const dismissAutomationFailure = useCallback(
-    (automationId: string, generation: number) => {
-      void bridge()
-        .dismissAutomationFailure({ workspaceId, automationId, generation })
-        .then(async () => await reloadAutomationFailures())
-        .catch((error: unknown) => {
-          reportShellError("Couldn't dismiss that notice.", error);
-        });
-    },
-    [workspaceId, reloadAutomationFailures, reportShellError],
+  const { automationFailures, dismissAutomationFailure } = useAutomationFailures(
+    workspaceId,
+    workspaceIsReady,
+    reportShellError,
   );
 
   const refreshShareView = useCallback(async () => {
