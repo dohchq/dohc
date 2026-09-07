@@ -159,12 +159,6 @@ function pathsEqual(left: readonly string[], right: readonly string[]): boolean 
   );
 }
 
-export function relayShareTargetKey(target: RelayShareTarget): string {
-  return target.kind === "version"
-    ? JSON.stringify(["version", target.versionId])
-    : JSON.stringify(["paths", ...normalizedPathSet(target.paths)]);
-}
-
 function rowMatchesTarget(row: RelayShareLinkRow, target: RelayShareTarget): boolean {
   if (row.selector === null) return false;
   return target.kind === "version"
@@ -391,6 +385,7 @@ export function useRelayShareLinkPane(props: {
   onClose: () => void;
 }): {
   content: ReactNode;
+  scope: string;
   close: () => void;
 } {
   const [linkBusy, setLinkBusy] = useState(false);
@@ -443,7 +438,10 @@ export function useRelayShareLinkPane(props: {
   const activeOwnerMutationShareId = useRef<string | null>(null);
   const eligibleShareIdsRef = useRef<Set<string>>(new Set());
 
-  const targetKey = relayShareTargetKey(props.target);
+  const targetKey =
+    props.target.kind === "version"
+      ? JSON.stringify(["version", props.target.versionId])
+      : JSON.stringify(["paths", ...normalizedPathSet(props.target.paths)]);
   const linkScope = JSON.stringify([props.workspaceId, targetKey]);
 
   const visibleLinks = useMemo(() => {
@@ -2315,6 +2313,7 @@ export function useRelayShareLinkPane(props: {
         </section>
       </>
     ) : null,
+    scope: linkScope,
     close: closeDialog,
   };
 }

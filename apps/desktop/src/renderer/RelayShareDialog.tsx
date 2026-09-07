@@ -2,7 +2,7 @@ import { Share2, X } from "lucide-react";
 import { useState } from "react";
 import { EmailShareForm } from "./EmailShareForm";
 import { IconButton } from "./ui/controls";
-import { relayShareTargetKey, useRelayShareLinkPane } from "./useRelayShareLinkPane";
+import { useRelayShareLinkPane } from "./useRelayShareLinkPane";
 
 export type RelayShareTarget =
   | { kind: "paths"; paths: [string, ...string[]]; label?: string }
@@ -16,10 +16,6 @@ export function RelayShareDialog(props: {
   onClose: () => void;
 }) {
   const [shareWith, setShareWith] = useState<ShareWith>("email");
-  const emailScope = JSON.stringify([
-    props.workspaceId,
-    relayShareTargetKey(props.target),
-  ]);
   const linkPane = useRelayShareLinkPane({
     workspaceId: props.workspaceId,
     target: props.target,
@@ -89,7 +85,7 @@ export function RelayShareDialog(props: {
       </div>
 
       <EmailShareForm
-        key={emailScope}
+        key={linkPane.scope}
         workspaceId={props.workspaceId}
         target={props.target}
         visible={shareWith === "email"}
