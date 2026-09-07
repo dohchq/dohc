@@ -903,17 +903,22 @@ mod collection_relation_cleanup_tests {
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
             .expect("seed rich document");
         let mut cache = WriterDocCache::new();
-        let appended = dohc_engine_collab::record_local_update_creating_marker(
+        let appended = dohc_engine_collab::record_local_update(
             &mut store,
             &mut cache,
             &key,
-            Some(SOURCE_PATH),
-            ContentKind::Richdoc,
-            Regime::LocalOnly,
             &doc.encode_full_state(),
-            None,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some(SOURCE_PATH),
+                    content_kind: ContentKind::Richdoc,
+                    regime: Regime::LocalOnly,
+                }),
+                ..Default::default()
+            },
             &NoFaults,
             4,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("seed source lineage");
         assert!(matches!(appended, TxnOutcome::Committed(_)));

@@ -1,3 +1,4 @@
+import { modalFocusableElements, trapModalTabKey } from "./modalFocus";
 import { Smile } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type * as Y from "yjs";
@@ -49,15 +50,6 @@ export type PageIdentityProps = (
 
 function mapToObject(map: Y.Map<unknown>): Record<string, unknown> {
   return Object.fromEntries(map.entries());
-}
-
-// Elements a keyboard user can land on inside the picker — used both to seed
-// focus on open and to loop Tab/Shift+Tab within the dialog.
-const FOCUSABLE_SELECTOR =
-  'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-function getFocusable(container: HTMLElement): HTMLElement[] {
-  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
 }
 
 export function PageIdentity(props: PageIdentityProps) {
@@ -129,7 +121,7 @@ export function PageIdentity(props: PageIdentityProps) {
   useEffect(() => {
     if (!pickerOpen) return;
     const container = pickerRef.current;
-    getFocusable(container ?? document.createElement("div"))[0]?.focus();
+    if (container) modalFocusableElements(container)[0]?.focus();
 
     function onPointerDown(event: MouseEvent) {
       if (pickerRef.current && !pickerRef.current.contains(event.target as Node)) {
@@ -141,18 +133,7 @@ export function PageIdentity(props: PageIdentityProps) {
         setPickerOpen(false);
         return;
       }
-      if (event.key !== "Tab" || !pickerRef.current) return;
-      const focusable = getFocusable(pickerRef.current);
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
+      trapModalTabKey(event, pickerRef.current);
     }
     document.addEventListener("mousedown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);

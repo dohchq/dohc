@@ -214,17 +214,15 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<CaptureRetireResult, RuntimeError> {
-        let workspace_root: Option<CommandWorkspaceRoot> = None;
         let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
         let token: CancellationToken = CancellationToken::new();
         self.run_blocking(move |store, cache| {
-            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
             with_local_file_mutation_cache_reset(cache, || {
                 capture_retire_on_store(
                     store,
                     &input,
-                    root_dir,
-                    root_guard,
+                    None,
+                    None,
                     self_writes.as_deref(),
                     &leases,
                     faults.as_ref(),
@@ -359,17 +357,8 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        let workspace_root: Option<CommandWorkspaceRoot> = None;
         self.run(move |store, _cache| {
-            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
-            capture_secret_retire_on_store(
-                store,
-                &input,
-                root_dir,
-                root_guard,
-                faults.as_ref(),
-                &token,
-            )
+            capture_secret_retire_on_store(store, &input, None, None, faults.as_ref(), &token)
         })
         .await
     }
@@ -382,16 +371,14 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<CaptureRetireResult, RuntimeError> {
-        let workspace_root: Option<CommandWorkspaceRoot> = None;
         let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
         self.run(move |store, cache| {
-            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
             with_local_file_mutation_cache_reset(cache, || {
                 capture_retire_on_store(
                     store,
                     &input,
-                    root_dir,
-                    root_guard,
+                    None,
+                    None,
                     self_writes.as_deref(),
                     &leases,
                     faults.as_ref(),
@@ -1292,7 +1279,6 @@ mod capture_secret_root_guard_tests {
                 let actor = supervisor.open(&db, 1).expect("actor").actor;
                 let blocker = PausedRootGuard::bind(&root);
                 let blocker_guard: Arc<dyn WorkspaceRootGuard> = blocker.clone();
-                let (blocker_reply, blocker_rx) = oneshot::channel();
                 let blocker_input = CaptureRetire {
                     workspace_id: WORKSPACE_ID.to_owned(),
                     version_id: VERSION_ID.to_owned(),
@@ -1305,30 +1291,17 @@ mod capture_secret_root_guard_tests {
                     only_if_capture_origin: true,
                     allow_ydoc_origin: true,
                 };
-                let workspace_root: Option<CommandWorkspaceRoot> =
-                    Some((root, Some(blocker_guard)));
-                let leases = LeaseRegistry::new();
-                let blocker_token = CancellationToken::new();
-                actor
-                    .tx
-                    .blocking_send(Command::Run(Box::new(move |store, cache| {
-                        let (root_dir, root_guard) =
-                            command_workspace_root_parts(workspace_root.as_ref());
-                        let outcome = with_local_file_mutation_cache_reset(cache, || {
-                            capture_retire_on_store(
-                                store,
-                                &blocker_input,
-                                root_dir,
-                                root_guard,
-                                None,
-                                &leases,
-                                &NoFaults,
-                                &blocker_token,
-                            )
-                        });
-                        let _ = blocker_reply.send(outcome);
-                    })))
-                    .expect("queue blocker");
+                let blocker_actor = actor.clone();
+                let blocker_thread = std::thread::spawn(move || {
+                    blocker_actor.capture_retire_materialized_blocking_guarded(
+                        blocker_input,
+                        root,
+                        Arc::new(()),
+                        LeaseRegistry::new(),
+                        Arc::new(NoFaults),
+                        blocker_guard,
+                    )
+                });
                 blocker.wait_until_reached();
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -1402,7 +1375,7 @@ mod capture_secret_root_guard_tests {
                     })))
                     .expect("queue read barrier after cancelled mutation");
                 blocker.release();
-                let blocker_result = blocker_rx.blocking_recv();
+                let blocker_result = blocker_thread.join().expect("join blocker caller");
                 let result = pending.map(|pending| runtime.block_on(pending));
                 let drained_result = drained_rx.blocking_recv();
                 drop(actor);
@@ -1431,6 +1404,18 @@ mod capture_secret_root_guard_tests {
                 assert_eq!(after, before, "{method}, abandoned reply={abandon_reply}");
             }
         }
+    }
+
+    fn wait_for_command_admission(actor: &ActorHandle, available_before: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while actor.tx.capacity() == available_before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "public call did not acquire an actor channel slot"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(actor.tx.capacity(), available_before - 1);
     }
 
     struct RejectSecondValidation {
@@ -1533,12 +1518,10 @@ mod capture_secret_root_guard_tests {
         std::fs::create_dir_all(root.join("notes")).expect("create original notes");
         std::fs::write(root.join(PATH), b"original body").expect("write original file");
 
-        // Hold the writer on a command already ahead of the batch. Enqueuing
-        // both commands directly proves the root replacement happens after the
-        // batch entered the actor queue and before its transaction can start.
+        // Hold the writer until the public batch call acquires a channel slot.
+        // Replace the root before that call can start its transaction.
         let blocker = PausedRootGuard::bind(&root);
         let blocker_guard: Arc<dyn WorkspaceRootGuard> = blocker.clone();
-        let (blocker_reply, blocker_reply_rx) = oneshot::channel();
         let input: CaptureRetire = CaptureRetire {
             workspace_id: WORKSPACE_ID.to_owned(),
             version_id: VERSION_ID.to_owned(),
@@ -1551,35 +1534,21 @@ mod capture_secret_root_guard_tests {
             only_if_capture_origin: true,
             allow_ydoc_origin: true,
         };
-        let workspace_root: Option<CommandWorkspaceRoot> =
-            Some((root.clone(), Some(blocker_guard)));
-        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
-        let leases: LeaseRegistry = LeaseRegistry::new();
-        let faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
-        let token: CancellationToken = CancellationToken::new();
-        actor
-            .tx
-            .blocking_send(Command::Run(Box::new(move |store, cache| {
-                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
-                let outcome = with_local_file_mutation_cache_reset(cache, || {
-                    capture_retire_on_store(
-                        store,
-                        &input,
-                        root_dir,
-                        root_guard,
-                        self_writes.as_deref(),
-                        &leases,
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = blocker_reply.send(outcome);
-            })))
-            .expect("queue actor blocker");
+        let blocker_actor = actor.clone();
+        let blocker_root = root.clone();
+        let blocker_thread = std::thread::spawn(move || {
+            blocker_actor.capture_retire_materialized_blocking_guarded(
+                input,
+                blocker_root,
+                Arc::new(()),
+                LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                blocker_guard,
+            )
+        });
         blocker.wait_until_reached();
 
         let captured_guard: Arc<dyn WorkspaceRootGuard> = Arc::new(BoundRootGuard::bind(&root));
-        let (batch_reply, batch_reply_rx) = oneshot::channel();
         let inputs: Vec<CaptureIngest> = vec![CaptureIngest {
             workspace_id: WORKSPACE_ID.to_owned(),
             version_id: VERSION_ID.to_owned(),
@@ -1594,40 +1563,28 @@ mod capture_secret_root_guard_tests {
             claim_foreign_head: false,
         }];
         let search_policy: Arc<SearchPolicySnapshot> = Arc::new(read_engine_search_policy(&root));
-        let leases: LeaseRegistry = LeaseRegistry::new();
-        let faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
-        let root_dir: PathBuf = root.clone();
-        let root_guard: Arc<dyn WorkspaceRootGuard> = captured_guard;
-        let token: CancellationToken = CancellationToken::new();
-        actor
-            .tx
-            .blocking_send(Command::Run(Box::new(move |store, cache| {
-                let outcome = with_local_file_mutation_cache_reset(cache, || {
-                    capture_ingest_batch_on_store(
-                        store,
-                        &inputs,
-                        &search_policy,
-                        &leases,
-                        faults.as_ref(),
-                        &token,
-                        (&root_dir, root_guard.as_ref()),
-                    )
-                });
-                let _ = batch_reply.send(outcome);
-            })))
-            .expect("queue capture batch behind blocker");
+        let batch_actor = actor.clone();
+        let batch_root = root.clone();
+        let available_before = actor.tx.capacity();
+        let batch_thread = std::thread::spawn(move || {
+            batch_actor.capture_ingest_batch_blocking(
+                inputs,
+                search_policy,
+                LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                batch_root,
+                captured_guard,
+            )
+        });
+        wait_for_command_admission(&actor, available_before);
 
         std::fs::rename(&root, &moved_root).expect("move original workspace root");
         std::fs::create_dir_all(root.join("notes")).expect("create replacement notes");
         std::fs::write(root.join(PATH), b"replacement body").expect("write replacement file");
         let replacement_before = std::fs::read(root.join(PATH)).expect("read replacement file");
         blocker.release();
-        let blocker_result = blocker_reply_rx
-            .blocking_recv()
-            .expect("receive blocker result");
-        let batch_result = batch_reply_rx
-            .blocking_recv()
-            .expect("receive batch result");
+        let blocker_result = blocker_thread.join().expect("join blocker caller");
+        let batch_result = batch_thread.join().expect("join batch caller");
         let replacement_after = std::fs::read(root.join(PATH)).expect("reread replacement file");
 
         std::fs::remove_dir_all(&root).expect("remove replacement workspace root");
@@ -1708,12 +1665,10 @@ mod capture_secret_root_guard_tests {
             .expect("seed captured secret");
         std::fs::remove_file(root.join(SECRET_PATH)).expect("observe original secret removal");
 
-        // Hold the worker on a command already ahead of the secret retire.
-        // Sending the retire below therefore proves it entered the real actor
-        // queue before the pathname is rebound to a replacement directory.
+        // Hold the writer until the public secret retire call acquires a channel
+        // slot, then replace the root before the worker can validate it.
         let blocker = PausedRootGuard::bind(&root);
         let blocker_guard: Arc<dyn WorkspaceRootGuard> = blocker.clone();
-        let (blocker_reply, blocker_reply_rx) = oneshot::channel();
         let input: CaptureRetire = CaptureRetire {
             workspace_id: WORKSPACE_ID.to_owned(),
             version_id: VERSION_ID.to_owned(),
@@ -1726,35 +1681,21 @@ mod capture_secret_root_guard_tests {
             only_if_capture_origin: true,
             allow_ydoc_origin: true,
         };
-        let workspace_root: Option<CommandWorkspaceRoot> =
-            Some((root.clone(), Some(blocker_guard)));
-        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
-        let leases: LeaseRegistry = LeaseRegistry::new();
-        let faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
-        let token: CancellationToken = CancellationToken::new();
-        actor
-            .tx
-            .blocking_send(Command::Run(Box::new(move |store, cache| {
-                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
-                let outcome = with_local_file_mutation_cache_reset(cache, || {
-                    capture_retire_on_store(
-                        store,
-                        &input,
-                        root_dir,
-                        root_guard,
-                        self_writes.as_deref(),
-                        &leases,
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = blocker_reply.send(outcome);
-            })))
-            .expect("queue actor blocker");
+        let blocker_actor = actor.clone();
+        let blocker_root = root.clone();
+        let blocker_thread = std::thread::spawn(move || {
+            blocker_actor.capture_retire_materialized_blocking_guarded(
+                input,
+                blocker_root,
+                Arc::new(()),
+                LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                blocker_guard,
+            )
+        });
         blocker.wait_until_reached();
 
         let captured_guard: Arc<dyn WorkspaceRootGuard> = Arc::new(BoundRootGuard::bind(&root));
-        let (retire_reply, retire_reply_rx) = oneshot::channel();
         let input: CaptureSecretRetire = CaptureSecretRetire {
             workspace_id: WORKSPACE_ID.to_owned(),
             version_id: VERSION_ID.to_owned(),
@@ -1764,25 +1705,18 @@ mod capture_secret_root_guard_tests {
             now_ms: 4,
             only_if_own_origin: true,
         };
-        let workspace_root: Option<CommandWorkspaceRoot> =
-            Some((root.clone(), Some(captured_guard)));
-        let faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
-        let token: CancellationToken = CancellationToken::new();
-        actor
-            .tx
-            .blocking_send(Command::Run(Box::new(move |store, _cache| {
-                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
-                let outcome = capture_secret_retire_on_store(
-                    store,
-                    &input,
-                    root_dir,
-                    root_guard,
-                    faults.as_ref(),
-                    &token,
-                );
-                let _ = retire_reply.send(outcome);
-            })))
-            .expect("queue secret retire behind blocker");
+        let retire_actor = actor.clone();
+        let retire_root = root.clone();
+        let available_before = actor.tx.capacity();
+        let retire_thread = std::thread::spawn(move || {
+            retire_actor.capture_secret_retire_blocking_guarded(
+                input,
+                retire_root,
+                Arc::new(NoFaults),
+                captured_guard,
+            )
+        });
+        wait_for_command_admission(&actor, available_before);
 
         std::fs::rename(&root, &moved_root).expect("move original workspace root");
         std::fs::create_dir(&root).expect("create replacement workspace root");
@@ -1791,12 +1725,8 @@ mod capture_secret_root_guard_tests {
         let replacement_before =
             std::fs::read(root.join(SECRET_PATH)).expect("read replacement secret");
         blocker.release();
-        let blocker_result = blocker_reply_rx
-            .blocking_recv()
-            .expect("receive blocker result");
-        let retire_result = retire_reply_rx
-            .blocking_recv()
-            .expect("receive secret retire result");
+        let blocker_result = blocker_thread.join().expect("join blocker caller");
+        let retire_result = retire_thread.join().expect("join secret retire caller");
         let replacement_after =
             std::fs::read(root.join(SECRET_PATH)).expect("reread replacement secret");
 

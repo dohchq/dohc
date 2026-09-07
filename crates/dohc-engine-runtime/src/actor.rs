@@ -21,7 +21,7 @@
 //!
 //! Lifecycle is explicit — `open → ready → draining → closed` — and `Drop`
 //! releases the connection deterministically by joining the worker (no detached
-//! task outlives the actor). Cancellation ([`CancellationToken`]) is checked
+//! task outlives the actor). Cancellation ([`CancellationToken`](tokio_util::sync::CancellationToken)) is checked
 //! between bounded units, never inside a transaction.
 
 mod automations;
@@ -54,9 +54,8 @@ pub use ydoc::{
 
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
-use dohc_engine_collab::{LeaseRegistry, WriterDocCache};
+use dohc_engine_collab::WriterDocCache;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
-use relay::{DeferredRelayTransport, execute_relay_operation};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -64,7 +63,6 @@ use std::sync::mpsc::sync_channel as std_sync_channel;
 use std::thread::JoinHandle;
 use tokio::sync::mpsc::OwnedPermit;
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
 
 /// Bound on the actor's command queue. Backpressure blocks the sender rather
 /// than growing an unbounded queue (`plan §Rust policy`: bounded everything).
@@ -115,13 +113,6 @@ type ActorWork = Box<dyn FnOnce(&mut EngineStore, &mut WriterDocCache) + Send>;
 
 enum Command {
     Run(ActorWork),
-    Relay {
-        transport: DeferredRelayTransport,
-        operation: RelayOperation,
-        leases: LeaseRegistry,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<RelayOperationOutcome, RuntimeError>>,
-    },
     /// Break the loop and release the connection. Carries no reply: the caller
     /// joins the worker, and the join is the completion signal (so `close`
     /// needs no `blocking_recv`, staying safe to call from a `Drop` that runs
@@ -436,29 +427,6 @@ fn worker_main(
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
-            Command::Relay {
-                transport,
-                operation,
-                leases,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    execute_relay_operation(
-                        &mut store,
-                        &mut doc_cache,
-                        transport,
-                        operation,
-                        &leases,
-                    )
-                };
-                // A pull can claim, replace, or advance lineages behind the
-                // local path (probe-covered; reset hooks stay unconditional).
-                doc_cache.clear();
-                let _ = reply.send(outcome);
-            }
             Command::Close => {
                 // FIFO ordering means every command enqueued before Close has
                 // already been served; there is nothing left to drain.

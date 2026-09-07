@@ -26,8 +26,8 @@ use dohc_engine_domain::{
     write_projected_text_in_tx,
 };
 use dohc_engine_files::{
-    DurabilityPolicy, JobOutcome, MaterializeError, ProjectionTargetKind, ProjectionTargetState,
-    StdBackoff, StdReplacer, materialize_one, probe_projection_target,
+    DurabilityPolicy, JobOutcome, MaterializeError, MaterializeOptions, ProjectionTargetKind,
+    ProjectionTargetState, StdBackoff, StdReplacer, materialize_one, probe_projection_target,
 };
 #[cfg(test)]
 use dohc_engine_storage::FaultPoint;
@@ -929,22 +929,25 @@ fn seed_scene_from_artifact_on_store(
     // guarded closure can run again after a crash retry, so it rebuilds the
     // list from scratch each attempt.
     let mut created_moment_ids: Vec<String> = Vec::new();
-    let outcome = dohc_engine_collab::record_local_update_creating_marker_guarded(
+    let outcome = dohc_engine_collab::record_local_update(
         store,
         doc_cache,
         key,
-        Some(path),
-        ContentKind::Scene,
-        Regime::LocalOnly,
         &seed_update,
-        None,
-        None,
-        true,
-        true,
-        Some(&request_id),
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some(path),
+                content_kind: ContentKind::Scene,
+                regime: Regime::LocalOnly,
+            }),
+            ensure_parent_row: true,
+            require_empty_lineage: true,
+            request_id: Some(&request_id),
+            ..Default::default()
+        },
         faults,
         now_ms,
-        |tx, _| {
+        |tx, _, _update_sha| {
             created_moment_ids.clear();
             let version_is_active: bool = tx
                 .query_row(
@@ -1382,25 +1385,31 @@ pub(super) fn ydoc_record_update_on_store(
     let journal_key = key.clone();
     let journal_path = path.to_owned();
     let journal_kind = content_kind;
-    match dohc_engine_collab::record_local_update_creating_marker_guarded_for_lineage(
+    match dohc_engine_collab::record_local_update(
         store,
         doc_cache,
         key,
-        Some(path),
-        content_kind,
-        regime,
         update,
-        actor_origin_id.as_deref(),
-        attribution.as_ref(),
-        expected_lineage_claim_id.as_deref(),
-        // Parent row, seed guard, marker, append, and outbound journal all
-        // commit in one transaction — no bare-parent crash window, and a
-        // timed-out-commit seed retry dedupes inside the guard instead of
-        // refusing seed-onto-existing-lineage.
-        true,
-        require_empty_lineage,
-        seed_source_sha256.as_deref(),
-        request_id.as_deref(),
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some(path),
+                content_kind,
+                regime,
+            }),
+            actor_origin_id: actor_origin_id.as_deref(),
+            attribution: attribution.as_ref(),
+            lineage_guard: dohc_engine_collab::LineageGuard::Expect(
+                expected_lineage_claim_id.as_deref(),
+            ),
+            // Parent row, seed guard, marker, append, and outbound journal all
+            // commit in one transaction — no bare-parent crash window, and a
+            // timed-out-commit seed retry dedupes inside the guard instead of
+            // refusing seed-onto-existing-lineage.
+            ensure_parent_row: true,
+            require_empty_lineage,
+            seed_source_sha256: seed_source_sha256.as_deref(),
+            request_id: request_id.as_deref(),
+        },
         faults,
         now_ms,
         |tx, outcome, update_sha| {
@@ -1797,11 +1806,13 @@ pub(super) fn ydoc_settle_on_store(
                 store,
                 root_dir,
                 &job,
-                DurabilityPolicy::per_os(),
-                &StdReplacer,
-                &StdBackoff,
-                now_ms,
-                faults,
+                &MaterializeOptions {
+                    policy: DurabilityPolicy::per_os(),
+                    replacer: &StdReplacer,
+                    backoff: &StdBackoff,
+                    now_ms,
+                    faults,
+                },
             );
             let replay_outcome = match replay_outcome {
                 Ok(outcome) => outcome,
@@ -2067,11 +2078,13 @@ pub(super) fn ydoc_settle_on_store(
         store,
         root_dir,
         &job,
-        DurabilityPolicy::per_os(),
-        &StdReplacer,
-        &StdBackoff,
-        now_ms,
-        faults,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &StdBackoff,
+            now_ms,
+            faults,
+        },
     );
     let job_outcome = match job_outcome {
         Ok(outcome) => outcome,

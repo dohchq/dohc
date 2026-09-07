@@ -1,3 +1,4 @@
+import { isCodeBlock, isCodeMark } from "./pmHelpers";
 // Inline-atom rendering — a ProseMirror decoration plugin.
 //
 // Deliberately a *decoration*, not a node/mark: the atom stays as
@@ -16,7 +17,6 @@
 import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { parseInlineAtoms } from './inlineAtom'
-
 
 export const inlineAtomKey = new PluginKey('dohc-inline-atom')
 
@@ -50,21 +50,6 @@ type AtomRange = {
  *  (not `code`); CommonMark presets may use `code`; some define
  *  `spec.code`. Check all three so atoms are never decorated inside
  *  code. */
-function isCodeMark(m: PMMarkLike): boolean {
-  return (
-    m.type.name === 'inlineCode' ||
-    m.type.name === 'code' ||
-    m.type.spec?.code === true
-  )
-}
-function isCodeBlock(node: PMNodeLike | null): boolean {
-  return (
-    !!node &&
-    (node.type.name === 'code_block' ||
-      node.type.name === 'codeBlock' ||
-      node.type.spec?.code === true)
-  )
-}
 
 /** Pure: walk text nodes, skip code, return atom decoration ranges in
  *  absolute doc coordinates. Offsets map 1:1 because ProseMirror text

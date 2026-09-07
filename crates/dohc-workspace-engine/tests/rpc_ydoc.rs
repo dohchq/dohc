@@ -5089,7 +5089,7 @@ async fn close_materializes_a_deferred_winning_lineage_before_returning() {
     )
     .expect("queue winning base behind live session");
     assert!(
-        matches!(applied, dohc_engine_sync::ApplyOutcome::Applied(result) if result.deferred),
+        matches!(applied, dohc_engine_sync::ApplyOutcome { primary: dohc_engine_sync::ApplyDisposition::Applied(result), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (result.deferred)),
         "the winning base must start deferred behind the live session"
     );
     drop(store);

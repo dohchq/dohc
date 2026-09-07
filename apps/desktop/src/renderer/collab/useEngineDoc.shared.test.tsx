@@ -10,7 +10,7 @@ import {
 import { startTransition, StrictMode, Suspense } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
+import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
 import { resetOrphanedDrafts } from "../orphanedDrafts";
 import {
   disposeEngineDocLeasesForTests,

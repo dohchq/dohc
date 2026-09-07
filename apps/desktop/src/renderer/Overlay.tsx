@@ -4,6 +4,7 @@ import {
   useRef,
   type HTMLAttributes,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { isTopOverlay, pushOverlay, removeOverlay } from "./guestBlockingUi";
 import { trapModalTabKey } from "./modalFocus";
@@ -13,14 +14,17 @@ import { trapModalTabKey } from "./modalFocus";
 // file dialog, cloud panel, and plugin uninstall dialog so close/backdrop
 // behavior — and this keyboard behavior — stays identical everywhere.
 export function Overlay(props: {
-  onClose: () => void;
+  onClose?: () => void;
   children: ReactNode;
+  appearance?: "standard" | "warning";
+  panelRef?: RefObject<HTMLDivElement | null>;
   panelProps?: Omit<
     HTMLAttributes<HTMLDivElement>,
-    "children" | "className" | "onClick" | "tabIndex"
+    "children" | "onClick" | "tabIndex"
   > & { "data-testid"?: string };
 }) {
-  const panelRef = useRef<HTMLDivElement>(null);
+  const defaultPanelRef = useRef<HTMLDivElement>(null);
+  const panelRef = props.panelRef ?? defaultPanelRef;
   // A ref, not a dependency, so Escape and Tab always call this render's
   // onClose even though the keydown listener itself is only ever attached
   // once.
@@ -36,7 +40,7 @@ export function Overlay(props: {
 
   useLayoutEffect(() => {
     const panel = panelRef.current;
-    if (panel && !panel.contains(document.activeElement)) panel.focus();
+    if (panel && (props.appearance === "warning" || !panel.contains(document.activeElement))) panel.focus();
   }, []);
 
   useEffect(() => {
@@ -44,7 +48,7 @@ export function Overlay(props: {
       if (!isTopOverlay(idRef.current)) return;
       if (event.key === "Escape") {
         event.stopPropagation();
-        onCloseRef.current();
+        onCloseRef.current?.();
         return;
       }
       trapModalTabKey(event, panelRef.current);
@@ -57,14 +61,16 @@ export function Overlay(props: {
   return (
     <div
       data-dohc-modal="true"
-      className="fixed inset-0 z-30 flex items-start justify-center overflow-auto bg-black/20 p-4 pt-24 backdrop-blur-[1.5px]"
+      className={props.appearance === "warning"
+        ? "fixed inset-0 z-50 grid place-items-center bg-ink/20"
+        : "fixed inset-0 z-30 flex items-start justify-center overflow-auto bg-black/20 p-4 pt-24 backdrop-blur-[1.5px]"}
       onClick={props.onClose}
     >
       <div
         {...props.panelProps}
         ref={panelRef}
         tabIndex={-1}
-        className="dohc-pop-in"
+        className={props.panelProps?.className ?? "dohc-pop-in"}
         onClick={(event) => event.stopPropagation()}
       >
         {props.children}

@@ -1,4 +1,4 @@
-use super::{ActorHandle, Command};
+use super::ActorHandle;
 use crate::error::RuntimeError;
 use dohc_engine_collab::{LeaseRegistry, WriterDocCache};
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
@@ -17,7 +17,6 @@ use dohc_engine_sync::{
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use std::sync::{Arc, Mutex};
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -932,18 +931,29 @@ impl ActorHandle {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
-            let (reply, reply_rx) = oneshot::channel();
-            self.tx
-                .send(Command::Relay {
-                    transport: transport.clone(),
-                    operation: operation.clone(),
-                    leases: leases.clone(),
-                    token: token.clone(),
-                    reply,
+            let queued_transport = transport.clone();
+            let queued_operation = operation.clone();
+            let queued_leases = leases.clone();
+            let queued_token = token.clone();
+            let outcome = self
+                .run(move |store, cache| {
+                    let outcome = if queued_token.is_cancelled() {
+                        Err(RuntimeError::Cancelled)
+                    } else {
+                        execute_relay_operation(
+                            store,
+                            cache,
+                            queued_transport,
+                            queued_operation,
+                            &queued_leases,
+                        )
+                    };
+                    // A pull can claim, replace, or advance lineages behind the
+                    // local path (probe-covered; reset hooks stay unconditional).
+                    cache.clear();
+                    outcome
                 })
-                .await
-                .map_err(|_| RuntimeError::ActorUnavailable)?;
-            let outcome = reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?;
+                .await;
             match outcome {
                 Err(RuntimeError::Relay(RelayError::Local(reason)))
                     if reason == RELAY_IO_PENDING =>

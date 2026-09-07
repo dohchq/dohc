@@ -31,8 +31,8 @@ use dohc_engine_storage::{
     TxnOutcome, hex_sha256,
 };
 use dohc_engine_sync::{
-    ApplyOutcome, ConflictApplyResult, ReplicationEnvelope, apply_conflict_envelope,
-    read_replayed_refusal, retain_refusal_for_direct_retry,
+    ApplyDisposition, ApplyOutcome, ConflictApplyResult, ReplicationEnvelope,
+    apply_conflict_envelope, read_replayed_refusal, retain_refusal_for_direct_retry,
 };
 use rusqlite::{OptionalExtension, params};
 use std::path::PathBuf;
@@ -465,13 +465,25 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 match apply_conflict_envelope(store, &envelope, faults.as_ref(), &leases) {
-                    Ok(outcome @ ApplyOutcome::Refused(_)) => {
-                        retain_refusal_for_direct_retry(store, &envelope, faults.as_ref())
-                            .map(|()| outcome)
-                            .map_err(RuntimeError::from)
-                    }
-                    Ok(ApplyOutcome::Skipped) => read_replayed_refusal(store, &envelope)
-                        .map(|refusal| refusal.map_or(ApplyOutcome::Skipped, ApplyOutcome::Refused))
+                    Ok(
+                        outcome @ ApplyOutcome {
+                            primary: ApplyDisposition::Refused(_),
+                            ..
+                        },
+                    ) => retain_refusal_for_direct_retry(store, &envelope, faults.as_ref())
+                        .map(|()| outcome)
+                        .map_err(RuntimeError::from),
+                    Ok(
+                        mut outcome @ ApplyOutcome {
+                            primary: ApplyDisposition::Skipped,
+                            ..
+                        },
+                    ) => read_replayed_refusal(store, &envelope)
+                        .map(|refusal| {
+                            outcome.primary = refusal
+                                .map_or(ApplyDisposition::Skipped, ApplyDisposition::Refused);
+                            outcome
+                        })
                         .map_err(RuntimeError::from),
                     outcome => outcome.map_err(RuntimeError::from),
                 }
@@ -2048,22 +2060,23 @@ mod doc_cache_reset_tests {
         let key = DocKey::new("workspace", "main", "document").expect("document key");
         let update = Ydoc::wire().plaintext_insert(0, "cached");
         let mut cache = WriterDocCache::new();
-        let appended = dohc_engine_collab::record_local_update_creating_marker_guarded(
+        let appended = dohc_engine_collab::record_local_update(
             &mut store,
             &mut cache,
             &key,
-            Some("document.md"),
-            ContentKind::Plaintext,
-            Regime::LocalOnly,
             &update,
-            None,
-            None,
-            true,
-            false,
-            None,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some("document.md"),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                ensure_parent_row: true,
+                ..Default::default()
+            },
             &NoFaults,
             2,
-            |_tx, _outcome| Ok(()),
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("append update");
         assert!(matches!(appended, TxnOutcome::Committed(_)));

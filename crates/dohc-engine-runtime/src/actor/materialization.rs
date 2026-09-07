@@ -9,7 +9,7 @@ use dohc_engine_domain::{
     decode_binary_rollback_job_identity,
 };
 use dohc_engine_files::{
-    DurabilityPolicy, JobOutcome, StdBackoff, StdReplacer, materialize_one,
+    DurabilityPolicy, JobOutcome, MaterializeOptions, StdBackoff, StdReplacer, materialize_one,
     materialize_secret_delete_one, materialize_secret_one,
 };
 #[cfg(test)]
@@ -594,9 +594,13 @@ pub(super) fn replay_pending_materializations(
                     store,
                     root_dir,
                     &job,
-                    DurabilityPolicy::per_os(),
-                    now_ms,
-                    faults,
+                    &MaterializeOptions {
+                        policy: DurabilityPolicy::per_os(),
+                        replacer: &StdReplacer,
+                        backoff: &StdBackoff,
+                        now_ms,
+                        faults,
+                    },
                 ) {
                     Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
                         summary.completed += 1;
@@ -642,11 +646,13 @@ pub(super) fn replay_pending_materializations(
                 root_dir,
                 &job,
                 plaintext.as_bytes(),
-                DurabilityPolicy::per_os(),
-                &StdReplacer,
-                &StdBackoff,
-                now_ms,
-                faults,
+                &MaterializeOptions {
+                    policy: DurabilityPolicy::per_os(),
+                    replacer: &StdReplacer,
+                    backoff: &StdBackoff,
+                    now_ms,
+                    faults,
+                },
             );
             match outcome {
                 Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
@@ -736,11 +742,13 @@ pub(super) fn replay_pending_materializations(
                 store,
                 root_dir,
                 &job,
-                DurabilityPolicy::per_os(),
-                &StdReplacer,
-                &StdBackoff,
-                now_ms,
-                faults,
+                &MaterializeOptions {
+                    policy: DurabilityPolicy::per_os(),
+                    replacer: &StdReplacer,
+                    backoff: &StdBackoff,
+                    now_ms,
+                    faults,
+                },
             )
             .map_err(RuntimeError::from)
         };
@@ -804,11 +812,13 @@ pub(super) fn materialize_pending_job(
         store,
         root_dir,
         job,
-        DurabilityPolicy::per_os(),
-        &StdReplacer,
-        &StdBackoff,
-        now_ms,
-        faults,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &StdBackoff,
+            now_ms,
+            faults,
+        },
     );
     let (materialized, reported) = match outcome {
         Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
