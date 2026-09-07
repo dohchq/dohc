@@ -16,6 +16,8 @@ import type { JoinedSharedChannel } from "./registryStore";
 // caller can mark it in the registry — the local copy stays readable, it just
 // stops updating (PR-18's honest end-of-share).
 
+export const RELAY_FETCH_TIMEOUT_MS = 15_000;
+
 // Bounds every relay request in a shared-channel pass:
 // listChatChannels awaits the pass, so a hung relay socket must abort after
 // the timeout instead of blocking the Chats surface indefinitely. Errors ride

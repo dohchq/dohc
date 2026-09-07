@@ -1,3 +1,4 @@
+import { extensionOf } from "./path";
 import {
   defaultKeymap,
   history,
@@ -36,10 +37,6 @@ export type SourceCodePendingUndo = {
   undoText: string;
 };
 
-function extensionOf(path: string): string {
-  const dot = path.lastIndexOf(".");
-  return dot === -1 ? "" : path.slice(dot + 1).toLowerCase();
-}
 
 const CODEMIRROR_THEME = EditorView.theme({
   "&": {

@@ -1,95 +1,67 @@
 import { describe, expect, it } from "vitest";
-import {
-  extractOutline,
-  resolveActiveHeadingIndex,
-  type PMHeadingNodeLike,
-  type PMOutlineDocLike,
-} from "./outline";
+import { extractOutline, resolveActiveHeadingIndex } from "./outline";
+import { codeBlock, doc, heading, paragraph, schema } from "./testDocs";
 
-// Offline test of the extraction logic — a hand-built doc whose
-// `descendants` mirrors ProseMirror's (node, pos), same pattern as
-// inlineAtomPlugin.test.ts.
-
-type Entry = { type: string; text?: string; level?: number; pos: number };
-
-function fakeDoc(entries: Entry[]): PMOutlineDocLike {
-  return {
-    descendants(cb) {
-      for (const e of entries) {
-        const node: PMHeadingNodeLike = {
-          type: { name: e.type },
-          attrs: e.type === "heading" ? { level: e.level } : undefined,
-          textContent: e.text ?? "",
-        };
-        cb(node, e.pos);
-      }
-    },
-  };
-}
+// Extraction over real ProseMirror documents (testDocs.ts). Positions are
+// hand-computed from node sizes: a textblock's nodeSize is text length + 2,
+// and the first top-level block starts at pos 0.
 
 describe("extractOutline", () => {
   it("extracts headings with level, text, and pos in document order", () => {
-    const doc = fakeDoc([
-      { type: "heading", level: 1, text: "Title", pos: 0 },
-      { type: "paragraph", text: "intro copy", pos: 8 },
-      { type: "heading", level: 2, text: "Section A", pos: 30 },
-      { type: "heading", level: 3, text: "Subsection", pos: 60 },
-    ]);
+    // "Title" (nodeSize 7) → paragraph "intro copy" at 7 (nodeSize 12) →
+    // "Section A" at 19 (nodeSize 11) → "Subsection" at 30.
+    const d = doc(
+      heading(1, "Title"),
+      paragraph("intro copy"),
+      heading(2, "Section A"),
+      heading(3, "Subsection"),
+    );
 
-    expect(extractOutline(doc)).toEqual([
+    expect(extractOutline(d)).toEqual([
       { level: 1, text: "Title", pos: 0 },
-      { level: 2, text: "Section A", pos: 30 },
-      { level: 3, text: "Subsection", pos: 60 },
+      { level: 2, text: "Section A", pos: 19 },
+      { level: 3, text: "Subsection", pos: 30 },
     ]);
   });
 
   it("supports all six heading levels", () => {
-    const doc = fakeDoc(
-      [1, 2, 3, 4, 5, 6].map((level, i) => ({
-        type: "heading",
-        level,
-        text: `H${level}`,
-        pos: i * 10,
-      })),
-    );
-    expect(extractOutline(doc).map((h) => h.level)).toEqual([1, 2, 3, 4, 5, 6]);
+    const d = doc(...[1, 2, 3, 4, 5, 6].map((level) => heading(level, `H${level}`)));
+    expect(extractOutline(d).map((h) => h.level)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
   it("skips headings with no text (empty or whitespace-only)", () => {
-    const doc = fakeDoc([
-      { type: "heading", level: 1, text: "", pos: 0 },
-      { type: "heading", level: 2, text: "   ", pos: 5 },
-      { type: "heading", level: 1, text: "Real heading", pos: 12 },
-    ]);
-    expect(extractOutline(doc)).toEqual([{ level: 1, text: "Real heading", pos: 12 }]);
+    // Empty heading nodeSize 2 → whitespace heading at 2 (nodeSize 5) →
+    // "Real heading" at 7.
+    const d = doc(heading(1), heading(2, "   "), heading(1, "Real heading"));
+    expect(extractOutline(d)).toEqual([{ level: 1, text: "Real heading", pos: 7 }]);
   });
 
   it("trims heading text", () => {
-    const doc = fakeDoc([{ type: "heading", level: 1, text: "  Padded  ", pos: 0 }]);
-    expect(extractOutline(doc)).toEqual([{ level: 1, text: "Padded", pos: 0 }]);
+    expect(extractOutline(doc(heading(1, "  Padded  ")))).toEqual([
+      { level: 1, text: "Padded", pos: 0 },
+    ]);
   });
 
   it("ignores non-heading nodes entirely", () => {
-    const doc = fakeDoc([
-      { type: "paragraph", text: "not a heading", pos: 0 },
-      { type: "codeBlock", text: "# not markdown here", pos: 20 },
-    ]);
-    expect(extractOutline(doc)).toEqual([]);
+    const d = doc(paragraph("not a heading"), codeBlock("# not markdown here"));
+    expect(extractOutline(d)).toEqual([]);
   });
 
-  it("falls back to level 1 for a missing/non-numeric level attr", () => {
-    const doc: PMOutlineDocLike = {
-      descendants(cb) {
-        cb({ type: { name: "heading" }, attrs: {}, textContent: "No level" }, 0);
-      },
-    };
-    expect(extractOutline(doc)).toEqual([{ level: 1, text: "No level", pos: 0 }]);
+  it("falls back to the schema's default level when none is supplied", () => {
+    const d = doc(schema.node("heading", null, [schema.text("No level")]));
+    expect(extractOutline(d)).toEqual([{ level: 1, text: "No level", pos: 0 }]);
+  });
+
+  it("falls back to level 1 for a non-numeric level attr", () => {
+    // ProseMirror's computeAttrs applies the default only for a *missing*
+    // attribute; an explicit null survives into the real node's attrs.
+    const d = doc(schema.node("heading", { level: null }, [schema.text("No level")]));
+    expect(d.child(0).attrs.level).toBeNull();
+    expect(extractOutline(d)).toEqual([{ level: 1, text: "No level", pos: 0 }]);
   });
 
   it("returns an empty array for a doc with no headings", () => {
-    expect(extractOutline(fakeDoc([{ type: "paragraph", text: "just prose", pos: 0 }]))).toEqual(
-      [],
-    );
+    expect(extractOutline(doc(paragraph("just prose")))).toEqual([]);
   });
 });
 

@@ -20,9 +20,9 @@
 // find/replace is meant to reach fenced code same as prose.
 
 import { Extension, type Editor } from '@tiptap/core'
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey, type EditorState, type Transaction } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
-import type { PMDocLike } from './inlineAtomPlugin'
 
 export const findReplaceKey = new PluginKey<FindReplaceState>('dohc-find-replace')
 
@@ -71,7 +71,7 @@ function escapeRegExp(value: string): string {
  *  within a textblock (`**bo**ld` searching "old") without spanning an
  *  actual block boundary or a non-text leaf. */
 export function computeMatches(
-  doc: PMDocLike,
+  doc: ProseMirrorNode,
   query: string,
   caseSensitive: boolean,
 ): FindMatch[] {
@@ -129,7 +129,7 @@ export function prevMatchIndex(count: number, activeIndex: number): number {
   return (activeIndex - 1 + count) % count
 }
 
-function recomputeMatches(state: FindReplaceState, doc: PMDocLike): FindReplaceState {
+function recomputeMatches(state: FindReplaceState, doc: ProseMirrorNode): FindReplaceState {
   const matches = computeMatches(doc, state.query, state.caseSensitive)
   return { ...state, matches, activeIndex: matches.length ? 0 : -1 }
 }
@@ -140,7 +140,7 @@ function recomputeMatches(state: FindReplaceState, doc: PMDocLike): FindReplaceS
 export function findReplaceReducer(
   state: FindReplaceState,
   action: FindReplaceAction,
-  doc: PMDocLike,
+  doc: ProseMirrorNode,
 ): FindReplaceState {
   switch (action.type) {
     case 'open': {
@@ -246,9 +246,9 @@ export function makeFindReplacePlugin() {
       init: () => CLOSED_FIND_REPLACE_STATE,
       apply(tr, old) {
         const action = tr.getMeta(findReplaceKey) as FindReplaceAction | undefined
-        if (action) return findReplaceReducer(old, action, tr.doc as unknown as PMDocLike)
+        if (action) return findReplaceReducer(old, action, tr.doc)
         if (tr.docChanged && old.open && old.query) {
-          return findReplaceReducer(old, { type: 'sync' }, tr.doc as unknown as PMDocLike)
+          return findReplaceReducer(old, { type: 'sync' }, tr.doc)
         }
         return old
       },

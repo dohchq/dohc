@@ -20,8 +20,8 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_storage::{EngineStore, hex_sha256};
 use dohc_engine_sync::{
-    AlwaysLive, ApplyOutcome, NoLiveLeases, ReplicationEnvelope, apply_replication_envelope,
-    apply_ydoc_envelope,
+    AlwaysLive, ApplyDisposition, ApplyOutcome, NoLiveLeases, ReplicationEnvelope,
+    apply_replication_envelope, apply_ydoc_envelope,
 };
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::{
@@ -1009,7 +1009,7 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
             )
             .expect("queue remote collection update");
             assert!(
-                matches!(applied, dohc_engine_sync::ApplyOutcome::Applied(result) if result.deferred),
+                matches!(applied, dohc_engine_sync::ApplyOutcome { primary: dohc_engine_sync::ApplyDisposition::Applied(result), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (result.deferred)),
                 "the live device must defer the remote update"
             );
         }
@@ -2182,9 +2182,16 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
     .expect("apply remote moment");
     // A file-authored edit derives the same field facts a frontmatter-map
     // edit does: the record events and history ride this apply too.
-    let ApplyOutcome::Applied(routed) = &applied else {
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(routed),
+        refusals: outcome_refusals,
+        sharing_declined: outcome_sharing_declined,
+    } = &applied
+    else {
         panic!("the remote moment must fast-forward the seeded head: {applied:?}");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     let facts = routed
         .record_facts
         .first()
@@ -2353,7 +2360,14 @@ async fn remote_moment_append_without_frontmatter_clears_the_collection_index() 
     )
     .expect("apply remote moment");
     assert!(
-        matches!(applied, ApplyOutcome::Applied(_)),
+        matches!(
+            applied,
+            ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ),
         "the remote moment must fast-forward the seeded head: {applied:?}"
     );
     drop(store);
@@ -2562,7 +2576,7 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
     )
     .expect("queue remote collection update");
     assert!(
-        matches!(applied, ApplyOutcome::Applied(result) if result.deferred),
+        matches!(applied, ApplyOutcome { primary: ApplyDisposition::Applied(result), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (result.deferred)),
         "the live device must defer the remote update"
     );
     // ADR 0008 pin: a subscribed automation must not be claimed by the drain

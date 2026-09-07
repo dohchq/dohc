@@ -11,7 +11,7 @@ type SitePreviewHandle = StaticSitePreview | SiteProcessHandle;
 // requireWorkspace alone only proves a workspaceId is registered somewhere
 // in this app instance. Site IPC also needs to prove that the sender still
 // shows that workspace.
-export function assertActiveWorkspaceForSite(
+function assertActiveWorkspaceForSite(
   activeWorkspaceId: string | undefined,
   workspaceId: string,
   subject: string,

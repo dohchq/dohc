@@ -29,7 +29,7 @@ import {
 } from "react";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import type { DraftFlush } from "../FileInspector";
+import type { DraftFlush } from "../useAutosavedTextDraft";
 import { Overlay } from "../Overlay";
 import { momentDiffName } from "./EditorTabs";
 import { planDrop, type DragSource } from "./file-tree-dnd";
