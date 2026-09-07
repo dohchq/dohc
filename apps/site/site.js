@@ -163,7 +163,7 @@ for (const link of document.querySelectorAll('[data-download-primary], [data-dow
     const status = document.createElement('span');
     status.className = 'visually-hidden';
     status.setAttribute('role', 'status');
-    link.after(status);
+    link.parentElement.append(status);
     link.setAttribute('aria-busy', 'true');
     link.setAttribute('aria-disabled', 'true');
     if (label?.firstChild) label.firstChild.textContent = 'Checking release…';
