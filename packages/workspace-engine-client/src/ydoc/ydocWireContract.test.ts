@@ -1,6 +1,6 @@
 import { ProtocolShapeError } from "../wireSchema";
 import { describe, expect, it } from "vitest";
-import { decodeYdocOpenResult, decodeYdocSettleResult } from "./ydocWireContract";
+import { decodeYdocResult, YDOC_METHOD } from "./ydocWireContract";
 
 // AUDIT-SILENTSAVE round 2 (D4). The settle result grew two fields that carry
 // safety meaning — `content: string | null` (null = the artifact was past the
@@ -25,15 +25,15 @@ function settleResult(overrides: Record<string, unknown> = {}) {
   };
 }
 
-describe("decodeYdocSettleResult", () => {
+describe("ydoc.settle result", () => {
   it("accepts a normal in-band settle", () => {
-    const decoded = decodeYdocSettleResult(settleResult());
+    const decoded = decodeYdocResult(YDOC_METHOD.settle, settleResult());
     expect(decoded.content).toBe("# Body\n");
     expect(decoded.materialized).toBe(true);
   });
 
   it("accepts content: null — the over-cap answer", () => {
-    const decoded = decodeYdocSettleResult(settleResult({ content: null }));
+    const decoded = decodeYdocResult(YDOC_METHOD.settle, settleResult({ content: null }));
     // null must survive as null: coercing it to "" here would hand the capture
     // layer an empty body to mirror onto disk, which is the data loss this
     // whole change exists to stop.
@@ -42,19 +42,20 @@ describe("decodeYdocSettleResult", () => {
 
   it("Rejects an absent content key — null means something, missing is a violation", () => {
     const { content: _omitted, ...withoutContent } = settleResult();
-    expect(() => decodeYdocSettleResult(withoutContent)).toThrow(
+    expect(() => decodeYdocResult(YDOC_METHOD.settle, withoutContent)).toThrow(
       ProtocolShapeError,
     );
   });
 
   it("rejects non-string, non-null content", () => {
-    expect(() => decodeYdocSettleResult(settleResult({ content: 12 }))).toThrow(
+    expect(() => decodeYdocResult(YDOC_METHOD.settle, settleResult({ content: 12 }))).toThrow(
       ProtocolShapeError,
     );
   });
 
   it("carries materialized: false through", () => {
-    const decoded = decodeYdocSettleResult(
+    const decoded = decodeYdocResult(
+      YDOC_METHOD.settle,
       settleResult({ materialized: false, content: null }),
     );
     expect(decoded.materialized).toBe(false);
@@ -62,20 +63,20 @@ describe("decodeYdocSettleResult", () => {
 
   it("Rejects an absent materialized key rather than assuming the file landed", () => {
     const { materialized: _omitted, ...withoutMaterialized } = settleResult();
-    expect(() => decodeYdocSettleResult(withoutMaterialized)).toThrow(
+    expect(() => decodeYdocResult(YDOC_METHOD.settle, withoutMaterialized)).toThrow(
       ProtocolShapeError,
     );
   });
 
   it("rejects a non-boolean materialized", () => {
     expect(() =>
-      decodeYdocSettleResult(settleResult({ materialized: "yes" })),
+      decodeYdocResult(YDOC_METHOD.settle, settleResult({ materialized: "yes" })),
     ).toThrow(ProtocolShapeError);
   });
 
   it("reports a wrong-typed nested projection field path", () => {
     expect(() =>
-      decodeYdocSettleResult(settleResult({
+      decodeYdocResult(YDOC_METHOD.settle, settleResult({
         projection: {
           contentKind: "richdoc",
           sourceStateVectorSha256: 7,
@@ -112,15 +113,15 @@ function openResult(overrides: Record<string, unknown> = {}) {
   };
 }
 
-describe("decodeYdocOpenResult", () => {
+describe("ydoc.open result", () => {
   it("accepts scene sessions", () => {
     expect(
-      decodeYdocOpenResult(openResult({ contentKind: "scene" })).contentKind,
+      decodeYdocResult(YDOC_METHOD.open, openResult({ contentKind: "scene" })).contentKind,
     ).toBe("scene");
   });
 
   it("carries optional seed content through", () => {
-    expect(decodeYdocOpenResult(openResult({ seedContent: "# Seed\n" }))).toMatchObject({
+    expect(decodeYdocResult(YDOC_METHOD.open, openResult({ seedContent: "# Seed\n" }))).toMatchObject({
       seedContent: "# Seed\n",
     });
   });
@@ -136,7 +137,7 @@ describe("decodeYdocOpenResult", () => {
       sha256: "a".repeat(64),
     };
     expect(
-      decodeYdocOpenResult(openResult({
+      decodeYdocResult(YDOC_METHOD.open, openResult({
         contentKind: "scene",
         artifactAssets: [descriptor],
       })).artifactAssets,
@@ -167,13 +168,14 @@ describe("decodeYdocOpenResult", () => {
       { ...asset, mimeType: "" },
     ]) {
       expect(() =>
-        decodeYdocOpenResult(openResult({ artifactAssets: [invalid] })),
+        decodeYdocResult(YDOC_METHOD.open, openResult({ artifactAssets: [invalid] })),
       ).toThrow(ProtocolShapeError);
     }
   });
 
   it("carries head and lineage through independently", () => {
-    const decoded = decodeYdocOpenResult(
+    const decoded = decodeYdocResult(
+      YDOC_METHOD.open,
       openResult({ head: "absent", lineage: "existing" }),
     );
     expect(decoded.head).toBe("absent");
@@ -182,29 +184,30 @@ describe("decodeYdocOpenResult", () => {
 
   it("Rejects an absent head key instead of assuming the version has the path", () => {
     const { head: _omitted, ...withoutHead } = openResult();
-    expect(() => decodeYdocOpenResult(withoutHead)).toThrow(
+    expect(() => decodeYdocResult(YDOC_METHOD.open, withoutHead)).toThrow(
       ProtocolShapeError,
     );
   });
 
   it("Rejects an absent lineage key instead of assuming there is nothing to lose", () => {
     const { lineage: _omitted, ...withoutLineage } = openResult();
-    expect(() => decodeYdocOpenResult(withoutLineage)).toThrow(
+    expect(() => decodeYdocResult(YDOC_METHOD.open, withoutLineage)).toThrow(
       ProtocolShapeError,
     );
   });
 
   it("rejects values outside the contract", () => {
-    expect(() => decodeYdocOpenResult(openResult({ head: true }))).toThrow(
+    expect(() => decodeYdocResult(YDOC_METHOD.open, openResult({ head: true }))).toThrow(
       ProtocolShapeError,
     );
     expect(() =>
-      decodeYdocOpenResult(openResult({ lineage: "present" })),
+      decodeYdocResult(YDOC_METHOD.open, openResult({ lineage: "present" })),
     ).toThrow(ProtocolShapeError);
   });
 
   it("strips extra daemon fields without rejecting the result", () => {
-    const decoded = decodeYdocOpenResult(
+    const decoded = decodeYdocResult(
+      YDOC_METHOD.open,
       openResult({ seedMarkdown: "# Seed", daemonOnly: true }),
     );
     expect(decoded).not.toHaveProperty("seedMarkdown");

@@ -19,13 +19,8 @@ import type { Event, Request, Response, WorkspaceHandle } from "../protocol";
 import {
   YDOC_EVENT,
   YDOC_METHOD,
-  decodeYdocCloseResult,
-  decodeYdocEvictResult,
-  decodeYdocOpenResult,
-  decodeYdocRecordUpdateResult,
   decodeYdocRemoteUpdatePayload,
-  decodeYdocResyncResult,
-  decodeYdocSettleResult,
+  decodeYdocResult,
   type ChangeAttributionWire,
   type YdocCloseParams,
   type YdocContentKind,
@@ -900,7 +895,8 @@ export class YdocAdapterSession {
     };
     const idempotencyKey =
       options?.idempotencyKey ?? `${this.sessionId}:${this.nextLocalUpdateSeq++}`;
-    const result = decodeYdocRecordUpdateResult(
+    const result = decodeYdocResult(
+      YDOC_METHOD.recordUpdate,
       await this.adapter.request(
         this.workspace,
         YDOC_METHOD.recordUpdate,
@@ -956,7 +952,7 @@ export class YdocAdapterSession {
       sessionId: this.sessionId,
       ...(options?.summary ? { summary: options.summary } : {}),
     };
-    let raw: unknown;
+    let raw: Response["result"];
     try {
       raw = await this.adapter.request(this.workspace, YDOC_METHOD.settle, params);
     } catch (error) {
@@ -977,7 +973,7 @@ export class YdocAdapterSession {
         throw error;
       }
     }
-    const result = decodeYdocSettleResult(raw as Parameters<typeof decodeYdocSettleResult>[0]);
+    const result = decodeYdocResult(YDOC_METHOD.settle, raw);
     this.lastSettledSha = result.sha256;
     return result;
   }
@@ -1111,7 +1107,7 @@ export class YdocAdapterSession {
       YDOC_METHOD.resync,
       { sessionId: this.sessionId },
     );
-    const result = decodeYdocResyncResult(delivery.result);
+    const result = decodeYdocResult(YDOC_METHOD.resync, delivery.result);
     return {
       update: delivery.bytes,
       lineageClaimId: result.lineageClaimId,
@@ -1129,7 +1125,8 @@ export class YdocAdapterSession {
       ...(options?.summary ? { summary: options.summary } : {}),
     };
     try {
-      decodeYdocCloseResult(
+      decodeYdocResult(
+        YDOC_METHOD.close,
         await this.adapter.request(this.workspace, YDOC_METHOD.close, params),
       );
     } catch (error) {
@@ -1150,7 +1147,8 @@ export class YdocAdapterSession {
     await this.recordChain.catch(() => undefined);
     const params: YdocEvictParams = { sessionId: this.sessionId };
     try {
-      decodeYdocEvictResult(
+      decodeYdocResult(
+        YDOC_METHOD.evict,
         await this.adapter.request(this.workspace, YDOC_METHOD.evict, params),
       );
     } catch (error) {
@@ -1310,7 +1308,7 @@ export class YdocLiveAdapter {
         error instanceof DaemonRefusalError ? error.cause : error,
       );
     }
-    const result = decodeYdocOpenResult(delivery.result);
+    const result = decodeYdocResult(YDOC_METHOD.open, delivery.result);
     const session = new YdocAdapterSession(this, input.workspace, result.sessionId, {
       objectId: result.objectId,
       path: result.path,
