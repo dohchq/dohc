@@ -76,6 +76,7 @@ import { useAgentSetup } from "./shell/useAgentSetup";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useTabTitles } from "./shell/useTabTitles";
+import { useWorkspaceListing } from "./shell/useWorkspaceListing";
 import type { SearchResultsEventEntry } from "../ipc/bridgeContract";
 import {
   fileOpenStartMark,
@@ -132,7 +133,6 @@ import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
-import { indexFileListing } from "./workbench/file-listing-index";
 import {
   noteWorkspaceLabel,
   remapOrphanedDraftPaths,
@@ -227,7 +227,6 @@ import {
   pluginWebAppTabPath,
   parseSiteTabPath,
   parseUiState,
-  pruneMissingRestoredTabs,
   recordRecentFile,
   remapWorkbenchPaths,
   serializeUiState,
@@ -627,12 +626,17 @@ export function DesktopWorkspaceShell(props: {
   onShareHandoffOpened?: () => void;
 }) {
   const workspaceShareMounts = props.workspace.shareMounts ?? EMPTY_SHARE_MOUNTS;
-  const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
-  // An empty workspace also lists zero files, so freshness needs its own flag.
-  // A completed main-process cache hit can paint the explorer immediately,
-  // but restored-tab reconciliation must wait for an independent disk walk.
-  const [filesRevalidated, setFilesRevalidated] = useState(false);
-  const [folders, setFolders] = useState<string[]>([]);
+  const {
+    files,
+    folders,
+    fileIndex,
+    filesRevalidated,
+    listingsSettled,
+    fileListingCommit,
+    refreshFiles,
+    hasCommittedListing,
+    prepareRestoredTabPruning,
+  } = useWorkspaceListing(props.workspace.workspaceId);
   // Main's single answer to "does anything record here": when the
   // open-time decision produced no recorder (a shared view or a failed
   // capture build), every engine-history call can only error.
@@ -934,10 +938,9 @@ export function DesktopWorkspaceShell(props: {
   const {
     markdownWikilinkFiles,
     conflictSummaries,
-    presentPaths,
     hasMarkdownPath,
     graphRefreshKey,
-  } = useMemo(() => indexFileListing(files), [files]);
+  } = fileIndex;
 
   const focusedGroup = activeGroup(wb);
   const focusedTabPath = activeTabPath(wb);
@@ -1296,70 +1299,6 @@ export function DesktopWorkspaceShell(props: {
   // unmount with a crashed shell and the crash screen's reload would destroy
   // the drafts unannounced.
 
-  // Latest-wins: fourteen call sites issue listings — mount, the watcher,
-  // imports, restores, the share pull — and they can resolve out of order. An
-  // older snapshot committing last would show a stale tree and make the
-  // reconciliation below read a live file as deleted.
-  //
-  // Supersession is decided when a response commits, not when it is issued. A
-  // newer request that is merely in flight has not answered anything yet, and
-  // if it fails it never will: dropping this answer for it would leave the
-  // explorer empty after a failed refresh, with nothing to retry it. So an
-  // older answer fills an unanswered UI, and the newer one supersedes it when
-  // it lands. Only an answer older than what is already displayed is dropped.
-  const filesRequest = useRef(0);
-  const committedFilesRequest = useRef(0);
-  // How many listings are still in flight, and a bump each time that reaches
-  // zero. The destructive close waits for quiet, not for a particular id: a
-  // request that fails never commits, so keying off "newest issued" would
-  // block the close for as long as the app ran.
-  const pendingFilesRequests = useRef(0);
-  // The newest request that FAILED. A failure is not an answer, so it cannot
-  // refute anything — but it does mean the tree may have moved in a way no
-  // surviving snapshot saw, which taints every older snapshot for the one
-  // purpose that cannot be undone. See the close below.
-  const failedFilesRequest = useRef(0);
-  const [listingsSettled, setListingsSettled] = useState(0);
-  const [fileListingCommit, setFileListingCommit] = useState<{
-    request: number;
-    listingSource: "cached" | "fresh";
-  } | null>(null);
-  const refreshFiles = useCallback(
-    async (options: { allowCached?: true } = {}) => {
-      const request = ++filesRequest.current;
-      pendingFilesRequests.current += 1;
-      try {
-        const result = await bridge().listWorkspaceFiles({
-          workspaceId,
-          ...options,
-        });
-        if (request <= committedFilesRequest.current) {
-          return result.cached === true;
-        }
-        committedFilesRequest.current = request;
-        setFiles(result.files);
-        setFolders(result.folders ?? []);
-        setFilesRevalidated(result.cached !== true);
-        setFileListingCommit({
-          request,
-          listingSource: result.cached === true ? "cached" : "fresh",
-        });
-        return result.cached === true;
-      } catch (error) {
-        if (request > failedFilesRequest.current) {
-          failedFilesRequest.current = request;
-        }
-        throw error;
-      } finally {
-        pendingFilesRequests.current -= 1;
-        if (pendingFilesRequests.current === 0) {
-          setListingsSettled((settled) => settled + 1);
-        }
-      }
-    },
-    [workspaceId],
-  );
-
   // Keep a restored tab only while the workspace still lists its file. A
   // rollback, an external delete, or a share pull changes the tree without an
   // explorer op, so nothing remaps the stored tabs and Open Editors keeps a
@@ -1376,35 +1315,10 @@ export function DesktopWorkspaceShell(props: {
   // that beats the ui-state load finds nothing restored yet, and the restore
   // is what has to re-run the check.
   useEffect(() => {
-    if (!filesRevalidated || restoredTabPaths.size === 0) return;
-    // Closing a tab is destructive, so it waits until no listing is in
-    // flight. The watermark above deliberately lets an older success fill the
-    // display — right for the explorer, wrong for closing tabs, because a
-    // pull still in flight can carry back a file this older listing predates.
-    // Once everything has settled, the committed response is the newest
-    // SUCCESS by construction (a response only commits if it is newer than
-    // what is displayed), so a failed newer request leaves the older listing
-    // authoritative instead of blocking the close for the rest of the session.
-    if (pendingFilesRequests.current > 0) return;
-    // A failure since the displayed listing was issued means the tree may
-    // have changed in a way this snapshot never saw — refreshShareView pulls
-    // a file back and the listing that would have shown it is the one that
-    // failed. Closing on the older snapshot would then close a tab whose file
-    // exists. Waiting costs a delay; closing costs the user their tab, so the
-    // close waits for a success issued after the failure. Not a deadlock: the
-    // next successful listing re-enables it.
-    if (committedFilesRequest.current <= failedFilesRequest.current) return;
-    // A dirty tab is never closed. Closing it unmounts the keyed inspector
-    // mid-draft, whose cleanup flushes best-effort to a path that no longer
-    // exists; the write fails, the failure is swallowed, and the draft is
-    // gone with no error and no way back. Waiting costs nothing: this re-runs
-    // when the draft settles, and closes the tab then.
-    const closable = new Set(
-      [...restoredTabPaths].filter((path) => !dirtyPaths.has(path)),
-    );
-    const fileExists = (path: string) => presentPaths.has(path);
+    const prune = prepareRestoredTabPruning(restoredTabPaths, dirtyPaths);
+    if (prune === null) return;
     const current = wbRef.current;
-    const next = pruneMissingRestoredTabs(current, closable, fileExists);
+    const next = prune(current);
     if (next === current) return;
     const groupsOpeningFiles = groupsMountingNewDocument(current, next);
     if (
@@ -1424,10 +1338,9 @@ export function DesktopWorkspaceShell(props: {
     for (const groupId of groupsOpeningFiles) {
       rendererMarks.mark(fileOpenStartMark(groupId));
     }
-    setWb((state) => pruneMissingRestoredTabs(state, closable, fileExists));
+    setWb(prune);
   }, [
-    presentPaths,
-    filesRevalidated,
+    prepareRestoredTabPruning,
     listingsSettled,
     restoredTabPaths,
     dirtyPaths,
@@ -3777,7 +3690,7 @@ export function DesktopWorkspaceShell(props: {
     const coalescer = createActivityCoalescer(() => {
       const mode = filesRefreshMode;
       filesRefreshMode = "skip";
-      if (mode !== "skip" || committedFilesRequest.current === 0) {
+      if (mode !== "skip" || !hasCommittedListing()) {
         void refreshFiles(mode === "full" ? {} : { allowCached: true }).catch(
           (error) =>
             reportShellError("Could not refresh workspace files.", error),
@@ -3815,6 +3728,7 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
     isShareView,
     refreshCollections,
+    hasCommittedListing,
   ]);
 
   useEffect(() => {
