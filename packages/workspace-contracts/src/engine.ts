@@ -1391,10 +1391,8 @@ export interface SecretFileStore {
   close(): Promise<void>;
 }
 
-// Canonical home of the change-author vocabulary. `@dohc/workspace-core`
-// re-exports these (it already depends on this package), so the branded
-// local-author label stays a single nominal type everywhere instead of a
-// lossy structural copy.
+// Import change-author types from this module so the local-author label
+// keeps the same nominal brand in every package.
 declare const nonEmptyLocalAuthorLabelBrand: unique symbol;
 
 export type NonEmptyLocalAuthorLabel = string & {
