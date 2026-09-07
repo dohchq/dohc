@@ -1,12 +1,10 @@
-import {
-  parseHostControlIdentifier, parseHostEpoch, parseHostMode, type HostControlSnapshot,
-} from "@dohc/live-session-contract/host-control";
+import type { HostControlSnapshot } from "@dohc/live-session-contract/host-control";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import type { NamedLiveBrowserContext } from "./namedLiveBrowserAuth.js";
 import type { NamedLiveTicketOptions } from "./liveTickets.js";
 import type { LiveHostConnectionCoordinate, SyncRelayStorage, TicketHostReport } from "./storage.js";
-import { snapshotNamedTicketScope, snapshotTicketHostReport, ticketRecord } from "./liveTicketInputs.js";
+import { snapshotHostCoordinate, snapshotNamedTicketScope, snapshotTicketHostReport } from "./liveTicketInputs.js";
 
 export interface HeldLiveHostConnection {
   // The authenticated runtime assigns a fresh server-derived connectionId per incarnation.
@@ -25,15 +23,6 @@ export interface LiveHostConnections {
 export interface LiveHostBindingReportOptions {
   readonly storage: Pick<SyncRelayStorage, "getLiveHostControl">;
   readonly connections: LiveHostConnections;
-}
-
-function captureCoordinate(value: unknown): LiveHostConnectionCoordinate {
-  const record = ticketRecord(value, ["mode", "hostId", "hostEpoch", "instanceId", "connectionId"]);
-  return {
-    mode: parseHostMode(record.mode), hostId: parseHostControlIdentifier(record.hostId, "host ID"),
-    hostEpoch: parseHostEpoch(record.hostEpoch), instanceId: parseHostControlIdentifier(record.instanceId, "host instance ID"),
-    connectionId: parseHostControlIdentifier(record.connectionId, "connection ID"),
-  };
 }
 
 function eligible(snapshot: HostControlSnapshot | null, connection: LiveHostConnectionCoordinate): boolean {
@@ -75,7 +64,7 @@ export function createLiveHostBindingReports(options: LiveHostBindingReportOptio
         if (handle === null) return null;
         const signal = handle.invalidated;
         if (signal.aborted) return null;
-        const connection = captureCoordinate(handle.coordinate);
+        const connection = snapshotHostCoordinate(handle.coordinate);
         const request = handle.requestBinding.bind(handle);
         if (!eligible(readControl(), connection) || signal.aborted || current() !== handle) return null;
         const binding = await requestWhileLive(signal, () => request({ ...scope }, objectId));

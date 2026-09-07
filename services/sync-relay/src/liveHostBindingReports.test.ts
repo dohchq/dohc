@@ -218,9 +218,12 @@ it.each([false, true])("correlates simultaneous reverse-order responses; swapped
   const first = deferred<LiveObjectBinding | null>();
   const second = deferred<LiveObjectBinding | null>();
   state.request.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
-  const other = { ...binding, objectId: "object-2", currentPath: "docs/b.md" };
+  const otherScope = { workspaceId: "workspace-2", shareId: "share-2", grantId: "grant-2", userId: "user-2" };
+  const other = { ...binding, workspaceId: otherScope.workspaceId, objectId: "object-2", currentPath: "docs/b.md" };
   const a = state.adapter.currentBinding(scope, binding.objectId);
-  const b = state.adapter.currentBinding(scope, other.objectId);
+  const b = state.adapter.currentBinding(otherScope, other.objectId);
+  expect(state.request).toHaveBeenNthCalledWith(1, scope, binding.objectId);
+  expect(state.request).toHaveBeenNthCalledWith(2, otherScope, other.objectId);
   second.resolve(swapped ? binding : other);
   first.resolve(swapped ? other : binding);
   expect(await a).toEqual(swapped ? null : { connection: host, binding });
