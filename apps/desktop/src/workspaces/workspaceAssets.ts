@@ -640,7 +640,7 @@ class WorkspaceOperationSupersededError extends Error {
 export function createWorkspaceOperationScheduler() {
   const states = new Map<string, WorkspaceOperationState>();
   const activeLeases = new WeakMap<WorkspaceOperationLease, string>();
-  const pathKey = (value: string) =>
+  const resolvedPathKey = (value: string) =>
     process.platform === "win32" ? resolve(value).toLowerCase() : value;
 
   const drain = (key: string, state: WorkspaceOperationState): void => {
@@ -693,7 +693,7 @@ export function createWorkspaceOperationScheduler() {
     ) => Promise<T>,
     staleSensitive = false,
   ): Promise<T> => {
-    const key = pathKey(rootPath);
+    const key = resolvedPathKey(rootPath);
     const state = states.get(key) ?? {
       activeShared: 0,
       activeExclusive: false,
@@ -759,7 +759,7 @@ export function createWorkspaceOperationScheduler() {
       rootPath: string,
       lease: WorkspaceOperationLease,
     ): void => {
-      if (activeLeases.get(lease) !== pathKey(rootPath)) {
+      if (activeLeases.get(lease) !== resolvedPathKey(rootPath)) {
         throw new Error(
           "Workspace operation lease is inactive or belongs to another root.",
         );

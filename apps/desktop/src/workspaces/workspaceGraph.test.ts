@@ -1,4 +1,4 @@
-import { mkdir, open, symlink, writeFile } from "node:fs/promises";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -20,7 +20,6 @@ import {
 } from "./workspaceGraph";
 import { createTestScratch } from "./testTemp";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
-import { resolveWorkspaceFile } from "./workspaceAssets";
 import { listFiles } from "./workspaceFiles";
 
 // Independent cold-load oracle: it never reads the index cache or its invalidation state.
@@ -34,50 +33,30 @@ function isMarkdownGraphPath(path: string): boolean {
 }
 
 async function readGraphText(
-  rootPath: string,
   relativePath: string,
-  source?: WorkspaceGraphFileSource,
+  source: Required<WorkspaceGraphFileSource>,
 ): Promise<{ text: string; truncated: boolean; bytesRead: number }> {
-  if (source?.readText) {
-    const result = await source.readText(relativePath);
-    const sourceBytes = Buffer.byteLength(result.text, "utf8");
-    if (sourceBytes <= MAX_GRAPH_FILE_TEXT_BYTES) {
-      return {
-        text: result.text,
-        truncated: result.truncated,
-        bytesRead: sourceBytes,
-      };
-    }
-    const bytes = Buffer.alloc(MAX_GRAPH_FILE_TEXT_BYTES);
-    const bytesRead = bytes.write(
-      result.text,
-      0,
-      MAX_GRAPH_FILE_TEXT_BYTES,
-      "utf8",
-    );
+  const result = await source.readText(relativePath);
+  const sourceBytes = Buffer.byteLength(result.text, "utf8");
+  if (sourceBytes <= MAX_GRAPH_FILE_TEXT_BYTES) {
     return {
-      text: bytes.subarray(0, bytesRead).toString("utf8"),
-      truncated: true,
-      bytesRead,
+      text: result.text,
+      truncated: result.truncated,
+      bytesRead: sourceBytes,
     };
   }
-
-  const { realTarget } = await resolveWorkspaceFile(rootPath, relativePath, "read");
-  const handle = await open(realTarget, "r");
-  try {
-    const buf = Buffer.alloc(MAX_GRAPH_FILE_TEXT_BYTES + 1);
-    const { bytesRead } = await handle.read(
-      buf,
-      0,
-      MAX_GRAPH_FILE_TEXT_BYTES + 1,
-      0,
-    );
-    const truncated = bytesRead > MAX_GRAPH_FILE_TEXT_BYTES;
-    const slice = buf.subarray(0, Math.min(bytesRead, MAX_GRAPH_FILE_TEXT_BYTES));
-    return { text: slice.toString("utf8"), truncated, bytesRead: slice.length };
-  } finally {
-    await handle.close();
-  }
+  const bytes = Buffer.alloc(MAX_GRAPH_FILE_TEXT_BYTES);
+  const bytesRead = bytes.write(
+    result.text,
+    0,
+    MAX_GRAPH_FILE_TEXT_BYTES,
+    "utf8",
+  );
+  return {
+    text: bytes.subarray(0, bytesRead).toString("utf8"),
+    truncated: true,
+    bytesRead,
+  };
 }
 
 // Loads every markdown file in the workspace (bounded by the same file/byte
@@ -85,15 +64,14 @@ async function readGraphText(
 // `graphPaths` keeps the full scanned set (all kinds) — link resolution indexes
 // against it so a markdown link to a non-markdown file still resolves.
 async function loadGraphDocuments(
-  rootPath: string,
-  source?: WorkspaceGraphFileSource,
+  source: Required<WorkspaceGraphFileSource>,
 ): Promise<{
   docs: MarkdownGraphDocument[];
   graphPaths: string[];
   scannedFileCount: number;
   omittedFileCount: number;
 }> {
-  const listed = source ? await source.list() : await listFiles(rootPath);
+  const listed = await source.list();
   // Enforce the engine secret floor at the loader so every graph/backlinks
   // consumer inherits it: a secret- or ignored-classified file (the whole
   // `.env` family, incl. markdown-extensioned variants like `.env.local.md`,
@@ -117,7 +95,7 @@ async function loadGraphDocuments(
   for (let index = 0; index < selected.length; index++) {
     const path = selected[index];
     try {
-      const result = await readGraphText(rootPath, path, source);
+      const result = await readGraphText(path, source);
       if (totalTextBytes + result.bytesRead > MAX_GRAPH_TOTAL_TEXT_BYTES) {
         omittedFileCount += selected.length - index;
         break;
@@ -138,12 +116,11 @@ async function loadGraphDocuments(
   };
 }
 
-async function readWorkspaceGraph(
-  rootPath: string,
-  source?: WorkspaceGraphFileSource,
+async function coldGraphReference(
+  source: Required<WorkspaceGraphFileSource>,
 ): Promise<WorkspaceGraph> {
   const { docs, graphPaths, scannedFileCount, omittedFileCount } =
-    await loadGraphDocuments(rootPath, source);
+    await loadGraphDocuments(source);
   return buildMarkdownGraph(docs, {
     allPaths: graphPaths,
     omittedFileCount,
@@ -155,12 +132,11 @@ async function readWorkspaceGraph(
 // the open file, find every other file whose links resolve to it. Reuses the
 // graph's link extraction + resolution so a backlink and a graph edge always
 // agree on what points where.
-async function readWorkspaceBacklinks(
-  rootPath: string,
+async function coldBacklinksReference(
   targetPath: string,
-  source?: WorkspaceGraphFileSource,
+  source: Required<WorkspaceGraphFileSource>,
 ): Promise<BacklinkSource[]> {
-  const { docs, graphPaths } = await loadGraphDocuments(rootPath, source);
+  const { docs, graphPaths } = await loadGraphDocuments(source);
   return computeBacklinks(docs, targetPath, { allPaths: graphPaths });
 }
 
@@ -408,7 +384,7 @@ describe("buildMarkdownGraph", () => {
   });
 });
 
-describe("readWorkspaceGraph", () => {
+describe("WorkspaceGraphIndex", () => {
   it("reparses only the changed Markdown file while matching a fresh rebuild", async () => {
     const files = new Map([
       ["alpha.md", { identity: "alpha-1", text: "# Alpha\n[[Beta]]\n" }],
@@ -434,12 +410,12 @@ describe("readWorkspaceGraph", () => {
     const index = new WorkspaceGraphIndex();
 
     await expect(index.readGraph(root, incrementalSource)).resolves.toEqual(
-      await readWorkspaceGraph(root, freshSource),
+      await coldGraphReference(freshSource),
     );
     await expect(
       index.readBacklinks(root, "beta.md", incrementalSource),
     ).resolves.toEqual(
-      await readWorkspaceBacklinks(root, "beta.md", freshSource),
+      await coldBacklinksReference("beta.md", freshSource),
     );
     incrementalRead.mockClear();
 
@@ -450,12 +426,12 @@ describe("readWorkspaceGraph", () => {
     index.invalidate(["alpha.md"]);
 
     await expect(index.readGraph(root, incrementalSource)).resolves.toEqual(
-      await readWorkspaceGraph(root, freshSource),
+      await coldGraphReference(freshSource),
     );
     await expect(
       index.readBacklinks(root, "beta.md", incrementalSource),
     ).resolves.toEqual(
-      await readWorkspaceBacklinks(root, "beta.md", freshSource),
+      await coldBacklinksReference("beta.md", freshSource),
     );
     expect(incrementalRead).toHaveBeenCalledTimes(1);
     expect(incrementalRead).toHaveBeenCalledWith("alpha.md");
@@ -504,10 +480,10 @@ describe("readWorkspaceGraph", () => {
 
       const assertDifferential = async () => {
         expect(await index.readGraph(root, source)).toEqual(
-          await readWorkspaceGraph(root, freshSource),
+          await coldGraphReference(freshSource),
         );
         expect(await index.readBacklinks(root, "target.md", source)).toEqual(
-          await readWorkspaceBacklinks(root, "target.md", freshSource),
+          await coldBacklinksReference("target.md", freshSource),
         );
       };
 
@@ -587,7 +563,7 @@ describe("readWorkspaceGraph", () => {
     visible = new Set(["allowed.md", "public.md"]);
 
     const graph = await index.readGraph(root, source);
-    expect(graph).toEqual(await readWorkspaceGraph(root, source));
+    expect(graph).toEqual(await coldGraphReference(source));
     expect(graph.nodes.map((node) => node.path)).toEqual([
       "allowed.md",
       "public.md",
@@ -599,7 +575,7 @@ describe("readWorkspaceGraph", () => {
 
     const backlinks = await index.readBacklinks(root, "public.md", source);
     expect(backlinks).toEqual(
-      await readWorkspaceBacklinks(root, "public.md", source),
+      await coldBacklinksReference("public.md", source),
     );
     expect(backlinks.map((entry) => entry.sourcePath)).toEqual(["allowed.md"]);
   });
@@ -691,7 +667,7 @@ describe("readWorkspaceGraph", () => {
     const index = new WorkspaceGraphIndex();
 
     const first = await index.readGraph(root, source);
-    expect(first).toEqual(await readWorkspaceGraph(root, freshSource(true)));
+    expect(first).toEqual(await coldGraphReference(freshSource(true)));
     expect(first).toMatchObject({
       scannedFileCount: 66,
       omittedFileCount: 1,
@@ -707,7 +683,7 @@ describe("readWorkspaceGraph", () => {
     expect(peakReads).toBe(8);
 
     const second = await index.readGraph(root, source);
-    expect(second).toEqual(await readWorkspaceGraph(root, freshSource(false)));
+    expect(second).toEqual(await coldGraphReference(freshSource(false)));
     expect(second).toMatchObject({
       scannedFileCount: 66,
       omittedFileCount: 2,
@@ -743,7 +719,8 @@ describe("readWorkspaceGraph", () => {
       },
     };
 
-    const graph = await readWorkspaceGraph(root, source);
+    const index = new WorkspaceGraphIndex();
+    const graph = await index.readGraph(root, source);
     expect(graph.nodes).toMatchObject([
       { path: "index.md", title: "Canonical source" },
       { path: "target.md", title: "Canonical target" },
@@ -752,7 +729,7 @@ describe("readWorkspaceGraph", () => {
       { source: "index.md", target: "target.md", kind: "wikilink" },
     ]);
 
-    const backlinks = await readWorkspaceBacklinks(root, "target.md", source);
+    const backlinks = await index.readBacklinks(root, "target.md", source);
     expect(backlinks).toMatchObject([
       { sourcePath: "index.md", sourceTitle: "Canonical source" },
     ]);
@@ -771,7 +748,7 @@ describe("readWorkspaceGraph", () => {
       },
     };
 
-    await expect(readWorkspaceGraph(root, source)).resolves.toMatchObject({
+    await expect(new WorkspaceGraphIndex().readGraph(root, source)).resolves.toMatchObject({
       scannedFileCount: 1,
       truncatedFileCount: 1,
     });
@@ -789,7 +766,7 @@ describe("readWorkspaceGraph", () => {
     await writeFile(join(outside, "secret.md"), "# Secret\n");
     await symlink(join(outside, "secret.md"), join(root, "secret.md"), "file");
 
-    const graph = await readWorkspaceGraph(root);
+    const graph = await new WorkspaceGraphIndex().readGraph(root, { list: () => listFiles(root) });
     expect(graph.nodes.map((node) => node.path)).toEqual([
       "index.md",
       "notes/data.txt",
@@ -809,7 +786,7 @@ describe("readWorkspaceGraph", () => {
       );
     }
 
-    const graph = await readWorkspaceGraph(root);
+    const graph = await new WorkspaceGraphIndex().readGraph(root, { list: () => listFiles(root) });
     expect(graph.nodes).toHaveLength(70);
     expect(graph.scannedFileCount).toBe(70);
     expect(graph.omittedFileCount).toBeGreaterThan(0);
@@ -822,7 +799,7 @@ describe("readWorkspaceGraph", () => {
     // edge target even though it carries a wikilink.
     await writeFile(join(root, ".env.local.md"), "# Env\n[[roadmap]]\n");
 
-    const graph = await readWorkspaceGraph(root);
+    const graph = await new WorkspaceGraphIndex().readGraph(root, { list: () => listFiles(root) });
     expect(graph.nodes.map((node) => node.path)).toEqual(["roadmap.md"]);
     expect(graph.edges).toEqual([]);
   });
@@ -1003,7 +980,9 @@ describe("computeBacklinks", () => {
     );
     await writeFile(join(root, "target.md"), "# Target\n");
 
-    const sources = await readWorkspaceBacklinks(root, "target.md");
+    const sources = await new WorkspaceGraphIndex().readBacklinks(root, "target.md", {
+      list: () => listFiles(root),
+    });
     expect(sources).toEqual([
       {
         sourcePath: "one.md",
@@ -1030,7 +1009,9 @@ describe("computeBacklinks", () => {
     );
     await writeFile(join(root, "target.md"), "# Target\n");
 
-    const sources = await readWorkspaceBacklinks(root, "target.md");
+    const sources = await new WorkspaceGraphIndex().readBacklinks(root, "target.md", {
+      list: () => listFiles(root),
+    });
     expect(sources).toEqual([]);
   });
 
@@ -1038,7 +1019,9 @@ describe("computeBacklinks", () => {
     await writeFile(join(root, "allowed.md"), "# Allowed\nSee [[Target]].\n");
     await writeFile(join(root, "target.md"), "# Target\n");
 
-    const sources = await readWorkspaceBacklinks(root, "target.md");
+    const sources = await new WorkspaceGraphIndex().readBacklinks(root, "target.md", {
+      list: () => listFiles(root),
+    });
     expect(sources.map((source) => source.sourcePath)).toEqual(["allowed.md"]);
   });
 });

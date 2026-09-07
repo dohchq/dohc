@@ -95,9 +95,7 @@ export function createWorkspaceSearchDaemonQuery<
   Workspace extends EngineWorkspace,
 >(
   sessions: () => EngineWorkspaceSessions | null,
-): (workspace: Workspace, input: WorkspaceSearchEngineInput) => ReturnType<
-  typeof queryWorkspaceSearchDaemon
-> {
+): (workspace: Workspace, input: WorkspaceSearchEngineInput) => Promise<SearchResult[] | null> {
   return async (workspace, input) => {
     const current = sessions();
     if (!current) {
