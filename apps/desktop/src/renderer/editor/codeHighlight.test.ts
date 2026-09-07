@@ -4,12 +4,12 @@ import { Node as PMNode } from '@tiptap/pm/model'
 import { EditorState } from '@tiptap/pm/state'
 import type { DecorationSet } from '@tiptap/pm/view'
 import { getDohcProseMirrorSchema } from './import-export'
+import { codeBlock, doc, paragraph } from './testDocs'
 import {
   codeHighlightKey,
   computeCodeHighlightRanges,
   highlightSpans,
   makeCodeHighlightPlugin,
-  type PMNodeLike,
 } from './codeHighlight'
 
 // --- pure `highlightSpans` (no ProseMirror/jsdom involved) ---
@@ -46,30 +46,13 @@ describe('highlightSpans', () => {
   })
 })
 
-// --- pure `computeCodeHighlightRanges` over a hand-built fake doc (same
-// offline-testing pattern as inlineAtomPlugin.test.ts's fakeDoc) ---
-
-function fakeDoc(blocks: Array<{ pos: number; language: string; text: string }>): {
-  descendants: (cb: (node: PMNodeLike, pos: number) => boolean | void) => void
-  nodes: PMNodeLike[]
-} {
-  const nodes: PMNodeLike[] = blocks.map((b) => ({
-    type: { name: 'codeBlock' },
-    attrs: { language: b.language },
-    textContent: b.text,
-  }))
-  return {
-    nodes,
-    descendants(cb) {
-      blocks.forEach((b, i) => cb(nodes[i], b.pos))
-    },
-  }
-}
+// --- pure `computeCodeHighlightRanges` over real documents (testDocs.ts) ---
 
 describe('computeCodeHighlightRanges', () => {
   it('maps highlight spans into absolute doc coordinates (content starts at pos + 1)', () => {
-    const doc = fakeDoc([{ pos: 4, language: 'typescript', text: 'const x = 1;' }])
-    const ranges = computeCodeHighlightRanges(doc, new WeakMap())
+    // paragraph("ab") is nodeSize 4, so the code block sits at pos 4.
+    const d = doc(paragraph('ab'), codeBlock('const x = 1;', 'typescript'))
+    const ranges = computeCodeHighlightRanges(d, new WeakMap())
     expect(ranges.length).toBeGreaterThan(0)
     const keyword = ranges.find((r) => r.className === 'hljs-keyword')!
     // blockStart = pos + 1 = 5; "const" is the first 5 chars of the text.
@@ -78,43 +61,44 @@ describe('computeCodeHighlightRanges', () => {
   })
 
   it('produces no ranges for a plain-text block', () => {
-    const doc = fakeDoc([{ pos: 0, language: '', text: 'const x = 1;' }])
-    expect(computeCodeHighlightRanges(doc, new WeakMap())).toEqual([])
+    const d = doc(codeBlock('const x = 1;'))
+    expect(computeCodeHighlightRanges(d, new WeakMap())).toEqual([])
   })
 
   it('produces no ranges for an unrecognized language', () => {
-    const doc = fakeDoc([{ pos: 0, language: 'cobol', text: 'DISPLAY "hi".' }])
-    expect(computeCodeHighlightRanges(doc, new WeakMap())).toEqual([])
+    const d = doc(codeBlock('DISPLAY "hi".', 'cobol'))
+    expect(computeCodeHighlightRanges(d, new WeakMap())).toEqual([])
   })
 
   it('skips blocks over the 20k-char guard', () => {
     const hugeText = `const x = 1; ${'a'.repeat(20_000)}`
     expect(hugeText.length).toBeGreaterThan(20_000)
-    const doc = fakeDoc([{ pos: 0, language: 'typescript', text: hugeText }])
-    expect(computeCodeHighlightRanges(doc, new WeakMap())).toEqual([])
+    const d = doc(codeBlock(hugeText, 'typescript'))
+    expect(computeCodeHighlightRanges(d, new WeakMap())).toEqual([])
   })
 
   it('reuses cached spans for the same node object (only recomputes on identity change)', () => {
-    const doc = fakeDoc([{ pos: 0, language: 'typescript', text: 'const x = 1;' }])
-    const cache = new WeakMap<PMNodeLike, ReturnType<typeof highlightSpans>>()
+    const d = doc(codeBlock('const x = 1;', 'typescript'))
+    const block = d.child(0)
+    const cache = new WeakMap<PMNode, ReturnType<typeof highlightSpans>>()
 
-    computeCodeHighlightRanges(doc, cache)
-    const cachedAfterFirstRun = cache.get(doc.nodes[0])
+    computeCodeHighlightRanges(d, cache)
+    const cachedAfterFirstRun = cache.get(block)
     expect(cachedAfterFirstRun).toBeDefined()
 
-    computeCodeHighlightRanges(doc, cache)
+    computeCodeHighlightRanges(d, cache)
     // Same node object -> same cached array reference, i.e. not recomputed.
-    expect(cache.get(doc.nodes[0])).toBe(cachedAfterFirstRun)
+    expect(cache.get(block)).toBe(cachedAfterFirstRun)
   })
 
   it('recomputes when the node identity changes (e.g. a language-attr edit)', () => {
-    const cache = new WeakMap<PMNodeLike, ReturnType<typeof highlightSpans>>()
-    const first = fakeDoc([{ pos: 0, language: 'typescript', text: 'const x = 1;' }])
+    const cache = new WeakMap<PMNode, ReturnType<typeof highlightSpans>>()
+    const first = doc(codeBlock('const x = 1;', 'typescript'))
     computeCodeHighlightRanges(first, cache)
 
     // A new node object (as ProseMirror produces on setNodeMarkup) with a
     // different language over the same text.
-    const second = fakeDoc([{ pos: 0, language: 'python', text: 'const x = 1;' }])
+    const second = doc(codeBlock('const x = 1;', 'python'))
     const ranges = computeCodeHighlightRanges(second, cache)
     // "const" isn't a Python keyword, but "x" as a bare identifier and the
     // block itself should differ from the TS run — assert the language

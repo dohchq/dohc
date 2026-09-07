@@ -3823,7 +3823,7 @@ describe("the ydoc.open deadline", () => {
   // the plain id unconditionally, even when that exact id already had a
   // LIVE ALIAS somewhere else — an object renamed away from this path and
   // still referenced at its new one. Mirrors `resolve_capture_object`'s
-  // disambiguation branch (crates/dohc-engine-domain/src/store.rs).
+  // disambiguation branch (crates/dohc-engine-domain/src/store/capture_write.rs).
   it("a recaptured path does not graft onto a renamed object's still-live lineage", async () => {
     const PATH1 = "notes/original.md";
     const PATH2 = "notes/renamed.md";

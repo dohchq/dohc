@@ -115,7 +115,7 @@ describe("applyEmojiPick — plain-text insertion", () => {
     // ":smi" is 4 chars starting at doc pos 1; from = 1 (the ":"). The
     // cursor tracks the end of the typed query, same as during live typing.
     editor.commands.focus("end");
-    const view = editor.view as Parameters<typeof applyEmojiPick>[0];
+    const view = editor.view;
     applyEmojiPick(view, 1, smile);
 
     expect(editor.getText()).toBe(smile.emoji);
@@ -148,7 +148,7 @@ describe("EmojiPicker — dismiss leaves text intact", () => {
   it("Escape closes the picker without touching the document", async () => {
     const editor = makeEditor(":smi");
     const state: EmojiPickerState = { open: true, from: 1, query: "smi" };
-    const view = editor.view as Parameters<typeof EmojiPicker>[0]["view"];
+    const view = editor.view;
     const onDismiss = vi.fn();
 
     render(createElement(EmojiPicker, { state, view, onDismiss }));
@@ -166,7 +166,7 @@ describe("EmojiPicker — dismiss leaves text intact", () => {
     const editor = makeEditor(":smi");
     editor.commands.focus("end");
     const state: EmojiPickerState = { open: true, from: 1, query: "smi" };
-    const view = editor.view as Parameters<typeof EmojiPicker>[0]["view"];
+    const view = editor.view;
     const onDismiss = vi.fn();
 
     render(createElement(EmojiPicker, { state, view, onDismiss }));
@@ -183,7 +183,7 @@ describe("EmojiPicker — dismiss leaves text intact", () => {
     const editor = makeEditor(":smi");
     editor.commands.focus("end");
     const state: EmojiPickerState = { open: true, from: 1, query: "smi" };
-    const view = editor.view as Parameters<typeof EmojiPicker>[0]["view"];
+    const view = editor.view;
     const onDismiss = vi.fn();
 
     render(createElement(EmojiPicker, { state, view, onDismiss }));
@@ -198,7 +198,7 @@ describe("EmojiPicker — dismiss leaves text intact", () => {
   it("exposes the active option via aria-activedescendant and tracks arrow keys", () => {
     const editor = makeEditor(":smi");
     const state: EmojiPickerState = { open: true, from: 1, query: "smi" };
-    const view = editor.view as Parameters<typeof EmojiPicker>[0]["view"];
+    const view = editor.view;
 
     render(createElement(EmojiPicker, { state, view, onDismiss: vi.fn() }));
 

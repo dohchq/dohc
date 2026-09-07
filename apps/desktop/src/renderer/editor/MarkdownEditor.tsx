@@ -70,9 +70,9 @@ import {
   type WikilinkFile,
 } from "./wikilinkPlugin";
 import { makeMentionPlugin } from "./mentionTrigger";
-import { WikilinkPicker } from "./WikilinkPicker";
+import { WikilinkPicker, type WikilinkPickerState } from "./WikilinkPicker";
 import { makeEmojiPlugin } from "./emojiTrigger";
-import { EmojiPicker } from "./EmojiPicker";
+import { EmojiPicker, type EmojiPickerState } from "./EmojiPicker";
 import {
   FLOATING_MENU_MAX_HEIGHT,
   resolveFloatingMenuPosition,
@@ -1006,24 +1006,16 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       [collabActive, editor, value],
     );
 
-    const pickerView = editor
-      ? (editor.view as Parameters<typeof WikilinkPicker>[0]["view"])
-      : null;
-    const emojiPickerView = editor
-      ? (editor.view as Parameters<typeof EmojiPicker>[0]["view"])
-      : null;
-    const pickerState: Parameters<typeof WikilinkPicker>[0]["state"] =
-      acState.active
-        ? { open: true, from: acState.from, query: acState.query }
-        : { open: false };
-    const mentionPickerState: Parameters<typeof WikilinkPicker>[0]["state"] =
-      mentionState.active
-        ? { open: true, from: mentionState.from, query: mentionState.query }
-        : { open: false };
-    const emojiPickerState: Parameters<typeof EmojiPicker>[0]["state"] =
-      emojiState.active
-        ? { open: true, from: emojiState.from, query: emojiState.query }
-        : { open: false };
+    const pickerView = editor ? editor.view : null;
+    const pickerState: WikilinkPickerState = acState.active
+      ? { open: true, from: acState.from, query: acState.query }
+      : { open: false };
+    const mentionPickerState: WikilinkPickerState = mentionState.active
+      ? { open: true, from: mentionState.from, query: mentionState.query }
+      : { open: false };
+    const emojiPickerState: EmojiPickerState = emojiState.active
+      ? { open: true, from: emojiState.from, query: emojiState.query }
+      : { open: false };
 
     return (
       <div
@@ -1148,7 +1140,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             />
             <EmojiPicker
               state={emojiPickerState}
-              view={emojiPickerView}
+              view={pickerView}
               onDismiss={() => setEmojiState({ active: false })}
             />
             <LinkMenu
