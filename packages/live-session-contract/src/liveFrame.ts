@@ -20,7 +20,7 @@ import {
 
 export const LIVE_FRAME_HEADER_BYTES = 12;
 // RESULT success: header + string length/identifier + digest + tag + three u64 + bool.
-export const LIVE_FRAME_MINIMUM_MAX_BYTES = 12 + 4 + LIVE_UPDATE_IDENTIFIER_MAX_BYTES + 32 + 1 + 24 + 1;
+export const LIVE_FRAME_MINIMUM_MAX_BYTES = LIVE_FRAME_HEADER_BYTES + 4 + LIVE_UPDATE_IDENTIFIER_MAX_BYTES + 32 + 1 + 24 + 1;
 
 export interface LiveFrameReceivePolicy {
   readonly maxFrameBytes: number;
@@ -101,7 +101,7 @@ const policyFields = ["maxFrameBytes", "maxStateVectorBytes", "maxUpdateBytes", 
 function policy(value: unknown): LiveFrameReceivePolicy {
   const source = record(value, policyFields);
   const parsed = Object.fromEntries(policyFields.map(field => [field, integer(source[field], true)])) as unknown as LiveFrameReceivePolicy;
-  requireFrame(parsed.maxFrameBytes >= LIVE_FRAME_MINIMUM_MAX_BYTES && parsed.maxFrameBytes <= 0xffff_ffff + 12);
+  requireFrame(parsed.maxFrameBytes >= LIVE_FRAME_MINIMUM_MAX_BYTES && parsed.maxFrameBytes <= 0xffff_ffff + LIVE_FRAME_HEADER_BYTES);
   return parsed;
 }
 const refusalCodes: Record<LiveUpdateRefusal, number> = {
@@ -226,7 +226,6 @@ class Reader {
     const bytes = this.raw(size);
     let value: string;
     try { value = strictUtf8.decode(bytes); } catch { throw new LiveFrameError("invalid"); }
-    requireFrame(equalBytes(bytes, utf8.encode(value)));
     return value;
   }
   digest() { return Array.from(this.raw(32), byte => byte.toString(16).padStart(2, "0")).join(""); }
@@ -261,17 +260,22 @@ function payload(w: Writer, frame: LiveFrame) {
     case "close": w.number(closeCodes[frame.reason], 1); break;
   }
 }
-function encodeOwned(frame: LiveFrame, maxFrameBytes: number) {
-  const measure = new Writer(Math.min(maxFrameBytes - 12, 0xffff_ffff));
+function measureFrame(frame: LiveFrame, maxFrameBytes: number) {
+  const measure = new Writer(Math.min(maxFrameBytes - LIVE_FRAME_HEADER_BYTES, 0xffff_ffff));
   payload(measure, frame);
-  return writeBytes(maxFrameBytes, w => {
-    w.number(0x444c4956, 4); w.number(1, 1); w.number(kindCodes[frame.kind], 1); w.number(0, 2); w.number(measure.offset, 4);
-    payload(w, frame);
-  });
+  return measure.offset;
+}
+function encodeOwned(frame: LiveFrame, payloadBytes: number) {
+  const bytes = new Uint8Array(LIVE_FRAME_HEADER_BYTES + payloadBytes);
+  const w = new Writer(bytes.length, bytes);
+  w.number(0x444c4956, 4); w.number(1, 1); w.number(kindCodes[frame.kind], 1); w.number(0, 2); w.number(payloadBytes, 4);
+  payload(w, frame);
+  return bytes;
 }
 export function encodeLiveFrame(value: LiveFrame, maxFrameBytes: number): Uint8Array {
   integer(maxFrameBytes, true);
-  return encodeOwned(snapshotFrame(value), maxFrameBytes);
+  const frame = snapshotFrame(value);
+  return encodeOwned(frame, measureFrame(frame, maxFrameBytes));
 }
 function decodeFrame(value: Uint8Array, maxFrameBytes: number, copyChunk: boolean): LiveFrame {
   integer(maxFrameBytes, true);
@@ -280,7 +284,7 @@ function decodeFrame(value: Uint8Array, maxFrameBytes: number, copyChunk: boolea
   const r = new Reader(bytes);
   requireFrame(r.number(4) === 0x444c4956 && r.number(1) === 1);
   const kind = fromCode(kindCodes, r.number(1));
-  requireFrame(r.number(2) === 0 && r.number(4) === bytes.length - 12);
+  requireFrame(r.number(2) === 0 && r.number(4) === bytes.length - LIVE_FRAME_HEADER_BYTES);
   let frame: LiveFrame;
   switch (kind) {
     case "welcome": frame = { kind, hostEpoch: parseHostEpoch(r.number(8)), receivePolicy: readPolicy(r) }; break;
@@ -535,11 +539,11 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
       // caller can repair or wait. An illegal protocol transition retires the route.
       const frame = snapshotFrame(value);
       const max = Math.min(limits.receive.maxFrameBytes, sides[opposite(role)].receivePolicy?.maxFrameBytes ?? limits.receive.maxFrameBytes);
-      const measure = new Writer(max - 12); payload(measure, frame); const size = measure.offset + 12;
+      const payloadBytes = measureFrame(frame, max), size = payloadBytes + LIVE_FRAME_HEADER_BYTES;
       const release = holdFrame(role, frame.kind === "begin" || frame.kind === "chunk", size);
       try {
         if (frame.kind === "chunk") preflightChunk(role, frame, size);
-        const bytes = encodeOwned(frame, max);
+        const bytes = encodeOwned(frame, payloadBytes);
         transition(role, frame, size);
         return lease(bytes, release);
       } catch (error) {
@@ -554,7 +558,7 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
       let completed: LiveFrameLease<LiveFrameTransfer> | undefined;
       try {
         const bytes = byteView(value);
-        requireFrame(bytes.length >= 12 && bytes.length <= limits.receive.maxFrameBytes, "limit");
+        requireFrame(bytes.length >= LIVE_FRAME_HEADER_BYTES && bytes.length <= limits.receive.maxFrameBytes, "limit");
         const data = bytes[5] === kindCodes.begin || bytes[5] === kindCodes.chunk;
         release = holdFrame(opposite(role), data, bytes.length);
         const borrowed = decodeFrame(bytes, limits.receive.maxFrameBytes, false);

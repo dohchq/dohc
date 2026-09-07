@@ -336,16 +336,17 @@ describe("live frame route ownership", () => {
     let grantedBytes = 586, grantedFrames = 1, chargedBytes = 0, chargedFrames = 0;
     grant(server, client, grantedBytes, grantedFrames);
     consume(client, server, begin("client-vector", 1, 1200)); chargedBytes += 61; chargedFrames++;
-    let complete: ReturnType<Session["receive"]> | undefined;
+    let completedTransfer: ReturnType<Session["receive"]>["value"]["transfer"];
     for (let offset = 0; offset < 1200; offset += 400) {
       grantedBytes = chargedBytes + 586; grantedFrames = chargedFrames + 1;
       grant(server, client, grantedBytes, grantedFrames);
-      complete = deliver(client, server, { kind: "chunk", transferId: 1, offset, bytes: new Uint8Array(400).fill(offset / 400 + 1) });
+      const complete = deliver(client, server, { kind: "chunk", transferId: 1, offset, bytes: new Uint8Array(400).fill(offset / 400 + 1) });
       expect(server.usage().incoming.queuedBytes).toBe(428);
       expect(server.usage().assemblyBytes).toBe(1200);
+      completedTransfer = complete.value.transfer;
       complete.release(); chargedBytes += 428; chargedFrames++;
     }
-    const transfer = complete!.value.transfer!;
+    const transfer = completedTransfer!;
     expect(transfer.value.bytes).toEqual(new Uint8Array([...new Uint8Array(400).fill(1), ...new Uint8Array(400).fill(2), ...new Uint8Array(400).fill(3)]));
     expect(server.usage().assemblyBytes).toBe(1200);
     server.close(); server.close(); client.close();
