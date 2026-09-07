@@ -146,8 +146,8 @@ impl<'a> VersionedTextStore<'a> {
         let outcome = self.store.write_with(faults, |tx| {
             // Rollback replaces the target mutation with a compensating moment.
             // Any compensating disk intent needs a fresh store-global generation.
-            // Reserve it while the rolled-back moment is still present. Reusing that moment's
-            // historical generation lets any later completed job for the same
+            // Reserve it while the rolled-back moment is still present. Reusing
+            // that moment's historical generation lets any later completed job for the same
             // path supersede the compensator before it can restore disk.
             let restore_generation = next_moment_order(tx)?;
             tx.execute(
@@ -265,7 +265,7 @@ impl<'a> VersionedTextStore<'a> {
             }
 
             // Reconcile disk with an active-version rolled-back binary write:
-            //   * a pending job does not prove disk is clean â€” the materializer
+            //   * a pending job does not prove disk is clean — the materializer
             //     can crash after the atomic rename lands but before marking the
             //     job complete (`MaterializeAfterRenameBeforeComplete`), leaving
             //     the written bytes ON DISK with a still-pending job. So always
@@ -298,7 +298,7 @@ impl<'a> VersionedTextStore<'a> {
                     .map_err(DomainError::sql_corrupt)?;
                 match job {
                     // Only cancel/compensate against a job whose content is
-                    // exactly this write's bytes â€” never an unrelated
+                    // exactly this write's bytes — never an unrelated
                     // same-id job.
                     Some((status, generation, written_sha256, target_path, operation))
                         if generation == prep.moment.moment_order
@@ -327,7 +327,7 @@ impl<'a> VersionedTextStore<'a> {
                     Some(_) => {}
                     // No job at all: a CAPTURE-origin binary write (its bytes
                     // came FROM disk, so nothing was ever enqueued). The
-                    // rolled-back head still must be reconciled TO disk â€”
+                    // rolled-back head still must be reconciled TO disk —
                     // without a restore, disk keeps the newer bytes while the
                     // reconcile manifest records them as already captured, so
                     // the DB head would silently diverge forever. Restore
@@ -539,7 +539,7 @@ fn enqueue_binary_rollback_restore(
     );
     let preimage = Preimage::Present(written_sha256.to_owned());
     match before {
-        // First write: the rolled-back-to state is absent â†’ delete the file.
+        // First write: the rolled-back-to state is absent → delete the file.
         // `content_sha256` must reference an existing `binary_blobs` row (FK); the
         // written bytes still qualify and are unused by a delete job.
         None => enqueue_delete_job(

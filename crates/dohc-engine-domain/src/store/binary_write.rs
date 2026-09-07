@@ -149,7 +149,7 @@ pub fn write_binary_in_tx(
             metadata_correlation_id: input.metadata_correlation_id.clone(),
             author_json: input.author_json.clone(),
             // Active version only: disk mirrors the active version, so a
-            // non-active write must not enqueue a job â€” the open-time replay
+            // non-active write must not enqueue a job — the open-time replay
             // would land another version's bytes for the capture baseline to
             // ingest into the active head.
             materialize: version_is_active.then_some(preimage),
