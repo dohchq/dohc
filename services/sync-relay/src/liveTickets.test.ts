@@ -127,7 +127,7 @@ it("keeps storage failures internal and strips credential-bearing errors", async
   } finally { await state.close(); }
 });
 
-it("owns returned selectors and rejects hostile report arrays without invocation", async () => {
+it("owns returned selectors and rejects hostile report fields without invocation", async () => {
   const state = await fixture();
   try {
     const getter = vi.fn(() => "docs");
@@ -135,6 +135,9 @@ it("owns returned selectors and rejects hostile report arrays without invocation
     Object.defineProperty(paths, "0", { get: getter });
     let candidate = { ...report, binding: { ...binding, selectorPaths: paths } };
     const service = createNamedLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async () => candidate } });
+    expect(await service.mint({ objectId: binding.objectId }, scope)).toBeNull();
+    expect(getter).not.toHaveBeenCalled();
+    candidate = { ...report, connection: Object.defineProperty({ ...report.connection }, "connectionId", { get: getter }) };
     expect(await service.mint({ objectId: binding.objectId }, scope)).toBeNull();
     expect(getter).not.toHaveBeenCalled();
     candidate = structuredClone(report);
