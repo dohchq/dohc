@@ -717,6 +717,12 @@ importers:
       '@dohc/live-session-contract':
         specifier: workspace:*
         version: link:../live-session-contract
+      '@dohc/workspace-contracts':
+        specifier: workspace:*
+        version: link:../workspace-contracts
+      '@dohc/workspace-core':
+        specifier: workspace:*
+        version: link:../workspace-core
       '@tiptap/core':
         specifier: 3.29.2
         version: 3.29.2(@tiptap/pm@3.29.2)

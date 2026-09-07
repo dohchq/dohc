@@ -1261,6 +1261,7 @@ function frontmatterValueNeedsSharedType(value: unknown): boolean {
   // Yjs dispatches plain values through `value.constructor`, so that data key
   // must keep the older shared-type encoding.
   return Object.hasOwn(value, 'constructor')
+    || Object.hasOwn(value, '__proto__')
     || Object.values(value).some(frontmatterValueNeedsSharedType)
 }
 
