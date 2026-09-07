@@ -2,10 +2,8 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import {
-  disposeEngineDocLeasesForTests,
-  useEngineDoc,
-} from "./useEngineDoc";
+import { disposeEngineDocLeasesForTests } from "./engineDocLease";
+import { useEngineDoc } from "./useEngineDoc";
 
 // `available: false` used to mean two different things — "this document
 // is not engine-backed" and "dohc has not found out yet" — and the editor
