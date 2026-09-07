@@ -82,8 +82,7 @@ async function preferredDownloadKey() {
   } catch {
     // Safari and privacy-hardened browsers do not expose architecture.
   }
-  // Apple silicon is the current default; Intel remains one click away.
-  return 'mac-arm64';
+  return null;
 }
 
 const downloadControls = Array.from(document.querySelectorAll('[data-download-control]'));
@@ -121,7 +120,8 @@ preferredDownloadKey().then((key) => {
   downloadControls.forEach((control) => configureDownloadControl(control, key));
   const platform = key ? downloadBuilds[key].platform : null;
   standaloneDownloadLinks.forEach((link) => {
-    const matches = downloadBuilds[link.dataset.downloadCard]?.platform === platform;
+    const cardPlatform = link.dataset.downloadCard === 'mac' ? 'mac' : downloadBuilds[link.dataset.downloadCard]?.platform;
+    const matches = platform !== null && cardPlatform === platform;
     link.classList.toggle('is-preferred', matches);
     if (matches) {
       link.dataset.downloadCard = key;
@@ -708,6 +708,10 @@ if (agentDemo) {
         item.row = row;
         item.box = row.querySelector('input');
         item.box.addEventListener('change', () => {
+          if (!item.box.checked && item.had.length === 1 && item.had.includes(person)) {
+            item.box.checked = true;
+            return;
+          }
           const set = new Set(item.had);
           if (item.box.checked) set.add(person); else set.delete(person);
           item.had = Array.from(set);
@@ -751,8 +755,10 @@ if (agentDemo) {
     transfersHost.addEventListener('click', (event) => {
       const button = event.target.closest('[data-settle]');
       if (!button) return;
-      settled.add(button.dataset.settle);
+      const key = button.dataset.settle;
+      if (settled.has(key)) settled.delete(key); else settled.add(key);
       render();
+      transfersHost.querySelector(`[data-settle="${key}"]`)?.focus({ preventScroll: true });
     });
 
     const render = () => {
@@ -763,6 +769,9 @@ if (agentDemo) {
         receipt.items.forEach((item) => {
           const mine = item.had.includes(person);
           item.box.checked = mine;
+          item.box.disabled = mine && item.had.length === 1;
+          item.box.setAttribute('aria-label', `${item.name}${item.box.disabled ? '. Assign another person before removing this share.' : ''}`);
+          item.row.title = item.box.disabled ? 'Assign another person before removing this share.' : '';
           item.row.classList.toggle('is-mine', mine);
           const shared = mine && item.had.length > 1;
           item.row.querySelector('small').textContent = shared ? `÷${item.had.length}` : '';
@@ -799,8 +808,8 @@ if (agentDemo) {
           const done = settled.has(t.key);
           const verb = t.from === 'you' ? 'pay' : 'pays';
           const action = done
-            ? '<span class="app-settled">settled &#10003;</span>'
-            : `<button class="app-settle" type="button" data-settle="${t.key}">Settle</button>`;
+            ? `<span class="app-settled">settled &#10003;</span><button class="app-settle is-undo" type="button" data-settle="${t.key}" aria-label="Undo settlement from ${PEOPLE[t.from]} to ${PEOPLE[t.to]}">Undo</button>`
+            : `<button class="app-settle" type="button" data-settle="${t.key}" aria-label="Settle payment from ${PEOPLE[t.from]} to ${PEOPLE[t.to]}">Settle</button>`;
           return `<div class="app-transfer${done ? ' is-settled' : ''}"><span><b>${PEOPLE[t.from]}</b> ${verb} <b>${PEOPLE[t.to]}</b></span><span class="amt">${yen(t.value)}</span>${action}</div>`;
         })
         .join('');
@@ -966,7 +975,6 @@ if (syncDemo) {
   };
 
   // ---------- autoplay ----------
-  let typing = false;
   let typeFrame = null;
   let autoplayVisible = false;
   const foregroundWaiters = new Set();
@@ -999,9 +1007,8 @@ if (syncDemo) {
     const startValue = el.value;
     let t0 = performance.now();
     let shown = 0;
-    typing = true;
     const frame = (now) => {
-      if (manual) { typing = false; typeFrame = null; resolve(); return; }
+      if (manual) { typeFrame = null; resolve(); return; }
       if (!canAutoplay()) {
         const pausedAt = performance.now();
         typeFrame = null;
@@ -1015,7 +1022,7 @@ if (syncDemo) {
         onInput(el);
       }
       if (shown < text.length) typeFrame = tick(frame);
-      else { typing = false; typeFrame = null; resolve(); }
+      else { typeFrame = null; resolve(); }
     };
     typeFrame = tick(frame);
   });
@@ -1056,17 +1063,16 @@ if (syncDemo) {
     manual = true;
     resumeAutoplay();
     clearTimers();
-    typing = false;
     [a, b].forEach((el) => { stopReceiving(el); el.classList.remove('is-fading'); });
     if (toggle.checked) {
       const m = merge(base, a.value, b.value);
       a.value = m; b.value = m; base = m;
     }
-    if (!typing) hint.textContent = toggle.checked ? 'your turn. try typing on either device' : 'now type on both, then turn it back on';
+    hint.textContent = toggle.checked ? 'your turn. try typing on either device' : 'now type on both, then turn it back on';
   };
 
-  a.addEventListener('input', () => { if (!typing) { takeOver(); onInput(a); } });
-  b.addEventListener('input', () => { if (!typing) { takeOver(); onInput(b); } });
+  a.addEventListener('input', () => { takeOver(); onInput(a); });
+  b.addEventListener('input', () => { takeOver(); onInput(b); });
   a.addEventListener('pointerdown', takeOver);
   b.addEventListener('pointerdown', takeOver);
   toggle.addEventListener('change', () => { takeOver(); setConnection(toggle.checked); });

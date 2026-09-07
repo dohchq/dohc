@@ -49,9 +49,10 @@ export function createReaderFlip(showcase) {
   let visible = false;
   let suppressClick = false;
   let clickTimer = 0;
+  let explicitTurn = false;
 
   const nearest = () => Math.round((angle - 8) / 180) * 180;
-  const canPlay = () => visible && !document.hidden && !reduced.matches && !drag && !panel.contains(document.activeElement);
+  const canPlay = () => visible && !document.hidden && !reduced.matches && !drag && !showcase.contains(document.activeElement);
   const stop = () => { clearTimeout(timer); cancelAnimationFrame(frame); };
   const paint = () => {
     const yaw = angle - 8;
@@ -75,8 +76,9 @@ export function createReaderFlip(showcase) {
       turn(Math.cos(angle * Math.PI / 180) >= 0 ? 180 : 0, 1300);
     }, 2000);
   };
-  const turn = (target, duration = 750) => {
+  const turn = (target, duration = 750, explicit = false) => {
     stop();
+    explicitTurn = explicit;
     const from = angle;
     const fromTilt = tilt;
     const start = performance.now();
@@ -90,6 +92,7 @@ export function createReaderFlip(showcase) {
       else {
         // Normalize after settling; a long drag must not cause extra autoplay spins.
         angle = ((target % 360) + 360) % 360;
+        explicitTurn = false;
         paint();
         schedule();
       }
@@ -101,7 +104,7 @@ export function createReaderFlip(showcase) {
     const target = side === 'human' ? 0 : 180;
     if (focus) selectors.find(button => button.dataset.readerSide === side).focus({ preventScroll: true });
     const delta = ((target - angle + 540) % 360 + 360) % 360 - 180;
-    turn(angle + delta);
+    turn(angle + delta, 750, true);
   };
 
   for (const selector of selectors) on(selector, 'click', () => show(selector.dataset.readerSide));
@@ -143,8 +146,12 @@ export function createReaderFlip(showcase) {
     event.preventDefault();
     event.stopPropagation();
   }, { capture: true, signal: listeners.signal });
-  on(panel, 'focusin', () => { stop(); angle = nearest(); tilt = 0; paint(); });
-  on(panel, 'focusout', () => queueMicrotask(schedule));
+  on(showcase, 'focusin', () => {
+    clearTimeout(timer);
+    if (explicitTurn) return;
+    stop(); angle = nearest(); tilt = 0; paint();
+  });
+  on(showcase, 'focusout', () => queueMicrotask(schedule));
   const visibility = () => {
     if (document.hidden || !visible) {
       stop();

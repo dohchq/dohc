@@ -2,9 +2,13 @@ const host = document.getElementById("desktop-demo");
 
 if (host) {
   let mounted = false;
+  const status = host.querySelector<HTMLElement>("[data-demo-status]");
+  const retry = host.querySelector<HTMLButtonElement>("[data-demo-retry]");
   const mount = async (): Promise<boolean> => {
     if (mounted) return false;
     mounted = true;
+    if (status) status.textContent = "Loading your workspace…";
+    if (retry) retry.hidden = true;
     try {
       const [
         ,
@@ -37,10 +41,13 @@ if (host) {
       return true;
     } catch (error) {
       mounted = false;
+      if (status) status.textContent = "The demo could not load. Try again.";
+      if (retry) retry.hidden = false;
       console.error("Unable to load the interactive dohc demo", error);
       return false;
     }
   };
+  retry?.addEventListener("click", () => { void mount(); });
 
   if ("IntersectionObserver" in window) {
     const observer = new IntersectionObserver(

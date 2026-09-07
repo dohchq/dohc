@@ -97,7 +97,13 @@
   <!-- ============ interactive desktop demo ============ -->
   <section class="section demo-section" id="demo" aria-label="Interactive dohc workspace demo">
     <div class="demo-stage reveal">
-      <div id="desktop-demo" role="group" aria-label="Interactive demo of the dohc desktop app"></div>
+      <div id="desktop-demo" role="group" aria-label="Interactive demo of the dohc desktop app">
+        <div class="demo-loading" role="status">
+          <span class="demo-loading-mark" aria-hidden="true">dohc</span>
+          <p data-demo-status>Loading your workspace…</p>
+          <button type="button" data-demo-retry hidden>Try again</button>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -396,7 +402,7 @@
           <strong>Windows</strong>
           <span class="download-card-action">Download <svg viewBox="0 0 24 24" aria-hidden="true" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 21h14"/></svg></span>
         </a>
-        <a class="download-card" data-download-card="mac-arm64" href="https://github.com/dohc-ai/dohc/releases">
+        <a class="download-card" data-download-card="mac" href="https://github.com/dohc-ai/dohc/releases">
           <svg class="download-card-icon" aria-hidden="true"><use href="#os-apple"/></svg>
           <strong>macOS</strong>
           <span class="download-card-action">Download <svg viewBox="0 0 24 24" aria-hidden="true" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 21h14"/></svg></span>
