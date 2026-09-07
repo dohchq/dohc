@@ -78,6 +78,7 @@ export async function typeInMarkdownEditor(
   text: string,
 ): Promise<void> {
   if (editor.classList.contains("dohc-code-editor")) {
+    await textEditorContent(editor);
     appendCodeEditorText(editor, text);
     return;
   }
