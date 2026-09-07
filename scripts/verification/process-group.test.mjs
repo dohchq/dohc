@@ -270,13 +270,31 @@ test("Windows timeout kills descendants holding pipes after cmd.exe exits", {
       import assert from "node:assert/strict";
       import { readFileSync, writeFileSync } from "node:fs";
       import { join } from "node:path";
+      import { mock } from "node:test";
       import { run } from ${JSON.stringify(new URL("./process.mjs", import.meta.url).href)};
       const root = process.argv[1];
       let owner;
+      let stdout = "";
+      let expired = false;
+      mock.timers.enable({ apis: ["setTimeout"] });
       await assert.rejects(run("cmd.exe", ["/d", "/c", join(root, "leader.cmd")], {
         timeoutMs: 2000, log: join(root, "output.log"),
-        onSpawn: child => { owner = child; writeFileSync(join(root, "owner.json"), JSON.stringify({ pid: child.pid })); },
+        onSpawn: child => {
+          owner = child;
+          writeFileSync(join(root, "owner.json"), JSON.stringify({ pid: child.pid }));
+          child.stdout.on("data", chunk => {
+            stdout += chunk;
+            if (!expired && stdout.includes("descendant ready") && stdout.includes("cmd leader exited")) {
+              expired = true;
+              assert.equal(owner.exitCode, null);
+              assert.equal(owner.signalCode, null);
+              mock.timers.tick(2000);
+            }
+          });
+        },
       }), /timed out after 2000ms/);
+      assert.equal(expired, true);
+      mock.timers.reset();
       assert.ok(owner.exitCode !== null || owner.signalCode !== null);
       assert.match(readFileSync(join(root, "output.log"), "utf8"), /descendant ready/);
       assert.match(readFileSync(join(root, "output.log"), "utf8"), /cmd leader exited/);
