@@ -20,8 +20,7 @@ import {
 import { credentialScopedOperation, requireCredentials } from "../workspaces/credentialScopedOperation";
 import { resolveWorkspaceRelayAuthorId, type ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
-import { relayFetchWithTimeout } from "../workspaces/sharedChannels";
-import { SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS } from "../workspaces/desktopSharedChannelSync";
+import { relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
 import { ShareUnavailableError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import type { RegistryEntry, JoinedSharedChannel } from "../workspaces/registryStore";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -165,7 +164,7 @@ export function registerDirectMessagesIpcHandlers<
               baseUrl: normalizeServerUrl(syncCredentials.relayUrl),
               token: syncCredentials.token,
               fetch: relayFetchWithTimeout(
-                SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS,
+                RELAY_FETCH_TIMEOUT_MS,
               ),
             }
           : null;
@@ -324,7 +323,7 @@ export function registerDirectMessagesIpcHandlers<
           const relay = {
             baseUrl: normalizeServerUrl(acceptedRelayUrl),
             token: acceptCredentials.token,
-            fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+            fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
           };
           // Two open Chats views can accept the same account-wide request
           // concurrently; only the first may reserve it.

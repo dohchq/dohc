@@ -14,7 +14,7 @@ import type { RendererWorkspaceSender, RendererWorkspaceSessionOwner } from "../
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
-import { relayFetchWithTimeout } from "../workspaces/sharedChannels";
+import { relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
 
 export function createPresenceIpc<Sender extends RendererWorkspaceSender>(dependencies: {
   warmCredentialCache(): Promise<void>;
@@ -28,7 +28,6 @@ export function createPresenceIpc<Sender extends RendererWorkspaceSender>(depend
   // hung socket. The poll is a long-poll: its own AbortSignal (presenceCancel)
   // governs, and this safety cap only fires if the relay stalls past its hold
   // (<=30s) so an IPC invoke can never dangle forever.
-  const PRESENCE_PUBLISH_TIMEOUT_MS = 15_000;
   const PRESENCE_POLL_SAFETY_MS = 35_000;
   // In-flight presence long-polls, owned by (senderId + pollId) so a poll can only
   // be cancelled/superseded by its own window, and bounded so a renderer can't
@@ -60,7 +59,7 @@ export function createPresenceIpc<Sender extends RendererWorkspaceSender>(depend
     if (!credentials?.relayUrl) return null;
     const baseUrl = normalizeServerUrl(credentials.relayUrl);
     const token = credentials.token;
-    const fetchImpl = relayFetchWithTimeout(PRESENCE_PUBLISH_TIMEOUT_MS);
+    const fetchImpl = relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS);
     let relayScope: RelayPresenceScope;
     if (scope.kind === "workspace") {
       const entry = findWorkspace(scope.workspaceId);

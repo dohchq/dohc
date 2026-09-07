@@ -164,6 +164,7 @@ import {
 import {
   assertSharedChannelWritable,
   relayFetchWithTimeout,
+  RELAY_FETCH_TIMEOUT_MS,
 } from "./workspaces/sharedChannels";
 import {
   assertSharedChannelMessageIdentity,
@@ -763,12 +764,11 @@ function publishShareHandoffStatus(status: ShareHandoffStatus): void {
   }
 }
 
-const SHARE_HANDOFF_REDEMPTION_FETCH_TIMEOUT_MS = 15_000;
 const shareHandoffRedemption = createShareHandoffRedemptionCoordinator({
   intent: shareHandoffIntentSlot,
   createStatusId: randomUUID,
   credentialSnapshot: () => credentialSessionCache.snapshot(),
-  fetch: relayFetchWithTimeout(SHARE_HANDOFF_REDEMPTION_FETCH_TIMEOUT_MS),
+  fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
   handleUnauthorized: (requestCredentials) =>
     handleRelayUnauthorized({
       requestCredentials,
@@ -852,8 +852,7 @@ type RelayShareJsonOptions =
   | { retainDependentSetConflict: true }
   | { retainNotFound: true };
 
-const RELAY_SHARE_FETCH_TIMEOUT_MS = 15_000;
-const relayShareFetch = relayFetchWithTimeout(RELAY_SHARE_FETCH_TIMEOUT_MS);
+const relayShareFetch = relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS);
 
 async function relayShareJsonWithCredentials<T>(
   credentials: CloudSessionCredentials,

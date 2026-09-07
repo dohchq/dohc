@@ -18,9 +18,8 @@ import type { EngineRelayWorkspaceClient } from "../workspaces/engineRelayClient
 import { credentialScopedOperation, requireCredentials } from "../workspaces/credentialScopedOperation";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import {
-  endJoinedChannel, relayFetchWithTimeout, scopeJoinedChannels,
+  endJoinedChannel, relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS, scopeJoinedChannels,
 } from "../workspaces/sharedChannels";
-import { SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS } from "../workspaces/desktopSharedChannelSync";
 import {
   requireShareableChatChannel, resolveDmKinds, shareIdsToWithholdFromOrdinaryInvites,
   type DmPeekResult,
@@ -386,7 +385,7 @@ export function registerSharedChannelsIpcHandlers<
                     baseUrl: normalizeServerUrl(credentials.relayUrl!),
                     token: credentials.token,
                     fetch: relayFetchWithTimeout(
-                      SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS,
+                      RELAY_FETCH_TIMEOUT_MS,
                     ),
                   },
                   shareId,
@@ -477,7 +476,7 @@ export function registerSharedChannelsIpcHandlers<
           // Same timeout wrapper runSharedChannelSyncPass uses (:973): an
           // unresponsive relay must abort the join's fetch/pull instead of leaving
           // the renderer's "Joining…" button stuck forever.
-          fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+          fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
         };
         let joined: JoinedSharedChannel;
         try {

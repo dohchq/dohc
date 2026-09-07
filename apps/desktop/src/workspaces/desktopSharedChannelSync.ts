@@ -8,13 +8,12 @@ import {
   createPassCoverageReporter,
   joinedSharedChannelForTarget,
   relayFetchWithTimeout,
+  RELAY_FETCH_TIMEOUT_MS,
   SHARED_CHANNEL_SYNC_PASS_ROWS,
   syncJoinedSharedChannels,
 } from "./sharedChannels";
 import { joinedChannelMatchesCredentials } from "./chatRelayIdentity";
 import { runInWorkspaceAuthorityLane } from "./workspaceAuthorityLane";
-
-export const SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS = 15_000;
 
 interface SharedChannelSyncState {
   operationLanes: Map<string, Promise<void>>;
@@ -234,7 +233,7 @@ export function createDesktopSharedChannelSync<
       const relay = {
         baseUrl: normalizeServerUrl(relayUrl),
         token: syncCredentials.token,
-        fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+        fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
       };
       const daemonRelay = receivedShareEngine.relayForRegistered({
         ...entry,
