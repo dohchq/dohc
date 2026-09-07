@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { join } from "node:path";
 import type { BrowserWindow, Menu, MenuItem, MenuItemConstructorOptions, WebContents, KeyboardEvent } from "electron";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDesktopWindows } from "./desktopWindows";
@@ -8,6 +9,11 @@ import type { WorkspaceSummary } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettingsResult } from "../settings/userSettings";
 import { deferred } from "../testing/deferred";
 import * as windowZoom from "./windowZoom";
+import { createWorkspaceRootApproval, registerWorkspaceRegistryIpcHandlers } from "../ipc/workspaceRegistryIpc";
+import { createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
+import { createRegistryStore } from "../workspaces/registryStore";
+import { workspaceSummariesFrom } from "../workspaces/workspaceSummaryProjection";
+import { createTestScratch } from "../workspaces/testTemp";
 
 let nextSender = 1;
 class Contents extends EventEmitter {
@@ -40,7 +46,7 @@ const settings = (zoomLevel = 0): DesktopUserSettingsResult => ({
   } }, source: "stored",
 });
 
-function fixture(platform: NodeJS.Platform = "win32") {
+function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Dependencies["workspaceSummaries"]) {
   let stored = settings();
   let read: Dependencies["readCachedUserSettingsFile"] = async () => structuredClone(stored);
   let write: Dependencies["writeUserSettingsFile"] = async (_directory, value) => {
@@ -78,7 +84,7 @@ function fixture(platform: NodeJS.Platform = "win32") {
       showMessageBox: vi.fn(async () => ({ response: 0, checkboxChecked: false })),
     },
     process: { platform, execPath: "C:\\dohc\\dohc.exe" },
-    workspaceSummaries: vi.fn(() => rows),
+    workspaceSummaries: workspaceSummaries ?? vi.fn(() => rows),
     currentUpdateState: vi.fn(() => ({ canInstall })),
     stateDir: () => "state",
     readCachedUserSettingsFile: vi.fn((directory) => read(directory)),
@@ -332,6 +338,71 @@ describe("desktop window zoom", () => {
 });
 
 describe("desktop native menus", () => {
+  it("refreshes native menu entries from registry writes by the create and attach IPC handlers", async () => {
+    const home = await createTestScratch("registry-native-menu-");
+    const registryFile = join(home, "state", "workspaces.json");
+    const registry = createRegistryStore(registryFile);
+    const workspaceSummaries = () => workspaceSummariesFrom(registry.list());
+    const f = fixture("win32", workspaceSummaries);
+    const roots = createWorkspaceRootApproval(() => home);
+    const handlers = new Map<string, (event: { trusted: boolean }, payload: unknown) => unknown>();
+    registerWorkspaceRegistryIpcHandlers<{ trusted: boolean }>({
+      registerHandler: (channel, handler) => { handlers.set(channel, handler); },
+      assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
+      app: { isPackaged: true },
+      dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+      roots, effectiveHome: () => home, workspaceSummaries,
+      prioritizePreferredWorkspace: f.windows.prioritizePreferredWorkspace,
+      createWorkspaceFolder, registerPhysicalWorkspace: registry.register,
+      refreshNativeWorkspaceSurfaces: f.windows.refreshNativeWorkspaceSurfaces,
+      desktopMarks: { mark: () => undefined, measureSince: () => undefined },
+    });
+    const invoke = async (channel: string, payload?: unknown) => {
+      const handler = handlers.get(channel);
+      if (!handler) throw new Error(`Missing registered handler ${channel}`);
+      return handler({ trusted: true }, payload);
+    };
+    const recentEntries = () => submenu(item(f, "File", "Open Recent"));
+    f.windows.refreshNativeWorkspaceSurfaces();
+    expect(recentEntries()).toEqual([{ label: "No Recent Workspaces", enabled: false }]);
+    const root = await invoke(CHANNELS.getDefaultWorkspaceRoot) as string;
+    const created = await invoke(CHANNELS.createLocalWorkspace, {
+      rootPath: join(root, "Created Project"), kind: "personal",
+    }) as WorkspaceSummary;
+    expect(createRegistryStore(registryFile).list()).toEqual([created]);
+    expect(recentEntries()).toMatchObject([{ label: "Created Project", sublabel: created.rootPath }]);
+    expect(f.templates).toHaveLength(2);
+
+    const attached = await createWorkspaceFolder({
+      rootPath: roots.usableRoot(join(root, "Attached Project")), kind: "shared",
+      workspaceId: "attached-workspace",
+    });
+    await expect(invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attached.rootPath })).resolves.toEqual(attached);
+    expect(createRegistryStore(registryFile).list()).toEqual([created, attached]);
+    expect(recentEntries()).toMatchObject([
+      { label: "Created Project", sublabel: created.rootPath },
+      { label: "Attached Project", sublabel: attached.rootPath },
+    ]);
+    expect(f.templates).toHaveLength(3);
+    expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(f.dependencies.app.addRecentDocument).mock.calls).toEqual([
+      [created.rootPath], [attached.rootPath], [created.rootPath],
+    ]);
+    expect(vi.mocked(f.dependencies.app.setUserTasks).mock.calls.at(-1)![0]).toMatchObject([
+      { title: "Open Created Project", description: created.rootPath },
+      { title: "Open Attached Project", description: attached.rootPath },
+    ]);
+    await expect(invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attached.rootPath })).rejects.toThrow("already attached");
+    expect(f.templates).toHaveLength(3);
+    expect(createRegistryStore(registryFile).list()).toEqual([created, attached]);
+
+    const target = new Window();
+    click(recentEntries()[1]!, target.native);
+    expect(target.webContents.send).toHaveBeenCalledOnce();
+    expect(target.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, attached);
+    await expect(invoke(CHANNELS.getWorkspaceRegistry)).resolves.toEqual({ workspaces: [attached, created] });
+  });
+
   it("does no native work before ready and reads current update availability when rebuilding", () => {
     const f = fixture(); f.setReady(false);
     f.windows.refreshNativeWorkspaceSurfaces(); f.windows.refreshApplicationMenu();
