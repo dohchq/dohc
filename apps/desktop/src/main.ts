@@ -1,3 +1,7 @@
+import {
+  createDesktopWorkspaceCallbacks,
+  type DesktopWorkspaceCallbacksDependencies,
+} from "./workspaces/desktopWorkspaceCallbacks";
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
 import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
@@ -548,6 +552,26 @@ function notifyPluginPanelSdkEvent(event: unknown): void {
     win.webContents.send(CHANNELS.pluginPanelSdkEvent, payload.data);
   }
 }
+
+const {
+  withWorkspaceAttachment,
+  withWorkspaceAttachmentAsync,
+  createRelayOnChange,
+  onWatcherBatch,
+} = createDesktopWorkspaceCallbacks<DesktopWorkspaceAuthorityState>({
+  findWorkspace,
+  requireWorkspaceAuthority,
+  notifyRenderer,
+  get workspaceAuthorities(): DesktopWorkspaceCallbacksDependencies<DesktopWorkspaceAuthorityState>["workspaceAuthorities"] {
+    return workspaceAuthorities;
+  },
+  get pluginWorkspaceRuntimes(): DesktopWorkspaceCallbacksDependencies<DesktopWorkspaceAuthorityState>["pluginWorkspaceRuntimes"] {
+    return pluginWorkspaceRuntimes;
+  },
+  get chatDispatchService(): DesktopWorkspaceCallbacksDependencies<DesktopWorkspaceAuthorityState>["chatDispatchService"] {
+    return chatDispatchService;
+  },
+});
 
 let linuxStableCliBinDir: string | undefined;
 
@@ -1143,30 +1167,6 @@ function withCurrentWorkspaceAttachmentOperation<Result>(
   }
 }
 
-function withWorkspaceAttachment<Result>(
-  workspace: { workspaceId: string; attachmentId?: symbol },
-  work: (lease: DesktopWorkspaceAuthorityLease) => Result,
-): Result | undefined {
-  if (!findWorkspace(workspace.workspaceId)) return undefined;
-  let lease: DesktopWorkspaceAuthorityLease;
-  try {
-    lease = requireWorkspaceAuthority(workspace.workspaceId);
-  } catch {
-    return undefined;
-  }
-  try {
-    if (
-      workspace.attachmentId !== undefined &&
-      lease.binding.attachmentId !== workspace.attachmentId
-    ) {
-      return undefined;
-    }
-    return work(lease);
-  } finally {
-    lease.release();
-  }
-}
-
 function invalidateWorkspaceGraphIndexes(event: {
   workspaceId?: string;
   paths?: readonly string[];
@@ -1182,21 +1182,6 @@ function invalidateWorkspaceGraphIndexes(event: {
   for (const workspaceId of workspaceAuthorities.workspaceIds()) {
     invalidate(workspaceId);
   }
-}
-
-function withWorkspaceAttachmentAsync<Result>(
-  workspace: { workspaceId: string; attachmentId?: symbol },
-  work: (lease: DesktopWorkspaceAuthorityLease) => Result | Promise<Result>,
-): Promise<Result> {
-  return workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) => {
-    if (
-      workspace.attachmentId !== undefined &&
-      lease.binding.attachmentId !== workspace.attachmentId
-    ) {
-      throw new Error("This callback belongs to a retired workspace authority.");
-    }
-    return work(lease);
-  });
 }
 
 type DesktopPluginWorkspaceRuntimes = Omit<
@@ -1658,16 +1643,7 @@ function engineForWorkspace(
       recoverOrigin: () => daemonRelay.recoverOrigin(),
     },
     capture,
-    onChange: () => {
-      withWorkspaceAttachment(workspace, () => {
-        notifyRenderer({ workspaceId: workspace.workspaceId });
-        void withWorkspaceAttachmentAsync(workspace, () =>
-          chatDispatchService.scanWorkspace(workspace.workspaceId),
-        ).catch((error) => {
-          console.error("[desktop] relay dispatch scan:", error);
-        });
-      });
-    },
+    onChange: createRelayOnChange(workspace),
     // MU-C4: joined shared channels refresh on the same cadence as the
     // workspace's own sync (best-effort; never fails the pass).
     syncSharedChannels: async () => {
@@ -1717,12 +1693,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
     ),
   // One settled batch, two readers: the approval pipeline, and the plugins
   // that subscribed to a prefix of it. Neither changes the batch.
-  onWatcherBatch: (workspace, events) => {
-    withWorkspaceAttachment(workspace, () =>
-      pluginWorkspaceRuntimes.current(workspace.workspaceId)
-        ?.handleWatcherEvents(events),
-    );
-  },
+  onWatcherBatch,
 });
 
 function withWorkspaceActivityState<Result>(
