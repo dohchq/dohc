@@ -1,21 +1,25 @@
 import { useRequestSequence } from "./useRequestSequence";
 import { Check, Cloud, Copy, ExternalLink, LogOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { CloudStatusResult } from "../ipc/bridgeContract";
 import { canonicalCloudOrigin } from "../workspaces/cloudConfiguration";
 import { buildSyncCode } from "../workspaces/syncCode";
 import { bridge } from "./bridge";
 import { openLinkExternally } from "./linkActivation";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 
-type WorkspaceSecretState = "none" | "protected-key-present" | "protected-key-missing";
-type WorkspaceSyncState = {
-  workspaceSynced: boolean;
-  workspaceSyncConnected: boolean;
-  workspaceSecretState: WorkspaceSecretState;
+type WorkspaceSyncState = Required<Pick<
+  CloudStatusResult,
+  "workspaceSynced" | "workspaceSyncConnected" | "workspaceSecretState"
+>>;
+const UNSYNCED: WorkspaceSyncState = {
+  workspaceSynced: false,
+  workspaceSyncConnected: false,
+  workspaceSecretState: "none",
 };
 
 function normalizeWorkspaceSyncState(
-  status: Partial<WorkspaceSyncState>,
+  status: CloudStatusResult,
 ): WorkspaceSyncState {
   return {
     workspaceSynced: status.workspaceSynced ?? false,
@@ -56,9 +60,7 @@ export function CloudLogin(props: {
 }) {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [codeCopied, setCodeCopied] = useState(false);
-  const [workspaceSyncState, setWorkspaceSyncState] = useState(() =>
-    normalizeWorkspaceSyncState({}),
-  );
+  const [workspaceSyncState, setWorkspaceSyncState] = useState(UNSYNCED);
   const { workspaceSynced, workspaceSyncConnected, workspaceSecretState } =
     workspaceSyncState;
   const [syncBusy, setSyncBusy] = useState(false);
@@ -93,7 +95,7 @@ export function CloudLogin(props: {
     const session = sessionRef.next();
     clearPollTimer();
     setPhase({ kind: "loading" });
-    setWorkspaceSyncState(normalizeWorkspaceSyncState({}));
+    setWorkspaceSyncState(UNSYNCED);
     setSyncBusy(false);
     setSyncError(null);
     setNeedsPassphrase(false);

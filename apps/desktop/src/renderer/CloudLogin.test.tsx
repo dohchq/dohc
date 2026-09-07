@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CloudStatusResult } from "../ipc/bridgeContract";
 import { CloudLogin } from "./CloudLogin";
 
 import { deferred } from "../testing/deferred";
@@ -529,14 +530,9 @@ describe("CloudLogin", () => {
     );
   });
 
-  it("ignores a stale post-login status refresh after switching workspaces", async () => {
+  it.each(["resolve", "reject"] as const)("ignores a stale post-login status refresh after switching workspaces (%s)", async (outcome) => {
     vi.useFakeTimers();
-    const oldStatus = deferred<{
-      connected: boolean;
-      email: string;
-      workspaceSynced: boolean;
-      workspaceSyncConnected: boolean;
-    }>();
+    const oldStatus = deferred<CloudStatusResult>();
     const onConnected = vi.fn();
     bridgeMock.cloudStatus
       .mockResolvedValueOnce({
@@ -548,6 +544,7 @@ describe("CloudLogin", () => {
       .mockResolvedValueOnce({
         connected: true,
         email: "new@dohc.dev",
+        managedCloudStatus: "ready",
         workspaceSynced: false,
       });
     bridgeMock.cloudLoginPoll.mockResolvedValueOnce({
@@ -567,12 +564,17 @@ describe("CloudLogin", () => {
     rerender(<CloudLogin workspaceId="new" onConnected={onConnected} />);
     await act(async () => {});
     await act(async () => {
-      oldStatus.resolve({
-        connected: true,
-        email: "old@dohc.dev",
-        workspaceSynced: true,
-        workspaceSyncConnected: true,
-      });
+      if (outcome === "reject") {
+        oldStatus.reject(new Error("old workspace offline"));
+      } else {
+        oldStatus.resolve({
+          connected: true,
+          managedCloudStatus: "ready",
+          email: "old@dohc.dev",
+          workspaceSynced: true,
+          workspaceSyncConnected: true,
+        });
+      }
     });
 
     expect(screen.getByTestId("cloud-connected-email").textContent).toBe("new@dohc.dev");
@@ -621,8 +623,7 @@ describe("CloudLogin", () => {
     );
   });
 
-  // This is the only test that switches workspaces mid-flight, which is what
-  // makes deleting the stale-result guard fail rather than pass silently.
+  // Switch workspaces while cloudEnableSync is pending to observe its stale-result guard.
   it("does not let a stale protect result mark the next workspace as synced", async () => {
     const staleEnable = deferred<void>();
     bridgeMock.cloudStatus.mockImplementation(async (payload) => ({
