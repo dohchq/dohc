@@ -26,8 +26,7 @@ import {
 } from "./ipc/workspaceRegistryIpc";
 import { createAppLifecycle } from "./appLifecycle";
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
-import { databaseOpLogPath, normalizeAbsolutePath } from "@dohc/workspace-core";
-import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
+import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import {
   VersionedLiveAdapter,
@@ -322,7 +321,6 @@ import {
 } from "./plugins/pluginSurfaces";
 
 import {
-  prepareWorkspaceFileRead,
   resolveWorkspaceFile,
   withExclusiveWorkspaceOperation,
   withStaleSensitiveWorkspaceOperation,
@@ -342,7 +340,7 @@ import { createOwnedProjectionRepairer } from "./workspaces/ownedProjectionRepai
 import { createOwnedWorkspaceFileReader } from "./workspaces/ownedWorkspaceFileReader";
 import {
   workspaceDatabaseWorker,
-  type DatabaseEdit,
+  createWorkspaceDatabaseAccess,
 } from "./workspaces/workspaceDatabase";
 import type { OwnedWorkspaceDatabaseReader } from "./workspaces/ownedWorkspaceFileReader";
 import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
@@ -389,6 +387,8 @@ registerShareHandoffProtocol(app, process);
 // <img>/<audio> src, without piping large binaries through IPC as base64.
 // Must be declared before app `ready`.
 const DOHC_FILE_SCHEME = "dohc-file";
+const { workerDatabaseReader, editWorkspaceDatabaseInWorker } =
+  createWorkspaceDatabaseAccess(workspaceDatabaseWorker);
 protocol.registerSchemesAsPrivileged([
   {
     scheme: DOHC_FILE_SCHEME,
@@ -4027,81 +4027,6 @@ async function listOwnedWorkspaceFilesFor(
       );
     },
   });
-}
-
-function workerDatabaseReader(
-  signal?: AbortSignal,
-): OwnedWorkspaceDatabaseReader {
-  return {
-    readPrepared: (path, source) =>
-      source.withVerifiedPath((absolutePath) =>
-        workspaceDatabaseWorker.readPath({ absolutePath, path, signal }),
-      ),
-    readBytes: (path, bytes) =>
-      workspaceDatabaseWorker.readBytes({ bytes, path, signal }),
-    readPagePrepared: (path, source, table, offset) =>
-      source.withVerifiedPath((absolutePath) =>
-        workspaceDatabaseWorker.readPagePath({
-          absolutePath,
-          path,
-          table,
-          offset,
-          signal,
-        }),
-      ),
-    readPageBytes: (path, bytes, table, offset) =>
-      workspaceDatabaseWorker.readPageBytes({
-        bytes,
-        path,
-        table,
-        offset,
-        signal,
-      }),
-  };
-}
-
-async function editWorkspaceDatabaseInWorker(input: {
-  rootPath: string;
-  relativePath: string;
-  edit: DatabaseEdit;
-  author: ChangeAuthor;
-  nowMs: number;
-  operationId?: string;
-  signal?: AbortSignal;
-}) {
-  const resolved = await resolveWorkspaceFile(
-    input.rootPath,
-    input.relativePath,
-  );
-  if (input.signal?.aborted) throw new Error("Database edit was cancelled.");
-  const source = await prepareWorkspaceFileRead(
-    input.rootPath,
-    resolved.resolvedPath,
-  );
-  const logPath = join(
-    input.rootPath,
-    databaseOpLogPath(resolved.normalized),
-  );
-  return source.withVerifiedPath((absolutePath) =>
-    workspaceDatabaseWorker.editPath({
-      absolutePath,
-      path: resolved.normalized,
-      logPath,
-      statePath: join(dirname(logPath), "state.sqlite"),
-      edit: input.edit,
-      operation: {
-        operationId: input.operationId ?? randomUUID(),
-        databasePath: resolved.normalized,
-        table: input.edit.table,
-        op: input.edit.op,
-        rowId: String(input.edit.rowId),
-        payload: input.edit.payload ?? {},
-        appliedAt: input.nowMs,
-        author: input.author,
-      },
-      signal: input.signal,
-    }),
-  );
 }
 
 function ownedWorkspaceReadsFor(
