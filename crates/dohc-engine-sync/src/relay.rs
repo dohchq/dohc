@@ -3481,7 +3481,7 @@ fn proposed_change(op: &ReplicationEnvelope) -> ShareProposalChange {
 /// consolidated into one net change per file.
 ///
 /// One moment already states its object's complete post state rather than a
-/// delta — `store.rs` copies the before blob into `payloadAfterBlobSha256` for
+/// delta — `store/delete_rename.rs` copies the before blob into `payloadAfterBlobSha256` for
 /// a rename, and `moment_apply.rs` materializes from the after side whatever
 /// the operation says. So a run of moments for one object collapses by taking
 /// the base from the first and the destination from the last, and a write
