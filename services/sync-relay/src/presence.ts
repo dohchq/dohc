@@ -384,9 +384,7 @@ export class PresenceHub {
     if (this.sweepTimer) return;
     this.sweepTimer = setInterval(() => this.sweep(), this.sweepIntervalMs);
     // The sweeper must never keep the process alive on its own.
-    if (typeof this.sweepTimer === "object" && this.sweepTimer && "unref" in this.sweepTimer) {
-      (this.sweepTimer as unknown as { unref: () => void }).unref();
-    }
+    this.sweepTimer.unref();
   }
 
   private stopSweeper(): void {

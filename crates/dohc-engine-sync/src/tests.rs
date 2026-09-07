@@ -9482,8 +9482,10 @@ fn drained_parked_update_derives_its_record_facts() {
             &mut cache,
             &key,
             &filler,
+            dohc_engine_collab::LocalAppend::default(),
             &NoFaults,
             1_600 + index as i64,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("append filler update");
         assert!(matches!(outcome, TxnOutcome::Committed(_)));
@@ -9600,8 +9602,10 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
             &mut cache,
             &key,
             &filler,
+            dohc_engine_collab::LocalAppend::default(),
             &NoFaults,
             1_600 + index as i64,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("append filler update");
         assert!(matches!(outcome, TxnOutcome::Committed(_)));
@@ -9998,8 +10002,17 @@ fn cached_defer_and_drain_match_the_cold_path() {
                 }) => base_snapshot_sha,
                 other => panic!("unexpected claim: {other:?}"),
             };
-            dohc_engine_collab::record_local_update(store, cache, &key, &local, &NoFaults, 1_003)
-                .expect("warm local append");
+            dohc_engine_collab::record_local_update(
+                store,
+                cache,
+                &key,
+                &local,
+                dohc_engine_collab::LocalAppend::default(),
+                &NoFaults,
+                1_003,
+                |_tx, _outcome, _update_sha| Ok(()),
+            )
+            .expect("warm local append");
             claim
         };
     let warm_claim = setup(&mut warm_store, &mut warm_cache);
@@ -10193,8 +10206,10 @@ fn seed_warm_and_cold_remote_lineage(
         warm_cache,
         &key,
         &empty_base,
+        dohc_engine_collab::LocalAppend::default(),
         &NoFaults,
         2_001,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("warm cache seed");
     let cold_seed = dohc_engine_collab::record_local_update(
@@ -10202,8 +10217,10 @@ fn seed_warm_and_cold_remote_lineage(
         &mut cold_seed_cache,
         &key,
         &empty_base,
+        dohc_engine_collab::LocalAppend::default(),
         &NoFaults,
         2_001,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("cold cache seed");
     assert_eq!(warm_seed, cold_seed);
@@ -11536,8 +11553,17 @@ fn pulled_lineage_replacement_evicts_the_warmed_remote_path_entry() {
     .expect("local marker");
     let local = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "local draft");
     let mut cache = dohc_engine_collab::WriterDocCache::new();
-    dohc_engine_collab::record_local_update(&mut store, &mut cache, &key, &local, &NoFaults, 1_001)
-        .expect("warm local lineage");
+    dohc_engine_collab::record_local_update(
+        &mut store,
+        &mut cache,
+        &key,
+        &local,
+        dohc_engine_collab::LocalAppend::default(),
+        &NoFaults,
+        1_001,
+        |_tx, _outcome, _update_sha| Ok(()),
+    )
+    .expect("warm local lineage");
     assert!(cache.contains_for_test(&key));
     let before = cache.stats();
 
@@ -11937,17 +11963,22 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
 
     // A local-only session that crashed: durable rows, never settled.
     let draft = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "crashed draft");
-    dohc_engine_collab::record_local_update_creating_marker(
+    dohc_engine_collab::record_local_update(
         &mut engine,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
-        Some("notes/crashed.md"),
-        dohc_engine_collab::ContentKind::Plaintext,
-        dohc_engine_collab::Regime::LocalOnly,
         &draft,
-        None,
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some("notes/crashed.md"),
+                content_kind: dohc_engine_collab::ContentKind::Plaintext,
+                regime: dohc_engine_collab::Regime::LocalOnly,
+            }),
+            ..Default::default()
+        },
         &NoFaults,
         1_500,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("crashed draft rows");
 
@@ -15494,8 +15525,10 @@ fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
         &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
         &local_update,
+        dohc_engine_collab::LocalAppend::default(),
         &NoFaults,
         1_460,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("local row");
     // A lineage the client seeded from a captured head. The
@@ -15627,8 +15660,10 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
         &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
         &local_update,
+        dohc_engine_collab::LocalAppend::default(),
         &NoFaults,
         1_460,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("local row");
     // Same witness pin as the pulled-base twin: the deferred drain's

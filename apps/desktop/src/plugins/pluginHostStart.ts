@@ -1,3 +1,5 @@
+import type { PluginPipeline } from "./PluginPipeline";
+import type { PluginSurfaceHostLease, PluginPanelHostLease, PluginWebAppHostLease } from "./pluginSurfaces";
 import type { PluginHostStartOutcome } from "./pluginHostOwnership";
 import {
   PluginHostOwnership,
@@ -56,4 +58,71 @@ export async function ensurePluginStarted<H extends ActivatingPluginHost>(
   }
   await host.activationOf(pluginId);
   return host;
+}
+
+function createPluginSurfaceHostLease(
+  pipeline: PluginPipeline,
+  pluginId: string,
+): PluginSurfaceHostLease {
+  const host = pipeline.host;
+  const lease = acquirePluginSurfaceLease(pipeline.hostOwnership, pluginId);
+  return {
+    start: async () => {
+      const startedHost = await ensurePluginStarted(
+        host,
+        pluginId,
+        () =>
+          lease.start((authority) =>
+            pipeline.ensureStarted(pluginId, authority),
+          ),
+      );
+      const spawnId = startedHost.getSpawnId(pluginId);
+      if (!spawnId) {
+        throw new Error(`Plugin "${pluginId}" has no active process.`);
+      }
+      return spawnId;
+    },
+    currentSpawnId: () => host.getSpawnId(pluginId),
+    release: () => lease.release(),
+  };
+}
+
+export function createPluginPanelSurfaceHostLease(
+  pipeline: PluginPipeline,
+  pluginId: string,
+): PluginPanelHostLease {
+  const host = pipeline.host;
+  const lease = createPluginSurfaceHostLease(pipeline, pluginId);
+  return {
+    ...lease,
+    currentRecord: () => host.currentRecord(pluginId),
+    startPanel: async (panelId) => {
+      const spawnId = await lease.start();
+      const ready = host.readyPanelsForSpawn(pluginId, spawnId);
+      const panel = ready?.panels.find((candidate) => candidate.id === panelId);
+      if (!ready || !panel) {
+        throw new Error(
+          `Plugin "${pluginId}" does not declare panel "${panelId}" in its active runtime.`,
+        );
+      }
+      return { spawnId, hostRecord: ready.record, panel };
+    },
+  };
+}
+
+export function createPluginWebAppHostLease(
+  pipeline: PluginPipeline,
+  pluginId: string,
+  webAppId: string,
+  instanceKey: string | null,
+): PluginWebAppHostLease {
+  const host = pipeline.host;
+  return {
+    ...createPluginSurfaceHostLease(pipeline, pluginId),
+    startWebApp: () => host.startWebApp(pluginId, webAppId, instanceKey),
+    unpair: (expectedSpawnId) => {
+      if (host.getSpawnId(pluginId) !== expectedSpawnId) return Promise.resolve();
+      return host.stopWebApp(pluginId, webAppId, instanceKey);
+    },
+  };
 }
