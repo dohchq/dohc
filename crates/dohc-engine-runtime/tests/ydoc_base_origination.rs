@@ -967,7 +967,7 @@ async fn draining_a_delta_without_a_verified_base_keeps_it_parked() {
     assert!(
         matches!(
             parked,
-            dohc_engine_sync::ApplyOutcome::Applied(ref result) if result.deferred
+            dohc_engine_sync::ApplyOutcome { primary: dohc_engine_sync::ApplyDisposition::Applied(ref result), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (result.deferred)
         ),
         "the predecessor is deferred"
     );
@@ -1026,7 +1026,7 @@ async fn draining_an_unverified_edit_does_not_report_a_base_size_decline() {
     .expect("park remote edit behind the live lease");
     assert!(matches!(
         parked,
-        dohc_engine_sync::ApplyOutcome::Applied(ref result) if result.deferred
+        dohc_engine_sync::ApplyOutcome { primary: dohc_engine_sync::ApplyDisposition::Applied(ref result), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (result.deferred)
     ));
 
     assert!(matches!(
