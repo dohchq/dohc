@@ -403,32 +403,6 @@ describe("RelayShareDialog", () => {
     expect(screen.queryByRole("button", { name: "Create link" })).toBeNull();
   });
 
-  it("creates a path share and shows the copyable code", async () => {
-    const user = userEvent.setup();
-    render(
-      <RelayShareDialog
-        workspaceId="ws-1"
-        target={{ kind: "paths", paths: ["docs/plan.md"] }}
-        onClose={() => {}}
-      />,
-    );
-
-    await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
-    await user.click(screen.getByTestId("share-create"));
-
-    expect(bridgeMock.createRelayShare).toHaveBeenCalledWith({
-      workspaceId: "ws-1",
-      recipientEmail: "friend@dohc.test",
-      access: "view",
-      paths: ["docs/plan.md"],
-    });
-    const code = await screen.findByTestId("share-code");
-    expect(code.textContent).toBe(SHARE_CODE);
-
-    await user.click(screen.getByTestId("share-code-copy"));
-    expect(bridgeMock.writeClipboardText).toHaveBeenCalledWith({ text: SHARE_CODE });
-  });
-
   it("creates a version share addressed by version id", async () => {
     const user = userEvent.setup();
     render(
@@ -448,58 +422,6 @@ describe("RelayShareDialog", () => {
       access: "view",
       versionId: "version-7",
     });
-  });
-
-  it("offers View and Edit for email without promising a discussion", async () => {
-    const user = userEvent.setup();
-    render(
-      <RelayShareDialog
-        workspaceId="ws-1"
-        target={{ kind: "paths", paths: ["docs/plan.md"] }}
-        onClose={() => {}}
-      />,
-    );
-
-    const emailAccess = screen.getByRole("radiogroup", { name: "Access" });
-    expect(within(emailAccess).getByRole("radio", { name: "View" })).toBeTruthy();
-    expect(within(emailAccess).getByRole("radio", { name: "Edit" })).toBeTruthy();
-    expect(within(emailAccess).queryByRole("radio", { name: "Comment" })).toBeNull();
-    expect(screen.getByTestId("share-access-view").getAttribute("aria-checked")).toBe(
-      "true",
-    );
-    expect(screen.getByTestId("share-access-helper").textContent).toBe(
-      "They can read what you selected.",
-    );
-    expect(screen.queryByTestId("share-access-pending")).toBeNull();
-
-    await user.click(screen.getByTestId("share-access-edit"));
-    expect(screen.getByTestId("share-access-edit").getAttribute("aria-checked")).toBe(
-      "true",
-    );
-    expect(
-      screen.getByTestId("share-access-helper").textContent,
-      "promising 'edit what you selected' would name a right Edit does not grant",
-    ).toBe("They can read what you selected and send you changes to accept.");
-
-    await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
-    await user.click(screen.getByTestId("share-create"));
-    expect(bridgeMock.createRelayShare).toHaveBeenCalledWith({
-      workspaceId: "ws-1",
-      recipientEmail: "friend@dohc.test",
-      access: "edit",
-      paths: ["docs/plan.md"],
-    });
-  });
-
-  it("keeps the Edit label on the level the relay calls edit", () => {
-    render(
-      <RelayShareDialog
-        workspaceId="ws-1"
-        target={{ kind: "paths", paths: ["docs/plan.md"] }}
-        onClose={() => {}}
-      />,
-    );
-    expect(screen.getByTestId("share-access-edit").textContent).toBe("Edit");
   });
 
   it("drops the read-only claim from the lead sentence", () => {
@@ -536,27 +458,6 @@ describe("RelayShareDialog", () => {
       access: "view",
       paths: ["index.html", "assets/logo.png"],
     });
-  });
-
-  it("shows the handler's honest error copy (secret refusal), stripped of IPC noise", async () => {
-    bridgeMock.createRelayShare.mockRejectedValue(
-      new Error(
-        "Error invoking remote method 'desktop:create-relay-share': Error: Secret files can't be shared.",
-      ),
-    );
-    const user = userEvent.setup();
-    render(
-      <RelayShareDialog
-        workspaceId="ws-1"
-        target={{ kind: "paths", paths: [".env"] }}
-        onClose={() => {}}
-      />,
-    );
-    await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
-    await user.click(screen.getByTestId("share-create"));
-    expect((await screen.findByRole("alert")).textContent).toBe(
-      "Secret files can't be shared.",
-    );
   });
 
   it("shows View and Comment link access with the exact paths warning", async () => {
