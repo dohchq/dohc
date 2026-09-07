@@ -115,6 +115,19 @@ function configureDownloadControl(control, preferredKey) {
 
 preferredDownloadKey().then((key) => {
   downloadControls.forEach((control) => configureDownloadControl(control, key));
+  const platform = key ? downloadBuilds[key].platform : null;
+  standaloneDownloadLinks.forEach((link) => {
+    const matches = downloadBuilds[link.dataset.downloadCard]?.platform === platform;
+    link.classList.toggle('is-preferred', matches);
+    if (matches) {
+      link.dataset.downloadCard = key;
+      const badge = document.createElement('span');
+      badge.className = 'download-card-match';
+      badge.textContent = 'For your device';
+      link.appendChild(badge);
+    }
+  });
+  updateStandaloneDownloadLinks();
 });
 
 if (downloadControls.length) {
@@ -677,11 +690,16 @@ if (agentDemo) {
       receipt.items.reduce((sum, item) => sum + item.price, 0) * (1 + (receipt.service || 0));
 
     // Render the receipts once, then keep the DOM and only update state.
-    RECEIPTS.forEach((receipt) => {
-      const group = document.createElement('div');
+    RECEIPTS.forEach((receipt, index) => {
+      const disclosure = document.createElement('details');
+      disclosure.className = 'app-receipt';
+      disclosure.name = 'split-receipts';
+      disclosure.open = index === 0;
+      const group = document.createElement('summary');
       group.className = 'app-group';
       group.innerHTML = `<span>${receipt.name}</span><span>${PEOPLE[receipt.paidBy]} paid ${yen(receiptTotal(receipt))}</span>`;
-      list.appendChild(group);
+      disclosure.appendChild(group);
+      list.appendChild(disclosure);
       receipt.items.forEach((item) => {
         const row = document.createElement('label');
         row.className = 'app-item';
@@ -695,7 +713,7 @@ if (agentDemo) {
           settled.clear();
           render();
         });
-        list.appendChild(row);
+        disclosure.appendChild(row);
       });
     });
 

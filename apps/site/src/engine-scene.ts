@@ -40,7 +40,7 @@ export async function mountEngine(host: HTMLElement) {
   controls.enableZoom = false;
   controls.enableDamping = false;
   controls.rotateSpeed = 0.65;
-  controls.autoRotateSpeed = 0.35;
+  controls.autoRotateSpeed = 0.28;
   controls.minPolarAngle = 0.2;
   controls.maxPolarAngle = Math.PI * 0.8;
   renderer.domElement.style.touchAction = "pan-y";
@@ -57,7 +57,7 @@ export async function mountEngine(host: HTMLElement) {
   ground.receiveShadow = true;
   scene.add(ground);
   controls.target.copy(center);
-  const cameraDirection = new THREE.Vector3(9, 5.1, 8).normalize();
+  const cameraDirection = new THREE.Vector3(10, 6.5, 7).normalize();
   camera.position.copy(center).addScaledVector(cameraDirection, 14);
   controls.update();
   const pmrem = new THREE.PMREMGenerator(renderer);
@@ -92,13 +92,14 @@ export async function mountEngine(host: HTMLElement) {
   renderer.shadowMap.autoUpdate = false;
   renderer.shadowMap.needsUpdate = true;
   const motion = matchMedia("(prefers-reduced-motion: reduce)");
+  let openingHold = 1.6;
   let dragging = false;
   let visible = true;
   let frame = 0;
   let last = 0;
   let disposed = false;
   function syncRotation() {
-    controls.autoRotate = !motion.matches && !dragging;
+    controls.autoRotate = !motion.matches && !dragging && openingHold <= 0;
     requestDraw();
   }
   function draw(time: number) {
@@ -106,9 +107,13 @@ export async function mountEngine(host: HTMLElement) {
     if (disposed || !visible || document.hidden) return;
     const dt = Math.min((time - last) / 1000, 0.05);
     last = time;
+    if (!motion.matches && !dragging && openingHold > 0) {
+      openingHold = Math.max(0, openingHold - dt);
+      controls.autoRotate = openingHold === 0;
+    }
     controls.update(dt);
     renderer.render(scene, camera);
-    if (controls.autoRotate)
+    if (controls.autoRotate || (!motion.matches && !dragging && openingHold > 0))
       frame = requestAnimationFrame(draw);
   }
   function requestDraw() {
@@ -161,6 +166,7 @@ export async function mountEngine(host: HTMLElement) {
   );
   motion.addEventListener("change", syncRotation, { signal });
   controls.addEventListener("start", () => {
+    openingHold = 0;
     dragging = true;
     syncRotation();
   });
@@ -185,6 +191,7 @@ export async function mountEngine(host: HTMLElement) {
       )
         return;
       event.preventDefault();
+      openingHold = 0;
       const spherical = new THREE.Spherical().setFromVector3(
         camera.position.clone().sub(center),
       );
