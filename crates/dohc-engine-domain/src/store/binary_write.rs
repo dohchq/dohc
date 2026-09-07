@@ -12,8 +12,10 @@ use dohc_engine_storage::{FaultInjector, Preimage, put_binary_blob};
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 impl<'a> VersionedTextStore<'a> {
-    /// Write a binary head and enqueue its materialization intent in the same
-    /// transaction. Equal binary content is an idempotent no-op.
+    /// Write a binary head and, for an active-version change, enqueue its
+    /// materialization intent in the same transaction. Equal binary content
+    /// preserves the head and moment without adding an intent. It can still
+    /// store the blob or a request record; see [`write_binary_in_tx`].
     pub fn write_binary(
         &mut self,
         input: &WriteBinary,
@@ -26,10 +28,17 @@ impl<'a> VersionedTextStore<'a> {
     }
 }
 
-/// Apply a caller-originated binary write inside a caller-owned transaction.
-/// The runtime uses this seam to keep the binary FTS deletion atomic with the
-/// head/moment/materialization intent.
-#[doc(hidden)]
+/// Apply a binary write in the caller's transaction. The caller owns commit
+/// and must roll back on error, including failures in subsequent composed work.
+///
+/// Rejects the reserved capture origin and checks identifiers, the path, and
+/// version existence before request replay. A matching replay returns the
+/// recorded result without another write or materialization intent. Equal
+/// binary content preserves the head and moment but can store a blob or request
+/// row. Fresh head changes also validate moment metadata.
+///
+/// Fresh active-version changes enqueue a materialization intent. The runtime
+/// composes FTS changes in this transaction and performs disk work after commit.
 pub fn write_binary_in_tx(
     tx: &Transaction<'_>,
     input: &WriteBinary,
@@ -140,7 +149,7 @@ pub fn write_binary_in_tx(
             metadata_correlation_id: input.metadata_correlation_id.clone(),
             author_json: input.author_json.clone(),
             // Active version only: disk mirrors the active version, so a
-            // non-active write must not enqueue a job — the open-time replay
+            // non-active write must not enqueue a job â€” the open-time replay
             // would land another version's bytes for the capture baseline to
             // ingest into the active head.
             materialize: version_is_active.then_some(preimage),

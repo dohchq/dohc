@@ -38,8 +38,13 @@ impl<'a> VersionedTextStore<'a> {
         self.rename_text_file_with(input, faults, |_, _| Ok(()))
     }
 
-    /// Rename with a caller-supplied same-transaction side effect (the runtime
-    /// uses this for FTS maintenance).
+    /// Rename with a callback in the same transaction. Matching request replay
+    /// skips the callback. A fresh rename invokes it after the domain changes,
+    /// before recording the request and committing.
+    ///
+    /// A callback error aborts the transaction. This API cannot roll back
+    /// callback effects outside the database. The runtime uses the callback
+    /// to compose FTS maintenance and other transactional work.
     pub fn rename_text_file_with<F>(
         &mut self,
         input: &RenameTextFile,
@@ -234,7 +239,10 @@ fn normalized_delete_input(input: &DeleteTextFile) -> Result<DeleteTextFile, Dom
     Ok(normalized)
 }
 
-#[doc(hidden)]
+/// Validate identifiers, metadata, and the addressable plaintext path without
+/// reading or writing the database. Does not change the input or return its
+/// normalized path. Ignored paths are rejected; tracked paths shadowed by
+/// secret policy remain addressable for deletion.
 pub fn validate_delete_input(input: &DeleteTextFile) -> Result<(), DomainError> {
     normalized_delete_input(input).map(|_| ())
 }
@@ -368,8 +376,16 @@ fn snapshot_content_from_moment_side(
     }
 }
 
-/// Apply a text delete inside a caller-owned compound transaction.
-#[doc(hidden)]
+/// Delete a version-local alias and snapshot in the caller's transaction.
+/// The caller owns commit and must roll back on error, including failures in
+/// subsequent composed work. The shared object and sibling versions remain.
+///
+/// Input validation precedes request replay. A matching replay returns before
+/// checking the current version or source and makes no new deletion.
+/// Active-version deletion cancels pending write jobs for this workspace/path
+/// in the same transaction. It does not enqueue disk deletion or update FTS,
+/// Y.Doc, or outbound state; callers compose those effects and run disk work
+/// after commit.
 pub fn delete_text_in_tx(
     tx: &Transaction<'_>,
     input: &DeleteTextFile,

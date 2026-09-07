@@ -19,9 +19,12 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::{HashMap, HashSet};
 
 impl<'a> VersionedTextStore<'a> {
-    /// Remove one latest local mutation and restore its recorded preimage.
-    /// This is local-only history surgery and deliberately does not journal a
-    /// replication operation (`versions-rollback-text-file-mutation`).
+    /// Remove one latest local mutation and restore its recorded preimage
+    /// through a compensating moment. Returns `true` for matching request
+    /// replay and `false` for a fresh rollback.
+    ///
+    /// This wrapper adds no outbound row. Runtime composition journals the
+    /// compensating moment through [`Self::rollback_text_file_mutation_with`].
     pub fn rollback_text_file_mutation(
         &mut self,
         input: &RollbackTextFileMutation,
@@ -30,9 +33,16 @@ impl<'a> VersionedTextStore<'a> {
         self.rollback_text_file_mutation_with(input, faults, |_, _, _, _, _| Ok(()))
     }
 
-    /// Roll back with a caller-supplied same-transaction side effect. The
-    /// callback receives the mutated object id, the restored text head, if
-    /// present, the compensating moment id, and its recorded time.
+    /// Roll back with a callback in the same transaction. The callback receives
+    /// the mutated object id, the restored text head, if present, the
+    /// compensating moment id, and its recorded time.
+    ///
+    /// Matching request replay skips the callback. Fresh rollback invokes it
+    /// after restoring state and inserting the compensating moment, before
+    /// recording the request and committing. A callback error aborts the
+    /// transaction; callback effects outside the database cannot be rolled back.
+    /// The runtime composes Y.Doc/FTS reconciliation and outbound journaling here.
+    /// See [`Self::rollback_text_file_mutation`] for the boolean return value.
     pub fn rollback_text_file_mutation_with<F>(
         &mut self,
         input: &RollbackTextFileMutation,
@@ -134,10 +144,9 @@ impl<'a> VersionedTextStore<'a> {
         );
 
         let outcome = self.store.write_with(faults, |tx| {
-            // A rollback restore is a new disk intent even though history
-            // surgery removes (rather than appends) a moment. Reserve the same
-            // store-global now-generation a fresh mutation would receive while
-            // the rolled-back moment is still present. Reusing that moment's
+            // Rollback replaces the target mutation with a compensating moment.
+            // Any compensating disk intent needs a fresh store-global generation.
+            // Reserve it while the rolled-back moment is still present. Reusing that moment's
             // historical generation lets any later completed job for the same
             // path supersede the compensator before it can restore disk.
             let restore_generation = next_moment_order(tx)?;
@@ -256,7 +265,7 @@ impl<'a> VersionedTextStore<'a> {
             }
 
             // Reconcile disk with an active-version rolled-back binary write:
-            //   * a pending job does not prove disk is clean — the materializer
+            //   * a pending job does not prove disk is clean â€” the materializer
             //     can crash after the atomic rename lands but before marking the
             //     job complete (`MaterializeAfterRenameBeforeComplete`), leaving
             //     the written bytes ON DISK with a still-pending job. So always
@@ -289,7 +298,7 @@ impl<'a> VersionedTextStore<'a> {
                     .map_err(DomainError::sql_corrupt)?;
                 match job {
                     // Only cancel/compensate against a job whose content is
-                    // exactly this write's bytes — never an unrelated
+                    // exactly this write's bytes â€” never an unrelated
                     // same-id job.
                     Some((status, generation, written_sha256, target_path, operation))
                         if generation == prep.moment.moment_order
@@ -318,7 +327,7 @@ impl<'a> VersionedTextStore<'a> {
                     Some(_) => {}
                     // No job at all: a CAPTURE-origin binary write (its bytes
                     // came FROM disk, so nothing was ever enqueued). The
-                    // rolled-back head still must be reconciled TO disk —
+                    // rolled-back head still must be reconciled TO disk â€”
                     // without a restore, disk keeps the newer bytes while the
                     // reconcile manifest records them as already captured, so
                     // the DB head would silently diverge forever. Restore
@@ -530,7 +539,7 @@ fn enqueue_binary_rollback_restore(
     );
     let preimage = Preimage::Present(written_sha256.to_owned());
     match before {
-        // First write: the rolled-back-to state is absent → delete the file.
+        // First write: the rolled-back-to state is absent â†’ delete the file.
         // `content_sha256` must reference an existing `binary_blobs` row (FK); the
         // written bytes still qualify and are unused by a delete job.
         None => enqueue_delete_job(
@@ -659,7 +668,6 @@ fn enqueue_binary_rename_rollback_restore(
 
 /// Keep binary rollback materialization identities outside caller namespaces
 /// and bind them to the version whose disk state they compensate.
-#[doc(hidden)]
 pub fn binary_rollback_job_identity(
     workspace_id: &str,
     version_id: &str,
@@ -673,7 +681,6 @@ pub fn binary_rollback_job_identity(
 
 /// Derive the moment that records a text mutation rollback's compensating
 /// state. Callers use this identity to find only work owned by that rollback.
-#[doc(hidden)]
 pub fn rollback_compensating_moment_id(
     workspace_id: &str,
     version_id: &str,
@@ -691,7 +698,6 @@ pub fn rollback_compensating_moment_id(
 
 /// Recover the workspace, version, and mutation moment bound into a rollback
 /// materialization identity.
-#[doc(hidden)]
 pub fn decode_binary_rollback_job_identity(job_id: &str) -> Option<(&str, &str, &str)> {
     let encoded = job_id.strip_prefix("rollback-restore_\u{1f}")?;
     let (workspace_len, encoded) = encoded.split_once(':')?;

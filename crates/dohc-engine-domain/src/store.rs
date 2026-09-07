@@ -7,11 +7,10 @@
 //! the connection, open ritual, transaction boundary, and the crash-injection
 //! fault seam; the domain owns what a version/moment/fork/restore *means*.
 //!
-//! Validation (existence, name conflicts, duplicate moment ids) runs as reads
-//! before `BEGIN IMMEDIATE`. That is sound here precisely because of the
-//! single-writer invariant the runtime enforces (one writer thread per store):
-//! no concurrent writer can invalidate a check between the read and the
-//! transaction.
+//! Operations that prepare mutations through reads rely on one writer thread
+//! per store: no concurrent writer can invalidate those checks before
+//! `BEGIN IMMEDIATE`. Transaction entry points also validate within the
+//! caller's transaction. Callers own rollback when those entry points fail.
 
 mod binary_write;
 mod capture_write;
