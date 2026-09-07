@@ -1,5 +1,6 @@
 import { asRecord } from "@dohc/workspace-core";
-import { MAX_SHARE_ID_CHARS } from "./wireLimits";
+import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
+import { MAX_LOG_PAGE_SIZE, MAX_SHARE_ID_CHARS } from "./wireLimits";
 import { badRequest } from "./errors";
 
 export async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
@@ -113,4 +114,17 @@ export function parseWorkspaceId(value: unknown): string {
   // rather than strand it.
   if (workspaceId === "shares") throw badRequest("workspaceId is reserved");
   return workspaceId;
+}
+
+const DEFAULT_LOG_PAGE_SIZE = 100;
+
+export function parseLimit(value: string | null): number {
+  if (value === null || value === "") return DEFAULT_LOG_PAGE_SIZE;
+  const limit = Number(value);
+  if (!Number.isInteger(limit) || limit < 1) throw badRequest("limit must be a positive integer");
+  return Math.min(limit, MAX_LOG_PAGE_SIZE);
+}
+
+export function assertSha256(value: string): void {
+  if (!SHA256_HEX_PATTERN.test(value)) throw badRequest("sha256 must be 64 lowercase hex characters");
 }

@@ -3,12 +3,12 @@ import { randomUUID } from "node:crypto";
 import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
-import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import { stableJsonStringify } from "./canonicalJson";
 import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
 import { createDiscussionRoutes } from "./discussionRoutes";
 import { createShareReadQueries } from "./shareReadQueries";
+import { createLinkReadRoutes, type LinkReadRoute } from "./linkReadRoutes";
 import { createShareSummaries } from "./shareSummaries";
 import {
   hashLinkBearer,
@@ -32,10 +32,7 @@ import {
   validateLinkCapability,
   verifyRelayExchangeKey,
 } from "./linkSecurity";
-import {
-  DiscussionActivityCapacityError,
-  DiscussionActivityHub,
-} from "./discussionActivity";
+import { DiscussionActivityHub } from "./discussionActivity";
 import { PresenceHub } from "./presence";
 import { createPresenceRoutes } from "./presenceRoutes";
 import {
@@ -43,8 +40,8 @@ import {
   type ShareProposalRoute,
   type WorkspaceProposalRoute,
 } from "./proposalRoutes";
-import { cursorCodec, parseCursor, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
-import { filterOpForShareAppend, isChatChannelSelector, parseStoredAnyShareSelectorJson, targetVersionId, validateChatChannelShareSelector, validateChatShareAccess, validateFileShareAccess, validateShareSelector, type AnyShareSelector, type ChatShareThreadResolver, type ShareSelector, type ThreadFileBinding } from "./shareFilter";
+import { assertSha256, cursorCodec, parseCursor, parseLimit, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
+import { filterOpForShareAppend, isChatChannelSelector, parseStoredAnyShareSelectorJson, validateChatChannelShareSelector, validateChatShareAccess, validateFileShareAccess, validateShareSelector, type AnyShareSelector, type ChatShareThreadResolver, type ShareSelector, type ThreadFileBinding } from "./shareFilter";
 import { type EnforceWorkspaceIdentityResult, type SyncRelayLogInput, type SyncRelayIndependentGrantInventoryCursor, type SyncRelayLinkInventoryCursor, type SyncRelayShareGrantRow, type SyncRelayShareWithGrantRow, type SyncRelayStorage } from "./storage";
 import {
   authorizeShareAction,
@@ -55,9 +52,9 @@ import {
 } from "./shareAuthorization";
 import { PROPOSAL_ORIGIN_PREFIX } from "./shareProposals";
 import { badRequest, errorResponse, invalidLinkCapability, notFound, RELAY_ERRORS, relayError } from "./errors";
-import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_LOG_PAGE_SIZE, MAX_PAYLOAD_JSON_BYTES, MAX_SHARE_ID_CHARS } from "./wireLimits";
+import { MAX_BLOB_BYTES, MAX_LOG_PAGE_SIZE, MAX_PAYLOAD_JSON_BYTES, MAX_SHARE_ID_CHARS } from "./wireLimits";
 
-export { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
+export { MAX_BLOB_BYTES, MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 export { DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS } from "./discussionRoutes";
 export { LINK_FRESHNESS_PAGE_BUDGET, MAX_RAW_ROWS_PER_LINK_PAGE } from "./shareReadQueries";
 export { validateLinkCapability } from "./linkSecurity";
@@ -137,12 +134,9 @@ type SyncRelayRoute =
   | { route: "link-refresh" }
   | { route: "link-handoff" }
   | { route: "link-redeem" }
-  | { route: "link-share" }
-  | { route: "link-current" }
-  | { route: "link-log" }
+  | LinkReadRoute
   | { route: "link-discussion" }
   | { route: "link-discussion-activity" }
-  | { route: "link-blob"; sha256: string }
   | { route: "workspaces" }
   | { route: "blob"; workspaceId: string; sha256: string }
   | { route: "blob-have"; workspaceId: string }
@@ -172,20 +166,6 @@ type SyncRelayRoute =
   | { route: "presence"; workspaceId: string }
   | { route: "share-presence"; shareId: string };
 
-// Transport cap. The relay never parses content, so it cannot tell a captured
-// file from a document body from a Y.Doc payload; it carries the widest engine
-// ceiling and lets the Rust sync-apply path enforce the real one by referenced
-// kind on hydrate. A blob a peer smuggles under this cap but over its kind's
-// ceiling is rejected client-side as a protocol violation.
-//
-// The widest is now the Y.Doc payload bound, not the 10 MiB document body:
-// #549 measured a rich document at MAX_TEXT_BYTES encoding to 14.06 MiB of
-// Y.Doc full state, so MAX_YDOC_UPDATE_BYTES is 20 MiB. Under that number a
-// document the engine accepts would be refused 413 here, and the base it needs
-// could never reach a peer. Keep this at or above the engine's
-// MAX_INGEST_BLOB_BYTES (crates/dohc-engine-sync/src/hydration.rs); no test
-// compares the two, so check both when widening either.
-export const MAX_BLOB_BYTES = 20 * 1024 * 1024;
 export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 // One PAGE of the continuous replication lane, for the two log routes. It is
 // not the submit bound: a submit is one user act carrying one intent, and it
@@ -193,7 +173,6 @@ export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 // page should hold. Raising this one would only lengthen each replication
 // stall.
 export const MAX_OPS_PER_REQUEST = 500;
-const DEFAULT_LOG_PAGE_SIZE = 100;
 const MAX_LINK_CURRENT_FILES = 5_000;
 const MAX_ORIGIN_ID_CHARS = 256;
 const MAX_OP_KIND_CHARS = 128;
@@ -512,6 +491,25 @@ export function createSyncRelayHandler({
     linkGrantReadRateLimiter,
   );
 
+  const respondToLinkRead = createLinkReadRoutes(
+    storage,
+    nowMs,
+    linkCurrentFileLimit,
+    requireLinkRead,
+    requireFreshLinkRead,
+    linkJsonResponse,
+    filteredLogPage,
+    newestFilteredOpFreshness,
+    linkReadRateLimiter,
+    linkGrantReadRateLimiter,
+    linkLogReadRateLimiter,
+    linkGrantLogReadRateLimiter,
+    linkGrantEgressRateLimiter,
+    discussionActivity,
+    admitLinkBlobBytes,
+    respondWithLinkBytes,
+  );
+
   return async (request) => {
     try {
       const route = parseRoute(request);
@@ -553,250 +551,7 @@ export function createSyncRelayHandler({
         route.route === "link-log" ||
         route.route === "link-blob"
       ) {
-        const capabilityRateLimiter =
-          route.route === "link-log" ? linkLogReadRateLimiter : linkReadRateLimiter;
-        const grantRateLimiter =
-          route.route === "link-log"
-            ? linkGrantLogReadRateLimiter
-            : linkGrantReadRateLimiter;
-        const { capabilityToken, capability } = requireLinkRead(
-          request,
-          capabilityRateLimiter,
-          grantRateLimiter,
-        );
-        if (request.method !== "GET") throw relayError("method_not_allowed");
-        const share = storage.getShare(capability.shareId);
-        if (!share) throw notFound();
-
-        if (route.route === "link-share") {
-          const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
-          const freshness = newestFilteredOpFreshness(
-            share.workspaceId,
-            capability.effectiveSelector,
-            epochLogFloor,
-          );
-          const fresh = requireFreshLinkRead(capabilityToken, capability);
-          const presentation = createAccountlessPathProjection(
-            fresh.effectiveSelector,
-          );
-          return linkJsonResponse(fresh.shareId, fresh.grantId, {
-            ok: true,
-            effectiveSelector: presentation.selector,
-            access: fresh.access,
-            ...freshness,
-          });
-        }
-
-        if (route.route === "link-current") {
-          const snapshot = storage.readCurrentFileState({
-            workspaceId: share.workspaceId,
-            versionId: targetVersionId(capability.effectiveSelector),
-            selectorPaths: capability.effectiveSelector.paths,
-            limit: linkCurrentFileLimit,
-          });
-          if (snapshot.tooMany) throw notFound();
-          const freshness = newestFilteredOpFreshness(
-            share.workspaceId,
-            capability.effectiveSelector,
-            snapshot.epochLogFloor,
-          );
-          const fresh = requireFreshLinkRead(capabilityToken, capability);
-          const presentation = createAccountlessPathProjection(
-            fresh.effectiveSelector,
-          );
-          const files = snapshot.files.map((file) => {
-            const path = presentation.projectPath(file.path);
-            if (path === null) throw notFound();
-            return {
-              path,
-              blobSha256: file.blobSha256,
-              contentKind: file.contentKind,
-            };
-          });
-          return linkJsonResponse(fresh.shareId, fresh.grantId, {
-            ok: true,
-            effectiveSelector: presentation.selector,
-            access: fresh.access,
-            files,
-            nextCursor: snapshot.nextCursor,
-            epochLogFloor: snapshot.epochLogFloor,
-            ...freshness,
-          });
-        }
-
-        const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
-        if (route.route === "link-log") {
-          const url = new URL(request.url);
-          const requestedSince = parseCursor(url.searchParams.get("since"));
-          const since = Math.max(requestedSince, epochLogFloor);
-          const limit = parseLimit(url.searchParams.get("limit"));
-          const hold = parseLinkLogHold(url.searchParams.get("hold"));
-          let page = filteredLogPage(
-            share.workspaceId,
-            capability.effectiveSelector,
-            since,
-            limit,
-            "accountless",
-          );
-          if (
-            hold > 0 &&
-            page.ops.length === 0 &&
-            page.hasMore === false &&
-            page.nextCursor === since
-          ) {
-            const deadlineAtMs = Date.now() + hold;
-            let scanSince = since;
-            for (;;) {
-              requireFreshLinkRead(capabilityToken, capability);
-              const remainingHoldMs = Math.max(0, deadlineAtMs - Date.now());
-              if (remainingHoldMs === 0) break;
-              try {
-                await discussionActivity.wait(
-                  `log:${share.workspaceId}`,
-                  `link:${capability.session.capabilityHash}`,
-                  {
-                    holdMs: remainingHoldMs,
-                    signal: request.signal,
-                    shouldPark: () => {
-                      try {
-                        const fresh = requireFreshLinkRead(
-                          capabilityToken,
-                          capability,
-                        );
-                        const currentEpochLogFloor = storage.getEpochLogFloor(
-                          share.workspaceId,
-                        );
-                        if (currentEpochLogFloor !== epochLogFloor) return false;
-                        const checked = filteredLogPage(
-                          share.workspaceId,
-                          fresh.effectiveSelector,
-                          scanSince,
-                          limit,
-                          "accountless",
-                        );
-                        if (checked.ops.length > 0 || checked.hasMore) return false;
-                        scanSince = checked.nextCursor;
-                        return true;
-                      } catch {
-                        return false;
-                      }
-                    },
-                  },
-                );
-              } catch (error) {
-                if (error instanceof DiscussionActivityCapacityError) {
-                  throw relayError("link_read_rate_limited");
-                }
-                throw error;
-              }
-
-              const fresh = requireFreshLinkRead(capabilityToken, capability);
-              const currentEpochLogFloor = storage.getEpochLogFloor(
-                share.workspaceId,
-              );
-              page = filteredLogPage(
-                share.workspaceId,
-                fresh.effectiveSelector,
-                Math.max(scanSince, currentEpochLogFloor),
-                limit,
-                "accountless",
-              );
-              scanSince = page.nextCursor;
-              if (
-                page.ops.length > 0 ||
-                page.hasMore ||
-                currentEpochLogFloor !== epochLogFloor ||
-                Date.now() >= deadlineAtMs ||
-                request.signal.aborted
-              ) {
-                requireFreshLinkRead(capabilityToken, capability);
-                return linkJsonResponse(capability.shareId, capability.grantId, {
-                  ok: true,
-                  ...page,
-                  epochLogFloor: currentEpochLogFloor,
-                });
-              }
-            }
-            const fresh = requireFreshLinkRead(capabilityToken, capability);
-            const currentEpochLogFloor = storage.getEpochLogFloor(
-              share.workspaceId,
-            );
-            page = filteredLogPage(
-              share.workspaceId,
-              fresh.effectiveSelector,
-              Math.max(scanSince, currentEpochLogFloor),
-              limit,
-              "accountless",
-            );
-            requireFreshLinkRead(capabilityToken, capability);
-            return linkJsonResponse(capability.shareId, capability.grantId, {
-              ok: true,
-              ...page,
-              epochLogFloor: currentEpochLogFloor,
-            });
-          }
-          requireFreshLinkRead(capabilityToken, capability);
-          return linkJsonResponse(capability.shareId, capability.grantId, {
-            ok: true,
-            ...page,
-            epochLogFloor,
-          });
-        }
-
-        assertSha256(route.sha256);
-        const byteLength = storage.currentFileBlobByteLength({
-          workspaceId: share.workspaceId,
-          versionId: targetVersionId(capability.effectiveSelector),
-          selectorPaths: capability.effectiveSelector.paths,
-          sha256: route.sha256,
-          epochLogFloor,
-        });
-        if (
-          byteLength === null ||
-          !Number.isSafeInteger(byteLength) ||
-          byteLength < 0 ||
-          byteLength > MAX_BLOB_BYTES
-        ) {
-          throw notFound();
-        }
-        const releaseBytes = admitLinkBlobBytes(
-          capability.grantId,
-          byteLength,
-        );
-        if (!releaseBytes) throw relayError("link_read_rate_limited");
-        const settleEgress = linkGrantEgressRateLimiter.reserve(
-          capability.grantId,
-          byteLength,
-          nowMs(),
-        );
-        if (!settleEgress) {
-          releaseBytes();
-          throw relayError("link_read_rate_limited");
-        }
-        let streamOwnsAdmission = false;
-        try {
-          const blob = storage.getBlob(share.workspaceId, route.sha256);
-          if (!blob || blob.byteLength !== byteLength) throw notFound();
-          requireFreshLinkRead(capabilityToken, capability);
-          const response = respondWithLinkBytes(
-            blob,
-            capability.shareId,
-            capability.grantId,
-            releaseBytes,
-            settleEgress,
-            {
-              "content-length": String(byteLength),
-              "content-type": "application/octet-stream",
-            },
-          );
-          streamOwnsAdmission = true;
-          return response;
-        } finally {
-          if (!streamOwnsAdmission) {
-            releaseBytes();
-            settleEgress(0, nowMs());
-          }
-        }
+        return await respondToLinkRead(request, route);
       }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
       if (
@@ -2559,35 +2314,6 @@ function assertChatAuthorship(
       throw relayError("authorship_mismatch");
     }
   }
-}
-
-function parseLimit(value: string | null): number {
-  if (value === null || value === "") return DEFAULT_LOG_PAGE_SIZE;
-  const limit = Number(value);
-  if (!Number.isInteger(limit) || limit < 1) throw badRequest("limit must be a positive integer");
-  return Math.min(limit, MAX_LOG_PAGE_SIZE);
-}
-
-function parseLinkLogHold(value: string | null): number {
-  if (value === null) return 0;
-  if (!/^(?:0|[1-9]\d*)$/u.test(value)) {
-    throw badRequest("hold must be a non-negative integer");
-  }
-  const hold = Number(value);
-  if (
-    !Number.isSafeInteger(hold) ||
-    hold < 0 ||
-    hold > MAX_DISCUSSION_ACTIVITY_HOLD_MS
-  ) {
-    throw badRequest(
-      `hold must be a non-negative integer no greater than ${String(MAX_DISCUSSION_ACTIVITY_HOLD_MS)}`,
-    );
-  }
-  return hold;
-}
-
-function assertSha256(value: string): void {
-  if (!SHA256_HEX_PATTERN.test(value)) throw badRequest("sha256 must be 64 lowercase hex characters");
 }
 
 // If-Match for PUT /keys: absent means create-only; otherwise a (optionally
