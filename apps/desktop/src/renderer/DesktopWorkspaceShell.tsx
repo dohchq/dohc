@@ -37,7 +37,6 @@ import type {
   MyShareChangeRow,
   RefreshSharedViewResult,
   RebuildEngineStoreResult,
-  AgentRunStatusResult,
   ShareHandoffStatus,
   ShareProposalRow,
   SyncStatusResult,
@@ -63,6 +62,7 @@ import {
   hasUnacknowledgedShareSkips,
   shareSkipNoticeLines,
 } from "./shareSkipNotice";
+import { useAgentSetup } from "./shell/useAgentSetup";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import { useTabTitles } from "./shell/useTabTitles";
 import type { SearchResultsEventEntry } from "../ipc/bridgeContract";
@@ -170,7 +170,6 @@ import {
 } from "./workbench/TryInVersion";
 // Type-only: erased at compile time, so the ChatsView chunk stays lazy.
 import type {
-  AgentSetupSummary,
   ChatsDrafts,
   ChatsNav,
 } from "./workbench/ChatsView";
@@ -891,9 +890,6 @@ export function DesktopWorkspaceShell(props: {
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
-  const [agentRunStatus, setAgentRunStatus] = useState<AgentRunStatusResult | null>(null);
-  const agentSetupRequestRef = useRef(0);
-  const bootstrapAgentStatusRead = useRef<Promise<AgentRunStatusResult> | null>(null);
   // Relay-share dialog target: paths, or a version.
   const [shareTarget, setShareTarget] = useState<RelayShareTarget | null>(null);
   const [openShareOpen, setOpenShareOpen] = useState(false);
@@ -969,56 +965,11 @@ export function DesktopWorkspaceShell(props: {
   );
   const closeSettings = useCallback(() => setSettingsSection(null), []);
 
-  const agentSetup = useMemo<AgentSetupSummary | null>(() => {
-    if (!props.userSettings || !agentRunStatus) return null;
-    return {
-      preferredName: props.userSettings.settings.profile.preferredName,
-      runnerConfigured:
-        props.userSettings.settings.runner.command.trim().length > 0,
-      runnerEnabled: props.userSettings.settings.runner.enabled,
-      mcpEnabled: agentRunStatus.mcpEnabled,
-    };
-  }, [agentRunStatus, props.userSettings]);
-
-  // The workspace-scoped half of the setup snapshot is also the initial
-  // history lane's agent-status answer. Both consumers share this promise.
-  useEffect(() => {
-    const version = agentSetupRequestRef.current + 1;
-    agentSetupRequestRef.current = version;
-    setAgentRunStatus(null);
-    const read = bridge().getAgentRunStatus({
-      workspaceId: props.workspace.workspaceId,
-    });
-    bootstrapAgentStatusRead.current = read;
-    void read
-      .then((run) => {
-        if (agentSetupRequestRef.current !== version) return;
-        setAgentRunStatus(run);
-      })
-      .catch(() => {
-        if (agentSetupRequestRef.current === version) setAgentRunStatus(null);
-      });
-    return () => {
-      if (agentSetupRequestRef.current === version) agentSetupRequestRef.current += 1;
-    };
-  }, [props.workspace.workspaceId]);
-
-  const previousSettingsSection = useRef<SettingsSectionId | null>(null);
-  useEffect(() => {
-    const wasOpen = previousSettingsSection.current !== null;
-    previousSettingsSection.current = settingsSection;
-    if (!wasOpen || settingsSection !== null) return;
-    const version = agentSetupRequestRef.current + 1;
-    agentSetupRequestRef.current = version;
-    void bridge()
-      .getAgentRunStatus({ workspaceId: props.workspace.workspaceId })
-      .then((run) => {
-        if (agentSetupRequestRef.current === version) setAgentRunStatus(run);
-      })
-      .catch(() => {
-        if (agentSetupRequestRef.current === version) setAgentRunStatus(null);
-      });
-  }, [props.workspace.workspaceId, settingsSection]);
+  const { agentSetup, readAgentStatusForHistory } = useAgentSetup(
+    props.workspace.workspaceId,
+    props.userSettings,
+    settingsSection,
+  );
 
   // An Explorer operation retains every closure that is current while its
   // disk mutation is active. This keeps late drafts tied to the editor that
@@ -2232,14 +2183,6 @@ export function DesktopWorkspaceShell(props: {
         ),
     );
   }, [agentActiveLane, reportLaneFailure, workspaceId]);
-  const readAgentStatusForHistory = useCallback(() => {
-    const bootstrapRead = bootstrapAgentStatusRead.current;
-    if (bootstrapRead) {
-      bootstrapAgentStatusRead.current = null;
-      return bootstrapRead;
-    }
-    return bridge().getAgentRunStatus({ workspaceId });
-  }, [workspaceId]);
   const onSettingsAgentActiveChange = useCallback(
     ({ active, mutated }: { active: boolean; mutated: boolean }) => {
       if (!mutated) {
