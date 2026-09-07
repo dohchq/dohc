@@ -4007,7 +4007,7 @@ async function showOrCreateMainWindow(): Promise<BrowserWindow> {
 
 const desktopEngine = createDesktopEngine({
   app, dialog, process, createRustEngineDaemon, defaultEngineBinaryPath,
-  isQuitting: () => appLifecycle.isQuitting(),
+  isQuitting: (): boolean => appLifecycle.isQuitting(),
   workspaceAuthorities, pluginWorkspaceRuntimes, notifyRenderer,
   notifyAutomationFailuresChanged, launchMarks, desktopMarks, logLaunchMarksOnce,
 });
