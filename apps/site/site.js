@@ -869,8 +869,8 @@ if (agentDemo) {
 const syncDemo = document.querySelector('[data-sync-demo]');
 if (syncDemo) createSyncDemo(syncDemo);
 
-// Two readers: the agent's side is a file tree, yours is the window that
-// renders whatever file is picked. Same folder, no second copy.
+// Two readers: files and read-only projections on the agent's side,
+// rendered documents and chat on yours.
 const readers = document.querySelector('[data-readers]');
 
 if (readers) {
@@ -895,7 +895,7 @@ if (readers) {
     chat: {
       name: '#launch',
       view: `<div class="reader-msg">${WHO('S')}<span><b>Sam</b> sandbox is on track for the 19th, so the 24th is fine by me.</span></div><div class="reader-msg">${WHO('M')}<span><b>Maya</b> <span class="chat-mention">@My Agent</span> can you add the three gates as tasks?</span></div><div class="reader-msg">${AGENT_WHO}<span><b>My Agent</b> done. three tasks in tasks/, due the 21st.</span></div>`,
-      foot: 'Chat is a file in the workspace too. An @ lands in your agent\'s inbox; its reply lands in the room.',
+      foot: 'Chat is available as a read-only Markdown projection. Your agent replies through dohc\'s chat tools.',
     },
     app: {
       name: 'Split',
