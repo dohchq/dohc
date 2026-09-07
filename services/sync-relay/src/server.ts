@@ -95,10 +95,11 @@ export interface CreateSyncRelayHandlerOptions {
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
   nowMs?: () => number;
-  // Share-grant recipient lookup: maps an email to the relay account id, or
-  // null when no account matches. Absent means email-addressed grants are
-  // unavailable (grants by user id still work).
+  // Maps a verified email to its account id. An unknown or unverified address returns null.
+  // Absent means email-addressed grants are unavailable; grants by user id still work.
   resolveUserIdByEmail?: (email: string) => Promise<string | null> | string | null;
+  // Returns an address only when the account has verified it server-side.
+  lookupVerifiedUserEmail?: (userId: string) => Promise<string | null> | string | null;
   // Display-only reverse lookup for share listings; never used for authz.
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
   // Better Auth display name for discussion authorship; never used for authz.
@@ -364,6 +365,7 @@ export function createSyncRelayHandler({
   resolveActor,
   nowMs = () => Date.now(),
   resolveUserIdByEmail,
+  lookupVerifiedUserEmail,
   lookupUserEmail,
   lookupUserDisplayName,
   newShareId = () => randomUUID(),
@@ -403,7 +405,16 @@ export function createSyncRelayHandler({
     throw new TypeError("Named browser sessions require configured viewer origin and relay exchange.");
   }
   const namedBrowser = namedBrowserSessionLimits ? createNamedLiveBrowserHttp({
-    storage, resolveActor, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, now: nowMs,
+    storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, now: nowMs,
+    resolveActor: async (request, workspaceId) => {
+      request.signal.throwIfAborted();
+      const actor = await resolveActor(request, workspaceId);
+      request.signal.throwIfAborted();
+      if (actor.workspaceId !== workspaceId) return actor;
+      await claimPendingShares(actor.userId, request.signal);
+      request.signal.throwIfAborted();
+      return actor;
+    },
   }) : undefined;
   const relayExchangeKeyHash =
     relayExchangeKey === undefined ? undefined : hashRelayExchangeKey(relayExchangeKey);
@@ -702,14 +713,12 @@ export function createSyncRelayHandler({
     };
   };
 
-  // Lazy claim of pending email invites: the first time an
-  // invited account authenticates to the relay, any share addressed to its
-  // email becomes a real grant (recipient_user_id filled in). The session
-  // email is server-derived (never client-supplied), so this cannot be used
-  // to claim someone else's invite.
-  const claimPendingShares = async (userId: string): Promise<void> => {
-    if (!lookupUserEmail) return;
-    const email = await lookupUserEmail(userId);
+  // Claim email invites only after the authenticated account verifies its address.
+  const claimPendingShares = async (userId: string, signal?: AbortSignal): Promise<void> => {
+    signal?.throwIfAborted();
+    if (!lookupVerifiedUserEmail) return;
+    const email = await lookupVerifiedUserEmail(userId);
+    signal?.throwIfAborted();
     if (email) storage.claimPendingSharesForEmail(email, userId);
   };
 
@@ -3980,9 +3989,9 @@ export function createSyncRelayHandler({
 
         // Sharing by email. To close the account-enumeration oracle, the
         // response is identical whether or not the email has a dohc account:
-        // a known account becomes an immediate recipient, an unknown email
-        // becomes a pending invite (claimed when that account first touches
-        // the relay). Either way the response never echoes a recipient user
+        // a verified account becomes an immediate recipient. Other addresses
+        // become pending invites, claimed on a relay request after verification.
+        // Either way the response never echoes a recipient user
         // id, so the granter cannot distinguish "has an account" from "does
         // not" by inspecting the reply.
         const email = parseString(input.recipientEmail, "recipientEmail", MAX_EMAIL_CHARS);

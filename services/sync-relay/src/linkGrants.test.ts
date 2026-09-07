@@ -117,6 +117,7 @@ function handler(storage: SyncRelayStorage, overrides: HandlerOverrides = {}): S
     newShareId: () => "share-existing",
     resolveUserIdByEmail: () => null,
     lookupUserEmail: undefined,
+    lookupVerifiedUserEmail: undefined,
     ...overrides,
   });
 }

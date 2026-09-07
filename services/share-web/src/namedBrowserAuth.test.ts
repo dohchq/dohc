@@ -10,6 +10,7 @@ import { createShareWebApplication } from "./server";
 import { createNamedLiveBrowserResolver } from "../../sync-relay/src/namedLiveBrowserAuth";
 import { createNamedLiveBrowserSessions } from "../../sync-relay/src/namedLiveBrowserSessions";
 import { createSyncRelayHandler } from "../../sync-relay/src/server";
+import { createVerifiedEmailLookups } from "../../sync-relay/src/verifiedEmailLookups";
 import { serveFetchHandler } from "@dohc/service-http";
 import { request as requestHttp, type Server } from "node:http";
 import { closeTestStorages, testStorage } from "../../sync-relay/src/testing";
@@ -35,6 +36,7 @@ let admin: Client;
 let schemaCreated = false;
 let auth: WorkspaceAuth;
 let relayAuth: WorkspaceAuth;
+const verificationLinks = new Map<string, string>();
 
 describe.skipIf(!available)("named browser production auth lifecycle", () => {
   beforeAll(async () => {
@@ -46,7 +48,7 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
     await pool.query(await readFile(new URL("../../../packages/workspace-postgres/src/db/migrations/0001_better_auth.sql", import.meta.url), "utf8"));
     const options = {
       pool, baseURL: authOrigin, secret: "browser-auth-test-secret-at-least-32-characters",
-      trustedOrigins: [origin], sendEmail: async () => {},
+      trustedOrigins: [origin], sendEmail: async (to: string, _subject: string, body: string) => { verificationLinks.set(to, body); },
     };
     auth = createWorkspaceAuth(options);
     relayAuth = createWorkspaceAuth(options);
@@ -192,16 +194,19 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
 
   it("bootstraps named sessions through real share-web and relay HTTP with account cookies and durable grants", async () => {
     const storage = await testStorage();
-    storage.claimWorkspace({ workspaceId: "route-workspace", ownerUserId: "route-owner", createdAtMs: 1 });
+    const owner = await auth.api.signUpEmail({ body: { email: "route-owner@example.test", password, name: "Owner" } });
+    storage.claimWorkspace({ workspaceId: "route-workspace", ownerUserId: owner.user.id, createdAtMs: 1 });
     const users = await Promise.all(["alice", "bob"].map(name => auth.api.signUpEmail({
       body: { email: `route-${name}@example.test`, password, name },
     })));
     for (const [index, result] of users.entries()) storage.createShare({
-      share: { shareId: `route-share-${index}`, workspaceId: "route-workspace", granterUserId: "route-owner",
+      share: { shareId: `route-share-${index}`, workspaceId: "route-workspace", granterUserId: owner.user.id,
         selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }), createdAtMs: 1 },
       grant: { grantId: `route-grant-${index}`, shareId: `route-share-${index}`, principalKind: "user", principalUserId: result.user.id,
         principalEmail: null, access: "edit", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null },
     });
+    const verifiedEmails = createVerifiedEmailLookups(pool);
+    const resolveActor = vi.fn(createSessionActorResolver(relayAuth));
     const servers: Server[] = [];
     const limits = { maxRequestBytes: 2048, maxResponseBytes: 4152, maxPendingRequests: 4, timeoutMs: 10000 };
     const exchangeKey = "real-named-bootstrap-exchange-key-at-least-32";
@@ -216,7 +221,7 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
     }
     try {
       const authUrl = await listen(request => auth.handler(request));
-      const relayUrl = await listen(createSyncRelayHandler({ storage, resolveActor: createSessionActorResolver(relayAuth),
+      const relayUrl = await listen(createSyncRelayHandler({ storage, resolveActor, ...verifiedEmails,
         relayExchangeKey: exchangeKey, shareWebOrigin: origin,
         namedBrowserSessionLimits: { ...limits, maxSessions: 4, retentionMs: 60000 } }));
       const web = createShareWebApplication({ relayUrl, publicRelayUrl: "https://relay.example.test", relayExchangeKey: exchangeKey,
@@ -252,6 +257,54 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
         browserCookies.push(line!.split(";", 1)[0]!);
         await signed.body?.cancel();
       }
+      const ownerSignIn = await post("/api/account/sign-in", { email: "route-owner@example.test", password });
+      expect(ownerSignIn.status).toBe(200);
+      const ownerCookie = ownerSignIn.headers.getSetCookie().find(value => value.startsWith(`${getCookies({ baseURL: origin }).sessionToken.name}=`))!.split(";", 1)[0]!;
+      await ownerSignIn.body?.cancel();
+      const createInvite = async (recipient: { recipientEmail: string } | { recipientUserId: string }) => {
+        const response = await fetch(`${relayUrl}/sync/route-workspace/shares`, { method: "POST",
+          headers: { cookie: ownerCookie, "content-type": "application/json" },
+          body: JSON.stringify({ ...recipient, paths: ["docs"], access: "edit" }) });
+        expect(response.status).toBe(200);
+        return response.json() as Promise<{ shareId: string; grantId: string }>;
+      };
+      const verifyEmail = async (email: string) => {
+        const url = verificationLinks.get(email);
+        expect(url).toBeDefined();
+        const response = await auth.handler(new Request(url!));
+        expect(response.status).toBe(302);
+        expect(response.headers.get("location")).toBe(new URL(url!).searchParams.get("callbackURL"));
+        await response.body?.cancel();
+      };
+      // Sign-up issues a real session before mailbox verification. The production lookups must still refuse its address.
+      expect(users[0]!.user.emailVerified).toBe(false);
+      expect(await verifiedEmails.resolveUserIdByEmail("route-alice@example.test")).toBeNull();
+      expect(await verifiedEmails.lookupVerifiedUserEmail(users[0]!.user.id)).toBeNull();
+      const pendingInvite = await createInvite({ recipientEmail: "route-alice@example.test" });
+      expect(storage.getShareGrant(pendingInvite.grantId)).toMatchObject({ principalKind: "email", principalUserId: null, principalEmail: "route-alice@example.test" });
+      await verifyEmail("route-bob@example.test");
+      for (const cookie of browserCookies) {
+        const refused = await post("/api/live/named-session", { grantId: pendingInvite.grantId }, cookie);
+        expect(refused.status).toBe(404); await refused.body?.cancel();
+      }
+      // Another recipient route must not convert the unverified account's pending invite first.
+      const recipientList = await fetch(`${relayUrl}/sync/shares`, { headers: { cookie: browserCookies[0]! } });
+      expect(recipientList.status).toBe(200); await recipientList.body?.cancel();
+      expect(storage.getShareGrant(pendingInvite.grantId)).toMatchObject({ principalKind: "email", principalUserId: null });
+      const directInvite = await createInvite({ recipientUserId: users[0]!.user.id });
+      expect(storage.getShareGrant(directInvite.grantId)).toMatchObject({ principalKind: "user", principalUserId: users[0]!.user.id });
+      const directBootstrap = await post("/api/live/named-session", { grantId: directInvite.grantId }, browserCookies[0]);
+      expect(directBootstrap.status).toBe(200); await directBootstrap.body?.cancel();
+      await verifyEmail("route-alice@example.test");
+      expect(await verifiedEmails.resolveUserIdByEmail("ROUTE-ALICE@example.test")).toBe(users[0]!.user.id);
+      expect(await verifiedEmails.lookupVerifiedUserEmail(users[0]!.user.id)).toBe("route-alice@example.test");
+      const authCallsBeforeClaim = resolveActor.mock.calls.length;
+      const claimed = await post("/api/live/named-session", { grantId: pendingInvite.grantId }, browserCookies[0]);
+      expect(claimed.status).toBe(200); await claimed.body?.cancel();
+      expect(resolveActor.mock.calls.length - authCallsBeforeClaim).toBe(1);
+      expect(storage.getShareGrant(pendingInvite.grantId)).toMatchObject({ principalKind: "user", principalUserId: users[0]!.user.id, principalEmail: null });
+      const verifiedInvite = await createInvite({ recipientEmail: "route-alice@example.test" });
+      expect(storage.getShareGrant(verifiedInvite.grantId)).toMatchObject({ principalKind: "user", principalUserId: users[0]!.user.id });
       // The public sign-in has no rememberMe input. Preserve an existing signed preference from account auth.
       const temporarySignIn = await auth.handler(new Request(`${authOrigin}/api/auth/sign-in/email`, {
         method: "POST", headers: { origin, "content-type": "application/json" },

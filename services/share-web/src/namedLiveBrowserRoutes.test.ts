@@ -19,7 +19,10 @@ function request(body: unknown = { grantId: "alice-grant" }, user = "alice", cha
     headers: { host: "share.example.test", origin, "content-type": "application/json", cookie: cookie(user) }, ...changes });
 }
 
-async function fixture(resolve?: ResolveActor, options: { maxSessions?: number; timeoutMs?: number } = {}, access = "edit") {
+async function fixture(resolve?: ResolveActor, options: { maxSessions?: number; maxPendingRequests?: number; timeoutMs?: number } = {}, access = "edit", lookups: {
+  lookupVerifiedUserEmail?: (userId: string) => Promise<string | null> | string | null;
+  lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
+} = {}) {
   const storage = await testStorage();
   storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1 });
   for (const user of ["alice", "bob"]) storage.createShare({
@@ -34,7 +37,7 @@ async function fixture(resolve?: ResolveActor, options: { maxSessions?: number; 
     if (!userId) throw new UnauthorizedError();
     return { userId, workspaceId };
   }));
-  const relayOptions = { storage, resolveActor, shareWebOrigin: origin, relayExchangeKey: exchangeKey,
+  const relayOptions = { storage, resolveActor, ...lookups, shareWebOrigin: origin, relayExchangeKey: exchangeKey,
     namedBrowserSessionLimits: { ...relayLimits, ...options } };
   let relay = createSyncRelayHandler(relayOptions);
   const forwarded: Request[] = [];
@@ -49,6 +52,67 @@ async function fixture(resolve?: ResolveActor, options: { maxSessions?: number; 
 afterEach(async () => { vi.useRealTimers(); await closeTestStorages(); });
 
 describe("named browser HTTP bootstrap and private resolution", () => {
+  function seedPendingInvite(storage: Awaited<ReturnType<typeof fixture>>["storage"]) {
+    storage.createShare({
+      share: { shareId: "pending-share", workspaceId: "workspace", granterUserId: "owner",
+        selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }), createdAtMs: 1 },
+      grant: { grantId: "pending-grant", shareId: "pending-share", principalKind: "email", principalUserId: null,
+        principalEmail: "invited@example.test", access: "edit", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null },
+    });
+  }
+
+  it.each([
+    { label: "verified invited account", user: "alice", verifiedEmail: "invited@example.test", status: 200 },
+    { label: "wrong verified account", user: "bob", verifiedEmail: "bob@example.test", status: 404 },
+    { label: "unverified invited account", user: "alice", verifiedEmail: null, status: 404 },
+  ])("claims pending email invites only for the $label", async ({ user, verifiedEmail, status }) => {
+    const lookupVerifiedUserEmail = vi.fn(() => verifiedEmail);
+    const f = await fixture(undefined, {}, "edit", { lookupVerifiedUserEmail, lookupUserEmail: () => "invited@example.test" });
+    seedPendingInvite(f.storage);
+    const response = await f.web.handle(request({ grantId: "pending-grant" }, user));
+    expect(response.status).toBe(status);
+    expect(f.resolveActor).toHaveBeenCalledTimes(1);
+    expect(lookupVerifiedUserEmail).toHaveBeenCalledExactlyOnceWith(user);
+    if (status === 200) {
+      const { discriminator } = await response.json() as { discriminator: string };
+      expect(f.storage.getShareGrant("pending-grant")).toMatchObject({ principalKind: "user", principalUserId: "alice", principalEmail: null });
+      expect(await f.web.resolveNamedBrowserSession(request(), discriminator)).toEqual({ userId: "alice", workspaceId: "workspace", shareId: "pending-share", grantId: "pending-grant" });
+    } else {
+      expect(f.storage.getShareGrant("pending-grant")).toMatchObject({ principalKind: "email", principalUserId: null });
+      expect((await f.relay(new Request("http://relay.invalid/sync/shares", { headers: { cookie: cookie(user) } }))).status).toBe(200);
+      expect(f.storage.getShareGrant("pending-grant")).toMatchObject({ principalKind: "email", principalUserId: null });
+      expect((await f.web.handle(request({ grantId: "pending-grant" }, user))).status).toBe(404);
+    }
+  });
+
+  it("does not claim a pending email invite for a mismatched workspace", async () => {
+    const lookupVerifiedUserEmail = vi.fn(() => "invited@example.test");
+    const f = await fixture(() => ({ userId: "alice", workspaceId: "other" }), {}, "edit", { lookupVerifiedUserEmail });
+    seedPendingInvite(f.storage);
+    expect((await f.web.handle(request({ grantId: "pending-grant" }))).status).toBe(404);
+    expect(lookupVerifiedUserEmail).not.toHaveBeenCalled();
+    expect(f.storage.getShareGrant("pending-grant")).toMatchObject({ principalKind: "email", principalUserId: null });
+  });
+
+  it("keeps a cancelled pending email lookup in its slot and never claims its invite", async () => {
+    let enter!: () => void, release!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const f = await fixture(undefined, { maxPendingRequests: 1 }, "edit", { lookupVerifiedUserEmail: async userId => {
+      if (userId !== "alice") return "bob@example.test";
+      enter(); await blocked; return "invited@example.test";
+    } });
+    seedPendingInvite(f.storage);
+    const controller = new AbortController();
+    const pending = f.web.handle(request({ grantId: "pending-grant" }, "alice", { signal: controller.signal }));
+    await entered; controller.abort();
+    expect((await pending).status).toBe(404);
+    expect((await f.web.handle(request({ grantId: "bob-grant" }, "bob"))).status).toBe(404);
+    release();
+    await vi.waitFor(async () => expect((await f.web.handle(request({ grantId: "bob-grant" }, "bob"))).status).toBe(200));
+    expect(f.storage.getShareGrant("pending-grant")).toMatchObject({ principalKind: "email", principalUserId: null });
+  });
+
   it("ignores valueless cookie suffixes and preserves only recognized account cookies", async () => {
     const f = await fixture(incoming => {
       expect(incoming.headers.get("cookie")).toBe(`${cookie("alice")}; ${preferenceCookieName}=signed-preference`);

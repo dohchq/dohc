@@ -10,6 +10,7 @@ import {
   serveFetchHandler,
 } from "@dohc/service-http";
 import { Pool } from "pg";
+import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
 import { errorBody } from "./errors";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
@@ -157,6 +158,7 @@ let pool: Pool | undefined;
 const TEST_EMAIL_SUFFIX = "@dohc.test";
 let resolveUserIdByEmail: (email: string) => Promise<string | null> | string | null;
 let lookupUserEmail: (userId: string) => Promise<string | null> | string | null;
+let lookupVerifiedUserEmail: (userId: string) => Promise<string | null> | string | null;
 let lookupUserDisplayName: (
   userId: string,
 ) => Promise<string | null> | string | null;
@@ -196,16 +198,11 @@ if (testAuthSeam) {
       ? email.slice(0, -TEST_EMAIL_SUFFIX.length)
       : null;
   lookupUserEmail = (userId) => `${userId}${TEST_EMAIL_SUFFIX}`;
+  lookupVerifiedUserEmail = lookupUserEmail;
   lookupUserDisplayName = (userId) => userId;
 } else {
   // Better Auth's canonical table/column names on the shared Postgres.
-  resolveUserIdByEmail = async (email) => {
-    const result = await pool!.query<{ id: string }>(
-      'SELECT id FROM "user" WHERE lower(email) = lower($1) LIMIT 1',
-      [email],
-    );
-    return result.rows[0]?.id ?? null;
-  };
+  ({ resolveUserIdByEmail, lookupVerifiedUserEmail } = createVerifiedEmailLookups(pool!));
   lookupUserEmail = async (userId) => {
     const result = await pool!.query<{ email: string }>(
       'SELECT email FROM "user" WHERE id = $1 LIMIT 1',
@@ -232,6 +229,7 @@ const relayHandler = createSyncRelayHandler({
   resolveActor,
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
   lookupUserEmail: (userId) => lookupUserEmail(userId),
+  lookupVerifiedUserEmail: (userId) => lookupVerifiedUserEmail(userId),
   lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
   presence,
   linkKey,
