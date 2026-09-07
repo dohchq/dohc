@@ -13,6 +13,7 @@ import { isCodeBlockNode, normalizeLanguage, stopEditorMouseEvent } from "./pmHe
 // the diagram, or arrow-key navigation from a neighboring block) reveals
 // the raw fence again for editing.
 
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state'
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 
@@ -24,19 +25,7 @@ const MAX_MERMAID_CHARS = 10_000
 const RENDER_DEBOUNCE_MS = 400
 
 // ---------------------------------------------------------------------------
-// Pure block detection — mirrors the local DocLike shapes in
-// codeBlockChrome.tsx / calloutChrome.ts so this stays testable without a
-// real ProseMirror/jsdom instance.
-
-type DocDescendantNode = {
-  type: { name: string }
-  attrs: Record<string, unknown>
-  textContent: string
-  nodeSize: number
-}
-type DocLike = {
-  descendants: (cb: (node: DocDescendantNode, pos: number) => boolean | void) => void
-}
+// Pure block detection.
 
 type MermaidBlock = {
   /** Doc position of the codeBlock's own start (before its content). */
@@ -49,7 +38,7 @@ type MermaidBlock = {
 }
 
 /** Pure: walk the doc, return every `codeBlock` with `language: "mermaid"`. */
-export function computeMermaidBlocks(doc: DocLike): MermaidBlock[] {
+export function computeMermaidBlocks(doc: ProseMirrorNode): MermaidBlock[] {
   const blocks: MermaidBlock[] = []
   doc.descendants((node, pos) => {
     if (!isCodeBlockNode(node)) return
@@ -331,7 +320,7 @@ function buildMermaidPreviewWidget(id: string): (view: EditorView) => HTMLElemen
 }
 
 function buildMermaidDecorationSet(
-  doc: unknown,
+  doc: ProseMirrorNode,
   entries: readonly MermaidWidgetEntry[],
   cursorPos: number,
 ): DecorationSet {
@@ -358,7 +347,7 @@ function buildMermaidDecorationSet(
       }),
     )
   }
-  return DecorationSet.create(doc as never, decorations)
+  return DecorationSet.create(doc, decorations)
 }
 
 function applyMermaidResult(container: HTMLElement, result: MermaidRenderResult): void {
@@ -411,7 +400,7 @@ export function makeMermaidPreviewPlugin(render: MermaidRenderFn = renderMermaid
     state: {
       init(_, instance) {
         let seq = 0
-        const entries = computeMermaidBlocks(instance.doc as unknown as DocLike).map((block) => ({
+        const entries = computeMermaidBlocks(instance.doc).map((block) => ({
           id: `m${seq++}`,
           pos: block.pos,
           end: block.end,
@@ -428,7 +417,7 @@ export function makeMermaidPreviewPlugin(render: MermaidRenderFn = renderMermaid
         // cursor moved into/out of a block — toggle collapse), same trigger
         // pair as wikilinkPlugin's source/preview toggle.
         if (!tr.docChanged && !tr.selectionSet) return old
-        const blocks = computeMermaidBlocks(newState.doc as unknown as DocLike)
+        const blocks = computeMermaidBlocks(newState.doc)
         let seq = old.seq
         // Map each previous fence's position through the transaction so a fence
         // shifted by an edit above it keeps its stable id (and painted widget)

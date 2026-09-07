@@ -403,14 +403,13 @@ describe('desktop editor markdown round-trip', () => {
     ).toBe('![backslash]()')
   })
 
-  // PARITY FIXTURE. sanitizeImageSrc is implemented twice — apps/desktop's
-  // editor/extensions.ts and packages/ydoc-projection's
-  // dohc-markdown-extensions.ts — because neither package may import the other.
-  // This table is duplicated verbatim in the other package's import-export test
-  // and is what keeps the two copies from drifting: any change to the image-src
-  // contract has to change both implementations and both tables, or one side
-  // goes red. Driven through the node attrs (not markdown source) so each input
-  // reaches the sanitizer exactly as written.
+  // SHARED CONTRACT TABLE. sanitizeImageSrc lives once, in
+  // @dohc/ydoc-projection/image-src. This suite and packages/ydoc-projection's
+  // import-export test drive the same table through their own markdown
+  // adapters (the desktop editor's pipeline and the projection package's), so
+  // a change to the image-src contract shows up on both surfaces. Driven
+  // through the node attrs (not markdown source) so each input reaches the
+  // sanitizer exactly as written.
   const IMAGE_SRC_CONTRACT: ReadonlyArray<{ src: string; markdown: string }> = [
     // Kept — relative asset paths (the ordinary case).
     { src: 'assets/pic.png', markdown: '![x](assets/pic.png)' },
@@ -441,7 +440,7 @@ describe('desktop editor markdown round-trip', () => {
     { src: '   ', markdown: '![x]()' },
   ]
 
-  it('pins the image-src contract (parity fixture — duplicated in the sibling package)', () => {
+  it('pins the image-src contract through the desktop adapter', () => {
     for (const { src, markdown } of IMAGE_SRC_CONTRACT) {
       expect(
         yDocToMarkdown(

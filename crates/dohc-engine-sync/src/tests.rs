@@ -13,6 +13,7 @@ use dohc_engine_domain::{
     SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread, VersionedTextStore,
     WriteBinary, attachment_id_for, channel_slug_for_name,
 };
+use dohc_engine_files::MaterializeOptions;
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{
     ScratchDir, ScriptedFaults, decode_hex, engine_db_path, flip_byte, open_store,

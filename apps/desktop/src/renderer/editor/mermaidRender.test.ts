@@ -6,6 +6,7 @@ import { Markdown } from '@tiptap/markdown'
 import { TaskList } from '@tiptap/extension-list'
 import { TextSelection } from '@tiptap/pm/state'
 import { DohcTaskItem, dohcMarkdownExtensions } from './extensions'
+import { codeBlock, doc, paragraph } from './testDocs'
 import {
   computeMermaidBlocks,
   isMermaidBlockCollapsed,
@@ -19,63 +20,33 @@ import {
   type MermaidWidgetEntry,
 } from './mermaidRender'
 
-// --- pure `computeMermaidBlocks` / `isMermaidBlockCollapsed` over a
-// hand-built fake doc (same offline-testing pattern as
-// codeHighlight.test.ts's fakeDoc) ---
-
-type FakeBlockNode = {
-  type: { name: string }
-  attrs: Record<string, unknown>
-  textContent: string
-  nodeSize: number
-}
-
-function fakeDoc(blocks: Array<{ pos: number; language: string; text: string }>): {
-  descendants: (cb: (node: FakeBlockNode, pos: number) => boolean | void) => void
-} {
-  return {
-    descendants(cb) {
-      for (const b of blocks) {
-        cb(
-          {
-            type: { name: 'codeBlock' },
-            attrs: { language: b.language },
-            textContent: b.text,
-            nodeSize: b.text.length + 2,
-          },
-          b.pos,
-        )
-      }
-    },
-  }
-}
+// --- pure `computeMermaidBlocks` / `isMermaidBlockCollapsed` over real
+// documents (testDocs.ts) ---
 
 describe('computeMermaidBlocks', () => {
   it('finds codeBlocks whose language is mermaid', () => {
-    const doc = fakeDoc([{ pos: 4, language: 'mermaid', text: 'graph TD;A-->B' }])
-    const blocks = computeMermaidBlocks(doc)
+    // paragraph("ab") is nodeSize 4, so the fence sits at pos 4; a code
+    // block's nodeSize is its text length + 2.
+    const d = doc(paragraph('ab'), codeBlock('graph TD;A-->B', 'mermaid'))
+    const blocks = computeMermaidBlocks(d)
     expect(blocks).toEqual([{ pos: 4, end: 4 + 'graph TD;A-->B'.length + 2, text: 'graph TD;A-->B' }])
   })
 
   it('ignores non-mermaid code blocks', () => {
-    const doc = fakeDoc([
-      { pos: 0, language: 'typescript', text: 'const x = 1;' },
-      { pos: 20, language: '', text: 'plain' },
-    ])
-    expect(computeMermaidBlocks(doc)).toEqual([])
+    const d = doc(codeBlock('const x = 1;', 'typescript'), codeBlock('plain'))
+    expect(computeMermaidBlocks(d)).toEqual([])
   })
 
   it('is case/whitespace tolerant on the language attr', () => {
-    const doc = fakeDoc([{ pos: 0, language: '  Mermaid  ', text: 'graph TD;A' }])
-    expect(computeMermaidBlocks(doc)).toHaveLength(1)
+    const d = doc(codeBlock('graph TD;A', '  Mermaid  '))
+    expect(computeMermaidBlocks(d)).toHaveLength(1)
   })
 
   it('finds multiple mermaid blocks in doc order', () => {
-    const doc = fakeDoc([
-      { pos: 0, language: 'mermaid', text: 'graph TD;A' },
-      { pos: 20, language: 'mermaid', text: 'graph TD;B' },
-    ])
-    expect(computeMermaidBlocks(doc).map((b) => b.pos)).toEqual([0, 20])
+    // The first fence's nodeSize is 12 ('graph TD;A'.length + 2), so the
+    // second starts at pos 12.
+    const d = doc(codeBlock('graph TD;A', 'mermaid'), codeBlock('graph TD;B', 'mermaid'))
+    expect(computeMermaidBlocks(d).map((b) => b.pos)).toEqual([0, 12])
   })
 })
 

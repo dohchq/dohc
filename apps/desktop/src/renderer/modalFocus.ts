@@ -37,3 +37,9 @@ export function modalFocusableElements(container: HTMLElement): HTMLElement[] {
       !element.matches(":disabled"),
   );
 }
+
+const BLOCKING_MODAL_SELECTOR = "[role='dialog'], [data-dohc-modal='true']";
+
+export function hasBlockingModal() {
+  return document.querySelector(BLOCKING_MODAL_SELECTOR) !== null;
+}
