@@ -994,6 +994,88 @@ describe("PluginsView", () => {
     ).toBe("starting");
   });
 
+  it("merges each directory's events when colliding ids arrive during initial load", async () => {
+    const list = deferred<{ ok: true; plugins: PluginStatusRecord[] }>();
+    bridgeMock.listPlugins.mockReturnValue(list.promise);
+    renderList();
+    await waitFor(() => expect(statusListener).not.toBeNull());
+    act(() => {
+      for (const directoryName of ["chat-a", "chat-b"]) {
+        statusListener?.({
+          kind: "changed",
+          workspaceId: "ws-1",
+          plugin: plugin("agent-chat", { directoryName, displayName: directoryName }),
+        });
+      }
+    });
+    await act(async () => {
+      list.resolve({ ok: true, plugins: [] });
+      await list.promise;
+    });
+    expect(screen.getAllByTestId("plugin-row")).toHaveLength(2);
+    expect(screen.getByText("chat-a")).toBeTruthy();
+    expect(screen.getByText("chat-b")).toBeTruthy();
+  });
+
+  it("does not restore the old directory from an action that settles after a rename", async () => {
+    const original = plugin("agent-chat", { directoryName: "chat-a", displayName: "Chat", status: "discovered", approvedHash: null, runtimeStatus: null });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [original] });
+    const install = deferred<{ ok: true; plugin: PluginStatusRecord }>();
+    bridgeMock.installPlugin.mockReturnValue(install.promise);
+    renderList();
+    await userEvent.click(await screen.findByTestId("plugin-install"));
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [{ ...original, directoryName: "chat-b", status: "disabled", disabledReason: "user" }],
+    });
+    act(() => {
+      statusListener?.({ kind: "renamed", workspaceId: "ws-1", pluginId: "agent-chat", from: "chat-a", to: "chat-b" });
+      statusListener?.({ kind: "changed", workspaceId: "ws-1", plugin: { ...original, directoryName: "chat-b", status: "disabled", disabledReason: "user" } });
+    });
+    await act(async () => {
+      install.resolve({ ok: true, plugin: { ...original, status: "disabled", disabledReason: "user" } });
+      await install.promise;
+    });
+    expect(screen.getAllByTestId("plugin-row")).toHaveLength(1);
+  });
+
+  it("keeps a renamed row while its authoritative list supersedes an older refresh", async () => {
+    const original = plugin("app", { directoryName: "old-app", displayName: "App" });
+    const older = deferred<{ ok: true; plugins: PluginStatusRecord[] }>();
+    const renamed = deferred<{ ok: true; plugins: PluginStatusRecord[] }>();
+    bridgeMock.listPlugins.mockResolvedValueOnce({ ok: true, plugins: [original] })
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(renamed.promise);
+    renderList();
+    await screen.findByText("plugins/old-app");
+
+    act(() => statusListener?.({ kind: "discovery-changed", workspaceId: "ws-1" }));
+    act(() => statusListener?.({
+      kind: "renamed", workspaceId: "ws-1", pluginId: "app", from: "old-app", to: "new-app",
+    }));
+    expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(3);
+    expect(screen.getByText("plugins/new-app")).toBeTruthy();
+    expect(screen.queryByText("plugins/old-app")).toBeNull();
+
+    await act(async () => {
+      older.resolve({ ok: true, plugins: [original] });
+      await older.promise;
+    });
+    expect(screen.getByText("plugins/new-app")).toBeTruthy();
+    expect(screen.getAllByTestId("plugin-row")).toHaveLength(1);
+
+    act(() => statusListener?.({
+      kind: "changed", workspaceId: "ws-1",
+      plugin: { ...original, directoryName: "new-app", rootPath: "/workspace/plugins/new-app", status: "starting" },
+    }));
+    await act(async () => {
+      renamed.resolve({ ok: true, plugins: [{ ...original, directoryName: "new-app", rootPath: "/workspace/plugins/new-app" }] });
+      await renamed.promise;
+    });
+    expect(screen.getAllByTestId("plugin-row")).toHaveLength(1);
+    expect(screen.getByTestId("plugin-status").getAttribute("data-status")).toBe("starting");
+  });
+
   it("lets a status event newer than an in-flight action's response win", async () => {
     const fresh = plugin("fresh-plugin", {
       status: "discovered",
@@ -1138,12 +1220,7 @@ describe("PluginsView", () => {
     expect(screen.getByText("staying-plugin")).toBeTruthy();
   });
 
-  // Round 15 finding 2: a "removed" event carries only an id, and two rows
-  // can share one (a broken manifest's directory-derived fallback colliding
-  // with some other, unrelated plugin's real id). Dropping every row with
-  // that id used to take the survivor down with it, even if only for one
-  // render before the next full list arrived.
-  it("keeps a survivor visible when a removed event's id names two rows, then reconciles for real", async () => {
+  it("removes only the named directory when two rows share a plugin id", async () => {
     bridgeMock.listPlugins
       .mockResolvedValueOnce({
         ok: true,
@@ -1170,28 +1247,12 @@ describe("PluginsView", () => {
       });
     });
 
-    // Ambiguous id: nothing is dropped locally, so the survivor — and, for
-    // this one render, the row that actually left too — both stay exactly
-    // as they were. Never a bare loading state either: the whole point is
-    // that nothing already on screen disappears while this settles.
-    expect(screen.getAllByTestId("plugin-row")).toHaveLength(2);
-    expect(screen.getByText("Chat A")).toBeTruthy();
-    expect(screen.getByText("Chat B")).toBeTruthy();
-
-    // The reload it triggers reconciles for real, without a manual refresh.
-    await waitFor(() => expect(screen.getAllByTestId("plugin-row")).toHaveLength(1));
+    expect(screen.getAllByTestId("plugin-row")).toHaveLength(1);
     expect(screen.getByText("Chat B")).toBeTruthy();
     expect(screen.queryByText("Chat A")).toBeNull();
-    expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(1);
   });
 
-  // A standing collision (two rows genuinely sharing this id, at two real,
-  // permanently different directories) must not re-trigger a reload on
-  // every ordinary "changed" event for either row — only the single-row
-  // case upsertPlugin's own migration logic can actually get wrong.
-  // Checking "does ANY row with this id have a different directory" would
-  // read every one of these as ambiguous forever; checking the exact row
-  // upsertPlugin would migrate (matchingId.length === 1) does not.
   it("does not reload on an ordinary changed event for either row of a standing collision", async () => {
     bridgeMock.listPlugins.mockResolvedValue({
       ok: true,
@@ -1221,13 +1282,6 @@ describe("PluginsView", () => {
     expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(1);
   });
 
-  // Round 16 finding 1: with no prior ready list, the ambiguity check has
-  // nothing to count rows in — the naive read is "not ambiguous", so the
-  // initial request's own merge (once it lands) re-applies the removed
-  // event against whatever it fetched. If that fetch already reflects the
-  // removal (one row left, sharing the removed id with the survivor), the
-  // merge reads "only one row has this id now" as proof there was never a
-  // collision, and drops the survivor anyway.
   it("keeps a survivor visible when a removal arrives before the initial load ever settles", async () => {
     const initialLoad = deferred<{
       ok: true;
@@ -1266,10 +1320,7 @@ describe("PluginsView", () => {
 
     await waitFor(() => expect(screen.getAllByTestId("plugin-row")).toHaveLength(1));
     expect(screen.getByText("Chat B")).toBeTruthy();
-    // The unconditional reload this pins: a second request, issued after
-    // the removed event was recorded, whose own newerEvents excludes it —
-    // its fetch is trusted as-is instead of re-filtered.
-    expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(1);
   });
 
   it("never repaints one workspace's rows from another workspace's status event", async () => {

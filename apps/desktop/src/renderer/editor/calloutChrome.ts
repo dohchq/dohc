@@ -1,13 +1,9 @@
+import { stopEditorMouseEvent } from "./pmHelpers";
 import type { Node } from "@tiptap/pm/model";
 import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 
 const calloutChromeKey = new PluginKey<DecorationSet>("dohc-callout-chrome");
-
-function stopEditorMouseEvent(event: Event) {
-  event.preventDefault();
-  event.stopPropagation();
-}
 
 const CALLOUT_TYPE_OPTIONS = [
   { value: "note", label: "Note" },

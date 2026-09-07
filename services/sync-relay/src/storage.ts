@@ -1,3 +1,6 @@
+import { LIVE_TICKET_LIFETIME_MS, parseLiveTicketAudience, parseLiveTicketClaims, parseRedeemedLiveTicket, type LiveTicketClaims, type RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
+import type { NamedLiveBrowserContext } from "./namedLiveBrowserAuth.js";
+import { ticketRecord, snapshotNamedTicketScope, snapshotTicketHostReport, parseTicketHash } from "./liveTicketInputs.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -88,6 +91,29 @@ export interface LiveHostConnectionCoordinate {
   readonly hostEpoch: HostEpoch;
   readonly instanceId: string;
   readonly connectionId: string;
+}
+
+export interface TicketHostReport {
+  readonly connection: LiveHostConnectionCoordinate;
+  readonly binding: LiveObjectBinding;
+}
+export interface NamedLiveTicketLookup {
+  readonly tokenHash: string;
+  readonly scope: NamedLiveBrowserContext;
+  readonly audience: string;
+}
+export interface NamedLiveTicketMint extends NamedLiveTicketLookup {
+  readonly objectId: string;
+  readonly ticketId: string;
+  readonly report: TicketHostReport;
+}
+export interface NamedLiveTicketRedemption extends NamedLiveTicketLookup {
+  readonly report: TicketHostReport;
+}
+export interface LiveTicketStoragePolicy {
+  readonly retainedTicketsPerPrincipalGrant: number;
+  readonly expiredTicketCleanupBatchSize: number;
+  readonly now: () => number;
 }
 
 export interface CurrentLiveBindingRequest {
@@ -507,6 +533,9 @@ export interface AppendLogBatchGuardContext {
 export interface SyncRelayStorage {
   close(): void;
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult;
+  mintNamedLiveTicket(input: NamedLiveTicketMint): { expiresAtMs: number } | null;
+  readNamedLiveTicketTarget(input: NamedLiveTicketLookup): { workspaceId: string; objectId: string } | null;
+  redeemNamedLiveTicket(input: NamedLiveTicketRedemption): RedeemedLiveTicket | null;
   getLiveHostControl(): HostControlSnapshot | null;
   provisionLiveHostControl(input: {
     mode: HostMode;
@@ -1009,6 +1038,7 @@ function dependentGrantIdsMatch(
 }
 
 export interface OpenSyncRelayStorageOptions {
+  liveTickets?: LiveTicketStoragePolicy;
   workspaceQuotaBytes?: number;
   blobGraceMs?: number;
   linkSessionsPerGrantLimit?: number;
@@ -1404,6 +1434,7 @@ CREATE TABLE sync_relay_session_host_control (
 `;
 
 function normalizedSchemaSql(value: string): string {
+  // Preserve quoted values: changing 'main' to 'MAIN' changes the constraint.
   return value.trim().replace(/;$/, "").replace(/\s+/g, " ");
 }
 
@@ -1573,15 +1604,13 @@ function assertLiveDocumentAuthoritySchema(db: SqliteDb): void {
   const same = (actual: unknown, expected: unknown): void => {
     if (JSON.stringify(actual) !== JSON.stringify(expected)) fail();
   };
-  // Preserve quoted values: changing 'main' to 'MAIN' changes the constraint.
-  const sqlText = (sql: string): string => sql.trim().replace(/;$/, "").replace(/\s+/g, " ");
   for (const [name, sql] of Object.entries(LIVE_DOCUMENT_AUTHORITY_SCHEMA)) {
     const rows = db.prepare("SELECT type, tbl_name, sql FROM sqlite_schema WHERE name = ?").all(name);
     const row = rows[0];
     const table = name === "sync_relay_live_documents" || name === "idx_sync_relay_live_documents_current"
       ? "sync_relay_live_documents" : "sync_relay_live_document_baseline_ranges";
     if (rows.length !== 1 || !row || row.type !== (name.startsWith("idx_") ? "index" : "table")
-      || row.tbl_name !== table || typeof row.sql !== "string" || sqlText(row.sql) !== sqlText(sql)) fail();
+      || row.tbl_name !== table || typeof row.sql !== "string" || normalizedSchemaSql(row.sql) !== normalizedSchemaSql(sql)) fail();
   }
   const documentKey = ["workspace_id", "main_version_id", "object_id", "lineage_claim_id"];
   for (const [table, columns] of Object.entries(LIVE_DOCUMENT_AUTHORITY_COLUMNS)) {
@@ -1626,6 +1655,168 @@ function initializeLiveDocumentAuthoritySchema(db: SqliteDb): void {
   assertLiveDocumentAuthoritySchema(db);
   db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
     .run(LIVE_DOCUMENT_AUTHORITY_MIGRATION_ID, Date.now());
+}
+
+const LIVE_TICKET_TABLE = "sync_relay_live_session_tickets";
+const LIVE_TICKET_MIGRATION = "live-session-tickets-v1";
+const LIVE_TICKET_SCHEMA = {
+  sync_relay_live_session_tickets: `
+CREATE TABLE sync_relay_live_session_tickets (
+  ticket_id TEXT NOT NULL
+    CHECK (length(CAST(ticket_id AS BLOB)) BETWEEN 1 AND 512),
+  token_hash TEXT NOT NULL CHECK (
+    length(token_hash) = 43 AND length(CAST(token_hash AS BLOB)) = 43
+    AND token_hash NOT GLOB '*[^A-Za-z0-9_-]*'
+  ),
+  audience TEXT NOT NULL
+    CHECK (length(CAST(audience AS BLOB)) BETWEEN 1 AND 2048),
+  workspace_id TEXT NOT NULL
+    CHECK (length(CAST(workspace_id AS BLOB)) BETWEEN 1 AND 512),
+  main_version_id TEXT NOT NULL CHECK (main_version_id = 'main'),
+  object_id TEXT NOT NULL
+    CHECK (length(CAST(object_id AS BLOB)) BETWEEN 1 AND 512),
+  lineage_claim_id TEXT NOT NULL CHECK (
+    length(lineage_claim_id) = 64 AND length(CAST(lineage_claim_id AS BLOB)) = 64
+    AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'
+  ),
+  current_path TEXT NOT NULL
+    CHECK (length(CAST(current_path AS BLOB)) BETWEEN 1 AND 1024),
+  selector_paths_json TEXT NOT NULL CHECK (
+    length(CAST(selector_paths_json AS BLOB)) BETWEEN 2 AND (100 * (6 * 1024 + 3) + 1)
+  ),
+  restore_fence_generation INTEGER NOT NULL
+    CHECK (restore_fence_generation BETWEEN 1 AND 9007199254740991),
+  principal_kind TEXT NOT NULL CHECK (principal_kind = 'named'),
+  principal_id TEXT NOT NULL
+    CHECK (length(CAST(principal_id AS BLOB)) BETWEEN 1 AND 512),
+  grant_id TEXT NOT NULL
+    CHECK (length(CAST(grant_id AS BLOB)) BETWEEN 1 AND 512),
+  grant_generation INTEGER NOT NULL
+    CHECK (grant_generation BETWEEN 1 AND 9007199254740991),
+  host_epoch INTEGER NOT NULL
+    CHECK (host_epoch BETWEEN 1 AND 9007199254740991),
+  minted_at_ms INTEGER NOT NULL
+    CHECK (minted_at_ms BETWEEN 0 AND 9007199254710991),
+  expires_at_ms INTEGER NOT NULL CHECK (
+    expires_at_ms BETWEEN 0 AND 9007199254740991
+    AND expires_at_ms = minted_at_ms + 30000
+  ),
+  redeemed_at_ms INTEGER CHECK (
+    redeemed_at_ms IS NULL OR (
+      redeemed_at_ms BETWEEN 0 AND 9007199254740991
+      AND minted_at_ms <= redeemed_at_ms AND redeemed_at_ms < expires_at_ms
+    )
+  ),
+  PRIMARY KEY (ticket_id),
+  FOREIGN KEY (workspace_id)
+    REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+`,
+  idx_sync_relay_live_session_tickets_hash: `
+CREATE UNIQUE INDEX idx_sync_relay_live_session_tickets_hash
+  ON sync_relay_live_session_tickets(token_hash);
+`,
+  idx_sync_relay_live_session_tickets_scope_expiry: `
+CREATE INDEX idx_sync_relay_live_session_tickets_scope_expiry
+  ON sync_relay_live_session_tickets(
+    workspace_id, principal_kind, principal_id, grant_id, expires_at_ms, ticket_id
+  );
+`,
+  idx_sync_relay_live_session_tickets_expiry: `
+CREATE INDEX idx_sync_relay_live_session_tickets_expiry
+  ON sync_relay_live_session_tickets(expires_at_ms, ticket_id);
+`,
+} as const;
+
+const LIVE_TICKET_COLUMNS = [
+  "ticket_id", "token_hash", "audience", "workspace_id", "main_version_id", "object_id",
+  "lineage_claim_id", "current_path", "selector_paths_json", "restore_fence_generation",
+  "principal_kind", "principal_id", "grant_id", "grant_generation", "host_epoch",
+  "minted_at_ms", "expires_at_ms", "redeemed_at_ms",
+] as const;
+const LIVE_TICKET_INTEGER_COLUMNS = new Set<string>([
+  "restore_fence_generation", "grant_generation", "host_epoch", "minted_at_ms", "expires_at_ms", "redeemed_at_ms",
+]);
+
+function assertLiveTicketSchema(db: SqliteDb): void {
+  const fail = (): never => { throw new Error("live-ticket schema is missing or damaged"); };
+  const same = (actual: unknown, expected: unknown): void => {
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) fail();
+  };
+  for (const [name, sql] of Object.entries(LIVE_TICKET_SCHEMA)) {
+    const rows = db.prepare("SELECT type, tbl_name, sql FROM sqlite_schema WHERE name = ?").all(name);
+    const row = rows[0];
+    if (rows.length !== 1 || !row || row.type !== (name === LIVE_TICKET_TABLE ? "table" : "index") ||
+      row.tbl_name !== LIVE_TICKET_TABLE || typeof row.sql !== "string" || normalizedSchemaSql(row.sql) !== normalizedSchemaSql(sql)) fail();
+  }
+  same(db.prepare(`PRAGMA table_info(${LIVE_TICKET_TABLE})`).all().map(row =>
+    [row.cid, row.name, row.type, row.notnull, row.dflt_value, row.pk]),
+  LIVE_TICKET_COLUMNS.map((name, cid) => [cid, name, LIVE_TICKET_INTEGER_COLUMNS.has(name) ? "INTEGER" : "TEXT",
+    name === "redeemed_at_ms" ? 0 : 1, null, name === "ticket_id" ? 1 : 0]));
+  same(db.prepare(`PRAGMA foreign_key_list(${LIVE_TICKET_TABLE})`).all().map(row =>
+    [row.id, row.seq, row.table, row.from, row.to, row.on_update, row.on_delete, row.match]),
+  [[0, 0, "sync_relay_workspaces", "workspace_id", "workspace_id", "NO ACTION", "CASCADE", "NONE"]]);
+  const indexes = [
+    ["idx_sync_relay_live_session_tickets_hash", 1, "c", ["token_hash"]],
+    ["idx_sync_relay_live_session_tickets_scope_expiry", 0, "c", ["workspace_id", "principal_kind", "principal_id", "grant_id", "expires_at_ms", "ticket_id"]],
+    ["idx_sync_relay_live_session_tickets_expiry", 0, "c", ["expires_at_ms", "ticket_id"]],
+    [`sqlite_autoindex_${LIVE_TICKET_TABLE}_1`, 1, "pk", ["ticket_id"]],
+  ] as const;
+  const sorted = (rows: unknown[][]): unknown[][] => rows.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  same(sorted(db.prepare(`PRAGMA index_list(${LIVE_TICKET_TABLE})`).all().map(row => [row.name, row.unique, row.origin, row.partial])),
+    sorted(indexes.map(([name, unique, origin]) => [name, unique, origin, 0])));
+  for (const [name, , , columns] of indexes) {
+    same(db.prepare(`PRAGMA index_info(${name})`).all().map(row => [row.seqno, row.cid, row.name]),
+      columns.map((column, seq) => [seq, LIVE_TICKET_COLUMNS.findIndex(value => value === column), column]));
+  }
+  same(db.prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = ?").all(LIVE_TICKET_TABLE), []);
+}
+
+function initializeLiveTicketSchema(db: SqliteDb): void {
+  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(LIVE_TICKET_MIGRATION) !== undefined;
+  if (marked) { assertLiveTicketSchema(db); return; }
+  const existing = db.prepare("SELECT name FROM sqlite_schema WHERE name IN (?, ?, ?, ?)").all(...Object.keys(LIVE_TICKET_SCHEMA));
+  if (existing.length) throw new Error("unmarked live-ticket schema already exists");
+  for (const sql of Object.values(LIVE_TICKET_SCHEMA)) db.exec(sql);
+  assertLiveTicketSchema(db);
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(LIVE_TICKET_MIGRATION, Date.now());
+}
+
+function parseStoredLiveTicket(row: Record<string, unknown>): { claims: LiveTicketClaims; redeemedAtMs: number | null } {
+  try {
+    for (const column of LIVE_TICKET_COLUMNS) {
+      const value = row[column];
+      if (column === "redeemed_at_ms" && value === null) continue;
+      if (LIVE_TICKET_INTEGER_COLUMNS.has(column)) {
+        if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error();
+      } else if (typeof value !== "string") throw new Error();
+    }
+    parseTicketHash(row.token_hash);
+    if (row.principal_kind !== "named" || row.main_version_id !== "main" || Number(row.restore_fence_generation) < 1) throw new Error();
+    parseLiveUpdateDigest(row.lineage_claim_id);
+    const claims = parseLiveTicketClaims({
+      ticketId: row.ticket_id, audience: row.audience,
+      binding: { workspaceId: row.workspace_id, mainVersionId: row.main_version_id, objectId: row.object_id,
+        lineageClaimId: row.lineage_claim_id, currentPath: row.current_path,
+        selectorPaths: JSON.parse(row.selector_paths_json as string), restoreFenceGeneration: row.restore_fence_generation },
+      authority: { principalKind: row.principal_kind, principalId: row.principal_id, grantId: row.grant_id, grantGeneration: row.grant_generation },
+      hostEpoch: row.host_epoch, mintedAtMs: row.minted_at_ms, expiresAtMs: row.expires_at_ms,
+    });
+    if (claims.ticketId !== row.ticket_id || claims.audience !== row.audience || claims.binding.workspaceId !== row.workspace_id ||
+      claims.binding.objectId !== row.object_id || claims.binding.lineageClaimId !== row.lineage_claim_id ||
+      claims.binding.currentPath !== row.current_path || JSON.stringify(claims.binding.selectorPaths) !== row.selector_paths_json ||
+      claims.authority.principalId !== row.principal_id || claims.authority.grantId !== row.grant_id) throw new Error();
+    const redeemedAtMs = row.redeemed_at_ms as number | null;
+    if (redeemedAtMs !== null) parseRedeemedLiveTicket({ ...claims, redeemedAtMs });
+    return { claims, redeemedAtMs };
+  } catch { throw new Error("stored live ticket is damaged"); }
+}
+
+const LIVE_TICKET_REFUSED = Symbol("live-ticket refused");
+
+function snapshotTicketLookup(input: Record<string, unknown>): NamedLiveTicketLookup {
+  return { tokenHash: parseTicketHash(input.tokenHash), audience: parseLiveTicketAudience(input.audience),
+    scope: snapshotNamedTicketScope(input.scope) };
 }
 
 export function initializeSyncRelaySchema(db: SqliteDb): void {
@@ -1926,6 +2117,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     `);
     initializeSessionHostControlSchema(db);
     initializeLiveDocumentAuthoritySchema(db);
+    initializeLiveTicketSchema(db);
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)
@@ -2534,30 +2726,9 @@ function parseHostControlTimestamp(value: unknown, name: string): number {
   return value as number;
 }
 
-function snapshotAuthorityRecord(value: unknown, fields: readonly string[]): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || nodeTypes.isProxy(value) || Array.isArray(value) ||
-      (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
-    throw new TypeError("live authority input must be a record");
-  }
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const keys = Reflect.ownKeys(descriptors);
-  if (keys.length !== fields.length || keys.some(key => typeof key !== "string" || !fields.includes(key))) {
-    throw new TypeError("live authority input has unexpected fields");
-  }
-  const copy: Record<string, unknown> = {};
-  for (const field of fields) {
-    const descriptor = descriptors[field];
-    if (!descriptor || !Object.hasOwn(descriptor, "value")) {
-      throw new TypeError("live authority input must contain own data fields");
-    }
-    copy[field] = descriptor.value;
-  }
-  return copy;
-}
-
 function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest): CurrentLiveBindingRequest {
-  const outer = snapshotAuthorityRecord(input, ["document", "actor"]);
-  const document = parseLiveDocumentKey(snapshotAuthorityRecord(outer.document,
+  const outer = ticketRecord(input, ["document", "actor"]);
+  const document = parseLiveDocumentKey(ticketRecord(outer.document,
     ["workspaceId", "mainVersionId", "objectId", "lineageClaimId"]));
   if (document.mainVersionId !== "main") throw new TypeError("live authority requires main");
   parseLiveUpdateDigest(document.lineageClaimId);
@@ -2567,7 +2738,7 @@ function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest): Curren
   if (!kind || !Object.hasOwn(kind, "value") || (kind.value !== "owner" && kind.value !== "named")) {
     throw new TypeError("live authority requires an owner or named actor");
   }
-  const actor = snapshotAuthorityRecord(outer.actor,
+  const actor = ticketRecord(outer.actor,
     kind.value === "owner" ? ["kind", "userId", "shareId"] : ["kind", "userId", "grantId"]);
   if (actor.kind !== kind.value) throw new TypeError("live authority actor changed during capture");
   const userId = parseLiveUpdateIdentifier(actor.userId, "actor user ID");
@@ -2851,6 +3022,17 @@ export function openSyncRelayStorage(
     }
   }
   const newDiscussionId = options.newDiscussionId ?? randomUUID;
+  const suppliedTickets = options.liveTickets;
+  const liveTickets = suppliedTickets === undefined ? undefined :
+    ticketRecord(suppliedTickets, ["retainedTicketsPerPrincipalGrant", "expiredTicketCleanupBatchSize", "now"]);
+  if (liveTickets !== undefined) {
+    for (const field of ["retainedTicketsPerPrincipalGrant", "expiredTicketCleanupBatchSize"] as const) {
+      if (typeof liveTickets[field] !== "number" || !Number.isSafeInteger(liveTickets[field]) || liveTickets[field] <= 0) {
+        throw new TypeError("Live-ticket policies must be positive safe integers.");
+      }
+    }
+    if (typeof liveTickets.now !== "function") throw new TypeError("Live tickets require a storage clock.");
+  }
   const db = new DatabaseSync(resolved);
   try {
     db.exec(`PRAGMA busy_timeout = ${SYNC_RELAY_BUSY_TIMEOUT_MS}`);
@@ -2859,14 +3041,17 @@ export function openSyncRelayStorage(
     initializeSyncRelaySchema(db);
     return new SqliteSyncRelayStorage(
       db,
-      workspaceQuotaBytes,
-      blobGraceMs,
-      linkSessionsPerGrantLimit,
-      linkDiscussionPrincipalLimit,
-      discussionMessageRateLimit,
-      discussionLifetimeMessageLimit,
-      discussionNonOwnerShareRowLimit,
-      newDiscussionId,
+      {
+        workspaceQuotaBytes,
+        blobGraceMs,
+        linkSessionsPerGrantLimit,
+        linkDiscussionPrincipalLimit,
+        discussionMessageRateLimit,
+        discussionLifetimeMessageLimit,
+        discussionNonOwnerShareRowLimit,
+        newDiscussionId,
+      },
+      liveTickets as unknown as LiveTicketStoragePolicy | undefined,
     );
   } catch (error) {
     try {
@@ -2877,17 +3062,15 @@ export function openSyncRelayStorage(
 }
 
 class SqliteSyncRelayStorage implements SyncRelayStorage {
+  private readonly newDiscussionId: () => string;
+
   constructor(
     private readonly db: SqliteDb,
-    private readonly workspaceQuotaBytes: number,
-    private readonly blobGraceMs: number,
-    private readonly linkSessionsPerGrantLimit: number,
-    private readonly linkDiscussionPrincipalLimit: number,
-    private readonly discussionMessageRateLimit: number,
-    private readonly discussionLifetimeMessageLimit: number,
-    private readonly discussionNonOwnerShareRowLimit: number,
-    private readonly newDiscussionId: () => string,
-  ) {}
+    private readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets">>,
+    private readonly liveTickets: LiveTicketStoragePolicy | undefined,
+  ) {
+    this.newDiscussionId = options.newDiscussionId;
+  }
 
   close(): void {
     this.db.close();
@@ -2897,64 +3080,175 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return readLiveHostControl(this.db);
   }
 
-  resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
-    const { document, actor } = snapshotCurrentBindingRequest(input);
-    return this.tx<CurrentLiveBindingResult>(() => {
-      const host = readLiveHostControl(this.db);
-      if (host !== null) assertCurrentAuthorityHost(this.db, host);
-      if (host === null || host.admissionState !== "open" || host.transition !== null) {
-        return { kind: "refused", reason: "host-unavailable" };
-      }
-      authorityIntegrity(host.registeredInstanceId !== null && host.registeredConnectionId !== null);
-      const stored = readLiveDocumentAuthority(this.db, document);
-      if (!stored || !stored.current || !stored.open || stored.binding.lineageClaimId !== document.lineageClaimId) {
-        return { kind: "refused", reason: "stale-document" };
-      }
-      const latest = this.db.prepare(`SELECT path, content_kind, blob_sha256, byte_length, relay_seq, recorded_at_ms FROM sync_relay_object_moments
-        WHERE workspace_id = ? AND object_id = ? AND version_id = 'main' ORDER BY relay_seq DESC LIMIT 1`)
-        .get(document.workspaceId, document.objectId);
-      if (!latest || latest.path !== stored.binding.currentPath || latest.content_kind !== "text" ||
-          typeof latest.blob_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(latest.blob_sha256) ||
-          typeof latest.byte_length !== "number" || !Number.isSafeInteger(latest.byte_length) || latest.byte_length < 0 ||
-          typeof latest.relay_seq !== "number" || !Number.isSafeInteger(latest.relay_seq) || latest.relay_seq < 1 ||
-          typeof latest.recorded_at_ms !== "number" || !Number.isSafeInteger(latest.recorded_at_ms) || latest.recorded_at_ms < 0 ||
-          this.objectIdAtPathInVersion({ workspaceId: document.workspaceId, versionId: "main", path: stored.binding.currentPath }) !== document.objectId) {
-        return { kind: "refused", reason: "stale-document" };
-      }
-      let share: SyncRelayShareRow;
-      let selector: ShareSelector;
-      let authority: ServerDerivedLiveUpdateAuthority;
-      if (actor.kind === "named") {
-        const named = authorizeNamedLiveEditShareGrant({ storage: this, actorUserId: actor.userId, grantId: actor.grantId });
-        if (!named.ok) return { kind: "refused", reason: named.reason };
-        share = named.share;
-        selector = named.effectiveSelector;
-        authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "named", principalId: actor.userId,
-          grantId: named.grant.grantId, grantGeneration: named.grant.generation });
-      } else {
-        const owned = this.getShare(actor.shareId);
-        if (!owned || owned.granterUserId !== actor.userId || !this.workspaceIsOwnedBy(owned.workspaceId, actor.userId)) {
-          return { kind: "refused", reason: "not-authorized" };
-        }
-        share = owned;
-        const parsed = parseStoredAnyShareSelectorJson(share.selectorJson);
-        const effective = parsed && effectiveShareSelector(parsed, "edit");
-        if (!effective || !isLiveEditShareSelector(effective)) return { kind: "refused", reason: "stale-selector" };
-        selector = effective;
-        authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "owner", principalId: actor.userId,
-          grantId: null, grantGeneration: null });
-      }
-      if (share.workspaceId !== document.workspaceId) return { kind: "refused", reason: "not-authorized" };
-      if (!canonicalLiveSelector(share, selector) || visibleSharePath(selector, stored.binding.currentPath) !== stored.binding.currentPath) {
-        return { kind: "refused", reason: "stale-selector" };
-      }
-      let binding: LiveObjectBinding;
-      try { binding = parseLiveObjectBinding({ ...stored.binding, selectorPaths: selector.paths }); }
-      catch { return { kind: "refused", reason: "stale-selector" }; }
-      return { kind: "current", binding, authority,
-        host: { mode: host.configuredMode, hostId: host.configuredHostId, hostEpoch: host.hostEpoch,
-          instanceId: host.registeredInstanceId, connectionId: host.registeredConnectionId } };
+  private ticketTransaction<T>(run: (now: number, policy: LiveTicketStoragePolicy) => T): T | null {
+    const policy = this.liveTickets;
+    if (policy === undefined) throw new Error("Live-ticket storage is not configured.");
+    try {
+      return this.tx(() => {
+        const now = policy.now();
+        if (typeof now !== "number" || !Number.isSafeInteger(now) || now < 0) throw new Error("Invalid live-ticket clock.");
+        return run(now, policy);
+      });
+    } catch (error) {
+      if (error === LIVE_TICKET_REFUSED) return null;
+      throw error;
+    }
+  }
+
+  private ticketScopeIsCurrent(scope: NamedLiveBrowserContext): boolean {
+    const grant = this.getShareGrant(scope.grantId);
+    const share = grant && this.getShare(grant.shareId);
+    return !!grant && grant.shareId === scope.shareId && !!share && share.workspaceId === scope.workspaceId &&
+      authorizeNamedLiveEditShareGrant({ storage: this, actorUserId: scope.userId, grantId: scope.grantId }).ok;
+  }
+
+  private currentTicketAuthority(scope: NamedLiveBrowserContext, objectId: string, report: TicketHostReport):
+    Extract<CurrentLiveBindingResult, { kind: "current" }> {
+    if (report.binding.workspaceId !== scope.workspaceId || report.binding.objectId !== objectId ||
+      !this.ticketScopeIsCurrent(scope)) throw LIVE_TICKET_REFUSED;
+    const current = this.currentLiveDocumentBinding({
+      document: { workspaceId: scope.workspaceId, objectId, mainVersionId: "main", lineageClaimId: report.binding.lineageClaimId },
+      actor: { kind: "named", userId: scope.userId, grantId: scope.grantId },
     });
+    if (current.kind !== "current" || current.authority.principalKind !== "named" || current.binding.restoreFenceGeneration === 0 ||
+      JSON.stringify(current.binding) !== JSON.stringify(report.binding) ||
+      JSON.stringify(current.host) !== JSON.stringify(report.connection)) throw LIVE_TICKET_REFUSED;
+    return current;
+  }
+
+  private matchingTicket(input: NamedLiveTicketLookup, now: number): LiveTicketClaims {
+    const row = this.db.prepare(`SELECT * FROM ${LIVE_TICKET_TABLE} WHERE token_hash = ?`).get(input.tokenHash);
+    if (!row) throw LIVE_TICKET_REFUSED;
+    const { claims, redeemedAtMs } = parseStoredLiveTicket(row);
+    if (redeemedAtMs !== null || now < claims.mintedAtMs || now >= claims.expiresAtMs || claims.audience !== input.audience ||
+      claims.binding.workspaceId !== input.scope.workspaceId || claims.authority.principalKind !== "named" ||
+      claims.authority.principalId !== input.scope.userId || claims.authority.grantId !== input.scope.grantId ||
+      !this.ticketScopeIsCurrent(input.scope)) throw LIVE_TICKET_REFUSED;
+    return claims;
+  }
+
+  readNamedLiveTicketTarget(input: NamedLiveTicketLookup): { workspaceId: string; objectId: string } | null {
+    const owned = snapshotTicketLookup(ticketRecord(input, ["tokenHash", "scope", "audience"]));
+    return this.ticketTransaction(now => {
+      const claims = this.matchingTicket(owned, now);
+      return { workspaceId: claims.binding.workspaceId, objectId: claims.binding.objectId };
+    });
+  }
+
+  mintNamedLiveTicket(input: NamedLiveTicketMint): { expiresAtMs: number } | null {
+    const raw = ticketRecord(input, ["tokenHash", "scope", "audience", "objectId", "ticketId", "report"]);
+    const owned = snapshotTicketLookup(raw);
+    const objectId = parseLiveUpdateIdentifier(raw.objectId, "object ID");
+    const ticketId = parseLiveUpdateIdentifier(raw.ticketId, "ticket ID");
+    const report = snapshotTicketHostReport(raw.report);
+    return this.ticketTransaction((now, policy) => {
+      if (now > Number.MAX_SAFE_INTEGER - LIVE_TICKET_LIFETIME_MS) throw LIVE_TICKET_REFUSED;
+      const current = this.currentTicketAuthority(owned.scope, objectId, report);
+      const claims = parseLiveTicketClaims({ ticketId, audience: owned.audience, authority: current.authority,
+        binding: current.binding, hostEpoch: current.host.hostEpoch, mintedAtMs: now, expiresAtMs: now + LIVE_TICKET_LIFETIME_MS });
+      if (this.db.prepare(`SELECT 1 FROM ${LIVE_TICKET_TABLE} WHERE ticket_id = ? OR token_hash = ? LIMIT 1`).get(ticketId, owned.tokenHash)) {
+        throw LIVE_TICKET_REFUSED;
+      }
+      this.db.prepare(`DELETE FROM ${LIVE_TICKET_TABLE} WHERE ticket_id IN (
+        SELECT ticket_id FROM ${LIVE_TICKET_TABLE} WHERE expires_at_ms <= ? ORDER BY expires_at_ms, ticket_id LIMIT ?
+      )`).run(now, policy.expiredTicketCleanupBatchSize);
+      const count = this.db.prepare(`SELECT count(*) AS retained_count FROM (
+        SELECT ticket_id FROM ${LIVE_TICKET_TABLE}
+        WHERE workspace_id = ? AND principal_kind = 'named' AND principal_id = ? AND grant_id = ? AND expires_at_ms > ?
+        ORDER BY expires_at_ms, ticket_id LIMIT ?
+      )`).get(owned.scope.workspaceId, owned.scope.userId, owned.scope.grantId, now, policy.retainedTicketsPerPrincipalGrant);
+      if (!count || Number(count.retained_count) >= policy.retainedTicketsPerPrincipalGrant) throw LIVE_TICKET_REFUSED;
+      this.db.prepare(`INSERT INTO ${LIVE_TICKET_TABLE} (${LIVE_TICKET_COLUMNS.join(", ")})
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`).run(
+        claims.ticketId, owned.tokenHash, claims.audience, claims.binding.workspaceId, claims.binding.mainVersionId,
+        claims.binding.objectId, claims.binding.lineageClaimId, claims.binding.currentPath, JSON.stringify(claims.binding.selectorPaths),
+        claims.binding.restoreFenceGeneration, claims.authority.principalKind, claims.authority.principalId,
+        claims.authority.grantId, claims.authority.grantGeneration, claims.hostEpoch, claims.mintedAtMs, claims.expiresAtMs,
+      );
+      return { expiresAtMs: claims.expiresAtMs };
+    });
+  }
+
+  redeemNamedLiveTicket(input: NamedLiveTicketRedemption): RedeemedLiveTicket | null {
+    const raw = ticketRecord(input, ["tokenHash", "scope", "audience", "report"]);
+    const owned = snapshotTicketLookup(raw);
+    const report = snapshotTicketHostReport(raw.report);
+    return this.ticketTransaction(now => {
+      const claims = this.matchingTicket(owned, now);
+      const current = this.currentTicketAuthority(owned.scope, claims.binding.objectId, report);
+      if (JSON.stringify(current.binding) !== JSON.stringify(claims.binding) ||
+        JSON.stringify(current.authority) !== JSON.stringify(claims.authority) || current.host.hostEpoch !== claims.hostEpoch) {
+        throw LIVE_TICKET_REFUSED;
+      }
+      const redeemed = parseRedeemedLiveTicket({ ...claims, redeemedAtMs: now });
+      const updated = this.db.prepare(`UPDATE ${LIVE_TICKET_TABLE} SET redeemed_at_ms = ?
+        WHERE ticket_id = ? AND token_hash = ? AND redeemed_at_ms IS NULL AND minted_at_ms <= ? AND expires_at_ms > ?`)
+        .run(now, claims.ticketId, owned.tokenHash, now, now);
+      if (updated.changes !== 1) throw LIVE_TICKET_REFUSED;
+      return redeemed;
+    });
+  }
+
+  resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
+    const request = snapshotCurrentBindingRequest(input);
+    return this.tx(() => this.currentLiveDocumentBinding(request));
+  }
+
+  private currentLiveDocumentBinding({ document, actor }: CurrentLiveBindingRequest): CurrentLiveBindingResult {
+    const host = readLiveHostControl(this.db);
+    if (host !== null) assertCurrentAuthorityHost(this.db, host);
+    if (host === null || host.admissionState !== "open" || host.transition !== null) {
+      return { kind: "refused", reason: "host-unavailable" };
+    }
+    authorityIntegrity(host.registeredInstanceId !== null && host.registeredConnectionId !== null);
+    const stored = readLiveDocumentAuthority(this.db, document);
+    if (!stored || !stored.current || !stored.open || stored.binding.lineageClaimId !== document.lineageClaimId) {
+      return { kind: "refused", reason: "stale-document" };
+    }
+    const latest = this.db.prepare(`SELECT path, content_kind, blob_sha256, byte_length, relay_seq, recorded_at_ms FROM sync_relay_object_moments
+      WHERE workspace_id = ? AND object_id = ? AND version_id = 'main' ORDER BY relay_seq DESC LIMIT 1`)
+      .get(document.workspaceId, document.objectId);
+    if (!latest || latest.path !== stored.binding.currentPath || latest.content_kind !== "text" ||
+        typeof latest.blob_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(latest.blob_sha256) ||
+        typeof latest.byte_length !== "number" || !Number.isSafeInteger(latest.byte_length) || latest.byte_length < 0 ||
+        typeof latest.relay_seq !== "number" || !Number.isSafeInteger(latest.relay_seq) || latest.relay_seq < 1 ||
+        typeof latest.recorded_at_ms !== "number" || !Number.isSafeInteger(latest.recorded_at_ms) || latest.recorded_at_ms < 0 ||
+        this.objectIdAtPathInVersion({ workspaceId: document.workspaceId, versionId: "main", path: stored.binding.currentPath }) !== document.objectId) {
+      return { kind: "refused", reason: "stale-document" };
+    }
+    let share: SyncRelayShareRow;
+    let selector: ShareSelector;
+    let authority: ServerDerivedLiveUpdateAuthority;
+    if (actor.kind === "named") {
+      const named = authorizeNamedLiveEditShareGrant({ storage: this, actorUserId: actor.userId, grantId: actor.grantId });
+      if (!named.ok) return { kind: "refused", reason: named.reason };
+      share = named.share;
+      selector = named.effectiveSelector;
+      authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "named", principalId: actor.userId,
+        grantId: named.grant.grantId, grantGeneration: named.grant.generation });
+    } else {
+      const owned = this.getShare(actor.shareId);
+      if (!owned || owned.granterUserId !== actor.userId || !this.workspaceIsOwnedBy(owned.workspaceId, actor.userId)) {
+        return { kind: "refused", reason: "not-authorized" };
+      }
+      share = owned;
+      const parsed = parseStoredAnyShareSelectorJson(share.selectorJson);
+      const effective = parsed && effectiveShareSelector(parsed, "edit");
+      if (!effective || !isLiveEditShareSelector(effective)) return { kind: "refused", reason: "stale-selector" };
+      selector = effective;
+      authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "owner", principalId: actor.userId,
+        grantId: null, grantGeneration: null });
+    }
+    if (share.workspaceId !== document.workspaceId) return { kind: "refused", reason: "not-authorized" };
+    if (!canonicalLiveSelector(share, selector) || visibleSharePath(selector, stored.binding.currentPath) !== stored.binding.currentPath) {
+      return { kind: "refused", reason: "stale-selector" };
+    }
+    let binding: LiveObjectBinding;
+    try { binding = parseLiveObjectBinding({ ...stored.binding, selectorPaths: selector.paths }); }
+    catch { return { kind: "refused", reason: "stale-selector" }; }
+    return { kind: "current", binding, authority,
+      host: { mode: host.configuredMode, hostId: host.configuredHostId, hostEpoch: host.hostEpoch,
+        instanceId: host.registeredInstanceId, connectionId: host.registeredConnectionId } };
   }
 
   provisionLiveHostControl(input: {
@@ -3686,7 +3980,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     // never be accepted, so the granter's only honest answer would be
     // "decline". A settled proposal stops protecting its blobs: an accepted
     // one has them in the log, and a declined one never will.
-    const cutoff = options.nowMs - this.blobGraceMs;
+    const cutoff = options.nowMs - this.options.blobGraceMs;
     // Phase 1 (read only, no write lock): candidate shas that are unreferenced
     // and aged past the grace window.
     const candidates = this.db
@@ -4113,9 +4407,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   private assertWorkspaceQuota(workspaceId: string, addedBytes: number): void {
     if (addedBytes <= 0) return;
     const currentUsage = this.workspaceUsageBytes(workspaceId);
-    if (currentUsage + addedBytes > this.workspaceQuotaBytes) {
+    if (currentUsage + addedBytes > this.options.workspaceQuotaBytes) {
       throw new SyncRelayQuotaExceededError(
-        `workspace storage quota exceeded: ${currentUsage + addedBytes} bytes would exceed quota ${this.workspaceQuotaBytes}`,
+        `workspace storage quota exceeded: ${currentUsage + addedBytes} bytes would exceed quota ${this.options.workspaceQuotaBytes}`,
       );
     }
   }
@@ -4524,7 +4818,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           .get(session.grantId)?.count ?? 0,
       );
       const sessionsToDelete =
-        liveSessionCount - this.linkSessionsPerGrantLimit + 1;
+        liveSessionCount - this.options.linkSessionsPerGrantLimit + 1;
       if (sessionsToDelete > 0) {
         this.db
           .prepare(
@@ -4800,7 +5094,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             )
             .get(grantId, Number(authority.grant_generation))?.count ?? 0,
         );
-        if (principalCount >= this.linkDiscussionPrincipalLimit) {
+        if (principalCount >= this.options.linkDiscussionPrincipalLimit) {
           return { ok: false, reason: "principal-limit" };
         }
       }
@@ -4820,7 +5114,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
               createdAtMs - DISCUSSION_MESSAGE_RATE_WINDOW_MS,
             )?.count ?? 0,
         );
-        if (rateCount >= this.discussionMessageRateLimit) {
+        if (rateCount >= this.options.discussionMessageRateLimit) {
           return { ok: false, reason: "rate-limit" };
         }
         const lifetimeCount = Number(
@@ -4832,7 +5126,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             )
             .get(principal.principalId)?.count ?? 0,
         );
-        if (lifetimeCount >= this.discussionLifetimeMessageLimit) {
+        if (lifetimeCount >= this.options.discussionLifetimeMessageLimit) {
           return { ok: false, reason: "lifetime-limit" };
         }
       }
@@ -4845,7 +5139,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           )
           .get(shareId)?.count ?? 0,
       );
-      if (shareRowCount >= this.discussionNonOwnerShareRowLimit) {
+      if (shareRowCount >= this.options.discussionNonOwnerShareRowLimit) {
         return { ok: false, reason: "share-limit" };
       }
 
@@ -4877,7 +5171,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       });
       if (
         this.workspaceUsageBytes(workspaceId) + principalAddedBytes + messageStorageBytes >
-        this.workspaceQuotaBytes
+        this.options.workspaceQuotaBytes
       ) {
         return { ok: false, reason: "workspace-quota" };
       }
@@ -5063,7 +5357,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
               createdAtMs - DISCUSSION_MESSAGE_RATE_WINDOW_MS,
             )?.count ?? 0,
         );
-        if (rateCount >= this.discussionMessageRateLimit) {
+        if (rateCount >= this.options.discussionMessageRateLimit) {
           return { ok: false, reason: "rate-limit" };
         }
         const lifetimeCount = Number(
@@ -5077,7 +5371,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             )
             .get(input.shareId, input.authorUserId)?.count ?? 0,
         );
-        if (lifetimeCount >= this.discussionLifetimeMessageLimit) {
+        if (lifetimeCount >= this.options.discussionLifetimeMessageLimit) {
           return { ok: false, reason: "lifetime-limit" };
         }
         const shareRowCount = Number(
@@ -5089,7 +5383,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             )
             .get(input.shareId)?.count ?? 0,
         );
-        if (shareRowCount >= this.discussionNonOwnerShareRowLimit) {
+        if (shareRowCount >= this.options.discussionNonOwnerShareRowLimit) {
           return { ok: false, reason: "share-limit" };
         }
       }
@@ -5112,7 +5406,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       });
       if (
         this.workspaceUsageBytes(String(share.workspace_id)) + messageStorageBytes >
-        this.workspaceQuotaBytes
+        this.options.workspaceQuotaBytes
       ) {
         return { ok: false, reason: "workspace-quota" };
       }

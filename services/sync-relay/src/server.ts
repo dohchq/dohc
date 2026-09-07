@@ -131,7 +131,7 @@ export interface CreateSyncRelayHandlerOptions {
   linkLogReadRateLimiter?: TokenBucketLimiter;
   linkGrantLogReadRateLimiter?: TokenBucketLimiter;
   linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
-  linkCapabilityReadFallbackPageSize?: number;
+  linkFreshnessPageSize?: number;
   linkCurrentFileLimit?: number;
   newLinkBearer?: () => string;
   newLinkHandoffCode?: () => string;
@@ -235,8 +235,8 @@ const DISCUSSION_MODERATION_HANDLE_MAX_CHARS = 512;
 const MAX_LINK_CURRENT_FILES = 5_000;
 // One accountless response may scan this many raw log rows for admitted ops.
 export const MAX_RAW_ROWS_PER_LINK_PAGE = 10_000;
-// Capability reads may synchronously inspect at most 10,000 fallback rows.
-export const LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET = 20;
+// Freshness reads inspect at most 20 pages, or 10,000 rows at the default page size.
+export const LINK_FRESHNESS_PAGE_BUDGET = 20;
 // Presence (ephemeral awareness) transport limits.
 export const MAX_PRESENCE_TOPIC_CHARS = 1024;
 export const MAX_CLIENT_ID_CHARS = 128;
@@ -391,7 +391,7 @@ export function createSyncRelayHandler({
     LINK_READ_MAX_CAPABILITIES,
   ),
   linkGrantEgressRateLimiter = new LinkEgressRateLimiter(),
-  linkCapabilityReadFallbackPageSize = MAX_LOG_PAGE_SIZE,
+  linkFreshnessPageSize = MAX_LOG_PAGE_SIZE,
   linkCurrentFileLimit = MAX_LINK_CURRENT_FILES,
   newLinkBearer = () => mintLinkBearer(),
   newLinkHandoffCode = () => mintLinkHandoffCode(),
@@ -1299,13 +1299,13 @@ export function createSyncRelayHandler({
       : createAccountlessPathProjection(selector);
     for (
       let pagesRead = 0;
-      pagesRead < LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET;
+      pagesRead < LINK_FRESHNESS_PAGE_BUDGET;
       pagesRead += 1
     ) {
       const rows = storage.fetchLogPageDescending({
         workspaceId,
         beforeRelaySeq,
-        limit: linkCapabilityReadFallbackPageSize,
+        limit: linkFreshnessPageSize,
       });
       for (const row of rows) {
         if (row.relaySeq <= epochLogFloor) {
@@ -1332,7 +1332,7 @@ export function createSyncRelayHandler({
           return { lastSettledAtMs: row.recordedAtMs, lastSettledKnown: true };
         }
       }
-      if (rows.length < linkCapabilityReadFallbackPageSize) {
+      if (rows.length < linkFreshnessPageSize) {
         return { lastSettledAtMs: null, lastSettledKnown: true };
       }
       beforeRelaySeq = rows[rows.length - 1]!.relaySeq;
