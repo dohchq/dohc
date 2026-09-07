@@ -42,6 +42,7 @@ function handler(
     nowMs: () => NOW_MS,
     resolveUserIdByEmail: undefined,
     lookupUserEmail: undefined,
+    lookupVerifiedUserEmail: undefined,
     linkKey: undefined,
     shareWebOrigin: undefined,
     ...overrides,

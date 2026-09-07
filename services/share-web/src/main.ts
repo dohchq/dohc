@@ -40,11 +40,13 @@ const { handle: handler } = createShareWebApplication({
   publicHosts: config.publicHosts,
   viewerAssetsDir,
   accountAuth: config.accountAuth,
+  namedBrowserSessionLimits: config.namedBrowserSessionLimits,
 });
 
 const server = serveFetchHandler({
   handler,
-  maxBodyBytes: () => MAX_REQUEST_BODY_BYTES,
+  maxBodyBytes: url => url.pathname === "/api/live/named-session" && config.namedBrowserSessionLimits
+    ? config.namedBrowserSessionLimits.maxRequestBytes : MAX_REQUEST_BODY_BYTES,
   oversized: refusal,
   failure: refusal,
   prepareHeaders: (headers, incoming) => {
