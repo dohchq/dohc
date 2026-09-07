@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -20,10 +21,11 @@ beforeAll(async () => {
 });
 afterAll(async () => { if (root) await rm(root, { recursive: true, force: true }); });
 
-async function run(args: string[], umask?: number) {
+async function run(args: string[], umask?: number, platform?: "darwin", preload?: string) {
   try {
-    const invocation = umask === undefined ? [command, ...args] : ["--input-type=module", "--eval",
-      `process.umask(${umask}); process.argv = [process.execPath, ${JSON.stringify(command)}, ...${JSON.stringify(args)}]; await import(${JSON.stringify(pathToFileURL(command).href)});`];
+    const invocation = umask === undefined && platform === undefined ? [command, ...args] : ["--input-type=module", "--eval",
+      `if (${umask !== undefined}) process.umask(${umask}); if (${platform !== undefined}) Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} }); process.argv = [process.execPath, ${JSON.stringify(command)}, ...${JSON.stringify(args)}]; await import(${JSON.stringify(pathToFileURL(command).href)});`];
+    if (preload) invocation.unshift("--import", pathToFileURL(preload).href);
     const result = await exec(process.execPath, invocation, { windowsHide: true, timeout: 30_000, env: { ...process.env, NODE_OPTIONS: "" } });
     return { code: 0, ...result };
   } catch (error) {
@@ -32,22 +34,34 @@ async function run(args: string[], umask?: number) {
   }
 }
 
-it.runIf(process.platform === "darwin")("reports unavailable ACL validation without creating a credential directory", async () => {
-  const directory = join(root, "darwin-credential"), database = join(root, "darwin.sqlite");
-  const result = await run(["provision", "--database", database, "--host-id", "darwin-device", "--output-directory", directory]);
+it.each(["missing", "existing"] as const)("refuses unsupported provisioning before touching a %s database", async kind => {
+  const directory = join(root, "darwin-credential-" + kind), database = join(root, "darwin-" + kind + ".sqlite");
+  if (kind === "existing") await writeFile(database, "operator-owned non-database bytes");
+  const result = await run(["provision", "--database", database, "--host-id", "darwin-device", "--output-directory", directory], undefined, "darwin");
   expect(result).toMatchObject({ code: 1, stdout: "" });
-  expect(result.stderr).toContain("Device host credential files are unavailable on macOS because ACL validation is not implemented.");
+  expect(result.stderr).toBe("Device host credential files are unavailable on macOS because ACL validation is not implemented.\n");
   await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+  if (kind === "existing") expect(await readFile(database, "utf8")).toBe("operator-owned non-database bytes");
+  else await expect(stat(database)).rejects.toMatchObject({ code: "ENOENT" });
+  for (const suffix of ["-wal", "-shm", "-journal"]) await expect(stat(database + suffix)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("explains durable credential storage and unrecoverable loss in help", async () => {
+  const result = await run(["--help"], undefined, "darwin");
+  expect(result).toMatchObject({ code: 0, stderr: "" });
+  expect(result.stdout).toContain("Store the credential file on durable storage. The relay does not keep a recoverable copy.");
+  expect(result.stdout).toContain("Losing the file prevents recovery at the current host epoch.");
 });
 
 it.skipIf(process.platform === "darwin")("runs the actual provision/replay/revoke commands without printing the credential or changing its instance", async () => {
   const database = join(root, "relay.sqlite"), directory = join(root, "credential");
   const args = ["provision", "--database", database, "--host-id", "configured-device", "--output-directory", directory];
   const provision = await run(args);
-  expect(provision, provision.stderr).toMatchObject({ code: 0, stdout: `Device host credential provisioned.\nDatabase: ${JSON.stringify(database)}\n` });
+  expect(provision, provision.stderr).toMatchObject({ code: 0 });
   const file = join(directory, "device-host-credential.json"), bytes = await readFile(file);
   const credential = parseDeviceHostCredential(JSON.parse(bytes.toString()));
   expect(credential.secret).toHaveLength(43);
+  expect(provision.stdout).toBe(`Device host credential provisioned.\nDatabase: ${JSON.stringify(database)}\nInstance ID: ${JSON.stringify(credential.instanceId)}\nCredential file: ${JSON.stringify(file)}\n`);
   expect(provision.stdout + provision.stderr).not.toContain(credential.secret);
   if (process.platform !== "win32") {
     expect((await stat(directory)).mode & 0o777).toBe(0o700);
@@ -55,13 +69,14 @@ it.skipIf(process.platform === "darwin")("runs the actual provision/replay/revok
   }
   const replay = await run(args); expect(replay, replay.stderr).toMatchObject({ code: 0 });
   expect(await readFile(file)).toEqual(bytes);
+  expect(replay.stdout).toBe(provision.stdout);
   const storage = openSyncRelayStorage(database);
   try {
     expect(storage.registerDeviceHost({ credential, connectionId: "real-registration", updatedAtMs: Date.now() }).ok).toBe(true);
   } finally { storage.close(); }
   const revoke = ["revoke", "--database", database, "--host-id", credential.hostId, "--instance-id", credential.instanceId];
   expect((await run(revoke)).code).toBe(1);
-  const revoked = await run([...revoke, "--confirm-revoke"]);
+  const revoked = await run([...revoke, "--confirm-revoke"], undefined, "darwin");
   expect(revoked).toMatchObject({ code: 0, stdout: `Device host credential revoked.\nDatabase: ${JSON.stringify(database)}\nHost admission: closed\n` });
   expect((await run([...revoke, "--confirm-revoke"])).code).toBe(0);
   const revokedReplay = await run(args);
@@ -173,3 +188,34 @@ it.skipIf(process.platform === "win32" || process.platform === "darwin")("reject
   expect((await run(redirected)).code).toBe(1);
   expect(await readFile(file)).toEqual(before);
 });
+
+it.skipIf(process.platform === "darwin")("requires publication and retry sync barriers before activating SQLite credentials", async () => {
+  const directory = join(root, "barrier-credential"), database = join(root, "barrier.sqlite");
+  const args = ["provision", "--database", database, "--host-id", "barrier-device", "--output-directory", directory];
+  const preload = join(root, "fail-credential-sync.mjs");
+  const failSync = async (flags: "wx" | "r+", after: number) => {
+    await writeFile(preload, `import fs from "node:fs/promises"; import { syncBuiltinESMExports } from "node:module";
+const open = fs.open; fs.open = async (...args) => {
+  const handle = await open(...args);
+  if (args[1] === ${JSON.stringify(flags)}) { let calls = 0; const sync = handle.sync.bind(handle);
+    handle.sync = async () => { if (++calls === ${after}) throw new Error("injected credential sync failure"); await sync(); };
+  } return handle;
+}; syncBuiltinESMExports();`);
+    const result = await run(args, undefined, undefined, preload);
+    expect(result).toMatchObject({ code: 1, stdout: "" });
+    const raw = new DatabaseSync(database);
+    try { expect(raw.prepare("SELECT count(*) AS n FROM sync_relay_device_host_credential").get()).toMatchObject({ n: 0 }); }
+    finally { raw.close(); }
+  };
+  await failSync("wx", 2);
+  const path = join(directory, "device-host-credential.json"), bytes = await readFile(path), before = await stat(path, { bigint: true });
+  await failSync("r+", 1);
+  expect(await readFile(path)).toEqual(bytes);
+  const recovered = await run(args); expect(recovered, recovered.stderr).toMatchObject({ code: 0 });
+  expect(await readFile(path)).toEqual(bytes);
+  const after = await stat(path, { bigint: true });
+  expect({ dev: after.dev, ino: after.ino, mtimeNs: after.mtimeNs }).toEqual({ dev: before.dev, ino: before.ino, mtimeNs: before.mtimeNs });
+  const storage = openSyncRelayStorage(database);
+  try { expect(storage.registerDeviceHost({ credential: parseDeviceHostCredential(JSON.parse(bytes.toString())), connectionId: "after-barrier", updatedAtMs: Date.now() }).ok).toBe(true); }
+  finally { storage.close(); }
+}, 60_000);

@@ -12,6 +12,10 @@ export class DeviceHostCredentialFileUnavailable extends Error {
   }
 }
 
+export function requireDeviceHostCredentialFileSupport(): void {
+  if (process.platform === "darwin") throw new DeviceHostCredentialFileUnavailable();
+}
+
 const windowsAccess = String.raw`
 $ErrorActionPreference = 'Stop'
 $path = $env:DOHC_HOST_CREDENTIAL_PATH
@@ -57,9 +61,15 @@ function sameFile(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+async function syncCredentialDirectory(directory: string): Promise<void> {
+  if (process.platform === "win32") return;
+  const parent = await open(directory, "r");
+  try { await parent.sync(); } finally { await parent.close(); }
+}
+
 // Persist the secret before provisioning. A crash can then retry with the same file.
 export async function prepareDeviceHostCredentialFile(directory: string, hostId: string, hostEpoch: HostEpoch): Promise<DeviceHostCredential> {
-  if (process.platform === "darwin") throw new DeviceHostCredentialFileUnavailable();
+  requireDeviceHostCredentialFileSupport();
   let created = false;
   try { await mkdir(directory, { mode: 0o700 }); created = true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
@@ -71,14 +81,19 @@ export async function prepareDeviceHostCredentialFile(directory: string, hostId:
     throw error;
   });
   if (existing !== null) {
-    await privatePath(path, false);
-    const handle = await open(path, "r");
+    const identity = await privatePath(path, false);
+    const handle = await open(path, "r+");
+    let credential: DeviceHostCredential;
     try {
-      if ((await handle.stat()).size > 8_192) throw new Error("Invalid credential file.");
-      const credential = parseDeviceHostCredential(JSON.parse(await handle.readFile("utf8")));
+      const opened = await handle.stat({ bigint: true });
+      if (!opened.isFile() || !sameFile(opened, identity)) throw new Error("Credential file changed.");
+      if (opened.size > 8_192n) throw new Error("Invalid credential file.");
+      credential = parseDeviceHostCredential(JSON.parse(await handle.readFile("utf8")));
       if (credential.hostId !== hostId || credential.hostEpoch !== hostEpoch) throw new Error("Credential scope differs.");
-      return credential;
+      await handle.sync();
     } finally { await handle.close(); }
+    await syncCredentialDirectory(directory);
+    return credential;
   }
   const credential = createDeviceHostCredential(hostId, hostEpoch);
   const temporary = join(directory, `.device-host-credential-${randomUUID()}.tmp`);
@@ -92,6 +107,7 @@ export async function prepareDeviceHostCredentialFile(directory: string, hostId:
     await handle.sync();
     if (!sameFile(await privatePath(temporary, false), identity)) throw new Error("Credential file changed.");
     await link(temporary, path);
+    await handle.sync();
   } finally {
     await handle.close();
     const current = await lstat(temporary, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
@@ -100,9 +116,6 @@ export async function prepareDeviceHostCredentialFile(directory: string, hostId:
     });
     if (identity && current?.isFile() && sameFile(current, identity)) await unlink(temporary);
   }
-  if (process.platform !== "win32") {
-    const parent = await open(directory, "r");
-    try { await parent.sync(); } finally { await parent.close(); }
-  }
+  await syncCredentialDirectory(directory);
   return credential;
 }

@@ -156,3 +156,93 @@ it.skipIf(process.platform === "darwin")("leaves a replacement path untouched wh
   expect((await actual.readFile(held)).length).toBe(0);
   expect(await actual.readFile(createdPath!, "utf8")).toBe("operator replacement");
 });
+
+it.skipIf(process.platform === "darwin")("syncs the published name after linking and before returning", async () => {
+  const { directory } = paths(), events: string[] = [];
+  vi.mocked(open).mockImplementation(async (...args) => {
+    const handle = await actual.open(...args);
+    const sync = handle.sync.bind(handle);
+    vi.spyOn(handle, "sync").mockImplementation(async () => {
+      await sync(); events.push(args[1] === "wx" ? "file sync" : "directory sync");
+    });
+    return handle;
+  });
+  vi.mocked(link).mockImplementation(async (...args) => { await actual.link(...args); events.push("published"); });
+  await prepareDeviceHostCredentialFile(directory, "host", epoch);
+  expect(events).toEqual(process.platform === "win32" ? ["file sync", "published", "file sync"] :
+    ["file sync", "published", "file sync", "directory sync"]);
+});
+
+it.skipIf(process.platform === "darwin")("retries through one existing-only writable handle without changing bytes or identity", async () => {
+  const { directory, final } = paths();
+  const credential = await prepareDeviceHostCredentialFile(directory, "host", epoch);
+  const before = await actual.readFile(final), identity = await actual.lstat(final, { bigint: true });
+  const events: string[] = [];
+  let validated = false;
+  vi.mocked(lstat).mockImplementation((async (...args: Parameters<typeof lstat>) => {
+    const stat = await actual.lstat(...args);
+    if (String(args[0]) === final && stat.isFile()) validated = true;
+    return stat;
+  }) as typeof lstat);
+  vi.mocked(open).mockImplementation(async (...args) => {
+    if (String(args[0]) === final) { expect(validated).toBe(true); expect(args[1]).toBe("r+"); }
+    const handle = await actual.open(...args);
+    if (String(args[0]) === final) {
+      const read = handle.readFile.bind(handle), sync = handle.sync.bind(handle);
+      vi.spyOn(handle, "readFile").mockImplementation(async (...readArgs) => { events.push("read"); return read(...readArgs); });
+      vi.spyOn(handle, "sync").mockImplementation(async () => { await sync(); events.push("file sync"); });
+      for (const method of ["writeFile", "truncate", "chmod"] as const) vi.spyOn(handle, method).mockImplementation(async () => { throw new Error("Existing credential mutation"); });
+    } else {
+      expect(String(args[0])).toBe(directory); expect(args[1]).toBe("r");
+      const sync = handle.sync.bind(handle);
+      vi.spyOn(handle, "sync").mockImplementation(async () => { await sync(); events.push("directory sync"); });
+    }
+    return handle;
+  });
+  expect(await prepareDeviceHostCredentialFile(directory, "host", epoch)).toEqual(credential);
+  expect(events).toEqual(process.platform === "win32" ? ["read", "file sync"] : ["read", "file sync", "directory sync"]);
+  expect(await actual.readFile(final)).toEqual(before);
+  const after = await actual.lstat(final, { bigint: true });
+  expect({ dev: after.dev, ino: after.ino, mode: after.mode, mtimeNs: after.mtimeNs }).toEqual(
+    { dev: identity.dev, ino: identity.ino, mode: identity.mode, mtimeNs: identity.mtimeNs });
+});
+
+it.skipIf(process.platform === "darwin")("refuses an existing file replaced after privacy validation before reading or syncing", async () => {
+  const { directory, final } = paths();
+  await prepareDeviceHostCredentialFile(directory, "host", epoch);
+  const before = await actual.readFile(final), held = join(directory, "held-original");
+  let read = false, synced = false;
+  vi.mocked(open).mockImplementation(async (...args) => {
+    if (String(args[0]) === final) {
+      await actual.rename(final, held); await actual.writeFile(final, before, { flag: "wx", mode: 0o600 });
+    }
+    const handle = await actual.open(...args);
+    if (String(args[0]) === final) {
+      const originalRead = handle.readFile.bind(handle), sync = handle.sync.bind(handle);
+      vi.spyOn(handle, "readFile").mockImplementation(async (...readArgs) => { read = true; return originalRead(...readArgs); });
+      vi.spyOn(handle, "sync").mockImplementation(async () => { synced = true; await sync(); });
+    }
+    return handle;
+  });
+  await expect(prepareDeviceHostCredentialFile(directory, "host", epoch)).rejects.toThrow("Credential file changed.");
+  expect(read).toBe(false); expect(synced).toBe(false);
+  expect(await actual.readFile(final)).toEqual(before); expect(await actual.readFile(held)).toEqual(before);
+});
+
+it.skipIf(process.platform === "win32" || process.platform === "darwin")("repeats a failed directory sync on an existing-file retry", async () => {
+  const { directory, final } = paths();
+  await prepareDeviceHostCredentialFile(directory, "host", epoch);
+  const before = await actual.readFile(final), failure = new Error("injected parent sync failure");
+  let attempts = 0;
+  vi.mocked(open).mockImplementation(async (...args) => {
+    const handle = await actual.open(...args);
+    if (String(args[0]) === directory) {
+      const sync = handle.sync.bind(handle);
+      vi.spyOn(handle, "sync").mockImplementation(async () => { attempts++; if (attempts === 1) throw failure; await sync(); });
+    }
+    return handle;
+  });
+  await expect(prepareDeviceHostCredentialFile(directory, "host", epoch)).rejects.toBe(failure);
+  await prepareDeviceHostCredentialFile(directory, "host", epoch);
+  expect(attempts).toBe(2); expect(await actual.readFile(final)).toEqual(before);
+});

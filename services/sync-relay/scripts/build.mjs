@@ -3,12 +3,11 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const entry = fileURLToPath(new URL("../src/main.ts", import.meta.url));
-const credentialEntry = fileURLToPath(new URL("../src/deviceHostCredentialCommand.ts", import.meta.url));
 const outdir = fileURLToPath(new URL("../dist", import.meta.url));
 
 await rm(outdir, { recursive: true, force: true });
 await build({
-  entryPoints: { main: entry, "device-host-credential": credentialEntry },
+  entryPoints: { main: entry },
   outdir,
   bundle: true,
   platform: "node",

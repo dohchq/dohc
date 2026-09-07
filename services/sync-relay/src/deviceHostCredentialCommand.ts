@@ -1,13 +1,15 @@
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { parseHostControlIdentifier, parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import { openSyncRelayStorage } from "./storage.js";
-import { DeviceHostCredentialFileUnavailable, prepareDeviceHostCredentialFile } from "./deviceHostCredentialFile.js";
+import { DeviceHostCredentialFileUnavailable, prepareDeviceHostCredentialFile, requireDeviceHostCredentialFileSupport } from "./deviceHostCredentialFile.js";
 
 const usage = `Run on the relay host with deployment-operator access to its database.
 provision --database PATH --host-id ID --output-directory NEW_PRIVATE_DIRECTORY
 revoke --database PATH --host-id ID --instance-id ID --confirm-revoke
 Provisioning creates the initial credential at the current host epoch. Retries reuse that credential.
 This command does not renew credentials across host epochs or replace a device instance.
+Store the credential file on durable storage. The relay does not keep a recoverable copy.
+Losing the file prevents recovery at the current host epoch.
 Credential-file provisioning is unavailable on macOS until ACL validation is implemented.
 Revocation permanently disables this credential. It preserves any maintenance transition.`;
 
@@ -33,16 +35,22 @@ async function main(args: string[]): Promise<void> {
   if (!isAbsolute(database)) throw new Error();
   const output = fields.get("--output-directory");
   if (output !== undefined && !isAbsolute(output)) throw new Error();
+  if (action === "provision") requireDeviceHostCredentialFileSupport();
   const storage = openSyncRelayStorage(database);
   try {
-    const result = action === "provision"
-      ? storage.provisionDeviceHostCredential({ credential: await prepareDeviceHostCredentialFile(output!, hostId,
-          storage.getLiveHostControl()?.hostEpoch ?? parseHostEpoch(1)), updatedAtMs: Date.now() })
+    const credential = action === "provision"
+      ? await prepareDeviceHostCredentialFile(output!, hostId, storage.getLiveHostControl()?.hostEpoch ?? parseHostEpoch(1))
+      : null;
+    const result = credential !== null
+      ? storage.provisionDeviceHostCredential({ credential, updatedAtMs: Date.now() })
       : storage.revokeDeviceHostCredential({ hostId, instanceId: parseHostControlIdentifier(fields.get("--instance-id"), "instance ID"), updatedAtMs: Date.now() });
     if (!result.ok) throw new Error();
     console.log(action === "provision" ? "Device host credential provisioned." : "Device host credential revoked.");
     console.log(`Database: ${JSON.stringify(resolve(database))}`);
-    if (action === "revoke") console.log(`Host admission: ${result.snapshot.admissionState}`);
+    if (credential !== null) {
+      console.log(`Instance ID: ${JSON.stringify(credential.instanceId)}`);
+      console.log(`Credential file: ${JSON.stringify(join(resolve(output!), "device-host-credential.json"))}`);
+    } else console.log(`Host admission: ${result.snapshot.admissionState}`);
   } finally { storage.close(); }
 }
 
