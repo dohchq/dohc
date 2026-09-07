@@ -8,7 +8,6 @@ import {
   serveFetchHandler,
 } from "@dohc/service-http";
 import { loadShareWebConfig } from "./config";
-import { parseDeviceControlLimits } from "@dohc/live-session-contract/device-control";
 import { createDeviceControlBridge } from "./deviceControlBridge";
 import { clientAddress } from "./clientAddress";
 import {
@@ -69,7 +68,7 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
   try {
     deviceControl = createDeviceControlBridge({
       publicHosts: config.publicHosts, relayUrl: config.relayUrl, relayExchangeKey: config.relayExchangeKey ?? "",
-      limits: parseDeviceControlLimits(JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS)),
+      limits: JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS),
       admission: JSON.parse(process.env.DOHC_SHARE_WEB_DEVICE_CONTROL_ADMISSION ?? "null"), trustedProxies: config.trustedProxies,
     });
   } catch {

@@ -1,6 +1,6 @@
 import { isAbsolute } from "node:path";
 import { parseDeviceControlLimits } from "@dohc/live-session-contract/device-control";
-import { readDeviceHostCredentialFile } from "./deviceHostCredentialFile.js";
+import { DeviceHostCredentialFileUnavailable, readDeviceHostCredentialFile } from "./deviceHostCredentialFile.js";
 import { connectDeviceHost } from "./deviceHostConnect.js";
 
 const usage = `Connect this device outbound to share-web. No inbound listener or relay database is needed.
@@ -38,7 +38,8 @@ async function main(args: string[]): Promise<void> {
   if (!registered || !requestedStop) throw new Error();
 }
 
-main(process.argv.slice(2)).catch(() => {
-  console.error("Device host connection closed or refused. Check the service, credential, and limits. Use --help for arguments.");
+main(process.argv.slice(2)).catch(error => {
+  console.error(error instanceof DeviceHostCredentialFileUnavailable ? error.message :
+    "Device host connection closed or refused. Check the service, credential, and limits. Use --help for arguments.");
   process.exitCode = 1;
 });

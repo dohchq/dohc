@@ -17,7 +17,6 @@ import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
 import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
-import { parseDeviceControlLimits } from "@dohc/live-session-contract/device-control";
 import { createDeviceControl } from "./deviceControl";
 
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
@@ -334,7 +333,7 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
     deviceControl = createDeviceControl({
       storage, relayExchangeKey: relayExchangeKey ?? "",
       hosts: new Set((process.env.DOHC_RELAY_DEVICE_CONTROL_HOSTS ?? "").split(",")),
-      limits: parseDeviceControlLimits(JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS)),
+      limits: JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS),
     });
   } catch {
     fatal("FATAL: Invalid device control configuration. Check DOHC_DEVICE_CONTROL_LIMITS, DOHC_RELAY_DEVICE_CONTROL_HOSTS, and relay exchange key.");

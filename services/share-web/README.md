@@ -101,10 +101,13 @@ Set `DOHC_SHARE_WEB_DEVICE_CONTROL_ADMISSION` on share-web to a JSON object with
 There are no admission defaults. Capacity and key count must be positive integers; refill rate must be a positive finite number.
 Each client address gets a token bucket before share-web dials the relay.
 Share-web derives that address from the socket and its existing trusted-proxy configuration.
+Configure the terminating proxy and `X-Forwarded-For` as described in "Public origin and proxy" above.
+Clients sharing a derived address share its admission bucket. An unlisted proxy can put every device in one bucket.
+Repeated attempts from the same address can delay another device's reconnect.
 Caller-supplied internal client-address headers cannot select a bucket.
 The limiter bounds repeated attempts per retained address; it does not guarantee admission during a distributed flood.
 
-Set `DOHC_RELAY_DEVICE_CONTROL_HOSTS` on the relay to its exact comma-separated internal Host values, including ports.
+Set `DOHC_RELAY_DEVICE_CONTROL_HOSTS` on the relay to its exact comma-separated internal Host values, including non-default ports.
 Both services require their configured relay exchange key, including in development and tests.
 The internal relay URL must be an HTTP or HTTPS origin without a path.
 Share-web sends its configured exchange key and never forwards a caller's internal authentication headers.
@@ -115,9 +118,9 @@ Keep Authorization out of proxy logs and traces.
 Set the proxy's idle timeout above the configured heartbeat interval plus deadline.
 The device command always verifies the public TLS certificate.
 
-Build the relay package before running its commands.
 Use `pnpm --filter @dohc/sync-relay host:credential --help` for initial provisioning and permanent revocation.
 Place the resulting credential directory on the device with access restricted to its owner.
+Build the relay package before running the outbound connector.
 Run `pnpm --filter @dohc/sync-relay host:connect --help` for the outbound connector arguments.
 The connector reads the existing credential and opens no listener or relay database.
 Credential-file creation, reading, and the connector are unavailable on macOS until ACL validation is implemented.

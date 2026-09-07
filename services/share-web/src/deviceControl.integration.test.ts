@@ -112,6 +112,26 @@ async function freePort(): Promise<number> {
   return address.port;
 }
 
+it("reports unsupported credential-file platforms without exposing other connector errors", async () => {
+  const platform = join(scratch, "unsupported-platform.mjs");
+  await writeFile(platform, "Object.defineProperty(process, 'platform', { value: 'darwin' });\n");
+  const unavailable = child(["--import", pathToFileURL(platform).href, connectorCommand,
+    "--url", "wss://localhost/api/device-control", "--credential-directory", join(scratch, "private-credential"),
+    "--limits-json", JSON.stringify(limits)]);
+  await once(unavailable.process, "close");
+  expect(unavailable.process.exitCode).toBe(1);
+  expect(unavailable.logs()).toContain("Device host credential files are unavailable on macOS because ACL validation is not implemented.");
+  expect(unavailable.logs()).not.toContain("private-credential");
+
+  const invalid = child([connectorCommand, "--url", "wss://localhost/api/device-control",
+    "--credential-directory", join(scratch, "private-credential"), "--limits-json", "private-invalid-json"]);
+  await once(invalid.process, "close");
+  expect(invalid.process.exitCode).toBe(1);
+  expect(invalid.logs()).toContain("Device host connection closed or refused.");
+  expect(invalid.logs()).not.toContain("private-invalid-json");
+  expect(invalid.logs()).not.toContain("private-credential");
+});
+
 it.skipIf(process.platform === "darwin")("runs the built connector outbound through actual share-web and relay, with no document authority", async () => {
   const database = join(scratch, "relay.sqlite"), directory = join(scratch, "credential"), assets = join(scratch, "viewer");
   await mkdir(assets);

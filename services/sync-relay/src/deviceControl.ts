@@ -24,14 +24,11 @@ export function createDeviceControl(options: {
     closeTimeout: limits.closeTimeoutMs, handleProtocols: () => DEVICE_CONTROL_PROTOCOL };
   const server = new WebSocketServer(receive);
   const connections = new Set<() => void>();
-  const held = new WeakSet<Duplex>();
   let current: (() => void) | undefined;
   let closed = false;
   server.on("wsClientError", (_error, socket) => refuseDeviceControl(socket, limits.closeTimeoutMs));
 
   function handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
-    if (held.has(socket)) { socket.destroy(); return; }
-    held.add(socket);
     const headers = parseRequest(request);
     if (closed || connections.size >= limits.maxConnections || head.length > limits.maxPendingBytes || !headers ||
       !verifyRelayExchangeKey(headers.get("x-dohc-relay-exchange-key") ?? null, keyHash)) {
@@ -88,8 +85,6 @@ export function createDeviceControl(options: {
     connections.add(stop);
     socket.once("close", stop);
     socket.once("error", stop);
-    timer = setTimeout(stop, limits.handshakeTimeoutMs);
-    timer.unref();
     socket.pause();
     try {
       server.handleUpgrade(request, socket, head, accepted => {
@@ -111,7 +106,6 @@ export function createDeviceControl(options: {
         registered = true;
         current?.();
         current = stop;
-        clearTimeout(timer);
         ws.send(notice, error => { if (error) stop(); });
         schedulePing();
         ws.resume();

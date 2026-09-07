@@ -41,13 +41,10 @@ export function createDeviceControlBridge(options: {
   const server = new WebSocketServer({ ...receive, noServer: true, clientTracking: false,
     handleProtocols: () => DEVICE_CONTROL_PROTOCOL });
   const connections = new Set<() => void>();
-  const held = new WeakSet<Duplex>();
   let closed = false;
   server.on("wsClientError", (_error, socket) => refuseDeviceControl(socket, limits.closeTimeoutMs));
 
   function handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
-    if (held.has(socket)) { socket.destroy(); return; }
-    held.add(socket);
     const headers = parseRequest(request);
     if (closed || !headers || connections.size >= limits.maxConnections || head.length !== 0) {
       refuseDeviceControl(socket, limits.closeTimeoutMs); return;
