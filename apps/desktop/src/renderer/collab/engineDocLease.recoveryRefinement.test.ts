@@ -1,12 +1,10 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { resetOrphanedDrafts, useOrphanedDrafts } from "../orphanedDrafts";
-import {
-  disposeEngineDocLeasesForTests,
-  useEngineDoc,
-} from "./useEngineDoc";
+import { disposeEngineDocLeasesForTests } from "./engineDocLease";
+import { retainObservedEngineDocLease } from "./engineDocLeaseTestHarness";
 
 // A recovery draft is written twice: a lossless snapshot synchronously at the
 // failure, then faithful Markdown once the lazy projection answers. The second
@@ -89,43 +87,33 @@ function richInitialUpdate(): Uint8Array {
 
 let appendedBlocks = 0;
 
-function Harness(props: { workspaceId: string; path: string }) {
-  const engine = useEngineDoc({
-    workspaceId: props.workspaceId,
-    path: props.path,
+function appendBlock(doc: Y.Doc) {
+  appendedBlocks += 1;
+  const label = `edit-${appendedBlocks}`;
+  doc.transact(() => {
+    const body = doc.getXmlFragment("body");
+    const paragraph = new Y.XmlElement("paragraph");
+    const text = new Y.XmlText();
+    text.insert(0, label);
+    paragraph.insert(0, [text]);
+    body.insert(body.length, [paragraph]);
+  });
+}
+
+let observer: ReturnType<typeof retainObservedEngineDocLease> | null = null;
+
+function retainDocument() {
+  const retained = retainObservedEngineDocLease({
+    workspaceId: "ws-1",
+    path: "notes/rich.md",
     enabled: true,
   });
-  const drafts = useOrphanedDrafts(props.workspaceId, props.path);
-  return (
-    <div>
-      <span data-testid="available">{String(engine.available)}</span>
-      <span data-testid="draft">{drafts.at(-1)?.text ?? "none"}</span>
-      <span data-testid="draft-count">{drafts.length}</span>
-      <button
-        type="button"
-        data-testid="append-block"
-        onClick={() => {
-          const doc = engine.doc;
-          if (!doc) return;
-          appendedBlocks += 1;
-          const label = `edit-${appendedBlocks}`;
-          doc.transact(() => {
-            const body = doc.getXmlFragment("body");
-            const paragraph = new Y.XmlElement("paragraph");
-            const text = new Y.XmlText();
-            text.insert(0, label);
-            paragraph.insert(0, [text]);
-            body.insert(body.length, [paragraph]);
-          });
-        }}
-      >
-        append block
-      </button>
-    </div>
-  );
+  observer = retained;
+  return retained;
 }
 
 beforeEach(() => {
+  observer = null;
   projectionCalls = 0;
   failProjectionCall = null;
   projectionGate = null;
@@ -134,8 +122,12 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  projectionGate?.release();
   cleanup();
+  observer?.release();
   await disposeEngineDocLeasesForTests();
+  await observer?.lease.dispose();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   resetOrphanedDrafts();
   projectionGate = null;
@@ -152,22 +144,23 @@ it("refines the newest refused snapshot, not the one each edit queued", async ()
   // typing through a refused session produces.
   const release = armProjectionGate();
 
-  render(<Harness workspaceId="ws-1" path="notes/rich.md" />);
+  const drafts = renderHook(() => useOrphanedDrafts("ws-1", "notes/rich.md"));
+  const retained = retainDocument();
   await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
+    expect(retained.snapshot.outcome?.kind).toBe("bound"),
   );
 
   act(() => {
-    screen.getByTestId("append-block").click();
+    appendBlock(retained.boundDoc());
   });
   await waitFor(() =>
-    expect(screen.getByTestId("draft-count").textContent).toBe("1"),
+    expect(drafts.result.current.length).toBe(1),
   );
   act(() => {
-    screen.getByTestId("append-block").click();
+    appendBlock(retained.boundDoc());
   });
   await waitFor(() =>
-    expect(screen.getByTestId("draft").textContent).toContain("edit-2"),
+    expect(drafts.result.current.at(-1)?.text).toContain("edit-2"),
   );
 
   // The newest snapshot's projection fails. The first edit's refinement — the
@@ -183,8 +176,8 @@ it("refines the newest refused snapshot, not the one each edit queued", async ()
     { timeout: 10_000 },
   );
 
-  expect(screen.getByTestId("draft").textContent, "project the bytes each refinement was queued with instead of the newest ones — the first edit's Markdown lands last, and the second edit is gone from the only copy of it that exists.").toContain("edit-1");
-  expect(screen.getByTestId("draft").textContent).toContain("edit-2");
-  expect(screen.getByTestId("draft-count").textContent).toBe("1");
+  expect(drafts.result.current.at(-1)?.text, "project the bytes each refinement was queued with instead of the newest ones — the first edit's Markdown lands last, and the second edit is gone from the only copy of it that exists.").toContain("edit-1");
+  expect(drafts.result.current.at(-1)?.text).toContain("edit-2");
+  expect(drafts.result.current.length).toBe(1);
   consoleError.mockRestore();
 });

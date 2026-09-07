@@ -1,3 +1,4 @@
+import { errorMessage } from "./workspaceError";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import type {
@@ -290,7 +291,7 @@ export async function createCollectionRecord(
     } catch (error) {
       // The record exists by now: name it, so the caller reconciles instead
       // of creating a second one.
-      const detail = error instanceof Error ? error.message : String(error);
+      const detail = errorMessage(error);
       throw new Error(
         `The record was created at ${path} (id ${recordId}), but its fields could not be set: ${detail}`,
         { cause: error },
