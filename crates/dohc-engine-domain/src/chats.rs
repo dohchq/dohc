@@ -958,6 +958,17 @@ pub fn decode_feed_cursor(cursor: &str) -> Result<FeedCursorValue, DomainError> 
 
 // --------------------------------------------------------------- normalization
 
+fn validate_chat_page_limit(limit: i64) -> Result<(), DomainError> {
+    if !(1..=501).contains(&limit) {
+        Err(DomainError::chat(
+            "invalid-cursor",
+            "Page limit is invalid.",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn non_empty(value: &str, code: &'static str, reason: &'static str) -> Result<(), DomainError> {
     if value.is_empty() {
         Err(DomainError::chat(code, reason))
@@ -2826,12 +2837,7 @@ impl<'a> LinkedChatStore<'a> {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChannelThreadSummary>, DomainError> {
-        if !(1..=501).contains(&limit) {
-            return Err(DomainError::chat(
-                "invalid-cursor",
-                "Page limit is invalid.",
-            ));
-        }
+        validate_chat_page_limit(limit)?;
         let (has_after, after_updated_at_ms, after_thread_id) = match after {
             Some((updated_at_ms, thread_id)) => (1_i64, updated_at_ms, thread_id),
             None => (0_i64, 0_i64, String::new()),
@@ -3010,12 +3016,7 @@ impl<'a> LinkedChatStore<'a> {
                 "Linked file object id is invalid.",
             ));
         }
-        if !(1..=501).contains(&limit) {
-            return Err(DomainError::chat(
-                "invalid-cursor",
-                "Page limit is invalid.",
-            ));
-        }
+        validate_chat_page_limit(limit)?;
         let (has_after, after_created_at_ms, after_thread_id) = match after {
             Some((created_at_ms, thread_id)) => (1_i64, created_at_ms, thread_id),
             None => (0_i64, 0_i64, String::new()),
@@ -3087,12 +3088,7 @@ impl<'a> LinkedChatStore<'a> {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatAttachment>, DomainError> {
-        if !(1..=501).contains(&limit) {
-            return Err(DomainError::chat(
-                "invalid-cursor",
-                "Page limit is invalid.",
-            ));
-        }
+        validate_chat_page_limit(limit)?;
         let (has_after, after_created_at_ms, after_attachment_id) = match after {
             Some((created_at_ms, attachment_id)) => (1_i64, created_at_ms, attachment_id),
             None => (0_i64, 0_i64, String::new()),
@@ -3140,12 +3136,7 @@ impl<'a> LinkedChatStore<'a> {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatFileMention>, DomainError> {
-        if !(1..=501).contains(&limit) {
-            return Err(DomainError::chat(
-                "invalid-cursor",
-                "Page limit is invalid.",
-            ));
-        }
+        validate_chat_page_limit(limit)?;
         let object_id = object_id.map(normalize_attachment_object_id).transpose()?;
         let path_hint = path_hint.map(normalize_attachment_path_hint).transpose()?;
         if object_id.is_none() && path_hint.is_none() {
@@ -3311,12 +3302,7 @@ impl<'a> LinkedChatStore<'a> {
         after: Option<MentionCursor>,
         limit: i64,
     ) -> Result<Vec<ChatMention>, DomainError> {
-        if !(1..=501).contains(&limit) {
-            return Err(DomainError::chat(
-                "invalid-cursor",
-                "Page limit is invalid.",
-            ));
-        }
+        validate_chat_page_limit(limit)?;
         let handle = normalize_mention_handle(handle)?;
         let (has_after, after_created_at_ms, after_message_id) = match after {
             Some(after) => (1_i64, after.created_at_ms, after.message_id),
@@ -3384,12 +3370,7 @@ impl<'a> LinkedChatStore<'a> {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<AgentUnreadThreadRow>, DomainError> {
-        if !(1..=501).contains(&limit) {
-            return Err(DomainError::chat(
-                "invalid-cursor",
-                "Page limit is invalid.",
-            ));
-        }
+        validate_chat_page_limit(limit)?;
         let (has_after, after_created_at_ms, after_message_id) = match after {
             Some((created_at_ms, message_id)) => (1_i64, created_at_ms, message_id),
             None => (0_i64, 0_i64, String::new()),

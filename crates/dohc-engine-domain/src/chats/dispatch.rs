@@ -2,7 +2,7 @@ use super::{
     AgentRunRecord, DispatchClaim, DispatchRecord, DispatchRecovery, LinkedChatStore,
     MAX_DISPATCH_ID_UTF16_UNITS, RunRecordLink, ThreadDispatchPause, collect, committed,
     dispatch_corrupt, is_js_trim_ws, non_empty, normalize_verified_user_id,
-    persisted_nonnegative_safe, persisted_safe_integer,
+    persisted_nonnegative_safe, persisted_safe_integer, validate_chat_page_limit,
 };
 use crate::error::DomainError;
 use dohc_engine_storage::FaultInjector;
@@ -70,17 +70,6 @@ fn normalize_failure_reason(reason: &str) -> Result<String, DomainError> {
         })
     } else {
         Ok(reason.to_owned())
-    }
-}
-
-fn validate_dispatch_page_limit(limit: i64) -> Result<(), DomainError> {
-    if !(1..=501).contains(&limit) {
-        Err(DomainError::chat(
-            "invalid-cursor",
-            "Page limit is invalid.",
-        ))
-    } else {
-        Ok(())
     }
 }
 
@@ -361,7 +350,7 @@ impl<'a> LinkedChatStore<'a> {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<DispatchRecord>, DomainError> {
-        validate_dispatch_page_limit(limit)?;
+        validate_chat_page_limit(limit)?;
         let (has_after, after_created_at_ms, after_trigger) = dispatch_after(after);
         self.store.read_with(|conn| {
             let mut stmt = conn
@@ -399,7 +388,7 @@ impl<'a> LinkedChatStore<'a> {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<DispatchClaim>, DomainError> {
-        validate_dispatch_page_limit(limit)?;
+        validate_chat_page_limit(limit)?;
         let (has_after, after_updated_at_ms, after_trigger) = dispatch_after(after);
         self.store.read_with(|conn| {
             let broken_running: i64 = conn
@@ -469,7 +458,7 @@ impl<'a> LinkedChatStore<'a> {
         limit: i64,
     ) -> Result<Vec<String>, DomainError> {
         let run_id = normalize_dispatch_run_id(run_id)?;
-        validate_dispatch_page_limit(limit)?;
+        validate_chat_page_limit(limit)?;
         let (has_after, after_message_id) = match after_message_id {
             Some(message_id) => (1_i64, message_id),
             None => (0_i64, String::new()),
@@ -527,7 +516,7 @@ impl<'a> LinkedChatStore<'a> {
                 "Run record limit must be a positive integer.",
             ));
         }
-        validate_dispatch_page_limit(page_limit)?;
+        validate_chat_page_limit(page_limit)?;
         let (has_after, after_started_at_ms, after_run_id, after_message_id) = match after {
             Some((started_at_ms, run_id, message_id)) => (1_i64, started_at_ms, run_id, message_id),
             None => (0_i64, 0_i64, String::new(), String::new()),
@@ -879,7 +868,7 @@ impl<'a> LinkedChatStore<'a> {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<DispatchRecovery>, DomainError> {
-        validate_dispatch_page_limit(limit)?;
+        validate_chat_page_limit(limit)?;
         let (has_after, after_started_at_ms, after_run_id) = dispatch_after(after);
         self.store.read_with(|conn| {
             let duplicate: i64 = conn
