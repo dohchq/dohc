@@ -16,8 +16,9 @@ use dohc_engine_runtime::{
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_sync::{
-    ApplyOutcome, MAX_PAYLOAD_JSON_BYTES, ReplicationEnvelope, apply_moment_envelope_detailed,
-    apply_replication_envelope, apply_secret_envelope, apply_version_envelope,
+    ApplyDisposition, ApplyOutcome, MAX_PAYLOAD_JSON_BYTES, ReplicationEnvelope,
+    apply_moment_envelope_detailed, apply_replication_envelope, apply_secret_envelope,
+    apply_version_envelope,
 };
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use rusqlite::params;
@@ -506,9 +507,16 @@ fn apply_logged_op(peer: &mut EngineStore, workspace_id: &str, op: &LoggedOp) {
                 &dohc_engine_sync::NoLiveLeases,
             )
             .unwrap_or_else(|error| panic!("apply moment envelope {error:?}: {:?}", op.payload));
-            let ApplyOutcome::Applied(result) = outcome else {
+            let ApplyOutcome {
+                primary: ApplyDisposition::Applied(result),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            } = outcome
+            else {
                 panic!("originated moment outcome {outcome:?}: {:?}", op.payload);
             };
+            assert!(outcome_refusals.is_empty());
+            assert!(outcome_sharing_declined.is_empty());
             assert_eq!(result.conflicts_opened, 0, "{:?}", op.payload);
         }
         "conflict.resolve" => {
@@ -521,19 +529,31 @@ fn apply_logged_op(peer: &mut EngineStore, workspace_id: &str, op: &LoggedOp) {
                     &dohc_engine_sync::NoLiveLeases,
                 )
                 .expect("apply conflict.resolve envelope"),
-                ApplyOutcome::Applied(_)
+                ApplyOutcome {
+                    primary: ApplyDisposition::Applied(_),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ));
         }
         "version.create" => {
             assert!(matches!(
                 apply_version_envelope(peer, &envelope, &NoFaults).expect("apply version envelope"),
-                ApplyOutcome::Applied(())
+                ApplyOutcome {
+                    primary: ApplyDisposition::Applied(()),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ));
         }
         kind if kind.starts_with("secret.") => {
             assert!(matches!(
                 apply_secret_envelope(peer, &envelope, &NoFaults).expect("apply secret envelope"),
-                ApplyOutcome::Applied(())
+                ApplyOutcome {
+                    primary: ApplyDisposition::Applied(()),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ));
         }
         other => panic!("unexpected op kind {other}"),

@@ -682,7 +682,11 @@ mod tests {
         };
         assert!(matches!(
             crate::apply_moment_envelope(&mut store, &refused, &NoFaults, &crate::NoLiveLeases),
-            Ok(crate::ApplyOutcome::Refused(_))
+            Ok(crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Refused(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
 
         enroll(&mut store).expect("enroll");
@@ -723,7 +727,11 @@ mod tests {
         };
         assert!(matches!(
             crate::apply_moment_envelope(&mut store, &refused, &NoFaults, &crate::NoLiveLeases),
-            Ok(crate::ApplyOutcome::Refused(_))
+            Ok(crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Refused(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         let (refusals, refusal_report_id) =
             crate::apply::claim_pending_refusals(&mut store, "ws", &NoFaults)
@@ -1033,7 +1041,11 @@ mod tests {
         };
         assert!(matches!(
             crate::apply_version_envelope(&mut store, &refused, &NoFaults),
-            Ok(crate::ApplyOutcome::Refused(_))
+            Ok(crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Refused(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
 
         enroll(&mut store).expect("enroll");
@@ -1845,13 +1857,13 @@ mod tests {
         .expect("peer applies Y.Doc base");
         assert_eq!(
             outcome,
-            crate::ApplyOutcome::Applied(crate::YdocApplyResult {
+            crate::ApplyOutcome::new(crate::ApplyDisposition::Applied(crate::YdocApplyResult {
                 deferred: false,
                 reason: None,
                 conflicts_opened: 0,
                 lineage_replacement: None,
                 record_facts: Vec::new(),
-            }),
+            })),
             "the Y.Doc base must fast-forward its shipped fork ancestor"
         );
     }
@@ -2132,7 +2144,11 @@ mod tests {
         };
         assert!(matches!(
             crate::apply_secret_envelope(&mut store, &imported, &NoFaults),
-            Ok(crate::ApplyOutcome::Applied(()))
+            Ok(crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Applied(()),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         let source: (Option<String>, Option<i64>) = store
             .read_with(|conn| {
