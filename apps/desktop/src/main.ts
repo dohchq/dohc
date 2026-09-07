@@ -54,11 +54,10 @@ import {
 } from "electron";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, readdir } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import {
   PluginPanelSdkEvent,
   PluginStatusChangedEvent,
-  WorkspaceIdPayload,
   McpConfigResult,
   DesktopUserSettingsResult,
   SyncStatusResult,
@@ -293,7 +292,6 @@ import {
 } from "./plugins/pluginHostStart";
 import { createDesktopPluginSdk } from "./plugins/desktopPluginSdk";
 import { createOwnedWorkspaceSdkReads } from "./workspaces/ownedWorkspaceSdkReads";
-import type { RegisteredPlugin } from "./plugins/pluginPanelRegistration";
 import { PluginWorkspaceRuntimes } from "./plugins/pluginWorkspaceRuntimes";
 import {
   type PluginSurfaces,
@@ -1932,7 +1930,7 @@ function createTryInVersionSessionsFor(
   binding: WorkspaceAuthorityBinding<RegistryEntry>,
 ) {
   return createTryInVersionSessions({
-  operationsFor: async (workspaceId) => {
+  operationsFor: async () => {
     return workspaceAuthorities.withBinding(binding, async (lease) => {
       desktopMarks.mark("try-in-version-ops-start");
       const workspace = canonicalWorkspaceFor(lease);
@@ -3010,19 +3008,6 @@ const { invokeWorkspacePluginSdk, routePluginPanelSdk } =
     workspaceAuthorities, pluginWorkspaceRuntimes, sharedViewOf,
     notifyPluginPanelSdkEvent,
   });
-
-// A plugin this workspace can serve panels for. The pipeline's current
-// discovery owns the manifest. The registration map is only a fallback for a
-// plugin the pipeline does not currently expose. Approval is unaffected:
-// ensurePluginStarted still hash-verifies before it executes anything, and
-// panels still serve from the approved snapshot rather than from pluginRoot.
-function registeredPlugin(
-  workspaceId: string,
-  pluginId: string,
-): RegisteredPlugin | undefined {
-  return pluginWorkspaceRuntimes.current(workspaceId)
-    ?.registeredPlugin(pluginId);
-}
 
 const startPluginPanelPreview = createPluginPanelPreviewStarter(stateDir);
 

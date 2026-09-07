@@ -12,7 +12,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { isInside } from "../security/pathContainment";
 import {
   resolveWorkspaceFile,

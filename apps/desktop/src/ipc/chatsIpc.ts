@@ -512,7 +512,7 @@ export function registerChatsIpcHandlers<
   registerHandler(CHANNELS.listChatThreadDecisions, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatThreadDecisionsPayload.parse(payload);
-    const { workspace, capture } = await requireEngineCapture(
+    const { workspace } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
     );
