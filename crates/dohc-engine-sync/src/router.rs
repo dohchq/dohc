@@ -179,17 +179,5 @@ fn map_applied<T>(
     result: Result<ApplyOutcome<T>, SyncError>,
     wrap: impl FnOnce(T) -> RoutedApply,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
-    result.map(|outcome| {
-        let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
-        let mapped = match primary {
-            ApplyOutcome::Applied(value) => ApplyOutcome::Applied(wrap(value)),
-            ApplyOutcome::Refused(refusal) => ApplyOutcome::Refused(refusal),
-            ApplyOutcome::Skipped => ApplyOutcome::Skipped,
-            ApplyOutcome::Crashed { committed } => ApplyOutcome::Crashed { committed },
-            ApplyOutcome::WithDiagnostics { .. } => unreachable!("diagnostics were flattened"),
-        };
-        mapped
-            .with_refusals(refusals)
-            .with_sharing_declined(sharing_declined)
-    })
+    result.map(|outcome| outcome.map(wrap))
 }

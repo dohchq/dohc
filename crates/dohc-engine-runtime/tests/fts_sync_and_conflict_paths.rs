@@ -10,8 +10,8 @@ use dohc_engine_runtime::search::{ensure_search_index_for_version, search_worksp
 use dohc_engine_runtime::{CancellationToken, NoFaults, SearchResult, WorkspaceSupervisor};
 use dohc_engine_storage::{EngineStore, StorageError, hex_sha256, put_binary_blob};
 use dohc_engine_sync::{
-    AlwaysLive, ApplyOutcome, NoLiveLeases, ReplicationEnvelope, SyncError, apply_envelope_with,
-    apply_ydoc_envelope, drain_deferred_ydoc_for_key,
+    AlwaysLive, ApplyDisposition, ApplyOutcome, NoLiveLeases, ReplicationEnvelope, SyncError,
+    apply_envelope_with, apply_ydoc_envelope, drain_deferred_ydoc_for_key,
 };
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::params;
@@ -158,7 +158,11 @@ fn replicated_ydoc_base_projection_updates_certified_search_index() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let hits = search_store(&store, scratch.path(), NEEDLE, 1_300);
     assert_eq!(
@@ -212,7 +216,7 @@ fn retained_ydoc_drain_replay_keeps_current_search_content() {
     );
     assert!(matches!(
         apply_ydoc_envelope(&mut store,&mut dohc_engine_collab::WriterDocCache::new(), &base_operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(result)) if !result.deferred
+        Ok(ApplyOutcome { primary: ApplyDisposition::Applied(result), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (!result.deferred)
     ));
     let update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, HISTORICAL);
     let update_sha = store.put_binary_blob(&update).expect("store update");
@@ -233,7 +237,7 @@ fn retained_ydoc_drain_replay_keeps_current_search_content() {
     );
     assert!(matches!(
         apply_ydoc_envelope(&mut store,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &AlwaysLive),
-        Ok(ApplyOutcome::Applied(result)) if result.deferred
+        Ok(ApplyOutcome { primary: ApplyDisposition::Applied(result), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (result.deferred)
     ));
     assert_eq!(
         drain_deferred_ydoc_for_key(
@@ -365,7 +369,14 @@ fn refused_replicated_mutation_rolls_back_fts_writes() {
         })
     })
     .expect("refusal is acknowledged");
-    assert!(matches!(outcome, ApplyOutcome::Refused(_)));
+    assert!(matches!(
+        outcome,
+        ApplyOutcome {
+            primary: ApplyDisposition::Refused(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
 
     assert_eq!(
         search_store(&store, scratch.path(), BASELINE, 1_400)

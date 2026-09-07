@@ -9,8 +9,9 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::{
-    ApplyOutcome, NoLiveLeases, RefusalReason, ReplicationEnvelope, ReplicationRefusal, SyncError,
-    apply_replication_envelope, apply_ydoc_envelope, read_replication_acked_seq,
+    ApplyDisposition, ApplyOutcome, NoLiveLeases, RefusalReason, ReplicationEnvelope,
+    ReplicationRefusal, SyncError, apply_replication_envelope, apply_ydoc_envelope,
+    read_replication_acked_seq,
 };
 
 fn test_store() -> (ScratchDir, EngineStore) {
@@ -366,7 +367,7 @@ fn moment_after_equivalent_ydoc_projection_fast_forwards() {
     );
     assert_eq!(
         apply_moment_envelope(&mut peer, &next, &NoFaults).expect("next moment"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     let (latest_moment_id, conflicts): (String, i64) = peer
         .read_with(|conn| {
@@ -528,7 +529,7 @@ fn moment_delete_retires_the_receiver_ydoc_lineage() {
     );
     assert_eq!(
         apply_moment_envelope(&mut peer, &delete, &NoFaults).expect("apply delete"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     let (snapshots, markers): (i64, i64) = peer
         .read_with(|conn| {
@@ -881,7 +882,7 @@ fn malformed_moment_append_is_refused_and_acked_before_the_origin_continues() {
             &crate::NoLiveLeases
         )
         .expect("malformed per-operation payload is a disposition"),
-        ApplyOutcome::Refused(ReplicationRefusal {
+        ApplyOutcome::new(ApplyDisposition::Refused(ReplicationRefusal {
             workspace_id: "ws".to_owned(),
             origin_id: "malformed-moment-peer".to_owned(),
             origin_seq: 0,
@@ -889,7 +890,7 @@ fn malformed_moment_append_is_refused_and_acked_before_the_origin_continues() {
             reason: RefusalReason::InvalidInput {
                 reason: "moment.append payload is malformed".to_owned(),
             },
-        }),
+        })),
         "parsing before apply_envelope_with returns a hard error and leaves seq 0 unacked"
     );
     assert_eq!(
@@ -920,7 +921,11 @@ fn malformed_moment_append_is_refused_and_acked_before_the_origin_continues() {
             &NoFaults,
             &crate::NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let channel_rows: i64 = store
         .read_with(|conn| {
@@ -951,7 +956,7 @@ fn moment_append_head_fast_forward_write_delete_and_rename_updates_alias_snapsho
     );
     assert_eq!(
         apply_moment_envelope(&mut write_store, &write, &NoFaults).expect("write"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(
         snapshot(&write_store, "object-write"),
@@ -1005,7 +1010,7 @@ fn moment_append_head_fast_forward_write_delete_and_rename_updates_alias_snapsho
     );
     assert_eq!(
         apply_moment_envelope(&mut delete_store, &delete, &NoFaults).expect("delete"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(snapshot(&delete_store, "object-delete"), None);
     assert!(aliases(&delete_store, "object-delete").is_empty());
@@ -1048,7 +1053,7 @@ fn moment_append_head_fast_forward_write_delete_and_rename_updates_alias_snapsho
     );
     assert_eq!(
         apply_moment_envelope(&mut rename_store, &rename, &NoFaults).expect("rename"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(
         aliases(&rename_store, "object-rename"),
@@ -1237,7 +1242,14 @@ fn moment_append_live_lease_blocks_all_mutations_and_write_waits_for_ydoc_rewrit
             );
             continue;
         }
-        assert!(matches!(closed, Ok(ApplyOutcome::Applied(_))));
+        assert!(matches!(
+            closed,
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ));
         match operation {
             "delete" => assert_eq!(snapshot(&store, &object_id), None),
             "rename" => assert_eq!(snapshot(&store, &object_id).unwrap().0, "renamed.md"),
@@ -1276,7 +1288,7 @@ fn moment_append_content_fast_forward_converges_text_at_the_same_path() {
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("converge"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(snapshot(&store, "object").unwrap().3, "remote-head");
     assert!(conflict_ids(&store).is_empty());
@@ -1317,7 +1329,7 @@ fn moment_append_content_fast_forward_converges_binary_at_the_same_path() {
     let op = envelope("peer", 0, "ws", payload);
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("binary converge"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     let head = snapshot(&store, "binary-object").unwrap();
     assert_eq!(head.0, "same.bin");
@@ -1357,7 +1369,7 @@ fn moment_append_same_bytes_at_a_different_path_conflicts_instead_of_converging(
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("diverge"),
-        ApplyOutcome::Applied(1)
+        ApplyOutcome::new(ApplyDisposition::Applied(1))
     );
     assert_eq!(snapshot(&store, "object").unwrap().0, "local.md");
     assert_eq!(conflict_ids(&store).len(), 1);
@@ -1394,7 +1406,7 @@ fn moment_append_content_convergent_adoption_localizes_rollback_but_keeps_wire_p
     let wire = op.payload_json().expect("wire json");
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("adopt"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     store
         .read_with(|conn| {
@@ -1450,7 +1462,7 @@ fn moment_append_both_sides_deleted_is_record_only_and_touches_no_search_state()
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("both deleted"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(snapshot(&store, "deleted-object"), None);
     assert_eq!(
@@ -1502,7 +1514,7 @@ fn moment_append_divergence_opens_one_duplicate_envelope_skips_and_next_head_coa
     let first = envelope("peer", 0, "ws", first_payload);
     assert_eq!(
         apply_moment_envelope(&mut store, &first, &NoFaults).expect("first"),
-        ApplyOutcome::Applied(1)
+        ApplyOutcome::new(ApplyDisposition::Applied(1))
     );
     store
         .read_with(|conn| {
@@ -1536,7 +1548,7 @@ fn moment_append_divergence_opens_one_duplicate_envelope_skips_and_next_head_coa
         .expect("wire before conflict base");
     assert_eq!(
         apply_moment_envelope(&mut store, &first, &NoFaults).expect("duplicate envelope"),
-        ApplyOutcome::Skipped
+        ApplyOutcome::new(ApplyDisposition::Skipped)
     );
     let second = envelope(
         "peer",
@@ -1555,7 +1567,7 @@ fn moment_append_divergence_opens_one_duplicate_envelope_skips_and_next_head_coa
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &second, &NoFaults).expect("coalesce"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(conflict_ids(&store).len(), 1);
     let incoming: String = store
@@ -1626,11 +1638,11 @@ fn moment_append_deterministic_conflict_id_is_identical_when_branch_roots_are_sw
     );
     assert_eq!(
         apply_moment_envelope(&mut left, &right_into_left, &NoFaults).expect("left"),
-        ApplyOutcome::Applied(1)
+        ApplyOutcome::new(ApplyDisposition::Applied(1))
     );
     assert_eq!(
         apply_moment_envelope(&mut right, &left_into_right, &NoFaults).expect("right"),
-        ApplyOutcome::Applied(1)
+        ApplyOutcome::new(ApplyDisposition::Applied(1))
     );
     assert_eq!(conflict_ids(&left), conflict_ids(&right));
     assert_eq!(conflict_ids(&left).len(), 1);
@@ -1675,7 +1687,7 @@ fn moment_append_occupancy_divergence_returns_two_distinct_conflicts() {
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("occupancy"),
-        ApplyOutcome::Applied(2)
+        ApplyOutcome::new(ApplyDisposition::Applied(2))
     );
     let ids = conflict_ids(&store);
     assert_eq!(ids.len(), 2);
@@ -1714,7 +1726,7 @@ fn moment_append_record_only_divergence_is_not_a_head_and_cannot_be_rolled_back(
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("diverge"),
-        ApplyOutcome::Applied(1)
+        ApplyOutcome::new(ApplyDisposition::Applied(1))
     );
     assert_eq!(snapshot(&store, "object").unwrap().3, "local-root");
     let record_only: i64 = store
@@ -1809,7 +1821,7 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
     let append = envelope("moment-peer", 0, "ws", payload);
     assert_eq!(
         apply_moment_envelope(&mut store, &append, &NoFaults).expect("append after shipped head"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     type StoredPreimage = (
         Option<String>,
@@ -1908,11 +1920,11 @@ fn moment_append_first_delivery_refuses_and_acks_plaintext_id_collision_but_rede
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &first, &NoFaults).expect("first"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &first, &NoFaults).expect("redelivery"),
-        ApplyOutcome::Skipped
+        ApplyOutcome::new(ApplyDisposition::Skipped)
     );
     let duplicate_id = envelope(
         "second-peer",
@@ -1928,10 +1940,10 @@ fn moment_append_first_delivery_refuses_and_acks_plaintext_id_collision_but_rede
     assert!(
         matches!(
             apply_moment_envelope(&mut store, &duplicate_id, &NoFaults),
-            Ok(ApplyOutcome::Refused(ReplicationRefusal {
+            Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
                 reason: RefusalReason::InvalidInput { ref reason },
                 ..
-            })) if reason == "replicated plaintext moment id collides with existing history"
+            }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "replicated plaintext moment id collides with existing history")
         ),
         "treating a same-table ID hit as idempotence lets this unrelated first-delivery coordinate claim another moment; true replay was already skipped above before entering the moment applier."
     );
@@ -1990,7 +2002,7 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
     .expect("apply active moment");
     assert_eq!(
         first,
-        ApplyOutcome::Applied(crate::RoutedApply {
+        ApplyOutcome::new(ApplyDisposition::Applied(crate::RoutedApply {
             conflict: None,
             conflicts_opened: 0,
             materialization_changes: vec![crate::MomentMaterializationChange {
@@ -2000,7 +2012,7 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
                 content_kind: "text",
             }],
             record_facts: Vec::new(),
-        })
+        }))
     );
     store
         .read_with(|conn| {
@@ -2050,10 +2062,10 @@ fn moment_append_refuses_and_acks_id_collision_with_secret_history() {
     assert!(
         matches!(
             apply_moment_envelope(&mut store, &op, &NoFaults),
-            Ok(ApplyOutcome::Refused(ReplicationRefusal {
+            Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
                 reason: RefusalReason::InvalidInput { ref reason },
                 ..
-            })) if reason == "replicated plaintext moment id collides with existing history"
+            }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "replicated plaintext moment id collides with existing history")
         ),
         "removing the secret_moments arm lets two unrelated histories claim the same workspace-wide moment identity."
     );
@@ -2101,7 +2113,7 @@ fn moment_append_accepts_only_oracle_metadata_origins_and_acks_refusals() {
         assert_eq!(
             apply_moment_envelope(&mut accepted_store, &op, &NoFaults)
                 .expect("oracle origin must apply"),
-            ApplyOutcome::Applied(0),
+            ApplyOutcome::new(ApplyDisposition::Applied(0)),
             "{origin}"
         );
     }
@@ -2131,10 +2143,10 @@ fn moment_append_accepts_only_oracle_metadata_origins_and_acks_refusals() {
         assert!(
             matches!(
                 apply_moment_envelope(&mut store, &op, &NoFaults),
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
+                Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
                     reason: RefusalReason::InvalidInput { ref reason },
                     ..
-                })) if reason == "moment.append payload is invalid"
+                }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "moment.append payload is invalid")
             ),
             "an empty-only check accepts capture/ydoc ownership markers and can make the local capture reconciler claim replicated content."
         );
@@ -2228,7 +2240,11 @@ fn moment_append_requires_version_create_ordering_and_never_acks_a_missing_targe
             &NoFaults,
             &crate::NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
         apply_replication_envelope(
@@ -2238,7 +2254,11 @@ fn moment_append_requires_version_create_ordering_and_never_acks_a_missing_targe
             &NoFaults,
             &crate::NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&store, "ws", "peer").expect("retry ack"),
@@ -2343,10 +2363,14 @@ fn moment_append_refuses_non_tracked_or_noncanonical_paths_without_rows_and_acks
         assert!(
             matches!(
                 apply_moment_envelope(&mut store, &op, &NoFaults),
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
-                    reason: RefusalReason::InvalidInput { .. },
-                    ..
-                }))
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Refused(ReplicationRefusal {
+                        reason: RefusalReason::InvalidInput { .. },
+                        ..
+                    }),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ),
             "{case} must be refused"
         );
@@ -2394,7 +2418,7 @@ fn moment_append_refuses_non_tracked_or_noncanonical_paths_without_rows_and_acks
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &canonical, &NoFaults).expect("canonical tracked path"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(
         snapshot(&store, "canonical-object").unwrap().0,
@@ -2423,7 +2447,7 @@ fn moment_append_refuses_non_tracked_or_noncanonical_paths_without_rows_and_acks
     assert_eq!(
         apply_moment_envelope(&mut store, &canonical_before, &NoFaults)
             .expect("canonical tracked beforePath"),
-        ApplyOutcome::Applied(1)
+        ApplyOutcome::new(ApplyDisposition::Applied(1))
     );
 }
 
@@ -2479,7 +2503,7 @@ fn moment_append_persists_full_wire_payload_provenance() {
     let op = envelope("peer", 0, "ws", payload);
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("content-convergent adoption"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
 
     let provenance = store
@@ -2714,7 +2738,7 @@ fn moment_append_search_index_respects_files_and_visibility_policy() {
         );
         assert_eq!(
             apply_moment_envelope(&mut store, &op, &NoFaults).expect("policy-aware apply"),
-            ApplyOutcome::Applied(0)
+            ApplyOutcome::new(ApplyDisposition::Applied(0))
         );
     }
 
@@ -2751,7 +2775,7 @@ fn moment_append_search_index_respects_files_and_visibility_policy() {
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &degraded, &NoFaults).expect("degraded-policy apply"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     // A degraded policy freezes FILE indexing: the prior row remains until a
     // healthy policy can safely decide whether to replace or remove it.
@@ -2777,10 +2801,14 @@ fn moment_append_refuses_each_incomplete_payload_before_tuple_without_rows_and_a
         assert!(
             matches!(
                 apply_moment_envelope(&mut store, &op, &NoFaults),
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
-                    reason: RefusalReason::InvalidInput { .. },
-                    ..
-                }))
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Refused(ReplicationRefusal {
+                        reason: RefusalReason::InvalidInput { .. },
+                        ..
+                    }),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ),
             "{case} must be refused"
         );
@@ -2833,7 +2861,7 @@ fn replicated_delete_after_path_divergent_rename_removes_the_live_alias() {
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &rename, &NoFaults).expect("rename"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(
         aliases(&store, "rename-delete-object"),
@@ -2857,7 +2885,7 @@ fn replicated_delete_after_path_divergent_rename_removes_the_live_alias() {
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &delete, &NoFaults).expect("delete"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert!(
         aliases(&store, "rename-delete-object").is_empty(),
@@ -2879,10 +2907,14 @@ fn moment_append_refuses_overlong_moment_and_object_ids_with_ack() {
         assert!(
             matches!(
                 apply_moment_envelope(&mut store, &op, &NoFaults),
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
-                    reason: RefusalReason::InvalidInput { .. },
-                    ..
-                }))
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Refused(ReplicationRefusal {
+                        reason: RefusalReason::InvalidInput { .. },
+                        ..
+                    }),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ),
             "overlong {case} must be refused"
         );
