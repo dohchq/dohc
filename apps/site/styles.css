@@ -1829,7 +1829,7 @@ p { text-wrap: pretty; }
   bottom: max(20px, env(safe-area-inset-bottom));
   z-index: 30;
   width: 300px;
-  max-width: calc(100vw - 24px);
+  max-width: calc(100% - 24px);
   max-height: calc(100dvh - 100px);
   overflow-y: auto;
   border: 1px solid var(--line);
