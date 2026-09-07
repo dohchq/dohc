@@ -119,3 +119,17 @@ export async function prepareDeviceHostCredentialFile(directory: string, hostId:
   await syncCredentialDirectory(directory);
   return credential;
 }
+
+export async function readDeviceHostCredentialFile(directory: string): Promise<DeviceHostCredential> {
+  requireDeviceHostCredentialFileSupport();
+  await privatePath(directory, true);
+  const path = join(directory, "device-host-credential.json");
+  const identity = await privatePath(path, false);
+  const handle = await open(path, "r");
+  try {
+    const opened = await handle.stat({ bigint: true });
+    if (!opened.isFile() || !sameFile(opened, identity)) throw new Error("Credential file changed.");
+    if (opened.size > 8_192n) throw new Error("Invalid credential file.");
+    return parseDeviceHostCredential(JSON.parse(await handle.readFile("utf8")));
+  } finally { await handle.close(); }
+}
