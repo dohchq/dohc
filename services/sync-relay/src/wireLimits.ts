@@ -1,1 +1,3 @@
 export const MAX_PAYLOAD_JSON_BYTES = 256 * 1024;
+export const MAX_SHARE_ID_CHARS = 128;
+export const MAX_DISCUSSION_ACTIVITY_HOLD_MS = 30_000;

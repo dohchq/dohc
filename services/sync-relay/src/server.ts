@@ -1,23 +1,18 @@
 import { jsonResponse, sha256Hex, TokenBucketLimiter } from "@dohc/service-http";
 import { randomUUID } from "node:crypto";
-import {
-  LINK_SECRET_PATTERN,
-  SHA256_HEX_PATTERN,
-} from "@dohc/security-contract/wire-patterns";
-import { asRecord } from "@dohc/workspace-core";
-import type { LinkExchangeResult } from "@dohc/security-contract";
+import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import { stableJsonStringify } from "./canonicalJson";
 import { createLinkResponseStreams } from "./linkResponseStreams";
+import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
+import { createDiscussionRoutes } from "./discussionRoutes";
 import { createShareSummaries } from "./shareSummaries";
 import {
-  constantTimeHashEqual,
   hashLinkBearer,
-  hashLinkHandoffCode,
-  hashLinkProfileSecret,
   hashRelayExchangeKey,
+  isPublicLinkAccess,
   LinkEgressRateLimiter,
   LINK_EXCHANGE_BUCKET_CAPACITY,
   LINK_EXCHANGE_REFILL_PER_SECOND,
@@ -29,11 +24,8 @@ import {
   LINK_GRANT_LOG_READ_REFILL_PER_SECOND,
   LINK_GRANT_READ_BUCKET_CAPACITY,
   LINK_GRANT_READ_REFILL_PER_SECOND,
-  LINK_HANDOFF_CODE_TTL_MS,
   LINK_LOG_READ_BUCKET_CAPACITY,
   LINK_LOG_READ_REFILL_PER_SECOND,
-  LINK_SESSION_RENEWAL_GRACE_MS,
-  LINK_SESSION_TTL_MS,
   mintLinkBearer,
   mintLinkHandoffCode,
   validateLinkCapability,
@@ -50,22 +42,22 @@ import {
   type ShareProposalRoute,
   type WorkspaceProposalRoute,
 } from "./proposalRoutes";
-import { parseCursor, parseString, readJsonObject } from "./requestInputs";
+import { cursorCodec, parseCursor, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import { filterOpForShare, filterOpForShareAppend, hasValidShareMomentShape, isChatChannelSelector, parseShareOpPayloadWithReferencedPaths, parseStoredAnyShareSelectorJson, targetVersionId, validateChatChannelShareSelector, validateChatShareAccess, validateFileShareAccess, validateShareSelector, type AnyShareSelector, type ChatShareChannelKind, type ChatShareThreadResolver, type ShareSelector, type ThreadFileBinding } from "./shareFilter";
-import { SHARED_BLOB_CANDIDATE_LIMIT, LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT, LINK_DISCUSSION_PAGE_LIMIT, normalizeDiscussionDisplayName, type EnforceWorkspaceIdentityResult, type SyncRelayLogInput, type SyncRelayLogRow, type SyncRelayIndependentGrantInventoryCursor, type SyncRelayLinkInventoryCursor, type SyncRelayShareDiscussionCursor, type SyncRelayShareDiscussionMessageRow, type SyncRelayShareDiscussionActivityPage, type SyncRelayShareDiscussionPage, type SyncRelayShareGrantRow, type SyncRelayShareWithGrantRow, type SyncRelayStorage } from "./storage";
+import { SHARED_BLOB_CANDIDATE_LIMIT, type EnforceWorkspaceIdentityResult, type SyncRelayLogInput, type SyncRelayLogRow, type SyncRelayIndependentGrantInventoryCursor, type SyncRelayLinkInventoryCursor, type SyncRelayShareGrantRow, type SyncRelayShareWithGrantRow, type SyncRelayStorage } from "./storage";
 import {
   authorizeShareAction,
-  authorizeLinkShareAction,
   resolveReceivedShareAuthority,
   selectorTargetsBlockedChannel,
   type AuthorizedShareAction,
   type ShareAction,
 } from "./shareAuthorization";
 import { PROPOSAL_ORIGIN_PREFIX } from "./shareProposals";
-import { badRequest, errorResponse, notFound, RELAY_ERRORS, relayError, RelayError } from "./errors";
-import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
+import { badRequest, errorResponse, invalidLinkCapability, notFound, RELAY_ERRORS, relayError } from "./errors";
+import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_PAYLOAD_JSON_BYTES, MAX_SHARE_ID_CHARS } from "./wireLimits";
 
-export { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
+export { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
+export { DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS } from "./discussionRoutes";
 export { validateLinkCapability } from "./linkSecurity";
 export {
   MAX_PRESENCE_TOPIC_CHARS,
@@ -78,10 +70,6 @@ export type SyncRelayHandler = (request: Request) => Promise<Response>;
 
 function composePublicLinkUrl(shareWebOrigin: string, secret: string): string {
   return `${shareWebOrigin}/s/#${secret}`;
-}
-
-function isPublicLinkAccess(value: string): value is "view" | "comment" {
-  return value === "view" || value === "comment";
 }
 
 function validatePublicLinkAccess(value: unknown): "view" | "comment" {
@@ -205,17 +193,11 @@ export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 export const MAX_OPS_PER_REQUEST = 500;
 const DEFAULT_LOG_PAGE_SIZE = 100;
 const MAX_LOG_PAGE_SIZE = 500;
-const DEFAULT_DISCUSSION_PAGE_SIZE = 50;
-export const DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS = 1_000;
-const DEFAULT_DISCUSSION_ACTIVITY_HOLD_MS = 25_000;
-export const MAX_DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
-const DISCUSSION_MODERATION_HANDLE_MAX_CHARS = 512;
 const MAX_LINK_CURRENT_FILES = 5_000;
 // One accountless response may scan this many raw log rows for admitted ops.
 export const MAX_RAW_ROWS_PER_LINK_PAGE = 10_000;
 // Freshness reads inspect at most 20 pages, or 10,000 rows at the default page size.
 export const LINK_FRESHNESS_PAGE_BUDGET = 20;
-const MAX_WORKSPACE_ID_CHARS = 256;
 const MAX_ORIGIN_ID_CHARS = 256;
 const MAX_OP_KIND_CHARS = 128;
 const ACCOUNTLESS_FILE_REPLAY_OP_KINDS = new Set([
@@ -225,8 +207,6 @@ const ACCOUNTLESS_FILE_REPLAY_OP_KINDS = new Set([
 ]);
 const FILE_FRESHNESS_OP_KINDS = new Set(["moment.append", "version.create"]);
 const MAX_EMAIL_CHARS = 320;
-const MAX_SHARE_ID_CHARS = 128;
-const CURSOR_MAX_CHARS = 1_024;
 const MAX_IDENTITY_BYTES = 512;
 
 interface SettledMomentIdentity {
@@ -263,39 +243,6 @@ function settledMomentIdentity(row: SyncRelayLogRow): SettledMomentIdentity | nu
         ? record.payloadAfterPath
         : null;
   return { objectId, versionId, referencedPaths, settledPath, deleted };
-}
-
-async function discussionDisplayName(
-  lookupUserDisplayName:
-    | CreateSyncRelayHandlerOptions["lookupUserDisplayName"]
-    | undefined,
-  userId: string,
-): Promise<string> {
-  if (!lookupUserDisplayName) return "Unnamed";
-
-  let lookup: Promise<string | null>;
-  try {
-    lookup = Promise.resolve(lookupUserDisplayName(userId));
-  } catch {
-    return "Unnamed";
-  }
-
-  let deadline: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const deadlineResult = new Promise<null>((resolve) => {
-      deadline = setTimeout(
-        () => resolve(null),
-        DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS,
-      );
-      deadline.unref();
-    });
-    const lookedUpName = await Promise.race([lookup, deadlineResult]);
-    return normalizeDiscussionDisplayName(lookedUpName) ?? "Unnamed";
-  } catch {
-    return "Unnamed";
-  } finally {
-    if (deadline) clearTimeout(deadline);
-  }
 }
 
 export function createSyncRelayHandler({
@@ -447,156 +394,6 @@ export function createSyncRelayHandler({
     requireShareAction,
     chatResolverFor,
   );
-
-  type DiscussionViewer = "public" | "named" | "owner";
-
-  const privateRefused = (): Response => privateErrorResponse(notFound());
-
-  const privateResponse = (response: Response): Response => {
-    response.headers.set("cache-control", "private, no-store");
-    return response;
-  };
-
-  const privateJsonResponse = (body: unknown, status = 200): Response =>
-    privateResponse(jsonResponse(body, status));
-
-  const privateErrorResponse = (error: unknown): Response =>
-    privateResponse(errorResponse(error));
-
-  const projectDiscussionMessage = (
-    message: SyncRelayShareDiscussionMessageRow & {
-      linkPrincipalBlocked?: boolean | null;
-    },
-    viewer: DiscussionViewer,
-  ): Record<string, unknown> => {
-    const base = {
-      messageId: message.messageId,
-      createdAtMs: message.createdAtMs,
-      deleted: message.deletedAtMs !== null,
-    };
-    if (message.deletedAtMs !== null && viewer !== "owner") return base;
-    const author =
-      message.authorKind === "link"
-        ? {
-            kind: "link" as const,
-            displayName: message.displayNameSnapshot,
-            unverified: true as const,
-          }
-        : {
-            kind: "named" as const,
-            displayName: message.displayNameSnapshot,
-          };
-    return {
-      ...base,
-      ...(message.deletedAtMs === null ? { body: message.body } : {}),
-      author,
-      ...(viewer === "owner" &&
-      message.authorKind === "link" &&
-      message.linkGrantId !== null &&
-      message.linkPrincipalId !== null
-        ? {
-            moderation: {
-              linkGrantId: message.linkGrantId,
-              linkPrincipalId: message.linkPrincipalId,
-              blocked: message.linkPrincipalBlocked === true,
-            },
-          }
-        : {}),
-    };
-  };
-
-  const requireDiscussionAuthority = (
-    shareId: string,
-    actorUserId: string,
-    action: "read" | "append",
-    requestedWorkspaceId?: string,
-  ): { viewer: "owner" | "named" } => {
-    const share = storage.getShare(shareId);
-    if (!share) throw notFound();
-    if (
-      storage.workspaceIsOwnedBy(share.workspaceId, actorUserId)
-    ) {
-      if (share.workspaceId !== requestedWorkspaceId) throw notFound();
-      return { viewer: "owner" };
-    }
-    if (requestedWorkspaceId !== undefined) throw notFound();
-    const authorized = requireShareAction(shareId, actorUserId, "read");
-    if (
-      action === "append" &&
-      authorized.grant.access !== "comment" &&
-      authorized.grant.access !== "edit"
-    ) {
-      throw relayError("share_read_only");
-    }
-    return { viewer: "named" };
-  };
-
-  const isCurrentDiscussionOwner = (
-    shareId: string,
-    actorUserId: string,
-  ): boolean => {
-    const share = storage.getShare(shareId);
-    return (
-      share !== null &&
-      storage.workspaceIsOwnedBy(share.workspaceId, actorUserId)
-    );
-  };
-
-  const discussionPage = (
-    page: SyncRelayShareDiscussionPage,
-    viewer: DiscussionViewer,
-    profileName: string | null = null,
-  ): Record<string, unknown> => {
-    return {
-      ok: true,
-      activityRevision: page.activityRevision,
-      ...(viewer === "owner"
-        ? { linkCommentsPaused: page.linkCommentsPaused }
-        : {}),
-      ...(viewer === "public" ? { profileName } : {}),
-      messages: page.messages.map((message) =>
-        projectDiscussionMessage(message, viewer),
-      ),
-      nextCursor:
-        page.nextCursor === null
-          ? null
-          : discussionCursor.encode(page.nextCursor),
-    };
-  };
-
-  const discussionActivityPage = (
-    page: SyncRelayShareDiscussionActivityPage,
-    viewer: DiscussionViewer,
-  ): Record<string, unknown> => ({
-    ok: true,
-    latestRevision: page.latestRevision,
-    cursorRevision: page.cursorRevision,
-    hasMore: page.hasMore,
-    messages: page.messages.map((message) =>
-      projectDiscussionMessage(message, viewer),
-    ),
-    ...(viewer === "owner"
-      ? {
-          linkCommentsPaused: page.linkCommentsPaused,
-          principals: page.principals.map((principal) => ({
-            principalId: principal.principalId,
-            blocked: principal.blockedAtMs !== null,
-          })),
-        }
-      : {}),
-  });
-
-  const publicDiscussionActivityPage = (
-    page: SyncRelayShareDiscussionActivityPage,
-    access: "view" | "comment",
-    composerState: "available" | "blocked" | "paused",
-    profileName: string | null,
-  ): Record<string, unknown> => ({
-    ...discussionActivityPage(page, "public"),
-    access,
-    composerState,
-    profileName,
-  });
 
   // The share and an active grant of `kind` on it, when the actor owns both
   // the share and its workspace right now. Anything else is a generic 404.
@@ -1014,859 +811,52 @@ export function createSyncRelayHandler({
     );
   };
 
-  const respondToLinkDiscussion = async (request: Request): Promise<Response> => {
-    if (!linkKey) return privateRefused();
-    if (request.method !== "GET" && request.method !== "POST") {
-      return privateErrorResponse(relayError("method_not_allowed"));
-    }
-    if (
-      request.method === "POST" &&
-      (relayExchangeKeyHash === undefined || !hasValidRelayExchangeKey(request))
-    ) {
-      return privateRefused();
-    }
-    const profileSecret = request.headers.get("x-dohc-link-profile-secret");
-    if (
-      (request.method === "POST" && profileSecret === null) ||
-      (profileSecret !== null && !LINK_SECRET_PATTERN.test(profileSecret))
-    ) {
-      return privateRefused();
-    }
+  const {
+    respondToLinkDiscussion,
+    respondToLinkDiscussionActivity,
+    respondToShareDiscussion,
+    respondToShareDiscussionActivity,
+    respondToShareDiscussionModeration,
+  } = createDiscussionRoutes(
+    storage,
+    resolveActor,
+    nowMs,
+    lookupUserDisplayName,
+    claimPendingShares,
+    requireShareAction,
+    requireShareWorkspace,
+    linkKey,
+    relayExchangeKeyHash !== undefined,
+    hasValidRelayExchangeKey,
+    requireLinkRead,
+    requireFreshLinkRead,
+    linkJsonResponse,
+    linkReadRateLimiter,
+    linkGrantReadRateLimiter,
+    discussionActivity,
+  );
 
-    try {
-      const { capabilityToken, capability } = requireLinkRead(
-        request,
-        linkReadRateLimiter,
-        linkGrantReadRateLimiter,
-      );
-      if (request.method === "GET") {
-        const url = new URL(request.url);
-        const cursor = discussionCursor.decode(url.searchParams.get("cursor"));
-        const limit = parseDiscussionLimit(url.searchParams.get("limit"));
-        const direction = parseDiscussionDirection(
-          url.searchParams.get("direction"),
-        );
-        const storedPage = storage.listShareDiscussionMessages({
-          shareId: capability.shareId,
-          ...(direction === "newest-first"
-            ? { before: cursor }
-            : { after: cursor }),
-          direction,
-          limit,
-        });
-        const principal = profileSecret === null
-          ? null
-          : storage.getLinkPrincipalForGrantProfile(
-              capability.grantId,
-              hashLinkProfileSecret(profileSecret, linkKey),
-            );
-        const page = discussionPage(
-          storedPage,
-          "public",
-          principal?.displayName ?? null,
-        );
-        requireFreshLinkRead(capabilityToken, capability);
-        return privateResponse(
-          linkJsonResponse(capability.shareId, capability.grantId, page),
-        );
-      }
-
-      const input = parseLinkDiscussionAppendBody(await readJsonObject(request));
-      const result = storage.appendLinkDiscussionMessage({
-        capabilityHash: capability.session.capabilityHash,
-        profileTokenHash: hashLinkProfileSecret(profileSecret!, linkKey),
-        claimedName: input.claimedName,
-        body: input.body,
-        idempotencyKey: input.idempotencyKey,
-        createdAtMs: nowMs(),
-        guard: () => {
-          requireFreshLinkRead(capabilityToken, capability);
-        },
-      });
-      if (!result.ok) {
-        if (result.reason === "invalid-input") {
-          return privateErrorResponse(badRequest("discussion message is invalid"));
-        }
-        if (result.reason === "paused") {
-          return privateJsonResponse(
-            {
-              ok: false,
-              error: "link discussion writes are paused",
-              code: RELAY_ERRORS.link_discussion_paused.code,
-              activityRevision: result.activityRevision,
-            },
-            RELAY_ERRORS.link_discussion_paused.status,
-          );
-        }
-        if (result.reason === "blocked") {
-          return privateJsonResponse(
-            {
-              ok: false,
-              error: "link discussion writes are blocked",
-              code: RELAY_ERRORS.link_discussion_blocked.code,
-              activityRevision: result.activityRevision,
-            },
-            RELAY_ERRORS.link_discussion_blocked.status,
-          );
-        }
-        if (
-          result.reason === "principal-limit" ||
-          result.reason === "lifetime-limit" ||
-          result.reason === "share-limit"
-        ) {
-          return privateErrorResponse(
-            relayError("discussion_limit_reached", "discussion message limit reached"),
-          );
-        }
-        return privateRefused();
-      }
-      if (!result.replayed) discussionActivity.wake(capability.shareId);
-      return privateResponse(
-        linkJsonResponse(capability.shareId, capability.grantId, {
-          ok: true,
-          message: projectDiscussionMessage(result.message, "public"),
-        }),
-      );
-    } catch (error) {
-      if (
-        error instanceof RelayError &&
-        (error.statusCode === 401 || error.code === RELAY_ERRORS.not_found.code)
-      ) {
-        return privateRefused();
-      }
-      return privateErrorResponse(error);
-    }
-  };
-
-  const respondToLinkDiscussionActivity = async (
-    request: Request,
-  ): Promise<Response> => {
-    if (!linkKey) return privateRefused();
-    if (request.method !== "GET") {
-      return privateErrorResponse(relayError("method_not_allowed"));
-    }
-    const profileSecret = request.headers.get("x-dohc-link-profile-secret");
-    if (profileSecret === null || !LINK_SECRET_PATTERN.test(profileSecret)) {
-      return privateRefused();
-    }
-
-    try {
-      const { capabilityToken, capability } = requireLinkRead(
-        request,
-        linkReadRateLimiter,
-        linkGrantReadRateLimiter,
-      );
-      const query = parseDiscussionActivityQuery(new URL(request.url).searchParams);
-      const observedRevision = storage.getShareDiscussionRevision(capability.shareId);
-      if (observedRevision === null) return privateRefused();
-      if (query.since > observedRevision) {
-        throw badRequest("since is ahead of discussion activity");
-      }
-      if (query.since === observedRevision && query.hold > 0) {
-        try {
-          await discussionActivity.wait(
-            capability.shareId,
-            `link:${capability.session.capabilityHash}`,
-            {
-              holdMs: query.hold,
-              signal: request.signal,
-              shouldPark: () => {
-                try {
-                  requireFreshLinkRead(capabilityToken, capability);
-                  return (
-                    storage.getShareDiscussionRevision(capability.shareId) ===
-                    query.since
-                  );
-                } catch {
-                  return false;
-                }
-              },
-            },
-          );
-        } catch (error) {
-          if (error instanceof DiscussionActivityCapacityError) {
-            throw relayError("link_read_rate_limited");
-          }
-          throw error;
-        }
-      }
-
-      // Every settled wait (wake, timeout, or abort) re-establishes the
-      // capability before reading durable state, then once more before bytes
-      // leave the process.
-      requireFreshLinkRead(capabilityToken, capability);
-      const page = storage.listShareDiscussionActivity({
-        shareId: capability.shareId,
-        sinceRevision: query.since,
-        limit: query.limit,
-      });
-      const principal = storage.getLinkPrincipalForGrantProfile(
-        capability.grantId,
-        hashLinkProfileSecret(profileSecret, linkKey),
-      );
-      const composerState = page.linkCommentsPaused
-        ? "paused"
-        : principal !== null && principal.blockedAtMs !== null
-          ? "blocked"
-          : "available";
-      const fresh = requireFreshLinkRead(capabilityToken, capability);
-      if (!isPublicLinkAccess(fresh.access)) return privateRefused();
-      return privateResponse(
-        linkJsonResponse(
-          capability.shareId,
-          capability.grantId,
-          publicDiscussionActivityPage(
-            page,
-            fresh.access,
-            composerState,
-            principal?.displayName ?? null,
-          ),
-        ),
-      );
-    } catch (error) {
-      if (
-        error instanceof RelayError &&
-        (error.statusCode === 401 || error.code === RELAY_ERRORS.not_found.code)
-      ) {
-        return privateRefused();
-      }
-      return privateErrorResponse(error);
-    }
-  };
-
-  const respondToShareDiscussion = async (
-    request: Request,
-    shareId: string,
-  ): Promise<Response> => {
-    try {
-      const url = new URL(request.url);
-      const actor = await resolveActor(
-        request,
-        request.method === "GET"
-          ? (url.searchParams.get("workspaceId") ?? "")
-          : "",
-      );
-      if (
-        !actor.userId ||
-        Buffer.byteLength(actor.userId, "utf8") >
-          LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT
-      ) {
-        throw badRequest("discussion actor id is invalid");
-      }
-      await claimPendingShares(actor.userId);
-      if (request.method === "GET") {
-        const query = parseDiscussionListQuery(url.searchParams);
-        const initialAuthority = requireDiscussionAuthority(
-          shareId,
-          actor.userId,
-          "read",
-          query.workspaceId,
-        );
-        if (
-          query.direction === "newest-first" &&
-          initialAuthority.viewer !== "owner"
-        ) {
-          throw notFound();
-        }
-        const storedPage = storage.listShareDiscussionMessages({
-          shareId,
-          ...(query.direction === "newest-first"
-            ? { before: query.cursor }
-            : { after: query.cursor }),
-          direction: query.direction,
-          limit: query.limit,
-        });
-        const finalAuthority = requireDiscussionAuthority(
-          shareId,
-          actor.userId,
-          "read",
-          query.workspaceId,
-        );
-        if (
-          query.direction === "newest-first" &&
-          finalAuthority.viewer !== "owner"
-        ) {
-          throw notFound();
-        }
-        return privateJsonResponse(
-          discussionPage(storedPage, finalAuthority.viewer),
-        );
-      }
-      if (request.method !== "POST") {
-        return privateErrorResponse(relayError("method_not_allowed"));
-      }
-
-      const input = parseNamedDiscussionAppendBody(await readJsonObject(request));
-      const authority = requireDiscussionAuthority(
-        shareId,
-        actor.userId,
-        "read",
-        input.workspaceId,
-      );
-      const displayName = await discussionDisplayName(
-        lookupUserDisplayName,
-        actor.userId,
-      );
-      const result = storage.appendAuthenticatedDiscussionMessage({
-        shareId,
-        authorUserId: actor.userId,
-        displayName,
-        body: input.body,
-        idempotencyKey: input.idempotencyKey,
-        createdAtMs: nowMs(),
-        readGuard: () => {
-          const current = requireDiscussionAuthority(
-            shareId,
-            actor.userId,
-            "read",
-            input.workspaceId,
-          );
-          return current.viewer === "owner" ? "owner" : "recipient";
-        },
-        appendGuard: () => {
-          const current = requireDiscussionAuthority(
-            shareId,
-            actor.userId,
-            "append",
-            input.workspaceId,
-          );
-          return current.viewer === "owner" ? "owner" : "recipient";
-        },
-      });
-      if (!result.ok) {
-        if (result.reason === "idempotency-conflict") {
-          throw relayError("conflict", "idempotency key was already used for a different message");
-        }
-        if (result.reason === "rate-limit") {
-          throw relayError("discussion_rate_limited", "discussion message rate limit reached");
-        }
-        if (result.reason === "lifetime-limit") {
-          throw relayError("discussion_limit_reached", "recipient discussion message limit reached");
-        }
-        if (result.reason === "share-limit") {
-          throw relayError("discussion_limit_reached", "share discussion message limit reached");
-        }
-        if (result.reason === "workspace-quota") {
-          throw relayError("quota_exceeded", "workspace quota exceeded");
-        }
-        throw badRequest("discussion message is invalid");
-      }
-      if (!result.replayed) discussionActivity.wake(shareId);
-      return privateJsonResponse({
-        ok: true,
-        message: projectDiscussionMessage(result.message, authority.viewer),
-      });
-    } catch (error) {
-      return privateErrorResponse(error);
-    }
-  };
-
-  const respondToShareDiscussionActivity = async (
-    request: Request,
-    shareId: string,
-  ): Promise<Response> => {
-    if (request.method !== "GET") {
-      return privateErrorResponse(relayError("method_not_allowed"));
-    }
-    try {
-      const url = new URL(request.url);
-      const actor = await resolveActor(
-        request,
-        url.searchParams.get("workspaceId") ?? "",
-      );
-      if (
-        !actor.userId ||
-        Buffer.byteLength(actor.userId, "utf8") >
-          LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT
-      ) {
-        throw badRequest("discussion actor id is invalid");
-      }
-      await claimPendingShares(actor.userId);
-      const query = parseDiscussionActivityQuery(url.searchParams);
-      const initialAuthority = requireDiscussionAuthority(
-        shareId,
-        actor.userId,
-        "read",
-        query.workspaceId,
-      );
-      const observedRevision = storage.getShareDiscussionRevision(shareId);
-      if (observedRevision === null) throw notFound();
-      if (query.since > observedRevision) {
-        throw badRequest("since is ahead of discussion activity");
-      }
-      if (query.since === observedRevision && query.hold > 0) {
-        try {
-          await discussionActivity.wait(shareId, `user:${actor.userId}`, {
-            holdMs: query.hold,
-            signal: request.signal,
-            shouldPark: () => {
-              try {
-                const authority = requireDiscussionAuthority(
-                  shareId,
-                  actor.userId,
-                  "read",
-                  query.workspaceId,
-                );
-                return (
-                  (initialAuthority.viewer !== "owner" ||
-                    authority.viewer === "owner") &&
-                  storage.getShareDiscussionRevision(shareId) === query.since
-                );
-              } catch {
-                return false;
-              }
-            },
-          });
-        } catch (error) {
-          if (error instanceof DiscussionActivityCapacityError) {
-            throw relayError("link_read_rate_limited");
-          }
-          throw error;
-        }
-      }
-
-      const postWakeAuthority = requireDiscussionAuthority(
-        shareId,
-        actor.userId,
-        "read",
-        query.workspaceId,
-      );
-      if (
-        initialAuthority.viewer === "owner" &&
-        postWakeAuthority.viewer !== "owner"
-      ) {
-        throw notFound();
-      }
-      const page = storage.listShareDiscussionActivity({
-        shareId,
-        sinceRevision: query.since,
-        limit: query.limit,
-      });
-      const finalAuthority = requireDiscussionAuthority(
-        shareId,
-        actor.userId,
-        "read",
-        query.workspaceId,
-      );
-      if (
-        initialAuthority.viewer === "owner" &&
-        finalAuthority.viewer !== "owner"
-      ) {
-        throw notFound();
-      }
-      return privateJsonResponse(
-        discussionActivityPage(page, finalAuthority.viewer),
-      );
-    } catch (error) {
-      return privateErrorResponse(error);
-    }
-  };
-
-  const respondToShareDiscussionModeration = async (
-    request: Request,
-    shareId: string,
-  ): Promise<Response> => {
-    if (request.method !== "POST") return privateRefused();
-    let actorUserId: string;
-    let action: DiscussionModerationAction;
-    let workspaceId: string;
-    let input: Record<string, unknown>;
-    try {
-      input = await readJsonObject(request);
-      workspaceId = parseWorkspaceId(input.workspaceId);
-    } catch (error) {
-      return privateErrorResponse(error);
-    }
-    try {
-      const actor = await resolveActor(request, workspaceId);
-      const share = storage.getShare(shareId);
-      if (
-        !actor.userId ||
-        Buffer.byteLength(actor.userId, "utf8") >
-          LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT ||
-        !share ||
-        !isCurrentDiscussionOwner(shareId, actor.userId)
-      ) {
-        return privateRefused();
-      }
-      requireShareWorkspace(share, workspaceId);
-      actorUserId = actor.userId;
-      action = parseDiscussionModerationAction(input);
-    } catch {
-      return privateRefused();
-    }
-    try {
-      const changedAtMs = nowMs();
-      if (action.action === "delete") {
-        const deleted = storage.deleteShareDiscussionMessage({
-          shareId,
-          workspaceId,
-          messageId: action.messageId,
-          deletedAtMs: changedAtMs,
-          actorUserId,
-        });
-        if (deleted === null) return privateRefused();
-        discussionActivity.wake(shareId);
-        return privateJsonResponse({
-          ok: true,
-          message: {
-            messageId: deleted.messageId,
-            createdAtMs: deleted.createdAtMs,
-            deleted: true,
-          },
-        });
-      }
-      if (action.action === "block" || action.action === "unblock") {
-        const blocked = action.action === "block";
-        if (
-          !storage.setLinkPrincipalBlocked({
-            shareId,
-            workspaceId,
-            principalId: action.principalId,
-            actorUserId,
-            blockedAtMs: blocked ? changedAtMs : null,
-          })
-        ) {
-          return privateRefused();
-        }
-        discussionActivity.wake(shareId);
-        return privateJsonResponse({ ok: true, blocked });
-      }
-      const linkCommentsPaused = action.action === "pause";
-      if (
-        !storage.setShareLinkWritesPaused({
-          shareId,
-          workspaceId,
-          actorUserId,
-          pausedAtMs: linkCommentsPaused ? changedAtMs : null,
-        })
-      ) {
-        return privateRefused();
-      }
-      discussionActivity.wake(shareId);
-      return privateJsonResponse({ ok: true, linkCommentsPaused });
-    } catch (error) {
-      return privateErrorResponse(error);
-    }
-  };
-
-  const requireRefreshableLinkSession = (request: Request, refreshedAtMs: number) => {
-    if (!linkKey) throw invalidLinkCapability();
-    const match = /^LinkCapability ([A-Za-z0-9_-]{43})$/u.exec(
-      request.headers.get("authorization") ?? "",
-    );
-    if (!match) throw invalidLinkCapability();
-    const capabilityToken = match[1]!;
-    const capabilityHash = hashLinkBearer(capabilityToken, linkKey);
-    const session = storage.findLinkSessionByCapabilityHash(capabilityHash);
-    if (
-      !session ||
-      !constantTimeHashEqual(capabilityHash, session.capabilityHash) ||
-      session.expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS < refreshedAtMs
-    ) {
-      throw invalidLinkCapability();
-    }
-    return { capabilityHash, session };
-  };
-
-  const linkExchangeResult = (
-    authorized: AuthorizedShareAction<ShareSelector>,
-    capabilityToken: string,
-    capabilityExpiresAtMs: number,
-  ): LinkExchangeResult => {
-    const presentation = createAccountlessPathProjection(
-      authorized.effectiveSelector,
-    );
-    return {
-      shareId: authorized.share.shareId,
-      grantId: authorized.grant.grantId,
-      generation: authorized.grant.generation,
-      access: authorized.effectiveSelector.access,
-      effectiveSelector: presentation.selector,
-      capabilityToken,
-      capabilityExpiresAtMs,
-    };
-  };
-
-  const respondToLinkExchange = async (request: Request): Promise<Response> => {
-    if (!linkKey) return refused();
-    if (!hasValidRelayExchangeKey(request)) return refused();
-    const ip = request.headers.get("x-dohc-relay-client-ip") ?? "unknown";
-    if (!linkExchangeRateLimiter.allow(ip, nowMs())) return refused();
-
-    let secret = "";
-    let wellFormed = false;
-    try {
-      const input = await readJsonObject(request);
-      if (typeof input.secret === "string") {
-        secret = input.secret;
-        wellFormed = LINK_SECRET_PATTERN.test(secret);
-      }
-    } catch {
-      // The exchange never distinguishes malformed JSON from a bad bearer.
-    }
-
-    try {
-      // Hash before deciding whether the input was well formed. The lookup and
-      // comparison also run for garbage, against a digest that cannot match.
-      const secretHash = hashLinkBearer(secret, linkKey);
-      const dummyHash = hashLinkBearer("", linkKey);
-      const found = storage.findLinkGrantByCredentialHash(secretHash);
-      const hashMatches = constantTimeHashEqual(
-        secretHash,
-        found?.credential.secretHash ?? dummyHash,
-      );
-      if (!wellFormed || !found || !hashMatches) return refused();
-
-      const authorized = authorizeLinkShareAction({
-        storage,
-        grantId: found.grant.grantId,
-        action: "read",
-      });
-      if (
-        !authorized.ok ||
-        authorized.grant.generation !== found.credential.generation ||
-        !isPublicLinkAccess(authorized.grant.access)
-      ) {
-        return refused();
-      }
-
-      const capabilityToken = newLinkBearer();
-      const mintedAtMs = nowMs();
-      const capabilityExpiresAtMs = mintedAtMs + LINK_SESSION_TTL_MS;
-      const minted = storage.mintLinkSession({
-        session: {
-          sessionId: newId(),
-          capabilityHash: hashLinkBearer(capabilityToken, linkKey),
-          grantId: authorized.grant.grantId,
-          generation: authorized.grant.generation,
-          mintedAtMs,
-          expiresAtMs: capabilityExpiresAtMs,
-        },
-        // This is the commit-time check. Rotation, retuning, revocation, owner
-        // loss, or selector damage that lands after the first lookup wins.
-        guard: () => {
-          const current = storage.findLinkGrantByCredentialHash(secretHash);
-          const currentMatches = constantTimeHashEqual(
-            secretHash,
-            current?.credential.secretHash ?? dummyHash,
-          );
-          if (
-            !current ||
-            !currentMatches ||
-            current.credential.credentialId !== found.credential.credentialId
-          ) {
-            throw notFound();
-          }
-          const fresh = authorizeLinkShareAction({
-            storage,
-            grantId: current.grant.grantId,
-            action: "read",
-          });
-          if (
-            !fresh.ok ||
-            fresh.grant.generation !== found.grant.generation ||
-            fresh.grant.generation !== current.credential.generation ||
-            fresh.grant.access !== authorized.grant.access
-          ) {
-            throw notFound();
-          }
-        },
-      });
-      if (!minted) return refused();
-
-      const exchange = linkExchangeResult(
-        authorized,
-        capabilityToken,
-        capabilityExpiresAtMs,
-      );
-      return jsonResponse({ ok: true, ...exchange });
-    } catch (error) {
-      if (error instanceof RelayError) return refused();
-      throw error;
-    }
-  };
-
-  const respondToLinkRefresh = (request: Request): Response => {
-    if (!hasValidRelayExchangeKey(request)) {
-      return errorResponse(notFound());
-    }
-    if (!linkKey) throw invalidLinkCapability();
-    const refreshLinkKey = linkKey;
-    const refreshedAtMs = nowMs();
-    const current = requireRefreshableLinkSession(request, refreshedAtMs);
-    if (
-      !linkReadRateLimiter.allow(current.capabilityHash, refreshedAtMs) ||
-      !linkGrantReadRateLimiter.allow(current.session.grantId, refreshedAtMs)
-    ) {
-      throw relayError("link_read_rate_limited");
-    }
-    const authorized = authorizeLinkShareAction({
-      storage,
-      grantId: current.session.grantId,
-      action: "read",
-    });
-    if (
-      !authorized.ok ||
-      authorized.grant.generation !== current.session.generation ||
-      !isPublicLinkAccess(authorized.grant.access)
-    ) {
-      throw invalidLinkCapability();
-    }
-
-    const capabilityToken = newLinkBearer();
-    const capabilityExpiresAtMs = refreshedAtMs + LINK_SESSION_TTL_MS;
-    const replaced = storage.replaceLinkSession({
-      currentSession: current.session,
-      session: {
-        sessionId: newId(),
-        capabilityHash: hashLinkBearer(capabilityToken, refreshLinkKey),
-        grantId: authorized.grant.grantId,
-        generation: authorized.grant.generation,
-        mintedAtMs: refreshedAtMs,
-        expiresAtMs: capabilityExpiresAtMs,
-      },
-      guard: () => {
-        const fresh = authorizeLinkShareAction({
-          storage,
-          grantId: current.session.grantId,
-          action: "read",
-        });
-        if (
-          !fresh.ok ||
-          fresh.share.shareId !== authorized.share.shareId ||
-          fresh.grant.grantId !== authorized.grant.grantId ||
-          fresh.grant.generation !== authorized.grant.generation ||
-          fresh.grant.access !== authorized.grant.access
-        ) {
-          throw invalidLinkCapability();
-        }
-      },
-    });
-    if (!replaced) throw invalidLinkCapability();
-
-    const refresh = linkExchangeResult(
-      authorized,
-      capabilityToken,
-      capabilityExpiresAtMs,
-    );
-    return jsonResponse({ ok: true, ...refresh });
-  };
-
-  const respondToLinkHandoff = (request: Request): Response => {
-    if (!linkKey || relayExchangeKeyHash === undefined) return refused();
-    if (!hasValidRelayExchangeKey(request)) return refused();
-    if (request.body !== null) return refused();
-    try {
-      const { capabilityToken, capability } = requireLinkRead(
-        request,
-        linkReadRateLimiter,
-        linkGrantReadRateLimiter,
-      );
-      const code = newLinkHandoffCode();
-      if (!LINK_SECRET_PATTERN.test(code)) return refused();
-      const mintedAtMs = nowMs();
-      const expiresAtMs = mintedAtMs + LINK_HANDOFF_CODE_TTL_MS;
-      const minted = storage.mintLinkHandoffCode({
-        code: {
-          codeId: newId(),
-          codeHash: hashLinkHandoffCode(code, linkKey),
-          grantId: capability.grantId,
-          generation: capability.generation,
-          mintedAtMs,
-          expiresAtMs,
-        },
-        guard: () => {
-          try {
-            const fresh = validateLinkCapability({
-              storage,
-              capabilityToken,
-              linkKey,
-              nowMs: nowMs(),
-            });
-            return (
-              fresh !== null &&
-              fresh.shareId === capability.shareId &&
-              fresh.grantId === capability.grantId &&
-              fresh.generation === capability.generation &&
-              fresh.access === capability.access &&
-              isPublicLinkAccess(fresh.access)
-            );
-          } catch {
-            return false;
-          }
-        },
-      });
-      if (!minted) return refused();
-      return jsonResponse({ ok: true, code, expiresAtMs });
-    } catch (error) {
-      if (
-        error instanceof RelayError &&
-        error.code !== RELAY_ERRORS.link_read_rate_limited.code
-      ) {
-        return refused();
-      }
-      throw error;
-    }
-  };
-
-  const respondToLinkRedeem = async (
-    request: Request,
-    principalUserId: string,
-  ): Promise<Response> => {
-    if (!linkKey) return refused();
-    let code = "";
-    try {
-      const input = await readJsonObject(request);
-      if (
-        Object.keys(input).length !== 1 ||
-        typeof input.code !== "string" ||
-        !LINK_SECRET_PATTERN.test(input.code)
-      ) {
-        return refused();
-      }
-      code = input.code;
-    } catch {
-      return refused();
-    }
-
-    const admittedAtMs = nowMs();
-    if (!linkRedeemRateLimiter.allow(principalUserId, admittedAtMs)) {
-      throw relayError("link_read_rate_limited");
-    }
-    const codeHash = hashLinkHandoffCode(code, linkKey);
-    if (!storage.hasLinkHandoffCode(codeHash)) return refused();
-
-    const result = storage.redeemLinkHandoffCode({
-      codeHash,
-      principalUserId,
-      redeemedAtMs: admittedAtMs,
-      mintGrantId: newGrantId,
-      guard: (storedCode) => {
-        try {
-          const authorized = authorizeLinkShareAction({
-            storage,
-            grantId: storedCode.grantId,
-            action: "read",
-          });
-          return (
-            authorized.ok &&
-            authorized.grant.grantId === storedCode.grantId &&
-            isPublicLinkAccess(authorized.grant.access)
-          );
-        } catch {
-          return false;
-        }
-      },
-    });
-    if (!result.ok) return refused();
-    return jsonResponse({
-      ok: true,
-      shareId: result.shareId,
-      grantId: result.grant.grantId,
-      access: result.grant.access,
-    });
-  };
+  const {
+    respondToLinkExchange,
+    respondToLinkRefresh,
+    respondToLinkHandoff,
+    respondToLinkRedeem,
+  } = createLinkCredentialRoutes(
+    storage,
+    linkKey,
+    relayExchangeKeyHash !== undefined,
+    hasValidRelayExchangeKey,
+    requireLinkRead,
+    nowMs,
+    newId,
+    newGrantId,
+    newLinkBearer,
+    newLinkHandoffCode,
+    linkExchangeRateLimiter,
+    linkRedeemRateLimiter,
+    linkReadRateLimiter,
+    linkGrantReadRateLimiter,
+  );
 
   return async (request) => {
     try {
@@ -3626,68 +2616,6 @@ function parseShareId(value: string | undefined): string {
   return value;
 }
 
-type CursorField = "id" | "messageId" | "ms";
-
-// An opaque page cursor: base64url JSON with a version and the named fields,
-// nothing more. Ids are share-id shaped, message ids are bounded text, and
-// times are non-negative safe integers.
-function cursorCodec<Cursor extends object>(
-  fields: { [Key in keyof Cursor]: CursorField },
-  label: string,
-): {
-  encode: (cursor: Cursor) => string;
-  decode: (value: string | null) => Cursor | undefined;
-} {
-  const names = Object.keys(fields).sort();
-  const expectedKeys = [...names, "version"].sort().join("\0");
-  return {
-    encode: (cursor) =>
-      Buffer.from(JSON.stringify({ version: 1, ...cursor }), "utf8").toString("base64url"),
-    decode: (value) => {
-      if (value === null) return undefined;
-      const invalid = () => badRequest(`${label} is invalid`);
-      if (value.length === 0 || value.length > CURSOR_MAX_CHARS || !/^[A-Za-z0-9_-]+$/u.test(value)) {
-        throw invalid();
-      }
-      let decoded: unknown;
-      try {
-        decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
-      } catch {
-        throw invalid();
-      }
-      const row = asRecord(decoded);
-      if (!row || Object.keys(row).sort().join("\0") !== expectedKeys || row.version !== 1) {
-        throw invalid();
-      }
-      const cursor: Record<string, string | number> = {};
-      for (const name of names) {
-        const field = row[name];
-        const kind = fields[name as keyof Cursor];
-        if (kind === "ms") {
-          if (!Number.isSafeInteger(field) || Number(field) < 0) throw invalid();
-          cursor[name] = Number(field);
-        } else if (kind === "messageId") {
-          if (typeof field !== "string" || field.length === 0 || field.length > 512) {
-            throw invalid();
-          }
-          cursor[name] = field;
-        } else {
-          if (
-            typeof field !== "string" ||
-            field.length === 0 ||
-            field.length > MAX_SHARE_ID_CHARS ||
-            !/^[a-z0-9][a-z0-9-]*$/u.test(field)
-          ) {
-            throw invalid();
-          }
-          cursor[name] = field;
-        }
-      }
-      return cursor as unknown as Cursor;
-    },
-  };
-}
-
 const linkInventoryCursor = cursorCodec<SyncRelayLinkInventoryCursor>(
   { shareCreatedAtMs: "ms", shareId: "id", linkCreatedAtMs: "ms", grantId: "id" },
   "cursor",
@@ -3696,198 +2624,6 @@ const independentGrantInventoryCursor = cursorCodec<SyncRelayIndependentGrantInv
   { shareId: "id", grantCreatedAtMs: "ms", grantId: "id" },
   "independentGrantCursor",
 );
-const discussionCursor = cursorCodec<SyncRelayShareDiscussionCursor>(
-  { createdAtMs: "ms", messageId: "messageId" },
-  "cursor",
-);
-
-function parseDiscussionLimit(value: string | null): number {
-  if (value === null) return DEFAULT_DISCUSSION_PAGE_SIZE;
-  if (!/^[1-9][0-9]{0,2}$/u.test(value)) {
-    throw badRequest("limit is invalid");
-  }
-  const limit = Number(value);
-  if (limit > LINK_DISCUSSION_PAGE_LIMIT) {
-    throw badRequest(`limit must not exceed ${LINK_DISCUSSION_PAGE_LIMIT}`);
-  }
-  return limit;
-}
-
-function parseDiscussionDirection(
-  value: string | null,
-): "oldest-first" | "newest-first" {
-  if (value === null || value === "oldest-first") return "oldest-first";
-  if (value === "newest-first") return "newest-first";
-  throw badRequest("direction is invalid");
-}
-
-function parseOptionalDiscussionWorkspaceId(
-  searchParams: URLSearchParams,
-): string | undefined {
-  const values = searchParams.getAll("workspaceId");
-  if (values.length === 0) return undefined;
-  if (values.length !== 1) {
-    throw badRequest("workspaceId is invalid");
-  }
-  return parseWorkspaceId(values[0]);
-}
-
-function parseDiscussionListQuery(searchParams: URLSearchParams): {
-  workspaceId?: string;
-  cursor: SyncRelayShareDiscussionCursor | undefined;
-  limit: number;
-  direction: "oldest-first" | "newest-first";
-} {
-  const allowed = new Set(["workspaceId", "cursor", "limit", "direction"]);
-  for (const key of searchParams.keys()) {
-    if (!allowed.has(key) || searchParams.getAll(key).length !== 1) {
-      throw badRequest("discussion query is invalid");
-    }
-  }
-  return {
-    workspaceId: parseOptionalDiscussionWorkspaceId(searchParams),
-    cursor: discussionCursor.decode(searchParams.get("cursor")),
-    limit: parseDiscussionLimit(searchParams.get("limit")),
-    direction: parseDiscussionDirection(searchParams.get("direction")),
-  };
-}
-
-function parseDiscussionActivityQuery(searchParams: URLSearchParams): {
-  workspaceId?: string;
-  since: number;
-  hold: number;
-  limit: number;
-} {
-  const allowed = new Set(["workspaceId", "since", "hold", "limit"]);
-  for (const key of searchParams.keys()) {
-    if (!allowed.has(key) || searchParams.getAll(key).length !== 1) {
-      throw badRequest("discussion activity query is invalid");
-    }
-  }
-  const parseNonnegative = (value: string | null, name: string): number => {
-    if (value === null || !/^(0|[1-9][0-9]*)$/u.test(value)) {
-      throw badRequest(`${name} is invalid`);
-    }
-    const parsed = Number(value);
-    if (!Number.isSafeInteger(parsed)) throw badRequest(`${name} is invalid`);
-    return parsed;
-  };
-  const since = parseNonnegative(searchParams.get("since"), "since");
-  const holdValue = searchParams.get("hold");
-  const hold =
-    holdValue === null
-      ? DEFAULT_DISCUSSION_ACTIVITY_HOLD_MS
-      : parseNonnegative(holdValue, "hold");
-  if (hold > MAX_DISCUSSION_ACTIVITY_HOLD_MS) {
-    throw badRequest(
-      `hold must not exceed ${MAX_DISCUSSION_ACTIVITY_HOLD_MS}`,
-    );
-  }
-  return {
-    workspaceId: parseOptionalDiscussionWorkspaceId(searchParams),
-    since,
-    hold,
-    limit: parseDiscussionLimit(searchParams.get("limit")),
-  };
-}
-
-function parseLinkDiscussionAppendBody(input: Record<string, unknown>): {
-  body: string;
-  idempotencyKey: string;
-  claimedName?: string;
-} {
-  const keys = Object.keys(input);
-  if (
-    keys.some(
-      (key) => key !== "body" && key !== "idempotencyKey" && key !== "claimedName",
-    ) ||
-    !Object.hasOwn(input, "body") ||
-    !Object.hasOwn(input, "idempotencyKey") ||
-    typeof input.body !== "string" ||
-    typeof input.idempotencyKey !== "string" ||
-    (Object.hasOwn(input, "claimedName") && typeof input.claimedName !== "string")
-  ) {
-    throw badRequest("discussion append body is invalid");
-  }
-  return {
-    body: input.body,
-    idempotencyKey: input.idempotencyKey,
-    ...(typeof input.claimedName === "string"
-      ? { claimedName: input.claimedName }
-      : {}),
-  };
-}
-
-function parseNamedDiscussionAppendBody(input: Record<string, unknown>): {
-  workspaceId?: string;
-  body: string;
-  idempotencyKey: string;
-} {
-  if (
-    Object.keys(input).some(
-      (key) =>
-        key !== "workspaceId" && key !== "body" && key !== "idempotencyKey",
-    ) ||
-    !Object.hasOwn(input, "body") ||
-    !Object.hasOwn(input, "idempotencyKey") ||
-    typeof input.body !== "string" ||
-    typeof input.idempotencyKey !== "string"
-  ) {
-    throw badRequest("discussion append body is invalid");
-  }
-  return {
-    ...(Object.hasOwn(input, "workspaceId")
-      ? { workspaceId: parseWorkspaceId(input.workspaceId) }
-      : {}),
-    body: input.body,
-    idempotencyKey: input.idempotencyKey,
-  };
-}
-
-type DiscussionModerationAction =
-  | { action: "delete"; messageId: string }
-  | { action: "block" | "unblock"; principalId: string }
-  | { action: "pause" | "resume" };
-
-function parseDiscussionModerationAction(
-  input: Record<string, unknown>,
-): DiscussionModerationAction {
-  const validHandle = (value: unknown): value is string =>
-    typeof value === "string" &&
-    value.length > 0 &&
-    value.length <= DISCUSSION_MODERATION_HANDLE_MAX_CHARS;
-  if (input.action === "delete") {
-    if (
-      Object.keys(input).sort().join("\0") !==
-        ["action", "messageId", "workspaceId"].join("\0") ||
-      !validHandle(input.messageId)
-    ) {
-      throw notFound();
-    }
-    return { action: "delete", messageId: input.messageId };
-  }
-  if (input.action === "block" || input.action === "unblock") {
-    if (
-      Object.keys(input).sort().join("\0") !==
-        ["action", "principalId", "workspaceId"].join("\0") ||
-      !validHandle(input.principalId)
-    ) {
-      throw notFound();
-    }
-    return { action: input.action, principalId: input.principalId };
-  }
-  if (input.action === "pause" || input.action === "resume") {
-    if (
-      Object.keys(input).sort().join("\0") !==
-      ["action", "workspaceId"].join("\0")
-    ) {
-      throw notFound();
-    }
-    return { action: input.action };
-  }
-  throw notFound();
-}
-
 function parseExpectedDependentGrantIds(
   input: Record<string, unknown>,
   allowedKeys: readonly string[],
@@ -3966,15 +2702,6 @@ async function readBytes(request: Request, maxBytes: number): Promise<Uint8Array
   const bytes = new Uint8Array(await request.arrayBuffer());
   if (bytes.byteLength > maxBytes) throw relayError("payload_too_large");
   return bytes;
-}
-
-function parseWorkspaceId(value: unknown): string {
-  const workspaceId = parseString(value, "workspaceId", MAX_WORKSPACE_ID_CHARS);
-  // Reserved: "/sync/shares/..." is the share-route namespace. A
-  // workspace with this id could never be addressed, so refuse the claim
-  // rather than strand it.
-  if (workspaceId === "shares") throw badRequest("workspaceId is reserved");
-  return workspaceId;
 }
 
 function parseWorkspaceIdentityValue(value: unknown, name: string): string {
@@ -4224,15 +2951,4 @@ function parseIfMatchSha256(header: string | null): string | null {
 
 function arrayBufferForBytes(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-}
-
-// The public refusal: every route answers an unauthorized probe with the same bytes.
-function refused(): Response {
-  return errorResponse(notFound());
-}
-
-// A link credential that does not resolve answers 401 with the not-found body:
-// the status tells the viewer to re-exchange, and the body says nothing more.
-function invalidLinkCapability(): RelayError {
-  return new RelayError("not_found", undefined, 401);
 }
