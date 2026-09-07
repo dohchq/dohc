@@ -1,65 +1,19 @@
-# The pull-request gate this repository did not have.
-#
-# Before this, PRs had NO automated checks at all: "Desktop Release" is
-# state=disabled_manually (turned off 2026-07-01 after three failures),
-# "Engine tests (native matrix)" is registered but its workflow file no longer
-# exists on main. Every
-# open PR showed CodeRabbit as its only check -- with ten PRs queued behind the
-# Rust-engine cutover.
-#
-# What that cost, concretely: PR #272 added a workspace package to
-# apps/desktop dependencies without adding it to mainBundledWorkspaceDeps.
-# electron-vite then externalizes it, and workspace packages ship raw
-# TypeScript with extensionless relative imports, so the main process dies at
-# startup with ERR_MODULE_NOT_FOUND. Typecheck and the unit suite were both
-# green, because vitest and tsc resolve TypeScript sources directly.
-#
-# Scope is deliberately correctness, not release. Packaging, signing and update
-# manifests stay in Desktop Release. This workflow only claims to answer: does
-# the tree typecheck, do the tests pass, and does the Rust engine gate hold.
-#
-# COST MODEL (why every choice below looks the way it does): the whole gate
-# must fit Blacksmith's free tier -- 3,000 x64-2vCPU-minutes per month, where a
-# 4vCPU minute burns 2x. The three levers:
-#   1. Blacksmith rust-cache -- the previous incarnation compiled the entire
-#      workspace from scratch on every run.
-#   2. Prebuilt cargo-deny/cargo-audit via taiki-e/install-action (seconds,
-#      not ~15 compile-minutes each), still pinned to exact versions.
-#   3. Path filtering -- docs-only PRs cost ~1 minute; TypeScript-only PRs
-#      skip the engine gate. crates/** triggers BOTH jobs on purpose: the
-#      desktop e2e drives the real daemon binary, so a Rust change can break
-#      the JavaScript job.
-# Windows and macOS legs stay out of PR CI for the same budget reason: macOS
-# burns 20x, Windows 2x on slower runs. The canonical Windows gate runs
-# locally.
-# ------------------------------------------------------------------------
-# DISABLED ON PURPOSE (2026-07-28) -- dispatch-only, this is NOT an accident.
-#
-# Ice's call: pre-launch, the automated PR gate is not worth its run volume
-# yet. The jobs below are kept intact and working -- run them any time via
-# workflow_dispatch, or locally via the same scripts they call. Re-enable
-# when it makes more sense (approaching launch / first users) by restoring:
-#
-#   on:
-#     pull_request:
-#     push:
-#       branches: [main]
-#     merge_group:
-#     workflow_dispatch:
-#
-# and reverting the "deliberately disabled" test in
-# scripts/ci-verdict-provenance.test.mjs to its trigger-coverage version
-# (see the comment there). Until then: agents run the canonical gate and
-# the JS typecheck/tests locally before merging.
-# ------------------------------------------------------------------------
+# CI owns the full correctness suite. Local work uses focused checks.
+# Path filters skip unrelated gates; draft PRs defer the full suite until ready.
+# Packaging, signing, and update manifests stay in Desktop Release.
 name: PR checks
 
 on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
+  push:
+    branches: [main]
+  merge_group:
   workflow_dispatch:
 
 concurrency:
   group: pr-checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -76,6 +30,7 @@ jobs:
   # a manual dispatch both want the full answer, not a shortcut.
   changes:
     name: what changed
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     permissions:

@@ -10,7 +10,8 @@ Verification uses it to own command descendants and stop them after interruption
 Run `pnpm setup:worktree`. This installs the pinned dependencies and checks the local tools.
 Codex runs the same setup through `.codex/environments/environment.toml` when creating a worktree.
 
-For Rust PR verification, install these host tools at the versions pinned in `.github/workflows/pr-checks.yml`.
+For local Rust PR verification, install these host tools at the versions pinned in `.github/workflows/pr-checks.yml`.
+CI installs these tools itself. Local focused work does not require a duplicate full gate.
 Setup and doctor check Rust and Cargo, but do not install or check these additional tools.
 Use the [Rust build budget](../../.agents/skills/rust-gate/SKILL.md#cargo-outside-the-gate) for these installations.
 
@@ -57,6 +58,13 @@ Record the operator's result with the session evidence. The automated picker sea
 
 ## Verify a pull request
 
+CI owns the full suite. One verification owner links the run and records the selected gates in the PR.
+Run focused checks locally. Use the [review policy](../../AGENTS.md#select-reviewers) to select independent reviewers and handle later fixes.
+Before merging, confirm every applicable job passed for the final head and its tested integration with the target branch.
+For platform-specific changes, add focused checks on that platform.
+
+If CI is unavailable, use the local fallback below. Preserve all applicable checks and record why CI could not run.
+
 Fetch the PR's target branch. Use its fetched ref as `<target-ref>` below, such as `origin/main`.
 Run `pnpm verify:plan --base <target-ref>` to see the applicable workflow gates.
 Commit the changes. Run `pnpm verify:pr --base <target-ref>` against that clean commit.
@@ -71,7 +79,9 @@ An explicit `--job` runs that job even when the filters omit it.
 Use it when a build or test step reads a changed file outside the filters.
 
 Read `result.json` before reporting a pass. Include the commit, gates, and evidence directory in the PR.
-Repeat affected checks after review fixes. Evidence from another commit does not prove the new commit.
+After review fixes, let CI verify the new commit or rerun the applicable local fallback.
+Evidence from another commit does not prove the new commit.
+Use CI job timings or the local report's `steps[].seconds` when recording verification delays.
 
 ## Measure performance
 

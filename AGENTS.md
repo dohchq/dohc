@@ -128,31 +128,52 @@ Use Node 24.14 or newer and pnpm 11.20.0, as pinned in `package.json`.
 ## Verification
 
 Use [the agent verification procedure](docs/how-to/verify-agent-work.md) for worktree setup, desktop QA, debug access, and PR evidence.
-Start with `pnpm doctor`. Run `pnpm qa:smoke` for desktop boot, editing, persistence, and restart.
+For desktop QA, start with `pnpm doctor`. Use `pnpm qa:smoke` for boot, editing, persistence, and restart.
 
 Run the smallest check that proves the change.
 
-- `pnpm typecheck` and `pnpm test:desktop` cover most TypeScript desktop work.
-- Root `pnpm test` runs brand checks, repository Node tests, and every package suite. It is slow; prefer targeted commands while iterating.
+- Run the affected package's typecheck and focused unit or integration tests while editing.
+- CI owns the full suite. Run repository-wide checks locally only when requested, diagnosing CI, or replacing unavailable CI.
 - `pnpm test:desktop:e2e` prepares and verifies the desktop and native engine before launching Playwright.
 - For Rust work, use the [`rust-gate` skill](.agents/skills/rust-gate/SKILL.md), never a bare `cargo` command. Read the gate's `== summary ==` block rather than its exit code.
 - A test that needs a sleep to pass is wrong. Wait for the actual condition.
 
 ## Pull requests and merging
 
-**CI is deliberately dispatch-only while dohc is pre-launch.**
+CI runs on pull requests, pushes to `main`, merge groups, and manual dispatches.
+Keep one concern per PR. Keep required contract, caller, and test changes together.
+Finish implementation, self-simplification, and focused checks before requesting independent review.
 
-### Select local gates
+### Verify the final commit
 
-Use the `rust` and `js` filters in the [`changes` job of `pr-checks.yml`](.github/workflows/pr-checks.yml) to choose local gates for the exact PR head.
+The [`PR checks` workflow](.github/workflows/pr-checks.yml) selects the JavaScript and Rust gates from changed paths.
+Use `pnpm verify:plan --base <target-ref>` to inspect that selection locally.
 
-- Reproduce each matching workflow job locally, including its services, environment, prebuilds, and verdict checks.
-- Run both jobs when both filters match.
-- Run a job when one of its build or test steps reads a changed file even if the filter omits that file.
-- Run both jobs if impact is unclear. If no filter or build input matches, no code gate applies.
-- State which gates ran, or why none applied, in the PR.
+- One agent owns verification and the PR's evidence. Other agents run focused checks for their changes.
+- Before merging, require successful CI for the final head and its tested integration with the target branch.
+- Require every selected job to pass. A missing, cancelled, or failed run is not a pass.
+- If a job reads a changed file outside its filter, correct the filter and run that job.
+- When impact is unclear, run both jobs. A manual dispatch runs both.
+- Link the CI run in the PR. State which gates ran, or why no code gate applies.
+- Add focused platform verification when changed behavior depends on Windows or macOS.
 
-The Rust job must run through the `rust-gate` skill. Its script enforces disk preflight, build-slot queueing, and capped Cargo parallelism. Read the summary, not the process exit code.
+If CI is unavailable, use `pnpm verify:pr --base <target-ref>` as the single local fallback.
+It owns the service setup, prebuilds, gate selection, and evidence. Follow [the verification procedure](docs/how-to/verify-agent-work.md#verify-a-pull-request).
+Preserve every applicable check. Accept its `result.json` only for the final, unchanged commit.
+The Rust gate retains its build budget and mandatory summary-verdict checks in both environments.
+
+### Select reviewers
+
+- Routine changes need one primary independent reviewer. Additional bots provide optional feedback.
+- Non-trivial code changes need a primary reviewer from a different model family than the implementation agent.
+- Combine correctness and simplification in that review. Give the reviewer the diff, relevant source, and required behavior.
+- Authorization, isolation, security, privacy, migration, durability, and major integration changes need a second independent reviewer of those risks.
+- Add a second reviewer for a disputed blocking finding. Give that reviewer the disputed behavior and source.
+- Name the required reviewers and their scopes in the PR. Follow the shared model-routing policy for model selection.
+
+Keep each appointed reviewer through the fix rounds. Replace an unavailable reviewer once and record the reason.
+The replacement owns the remaining review, including necessary checks of later fixes.
+The original reviewer's return does not require another pass.
 
 ### Review findings
 
@@ -162,11 +183,16 @@ Treat a finding as evidence, not a command. Verify it against the current head a
 - Decline false positives, speculative hardening, alternative designs, and out-of-scope work with a short technical reason.
 - Prefer the smallest safe fix. Do not add policy or machinery only to satisfy a reviewer.
 
-### Simplification review
+### Complete the review
 
-Every code PR needs one simplification review after it becomes ready.
+- Batch verified fixes into one update. Ask the responsible reviewer to check the affected delta.
+- Request further rounds only for a new verified blocker or an unresolved high-risk concern.
+- For a rebase with an unchanged patch, the verification owner can record that comparison without restarting full review.
+- Conflict resolutions and substantive integration changes need review of the affected delta.
+- Before merging, account for the full reviewed diff, subsequent deltas, and every known finding on the final head.
+- Optional bot approval and reviewer unanimity are not merge requirements. Every verified blocker must still be resolved.
+- Record reviewed commits, delta coverage, and dispositions in one maintained PR review note.
 
-- Use an agent from a different model family than the implementation agent.
-- Give it the diff, relevant source, and required behavior without the implementation rationale.
-- Ask what can be deleted, combined, or made obvious without weakening behavior, performance, or product invariants.
-- Verify each finding. Apply clear simplifications, rerun affected gates, and record the reviewed commit and result in the PR.
+When ready to merge, add the review-round count, useful fixes, and any reviewer or verification delays to that note.
+Use CI job timings or local step durations for verification time. Report unknown durations as unknown.
+Use these records to identify repeated delays and slow or overlapping tests before adding gates or removing coverage.
