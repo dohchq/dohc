@@ -296,7 +296,7 @@ import {
   WILL_QUIT_BUDGET_MS,
 } from "./workspaces/siteRunner";
 import { createSitePreviewLifecycle } from "./workspaces/sitePreviewLifecycle";
-import { startStaticDirectoryPreview } from "./security/staticDirectoryPreview";
+import { createPluginPanelPreviewStarter } from "./plugins/pluginPanelLifecycle";
 import { PluginHost } from "./plugins/PluginHost";
 import { PluginHostOwnership } from "./plugins/pluginHostOwnership";
 import {
@@ -322,7 +322,6 @@ import { createPluginPanelSdkEventEmitter } from "./plugins/pluginPanelSdkEvent"
 import { PluginSurfaceHostLifecycle } from "./plugins/pluginSurfaceHostLifecycle";
 import { createPluginAgentDrivers } from "./plugins/pluginAgentDrivers";
 import { pluginDataDir } from "./plugins/pluginLocalState";
-import { pluginIdToSafePath } from "./plugins/pluginSourceSnapshot";
 import type { RegisteredPlugin } from "./plugins/pluginPanelRegistration";
 import { PluginWorkspaceRuntimes } from "./plugins/pluginWorkspaceRuntimes";
 import {
@@ -3806,34 +3805,7 @@ function registeredPlugin(
     ?.registeredPlugin(pluginId);
 }
 
-// Panels serve from the approved, hash-verified snapshot — never from
-// plugin.pluginRoot (live, unverified workspace-folder source) — matching
-// ensurePluginStarted's own hash-verify-before-execute gate: a panel is
-// code from this plugin as much as its process is, and the userData-
-// residency rule applies the same way.
-function pluginSnapshotRoot(workspace: CreatedWorkspace, pluginId: string): string {
-  return join(
-    pluginDataDir(stateDir(), workspace.rootPath),
-    "plugins",
-    pluginIdToSafePath(pluginId),
-    "snapshot",
-  );
-}
-
-async function startPluginPanelPreview(input: {
-  workspace: CreatedWorkspace;
-  pluginId: string;
-  panel: { entry: string };
-}) {
-  const snapshotRoot = pluginSnapshotRoot(input.workspace, input.pluginId);
-  const entryPath = join(snapshotRoot, input.panel.entry);
-  const handle = await startStaticDirectoryPreview(dirname(entryPath), {
-    containmentRoot: snapshotRoot,
-    entry: basename(entryPath),
-    entryLabel: "plugin panel entry",
-  });
-  return { url: handle.url, stop: () => handle.stop() };
-}
+const startPluginPanelPreview = createPluginPanelPreviewStarter(stateDir);
 
 async function stopAllPluginWorkspaces(): Promise<void> {
   // Runs once, from the will-quit teardown — the first moment a quit can no
