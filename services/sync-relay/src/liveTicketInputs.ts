@@ -3,7 +3,7 @@ import { parseHostEpoch, parseHostMode, parseHostControlIdentifier } from "@dohc
 import { LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT, parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { parseLiveUpdateIdentifier, parseLiveUpdateDigest } from "@dohc/live-session-contract/live-update-admission";
 import type { NamedLiveBrowserContext } from "./namedLiveBrowserAuth.js";
-import type { TicketHostReport } from "./storage.js";
+import type { LiveHostConnectionCoordinate, TicketHostReport } from "./storage.js";
 
 export function ticketRecord(value: unknown, fields: readonly string[]): Record<string, unknown> {
   if (typeof value !== "object" || value === null || types.isProxy(value) || Array.isArray(value) ||
@@ -34,9 +34,18 @@ export function snapshotNamedTicketScope(value: unknown): NamedLiveBrowserContex
   };
 }
 
+export function snapshotHostCoordinate(value: unknown): LiveHostConnectionCoordinate {
+  const coordinate = ticketRecord(value, ["mode", "hostId", "hostEpoch", "instanceId", "connectionId"]);
+  return {
+    mode: parseHostMode(coordinate.mode), hostId: parseHostControlIdentifier(coordinate.hostId, "host ID"),
+    hostEpoch: parseHostEpoch(coordinate.hostEpoch), instanceId: parseHostControlIdentifier(coordinate.instanceId, "host instance ID"),
+    connectionId: parseHostControlIdentifier(coordinate.connectionId, "connection ID"),
+  };
+}
+
 export function snapshotTicketHostReport(value: unknown): TicketHostReport {
   const report = ticketRecord(value, ["connection", "binding"]);
-  const coordinate = ticketRecord(report.connection, ["mode", "hostId", "hostEpoch", "instanceId", "connectionId"]);
+  const connection = snapshotHostCoordinate(report.connection);
   const raw = ticketRecord(report.binding, ["workspaceId", "mainVersionId", "objectId", "lineageClaimId", "currentPath", "selectorPaths", "restoreFenceGeneration"]);
   const selectors = raw.selectorPaths;
   if (!Array.isArray(selectors) || types.isProxy(selectors) || Object.getPrototypeOf(selectors) !== Array.prototype) {
@@ -56,11 +65,7 @@ export function snapshotTicketHostReport(value: unknown): TicketHostReport {
   if (binding.mainVersionId !== "main" || binding.currentPath !== raw.currentPath ||
     JSON.stringify(binding.selectorPaths) !== JSON.stringify(paths)) throw new TypeError("Invalid live-ticket binding.");
   parseLiveUpdateDigest(binding.lineageClaimId);
-  return { binding, connection: {
-    mode: parseHostMode(coordinate.mode), hostId: parseHostControlIdentifier(coordinate.hostId, "host ID"),
-    hostEpoch: parseHostEpoch(coordinate.hostEpoch), instanceId: parseHostControlIdentifier(coordinate.instanceId, "host instance ID"),
-    connectionId: parseHostControlIdentifier(coordinate.connectionId, "connection ID"),
-  } };
+  return { binding, connection };
 }
 
 export function parseTicketHash(value: unknown): string {
