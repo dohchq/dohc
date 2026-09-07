@@ -2,7 +2,7 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { useRef, useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import * as Y from "yjs";
+import type * as Y from "yjs";
 import { insertElementRevision, putSceneAsset } from "@dohc/excalidraw-scene";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 import {
@@ -13,37 +13,6 @@ import { disposeEngineDocLeasesForTests } from "./engineDocLease";
 import { useEngineDoc } from "./useEngineDoc";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
-
-const projectionGate = vi.hoisted(() => ({
-  pending: null as Promise<void> | null,
-  completed: 0,
-}));
-
-vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
-  const actual = await importOriginal<
-    typeof import("@dohc/ydoc-projection")
-  >();
-  return {
-    ...actual,
-    yDocToMarkdown(doc: Y.Doc) {
-      const markdown = actual.yDocToMarkdown(doc);
-      return (
-        projectionGate.pending?.then(() => {
-          projectionGate.completed += 1;
-          return `${markdown} [projected]`;
-        }) ??
-        markdown
-      );
-    },
-  };
-});
-
-// AUDIT-SILENTSAVE. The engine editor's save indicator used to be a 1s timer
-// that flipped to "saved" no matter what the engine did — three dogfood
-// journeys watched a doc read "Saved" over a ZERO-BYTE .md. It is now driven
-// only by main's real settle outcomes. These tests own that contract: no
-// timer may resurrect "saved", a failure must show, and a settle that predates
-// the newest keystroke must not claim to cover it.
 
 let lastBoundDoc: Y.Doc | null = null;
 
@@ -105,7 +74,6 @@ function Harness(props: {
       </span>
       <span data-testid="hydrated-assets">{hydratedAssets}</span>
       <span data-testid="text">{engine.doc?.getText("plainText").toString() ?? "none"}</span>
-      <span data-testid="drafts">{drafts.map((draft) => draft.text).join("|")}</span>
       <button
         type="button"
         data-testid="hydrate-assets"
@@ -188,8 +156,6 @@ beforeEach(() => {
   vi.stubGlobal("dohcDesktop", harness.api);
   resetOrphanedDrafts();
   lastBoundDoc = null;
-  projectionGate.pending = null;
-  projectionGate.completed = 0;
 });
 
 afterEach(async () => {
@@ -198,8 +164,6 @@ afterEach(async () => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   resetOrphanedDrafts();
-  projectionGate.pending = null;
-  projectionGate.completed = 0;
 });
 
 async function mountBound() {
@@ -213,7 +177,102 @@ async function flushLocalBatch(): Promise<void> {
   });
 }
 
+it("keeps a failed lineage handoff visible and read-only", async () => {
+  await mountBound();
+  const retired = lastBoundDoc!;
+  harness.setLineageReplacementFailure(new Error("acknowledgement refused"));
 
+  act(() => screen.getByTestId("type").click());
+  harness.emitLineageReplacement("winner");
+
+  await waitFor(() =>
+    expect(screen.getByTestId("state").textContent).toBe("error"),
+  );
+  expect(screen.getByTestId("available").textContent).toBe("true");
+  expect(screen.getByTestId("read-only-transition").textContent).toBe("true");
+  expect(screen.getByTestId("save-error").textContent).toContain(
+    "acknowledgement refused",
+  );
+  expect(screen.getByTestId("draft").textContent).toBe("seed!");
+  expect(lastBoundDoc).toBe(retired);
+
+  const attemptsBefore = harness.applyAttempts.length;
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  expect(harness.applyAttempts).toHaveLength(attemptsBefore);
+});
+
+it("keeps a refused lineage acknowledgement visible and read-only", async () => {
+  await mountBound();
+  harness.setLineageReplacementRefusal("session-unavailable");
+
+  act(() => screen.getByTestId("type").click());
+  harness.emitLineageReplacement("winner");
+
+  await waitFor(() =>
+    expect(screen.getByTestId("state").textContent).toBe("error"),
+  );
+  expect(screen.getByTestId("read-only-transition").textContent).toBe("true");
+  expect(screen.getByTestId("save-error").textContent).toContain(
+    "session-unavailable",
+  );
+});
+
+it("restores a failed scene handoff with the losing asset authority", async () => {
+  harness = harnessBridge("scene");
+  const loser = {
+    ...IMAGE_DESCRIPTOR,
+    id: "loser-image",
+    ref: "assets/loser.png",
+    sha256: "a".repeat(64),
+  };
+  const winner = {
+    ...IMAGE_DESCRIPTOR,
+    id: "winner-image",
+    ref: "assets/winner.png",
+    sha256: "b".repeat(64),
+  };
+  let winnerOwnsReader = false;
+  const readAsset = vi.fn(async () => ({
+    descriptor: winnerOwnsReader ? winner : loser,
+    bytes: winnerOwnsReader
+      ? new Uint8Array([4, 5, 6])
+      : new Uint8Array([1, 2, 3]),
+  }));
+  harness.setArtifactReader([loser], readAsset);
+  putSceneAsset(harness.sourceDoc, loser);
+  insertElementRevision(harness.sourceDoc, {
+    id: "loser-image-element",
+    type: "image",
+    fileId: loser.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    index: "a1",
+  });
+  harness.setLineageReplacementFailure(new Error("acknowledgement refused"));
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  expect(readAsset).not.toHaveBeenCalled();
+
+  act(() => screen.getByTestId("type").click());
+  harness.emitLineageReplacement("unused", [winner]);
+  winnerOwnsReader = true;
+
+  await waitFor(() =>
+    expect(screen.getByTestId("read-only-transition").textContent).toBe("true"),
+  );
+  expect(screen.getByTestId("artifact-asset-ids").textContent).toBe(loser.id);
+  act(() => screen.getByTestId("hydrate-assets").click());
+  await waitFor(() =>
+    expect(screen.getByTestId("hydrated-assets").textContent).toBe(loser.id),
+  );
+});
 
 it("clears a permanent refusal when an independent lineage wins", async () => {
   const view = render(<Harness workspaceId="ws-1" path="notes/big.md" />);
@@ -327,6 +386,292 @@ it("recovers a dirty replaced scene immediately and hydrates its image", async (
   });
   expect(screen.getByTestId("asset-recovery").textContent).toBe("none");
   expect(screen.getByTestId("draft-count").textContent).toBe("1");
+});
+
+it("keeps retired scene authority after a successful replacement", async () => {
+  harness = harnessBridge("scene");
+  let resolveAsset!: (value: {
+    descriptor: typeof IMAGE_DESCRIPTOR;
+    bytes: Uint8Array;
+  }) => void;
+  const asset = new Promise<{
+    descriptor: typeof IMAGE_DESCRIPTOR;
+    bytes: Uint8Array;
+  }>((resolve) => {
+    resolveAsset = resolve;
+  });
+  const readAsset = vi.fn(() => asset);
+  harness.setArtifactReader([IMAGE_DESCRIPTOR], readAsset);
+  putSceneAsset(harness.sourceDoc, IMAGE_DESCRIPTOR);
+  insertElementRevision(harness.sourceDoc, {
+    id: "restorable-image",
+    type: "image",
+    fileId: IMAGE_DESCRIPTOR.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: true,
+    index: "a1",
+  });
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  const retired = lastBoundDoc!;
+
+  harness.emitLineageReplacement("unused");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+
+  act(() =>
+    insertElementRevision(retired, {
+      id: "restorable-image",
+      type: "image",
+      fileId: IMAGE_DESCRIPTOR.id,
+      version: 2,
+      versionNonce: 2,
+      isDeleted: false,
+      index: "a1",
+    }),
+  );
+
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("none");
+  await act(async () => {
+    resolveAsset({
+      descriptor: IMAGE_DESCRIPTOR,
+      bytes: new Uint8Array([1, 2, 3]),
+    });
+    await asset;
+  });
+
+  await waitFor(() => {
+    const recovered = parseExcalidrawDocument(
+      screen.getByTestId("draft").textContent!,
+    );
+    expect(recovered.elements).toContainEqual(
+      expect.objectContaining({
+        id: "restorable-image",
+        fileId: IMAGE_DESCRIPTOR.id,
+      }),
+    );
+    expect(recovered.files[IMAGE_DESCRIPTOR.id]).toMatchObject({
+      dataURL: "data:image/png;base64,AQID",
+    });
+  });
+  expect(screen.getByTestId("available").textContent).toBe("true");
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("none");
+});
+
+it("hydrates winner-only scene assets after lineage replacement without reopening", async () => {
+  harness = harnessBridge("scene");
+  const loser = { ...IMAGE_DESCRIPTOR, id: "loser-image", ref: "assets/loser.png" };
+  const winner = {
+    ...IMAGE_DESCRIPTOR,
+    id: "winner-image",
+    ref: "assets/winner.png",
+    sha256: "b".repeat(64),
+  };
+  const readAsset = vi.fn(async (descriptor: typeof IMAGE_DESCRIPTOR) => {
+    if (descriptor.id !== winner.id) throw new Error("stale asset authority");
+    return { descriptor: winner, bytes: new Uint8Array([1, 2, 3]) };
+  });
+  harness.setArtifactReader([loser], readAsset);
+  putSceneAsset(harness.sourceDoc, loser);
+  insertElementRevision(harness.sourceDoc, {
+    id: "loser-image-element",
+    type: "image",
+    fileId: loser.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    index: "a1",
+  });
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("artifact-asset-ids").textContent).toBe(loser.id),
+  );
+
+  harness.emitLineageReplacement("unused", [winner]);
+
+  await waitFor(() =>
+    expect(screen.getByTestId("artifact-asset-ids").textContent).toBe(winner.id),
+  );
+  expect(harness.openCount()).toBe(1);
+  expect(screen.getByTestId("artifact-asset-ids").textContent).not.toContain(
+    loser.id,
+  );
+  act(() => screen.getByTestId("hydrate-assets").click());
+  await waitFor(() =>
+    expect(screen.getByTestId("hydrated-assets").textContent).toBe(winner.id),
+  );
+  expect(readAsset).toHaveBeenNthCalledWith(1, loser);
+  expect(readAsset).toHaveBeenNthCalledWith(2, winner);
+  expect(readAsset).toHaveBeenCalledTimes(2);
+});
+
+it("retries a failed retired-asset prewarm before writing a recovery draft", async () => {
+  harness = harnessBridge("scene");
+  putSceneAsset(harness.sourceDoc, IMAGE_DESCRIPTOR);
+  insertElementRevision(harness.sourceDoc, {
+    id: "image-element",
+    type: "image",
+    fileId: IMAGE_DESCRIPTOR.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    index: "a1",
+  });
+  let rejectPrewarm!: (error: Error) => void;
+  const prewarm = new Promise<never>((_resolve, reject) => {
+    rejectPrewarm = reject;
+  });
+  const readAsset = vi
+    .fn()
+    .mockImplementationOnce(() => prewarm)
+    .mockResolvedValue({
+      descriptor: IMAGE_DESCRIPTOR,
+      bytes: new Uint8Array([1, 2, 3]),
+    });
+  harness.setArtifactReader([IMAGE_DESCRIPTOR], readAsset);
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  act(() => screen.getByTestId("type").click());
+  await waitFor(() =>
+    expect(screen.getByTestId("state").textContent).toBe("saving"),
+  );
+  harness.emitLineageReplacement("unused");
+  await waitFor(() => expect(readAsset).toHaveBeenCalledOnce());
+  await act(async () => {
+    rejectPrewarm(new Error("temporary read failure"));
+    await prewarm.catch(() => undefined);
+  });
+
+  await waitFor(() => expect(readAsset).toHaveBeenCalledTimes(2));
+  await waitFor(() => {
+    const recovered = parseExcalidrawDocument(
+      screen.getByTestId("draft").textContent!,
+    );
+    expect(recovered.elements).toContainEqual(
+      expect.objectContaining({
+        id: "image-element",
+        fileId: IMAGE_DESCRIPTOR.id,
+      }),
+    );
+    expect(recovered.files[IMAGE_DESCRIPTOR.id]).toMatchObject({
+      dataURL: "data:image/png;base64,AQID",
+    });
+  });
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("none");
+});
+
+it("does not reuse a losing lineage asset when the winner reuses its file ID", async () => {
+  harness = harnessBridge("scene");
+  const loser = {
+    ...IMAGE_DESCRIPTOR,
+    ref: "assets/loser.png",
+    sha256: "a".repeat(64),
+  };
+  const winner = {
+    ...IMAGE_DESCRIPTOR,
+    ref: "assets/winner.png",
+    sha256: "b".repeat(64),
+  };
+  let resolveLoser!: (value: {
+    descriptor: typeof loser;
+    bytes: Uint8Array;
+  }) => void;
+  let resolveWinner!: (value: {
+    descriptor: typeof winner;
+    bytes: Uint8Array;
+  }) => void;
+  const loserRead = new Promise<{ descriptor: typeof loser; bytes: Uint8Array }>(
+    (resolve) => {
+      resolveLoser = resolve;
+    },
+  );
+  const winnerRead = new Promise<{
+    descriptor: typeof winner;
+    bytes: Uint8Array;
+  }>((resolve) => {
+    resolveWinner = resolve;
+  });
+  // Routed by descriptor identity, the way main selects among its pinned
+  // descriptors: the reused id alone can no longer pick a lineage.
+  const readAsset = vi.fn((descriptor: typeof IMAGE_DESCRIPTOR) =>
+    descriptor.sha256 === loser.sha256 ? loserRead : winnerRead,
+  );
+  harness.setArtifactReader([loser], readAsset);
+  putSceneAsset(harness.sourceDoc, loser);
+  insertElementRevision(harness.sourceDoc, {
+    id: "lineage-image",
+    type: "image",
+    fileId: loser.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    index: "a1",
+  });
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  const retired = lastBoundDoc!;
+  act(() => screen.getByTestId("type").click());
+  harness.emitLineageReplacement("unused", [winner]);
+  await waitFor(() => expect(readAsset).toHaveBeenCalledTimes(1));
+
+  act(() =>
+    insertElementRevision(retired, {
+      id: "lineage-image",
+      type: "image",
+      fileId: loser.id,
+      version: 2,
+      versionNonce: 2,
+      isDeleted: false,
+      index: "a1",
+      x: 77,
+    }),
+  );
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+
+  await waitFor(() => expect(readAsset).toHaveBeenCalledTimes(2));
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("loading:1");
+  await act(async () => {
+    resolveLoser({ descriptor: loser, bytes: new Uint8Array([9]) });
+    await loserRead;
+  });
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("loading:1");
+
+  await act(async () => {
+    resolveWinner({ descriptor: winner, bytes: new Uint8Array([1, 2, 3]) });
+    await winnerRead;
+  });
+  await waitFor(() => {
+    const recovered = parseExcalidrawDocument(
+      screen.getByTestId("draft").textContent!,
+    );
+    expect(recovered.files[winner.id]).toMatchObject({
+      dataURL: "data:image/png;base64,AQID",
+    });
+  });
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("none");
+  expect(screen.getByTestId("draft").textContent).not.toContain("CQ==");
 });
 
 it("delivers the final mirror state before the final consumer closes and reopens", async () => {
@@ -466,6 +811,138 @@ it("replaces the same deletion's draft when a keystroke lands before read-only c
   expect(harness.applied).toHaveLength(appliedAtDelete);
 });
 
+it("upgrades one deleted-scene draft with its verified image bytes", async () => {
+  harness = harnessBridge("scene");
+  const bytes = new Uint8Array(50 * 1024 + 8);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  expect(bytes.byteLength).toBeGreaterThan(48 * 1024);
+  let resolveAsset!: (value: {
+    descriptor: typeof IMAGE_DESCRIPTOR;
+    bytes: Uint8Array;
+  }) => void;
+  const asset = new Promise<{
+    descriptor: typeof IMAGE_DESCRIPTOR;
+    bytes: Uint8Array;
+  }>((resolve) => {
+    resolveAsset = resolve;
+  });
+  const readAsset = vi.fn(() => asset);
+  harness.setArtifactReader([IMAGE_DESCRIPTOR], readAsset);
+  putSceneAsset(harness.sourceDoc, IMAGE_DESCRIPTOR);
+  insertElementRevision(harness.sourceDoc, {
+    id: "image-element",
+    type: "image",
+    fileId: IMAGE_DESCRIPTOR.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    index: "a1",
+  });
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+
+  expect(readAsset).toHaveBeenCalledOnce();
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("loading:1");
+  expect(screen.getByTestId("draft-count").textContent).toBe("1");
+  const immediate = JSON.parse(screen.getByTestId("draft").textContent!);
+  expect(immediate.files).toEqual({});
+  expect(
+    immediate.elements.find((element: { id: string }) =>
+      element.id === "image-element",
+    ).fileId,
+  ).toBeNull();
+
+  // One last canvas callback can land before the read-only render commits.
+  // Its immediate snapshot must not wait behind the older image read, and the
+  // older async completion must not restore the previous scene revision.
+  act(() => screen.getByTestId("type").click());
+  await waitFor(() => {
+    const latest = JSON.parse(screen.getByTestId("draft").textContent!);
+    expect(
+      latest.elements.find((element: { id: string }) =>
+        element.id === "recovered-shape",
+      ).x,
+    ).toBe(20);
+  });
+
+  await act(async () => {
+    resolveAsset({ descriptor: IMAGE_DESCRIPTOR, bytes });
+    await asset;
+  });
+
+  await waitFor(() => {
+    const text = screen.getByTestId("draft").textContent!;
+    const recovered = parseExcalidrawDocument(text);
+    expect(recovered.elements).toContainEqual(
+      expect.objectContaining({
+        id: "image-element",
+        fileId: IMAGE_DESCRIPTOR.id,
+      }),
+    );
+    expect(recovered.elements).toContainEqual(
+      expect.objectContaining({ id: "recovered-shape", x: 20 }),
+    );
+    expect(recovered.files[IMAGE_DESCRIPTOR.id]).toMatchObject({
+      id: IMAGE_DESCRIPTOR.id,
+      mimeType: "image/png",
+      created: IMAGE_DESCRIPTOR.created,
+      lastRetrieved: IMAGE_DESCRIPTOR.lastRetrieved,
+      version: IMAGE_DESCRIPTOR.version,
+      dataURL: expect.stringMatching(/^data:image\/png;base64,iVBORw0KGgo/),
+    });
+  });
+  expect(screen.getByTestId("draft-count").textContent).toBe("1");
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("none");
+});
+
+it("keeps missing images explicit and never exposes a dangling recovery ref", async () => {
+  harness = harnessBridge("scene");
+  harness.setArtifactReader([IMAGE_DESCRIPTOR], async () => {
+    throw new Error("asset unavailable");
+  });
+  putSceneAsset(harness.sourceDoc, IMAGE_DESCRIPTOR);
+  insertElementRevision(harness.sourceDoc, {
+    id: "image-element",
+    type: "image",
+    fileId: IMAGE_DESCRIPTOR.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    index: "a1",
+  });
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+
+  await waitFor(() =>
+    expect(screen.getByTestId("asset-recovery").textContent).toBe("missing:1"),
+  );
+  const recovered = parseExcalidrawDocument(
+    screen.getByTestId("draft").textContent!,
+  );
+  expect(recovered.files).toEqual({});
+  expect(recovered.elements).toContainEqual(
+    expect.objectContaining({ id: "image-element", fileId: null }),
+  );
+});
+
 it("still holds the final text after teardown, with no further save-state event to answer it", async () => {
   const view = render(<Harness workspaceId="ws-1" path="notes/big.md" enabled />);
   await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
@@ -549,6 +1026,173 @@ it("keeps a failed delete interval retryable without storing a deleted verdict",
   await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
   expect(screen.getByTestId("removal-operation").textContent).toBe("none");
   expect(screen.getByTestId("deleted").textContent).toBe("false");
+});
+
+it("keeps invalid scene asset authority as a distinct unavailable outcome", async () => {
+  harness = harnessBridge("scene");
+  harness.setArtifactAssetsInvalid(true);
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+
+  await waitFor(() =>
+    expect(screen.getByTestId("artifact-assets-invalid").textContent).toBe(
+      "true",
+    ),
+  );
+  expect(screen.getByTestId("available").textContent).toBe("false");
+  expect(screen.getByTestId("engine-may-hold-document").textContent).toBe(
+    "false",
+  );
+  expect(screen.getByTestId("removal-operation").textContent).toBe("none");
+});
+
+it.each([
+  { kind: "richdoc" as const, path: "notes/big.md" },
+  { kind: "scene" as const, path: "drawing.excalidraw" },
+])("sets aside an oversized $kind edit and reports the measured limit", async ({
+  kind,
+  path,
+}) => {
+  harness = harnessBridge(kind);
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness
+      workspaceId="ws-1"
+      path={path}
+      kind={kind}
+      compactDraft
+    />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  act(() => screen.getByTestId("type-oversized").click());
+  await flushLocalBatch();
+
+  expect(harness.applyAttempts).toEqual([]);
+  expect(screen.getByTestId("state").textContent).toBe("error");
+  expect(screen.getByTestId("save-error").textContent).toContain(
+    `ENGINE_YDOC_UPDATE_MAX_BYTES is ${ENGINE_YDOC_UPDATE_MAX_BYTES} bytes`,
+  );
+  expect(screen.getByTestId("save-error").textContent).toMatch(
+    /the update is \d+ bytes/,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("draft").textContent).toBe("present"),
+  );
+  expect(Number(screen.getByTestId("draft-size").textContent)).toBeGreaterThan(
+    ENGINE_YDOC_UPDATE_MAX_BYTES,
+  );
+});
+
+it("reports pending and complete image recovery for an oversized scene", async () => {
+  harness = harnessBridge("scene");
+  let resolveAsset!: (value: {
+    descriptor: typeof IMAGE_DESCRIPTOR;
+    bytes: Uint8Array;
+  }) => void;
+  const asset = new Promise<{
+    descriptor: typeof IMAGE_DESCRIPTOR;
+    bytes: Uint8Array;
+  }>((resolve) => {
+    resolveAsset = resolve;
+  });
+  harness.setArtifactReader([IMAGE_DESCRIPTOR], () => asset);
+  putSceneAsset(harness.sourceDoc, IMAGE_DESCRIPTOR);
+  insertElementRevision(harness.sourceDoc, {
+    id: "image-element",
+    type: "image",
+    fileId: IMAGE_DESCRIPTOR.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    index: "a1",
+  });
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  act(() => screen.getByTestId("type-oversized").click());
+  await flushLocalBatch();
+
+  expect(
+    screen.getByTestId("permanent-failure-transition").textContent,
+  ).toBe("true");
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("loading:1");
+  const immediate = parseExcalidrawDocument(
+    screen.getByTestId("draft").textContent!,
+  );
+  expect(immediate.files).toEqual({});
+  expect(immediate.elements).toContainEqual(
+    expect.objectContaining({ id: "image-element", fileId: null }),
+  );
+
+  await act(async () => {
+    resolveAsset({ descriptor: IMAGE_DESCRIPTOR, bytes: new Uint8Array([1, 2, 3]) });
+    await asset;
+  });
+
+  await waitFor(() =>
+    expect(screen.getByTestId("asset-recovery").textContent).toBe("none"),
+  );
+  const recovered = parseExcalidrawDocument(
+    screen.getByTestId("draft").textContent!,
+  );
+  expect(recovered.elements).toContainEqual(
+    expect.objectContaining({
+      id: "image-element",
+      fileId: IMAGE_DESCRIPTOR.id,
+    }),
+  );
+  expect(recovered.files[IMAGE_DESCRIPTOR.id]).toMatchObject({
+    id: IMAGE_DESCRIPTOR.id,
+    dataURL: "data:image/png;base64,AQID",
+  });
+});
+
+it("reports a missing image after oversized-scene recovery fails", async () => {
+  harness = harnessBridge("scene");
+  harness.setArtifactReader([IMAGE_DESCRIPTOR], async () => {
+    throw new Error("asset unavailable");
+  });
+  putSceneAsset(harness.sourceDoc, IMAGE_DESCRIPTOR);
+  insertElementRevision(harness.sourceDoc, {
+    id: "image-element",
+    type: "image",
+    fileId: IMAGE_DESCRIPTOR.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    index: "a1",
+  });
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  act(() => screen.getByTestId("type-oversized").click());
+  await flushLocalBatch();
+
+  await waitFor(() =>
+    expect(screen.getByTestId("asset-recovery").textContent).toBe("missing:1"),
+  );
+  const recovered = parseExcalidrawDocument(
+    screen.getByTestId("draft").textContent!,
+  );
+  expect(recovered.files).toEqual({});
+  expect(recovered.elements).toContainEqual(
+    expect.objectContaining({ id: "image-element", fileId: null }),
+  );
 });
 
 it("degrades to not-engine-backed on a bridge without the save-state channel, instead of blanking the editor", async () => {

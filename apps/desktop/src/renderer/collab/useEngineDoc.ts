@@ -16,7 +16,6 @@ import {
 } from "./engineDocLease";
 
 export type { EngineRemovalInProgress };
-export type { EngineDocSaveState } from "./engineDocLease";
 
 // The engine Y.Doc editor hook for live files. Given a workspace, path, and
 // format kind, it opens a live engine Y.Doc session in main over IPC and binds
