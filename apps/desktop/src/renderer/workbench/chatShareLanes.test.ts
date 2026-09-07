@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import type { JoinedChannelAnswer } from "../../ipc/bridgeContract";
-import { answerLocally, emptyJoinedLaneOrder, planJoinedCommit } from "./ChatsView";
+import { answerLocally, emptyJoinedLaneOrder, planJoinedCommit } from "./chatShareLanes";
 
 // The joined lane's cache, tested where its rules live. Two of them cannot be
 // seen from the screen at all: what the cache still holds after a read, and
