@@ -328,16 +328,26 @@ test("Windows job closes descendants after the command completes normally", {
 for (const flag of ["--require", "--import"]) {
   test(`Windows ${flag} preloads run only in the assigned command and their descendants stop on timeout`, {
     skip: process.platform !== "win32", timeout: 15_000,
-  }, async () => {
+  }, async (context) => {
     const root = mkdtempSync(join(tmpdir(), "dohc-job-preload-"));
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const expire = () => context.mock.timers.tick(2000);
+    context.signal.addEventListener("abort", expire, { once: true });
     try {
       const preload = writeWindowsPreload(root);
       const nodeOptions = `${flag} ${JSON.stringify(flag === "--import" ? pathToFileURL(preload).href : preload)}`;
       const command = join(root, "command.mjs");
       writeFileSync(command, "setInterval(() => {}, 1000);\n");
       const log = join(root, "output.log");
+      let stdout = "";
       await assert.rejects(run(process.execPath, [command], {
         env: { ...process.env, NODE_OPTIONS: nodeOptions }, log, timeoutMs: 2000, quietStdout: true,
+        onSpawn(child) {
+          child.stdout.on("data", (chunk) => {
+            stdout += chunk;
+            if (stdout.includes("preload descendant ready")) expire();
+          });
+        },
       }), /timed out after 2000ms/);
       assert.match(readFileSync(log, "utf8"), /preload descendant ready/);
       const preloads = readFileSync(join(root, "preloads.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
@@ -348,6 +358,7 @@ for (const flag of ["--require", "--import"]) {
       const { pid } = JSON.parse(readFileSync(join(root, "descendant.json"), "utf8"));
       assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
     } finally {
+      context.signal.removeEventListener("abort", expire);
       stopWindowsDescendant(root);
       rmSync(root, { recursive: true, force: true });
     }
