@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { basename, isAbsolute } from "node:path";
 import {
   isSiteSourcePath,
@@ -11,10 +10,6 @@ export function assertSafeWorkspacePath(path: string): string {
     throw new Error(`invalid path: ${path}`);
   }
   return clean;
-}
-
-export function sha256(bytes: Uint8Array | string) {
-  return createHash("sha256").update(bytes).digest("hex");
 }
 
 // Delegates to the one extension -> media-type table in workspace-core;

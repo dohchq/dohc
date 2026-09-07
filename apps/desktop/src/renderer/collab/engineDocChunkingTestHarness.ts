@@ -58,4 +58,3 @@ export function harnessBridge(initialUpdate?: Uint8Array) {
     },
   };
 }
-

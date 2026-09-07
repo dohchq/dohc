@@ -16,8 +16,9 @@ use crate::cursor::{
 use crate::error::GENERIC_REPLAY_REFUSAL_CODE;
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
 use crate::{
-    ApplyOutcome, BlobContent, BlobHydration, BlobKind, ObservedBytes, RelayError,
-    ReplicationEnvelope, ShareDisposition, SyncError, blob_ceiling, hydrate_blob_content,
+    ApplyDisposition, ApplyOutcome, BlobContent, BlobHydration, BlobKind, ObservedBytes,
+    RelayError, ReplicationEnvelope, ShareDisposition, SyncError, blob_ceiling,
+    hydrate_blob_content,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1688,23 +1689,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             };
             match crate::apply_shared_envelope(store, &boundary, &envelope, faults) {
                 Ok(outcome) => {
-                    let (primary, nested_refusals, sharing_declined) =
-                        outcome.into_primary_and_diagnostics();
+                    let ApplyOutcome {
+                        primary,
+                        refusals: nested_refusals,
+                        sharing_declined,
+                    } = outcome;
                     debug_assert!(sharing_declined.is_empty());
                     for refusal in nested_refusals {
                         push_shared_channel_rejection(&mut refused, &mut rejections, refusal)?;
                     }
                     match primary {
-                        ApplyOutcome::Applied(_) => applied += 1,
-                        ApplyOutcome::Refused(refusal) => {
+                        ApplyDisposition::Applied(_) => applied += 1,
+                        ApplyDisposition::Refused(refusal) => {
                             push_shared_channel_rejection(&mut refused, &mut rejections, refusal)?;
                         }
-                        ApplyOutcome::Skipped => skipped += 1,
-                        ApplyOutcome::Crashed { .. } => {
+                        ApplyDisposition::Skipped => skipped += 1,
+                        ApplyDisposition::Crashed { .. } => {
                             return Err(RelayError::Local("injected-crash".to_owned()));
-                        }
-                        ApplyOutcome::WithDiagnostics { .. } => {
-                            unreachable!("diagnostics were flattened")
                         }
                     }
                 }
@@ -2091,8 +2092,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
             match crate::apply_shared_envelope(store, &boundary, &envelope, faults) {
                 Ok(outcome) => {
-                    let (primary, nested_refusals, sharing_declined) =
-                        outcome.into_primary_and_diagnostics();
+                    let ApplyOutcome {
+                        primary,
+                        refusals: nested_refusals,
+                        sharing_declined,
+                    } = outcome;
                     // A share-view CHAT op does mutate chat
                     // dependencies — that is what applying it means, and the
                     // replay it unparks can refuse ops of its own. Those
@@ -2112,16 +2116,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     }
                     debug_assert!(sharing_declined.is_empty());
                     match primary {
-                        ApplyOutcome::Applied(_) => {}
-                        ApplyOutcome::Refused(_) | ApplyOutcome::Skipped => {
+                        ApplyDisposition::Applied(_) => {}
+                        ApplyDisposition::Refused(_) | ApplyDisposition::Skipped => {
                             skipped += 1;
                             continue;
                         }
-                        ApplyOutcome::Crashed { .. } => {
+                        ApplyDisposition::Crashed { .. } => {
                             return Err(RelayError::Local("injected-crash".to_owned()));
-                        }
-                        ApplyOutcome::WithDiagnostics { .. } => {
-                            unreachable!("diagnostics were flattened")
                         }
                     }
                 }
@@ -3480,7 +3481,7 @@ fn proposed_change(op: &ReplicationEnvelope) -> ShareProposalChange {
 /// consolidated into one net change per file.
 ///
 /// One moment already states its object's complete post state rather than a
-/// delta — `store.rs` copies the before blob into `payloadAfterBlobSha256` for
+/// delta — `store/delete_rename.rs` copies the before blob into `payloadAfterBlobSha256` for
 /// a rename, and `moment_apply.rs` materializes from the after side whatever
 /// the operation says. So a run of moments for one object collapses by taking
 /// the base from the first and the destination from the last, and a write
@@ -4359,7 +4360,11 @@ fn accumulate_pull_outcome(
     sharing_declined: &mut Vec<crate::SharingDeclined>,
     record_facts: &mut Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
 ) -> Result<(), RelayError> {
-    let (primary, drain_refusals, drain_declines) = outcome.into_primary_and_diagnostics();
+    let ApplyOutcome {
+        primary,
+        refusals: drain_refusals,
+        sharing_declined: drain_declines,
+    } = outcome;
     for refusal in drain_refusals {
         push_refusal_once(refusals, refusal);
     }
@@ -4367,7 +4372,7 @@ fn accumulate_pull_outcome(
         push_sharing_declined_once(sharing_declined, declined);
     }
     match primary {
-        ApplyOutcome::Applied(routed) => {
+        ApplyDisposition::Applied(routed) => {
             *conflicts_opened = conflicts_opened
                 .checked_add(routed.conflicts_opened)
                 .ok_or(RelayError::InvalidResponse)?;
@@ -4382,11 +4387,11 @@ fn accumulate_pull_outcome(
             }
             *applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?;
         }
-        ApplyOutcome::Refused(refusal) => {
+        ApplyDisposition::Refused(refusal) => {
             *refused = refused.checked_add(1).ok_or(RelayError::InvalidResponse)?;
             push_refusal_once(refusals, refusal);
         }
-        ApplyOutcome::Skipped => {
+        ApplyDisposition::Skipped => {
             *conflicts_opened = conflicts_opened
                 .checked_add(crate::router::redelivered_conflicts_opened(store, op).map_err(local)?)
                 .ok_or(RelayError::InvalidResponse)?;
@@ -4400,10 +4405,9 @@ fn accumulate_pull_outcome(
             }
             *skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?;
         }
-        ApplyOutcome::Crashed { .. } => {
+        ApplyDisposition::Crashed { .. } => {
             return Err(RelayError::Local("injected-crash".to_owned()));
         }
-        ApplyOutcome::WithDiagnostics { .. } => unreachable!("diagnostics were flattened"),
     }
     Ok(())
 }

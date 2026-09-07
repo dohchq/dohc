@@ -16,31 +16,7 @@ import type { JoinedSharedChannel } from "./registryStore";
 // caller can mark it in the registry — the local copy stays readable, it just
 // stops updating (PR-18's honest end-of-share).
 
-// Per-key async serializer: shared-channel sync fires
-// from the relay cadence, several fire-and-forget IPC sends, and an awaited
-// listChatChannels — all for the same workspace. Overlapping passes race the
-// per-share cursor/peer updates in engine.db. Calls for the same key queue
-// (never coalesce: a send journaled after a pass started still gets its own
-// pass), different keys stay concurrent, and a rejected run never wedges the
-// queue.
-export function createKeyedSerializer(): <T>(key: string, run: () => Promise<T>) => Promise<T> {
-  const tails = new Map<string, Promise<void>>();
-  return (key, run) => {
-    const tail = tails.get(key) ?? Promise.resolve();
-    const result = tail.then(run);
-    // The stored tail always settles resolved so a rejection (surfaced to this
-    // caller via `result`) cannot poison later runs.
-    const settled = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    tails.set(key, settled);
-    void settled.then(() => {
-      if (tails.get(key) === settled) tails.delete(key);
-    });
-    return result;
-  };
-}
+export const RELAY_FETCH_TIMEOUT_MS = 15_000;
 
 // Bounds every relay request in a shared-channel pass:
 // listChatChannels awaits the pass, so a hung relay socket must abort after

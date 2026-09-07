@@ -1,3 +1,4 @@
+import { escapeHtml } from "@dohc/workspace-core/html";
 import DOMPurify, { type Config } from "dompurify";
 import { Marked } from "marked";
 
@@ -68,15 +69,6 @@ DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
     data.keepAttr = SAFE_LINK.test(data.attrValue) && !/^\s*(?:data|javascript):/iu.test(data.attrValue);
   }
 });
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
 
 export function renderSafeMarkdown(
   markdown: string,
