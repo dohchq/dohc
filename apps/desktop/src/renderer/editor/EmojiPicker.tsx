@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import type { ResolvedPos } from "@tiptap/pm/model";
 import { TextSelection } from "@tiptap/pm/state";
+import type { EditorView } from "@tiptap/pm/view";
 import { EMOJI_DATA, type EmojiEntry } from "./emojiData";
 import { resolveFloatingMenuPosition } from "./floatingMenuPosition";
 
@@ -12,22 +12,9 @@ export type EmojiPickerState =
       query: string;
     };
 
-type PickerView = {
-  coordsAtPos(pos: number): { left: number; top: number; bottom: number };
-  state: {
-    tr: {
-      insertText(text: string, from: number, to: number): unknown;
-      setSelection(s: unknown): unknown;
-    };
-    selection: { from: number };
-  };
-  dispatch(tr: unknown): void;
-  focus(): void;
-};
-
 type Props = {
   state: EmojiPickerState;
-  view: PickerView | null;
+  view: EditorView | null;
   onDismiss: () => void;
 };
 
@@ -36,12 +23,9 @@ type Props = {
  *  Exported standalone (not a closure inside the component) so it's
  *  directly testable against a real Editor without rendering React, same
  *  convention as WikilinkPicker's `applyWikilinkPick`. */
-export function applyEmojiPick(view: PickerView, from: number, entry: EmojiEntry): void {
+export function applyEmojiPick(view: EditorView, from: number, entry: EmojiEntry): void {
   const cursorPos = view.state.selection.from;
-  const tr = view.state.tr.insertText(entry.emoji, from, cursorPos) as {
-    doc: { resolve(pos: number): ResolvedPos };
-    setSelection(s: unknown): unknown;
-  };
+  const tr = view.state.tr.insertText(entry.emoji, from, cursorPos);
   const afterInsert = from + entry.emoji.length;
   tr.setSelection(TextSelection.near(tr.doc.resolve(afterInsert)));
   view.dispatch(tr);

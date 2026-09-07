@@ -4,6 +4,7 @@
 
 import { useEffect, useState } from "react";
 import type { Editor } from "@tiptap/core";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 
 export type WordCharCount = { words: number; characters: number };
 
@@ -21,22 +22,11 @@ export function countWordsAndCharacters(text: string): WordCharCount {
   return { words, characters };
 }
 
-// Minimal duck-typed doc shape — matches ProseMirror's Node#textBetween.
-export type PMTextDocLike = {
-  content: { size: number };
-  textBetween: (
-    from: number,
-    to: number,
-    blockSeparator?: string,
-    leafText?: string,
-  ) => string;
-};
-
 /** The doc's full text, one block per line (headings/paragraphs/list items
  *  etc. each end a "line" so words don't fuse across block boundaries —
  *  "Hello" + "World" reads as two words, not "HelloWorld"). Code blocks
  *  are not excluded: their text counts too. */
-export function getDocText(doc: PMTextDocLike): string {
+export function getDocText(doc: ProseMirrorNode): string {
   if (doc.content.size === 0) return "";
   return doc.textBetween(0, doc.content.size, "\n", "\n");
 }
