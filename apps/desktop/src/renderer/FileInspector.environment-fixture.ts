@@ -12,7 +12,7 @@ import "./DatabaseStudioView";
 
 import "./SourceCodeEditor";
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
-import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
+import { disposeEngineDocLeasesForTests } from "./collab/engineDocLease";
 
 export function setupFileInspectorTests(): void {
 

@@ -4,7 +4,8 @@ import { dismissOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
 import { Share2 } from "lucide-react";
 import { bridge } from "./bridge";
-import type { EngineDocSaveState, EngineRemovalInProgress } from "./collab/useEngineDoc";
+import type { EngineDocSaveState } from "./collab/engineDocLease";
+import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
 import { IconButton, SectionLabel } from "./ui/controls";
 import type { SaveState } from "./useAutosavedTextDraft";
 
