@@ -142,8 +142,8 @@ export function createSyncDemo(syncDemo) {
       receive(a, merged);
       receive(b, merged);
       swapText(linkLabel, 'connected');
-      setStatus('a', 'in sync', changed ? 'both edits kept' : savedOn('a'));
-      setStatus('b', 'in sync', changed ? 'both edits kept' : savedOn('b'));
+      setStatus('a', 'in sync', changed ? 'changes synced' : savedOn('a'));
+      setStatus('b', 'in sync', changed ? 'changes synced' : savedOn('b'));
       swapText(hint, changed ? 'back online. nothing was lost.' : (manual ? 'try typing on either device' : 'watching. click or type to take over.'));
     } else {
       swapText(linkLabel, 'no connection');
