@@ -185,7 +185,7 @@ struct DeferredRelayState {
 }
 
 #[derive(Clone, Default)]
-pub(super) struct DeferredRelayTransport {
+struct DeferredRelayTransport {
     state: Arc<Mutex<DeferredRelayState>>,
 }
 
@@ -1163,7 +1163,7 @@ fn execute_blocking_http_request(
     }
 }
 
-pub(super) fn execute_relay_operation(
+fn execute_relay_operation(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
     transport: DeferredRelayTransport,
