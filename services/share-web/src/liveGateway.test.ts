@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { connect, type Socket } from "node:net";
-import type { Duplex } from "node:stream";
+import { Duplex } from "node:stream";
 import { once } from "node:events";
 import { createHash } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
@@ -134,7 +134,47 @@ async function fixture(overrides: Partial<LiveGatewayOptions> = {}, onUpgrade?: 
   return { gateway, browser, raw, resolve, redeem, open, hosts, makeRoute, receiveOptions, invalidated, completions };
 }
 
+function stalledRefusal() {
+  let flush!: () => void;
+  const socket = new Duplex({ read() {}, write(_chunk, _encoding, callback) { flush = () => callback(); } });
+  const ports = { resolveNamedSession: vi.fn(async () => null), redeem: vi.fn(async () => null), openHostRoute: vi.fn(async () => null) };
+  const gateway = createLiveGateway({ publicHosts: new Set(["share.example.test"]), publicOrigin: origin, limits, ...ports });
+  const request = { method: "GET", url: `/api/live?session=${discriminator}`, rawHeaders: ["Host", "share.example.test"] } as IncomingMessage;
+  cleanups.push(async () => { gateway.close(); socket.destroy(); });
+  return { socket, ports, flush: () => flush(), refuse: () => gateway.handleUpgrade(request, socket, Buffer.alloc(0)) };
+}
+
 describe("private named live gateway", () => {
+  it("bounds a stalled refusal without extending its deadline on repeated refusal", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const state = stalledRefusal();
+    await state.refuse();
+    expect(state.socket.writableEnded).toBe(true);
+    expect(state.socket.writableFinished).toBe(false);
+    vi.advanceTimersByTime(limits.drainTimeoutMs / 2);
+    await state.refuse();
+    vi.advanceTimersByTime(limits.drainTimeoutMs / 2 - 1);
+    expect(state.socket.destroyed).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(state.socket.destroyed).toBe(true);
+    for (const port of Object.values(state.ports)) expect(port).not.toHaveBeenCalled();
+  });
+
+  it.each(["finish", "close"])("clears the refusal deadline after early %s", async ending => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const state = stalledRefusal();
+    const destroy = vi.spyOn(state.socket, "destroy");
+    await state.refuse();
+    vi.advanceTimersByTime(limits.drainTimeoutMs - 1);
+    const closed = once(state.socket, "close");
+    if (ending === "finish") state.flush(); else state.socket.destroy();
+    await closed;
+    expect(state.socket.writableFinished).toBe(ending === "finish");
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(limits.drainTimeoutMs);
+    expect(destroy).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ["Host: share.example.test"],
     ["Host: share.example.test", "Origin: https://evil.example.test"],

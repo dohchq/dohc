@@ -110,6 +110,9 @@ export function createLiveGateway(options: LiveGatewayOptions) {
     if (socket.destroyed || refusedSockets.has(socket)) return;
     if (socket.writableEnded || !socket.writable) { socket.destroy(); return; }
     refusedSockets.add(socket);
+    const deadline = setTimeout(() => socket.destroy(), limits.drainTimeoutMs);
+    deadline.unref();
+    socket.once("close", () => clearTimeout(deadline));
     socket.once("error", () => socket.destroy());
     socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", () => socket.destroy());
   }
