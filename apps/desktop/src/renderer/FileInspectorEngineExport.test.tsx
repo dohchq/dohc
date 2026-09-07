@@ -18,7 +18,7 @@ vi.mock("./editor/MarkdownEditor", () => new Promise(() => {}));
 import { markdownToYDoc } from "./editor/import-export";
 import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
-import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
+import { disposeEngineDocLeasesForTests } from "./collab/engineDocLease";
 
 configure({ asyncUtilTimeout: 5_000 });
 vi.setConfig({ testTimeout: 15_000 });

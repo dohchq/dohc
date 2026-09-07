@@ -117,7 +117,7 @@ import {
   resetOrphanedDrafts,
   useAllOrphanedDrafts,
 } from "./orphanedDrafts";
-import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
+import { disposeEngineDocLeasesForTests } from "./collab/engineDocLease";
 import {
   CollectionFieldWriteHost,
   abandonPendingCollectionFieldWrites,
