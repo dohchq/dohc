@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { CopyButton } from "./ui/CopyButton";
+import { useState } from "react";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import {
   dismissOrphanedDraft,
@@ -18,51 +19,6 @@ import {
 // (a persisted draft comes back on the next launch, so listing it under "these
 // are lost" would be false). `showWorkspace` goes with the guard's
 // cross-workspace list.
-//
-// The copy button repeats the quiet swap-and-restore rhythm of
-// FileInspector's CopySourceButton on purpose, without importing it: this
-// component mounts above the error boundary (the close guard), and pulling
-// the whole document-view module into that chunk for one button is the
-// wrong trade. `recoverySnapshot` is the exception it makes room for: it
-// carries the snapshot contract alone, and keeps the Tiptap projection behind
-// the same dynamic import the deletion path uses.
-function CopyDraftButton(props: { text: string }) {
-  const [label, setLabel] = useState<"Copy" | "Copied" | "Couldn't copy">(
-    "Copy",
-  );
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(
-    () => () => {
-      if (timer.current) clearTimeout(timer.current);
-    },
-    [],
-  );
-  return (
-    <button
-      type="button"
-      data-testid="recovery-list-copy"
-      onClick={() => {
-        const clipboard = navigator.clipboard;
-        if (!clipboard) return;
-        // A draft the projection never refined carries the document inside an
-        // encoded comment, and the decode happens here: the copy waits for the
-        // lossless text instead of taking whatever was ready to render.
-        void restoreRecoveryDraftText(props.text)
-          .then((restored) => clipboard.writeText(restored))
-          .then(() => setLabel("Copied"))
-          .catch(() => setLabel("Couldn't copy"))
-          .then(() => {
-            if (timer.current) clearTimeout(timer.current);
-            timer.current = setTimeout(() => setLabel("Copy"), 1200);
-          });
-      }}
-      className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
-    >
-      {label}
-    </button>
-  );
-}
-
 // Dismissing deletes the only copy of the text — the store is the last place
 // it exists — so the destructive step requires an explicit confirmation.
 // Shared by this list and the in-document notice: one
@@ -150,7 +106,7 @@ export function RecoveryList(props: {
             )}
           </span>
           <div className="flex shrink-0 items-center gap-2">
-            <CopyDraftButton text={row.draft.text} />
+            <CopyButton testId="recovery-list-copy" getText={() => restoreRecoveryDraftText(row.draft.text)} />
             <DismissDraftControls
               onDismiss={() =>
                 dismissOrphanedDraft(row.workspaceId, row.path, row.draft.id)

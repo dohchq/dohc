@@ -1,3 +1,4 @@
+import { useRequestSequence } from "../useRequestSequence";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createPresenceChannel,
@@ -77,7 +78,7 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
   // round 3), without needing any of the scope inputs to actually change.
   const [restartGeneration, setRestartGeneration] = useState(0);
   // Monotonic per-channel token; only the newest channel may repaint.
-  const tokenRef = useRef(0);
+  const requests = useRequestSequence();
   const channelRef = useRef<PresenceChannel | null>(null);
   const typingRef = useRef(false);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -90,8 +91,7 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
       setPeers(EMPTY_PEERS);
       return;
     }
-    const token = ++tokenRef.current;
-    let cancelled = false;
+    const token = requests.next();
     typingRef.current = false;
 
     const channel = createPresenceChannel({
@@ -102,14 +102,14 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
       onPeers: (next) => {
         // Drop a stale response: a newer channel (topic/workspace switch)
         // superseded this one, or the effect already cleaned up.
-        if (cancelled || token !== tokenRef.current) return;
+        if (!requests.isCurrent(token)) return;
         setPeers(next);
       },
     });
     channelRef.current = channel;
 
     return () => {
-      cancelled = true;
+      requests.next();
       if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
       void channel.stop();
       if (channelRef.current === channel) channelRef.current = null;

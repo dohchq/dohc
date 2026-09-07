@@ -1,3 +1,4 @@
+import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 import {
   Bot,
@@ -69,7 +70,7 @@ import {
   shareSkipNoticeLines,
 } from "./shareSkipNotice";
 import { buildChatCollaboration } from "./collab/chatCollaboration";
-import type { SearchResultsEventEntry } from "../ipc/channels";
+import type { SearchResultsEventEntry } from "../ipc/bridgeContract";
 import {
   fileOpenStartMark,
   rendererMarks,
@@ -1233,20 +1234,15 @@ export function EngineMomentDiffPage({
         </section>
       </div>
       {confirmRestoreOpen ? (
-        <Overlay onClose={() => setConfirmRestoreOpen(false)}>
-          <div
-            data-testid="engine-diff-restore-confirm"
-            className="w-[min(420px,calc(100vw-32px))] rounded border border-line bg-panel p-4 shadow-xl"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="engine-diff-restore-confirm-title"
-          >
-            <h3
-              id="engine-diff-restore-confirm-title"
-              className="m-0 text-sm font-semibold text-ink"
-            >
-              Restore this file?
-            </h3>
+        <ConfirmDialog
+          title="Restore this file?"
+          confirmLabel="Restore"
+          onCancel={() => setConfirmRestoreOpen(false)}
+          onConfirm={() => void restoreFile()}
+          testId="engine-diff-restore-confirm"
+          cancelTestId="engine-diff-cancel-restore"
+          confirmTestId="engine-diff-confirm-restore"
+        >
             <p className="mb-0 mt-2 text-xs leading-5 text-muted">
               This only changes this one file and records a new history entry.
               Any edits you made since are saved into history first.
@@ -1256,26 +1252,7 @@ export function EngineMomentDiffPage({
               <br />
               {restoreDetail}
             </p>
-            <div className="mt-4 flex justify-end gap-2">
-              <button
-                type="button"
-                data-testid="engine-diff-cancel-restore"
-                onClick={() => setConfirmRestoreOpen(false)}
-                className="h-8 cursor-pointer rounded border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                data-testid="engine-diff-confirm-restore"
-                onClick={() => void restoreFile()}
-                className="h-8 cursor-pointer rounded bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90"
-              >
-                Restore
-              </button>
-            </div>
-          </div>
-        </Overlay>
+        </ConfirmDialog>
       ) : null}
     </section>
   );
@@ -3513,7 +3490,6 @@ export function DesktopWorkspaceShell(props: {
     },
     [workspaceId, refreshFiles, reportShellError, showShellNotice],
   );
-
 
   // The one way a file opens (tree click, quick-open, tab activation): marks
   // file-open-start — file views measure open latency from here — then opens

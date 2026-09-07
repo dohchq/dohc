@@ -1,3 +1,4 @@
+import { formatChatTime } from "../time";
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createRef, useState, type Dispatch, type SetStateAction } from "react";
@@ -8,7 +9,6 @@ import {
   ChatMessageList,
   MentionText,
   chatAuthorLabel,
-  formatChatTime,
   runReactionToggle,
   type ReactionToggleContext,
 } from "./chatMessages";

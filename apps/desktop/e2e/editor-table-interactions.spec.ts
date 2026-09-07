@@ -100,7 +100,8 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
     const columnGrip = table.locator(
       '.dohc-table-grip--col[data-table-column="0"]',
     );
-    await expect(columnGrip).toHaveClass(/is-visible/);
+    await expect(columnGrip).toHaveCSS("opacity", "1");
+    await expect(columnGrip).toHaveCSS("pointer-events", "auto");
     const handleClearance = await page.evaluate(() => {
       const wrapper = document.querySelector<HTMLElement>(".tableWrapper");
       const grip = document.querySelector<HTMLElement>(
@@ -115,7 +116,8 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
     const resizeHandle = table.locator(
       '.dohc-table-row-resize[data-table-row-resize="1"]',
     );
-    await expect(resizeHandle).toHaveClass(/is-visible/);
+    await expect(resizeHandle).toHaveCSS("opacity", "1");
+    await expect(resizeHandle).toHaveCSS("pointer-events", "auto");
     const rowHeightBefore = await firstBodyRow.evaluate(
       (row) => row.getBoundingClientRect().height,
     );
