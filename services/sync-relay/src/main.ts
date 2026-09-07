@@ -17,6 +17,8 @@ import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
 import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
+import { parseDeviceControlLimits } from "@dohc/live-session-contract/device-control";
+import { createDeviceControl } from "./deviceControl";
 
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
   process.env.NODE_ENV === "test" ? process.env.SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS : undefined,
@@ -326,6 +328,24 @@ const server = serveFetchHandler({
 });
 
 const host = testAuthSeam ? "127.0.0.1" : (process.env.SYNC_RELAY_BIND ?? "0.0.0.0");
+let deviceControl: ReturnType<typeof createDeviceControl> | undefined;
+if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
+  try {
+    deviceControl = createDeviceControl({
+      storage, relayExchangeKey: relayExchangeKey ?? "",
+      hosts: new Set((process.env.DOHC_RELAY_DEVICE_CONTROL_HOSTS ?? "").split(",")),
+      limits: parseDeviceControlLimits(JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS)),
+    });
+  } catch {
+    fatal("FATAL: Invalid device control configuration. Check DOHC_DEVICE_CONTROL_LIMITS, DOHC_RELAY_DEVICE_CONTROL_HOSTS, and relay exchange key.");
+  }
+}
+if (deviceControl) {
+  server.on("upgrade", deviceControl.handleUpgrade);
+  process.once("SIGINT", deviceControl.close);
+  process.once("SIGTERM", deviceControl.close);
+  server.once("close", deviceControl.close);
+}
 server.listen(requestedPort, host, () => {
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : requestedPort;

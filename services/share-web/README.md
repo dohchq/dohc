@@ -70,6 +70,63 @@ present when they were taken until the operator expires the backup. The relay
 reads shared content in plaintext. A link secret hides the work from other
 people, not from the relay operator.
 
+## Device control connections
+
+The optional `/api/device-control` endpoint lets a device register through an outbound WSS connection.
+The relay authenticates its operator-provisioned credential and assigns a fresh connection ID.
+Registration establishes control only. It creates no document binding, ticket, journal receipt, or live editing endpoint.
+
+Set `DOHC_DEVICE_CONTROL_LIMITS` on both services to enable this endpoint.
+Its JSON object requires every field below, with positive integer values and no additional fields.
+The transport has no default limits.
+
+| Fields | Bound |
+| --- | --- |
+| `maxConnections` | Active connections and pending upgrades per service |
+| `maxHeaderBytes`, `maxCredentialBytes` | Raw header bytes and encoded Authorization bytes |
+| `maxPayloadBytes`, `maxPendingBytes` | Control message bytes and queued socket bytes |
+| `maxFragments`, `maxBufferedChunks` | WebSocket receiver fragments and buffered chunks |
+| `handshakeTimeoutMs` | Time to receive registration |
+| `heartbeatIntervalMs`, `heartbeatTimeoutMs` | Relay ping interval and device pong deadline |
+| `closeTimeoutMs` | Time allowed for socket closure |
+
+`maxPendingBytes` must exceed `maxPayloadBytes` by at least 16 bytes for frame headers.
+`maxCredentialBytes` must not exceed `maxHeaderBytes`.
+Each value and the combined heartbeat interval and deadline must fit a signed 32-bit integer.
+These transport bounds do not select document admission or capacity limits.
+The connection cap includes established connections and pending upgrades.
+Set `maxConnections` to at least 2 to permit a reconnect while the previous connection remains open.
+
+Set `DOHC_SHARE_WEB_DEVICE_CONTROL_ADMISSION` on share-web to a JSON object with `capacity`, `refillPerSecond`, and `maxKeys`.
+There are no admission defaults. Capacity and key count must be positive integers; refill rate must be a positive finite number.
+Each client address gets a token bucket before share-web dials the relay.
+Share-web derives that address from the socket and its existing trusted-proxy configuration.
+Caller-supplied internal client-address headers cannot select a bucket.
+The limiter bounds repeated attempts per retained address; it does not guarantee admission during a distributed flood.
+
+Set `DOHC_RELAY_DEVICE_CONTROL_HOSTS` on the relay to its exact comma-separated internal Host values, including ports.
+Both services require their configured relay exchange key, including in development and tests.
+The internal relay URL must be an HTTP or HTTPS origin without a path.
+Share-web sends its configured exchange key and never forwards a caller's internal authentication headers.
+
+Forward WebSocket upgrades through the public TLS proxy with the original Host and Authorization headers.
+The proxy must send exactly `Connection: Upgrade` and `Upgrade: websocket` on this endpoint.
+Keep Authorization out of proxy logs and traces.
+Set the proxy's idle timeout above the configured heartbeat interval plus deadline.
+The device command always verifies the public TLS certificate.
+
+Build the relay package before running its commands.
+Use `pnpm --filter @dohc/sync-relay host:credential --help` for initial provisioning and permanent revocation.
+Place the resulting credential directory on the device with access restricted to its owner.
+Run `pnpm --filter @dohc/sync-relay host:connect --help` for the outbound connector arguments.
+The connector reads the existing credential and opens no listener or relay database.
+Credential-file creation, reading, and the connector are unavailable on macOS until ACL validation is implemented.
+It exits when its connection closes; rerunning it reconnects the same instance with a new server-generated connection ID.
+
+Revocation through a separate SQLite connection blocks later registration transactions.
+The active connection closes when a heartbeat observes the changed durable host coordinate.
+That observation is not a synchronous notification from the operator's transaction.
+
 ## Reserved later-phase deployment work
 
 Phase 4 must define and test reverse-proxy WebSocket timeouts before browser

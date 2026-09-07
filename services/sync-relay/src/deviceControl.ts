@@ -1,0 +1,128 @@
+import { randomBytes, randomUUID } from "node:crypto";
+import type { IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
+import { WebSocket, WebSocketServer } from "ws";
+import { DEVICE_CONTROL_PATH, DEVICE_CONTROL_PROTOCOL, parseDeviceControlLimits,
+  parseDeviceControlRegistration, type DeviceControlLimits } from "@dohc/live-session-contract/device-control";
+import { createDeviceControlRequestParser, refuseDeviceControl } from "@dohc/service-http";
+import { parseDeviceHostCredential } from "./deviceHostCredential.js";
+import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity.js";
+import type { SyncRelayStorage } from "./storage.js";
+
+export function createDeviceControl(options: {
+  storage: SyncRelayStorage; hosts: ReadonlySet<string>; relayExchangeKey: string; limits: DeviceControlLimits;
+}) {
+  const limits = parseDeviceControlLimits(options.limits);
+  if (typeof options.relayExchangeKey !== "string" || options.relayExchangeKey.length < 32) {
+    throw new TypeError("Device control requires a relay exchange key.");
+  }
+  const keyHash = hashRelayExchangeKey(options.relayExchangeKey);
+  const parseRequest = createDeviceControlRequestParser({ hosts: options.hosts, path: DEVICE_CONTROL_PATH,
+    protocol: DEVICE_CONTROL_PROTOCOL, ...limits });
+  const receive = { noServer: true, clientTracking: false, perMessageDeflate: false as const, autoPong: false,
+    maxPayload: limits.maxPayloadBytes, maxFragments: limits.maxFragments, maxBufferedChunks: limits.maxBufferedChunks,
+    closeTimeout: limits.closeTimeoutMs, handleProtocols: () => DEVICE_CONTROL_PROTOCOL };
+  const server = new WebSocketServer(receive);
+  const connections = new Set<() => void>();
+  const held = new WeakSet<Duplex>();
+  let current: (() => void) | undefined;
+  let closed = false;
+  server.on("wsClientError", (_error, socket) => refuseDeviceControl(socket, limits.closeTimeoutMs));
+
+  function handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
+    if (held.has(socket)) { socket.destroy(); return; }
+    held.add(socket);
+    const headers = parseRequest(request);
+    if (closed || connections.size >= limits.maxConnections || head.length > limits.maxPendingBytes || !headers ||
+      !verifyRelayExchangeKey(headers.get("x-dohc-relay-exchange-key") ?? null, keyHash)) {
+      refuseDeviceControl(socket, limits.closeTimeoutMs); return;
+    }
+    let credential;
+    try {
+      const encoded = headers.get("authorization")!.slice(7);
+      const bytes = Buffer.from(encoded, "base64url");
+      if (bytes.toString("base64url") !== encoded) throw new Error();
+      credential = parseDeviceHostCredential(JSON.parse(bytes.toString("utf8")));
+      if (JSON.stringify(credential) !== bytes.toString("utf8")) throw new Error();
+    } catch { refuseDeviceControl(socket, limits.closeTimeoutMs); return; }
+    const connectionId = randomUUID();
+    const notice = JSON.stringify(parseDeviceControlRegistration({ type: "registered", mode: "device",
+      hostId: credential.hostId, hostEpoch: credential.hostEpoch, instanceId: credential.instanceId, connectionId }));
+    if (Buffer.byteLength(notice) > limits.maxPayloadBytes) { refuseDeviceControl(socket, limits.closeTimeoutMs); return; }
+    const parsedCredential = credential;
+    let ws: WebSocket | undefined;
+    let registered = false, done = false;
+    let expectedPong: Buffer | undefined;
+    let timer: ReturnType<typeof setTimeout>;
+    const stop = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      connections.delete(stop);
+      if (current === stop) current = undefined;
+      if (ws) ws.terminate(); else socket.destroy();
+      if (registered) {
+        // Storage checks this incarnation; a stale close cannot disconnect its replacement.
+        try { options.storage.disconnectDeviceHost({ credential: parsedCredential, connectionId, updatedAtMs: Date.now() }); }
+        catch { console.error("Device control disconnect could not be persisted."); }
+      }
+    };
+    const isCurrent = () => {
+      const host = options.storage.getLiveHostControl();
+      return host?.admissionState === "open" && host.configuredMode === "device" &&
+        host.configuredHostId === parsedCredential.hostId && host.hostEpoch === parsedCredential.hostEpoch &&
+        host.registeredInstanceId === parsedCredential.instanceId && host.registeredConnectionId === connectionId;
+    };
+    const schedulePing = () => {
+      timer = setTimeout(() => {
+        try {
+          if (done || !isCurrent() || ws?.readyState !== WebSocket.OPEN || ws.bufferedAmount > limits.maxPendingBytes - 32) { stop(); return; }
+          expectedPong = randomBytes(16);
+          ws.ping(expectedPong, undefined, error => { if (error) stop(); });
+          timer = setTimeout(stop, limits.heartbeatTimeoutMs);
+          timer.unref();
+        } catch { stop(); }
+      }, limits.heartbeatIntervalMs);
+      timer.unref();
+    };
+    connections.add(stop);
+    socket.once("close", stop);
+    socket.once("error", stop);
+    timer = setTimeout(stop, limits.handshakeTimeoutMs);
+    timer.unref();
+    socket.pause();
+    try {
+      server.handleUpgrade(request, socket, head, accepted => {
+        ws = accepted;
+        ws.on("error", stop);
+        ws.on("close", stop);
+        ws.on("message", stop);
+        ws.on("ping", stop);
+        ws.on("pong", data => {
+          if (!expectedPong || !data.equals(expectedPong)) { stop(); return; }
+          expectedPong = undefined;
+          clearTimeout(timer);
+          try { if (!isCurrent()) { stop(); return; } } catch { stop(); return; }
+          schedulePing();
+        });
+        if (done) { ws.terminate(); return; }
+        const result = options.storage.registerDeviceHost({ credential: parsedCredential, connectionId, updatedAtMs: Date.now() });
+        if (!result.ok) { stop(); return; }
+        registered = true;
+        current?.();
+        current = stop;
+        clearTimeout(timer);
+        ws.send(notice, error => { if (error) stop(); });
+        schedulePing();
+        ws.resume();
+      });
+    } catch { stop(); }
+  }
+
+  return { handleUpgrade, close() {
+    if (closed) return;
+    closed = true;
+    for (const stop of connections) stop();
+    server.close();
+  } };
+}
