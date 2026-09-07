@@ -25,34 +25,6 @@ themeToggle?.addEventListener('click', () => {
 
 syncThemeToggle();
 
-const fontComparison = document.querySelector('.font-comparison');
-if (fontComparison) {
-  fontComparison.querySelectorAll('[data-font-role]').forEach((group) => {
-    const role = group.dataset.fontRole;
-    const choices = Array.from(group.querySelectorAll('[data-font-value]'));
-    const applyFont = (value) => {
-      root.setAttribute('data-font-' + role, value);
-      choices.forEach((button) => {
-        button.setAttribute('aria-pressed', String(button.dataset.fontValue === value));
-      });
-    };
-    applyFont(root.getAttribute('data-font-' + role) === 'alternate' ? 'alternate' : 'current');
-    choices.forEach((button) => {
-      button.addEventListener('click', () => {
-        const value = button.dataset.fontValue;
-        applyFont(value);
-        try {
-          localStorage.setItem('dohc-font-' + role, value);
-        } catch {
-          // Comparison still works when storage is unavailable.
-        }
-      });
-    });
-  });
-  fontComparison.hidden = false;
-  document.body.classList.add('font-comparison-enabled');
-}
-
 const RELEASES_URL = 'https://github.com/dohc-ai/dohc/releases';
 
 function matchesBuild(extension, architecture) {
