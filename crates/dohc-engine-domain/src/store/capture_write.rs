@@ -24,22 +24,21 @@ use std::borrow::Cow;
 impl<'a> VersionedTextStore<'a> {
     // --------------------------------------------------------------------- writes
 
-    /// Write text to `path` in `version`. Creates the object + a `write` moment
-    /// on first write to the path, else updates the object in place with a new
-    /// moment (`versions-write-text-file`). A caller-supplied `moment_id`
-    /// duplicate in the workspace is rejected. When `request_id` is set the
-    /// write is exactly-once (a committed retry replays to the recorded result).
+    /// Write text and its history in one storage transaction.
+    ///
+    /// Creates an object for a new path or updates the existing path's object.
+    /// Rejects the reserved capture origin. A matching request replays its recorded
+    /// write; reusing a request id with a different payload is refused. Matching
+    /// existing write moments can also return a deduped result.
+    ///
+    /// Use [`write_text_in_tx`] to compose a write with other transaction effects.
     pub fn write_text(
         &mut self,
         input: &WriteText,
         faults: &dyn FaultInjector,
     ) -> Result<WriteResult, DomainError> {
-        // RESERVED ORIGIN, enforced at the PUBLIC door. This is the method
-        // the RPC surface calls; capture's own primitive reaches
-        // `write_text_in_tx` directly, so the reservation cannot be forged
-        // from outside while capture keeps writing its own origin. Without
-        // it a caller could mark DB-only content capture-owned and have the
-        // next disk-driven pass retire it.
+        // Capture passes its prepared state directly to the normalized writer.
+        // Keep reserved-origin refusal in this public method.
         reject_reserved_capture_origin(&input.metadata_origin)?;
         let outcome = self
             .store
@@ -47,16 +46,16 @@ impl<'a> VersionedTextStore<'a> {
         committed(outcome)
     }
 
-    /// Capture a text file without caller-supplied object or moment ids.
+    /// Record observed text in one storage transaction, deriving object and moment ids.
     ///
-    /// Every capture id hashes fields framed as `u64-LE byte length || bytes`,
-    /// so embedded delimiter bytes cannot make distinct inputs collide. New
-    /// paths first derive `object-<sha256(workspace_id, version_id, path)>`. An
-    /// existing row with that id is reused only when it has no live alias in
-    /// the workspace (retire/recreate continuity). If it is still live at
-    /// another path, capture mints a disambiguated object id by also framing
-    /// the next monotonic moment order. Write and retire moments both derive
-    /// `moment-<sha256(workspace_id, object_id, next_moment_order)>`.
+    /// Uses the ownership and replay rules of [`capture_ingest_with_admission_in_tx`]
+    /// with no admission callback. The caller supplies the observed disk content.
+    ///
+    /// An existing path keeps its object. A new path derives an object id from the
+    /// workspace, version, and path. Capture reuses that id when it has no live alias;
+    /// otherwise the next global moment order disambiguates it. Moment ids also bind
+    /// the producer, workspace, object, order, operation, and mutation identity.
+    /// Every hashed field uses a `u64-LE byte length || bytes` frame.
     pub fn capture_ingest(
         &mut self,
         input: &CaptureIngest,
@@ -68,13 +67,13 @@ impl<'a> VersionedTextStore<'a> {
         committed(outcome)
     }
 
-    /// Autonomous binary capture ingest: same derived-id scheme and
-    /// idempotency posture as [`VersionedTextStore::capture_ingest`], but the
-    /// content persists as a BINHEAD binary head (moment + snapshot with
-    /// `content_kind = 'binary'`) and NO materialization job is enqueued —
-    /// the bytes came FROM disk, matching the TS oracle, which never writes
-    /// disk on capture. Content-equality (same `binary_sha256` head) is a
-    /// deduped no-op.
+    /// Record observed binary content in one storage transaction.
+    ///
+    /// Uses [`capture_ingest_binary_with_admission_in_tx`] with no admission callback.
+    /// New heads and equal-content observations record completed materialization
+    /// evidence because the caller observed these bytes on disk. They enqueue no
+    /// pending disk write. Equal-content observations retain the existing moment;
+    /// request replay returns its recorded result without repeating the observation.
     pub fn capture_ingest_binary(
         &mut self,
         input: &CaptureIngestBinary,
@@ -86,7 +85,10 @@ impl<'a> VersionedTextStore<'a> {
         committed(outcome)
     }
 
-    /// Retire a captured path, returning an absent result when it is untracked.
+    /// Record a captured path's absence in one storage transaction.
+    ///
+    /// Uses [`capture_retire_in_tx`] and its head filters. A missing or excluded path
+    /// returns `retired: None`.
     pub fn capture_retire(
         &mut self,
         input: &CaptureRetire,
@@ -103,9 +105,13 @@ impl<'a> VersionedTextStore<'a> {
 // Free helpers (SQL over a borrowed connection/transaction).
 // ============================================================================
 
-/// A projected write can borrow every small field while transferring ownership
-/// of its document body into the returned snapshot.
-#[doc(hidden)]
+/// Input for text persistence with borrowed identifiers and metadata.
+///
+/// Path and text can be borrowed or owned. Path normalization may allocate.
+/// For a new write, owned text moves into the returned snapshot; borrowed text
+/// is copied for that snapshot. Replay returns the recorded result instead.
+///
+/// [`write_projected_text_in_tx`] accepts this input or a borrowed [`WriteText`].
 pub struct ProjectedWriteText<'a> {
     pub workspace_id: &'a str,
     pub version_id: &'a str,
@@ -141,14 +147,17 @@ struct ResolvedCaptureObject {
     known_object: Option<FileObjectRecord>,
 }
 
-/// Transaction-local facts shared by one actor-owned capture batch.
+/// Transaction-local producer and moment-order state for one capture batch attempt.
 ///
-/// The runtime advances `next_moment_order` only after an item's effects have
-/// been accepted by the surrounding rollback scope. Keeping the proposed order
-/// immutable while an item runs makes a failed or deduped item consume nothing,
-/// while still giving object disambiguation and moment derivation the same
-/// candidate.
-#[doc(hidden)]
+/// Use one context for one workspace and version. Ingest proposes an order;
+/// [`Self::commit_result`] advances it after the caller accepts the item's effects.
+/// Request replay and content dedupe consume no order. Producer and order reads
+/// stay lazy until needed.
+///
+/// The caller owns SQLite savepoints and the transaction. An all-or-none batch
+/// advances each successful item inside its outer savepoint and discards the
+/// context if that scope rolls back. A partial-success batch releases each
+/// successful item savepoint before advancing. Failed items do not advance.
 pub struct CaptureIngestBatchContext {
     workspace_id: String,
     version_id: String,
@@ -164,9 +173,10 @@ enum CaptureMomentOrderCursor {
 }
 
 impl CaptureIngestBatchContext {
-    /// Establish the shared coordinate. Producer and order stay lazy so an
-    /// all-dedupe replay keeps the legacy short-circuit and does not gain
-    /// unrelated failure modes.
+    /// Check the version and establish the batch's workspace and version.
+    ///
+    /// Producer identity and global moment order are read only when ingest needs
+    /// them, so replay does not require those reads.
     pub fn new(
         tx: &Transaction<'_>,
         workspace_id: &str,
@@ -183,8 +193,15 @@ impl CaptureIngestBatchContext {
         })
     }
 
-    /// Advance after the surrounding rollback scope accepts the item's side
-    /// effects. A dedupe points at an existing moment and consumes no order.
+    /// Accept a successful item's reserved order. This does not commit SQLite.
+    ///
+    /// Call after all effects in the item's rollback scope succeed. An all-or-none batch
+    /// calls this inside its outer savepoint; a partial-success batch first releases
+    /// the successful item's savepoint. Do not call for a failed item. Discard this
+    /// context if an enclosing rollback undoes previously accepted items.
+    ///
+    /// A deduped result leaves the cursor unchanged. A new result must match the
+    /// context's reserved order.
     pub fn commit_result(&mut self, result: &WriteResult) -> Result<(), DomainError> {
         if result.deduped {
             return Ok(());
@@ -283,7 +300,11 @@ fn normalized_write_input<'a>(
     Ok(input)
 }
 
-#[doc(hidden)]
+/// Validate caller-supplied text, identifiers, metadata, and the storable path.
+///
+/// Rejects [`CAPTURE_ORIGIN`] without accessing storage or changing the input.
+/// Version existence and stored-state checks happen during the write. Trusted
+/// transaction callers use this check before accepting ordinary user writes.
 pub fn validate_write_input(input: &WriteText) -> Result<(), DomainError> {
     reject_reserved_capture_origin(&input.metadata_origin)?;
     normalized_write_input(input.into()).map(|_| ())
@@ -318,7 +339,11 @@ fn normalized_capture_retire(input: &CaptureRetire) -> Result<CaptureRetire, Dom
     Ok(normalized)
 }
 
-#[doc(hidden)]
+/// Record observed text in the caller's transaction without an admission check.
+///
+/// Uses [`capture_ingest_with_admission_in_tx`] with an accepting callback.
+/// The caller owns lease checks, related effects, and transaction completion.
+/// Roll back the enclosing transaction or savepoint on error.
 pub fn capture_ingest_in_tx(
     tx: &Transaction<'_>,
     input: &CaptureIngest,
@@ -326,7 +351,19 @@ pub fn capture_ingest_in_tx(
     capture_ingest_with_admission_in_tx(tx, input, |_, _, _| Ok::<(), DomainError>(()))
 }
 
-#[doc(hidden)]
+/// Record observed text after caller-supplied admission, in the caller's transaction.
+///
+/// Validation and matching request replay precede admission. Replay returns the
+/// recorded result without calling `admit`. Otherwise `admit` receives workspace,
+/// version, and the existing alias's object id or the path's stable capture id.
+/// It runs before object resolution, allocation, and any needed disambiguation.
+/// Admission returns `E` directly; domain errors convert through `E: From<DomainError>`.
+///
+/// A head with a different `metadata_origin` is refused unless
+/// `claim_foreign_head` is set. Equal text returns the existing head; a claimed
+/// equal-text head can still update its stored origin. The caller supplies the
+/// disk observation and owns lease policy and related transaction effects.
+/// Roll back the enclosing transaction or savepoint on error.
 pub fn capture_ingest_with_admission_in_tx<E>(
     tx: &Transaction<'_>,
     input: &CaptureIngest,
@@ -338,8 +375,15 @@ where
     capture_ingest_with_context_and_admission_in_tx(tx, input, None, admit)
 }
 
-/// Capture one item using facts reserved by its actor-owned batch.
-#[doc(hidden)]
+/// Record one text observation using this batch's producer and proposed order.
+///
+/// Uses the admission, ownership, and replay rules of
+/// [`capture_ingest_with_admission_in_tx`]. The input must match the batch's
+/// workspace and version. This function does not advance the batch cursor.
+///
+/// The caller owns rollback scopes and calls [`CaptureIngestBatchContext::commit_result`]
+/// after accepting the item. Follow that method's distinct all-or-none and
+/// partial-success orders. Roll back the enclosing transaction or savepoint on error.
 pub fn capture_ingest_in_batch_with_admission_in_tx<E>(
     tx: &Transaction<'_>,
     input: &CaptureIngest,
@@ -576,7 +620,16 @@ where
     Ok(result)
 }
 
-#[doc(hidden)]
+/// Record a path's absence in the caller's transaction, deriving a delete moment.
+///
+/// Matching request replay returns the recorded deletion or recorded no-op.
+/// A missing path returns `retired: None`. `only_if_text_head` excludes binary
+/// heads. With `only_if_capture_origin`, only capture heads qualify unless
+/// `allow_ydoc_origin` also permits Y.Doc heads. Excluded heads return the same
+/// no-op shape. The caller chooses these filters for the observed absence.
+///
+/// The deletion uses the existing domain delete path. The caller owns related
+/// effects and transaction completion. Roll back the transaction or savepoint on error.
 pub fn capture_retire_in_tx(
     tx: &Transaction<'_>,
     input: &CaptureRetire,
@@ -744,15 +797,15 @@ pub fn capture_retire_in_tx(
     })
 }
 
-/// The metadata origin every capture write records. Ownership of a head is
-/// determined by this value: capture only ever overwrites or retires heads
-/// it wrote itself.
+/// The origin used to identify capture-owned heads.
 ///
-/// Reserved: `normalized_write_input` — which every plaintext write path
-/// runs, including `write_text_in_tx` behind the RPC surface — rejects this
-/// origin, so a caller cannot forge capture ownership and have its own
-/// content retired by a disk-driven pass. Only the capture primitives in
-/// this module may write it.
+/// [`VersionedTextStore::write_text`] and [`validate_write_input`] reject this
+/// origin for ordinary caller-supplied writes. The transaction write functions
+/// accept trusted origins and do not enforce that reservation themselves.
+///
+/// Capture ingest compares the input's origin with the existing head, with
+/// `claim_foreign_head` controlling mismatches. Retirement applies its own
+/// capture and Y.Doc origin filters.
 pub const CAPTURE_ORIGIN: &str = "capture";
 
 /// The metadata origin stamped by Y.Doc settles. Materialized Y.Doc heads are
@@ -767,7 +820,11 @@ pub const YDOC_ORIGIN: &str = "ydoc";
 /// cap (64 MiB) is what remains for writers neither path covers.
 pub const MAX_CAPTURE_BINARY_FILE_BYTES: usize = 5 * 1024 * 1024;
 
-#[doc(hidden)]
+/// Record observed binary content without admission, in the caller's transaction.
+///
+/// Uses [`capture_ingest_binary_with_admission_in_tx`] with an accepting callback,
+/// including its completed materialization evidence. The caller owns lease checks
+/// and related effects. Roll back the transaction or savepoint on error.
 pub fn capture_ingest_binary_in_tx(
     tx: &Transaction<'_>,
     input: &CaptureIngestBinary,
@@ -775,7 +832,22 @@ pub fn capture_ingest_binary_in_tx(
     capture_ingest_binary_with_admission_in_tx(tx, input, |_, _, _| Ok::<(), DomainError>(()))
 }
 
-#[doc(hidden)]
+/// Record observed binary content after admission, in the caller's transaction.
+///
+/// Validates the coordinate, path, binary size cap, and version before replay.
+/// Matching request replay returns the recorded result without calling `admit`.
+/// Otherwise admission receives workspace, version, and the existing alias's
+/// object id or stable capture id, before object resolution and disambiguation.
+/// Admission returns `E` directly; domain errors convert through `E: From<DomainError>`.
+///
+/// A differing head origin is refused unless `claim_foreign_head` is set.
+/// Equal binary content retains the existing head and origin. Both an equal-content
+/// observation and a new binary head record a completed materialization job for
+/// the observed generation. This evidence lets older pending jobs be superseded;
+/// capture enqueues no pending disk write. Request replay skips this work.
+///
+/// The caller supplies the disk observation and owns lease policy and related
+/// effects. Roll back the enclosing transaction or savepoint on error.
 pub fn capture_ingest_binary_with_admission_in_tx<E>(
     tx: &Transaction<'_>,
     input: &CaptureIngestBinary,
@@ -1057,25 +1129,19 @@ pub struct CaptureManifestSeedEntry {
 /// first scan always re-offers the path).
 pub const SECRET_SEED_SENTINEL_SHA: &str = "rehydrated-secret";
 
-/// Every CAPTURE-ORIGIN path in `version_id` with its content identity, for
-/// seeding a fresh files-layer manifest on workspace (re)open. Without this
-/// seed the baseline scan diffs against empty and can never emit a Retire
-/// for a file deleted while the daemon was down — the stale captured head
-/// would stay readable forever (`ReconcileController::rehydrated`'s
-/// documented follow-up: the rehydration SOURCE lives above the files
-/// crate, which is here).
+/// Read the initial scan manifest for one workspace and version.
 ///
-/// CAPTURE-ORIGIN ONLY, deliberately: the manifest states what CAPTURE
-/// believes is on disk. Content that arrived any other way (an RPC
-/// `versionedText.write`, a replication/sync apply) may legitimately have
-/// no disk counterpart yet, and seeding it would make the next baseline
-/// scan diff it as "removed" and retire it — capture deleting content it
-/// never owned.
+/// Includes capture heads, eligible Y.Doc heads, and capture-owned secret tips.
+/// Other origins are excluded because their content may never have reached disk.
+/// A Y.Doc head is excluded while its matching producer write remains pending.
+/// Matching pending rollback restores also exclude their destination heads.
 ///
-/// Matching pending rollback deletes are emitted as transient last-known-disk
-/// entries. This keeps a surviving delete target out of capture until the
-/// compensating job becomes terminal, without crossing version boundaries or
-/// creating a database head for that path.
+/// Pending rollback deletes contribute transient last-known-disk entries when
+/// their target has no alias in this version. These entries keep that path out
+/// of capture until the compensating job becomes terminal; they create no head.
+/// Secret entries use [`SECRET_SEED_SENTINEL_SHA`] so the next scan re-offers them.
+///
+/// This reads stored state through `EngineStore::read_with`; it does not scan disk.
 pub fn capture_manifest_seed(
     store: &EngineStore,
     workspace_id: &str,
@@ -1233,10 +1299,17 @@ fn reconstruct_capture_binary(
     })
 }
 
-/// Apply an R05 text write inside a caller-owned compound transaction. R06
-/// uses this seam so the canonical mutation, conflict transition, and durable
-/// materialization intent commit together rather than becoming three writes.
-#[doc(hidden)]
+/// Persist text and history inside a caller-owned compound transaction.
+///
+/// Validates and normalizes the input, then handles request replay, matching
+/// existing moments, and persistence. A new path requires an object id not already
+/// present in the workspace.
+/// The returned snapshot owns its text even when the input borrows it.
+///
+/// This is a trusted composition entry point: it accepts the supplied origin.
+/// Use [`validate_write_input`] when accepting ordinary caller-supplied writes.
+/// The caller owns related conflict, search indexing, journal, and materialization work.
+/// Roll back the enclosing transaction or savepoint on error.
 pub fn write_text_in_tx(
     tx: &Transaction<'_>,
     input: &WriteText,
@@ -1245,9 +1318,17 @@ pub fn write_text_in_tx(
     write_normalized_text_in_tx(tx, input, false, None)
 }
 
-/// Apply a projected text write. A Y.Doc settle has already durably recorded
-/// the CRDT edits that produced this projection.
-#[doc(hidden)]
+/// Persist a text projection inside the caller's transaction.
+///
+/// Accepts [`ProjectedWriteText`] or a borrowed [`WriteText`]. For a new path,
+/// an existing object row is allowed only when no alias or snapshot binds it in
+/// the workspace. This supports the object preallocated for a live Y.Doc seed.
+///
+/// Uses the same validation, replay, hydration, and persistence as ordinary text
+/// writes. For a new write, an owned document body moves into the result.
+/// Runtime and sync own Y.Doc persistence, related effects, and disk work.
+/// This trusted entry point accepts the supplied origin, as [`write_text_in_tx`] does.
+/// Roll back the enclosing transaction or savepoint on error.
 pub fn write_projected_text_in_tx<'a>(
     tx: &Transaction<'_>,
     input: impl Into<ProjectedWriteText<'a>>,
