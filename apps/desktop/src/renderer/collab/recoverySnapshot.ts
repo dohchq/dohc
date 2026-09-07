@@ -1,3 +1,4 @@
+import { bytesToBase64, base64ToBytes } from "../base64";
 import * as Y from "yjs";
 
 // Both halves of the recovery snapshot contract: the encoder the
@@ -89,17 +90,6 @@ const RECOVERY_COMMENT = new RegExp(
   "u",
 );
 
-function snapshotAsBase64(snapshot: Uint8Array): string {
-  let binary = "";
-  const chunkSize = 32_768;
-  for (let offset = 0; offset < snapshot.length; offset += chunkSize) {
-    binary += String.fromCharCode(
-      ...snapshot.subarray(offset, offset + chunkSize),
-    );
-  }
-  return btoa(binary);
-}
-
 export function durableMarkdownFromSnapshot(
   doc: Y.Doc,
   snapshot: Uint8Array,
@@ -111,7 +101,7 @@ export function durableMarkdownFromSnapshot(
   // in an inert Markdown comment until the async projection replaces this
   // whole fallback. A failed chunk load or renderer exit can lose formatting
   // from the readable fallback, but it cannot lose the document structure.
-  return `${fallback}${separator}<!-- ${YDOC_RECOVERY_MARKER}:${snapshotAsBase64(
+  return `${fallback}${separator}<!-- ${YDOC_RECOVERY_MARKER}:${bytesToBase64(
     snapshot,
   )} -->`;
 }
@@ -121,10 +111,7 @@ export function durableMarkdownFromSnapshot(
 // gone" from "the projection did not run". Null means gone.
 function recoverSnapshotDoc(encoded: string): Y.Doc | null {
   try {
-    const binary = atob(encoded);
-    const snapshot = Uint8Array.from(binary, (character) =>
-      character.charCodeAt(0),
-    );
+    const snapshot = base64ToBytes(encoded);
     const recovered = new Y.Doc();
     Y.applyUpdate(recovered, snapshot);
     return recovered;

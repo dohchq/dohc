@@ -1,3 +1,5 @@
+import { useRequestSequence } from "../useRequestSequence";
+import { ipcErrorMessage } from "../ipcError";
 import { Copy, Check } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type {
@@ -29,11 +31,6 @@ type LoadState =
     }
   | { status: "error"; message: string };
 
-function errorMessage(cause: unknown): string {
-  const text = cause instanceof Error ? cause.message : String(cause);
-  return text.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
-}
-
 function selectorLabel(share: RelayShareGrantedRow): string {
   // A row the relay could not read still lists, so ending it stays possible.
   if (!share.selector) return "Unreadable share";
@@ -57,10 +54,10 @@ export function SharedByMeList(props: { workspaceId: string }) {
   const [confirmShareId, setConfirmShareId] = useState<string | null>(null);
   // Latest-wins token: the open-changes read is workspace-scoped, so an
   // answer for one workspace must never repaint another.
-  const loadToken = useRef(0);
+  const loadToken = useRequestSequence();
 
   async function refresh() {
-    const token = ++loadToken.current;
+    const token = loadToken.next();
     try {
       const [shares, proposals] = await Promise.all([
         bridge().listRelayShares(),
@@ -69,7 +66,7 @@ export function SharedByMeList(props: { workspaceId: string }) {
           .listShareProposals({ workspaceId })
           .catch(() => ({ proposals: [] as ShareProposalRow[] })),
       ]);
-      if (token !== loadToken.current) return;
+      if (!loadToken.isCurrent(token)) return;
       // What the row shows: how many are waiting, and which one the Review
       // button opens — the oldest, because that is the one waiting longest.
       const openChanges = new Map<string, { count: number; oldest: ShareProposalRow }>();
@@ -85,8 +82,8 @@ export function SharedByMeList(props: { workspaceId: string }) {
       }
       setLoad({ status: "ready", shares: shares.granted, openChanges });
     } catch (cause) {
-      if (token !== loadToken.current) return;
-      setLoad({ status: "error", message: errorMessage(cause) });
+      if (!loadToken.isCurrent(token)) return;
+      setLoad({ status: "error", message: ipcErrorMessage(cause) });
     }
   }
 
@@ -103,7 +100,7 @@ export function SharedByMeList(props: { workspaceId: string }) {
       setConfirmShareId(null);
       await refresh();
     } catch (cause) {
-      setLoad({ status: "error", message: errorMessage(cause) });
+      setLoad({ status: "error", message: ipcErrorMessage(cause) });
     } finally {
       setBusyShareId(null);
     }
