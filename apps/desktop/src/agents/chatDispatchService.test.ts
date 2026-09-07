@@ -721,12 +721,6 @@ async function linkAgentReply(
   return message.id;
 }
 
-async function flushMicrotasks(iterations = 100): Promise<void> {
-  for (let index = 0; index < iterations; index += 1) {
-    await Promise.resolve();
-  }
-}
-
 afterEach(async () => {
   for (const fixture of fixtures.splice(0).reverse()) {
     for (const call of fixture.spawnCalls) call.process.markExitedSilently();
@@ -1078,11 +1072,16 @@ describe("chatDispatchService", () => {
     );
 
     fixture.spawnCalls[0]!.process.emitExit(0);
-    await flushMicrotasks(500);
 
-    await vi.waitFor(() => {
-      expect(fixture.completeRunRequests).toBe(6);
-    });
+    await vi.waitFor(
+      () => {
+        expect(fixture.completeRunRequests).toBe(6);
+        expect(fixture.errors).toContainEqual(
+          expect.objectContaining({ message: "sidecar exited during completion" }),
+        );
+      },
+      { interval: 0 },
+    );
     expect(await fixture.dispatch.getRunRecord(claim.run.runId)).not.toHaveProperty(
       "endedAtMs",
     );
@@ -1104,11 +1103,14 @@ describe("chatDispatchService", () => {
     await vi.advanceTimersByTimeAsync(remainingBackoffMs - 1);
     expect(fixture.completeRunRequests).toBe(6);
     await vi.advanceTimersByTimeAsync(1);
-    await flushMicrotasks(100);
 
-    await vi.waitFor(() => {
-      expect(fixture.completeRunRequests).toBe(7);
-    });
+    await vi.waitFor(
+      () => {
+        expect(fixture.completeRunRequests).toBe(7);
+        expect(fixture.spawnCalls).toHaveLength(2);
+      },
+      { interval: 0 },
+    );
     expect(await fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
       endedAtMs: fixture.now.value,
       exitCode: 0,
@@ -1162,11 +1164,14 @@ describe("chatDispatchService", () => {
 
     fixture.runner.command = "claude -p";
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
-    await flushMicrotasks(100);
 
-    await vi.waitFor(() => {
-      expect(fixture.failRunRequests).toBe(7);
-    });
+    await vi.waitFor(
+      () => {
+        expect(fixture.failRunRequests).toBe(7);
+        expect(fixture.spawnCalls).toHaveLength(1);
+      },
+      { interval: 0 },
+    );
     expect(await fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
       failureReason: expect.stringContaining("runner failed to start"),
     });
@@ -1334,7 +1339,10 @@ describe("chatDispatchService", () => {
     fixture.service.start();
     expect(fixture.spawnCalls).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_PUMP_MS);
-    await flushMicrotasks(50);
+    await vi.waitFor(() => {
+      expect(fixture.spawnCalls).toHaveLength(1);
+      expect(fixture.spawnCalls[0]!.process.stdinText).toContain("Remote tray-only task.");
+    }, { interval: 0 });
 
     expect(fixture.syncRequests).toEqual([WORKSPACE_ID]);
     expect(fixture.spawnCalls).toHaveLength(1);
@@ -1354,7 +1362,6 @@ describe("chatDispatchService", () => {
 
     fixture.service.start();
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_PUMP_MS);
-    await flushMicrotasks();
 
     expect(fixture.syncWorkspaces).toEqual([fixture.workspace]);
     expect(fixture.syncWorkspaces[0]?.attachmentId).toBe(attachmentId);
@@ -1366,6 +1373,7 @@ describe("chatDispatchService", () => {
     const replacementAttachmentId = Symbol("replacement attachment");
     const syncStarted = Promise.withResolvers<void>();
     const allowSync = Promise.withResolvers<void>();
+    let syncCalls = 0;
     const fixture = await createFixture({
       workspaceAttachmentId: replacementAttachmentId,
       pumpWorkspaces: [
@@ -1376,6 +1384,8 @@ describe("chatDispatchService", () => {
         },
       ],
       onQueueSync: async () => {
+        syncCalls += 1;
+        if (syncCalls > 1) return false;
         syncStarted.resolve();
         await allowSync.promise;
       },
@@ -1385,7 +1395,13 @@ describe("chatDispatchService", () => {
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_PUMP_MS);
     await syncStarted.promise;
     allowSync.resolve();
-    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_PUMP_MS);
+    await vi.waitFor(
+      () => {
+        expect(fixture.syncRequests).toHaveLength(2);
+      },
+      { interval: 0 },
+    );
 
     expect(fixture.syncWorkspaces[0]?.attachmentId).toBe(originalAttachmentId);
     expect(fixture.storeResolves).toEqual({ chat: 0, dispatch: 0 });
@@ -1416,11 +1432,9 @@ describe("chatDispatchService", () => {
 
     fixture.service.start();
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_PUMP_MS);
-    await flushMicrotasks();
     expect(starts).toEqual([WORKSPACE_ID, secondWorkspace.workspaceId]);
 
     releaseFirst?.();
-    await flushMicrotasks();
   });
 
   it("fails no-runner triggers and keeps one setup note per thread", async () => {
@@ -1558,18 +1572,27 @@ describe("chatDispatchService", () => {
     await fixture.claimStarted;
 
     const selfTest = fixture.service.runnerSelfTest(WORKSPACE_ID);
-    void selfTest.catch(() => undefined);
-    await flushMicrotasks();
-    const competingSpawnCount = fixture.spawnCalls.length;
-    if (competingSpawnCount > 0) {
-      fixture.spawnCalls[0]!.process.emitExit(1);
+    let selfTestSettled = false;
+    void selfTest.then(
+      () => { selfTestSettled = true; },
+      () => { selfTestSettled = true; },
+    );
+    try {
+      await vi.waitFor(() => {
+        expect(selfTestSettled || fixture.spawnCalls.length > 0).toBe(true);
+      });
+      const competingSpawnCount = fixture.spawnCalls.length;
+      expect(competingSpawnCount).toBe(0);
+      await expect(selfTest).resolves.toEqual({
+        ok: false,
+        detail: "A runner is already active in this workspace.",
+      });
+    } finally {
+      if (fixture.spawnCalls.length > 0) {
+        fixture.spawnCalls[0]!.process.emitExit(1);
+      }
+      fixture.releaseClaim?.();
     }
-    fixture.releaseClaim?.();
-    expect(competingSpawnCount).toBe(0);
-    await expect(selfTest).resolves.toEqual({
-      ok: false,
-      detail: "A runner is already active in this workspace.",
-    });
 
     await scanning;
     expect(fixture.spawnCalls).toHaveLength(1);
@@ -2003,14 +2026,15 @@ describe("chatDispatchService", () => {
 
     linkPending = false;
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
-    await flushMicrotasks();
-    messages = await fixture.chat.listMessages({
-      workspaceId: WORKSPACE_ID,
-      threadId: trigger.threadId,
-    });
-    expect(
-      messages.filter((message) => message.body.includes("produced no reply")),
-    ).toHaveLength(1);
+    await vi.waitFor(async () => {
+      messages = await fixture.chat.listMessages({
+        workspaceId: WORKSPACE_ID,
+        threadId: trigger.threadId,
+      });
+      expect(
+        messages.filter((message) => message.body.includes("produced no reply")),
+      ).toHaveLength(1);
+    }, { interval: 0 });
   });
 
   it("fails an interrupted startup run and re-dispatches its trigger once", async () => {
@@ -2118,7 +2142,13 @@ describe("chatDispatchService", () => {
     expect(fixture.requeues).toHaveLength(1);
 
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
-    await flushMicrotasks();
+    await vi.waitFor(
+      () => {
+        expect(fixture.requeues).toHaveLength(2);
+        expect(fixture.spawnCalls).toHaveLength(1);
+      },
+      { interval: 0 },
+    );
 
     expect(fixture.requeues).toEqual([
       {
@@ -2156,7 +2186,12 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls).toEqual([]);
 
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
-    await flushMicrotasks();
+    await vi.waitFor(
+      () => {
+        expect(fixture.spawnCalls).toHaveLength(1);
+      },
+      { interval: 0 },
+    );
 
     expect(fixture.spawnCalls).toHaveLength(1);
   });
@@ -2180,7 +2215,14 @@ describe("chatDispatchService", () => {
     ).rejects.toThrow("daemon unavailable");
 
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
-    await flushMicrotasks();
+    await vi.waitFor(
+      () => {
+        expect(fixture.errors).toContainEqual(
+          expect.objectContaining({ message: "daemon still unavailable" }),
+        );
+      },
+      { interval: 0 },
+    );
     expect(fixture.spawnCalls).toEqual([]);
 
     await vi.advanceTimersByTimeAsync(
@@ -2189,7 +2231,12 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls).toEqual([]);
 
     await vi.advanceTimersByTimeAsync(1);
-    await flushMicrotasks();
+    await vi.waitFor(
+      () => {
+        expect(fixture.spawnCalls).toHaveLength(1);
+      },
+      { interval: 0 },
+    );
     expect(fixture.spawnCalls).toHaveLength(1);
   });
 
@@ -2387,7 +2434,6 @@ describe("chatDispatchService", () => {
     if (!claim) throw new Error("Expected a live run.");
 
     const stopping = fixture.service.stop();
-    await flushMicrotasks();
 
     expect(fixture.killCalls).toContainEqual({
       pid: -fixture.spawnCalls[0]!.process.pid!,
@@ -2428,7 +2474,6 @@ describe("chatDispatchService", () => {
     fixture.rejectNextFailRun(persistenceError);
 
     const stopping = fixture.service.stop();
-    await flushMicrotasks();
 
     expect(fixture.killCalls).toContainEqual({
       pid: -fixture.spawnCalls[0]!.process.pid!,
@@ -2519,21 +2564,30 @@ describe("chatDispatchService", () => {
     );
 
     await vi.advanceTimersByTimeAsync(60_000);
-    await flushMicrotasks(100);
 
-    await vi.waitFor(() => {
-      expect(fixture.failRunRequests).toBe(6);
-    });
+    await vi.waitFor(
+      () => {
+        expect(fixture.failRunRequests).toBe(6);
+        expect(fixture.errors).toContainEqual(
+          expect.objectContaining({ message: "sidecar unavailable during timeout persistence" }),
+        );
+      },
+      { interval: 0 },
+    );
     expect(await fixture.dispatch.getRunRecord(claim.run.runId)).not.toHaveProperty(
       "endedAtMs",
     );
 
+    const updatesBeforeRetry = fixture.runUpdatedWorkspaces.length;
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
-    await flushMicrotasks(100);
 
-    await vi.waitFor(() => {
-      expect(fixture.failRunRequests).toBe(7);
-    });
+    await vi.waitFor(
+      () => {
+        expect(fixture.failRunRequests).toBe(7);
+        expect(fixture.runUpdatedWorkspaces).toHaveLength(updatesBeforeRetry + 1);
+      },
+      { interval: 0 },
+    );
     expect(await fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
       endedAtMs: fixture.now.value,
       exitCode: 124,
@@ -2681,7 +2735,10 @@ describe("chatDispatchService", () => {
 
     const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID);
     await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID });
-    await flushMicrotasks();
+    await vi.waitFor(() => {
+      expect(fixture.spawnCalls).toHaveLength(1);
+      expect(fixture.spawnCalls[0]!.process.stdinText).toEqual(expect.any(String));
+    });
     expect(fixture.spawnCalls).toHaveLength(1);
     const call = fixture.spawnCalls[0]!;
     const threadId = call.options.env.DOHC_CHAT_THREAD;
@@ -2722,7 +2779,10 @@ describe("chatDispatchService", () => {
     });
 
     const retryPromise = fixture.service.runnerSelfTest(WORKSPACE_ID);
-    await flushMicrotasks();
+    await vi.waitFor(() => {
+      expect(fixture.spawnCalls).toHaveLength(2);
+      expect(fixture.spawnCalls[1]!.process.stdinText).toEqual(expect.any(String));
+    });
     const retryCall = fixture.spawnCalls[1];
     if (!retryCall) throw new Error("Expected a self-test retry.");
     expect(retryCall.options.env.DOHC_CHAT_THREAD).toBe(threadId);
@@ -2795,7 +2855,10 @@ describe("chatDispatchService", () => {
     fixture.runner.command = "claude -p";
     const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID);
     await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID });
-    await flushMicrotasks();
+    await vi.waitFor(() => {
+      expect(fixture.spawnCalls).toHaveLength(1);
+      expect(fixture.spawnCalls[0]!.process.stdinText).toEqual(expect.any(String));
+    });
     const call = fixture.spawnCalls[0]!;
     const threadId = call.options.env.DOHC_CHAT_THREAD!;
     await fixture.chat.sendMessage({
@@ -2817,7 +2880,13 @@ describe("chatDispatchService", () => {
 
     const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID);
     await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID });
-    await flushMicrotasks();
+    await vi.waitFor(
+      () => {
+        expect(fixture.spawnCalls).toHaveLength(1);
+        expect(fixture.spawnCalls[0]!.process.stdinText).toEqual(expect.any(String));
+      },
+      { interval: 0 },
+    );
     const process = fixture.spawnCalls[0]!.process;
 
     await vi.advanceTimersByTimeAsync(RUNNER_SELF_TEST_TIMEOUT_MS);
