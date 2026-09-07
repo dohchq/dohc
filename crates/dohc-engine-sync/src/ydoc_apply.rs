@@ -3260,7 +3260,7 @@ mod merge_drained_tests {
             merged.refusals,
             [refusal.clone(), older.clone(), refusal.clone()]
         );
-        assert_eq!(merged.sharing_declined, [declined.clone()]);
+        assert_eq!(merged.sharing_declined, std::slice::from_ref(&declined));
         assert_eq!(ids(merged), ["committed"]);
 
         let own_decline = crate::SharingDeclined {
