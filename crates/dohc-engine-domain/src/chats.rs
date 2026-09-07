@@ -4388,18 +4388,6 @@ impl<'a> LinkedChatStore<'a> {
         })
     }
 
-    /// The projection worker's poll (`listPendingBookmarks`): pending-outbox
-    /// bookmarks, oldest outbox update first, limit 1..=200 (default 50).
-    pub fn list_pending_bookmarks(
-        &self,
-        workspace_id: &str,
-        owner_user_id: &str,
-        limit: Option<i64>,
-    ) -> Result<Vec<ChatBookmark>, DomainError> {
-        self.list_pending_bookmarks_page(workspace_id, owner_user_id, limit.unwrap_or(50), None)
-            .map(|rows| rows.into_iter().map(|row| row.bookmark).collect())
-    }
-
     /// Keyset page for the projection worker's poll. The exclusive coordinate
     /// is the oracle order `(outbox.updated_at_ms, bookmark_id)`.
     pub fn list_pending_bookmarks_page(
