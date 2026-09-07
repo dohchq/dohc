@@ -11,7 +11,18 @@ import { escapeHtml } from '@dohc/workspace-core/html'
 import katex from 'katex'
 import { parseFrontmatter, displayFrontmatterValue } from '../markdown/frontmatter'
 import { markdownBodyToHtml } from './import-export'
-import { KATEX_EXPORT_CSS } from './katexExportStyles'
+// katexExport.css is KaTeX 0.17.0's `dist/katex.min.css` with every
+// `@font-face` block removed: the export must be a single self-contained file
+// with NO external assets, per above. Dropping the font files means the
+// KaTeX_* families are unavailable, so each `font-family: KaTeX_*` was given
+// a `'Times New Roman', serif` fallback: math renders with the full KaTeX
+// layout (fractions, super/subscripts, radicals, spacing) but in a serif
+// fallback face rather than the KaTeX glyphs. Degraded-but-readable by
+// design. Regenerate by re-running the strip+fallback transform against a
+// bumped katex dist css if the dependency is upgraded. The `?raw` file bytes
+// ARE the exported stylesheet, so the css file carries no comment header and
+// no trailing newline: either would leak into every exported document.
+import KATEX_EXPORT_CSS from './katexExport.css?raw'
 
 // The document's display title: the `title` frontmatter key (same key
 // PageIdentity.tsx reads/writes), falling back to the filename stem —

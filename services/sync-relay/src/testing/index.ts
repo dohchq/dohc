@@ -251,6 +251,7 @@ export function testHandler(
         ? email.slice(0, -TEST_EMAIL_SUFFIX.length)
         : null,
     lookupUserEmail: (userId) => `${userId}${TEST_EMAIL_SUFFIX}`,
+    lookupVerifiedUserEmail: (userId) => `${userId}${TEST_EMAIL_SUFFIX}`,
     newShareId: () => `share-${shareId++}`,
     newGrantId: () => `grant-${grantId++}`,
     newId: () => `id-${mintedId++}`,

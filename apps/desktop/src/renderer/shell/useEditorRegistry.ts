@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import type { DraftFlush, DraftFlushOptions, FileSaveState } from "../FileInspector";
+import type { DraftFlush, DraftFlushOptions } from "../useAutosavedTextDraft";
+import type { FileSaveState } from "../fileInspectorUi";
 import { beginCollectionLineageOperation } from "../collections/collectionLineageGate";
 import type { ActiveUndoHandler } from "../workbench/EngineMomentDiffPage";
 import type { TreeChangeOperation } from "../workbench/Explorer";

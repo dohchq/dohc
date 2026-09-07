@@ -1,4 +1,5 @@
 import { stopEditorMouseEvent, isCodeBlockNode } from "./pmHelpers";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, TextSelection, type EditorState } from "@tiptap/pm/state";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 
@@ -20,20 +21,6 @@ const CODE_LANGUAGE_OPTIONS = [
   { value: "go", label: "Go" },
   { value: "rust", label: "Rust" },
 ] as const;
-
-type DocDescendantNode = {
-  type: { name: string };
-  attrs: Record<string, unknown>;
-  textContent: string;
-  nodeSize: number;
-};
-
-type DocLike = {
-  descendants: (
-    cb: (node: DocDescendantNode, pos: number) => boolean | void,
-  ) => void;
-  nodeAt: (pos: number) => DocDescendantNode | null;
-};
 
 const codeLanguageKey = new PluginKey("dohc-code-language");
 const codeBlockContinuationKey = new PluginKey("dohc-code-block-continuation");
@@ -153,14 +140,14 @@ function insertParagraphAfterBlock(view: EditorView, blockPos: number): boolean 
 }
 
 function codeBlockAtSelection(state: EditorState): {
-  node: DocDescendantNode;
+  node: ProseMirrorNode;
   pos: number;
 } | null {
   const { $from } = state.selection;
   for (let depth = $from.depth; depth > 0; depth -= 1) {
     const node = $from.node(depth);
     if (!isCodeBlockNode(node)) continue;
-    return { node: node as unknown as DocDescendantNode, pos: $from.before(depth) };
+    return { node, pos: $from.before(depth) };
   }
   return null;
 }
@@ -172,10 +159,10 @@ function isSelectionAtEndOfCodeBlock(state: EditorState): boolean {
   return state.selection.$from.parentOffset >= block.node.textContent.length;
 }
 
-function buildCodeLanguageDecorations(doc: unknown): DecorationSet {
+function buildCodeLanguageDecorations(doc: ProseMirrorNode): DecorationSet {
   const decorations: Decoration[] = [];
 
-  (doc as DocLike).descendants((node, pos) => {
+  doc.descendants((node, pos) => {
     if (!isCodeBlockNode(node)) return;
 
     const language = cleanCodeLanguage(String(node.attrs.language ?? ""));
@@ -300,7 +287,7 @@ function buildCodeLanguageDecorations(doc: unknown): DecorationSet {
     );
   });
 
-  return DecorationSet.create(doc as never, decorations);
+  return DecorationSet.create(doc, decorations);
 }
 
 export function makeCodeBlockChromePlugin() {

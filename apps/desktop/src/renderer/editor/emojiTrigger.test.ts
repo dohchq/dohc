@@ -10,56 +10,22 @@ import {
   makeEmojiPlugin,
   emojiPluginKey,
 } from './emojiTrigger'
-import type { PMNodeLike, PMDocLike } from './inlineAtomPlugin'
+import { codeBlock, codeMarkText, doc, paragraph } from './testDocs'
 
-// `:shortcode:` emoji trigger tests. Pure functions; no DOM. Mirrors
-// mentionTrigger.test.ts's `detectMentionAutocomplete` test conventions
-// and cursor-position convention (doc root offset is 1, so
-// `nodeStart + text.length` puts the cursor right after the full text,
-// i.e. the whole string is "typed so far").
-
-function paragraph(): PMNodeLike {
-  return {
-    type: { name: 'paragraph' },
-  }
-}
-
-function codeBlock(): PMNodeLike {
-  return {
-    type: { name: 'code_block', spec: { code: true } },
-  }
-}
-
-function makeDocWithParent(
-  text: string,
-  parent: PMNodeLike | null,
-  marks: PMNodeLike['marks'] = [],
-): PMDocLike {
-  return {
-    descendants(cb) {
-      cb(
-        {
-          isText: true,
-          text,
-          marks,
-          type: { name: 'text' },
-        },
-        1,
-        parent,
-      )
-    },
-  }
-}
+// `:shortcode:` emoji trigger tests over real ProseMirror documents
+// (testDocs.ts). Cursor position convention (matches mentionTrigger.test.ts):
+// a block's text starts at pos 1, so `1 + text.length` puts the cursor
+// right after the full text (i.e. the whole string is "typed so far").
 
 describe('detectEmojiAutocomplete — :shortcode: picker trigger', () => {
   it('does not open after just one query character', () => {
-    expect(detectEmojiAutocomplete(makeDocWithParent(':s', paragraph()), 3)).toEqual({
+    expect(detectEmojiAutocomplete(doc(paragraph(':s')), 3)).toEqual({
       active: false,
     })
   })
 
   it('opens once the query reaches two characters (e.g. ":sm")', () => {
-    expect(detectEmojiAutocomplete(makeDocWithParent(':sm', paragraph()), 4)).toEqual({
+    expect(detectEmojiAutocomplete(doc(paragraph(':sm')), 4)).toEqual({
       active: true,
       from: 1,
       query: 'sm',
@@ -67,7 +33,7 @@ describe('detectEmojiAutocomplete — :shortcode: picker trigger', () => {
   })
 
   it('opens for an incomplete shortcode after whitespace', () => {
-    expect(detectEmojiAutocomplete(makeDocWithParent('see :smi', paragraph()), 9)).toEqual({
+    expect(detectEmojiAutocomplete(doc(paragraph('see :smi')), 9)).toEqual({
       active: true,
       from: 5,
       query: 'smi',
@@ -75,40 +41,37 @@ describe('detectEmojiAutocomplete — :shortcode: picker trigger', () => {
   })
 
   it('does not open mid-word / mid-timestamp (e.g. "12:30")', () => {
-    expect(detectEmojiAutocomplete(makeDocWithParent('12:30', paragraph()), 6)).toEqual({
+    expect(detectEmojiAutocomplete(doc(paragraph('12:30')), 6)).toEqual({
       active: false,
     })
   })
 
   it('does not open when ":" is preceded by other punctuation/text', () => {
-    expect(detectEmojiAutocomplete(makeDocWithParent('foo(:bar', paragraph()), 9)).toEqual({
+    expect(detectEmojiAutocomplete(doc(paragraph('foo(:bar')), 9)).toEqual({
       active: false,
     })
   })
 
   it('does not open inside fenced code blocks', () => {
-    expect(detectEmojiAutocomplete(makeDocWithParent(':nope', codeBlock()), 6)).toEqual({
+    expect(detectEmojiAutocomplete(doc(codeBlock(':nope')), 6)).toEqual({
       active: false,
     })
   })
 
   it('does not open inside inline code marks', () => {
-    expect(
-      detectEmojiAutocomplete(
-        makeDocWithParent(':nope', paragraph(), [{ type: { name: 'inlineCode' } }]),
-        6,
-      ),
-    ).toEqual({ active: false })
+    expect(detectEmojiAutocomplete(doc(paragraph(codeMarkText(':nope'))), 6)).toEqual({
+      active: false,
+    })
   })
 
   it('closes once a space follows the query (no longer trailing at cursor)', () => {
-    expect(detectEmojiAutocomplete(makeDocWithParent(':foo bar', paragraph()), 9)).toEqual({
+    expect(detectEmojiAutocomplete(doc(paragraph(':foo bar')), 9)).toEqual({
       active: false,
     })
   })
 
   it('closes once the shortcode is closed with a second colon', () => {
-    expect(detectEmojiAutocomplete(makeDocWithParent(':smile:', paragraph()), 8)).toEqual({
+    expect(detectEmojiAutocomplete(doc(paragraph(':smile:')), 8)).toEqual({
       active: false,
     })
   })
@@ -123,7 +86,7 @@ describe('detectEmojiAutocomplete — :shortcode: picker trigger', () => {
 
 describe('detectCompleteEmojiShortcode — immediate-insert trigger', () => {
   it('detects a just-closed shortcode at the cursor', () => {
-    expect(detectCompleteEmojiShortcode(makeDocWithParent(':smile:', paragraph()), 8)).toEqual({
+    expect(detectCompleteEmojiShortcode(doc(paragraph(':smile:')), 8)).toEqual({
       from: 1,
       to: 8,
       shortcode: 'smile',
@@ -131,26 +94,24 @@ describe('detectCompleteEmojiShortcode — immediate-insert trigger', () => {
   })
 
   it('detects a just-closed shortcode after whitespace', () => {
-    // "nice :fire: today" — nodeStart is 1 (doc root offset convention),
-    // so the ":" at text index 5 sits at absolute pos 6, and the cursor
-    // right after the closing ":" (text index 11) sits at absolute pos 12.
+    // "nice :fire: today" — the text node starts at pos 1, so the ":" at
+    // text index 5 sits at absolute pos 6, and the cursor right after the
+    // closing ":" (text index 11) sits at absolute pos 12.
     expect(
-      detectCompleteEmojiShortcode(makeDocWithParent('nice :fire: today', paragraph()), 12),
+      detectCompleteEmojiShortcode(doc(paragraph('nice :fire: today')), 12),
     ).toEqual({ from: 6, to: 12, shortcode: 'fire' })
   })
 
   it('returns null while the shortcode is still open (no closing colon yet)', () => {
-    expect(detectCompleteEmojiShortcode(makeDocWithParent(':smile', paragraph()), 7)).toBeNull()
+    expect(detectCompleteEmojiShortcode(doc(paragraph(':smile')), 7)).toBeNull()
   })
 
   it('returns null for a single-character shortcode (below the 2-char minimum)', () => {
-    expect(detectCompleteEmojiShortcode(makeDocWithParent(':s:', paragraph()), 4)).toBeNull()
+    expect(detectCompleteEmojiShortcode(doc(paragraph(':s:')), 4)).toBeNull()
   })
 
   it('returns null inside fenced code blocks', () => {
-    expect(
-      detectCompleteEmojiShortcode(makeDocWithParent(':smile:', codeBlock()), 8),
-    ).toBeNull()
+    expect(detectCompleteEmojiShortcode(doc(codeBlock(':smile:')), 8)).toBeNull()
   })
 })
 

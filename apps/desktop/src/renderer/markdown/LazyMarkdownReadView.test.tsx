@@ -44,10 +44,13 @@ describe("LazyMarkdownReadView", () => {
       screen.getByTestId("error-boundary-markdown-read-view-retry"),
     );
 
+    expect(loader).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await loader.mock.results[1]!.value;
+    });
     expect(
       await screen.findByRole("heading", { name: "Recovered document" }),
     ).toBeTruthy();
-    expect(loader).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(onRendered).toHaveBeenCalledOnce());
   });
 

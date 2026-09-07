@@ -1,57 +1,7 @@
-# The pull-request gate this repository did not have.
-#
-# Before this, PRs had NO automated checks at all: "Desktop Release" is
-# state=disabled_manually (turned off 2026-07-01 after three failures),
-# "Engine tests (native matrix)" is registered but its workflow file no longer
-# exists on main. Every
-# open PR showed CodeRabbit as its only check -- with ten PRs queued behind the
-# Rust-engine cutover.
-#
-# What that cost, concretely: PR #272 added a workspace package to
-# apps/desktop dependencies without adding it to mainBundledWorkspaceDeps.
-# electron-vite then externalizes it, and workspace packages ship raw
-# TypeScript with extensionless relative imports, so the main process dies at
-# startup with ERR_MODULE_NOT_FOUND. Typecheck and the unit suite were both
-# green, because vitest and tsc resolve TypeScript sources directly.
-#
-# Scope is deliberately correctness, not release. Packaging, signing and update
-# manifests stay in Desktop Release. This workflow only claims to answer: does
-# the tree typecheck, do the tests pass, and does the Rust engine gate hold.
-#
-# COST MODEL (why every choice below looks the way it does): the whole gate
-# must fit Blacksmith's free tier -- 3,000 x64-2vCPU-minutes per month, where a
-# 4vCPU minute burns 2x. The three levers:
-#   1. Blacksmith rust-cache -- the previous incarnation compiled the entire
-#      workspace from scratch on every run.
-#   2. Prebuilt cargo-deny/cargo-audit via taiki-e/install-action (seconds,
-#      not ~15 compile-minutes each), still pinned to exact versions.
-#   3. Path filtering -- docs-only PRs cost ~1 minute; TypeScript-only PRs
-#      skip the engine gate. crates/** triggers BOTH jobs on purpose: the
-#      desktop e2e drives the real daemon binary, so a Rust change can break
-#      the JavaScript job.
-# Windows and macOS legs stay out of PR CI for the same budget reason: macOS
-# burns 20x, Windows 2x on slower runs. The canonical Windows gate runs
-# locally.
-# ------------------------------------------------------------------------
-# DISABLED ON PURPOSE (2026-07-28) -- dispatch-only, this is NOT an accident.
-#
-# Ice's call: pre-launch, the automated PR gate is not worth its run volume
-# yet. The jobs below are kept intact and working -- run them any time via
-# workflow_dispatch, or locally via the same scripts they call. Re-enable
-# when it makes more sense (approaching launch / first users) by restoring:
-#
-#   on:
-#     pull_request:
-#     push:
-#       branches: [main]
-#     merge_group:
-#     workflow_dispatch:
-#
-# and reverting the "deliberately disabled" test in
-# scripts/ci-verdict-provenance.test.mjs to its trigger-coverage version
-# (see the comment there). Until then: agents run the canonical gate and
-# the JS typecheck/tests locally before merging.
-# ------------------------------------------------------------------------
+# Cloud CI is out of budget. PR verification uses pnpm verify:pr locally.
+# Keep dispatch-only; a manual run requires a registered local Linux x64 runner.
+# The local verifier reads the path filters and tool pins below.
+# Packaging, signing, and update manifests stay in Desktop Release.
 name: PR checks
 
 on:
@@ -59,7 +9,7 @@ on:
 
 concurrency:
   group: pr-checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -70,13 +20,10 @@ env:
   CARGO_NEXTEST_VERSION: "0.9.143"
 
 jobs:
-  # ~30 seconds on the smallest runner. For pull_request events dorny reads
-  # the diff through the API (no checkout needed). merge_group and
-  # workflow_dispatch bypass the filter and run everything -- a merge queue and
-  # a manual dispatch both want the full answer, not a shortcut.
+  # Manual dispatch runs both jobs. The local verifier selects from these filters.
   changes:
     name: what changed
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 5
     permissions:
       pull-requests: read
@@ -156,7 +103,7 @@ jobs:
     name: typecheck + tests
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.js == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 30
     # packages/workspace-auth exercises Better Auth against a REAL Postgres: it
     # applies the actual 0001_better_auth.sql migration and drives session and
@@ -217,10 +164,7 @@ jobs:
 
       # Registry + ./target cache for the daemon debug build below. Keyed
       # separately from the engine gate's cache: the two jobs build different
-      # subsets and would thrash a shared target cache. Upstream Swatinem, not
-      # the useblacksmith fork -- the fork is archived (last push 2025-10);
-      # Blacksmith's cache service accelerates the standard cache API on its
-      # runners, so upstream is both maintained and fast there.
+      # subsets and would thrash a shared target cache.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: js-daemon
@@ -259,7 +203,7 @@ jobs:
     name: engine gate
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

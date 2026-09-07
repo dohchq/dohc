@@ -80,6 +80,39 @@ function yDocFromBody(content: JSONContent[]): Y.Doc {
   return doc
 }
 
+it('preserves an NBSP paragraph after a task list without changing code whitespace', () => {
+  const root: JSONContent = {
+    type: 'doc',
+    content: [
+      {
+        type: 'taskList',
+        content: [{ type: 'taskItem', attrs: { checked: false }, content: [
+          { type: 'paragraph', content: [{ type: 'text', text: 'Your next document' }] },
+        ] }],
+      },
+      { type: 'paragraph', content: [
+        { type: 'text', text: '\u00a0Merge verification note. ' },
+        { type: 'text', text: 'code\u00a0space', marks: [{ type: 'code' }] },
+      ] },
+      { type: 'codeBlock', content: [{ type: 'text', text: '\u00a0fenced code' }] },
+    ],
+  }
+  const markdown = serializeRichdocBody(root)
+  const restored = markdownToYDoc(markdown)
+  try {
+    const body = yXmlFragmentToProseMirrorRootNode(
+      getDohcYDocBodyFragment(restored),
+      getDohcProseMirrorSchema(),
+    ).toJSON()
+    expect(body).toMatchObject(root)
+    expect(markdown).toContain('`code\u00a0space`')
+    expect(markdown).toContain('\n\u00a0fenced code\n')
+    expect(yDocToMarkdown(restored)).toBe(markdown)
+  } finally {
+    restored.destroy()
+  }
+})
+
 function yDocBodyJSON(doc: Y.Doc): JSONContent {
   return yXmlFragmentToProseMirrorRootNode(
     getDohcYDocBodyFragment(doc),
