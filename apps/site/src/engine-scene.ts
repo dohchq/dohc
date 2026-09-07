@@ -1,233 +1,111 @@
-import * as THREE from "three";
-import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { createInlineSixEngine } from "./inline-six-model";
+import type { EngineWorkerRequest, EngineWorkerResponse } from './engine-worker-types';
 
-export async function mountEngine(host: HTMLElement) {
-  let cancelled = false;
-  if (import.meta.hot) import.meta.hot.dispose(() => { cancelled = true; });
-  // Poly Haven Studio Small 09, CC0: https://polyhaven.com/a/studio_small_09
-  const studioTexture = await new HDRLoader().loadAsync("/engine-studio.hdr");
-  if (cancelled || !host.isConnected) {
-    studioTexture.dispose();
-    return;
-  }
-  let renderer: THREE.WebGLRenderer;
-  try {
-    renderer = new THREE.WebGLRenderer({
-      alpha: true,
-      antialias: true,
-      powerPreference: "low-power",
-    });
-  } catch {
-    studioTexture.dispose();
-    return;
-  }
+export function mountEngine(host: HTMLElement) {
+  const canvas = document.createElement('canvas');
+  if (!canvas.transferControlToOffscreen || typeof Worker === 'undefined') return;
+  const worker = new Worker(new URL('./engine-renderer.worker.ts', import.meta.url), { type: 'module' });
+  const send = (message: EngineWorkerRequest) => worker.postMessage(message);
   const lifetime = new AbortController();
-  const signal = lifetime.signal;
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
-  renderer.setClearColor(0, 0);
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.0;
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.VSMShadowMap;
-  host.append(renderer.domElement);
-  const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(33, 1, 0.1, 60);
-  const controls = new OrbitControls(camera, renderer.domElement);
-  controls.enablePan = false;
-  controls.enableZoom = false;
-  controls.enableDamping = false;
-  controls.rotateSpeed = 0.65;
-  controls.autoRotateSpeed = 0.28;
-  controls.minPolarAngle = 0.2;
-  controls.maxPolarAngle = Math.PI * 0.8;
-  renderer.domElement.style.touchAction = "pan-y";
-  const { engine, dispose: disposeModel } = createInlineSixEngine();
-  scene.add(engine);
-  const box = new THREE.Box3().setFromObject(engine);
-  const center = box.getCenter(new THREE.Vector3());
-  const radius = box.getBoundingSphere(new THREE.Sphere()).radius;
-  const groundGeometry = new THREE.PlaneGeometry(30, 30);
-  const groundMaterial = new THREE.ShadowMaterial({ opacity: 0.12, depthWrite: false });
-  const ground = new THREE.Mesh(groundGeometry, groundMaterial);
-  ground.rotation.x = -Math.PI / 2;
-  ground.position.y = box.min.y - 0.015;
-  ground.receiveShadow = true;
-  scene.add(ground);
-  controls.target.copy(center);
-  const cameraDirection = new THREE.Vector3(10, 6.5, 7).normalize();
-  camera.position.copy(center).addScaledVector(cameraDirection, 14);
-  controls.update();
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  const environment = pmrem.fromEquirectangular(studioTexture);
-  studioTexture.dispose();
-  scene.environment = environment.texture;
-  scene.environmentIntensity = 0.7;
-  scene.environmentRotation.y = 0.75;
-  pmrem.dispose();
-  scene.add(new THREE.HemisphereLight(0xe9efff, 0x8c8274, 0.3));
-  const key = new THREE.DirectionalLight(0xfff5e9, 1.6);
-  key.position.set(-2, 10, 3);
-  key.castShadow = true;
-  key.shadow.mapSize.set(1024, 1024);
-  Object.assign(key.shadow.camera, {
-    left: -5,
-    right: 5,
-    top: 5,
-    bottom: -5,
-    near: 0.1,
-    far: 22,
-  });
-  key.shadow.camera.updateProjectionMatrix();
-  key.shadow.normalBias = 0.025;
-  key.shadow.bias = -0.0001;
-  key.shadow.radius = 8;
-  key.shadow.blurSamples = 12;
-  scene.add(key);
-  const fill = new THREE.DirectionalLight(0xdbe6ff, 0.65);
-  fill.position.set(5, 2, -3);
-  scene.add(fill);
-  renderer.shadowMap.autoUpdate = false;
-  renderer.shadowMap.needsUpdate = true;
-  const motion = matchMedia("(prefers-reduced-motion: reduce)");
-  let dragging = false;
-  let visible = true;
-  let frame = 0;
-  let last = 0;
-  let disposed = false;
-  function syncRotation() {
-    controls.autoRotate = !motion.matches && !dragging;
-    requestDraw();
-  }
-  function draw(time: number) {
+  const { signal } = lifetime;
+  let theta = Math.atan2(10, 7);
+  let phi = Math.atan2(Math.hypot(10, 7), 6.5);
+  const clampPhi = (value: number) => Math.max(.2, Math.min(Math.PI * .8, value));
+  canvas.style.touchAction = 'pan-y';
+  canvas.tabIndex = 0;
+  canvas.setAttribute('role', 'img');
+  canvas.setAttribute('aria-label', 'DOHC inline-six engine model. Grab and hold to pause. Drag or use arrow keys to rotate.');
+  host.append(canvas);
+  const motion = matchMedia('(prefers-reduced-motion: reduce)');
+  let ready = false, disposed = false, visible = true, dragging = false;
+  let frame = 0, last = 0, lastDraw = 0;
+  let width = host.clientWidth, height = host.clientHeight;
+
+  function draw(now: number) {
     frame = 0;
-    if (disposed || !visible || document.hidden) return;
-    const dt = Math.min((time - last) / 1000, 0.05);
-    last = time;
-    controls.update(dt);
-    renderer.render(scene, camera);
-    if (controls.autoRotate) frame = requestAnimationFrame(draw);
+    if (!ready || disposed || !visible || document.hidden || !width || !height) return;
+    if (now - lastDraw < 1000 / 60 - 1) { frame = requestAnimationFrame(draw); return; }
+    lastDraw = now;
+    if (!motion.matches && !dragging) theta -= Math.PI * 2 / 60 * .28 * Math.min((now - last) / 1000, .05);
+    last = now;
+    send({ type: 'view', view: { width, height, theta, phi } });
+    if (!motion.matches && !dragging) frame = requestAnimationFrame(draw);
   }
   function requestDraw() {
-    if (!frame && !disposed && visible && !document.hidden) {
+    if (!frame && ready && !disposed && visible && !document.hidden) {
       last = performance.now();
       frame = requestAnimationFrame(draw);
     }
   }
   function fit() {
-    const width = host.clientWidth,
-      height = host.clientHeight;
-    if (!width || !height) return;
-    renderer.setSize(width, height, false);
-    camera.aspect = width / height;
-    const halfFov = THREE.MathUtils.degToRad(camera.fov / 2);
-    const limitingFov = Math.min(
-      halfFov,
-      Math.atan(Math.tan(halfFov) * camera.aspect),
-    );
-    const distance = (radius / Math.sin(limitingFov)) * 0.83;
-    camera.position
-      .sub(center)
-      .normalize()
-      .multiplyScalar(distance)
-      .add(center);
-    camera.updateProjectionMatrix();
-    controls.update();
+    width = host.clientWidth; height = host.clientHeight;
+    if (!width || !height || !ready) return;
     requestDraw();
   }
-  const resize = new ResizeObserver(fit);
-  resize.observe(host);
-  const intersection = new IntersectionObserver(([entry]) => {
-    visible = entry.isIntersecting;
-    if (visible) requestDraw();
-    else {
-      cancelAnimationFrame(frame);
-      frame = 0;
-    }
-  });
+  function syncVisibility() {
+    send({ type: 'visible', visible: visible && !document.hidden });
+    if (visible && !document.hidden) requestDraw();
+    else { cancelAnimationFrame(frame); frame = 0; }
+  }
+  const resize = new ResizeObserver(fit); resize.observe(host);
+  const intersection = new IntersectionObserver(([entry]) => { visible = entry.isIntersecting; syncVisibility(); });
   intersection.observe(host);
-  document.addEventListener(
-    "visibilitychange",
-    () => {
-      if (document.hidden) {
-        cancelAnimationFrame(frame);
-        frame = 0;
-      } else if (visible) requestDraw();
-    },
-    { signal },
-  );
-  motion.addEventListener("change", syncRotation, { signal });
-  controls.addEventListener("start", () => {
+  document.addEventListener('visibilitychange', syncVisibility, { signal });
+  motion.addEventListener('change', requestDraw, { signal });
+  let pointer: { id: number; x: number; y: number } | undefined;
+  canvas.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || pointer) return;
+    pointer = { id: event.pointerId, x: event.clientX, y: event.clientY };
+    canvas.setPointerCapture(event.pointerId);
     dragging = true;
-    syncRotation();
-  });
-  controls.addEventListener("end", () => {
+    requestDraw();
+  }, { signal });
+  canvas.addEventListener('pointermove', event => {
+    if (!pointer || pointer.id !== event.pointerId) return;
+    const scale = Math.PI * 2 * .65 / Math.max(height, 1);
+    theta -= (event.clientX - pointer.x) * scale;
+    phi = clampPhi(phi - (event.clientY - pointer.y) * scale);
+    pointer.x = event.clientX; pointer.y = event.clientY;
+    requestDraw();
+  }, { signal });
+  const release = (event: PointerEvent) => {
+    if (event.pointerId !== pointer?.id) return;
+    pointer = undefined;
     dragging = false;
-    syncRotation();
-  });
-  controls.addEventListener("change", () => {
-    if (!controls.autoRotate) requestDraw();
-  });
-  renderer.domElement.tabIndex = 0;
-  renderer.domElement.setAttribute("role", "img");
-  renderer.domElement.setAttribute(
-    "aria-label",
-    "DOHC inline-six engine model. Grab and hold to pause. Drag or use arrow keys to rotate.",
-  );
-  renderer.domElement.addEventListener(
-    "keydown",
-    (event) => {
-      if (
-        !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)
-      )
-        return;
-      event.preventDefault();
-      const spherical = new THREE.Spherical().setFromVector3(
-        camera.position.clone().sub(center),
-      );
-      if (event.key === "ArrowLeft") spherical.theta -= 0.12;
-      if (event.key === "ArrowRight") spherical.theta += 0.12;
-      if (event.key === "ArrowUp")
-        spherical.phi = Math.max(controls.minPolarAngle, spherical.phi - 0.12);
-      if (event.key === "ArrowDown")
-        spherical.phi = Math.min(controls.maxPolarAngle, spherical.phi + 0.12);
-      camera.position
-        .copy(center)
-        .add(new THREE.Vector3().setFromSpherical(spherical));
-      controls.autoRotate = false;
-      controls.update();
-      syncRotation();
-    },
-    { signal },
-  );
-  renderer.domElement.addEventListener(
-    "webglcontextlost",
-    (event) => {
-      event.preventDefault();
-      dispose();
-    },
-    { once: true, signal },
-  );
-  syncRotation();
-  host.classList.add("engine-loaded");
-  fit();
+    requestDraw();
+  };
+  canvas.addEventListener('pointerup', release, { signal });
+  canvas.addEventListener('pointercancel', release, { signal });
+  canvas.addEventListener('lostpointercapture', release, { signal });
+  canvas.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    event.preventDefault();
+    if (event.key === 'ArrowLeft') theta -= .12;
+    if (event.key === 'ArrowRight') theta += .12;
+    if (event.key === 'ArrowUp') phi = clampPhi(phi - .12);
+    if (event.key === 'ArrowDown') phi = clampPhi(phi + .12);
+    requestDraw();
+  }, { signal });
+  worker.addEventListener('message', ({ data }: MessageEvent<EngineWorkerResponse>) => {
+    if (disposed) return;
+    if (data.type === 'ready') {
+      ready = true;
+      fit();
+    } else if (data.type === 'rendered') host.classList.add('engine-loaded');
+    else dispose();
+  }, { signal });
+  worker.addEventListener('error', dispose, { signal });
+  const offscreen = canvas.transferControlToOffscreen();
+  worker.postMessage({ type: 'init', canvas: offscreen, pixelRatio: Math.min(devicePixelRatio, 1.75), studioUrl: new URL('/engine-studio.hdr', location.href).href } satisfies EngineWorkerRequest, [offscreen]);
+
   function dispose() {
     if (disposed) return;
     disposed = true;
     cancelAnimationFrame(frame);
     lifetime.abort();
-    resize.disconnect();
-    intersection.disconnect();
-    controls.dispose();
-    disposeModel();
-    groundGeometry.dispose();
-    groundMaterial.dispose();
-    environment.dispose();
-    renderer.dispose();
-    renderer.domElement.remove();
-    host.classList.remove("engine-loaded");
+    resize.disconnect(); intersection.disconnect();
+    worker.terminate(); canvas.remove();
+    host.classList.remove('engine-loaded');
   }
   if (import.meta.hot) import.meta.hot.dispose(dispose);
+  return dispose;
 }

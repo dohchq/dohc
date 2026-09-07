@@ -110,7 +110,7 @@ function configureDownloadControl(control, preferredKey) {
     primaryLabel.textContent = build ? `Download for ${build.label}` : 'Download dohc';
     primaryIcon.setAttribute('href', `#os-${build?.icon ?? 'download'}`);
     primary.closest('[data-download-control]').dataset.detectedPlatform = build?.platform ?? 'unknown';
-    primary.setAttribute('aria-label', build ? `Download dohc for ${build.label}, ${build.detail}` : 'View dohc downloads');
+    primary.setAttribute('aria-label', build ? `Download for ${build.label}, ${build.detail}` : 'Download dohc');
   };
 
   control.updateResolvedDownloads = updatePrimary;
@@ -134,26 +134,12 @@ preferredDownloadKey().then((key) => {
   updateStandaloneDownloadLinks();
 });
 
-if (downloadControls.length) {
-  fetch('https://api.github.com/repos/dohc-ai/dohc/releases?per_page=10', {
-    headers: { Accept: 'application/vnd.github+json' },
-  })
-    .then((response) => response.ok ? response.json() : Promise.reject(new Error('No published release')))
-    .then((releases) => {
-      const available = releases.filter((release) => !release.draft && release.assets?.length);
-      const release = available.find((candidate) => !candidate.prerelease) ?? available[0];
-      if (!release) return;
-      Object.values(downloadBuilds).forEach((build) => {
-        const asset = release.assets.find((candidate) => build.matches(candidate.name));
-        if (asset?.browser_download_url) build.url = asset.browser_download_url;
-      });
-      downloadControls.forEach((control) => control.updateResolvedDownloads?.());
-      updateStandaloneDownloadLinks();
-    })
-    .catch(() => {
-      // The releases page remains a useful fallback before the first public build.
-    });
-}
+// Resolve assets at build time so visitors do not depend on GitHub's API.
+Object.values(downloadBuilds).forEach((build) => {
+  const asset = __DOHC_RELEASE_ASSETS__.find((candidate) => build.matches(candidate.name));
+  if (asset?.browser_download_url) build.url = asset.browser_download_url;
+});
+updateStandaloneDownloadLinks();
 
 const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const targets = document.querySelectorAll('.reveal');
@@ -361,7 +347,11 @@ if (principlesGraph) {
       renderGraph();
     };
 
+    let lastStep = 0;
     const step = (time) => {
+      if (document.hidden || !graphIsVisible) { frame = null; return; }
+      if (time - lastStep < 1000 / 60 - 1) { frame = requestAnimationFrame(step); return; }
+      lastStep = time;
       const activeAlpha = points.some((point) => point.dragging)
         ? Math.max(alpha, 0.22)
         : Math.max(alpha, 0.06);
@@ -571,6 +561,12 @@ if (principlesGraph) {
     layoutGraph();
     const graphResizeObserver = new ResizeObserver(layoutGraph);
     graphResizeObserver.observe(principleCanvas);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        if (frame !== null) cancelAnimationFrame(frame);
+        frame = null;
+      } else restartPhysics(0.16);
+    });
 
     if ('IntersectionObserver' in window) {
       const graphObserver = new IntersectionObserver(([entry]) => {
@@ -854,6 +850,8 @@ if (syncDemo) {
     const run = (now) => {
       if (handle.done) return;
       handle.done = true;
+      cancelAnimationFrame(handle.raf);
+      clearTimeout(handle.timer);
       fn(now || performance.now());
     };
     handle.raf = requestAnimationFrame(run);
@@ -970,7 +968,26 @@ if (syncDemo) {
   // ---------- autoplay ----------
   let typing = false;
   let typeFrame = null;
-  const wait = (ms) => new Promise((resolve) => { timers.push(setTimeout(resolve, ms)); });
+  let autoplayVisible = false;
+  const foregroundWaiters = new Set();
+  const canAutoplay = () => autoplayVisible && !document.hidden;
+  const whenVisible = () => manual || canAutoplay() ? Promise.resolve() : new Promise(resolve => foregroundWaiters.add(resolve));
+  const resumeAutoplay = () => {
+    syncDemo.classList.toggle('is-autoplay-paused', !manual && !canAutoplay());
+    if (manual || canAutoplay()) {
+      foregroundWaiters.forEach(resolve => resolve());
+      foregroundWaiters.clear();
+    }
+  };
+  const wait = async (ms) => {
+    await whenVisible();
+    if (manual) return;
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => { timers = timers.filter(id => id !== timer); resolve(); }, ms);
+      timers.push(timer);
+    });
+    await whenVisible();
+  };
   const clearTimers = () => {
     timers.forEach(clearTimeout);
     timers = [];
@@ -980,11 +997,17 @@ if (syncDemo) {
 
   const type = (el, text) => new Promise((resolve) => {
     const startValue = el.value;
-    const t0 = performance.now();
+    let t0 = performance.now();
     let shown = 0;
     typing = true;
     const frame = (now) => {
       if (manual) { typing = false; typeFrame = null; resolve(); return; }
+      if (!canAutoplay()) {
+        const pausedAt = performance.now();
+        typeFrame = null;
+        whenVisible().then(() => { t0 += performance.now() - pausedAt; typeFrame = tick(frame); });
+        return;
+      }
       const want = Math.min(text.length, Math.floor((now - t0) / 42));
       if (want > shown) {
         shown = want;
@@ -1002,6 +1025,7 @@ if (syncDemo) {
     a.classList.add('is-fading');
     b.classList.add('is-fading');
     await wait(380);
+    if (manual) return;
     a.value = START; b.value = START; base = START;
     a.classList.remove('is-fading');
     b.classList.remove('is-fading');
@@ -1030,7 +1054,9 @@ if (syncDemo) {
   const takeOver = () => {
     if (manual) return;
     manual = true;
+    resumeAutoplay();
     clearTimers();
+    typing = false;
     [a, b].forEach((el) => { stopReceiving(el); el.classList.remove('is-fading'); });
     if (toggle.checked) {
       const m = merge(base, a.value, b.value);
@@ -1053,15 +1079,16 @@ if (syncDemo) {
     // by the time anyone sees it.
     let started = false;
     const start = () => { if (!started) { started = true; play(); } };
+    document.addEventListener('visibilitychange', resumeAutoplay);
     if ('IntersectionObserver' in window) {
       const io = new IntersectionObserver((entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) { io.disconnect(); start(); }
-      }, { rootMargin: '200px 0px' });
+        autoplayVisible = entries.some((entry) => entry.isIntersecting);
+        resumeAutoplay();
+        if (autoplayVisible) start();
+      });
       io.observe(syncDemo);
-      // Some embedded browsers never deliver observer callbacks; poll as a floor.
-      const near = () => syncDemo.getBoundingClientRect().top < innerHeight + 200;
-      const poll = setInterval(() => { if (started) clearInterval(poll); else if (near()) { clearInterval(poll); start(); } }, 500);
     } else {
+      autoplayVisible = true;
       start();
     }
   }

@@ -6,8 +6,7 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 export function createInlineSixEngine() {
   const engine = new THREE.Group();
   const textures: THREE.Texture[] = [];
-  const grainCanvas = document.createElement("canvas");
-  grainCanvas.width = grainCanvas.height = 256;
+  const grainCanvas = new OffscreenCanvas(256, 256);
   const grainContext = grainCanvas.getContext("2d")!;
   const pixels = grainContext.createImageData(256, 256);
   let seed = 6419;
@@ -78,8 +77,7 @@ export function createInlineSixEngine() {
     roughness: 0.7,
   });
 
-  const brushedCanvas = document.createElement("canvas");
-  brushedCanvas.width = brushedCanvas.height = 256;
+  const brushedCanvas = new OffscreenCanvas(256, 256);
   const brushedContext = brushedCanvas.getContext("2d")!;
   const brushedPixels = brushedContext.createImageData(256, 256);
   for (let y = 0; y < 256; y++) {
@@ -320,8 +318,7 @@ export function createInlineSixEngine() {
   box([0.23, 0.045, 0.06], [0, 0.48, -1.95], steel, intakeCover, 0.012);
   // Fine red enamel inset, shared with the small ignition details.
   box([0.23, 0.012, 0.72], [0, 0.362, 0.1], red, intakeCover, 0.025);
-  const badgeCanvas = document.createElement('canvas');
-  badgeCanvas.width = 512; badgeCanvas.height = 128;
+  const badgeCanvas = new OffscreenCanvas(512, 128);
   const badgeContext = badgeCanvas.getContext('2d')!;
   badgeContext.fillStyle = '#f2eee7';
   badgeContext.font = '500 84px Arial';

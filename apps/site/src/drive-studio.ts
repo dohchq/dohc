@@ -65,10 +65,13 @@ export async function mountDriveStudio(host: HTMLElement) {
   let disposed = false;
   let frame = 0;
   let previous = 0;
+  let lastDraw = 0;
   let elapsed = 0;
   function draw(now: number) {
     frame = 0;
     if (disposed || !visible || document.hidden) return;
+    if (now - lastDraw < 1000 / 60 - 1) { frame = requestAnimationFrame(draw); return; }
+    lastDraw = now;
     const dt = Math.min((now - previous) / 1000, .05); previous = now;
     if (!motion.matches && !held) { elapsed += dt; model.update(elapsed); }
     renderer.render(scene, camera);

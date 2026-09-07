@@ -1,10 +1,44 @@
 import * as T from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 export interface DriveModel {
   root: T.Group;
   update: (time: number) => void;
   dispose: () => void;
+}
+
+function batchAssemblies(assemblies: T.Group[]) {
+  const moving = new Set(assemblies.slice(1));
+  const originals = new Set<T.BufferGeometry>();
+  assemblies[0].updateMatrixWorld(true);
+  for (const assembly of assemblies) {
+    const inverse = assembly.matrixWorld.clone().invert();
+    const batches = new Map<string, { material: T.Material; cast: boolean; receive: boolean; geometries: T.BufferGeometry[] }>();
+    const meshes: T.Mesh[] = [];
+    const visit = (object: T.Object3D) => {
+      if (object !== assembly && moving.has(object as T.Group)) return;
+      if (object instanceof T.Mesh && !Array.isArray(object.material)) meshes.push(object);
+      object.children.forEach(visit);
+    };
+    visit(assembly);
+    for (const mesh of meshes) {
+      const material = mesh.material as T.Material;
+      const key = `${material.uuid}:${mesh.castShadow}:${mesh.receiveShadow}`;
+      const batch = batches.get(key) ?? { material, cast: mesh.castShadow, receive: mesh.receiveShadow, geometries: [] };
+      const geometry = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry.clone();
+      geometry.applyMatrix4(new T.Matrix4().multiplyMatrices(inverse, mesh.matrixWorld));
+      batch.geometries.push(geometry); batches.set(key, batch);
+      originals.add(mesh.geometry); mesh.removeFromParent();
+    }
+    for (const batch of batches.values()) {
+      const mesh = new T.Mesh(mergeGeometries(batch.geometries)!, batch.material);
+      mesh.castShadow = batch.cast; mesh.receiveShadow = batch.receive;
+      assembly.add(mesh);
+      batch.geometries.forEach(geometry => geometry.dispose());
+    }
+  }
+  originals.forEach(geometry => geometry.dispose());
 }
 
 function workshop() {
@@ -172,5 +206,6 @@ export function createDifferential(): DriveModel {
     bolt([Math.cos(a) * .27, 3.49, Math.sin(a) * .27], .035, shaft);
   }
   w.label('dohc', .5, .15, [.0, -1.36, .7]);
+  batchAssemblies([root, carrier, shaft]);
   return { root, update: time => { carrier.rotation.y = time * .2; shaft.rotation.y = -time * .2 * 44 / 16; }, dispose: w.dispose };
 }

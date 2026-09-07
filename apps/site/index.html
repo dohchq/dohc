@@ -9,9 +9,9 @@
 <meta property="og:description" content="Build documents, data, dashboards, and workflows with your agents. Your workspace stays on your computer, in files you control." />
 <meta property="og:type" content="website" />
 <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Homemade+Apple&family=Inter:wght@400..800&family=Source+Serif+4:ital,wght@0,400..700;1,400..700&display=swap" rel="stylesheet" />
+<link rel="preload" href="/node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="/node_modules/@fontsource-variable/source-serif-4/files/source-serif-4-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="/node_modules/@fontsource-variable/source-serif-4/files/source-serif-4-latin-wght-italic.woff2" as="font" type="font/woff2" crossorigin />
 <link rel="stylesheet" href="styles.css" />
 <script>
   // Set theme before first paint to avoid a flash.
@@ -89,7 +89,7 @@
     </div>
     <figure class="hero-engine">
       <div class="hero-engine-view" data-engine-host role="group" aria-label="Interactive DOHC inline-six engine model">
-        <img class="hero-engine-poster" src="/inline-six-engine.png" alt="Jaguar XK-inspired inline-six engine with sealed polished aluminum cam covers, triple carburetors and curved exhaust headers." />
+        <img class="hero-engine-poster" src="/inline-six-engine.webp" srcset="/inline-six-engine-480.webp 480w, /inline-six-engine.webp 852w" sizes="(max-width: 780px) 90vw, (min-width: 1240px) 550px, 42vw" width="852" height="765" fetchpriority="high" alt="Jaguar XK-inspired inline-six engine with sealed polished aluminum cam covers, triple carburetors and curved exhaust headers." />
       </div>
     </figure>
   </section>
@@ -97,7 +97,7 @@
   <!-- ============ interactive desktop demo ============ -->
   <section class="section demo-section" id="demo" aria-label="Interactive dohc workspace demo">
     <div class="demo-stage reveal">
-      <div id="desktop-demo" aria-label="Interactive demo of the dohc desktop app"></div>
+      <div id="desktop-demo" role="group" aria-label="Interactive demo of the dohc desktop app"></div>
     </div>
   </section>
 
