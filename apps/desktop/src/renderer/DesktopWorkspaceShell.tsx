@@ -29,7 +29,6 @@ import type {
   ChatFileMentionRecord,
   ChatThreadRecord,
   DesktopUserSettingsResult,
-  DmRecord,
   EngineMomentRecord,
   EngineStoreRefusal,
   ImportWorkspaceFilesResult,
@@ -72,6 +71,7 @@ import {
   graphChatOpenTarget,
   type DmChatLocator,
 } from "./shell/chatOpenTarget";
+import { runCanonicalDmNavigation } from "./shell/canonicalDmNavigation";
 import { useAgentSetup } from "./shell/useAgentSetup";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import { useTabTitles } from "./shell/useTabTitles";
@@ -373,50 +373,6 @@ export function chatsOffCopy(syncStatus: SyncStatusResult | null): string {
   // Main has not said anything is wrong, so the chat read failing is all
   // this surface knows. No cause, and no claim about what exists.
   return "Chats are unavailable. dohc could not confirm whether this workspace has chats. Restart dohc to try again.";
-}
-
-export function resolveCanonicalDm(
-  locator: DmChatLocator,
-  dms: readonly DmRecord[],
-): DmRecord | null {
-  // A renderer-supplied graph/backlink row is only a locator. Never construct
-  // a DM record from its display metadata: require a canonical main-derived DM
-  // with the same running thread and every available stable channel identity.
-  if (!locator.channelId && !locator.channelWireId) return null;
-  return dms.find(
-    (dm) =>
-      dm.threadId === locator.threadId &&
-      (!locator.channelId || dm.channelId === locator.channelId) &&
-      (!locator.channelWireId || dm.channelWireId === locator.channelWireId),
-  ) ?? null;
-}
-
-export async function runCanonicalDmNavigation(input: {
-  locator: DmChatLocator;
-  syncDms: () => Promise<{ available: boolean; dms: DmRecord[] }>;
-  isCurrent: () => boolean;
-  open: (nav: Extract<ChatsNav, { level: "dm" }> | { level: "channels" }) => void;
-}): Promise<void> {
-  try {
-    const result = await input.syncDms();
-    if (!input.isCurrent()) return;
-    // `available` controls whether a new DM can be created; it does not make
-    // already-local conversations unreadable while signed out or offline.
-    const dm = resolveCanonicalDm(input.locator, result.dms);
-    input.open(
-      dm
-        ? {
-            level: "dm",
-            dm,
-            ...(input.locator.focusMessageId
-              ? { focusMessageId: input.locator.focusMessageId }
-              : {}),
-          }
-        : { level: "channels" },
-    );
-  } catch {
-    if (input.isCurrent()) input.open({ level: "channels" });
-  }
 }
 
 /** The record a pending canonical DM navigation checks itself against. */
