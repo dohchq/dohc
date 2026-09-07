@@ -6663,7 +6663,11 @@ describe("ui-state merge-on-load", () => {
     renderShell(bridge);
 
     // A second listing is issued while the first is still in flight.
-    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+      expect(screen.getByTestId("tab-live.md")).toBeTruthy();
+    });
     act(() => {
       bridge.emitWorkspaceActivity();
     });
