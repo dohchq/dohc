@@ -6974,22 +6974,25 @@ fn seed_scene_from_artifact_on_store(
     // guarded closure can run again after a crash retry, so it rebuilds the
     // list from scratch each attempt.
     let mut created_moment_ids: Vec<String> = Vec::new();
-    let outcome = dohc_engine_collab::record_local_update_creating_marker_guarded(
+    let outcome = dohc_engine_collab::record_local_update(
         store,
         doc_cache,
         key,
-        Some(path),
-        ContentKind::Scene,
-        Regime::LocalOnly,
         &seed_update,
-        None,
-        None,
-        true,
-        true,
-        Some(&request_id),
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some(path),
+                content_kind: ContentKind::Scene,
+                regime: Regime::LocalOnly,
+            }),
+            ensure_parent_row: true,
+            require_empty_lineage: true,
+            request_id: Some(&request_id),
+            ..Default::default()
+        },
         faults,
         now_ms,
-        |tx, _| {
+        |tx, _, _update_sha| {
             created_moment_ids.clear();
             let version_is_active: bool = tx
                 .query_row(
@@ -7427,25 +7430,31 @@ fn ydoc_record_update_on_store(
     let journal_key = key.clone();
     let journal_path = path.to_owned();
     let journal_kind = content_kind;
-    match dohc_engine_collab::record_local_update_creating_marker_guarded_for_lineage(
+    match dohc_engine_collab::record_local_update(
         store,
         doc_cache,
         key,
-        Some(path),
-        content_kind,
-        regime,
         update,
-        actor_origin_id.as_deref(),
-        attribution.as_ref(),
-        expected_lineage_claim_id.as_deref(),
-        // Parent row, seed guard, marker, append, and outbound journal all
-        // commit in one transaction — no bare-parent crash window, and a
-        // timed-out-commit seed retry dedupes inside the guard instead of
-        // refusing seed-onto-existing-lineage.
-        true,
-        require_empty_lineage,
-        seed_source_sha256.as_deref(),
-        request_id.as_deref(),
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some(path),
+                content_kind,
+                regime,
+            }),
+            actor_origin_id: actor_origin_id.as_deref(),
+            attribution: attribution.as_ref(),
+            lineage_guard: dohc_engine_collab::LineageGuard::Expect(
+                expected_lineage_claim_id.as_deref(),
+            ),
+            // Parent row, seed guard, marker, append, and outbound journal all
+            // commit in one transaction — no bare-parent crash window, and a
+            // timed-out-commit seed retry dedupes inside the guard instead of
+            // refusing seed-onto-existing-lineage.
+            ensure_parent_row: true,
+            require_empty_lineage,
+            seed_source_sha256: seed_source_sha256.as_deref(),
+            request_id: request_id.as_deref(),
+        },
         faults,
         now_ms,
         |tx, outcome, update_sha| {
@@ -11736,17 +11745,22 @@ mod collection_relation_cleanup_tests {
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
             .expect("seed rich document");
         let mut cache = WriterDocCache::new();
-        let appended = dohc_engine_collab::record_local_update_creating_marker(
+        let appended = dohc_engine_collab::record_local_update(
             &mut store,
             &mut cache,
             &key,
-            Some(SOURCE_PATH),
-            ContentKind::Richdoc,
-            Regime::LocalOnly,
             &doc.encode_full_state(),
-            None,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some(SOURCE_PATH),
+                    content_kind: ContentKind::Richdoc,
+                    regime: Regime::LocalOnly,
+                }),
+                ..Default::default()
+            },
             &NoFaults,
             4,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("seed source lineage");
         assert!(matches!(appended, TxnOutcome::Committed(_)));
@@ -11847,22 +11861,23 @@ mod doc_cache_reset_tests {
         let key = DocKey::new("workspace", "main", "document").expect("document key");
         let update = Ydoc::wire().plaintext_insert(0, "cached");
         let mut cache = WriterDocCache::new();
-        let appended = dohc_engine_collab::record_local_update_creating_marker_guarded(
+        let appended = dohc_engine_collab::record_local_update(
             &mut store,
             &mut cache,
             &key,
-            Some("document.md"),
-            ContentKind::Plaintext,
-            Regime::LocalOnly,
             &update,
-            None,
-            None,
-            true,
-            false,
-            None,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some("document.md"),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                ensure_parent_row: true,
+                ..Default::default()
+            },
             &NoFaults,
             2,
-            |_tx, _outcome| Ok(()),
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("append update");
         assert!(matches!(appended, TxnOutcome::Committed(_)));
