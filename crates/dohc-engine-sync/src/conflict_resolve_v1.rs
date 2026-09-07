@@ -4018,7 +4018,14 @@ mod tests {
             &crate::NoLiveLeases,
         );
         assert!(
-            matches!(applied, Ok(crate::ApplyOutcome::Applied(_))),
+            matches!(
+                applied,
+                Ok(crate::ApplyOutcome {
+                    primary: crate::ApplyDisposition::Applied(_),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+            ),
             "scene resolution replay failed: {applied:?}",
         );
         assert_eq!(
@@ -4083,7 +4090,14 @@ mod tests {
             &crate::NoLiveLeases,
         );
         assert!(
-            matches!(applied, Ok(crate::ApplyOutcome::Applied(_))),
+            matches!(
+                applied,
+                Ok(crate::ApplyOutcome {
+                    primary: crate::ApplyDisposition::Applied(_),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+            ),
             "scene asset reinstall replay failed: {applied:?}",
         );
         assert_eq!(scene_asset_head(&receiver), second_sender_asset);
@@ -4281,7 +4295,14 @@ mod tests {
             &crate::NoLiveLeases,
         )
         .expect("apply parent");
-        assert!(matches!(outcome, crate::ApplyOutcome::Applied(_)));
+        assert!(matches!(
+            outcome,
+            crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ));
         let (text, latest): (String, String) = store
             .read_with(|conn| {
                 conn.query_row(
@@ -4328,7 +4349,11 @@ mod tests {
                 &NoFaults,
                 &crate::NoLiveLeases
             ),
-            Ok(crate::ApplyOutcome::Applied(_))
+            Ok(crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         let moments_after: i64 = store
             .read_with(|conn| {
@@ -4378,7 +4403,11 @@ mod tests {
                 &NoFaults,
                 &leases
             ),
-            Ok(crate::ApplyOutcome::Applied(_))
+            Ok(crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         let after: (String, i64) = store
             .read_with(|conn| {
@@ -4453,7 +4482,14 @@ mod tests {
             &crate::NoLiveLeases,
         );
         assert!(
-            matches!(parent_outcome, Ok(crate::ApplyOutcome::Refused(_))),
+            matches!(
+                parent_outcome,
+                Ok(crate::ApplyOutcome {
+                    primary: crate::ApplyDisposition::Refused(_),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+            ),
             "poisoned successor must refuse its parent: {parent_outcome:?}",
         );
         store
@@ -4476,7 +4512,14 @@ mod tests {
             &crate::NoLiveLeases,
         );
         assert!(
-            matches!(outcome, Ok(crate::ApplyOutcome::Applied(_))),
+            matches!(
+                outcome,
+                Ok(crate::ApplyOutcome {
+                    primary: crate::ApplyDisposition::Applied(_),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+            ),
             "the refused parent's authenticated shadow must retire without applying: {outcome:?}",
         );
         assert_eq!(
@@ -4569,7 +4612,11 @@ mod tests {
                 &NoFaults,
                 &crate::NoLiveLeases,
             ),
-            Ok(crate::ApplyOutcome::Refused(_))
+            Ok(crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Refused(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         let child = imported_envelope(2, "moment.append", built.validated.shadows[0].clone());
         assert!(matches!(
@@ -4610,7 +4657,14 @@ mod tests {
             &crate::NoLiveLeases,
         );
         assert!(
-            matches!(outcome, Ok(crate::ApplyOutcome::Applied(_))),
+            matches!(
+                outcome,
+                Ok(crate::ApplyOutcome {
+                    primary: crate::ApplyDisposition::Applied(_),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+            ),
             "unexpected untagged moment outcome: {outcome:?}",
         );
         let (text, latest): (String, String) = store
@@ -4759,7 +4813,11 @@ mod tests {
                 &NoFaults,
                 &crate::NoLiveLeases,
             ),
-            Ok(crate::ApplyOutcome::Applied(_))
+            Ok(crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         let moments_after: i64 = store
             .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM moments", [], |row| row.get(0)))
@@ -4824,7 +4882,14 @@ mod tests {
             &crate::NoLiveLeases,
         );
         assert!(
-            matches!(outcome, Ok(crate::ApplyOutcome::Applied(_))),
+            matches!(
+                outcome,
+                Ok(crate::ApplyOutcome {
+                    primary: crate::ApplyDisposition::Applied(_),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+            ),
             "unexpected absent replay outcome: {outcome:?}",
         );
 
@@ -4868,7 +4933,11 @@ mod tests {
                 &NoFaults,
                 &crate::NoLiveLeases,
             ),
-            Ok(crate::ApplyOutcome::Applied(_))
+            Ok(crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
     }
 
@@ -4935,7 +5004,11 @@ mod tests {
                 &NoFaults,
                 &leases
             ),
-            Ok(crate::ApplyOutcome::Applied(_))
+            Ok(crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         assert_eq!(
             crate::read_replication_acked_seq(&store, "ws", "peer").expect("retry ack"),
@@ -5262,7 +5335,14 @@ mod tests {
             &crate::NoLiveLeases,
         )
         .expect("preserve divergent result");
-        assert!(matches!(outcome, crate::ApplyOutcome::Applied(_)));
+        assert!(matches!(
+            outcome,
+            crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ));
         let (text, latest, open, inactive): (String, String, i64, i64) = store
             .read_with(|conn| {
                 Ok::<_, rusqlite::Error>((
@@ -5337,7 +5417,11 @@ mod tests {
                 &NoFaults,
                 &crate::NoLiveLeases
             ),
-            Ok(crate::ApplyOutcome::Applied(_))
+            Ok(crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         let after: (i64, i64) = store
             .read_with(|conn| {

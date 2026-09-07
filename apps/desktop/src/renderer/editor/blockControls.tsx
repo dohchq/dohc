@@ -13,21 +13,6 @@ import {
 } from "./floatingMenuPosition";
 import { escapeHighlightMarkdown } from "./extensions";
 
-type TopLevelDocLike = {
-  forEach: (
-    cb: (
-      node: {
-        type: { name: string };
-        attrs?: Record<string, unknown>;
-        nodeSize: number;
-        textContent?: string;
-      },
-      offset: number,
-      index: number,
-    ) => void,
-  ) => void;
-};
-
 const blockControlsKey = new PluginKey("dohc-block-controls");
 
 // ── drag payload ──────────────────────────────────────────────────────────
@@ -108,14 +93,14 @@ function removeBlockDragGhost(slot: DragGhostSlot): void {
 }
 
 function buildBlockControlDecorations(
-  doc: unknown,
+  doc: ProseMirrorNode,
   onInsertRef: RefObject<(pos: number) => void>,
   onOpenMenuRef: RefObject<(pos: number, rect: DOMRect) => void>,
   ghostSlot: DragGhostSlot,
 ): DecorationSet {
   const decorations: Decoration[] = [];
 
-  (doc as TopLevelDocLike).forEach((node, offset, index) => {
+  doc.forEach((node, offset, index) => {
     const pos = offset;
     decorations.push(
       Decoration.node(pos, pos + node.nodeSize, {
@@ -199,7 +184,7 @@ function buildBlockControlDecorations(
     );
   });
 
-  return DecorationSet.create(doc as never, decorations);
+  return DecorationSet.create(doc, decorations);
 }
 
 function setVisibleBlockControl(
@@ -423,18 +408,6 @@ export function resolveBlockMenuState(pos: number, rect: DOMRect): BlockMenuStat
   };
 }
 
-type BlockTurnIntoChain = {
-  focus: () => BlockTurnIntoChain;
-  setTextSelection: (pos: number) => BlockTurnIntoChain;
-  setParagraph: () => BlockTurnIntoChain;
-  toggleHeading: (attrs: { level: 1 | 2 | 3 }) => BlockTurnIntoChain;
-  toggleBulletList: () => BlockTurnIntoChain;
-  toggleOrderedList: () => BlockTurnIntoChain;
-  toggleTaskList: () => BlockTurnIntoChain;
-  toggleBlockquote: () => BlockTurnIntoChain;
-  run: () => boolean;
-};
-
 export function duplicateBlock(editor: Editor | null, pos: number): void {
   const view = editor?.view;
   if (!view || !isEditableEditor(editor)) return;
@@ -471,10 +444,7 @@ export function turnBlockInto(
   if (!node) return;
 
   const inside = pos + 1;
-  const chain = editor
-    .chain()
-    .focus()
-    .setTextSelection(inside) as unknown as BlockTurnIntoChain;
+  const chain = editor.chain().focus().setTextSelection(inside);
 
   switch (id) {
     case "paragraph":

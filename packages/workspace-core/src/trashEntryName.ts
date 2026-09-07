@@ -52,7 +52,7 @@ const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder("utf-8", { ignoreBOM: true });
 
 /** How a platform counts a path component. */
-export type NameUnit = "utf16" | "utf8";
+type NameUnit = "utf16" | "utf8";
 
 /** NTFS counts UTF-16 code units; ext4 and APFS count UTF-8 bytes. */
 export function nameUnitFor(platform: string): NameUnit {
@@ -127,7 +127,7 @@ export function fitWithinNameMax(
 }
 
 /** The names to try, longest first, and what to do when they all fail. */
-export interface TrashEntryPlan {
+interface TrashEntryPlan {
   /** Rename targets in order. Never empty; the first is untruncated. */
   candidates: string[];
   /**

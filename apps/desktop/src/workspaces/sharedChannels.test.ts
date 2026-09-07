@@ -12,7 +12,6 @@ import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
   assertSharedChannelWritable,
-  createKeyedSerializer,
   createPassCoverageReporter,
   endJoinedChannel,
   joinedSharedChannelForTarget,
@@ -662,53 +661,6 @@ describe("createPassCoverageReporter", () => {
     reportCoverage({ workspaceId: "ws-1", live: 40, uncovered: 24, passRows: 16 });
     reportCoverage({ workspaceId: "ws-2", live: 40, uncovered: 24, passRows: 16 });
     expect(lines).toHaveLength(2);
-  });
-});
-
-describe("createKeyedSerializer", () => {
-  it("serializes runs for the same key (a second call waits for the first) and keeps keys independent", async () => {
-    const serialize = createKeyedSerializer();
-    const events: string[] = [];
-    let releaseFirst!: () => void;
-    const firstGate = new Promise<void>((resolve) => {
-      releaseFirst = resolve;
-    });
-
-    const first = serialize("ws-a", async () => {
-      events.push("a1:start");
-      await firstGate;
-      events.push("a1:end");
-    });
-    const second = serialize("ws-a", async () => {
-      events.push("a2:start");
-      events.push("a2:end");
-    });
-    const other = serialize("ws-b", async () => {
-      events.push("b1:start");
-      events.push("b1:end");
-    });
-
-    // A different key is not blocked by ws-a's in-flight pass.
-    await other;
-    expect(events).toEqual(["a1:start", "b1:start", "b1:end"]);
-
-    releaseFirst();
-    await first;
-    await second;
-    // The second ws-a pass ran only after the first finished — it queued (so
-    // ops journaled after the first pass started still get their own pass),
-    // never overlapped.
-    expect(events).toEqual(["a1:start", "b1:start", "b1:end", "a1:end", "a2:start", "a2:end"]);
-  });
-
-  it("keeps serving a key after a run rejects (a failed pass never wedges the queue)", async () => {
-    const serialize = createKeyedSerializer();
-    await expect(
-      serialize("ws-a", async () => {
-        throw new Error("boom");
-      }),
-    ).rejects.toThrow("boom");
-    await expect(serialize("ws-a", async () => "recovered")).resolves.toBe("recovered");
   });
 });
 

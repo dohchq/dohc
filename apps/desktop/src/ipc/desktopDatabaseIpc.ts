@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ChangeAuthor } from "@dohc/workspace-core";
+import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { DatabaseEdit } from "../workspaces/workspaceDatabase";
 import { createOwnedWorkspaceFileReader, type OwnedWorkspaceDatabaseReader } from "../workspaces/ownedWorkspaceFileReader";
 import { importOwnedWorkspaceDatabase } from "../workspaces/ownedWorkspaceDatabaseImport";

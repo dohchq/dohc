@@ -1,7 +1,7 @@
 import type { CliResultByVerb } from "./protocol";
 import { renderAuthorDisplayName } from "./chatIdentity";
 
-export type ThreadMarkdownInput = CliResultByVerb["show"];
+type ThreadMarkdownInput = CliResultByVerb["show"];
 
 function swapEnginePrefix(
   id: string,

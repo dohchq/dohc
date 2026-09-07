@@ -87,8 +87,8 @@ use dohc_engine_domain::{
     write_text_in_tx,
 };
 use dohc_engine_files::{
-    DurabilityPolicy, JobOutcome, MaterializeError, ProjectionTargetKind, ProjectionTargetState,
-    StdBackoff, StdReplacer, materialize_one, materialize_secret_delete_one,
+    DurabilityPolicy, JobOutcome, MaterializeError, MaterializeOptions, ProjectionTargetKind,
+    ProjectionTargetState, StdBackoff, StdReplacer, materialize_one, materialize_secret_delete_one,
     materialize_secret_one, probe_projection_target,
 };
 use dohc_engine_storage::{
@@ -97,9 +97,9 @@ use dohc_engine_storage::{
     hex_sha256, put_binary_blob, upsert_projection_job,
 };
 use dohc_engine_sync::{
-    ApplyOutcome, BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse,
-    BlobHaveRequest, BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse,
-    ConflictApplyResult, EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest,
+    ApplyDisposition, ApplyOutcome, BlobDownloadBatchRequest, BlobDownloadBatchResponse,
+    BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse, BlobUploadRequest, ClaimRequest,
+    ClaimResponse, ConflictApplyResult, EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest,
     KeyEnvelopeDownloadResponse, KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest,
     LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest,
     PullResponse, PushRequest, PushResponse, RecoverResponse, RelayCursor, RelayError,
@@ -3427,13 +3427,25 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 match apply_conflict_envelope(store, &envelope, faults.as_ref(), &leases) {
-                    Ok(outcome @ ApplyOutcome::Refused(_)) => {
-                        retain_refusal_for_direct_retry(store, &envelope, faults.as_ref())
-                            .map(|()| outcome)
-                            .map_err(RuntimeError::from)
-                    }
-                    Ok(ApplyOutcome::Skipped) => read_replayed_refusal(store, &envelope)
-                        .map(|refusal| refusal.map_or(ApplyOutcome::Skipped, ApplyOutcome::Refused))
+                    Ok(
+                        outcome @ ApplyOutcome {
+                            primary: ApplyDisposition::Refused(_),
+                            ..
+                        },
+                    ) => retain_refusal_for_direct_retry(store, &envelope, faults.as_ref())
+                        .map(|()| outcome)
+                        .map_err(RuntimeError::from),
+                    Ok(
+                        mut outcome @ ApplyOutcome {
+                            primary: ApplyDisposition::Skipped,
+                            ..
+                        },
+                    ) => read_replayed_refusal(store, &envelope)
+                        .map(|refusal| {
+                            outcome.primary = refusal
+                                .map_or(ApplyDisposition::Skipped, ApplyDisposition::Refused);
+                            outcome
+                        })
                         .map_err(RuntimeError::from),
                     outcome => outcome.map_err(RuntimeError::from),
                 }
@@ -5693,9 +5705,13 @@ fn replay_pending_materializations(
                     store,
                     root_dir,
                     &job,
-                    DurabilityPolicy::per_os(),
-                    now_ms,
-                    faults,
+                    &MaterializeOptions {
+                        policy: DurabilityPolicy::per_os(),
+                        replacer: &StdReplacer,
+                        backoff: &StdBackoff,
+                        now_ms,
+                        faults,
+                    },
                 ) {
                     Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
                         summary.completed += 1;
@@ -5741,11 +5757,13 @@ fn replay_pending_materializations(
                 root_dir,
                 &job,
                 plaintext.as_bytes(),
-                DurabilityPolicy::per_os(),
-                &StdReplacer,
-                &StdBackoff,
-                now_ms,
-                faults,
+                &MaterializeOptions {
+                    policy: DurabilityPolicy::per_os(),
+                    replacer: &StdReplacer,
+                    backoff: &StdBackoff,
+                    now_ms,
+                    faults,
+                },
             );
             match outcome {
                 Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
@@ -5835,11 +5853,13 @@ fn replay_pending_materializations(
                 store,
                 root_dir,
                 &job,
-                DurabilityPolicy::per_os(),
-                &StdReplacer,
-                &StdBackoff,
-                now_ms,
-                faults,
+                &MaterializeOptions {
+                    policy: DurabilityPolicy::per_os(),
+                    replacer: &StdReplacer,
+                    backoff: &StdBackoff,
+                    now_ms,
+                    faults,
+                },
             )
             .map_err(RuntimeError::from)
         };
@@ -7851,11 +7871,13 @@ fn ydoc_settle_on_store(
                 store,
                 root_dir,
                 &job,
-                DurabilityPolicy::per_os(),
-                &StdReplacer,
-                &StdBackoff,
-                now_ms,
-                faults,
+                &MaterializeOptions {
+                    policy: DurabilityPolicy::per_os(),
+                    replacer: &StdReplacer,
+                    backoff: &StdBackoff,
+                    now_ms,
+                    faults,
+                },
             );
             let replay_outcome = match replay_outcome {
                 Ok(outcome) => outcome,
@@ -8121,11 +8143,13 @@ fn ydoc_settle_on_store(
         store,
         root_dir,
         &job,
-        DurabilityPolicy::per_os(),
-        &StdReplacer,
-        &StdBackoff,
-        now_ms,
-        faults,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &StdBackoff,
+            now_ms,
+            faults,
+        },
     );
     let job_outcome = match job_outcome {
         Ok(outcome) => outcome,
@@ -8693,11 +8717,13 @@ fn materialize_pending_job(
         store,
         root_dir,
         job,
-        DurabilityPolicy::per_os(),
-        &StdReplacer,
-        &StdBackoff,
-        now_ms,
-        faults,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &StdBackoff,
+            now_ms,
+            faults,
+        },
     );
     let (materialized, reported) = match outcome {
         Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {

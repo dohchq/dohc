@@ -1,8 +1,8 @@
-export type WorkspaceObjectId = string;
+type WorkspaceObjectId = string;
 export type VersionId = string;
 export type WorkspaceId = string;
-export type VersionedTextMomentId = string;
-export type VersionedTextConflictId = string;
+type VersionedTextMomentId = string;
+type VersionedTextConflictId = string;
 
 export const MAX_VERSIONED_BINARY_FILE_BYTES = 5 * 1024 * 1024;
 
@@ -13,18 +13,8 @@ export const MAX_VERSIONED_BINARY_FILE_BYTES = 5 * 1024 * 1024;
  * installation belong to the desktop custody boundary. The daemon may only
  * transport the serialized wrapped envelope and its relay fingerprint.
  */
-export interface KeyEnvelopeUploadParams {
-  workspaceId: WorkspaceId;
-  envelopeJson: string;
-  ifMatch?: string;
-}
-
 export interface KeyEnvelopeUploadResult {
   etag: string;
-}
-
-export interface KeyEnvelopeDownloadParams {
-  workspaceId: WorkspaceId;
 }
 
 export interface KeyEnvelopeDownloadResult {
@@ -72,7 +62,7 @@ export class VersionedTextStoreError extends Error {
   }
 }
 
-export type VersionKind = "main" | "named";
+type VersionKind = "main" | "named";
 
 export interface VersionRecord {
   id: VersionId;
@@ -92,7 +82,7 @@ export interface FileObjectRecord {
   createdAtMs: number;
 }
 
-export type ActorNeutralWriteOrigin =
+type ActorNeutralWriteOrigin =
   | "api"
   | "local-file"
   | "restore"
@@ -111,7 +101,7 @@ export interface ActorNeutralWriteMetadata {
 // dohc-TRACKED agent runs stamp this; ordinary edits, reconciliation, and raw
 // external agent CLIs remain actor-neutral — an absent author is the honest
 // default, not a fallback.
-export interface AgentMomentAuthor {
+interface AgentMomentAuthor {
   kind: "agent";
   agentId: string;
   onBehalfOf: string;
@@ -119,7 +109,7 @@ export interface AgentMomentAuthor {
 }
 
 export type MomentAuthor = AgentMomentAuthor;
-export type VersionedFileContentKind = "text" | "binary";
+type VersionedFileContentKind = "text" | "binary";
 
 export interface TextFileSnapshot {
   objectId: WorkspaceObjectId;
@@ -147,13 +137,13 @@ export interface VersionedTextFileState {
   metadata?: ActorNeutralWriteMetadata;
 }
 
-export type VersionedTextComparisonStatus =
+type VersionedTextComparisonStatus =
   | "same"
   | "incoming-changed"
   | "current-changed"
   | "diverged";
 
-export interface VersionedTextComparison {
+interface VersionedTextComparison {
   workspaceId: WorkspaceId;
   path: string;
   targetVersionId: VersionId;
@@ -164,12 +154,12 @@ export interface VersionedTextComparison {
   status: VersionedTextComparisonStatus;
 }
 
-export type VersionedTextConflictStatus = "open" | "resolved";
-export type VersionedTextConflictResolution =
+type VersionedTextConflictStatus = "open" | "resolved";
+type VersionedTextConflictResolution =
   | "applied-incoming"
   | "applied-merged"
   | "kept-current";
-export type VersionedTextConflictChoice = "current" | "incoming" | "merged";
+type VersionedTextConflictChoice = "current" | "incoming" | "merged";
 
 export interface VersionedTextConflictRecord {
   id: VersionedTextConflictId;
@@ -188,7 +178,7 @@ export interface VersionedTextConflictRecord {
   resolution?: VersionedTextConflictResolution;
 }
 
-export type VersionedTextMergeResult =
+type VersionedTextMergeResult =
   | {
       kind: "unchanged";
       reason: "already-same" | "source-unchanged";
@@ -212,7 +202,7 @@ export type VersionedTextMergeResult =
       conflict: VersionedTextConflictRecord;
     };
 
-export type VersionedTextConflictResolveResult =
+type VersionedTextConflictResolveResult =
   | {
       kind: "resolved";
       conflict: VersionedTextConflictRecord;
@@ -220,7 +210,7 @@ export type VersionedTextConflictResolveResult =
       delete?: VersionedTextDeleteResult;
     };
 
-export interface VersionedTextConflictPage {
+interface VersionedTextConflictPage {
   conflicts: VersionedTextConflictRecord[];
   // Pass back as afterConflictId to fetch the next page; null when this page
   // reached the end of the listing.
@@ -236,7 +226,7 @@ export type SyncReplicationOpKind =
 // Wire encoding of "did the origin see a prior state for this object": absent
 // (no before at all), null (origin recorded an explicit no-file preimage), or
 // present (the before* fields below carry the origin's preimage snapshot).
-export type SyncMomentBeforePresence = "absent" | "null" | "present";
+type SyncMomentBeforePresence = "absent" | "null" | "present";
 
 export interface MomentAppendPayload {
   momentId: VersionedTextMomentId;
@@ -307,8 +297,8 @@ export interface ChatMessageAppendPayload {
   createdAtMs: number;
 }
 
-export type ChatFollowTargetKind = "person" | "agent" | "channel" | "thread";
-export type ChatFollowState = "following" | "unfollowed";
+type ChatFollowTargetKind = "person" | "agent" | "channel" | "thread";
+type ChatFollowState = "following" | "unfollowed";
 
 export interface VersionedTextMoment {
   id: VersionedTextMomentId;
@@ -352,7 +342,7 @@ export interface VersionedTextMomentSummary {
   syncRecordOnly?: boolean;
 }
 
-export interface VersionedTextMomentPage {
+interface VersionedTextMomentPage {
   // Newest first (descending momentOrder).
   moments: VersionedTextMomentSummary[];
   // Pass back as beforeMomentOrder to fetch the next (older) page; null when
@@ -363,7 +353,7 @@ export interface VersionedTextMomentPage {
   latestMomentOrder: number;
 }
 
-export interface VersionedTextMomentPayloadSnapshot {
+interface VersionedTextMomentPayloadSnapshot {
   path: string;
   contentKind?: VersionedFileContentKind;
   sha256?: string;
@@ -371,25 +361,25 @@ export interface VersionedTextMomentPayloadSnapshot {
   text: string;
 }
 
-export interface VersionedTextMomentPayload {
+interface VersionedTextMomentPayload {
   before: VersionedTextMomentPayloadSnapshot | null;
   after: VersionedTextMomentPayloadSnapshot;
 }
 
-export interface VersionedTextWriteResult {
+interface VersionedTextWriteResult {
   object: FileObjectRecord;
   snapshot: TextFileSnapshot;
   moment: VersionedTextMoment;
 }
 
-export interface VersionedTextRenameResult {
+interface VersionedTextRenameResult {
   object: FileObjectRecord;
   before: TextFileSnapshot;
   after: TextFileSnapshot;
   moment: VersionedTextMoment;
 }
 
-export interface VersionedTextDeleteResult {
+interface VersionedTextDeleteResult {
   object: FileObjectRecord;
   before: TextFileSnapshot;
   moment: VersionedTextMoment;
@@ -546,18 +536,18 @@ export interface VersionedTextStore {
 }
 
 export type ChatThreadId = string;
-export type ChatMessageId = string;
-export type ChatChannelId = string;
+type ChatMessageId = string;
+type ChatChannelId = string;
 
 // A DM is a private channel subtype. Single-user alpha ships the
 // kind enum only — no participant sets, presence, or DM UI yet.
 export type ChatChannelKind = "channel" | "dm" | "agent";
 
-export type ChatActor =
+type ChatActor =
   | { kind: "human"; displayName: string }
   | { kind: "agent"; displayName: string };
 
-export interface LinkedChatFileRef {
+interface LinkedChatFileRef {
   objectId: WorkspaceObjectId;
   pathHint?: string;
   linkedAtMs: number;
@@ -588,7 +578,7 @@ export interface ChatChannelSummary extends ChatChannel {
 // one local human actor for the single-user alpha). `lastReadSequence` counts
 // messages read from the start of the thread; `revision` is server-owned and
 // bumps on every applied advance — callers may CAS on it but never write it.
-export interface ChatThreadReadState {
+interface ChatThreadReadState {
   workspaceId: WorkspaceId;
   threadId: ChatThreadId;
   lastReadSequence: number;
@@ -633,9 +623,9 @@ export interface ChannelThreadSummary {
   };
 }
 
-export type ChatDecisionState = "open" | "resolved";
+type ChatDecisionState = "open" | "resolved";
 
-export interface ChatDecisionRecord {
+interface ChatDecisionRecord {
   workspaceId: WorkspaceId;
   threadId: ChatThreadId;
   messageId: ChatMessageId;
@@ -644,7 +634,7 @@ export interface ChatDecisionRecord {
   atMs: number;
 }
 
-export interface ChatAttachment {
+interface ChatAttachment {
   attachmentId: string;
   threadId: ChatThreadId;
   messageId: ChatMessageId;
@@ -683,7 +673,7 @@ export interface ChatMessage {
   attachments: ChatAttachment[];
 }
 
-export interface ChatAgentReadState {
+interface ChatAgentReadState {
   workspaceId: WorkspaceId;
   threadId: ChatThreadId;
   lastReadCreatedAtMs: number;
@@ -692,7 +682,7 @@ export interface ChatAgentReadState {
   updatedAtMs: number;
 }
 
-export interface ChatMentionRecord {
+interface ChatMentionRecord {
   threadId: ChatThreadId;
   messageId: ChatMessageId;
   handle: string;
@@ -703,12 +693,12 @@ export interface ChatMentionRecord {
 // Reactions (WS-MU-C2). The observed cell state — an emoji reaction by an
 // author is either present ("added") or tombstoned ("removed"). Tombstones are
 // retained so a stale re-add cannot win the LWW register.
-export type ChatReactionState = "added" | "removed";
+type ChatReactionState = "added" | "removed";
 
 // Who reacted. Solo this is the local user/agent; the design's verified relay
 // authorUserId (MU-C0) later fills authorId. displayName/kind render the
 // reaction ("<User>" / "<User>'s agent") without a separate lookup.
-export interface ChatReactionAuthor {
+interface ChatReactionAuthor {
   authorId: string;
   kind: ChatActor["kind"];
   displayName: string;
@@ -729,7 +719,7 @@ export interface ChatReaction {
   atMs: number;
 }
 
-export interface ChatFollow {
+interface ChatFollow {
   workspaceId: WorkspaceId;
   ownerUserId: string;
   targetKind: ChatFollowTargetKind;
@@ -738,7 +728,7 @@ export interface ChatFollow {
   updatedAtMs: number;
 }
 
-export interface ChatFeedReadState {
+interface ChatFeedReadState {
   workspaceId: WorkspaceId;
   ownerUserId: string;
   lastSeenCreatedAtMs: number;
@@ -746,7 +736,7 @@ export interface ChatFeedReadState {
   updatedAtMs: number;
 }
 
-export interface ChatFeedItem {
+interface ChatFeedItem {
   message: ChatMessage;
   thread: ChatThread;
   channel?: ChatChannel;
@@ -763,10 +753,10 @@ export interface ChatFeedPage {
   readState?: ChatFeedReadState;
 }
 
-export type ChatBookmarkTargetKind = "message" | "thread";
-export type ChatBookmarkMode = "live" | "snapshot";
-export type ChatBookmarkState = "active" | "archived";
-export type ChatBookmarkProjectionState = "pending" | "ready" | "failed" | "stale";
+type ChatBookmarkTargetKind = "message" | "thread";
+type ChatBookmarkMode = "live" | "snapshot";
+type ChatBookmarkState = "active" | "archived";
+type ChatBookmarkProjectionState = "pending" | "ready" | "failed" | "stale";
 
 /**
  * A receiver-owned request to materialize chat context as a workspace file.
@@ -797,19 +787,19 @@ export interface ChatBookmark {
   failureReason?: string;
 }
 
-export interface ChatBookmarkTransitionResult {
+interface ChatBookmarkTransitionResult {
   bookmark: ChatBookmark;
   // False when a materializer reports an obsolete generation. The current
   // bookmark is returned so the worker can immediately observe newer work.
   applied: boolean;
 }
 
-export type LinkedChatProjectionFileAccess =
+type LinkedChatProjectionFileAccess =
   | { kind: "allowed"; path: string }
   | { kind: "denied" }
   | { kind: "unknown" };
 
-export interface LinkedChatProjection {
+interface LinkedChatProjection {
   path: string;
   readOnly: true;
   threadId: ChatThreadId;
@@ -1096,7 +1086,7 @@ export interface LinkedChatStore {
   close(): Promise<void>;
 }
 
-export type AgentDispatchState = "pending" | "running" | "done" | "failed";
+type AgentDispatchState = "pending" | "running" | "done" | "failed";
 
 export interface AgentDispatchRecord {
   workspaceId: WorkspaceId;
@@ -1201,17 +1191,17 @@ export type EngineFilePathClassification =
   | { kind: "ignored" }
   | { kind: "secret" };
 
-export type VersionFileChangeStatus = "added" | "modified" | "deleted";
+type VersionFileChangeStatus = "added" | "modified" | "deleted";
 
 // One differing path, metadata only — what `versions.compareFiles` reports
 // per row. The hydrated shape below is built from this by reading the sides.
-export interface VersionFileChangeEntry {
+interface VersionFileChangeEntry {
   path: string;
   status: VersionFileChangeStatus;
   binary?: boolean;
 }
 
-export interface VersionFileChangeEntryPage {
+interface VersionFileChangeEntryPage {
   entries: VersionFileChangeEntry[];
   // Pass back as afterPath to fetch the next page; null when this page
   // reached the end of the comparison.
@@ -1265,7 +1255,7 @@ export type SecretFileStoreErrorCode =
 
 // Metadata-only description of one secret file's tip: no content, no digest
 // of the plaintext, nothing derived from the secret bytes except length.
-export interface SecretFileStat {
+interface SecretFileStat {
   workspaceId: WorkspaceId;
   versionId: VersionId;
   path: string;
@@ -1288,7 +1278,7 @@ export interface SecretFileMoment {
   protected: true;
 }
 
-export interface SecretFileCompareEntry {
+interface SecretFileCompareEntry {
   path: string;
   // Relative to the target (for example Main): "added" = only the source has
   // it, "deleted" = only the target has it, "modified" = both differ.
@@ -1302,24 +1292,24 @@ export interface SecretFileComparePage {
   nextAfterPath: string | null;
 }
 
-export interface SecretFileWriteOutcome {
+interface SecretFileWriteOutcome {
   // False when the write matched the current tip exactly (no new moment).
   changed: boolean;
   moment?: SecretFileMoment;
 }
 
-export interface SecretFileDeleteOutcome {
+interface SecretFileDeleteOutcome {
   // Null when the path was not tracked (delete of nothing is a no-op).
   moment: SecretFileMoment | null;
 }
 
-export interface SecretFileRestoreOutcome {
+interface SecretFileRestoreOutcome {
   restored: "text" | "deleted";
   restoredMomentId: string;
   path: string;
 }
 
-export type SecretFileMaterialization =
+type SecretFileMaterialization =
   | { present: false }
   | { present: true; text: string };
 
@@ -1401,10 +1391,8 @@ export interface SecretFileStore {
   close(): Promise<void>;
 }
 
-// Canonical home of the change-author vocabulary. `@dohc/workspace-core`
-// re-exports these (it already depends on this package), so the branded
-// local-author label stays a single nominal type everywhere instead of a
-// lossy structural copy.
+// Import change-author types from this module so the local-author label
+// keeps the same nominal brand in every package.
 declare const nonEmptyLocalAuthorLabelBrand: unique symbol;
 
 export type NonEmptyLocalAuthorLabel = string & {
@@ -1425,4 +1413,3 @@ export type ChangeAuthor =
       depth: number;
     }
   | { kind: "local"; label: NonEmptyLocalAuthorLabel };
-

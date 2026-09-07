@@ -2,7 +2,7 @@
 // Keep this module dependency-free so every layer agrees on token boundaries
 // and on which Markdown code ranges make a token inert.
 
-export type MentionKind = "user" | "agent";
+type MentionKind = "user" | "agent";
 
 export interface MentionCandidate {
   id: string;
@@ -12,21 +12,21 @@ export interface MentionCandidate {
   description?: string;
 }
 
-export interface MentionToken {
+interface MentionToken {
   start: number;
   end: number;
   handle: string;
 }
 
-export interface ResolvedMention extends MentionToken {
+interface ResolvedMention extends MentionToken {
   candidate: MentionCandidate;
 }
 
-export type MentionSegment =
+type MentionSegment =
   | { type: "text"; text: string }
   | { type: "mention"; text: string; candidate: MentionCandidate };
 
-export interface MentionScanOptions {
+interface MentionScanOptions {
   ignoreCode?: boolean;
 }
 
@@ -163,7 +163,7 @@ export function mentionsAnyCandidate(
   return findMentions(body, candidates, options).length > 0;
 }
 
-export interface ActiveMentionQuery {
+interface ActiveMentionQuery {
   start: number;
   query: string;
 }
@@ -222,7 +222,7 @@ function candidateScore(needle: string, candidate: MentionCandidate): number {
   return 0;
 }
 
-export interface MentionCompletion {
+interface MentionCompletion {
   value: string;
   caret: number;
 }
