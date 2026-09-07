@@ -1,3 +1,4 @@
+import { stopEditorMouseEvent, isCodeBlockNode } from "./pmHelpers";
 import { Plugin, PluginKey, TextSelection, type EditorState } from "@tiptap/pm/state";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 
@@ -37,15 +38,6 @@ type DocLike = {
 const codeLanguageKey = new PluginKey("dohc-code-language");
 const codeBlockContinuationKey = new PluginKey("dohc-code-block-continuation");
 const emptyListItemFocusKey = new PluginKey("dohc-empty-list-item-focus");
-
-function stopEditorMouseEvent(event: Event) {
-  event.preventDefault();
-  event.stopPropagation();
-}
-
-function isCodeBlockNode(node: { type: { name: string } }): boolean {
-  return node.type.name === "code_block" || node.type.name === "codeBlock";
-}
 
 function directElementChild(
   parent: HTMLElement,

@@ -1,3 +1,5 @@
+import { makeTriggerPlugin } from "./triggerPlugin";
+import { isCodeBlock, isCodeMark } from "./pmHelpers";
 // Notion-style `@`-mention trigger for page wikilinks.
 //
 // A second trigger surface over the same wikilink node used by the
@@ -17,11 +19,9 @@
 // in prose (emails, handles), so it must not fire mid-word (e.g.
 // `user@example`).
 
-import { Plugin, PluginKey } from '@tiptap/pm/state'
+import { PluginKey } from '@tiptap/pm/state'
 import type { PMDocLike } from './inlineAtomPlugin'
 import {
-  isCodeBlock,
-  isCodeMark,
   type AutocompleteState,
 } from './wikilinkPlugin'
 
@@ -74,36 +74,8 @@ export function detectMentionAutocomplete(
 export function makeMentionPlugin(
   onAutocompleteChange: (s: AutocompleteState) => void,
 ) {
-  let last: AutocompleteState = { active: false }
-  function notify(next: AutocompleteState) {
-    if (next.active && last.active) {
-      if (next.from === last.from && next.query === last.query) return
-    } else if (!next.active && !last.active) {
-      return
-    }
-    last = next
-    onAutocompleteChange(next)
-  }
-  return new Plugin({
+  return makeTriggerPlugin({
     key: mentionPluginKey,
-    view(view) {
-      function recompute() {
-        const state = view.state
-        const s = detectMentionAutocomplete(
-          state.doc as unknown as PMDocLike,
-          state.selection.from,
-        )
-        notify(s)
-      }
-      recompute()
-      return {
-        update() {
-          recompute()
-        },
-        destroy() {
-          notify({ active: false })
-        },
-      }
-    },
-  })
+
+  }, detectMentionAutocomplete, onAutocompleteChange)
 }

@@ -586,8 +586,10 @@ fn drained_parked_update_derives_its_record_facts() {
             &mut cache,
             &key,
             &filler,
+            dohc_engine_collab::LocalAppend::default(),
             &NoFaults,
             1_600 + index as i64,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("append filler update");
         assert!(matches!(outcome, TxnOutcome::Committed(_)));
@@ -705,8 +707,10 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
             &mut cache,
             &key,
             &filler,
+            dohc_engine_collab::LocalAppend::default(),
             &NoFaults,
             1_600 + index as i64,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("append filler update");
         assert!(matches!(outcome, TxnOutcome::Committed(_)));
@@ -2292,8 +2296,10 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
         &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
         &local_update,
+        dohc_engine_collab::LocalAppend::default(),
         &NoFaults,
         1_460,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("local row");
     // Same witness pin as the pulled-base twin: the deferred drain's

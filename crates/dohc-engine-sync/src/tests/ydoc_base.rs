@@ -1498,17 +1498,22 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
 
     // A local-only session that crashed: durable rows, never settled.
     let draft = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "crashed draft");
-    dohc_engine_collab::record_local_update_creating_marker(
+    dohc_engine_collab::record_local_update(
         &mut engine,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
-        Some("notes/crashed.md"),
-        dohc_engine_collab::ContentKind::Plaintext,
-        dohc_engine_collab::Regime::LocalOnly,
         &draft,
-        None,
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some("notes/crashed.md"),
+                content_kind: dohc_engine_collab::ContentKind::Plaintext,
+                regime: dohc_engine_collab::Regime::LocalOnly,
+            }),
+            ..Default::default()
+        },
         &NoFaults,
         1_500,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("crashed draft rows");
 
@@ -3880,8 +3885,10 @@ fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
         &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
         &local_update,
+        dohc_engine_collab::LocalAppend::default(),
         &NoFaults,
         1_460,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("local row");
     // A lineage the client seeded from a captured head. The

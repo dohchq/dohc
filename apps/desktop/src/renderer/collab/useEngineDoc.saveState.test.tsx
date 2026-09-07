@@ -8,10 +8,8 @@ import {
   insertElementRevision,
   putSceneAsset,
 } from "@dohc/excalidraw-scene";
-import {
-  ENGINE_YDOC_UPDATE_MAX_BYTES,
-  type EngineYDocSaveStateEvent,
-} from "../../ipc/channels";
+import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
+import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 import {
   resetOrphanedDrafts,
   useOrphanedDrafts,

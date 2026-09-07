@@ -1,3 +1,4 @@
+import { useRequestSequence } from "../useRequestSequence";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -18,7 +19,7 @@ import {
 } from "react";
 import {
   DEFAULT_USER_SETTINGS,
-  DesktopUserSettingsResult,
+  type DesktopUserSettingsResult,
   MAX_ZOOM_LEVEL,
   MIN_ZOOM_LEVEL,
   type DesktopUserSettings,
@@ -117,8 +118,8 @@ export function SettingsDialog(props: {
 }) {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
-  const userSaveRequestRef = useRef(0);
-  const workspaceSaveRequestRef = useRef(0);
+  const userSaveRequestRef = useRequestSequence();
+  const workspaceSaveRequestRef = useRequestSequence();
   // Workspace identity token. The request-id refs above only order responses
   // within one workspace; they say nothing about which workspace a response
   // belongs to. This is bumped whenever props.workspaceId changes, and every
@@ -126,7 +127,7 @@ export function SettingsDialog(props: {
   // captured still matches — so a slow response for workspace A can never repaint
   // (or, via the next full-settings save, overwrite) workspace B. Mirrors the
   // token guard DesktopWorkspaceShell uses for engine history.
-  const workspaceTokenRef = useRef(0);
+  const workspaceTokenRef = useRequestSequence();
   // A zoom broadcast arriving while the initial Promise.all load is in flight
   // is newer than the user-settings snapshot that load retained, and must not
   // be painted over.
@@ -176,15 +177,13 @@ export function SettingsDialog(props: {
   useEffect(
     () =>
       bridge().onUserSettingsChanged((result) => {
-        const parsed = DesktopUserSettingsResult.safeParse(result);
-        if (!parsed.success) return;
         settingsEventFiredRef.current = true;
         // A broadcast is newer than any request still in flight: bumping the
         // request counter drops those pending responses, so an older save's
         // answer cannot overwrite this result. The write behind the broadcast
         // already succeeded, so the saved state is honest.
-        userSaveRequestRef.current += 1;
-        setUserResult(parsed.data);
+        userSaveRequestRef.next();
+        setUserResult(result);
         markSaved();
       }),
     [markSaved],
@@ -200,8 +199,7 @@ export function SettingsDialog(props: {
     // Holding on to them would let a control edited before the new workspace's
     // settings arrive merge workspace A's values into a save aimed at B; with no
     // result, saveWorkspaceSettings refuses ("still loading") instead.
-    const token = workspaceTokenRef.current + 1;
-    workspaceTokenRef.current = token;
+    const token = workspaceTokenRef.next();
     settingsEventFiredRef.current = false;
     setWorkspaceResult(null);
     void Promise.all([
@@ -212,7 +210,7 @@ export function SettingsDialog(props: {
         if (cancelled) return;
         if (!settingsEventFiredRef.current) setUserResult(nextUser);
         applyAppearanceSettings(nextUser.settings.appearance);
-        if (workspaceTokenRef.current !== token) return;
+        if (!workspaceTokenRef.isCurrent(token)) return;
         setWorkspaceResult(nextWorkspace);
       })
       .catch((cause) => {
@@ -245,8 +243,7 @@ export function SettingsDialog(props: {
       setError("User settings are still loading.");
       return;
     }
-    const requestId = userSaveRequestRef.current + 1;
-    userSaveRequestRef.current = requestId;
+    const requestId = userSaveRequestRef.next();
     const previous = userResult;
     setUserResult((current) => ({
       settings,
@@ -258,11 +255,11 @@ export function SettingsDialog(props: {
     setError(null);
     try {
       const saved = await bridge().setUserSettings({ settings });
-      if (userSaveRequestRef.current !== requestId) return;
+      if (!userSaveRequestRef.isCurrent(requestId)) return;
       setUserResult(saved);
       markSaved();
     } catch (cause) {
-      if (userSaveRequestRef.current !== requestId) return;
+      if (!userSaveRequestRef.isCurrent(requestId)) return;
       setUserResult(previous);
       applyAppearanceSettings(previous.settings.appearance);
       setSaveState("error");
@@ -280,11 +277,10 @@ export function SettingsDialog(props: {
         setError("Workspace settings are still loading.");
         return;
       }
-      const requestId = workspaceSaveRequestRef.current + 1;
-      workspaceSaveRequestRef.current = requestId;
+      const requestId = workspaceSaveRequestRef.next();
       // Capture the workspace this save belongs to. Everything after the await
       // is only allowed to touch state if we are still on that workspace.
-      const token = workspaceTokenRef.current;
+      const token = workspaceTokenRef.current();
       const previous = workspaceResult;
       setWorkspaceResult((current) => ({
         settings: mergeWorkspaceSettings(
@@ -302,8 +298,8 @@ export function SettingsDialog(props: {
           patch,
         });
         if (
-          workspaceTokenRef.current !== token ||
-          workspaceSaveRequestRef.current !== requestId
+          !workspaceTokenRef.isCurrent(token) ||
+          !workspaceSaveRequestRef.isCurrent(requestId)
         ) {
           return;
         }
@@ -315,8 +311,8 @@ export function SettingsDialog(props: {
         else markSaved();
       } catch (cause) {
         if (
-          workspaceTokenRef.current !== token ||
-          workspaceSaveRequestRef.current !== requestId
+          !workspaceTokenRef.isCurrent(token) ||
+          !workspaceSaveRequestRef.isCurrent(requestId)
         ) {
           return;
         }
@@ -333,17 +329,16 @@ export function SettingsDialog(props: {
   // answer is the settings now on disk, so the row paints the level actually
   // in effect.
   const stepZoomSetting = useCallback(async (step: "in" | "out" | "reset") => {
-    const requestId = userSaveRequestRef.current + 1;
-    userSaveRequestRef.current = requestId;
+    const requestId = userSaveRequestRef.next();
     markSaving();
     setError(null);
     try {
       const saved = await bridge().stepWindowZoom({ step });
-      if (userSaveRequestRef.current !== requestId) return;
+      if (!userSaveRequestRef.isCurrent(requestId)) return;
       setUserResult(saved);
       markSaved();
     } catch (cause) {
-      if (userSaveRequestRef.current !== requestId) return;
+      if (!userSaveRequestRef.isCurrent(requestId)) return;
       setSaveState("error");
       // The refusal carries the reason; this surface owns the next step —
       // "open Settings" would name the dialog the user is already in.
@@ -356,27 +351,25 @@ export function SettingsDialog(props: {
   }, [markSaved, markSaving]);
 
   const resetUserSettings = useCallback(async () => {
-    const requestId = userSaveRequestRef.current + 1;
-    userSaveRequestRef.current = requestId;
+    const requestId = userSaveRequestRef.next();
     markSaving();
     setError(null);
     try {
       const next = await bridge().resetUserSettings();
-      if (userSaveRequestRef.current !== requestId) return;
+      if (!userSaveRequestRef.isCurrent(requestId)) return;
       setUserResult(next);
       applyAppearanceSettings(next.settings.appearance);
       markSaved();
     } catch (cause) {
-      if (userSaveRequestRef.current !== requestId) return;
+      if (!userSaveRequestRef.isCurrent(requestId)) return;
       setSaveState("error");
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }, [markSaved, markSaving]);
 
   const resetWorkspaceSettings = useCallback(async () => {
-    const requestId = workspaceSaveRequestRef.current + 1;
-    workspaceSaveRequestRef.current = requestId;
-    const token = workspaceTokenRef.current;
+    const requestId = workspaceSaveRequestRef.next();
+    const token = workspaceTokenRef.current();
     markSaving();
     setError(null);
     try {
@@ -384,8 +377,8 @@ export function SettingsDialog(props: {
         workspaceId: props.workspaceId,
       });
       if (
-        workspaceTokenRef.current !== token ||
-        workspaceSaveRequestRef.current !== requestId
+        !workspaceTokenRef.isCurrent(token) ||
+        !workspaceSaveRequestRef.isCurrent(requestId)
       ) {
         return;
       }
@@ -393,8 +386,8 @@ export function SettingsDialog(props: {
       markSaved();
     } catch (cause) {
       if (
-        workspaceTokenRef.current !== token ||
-        workspaceSaveRequestRef.current !== requestId
+        !workspaceTokenRef.isCurrent(token) ||
+        !workspaceSaveRequestRef.isCurrent(requestId)
       ) {
         return;
       }

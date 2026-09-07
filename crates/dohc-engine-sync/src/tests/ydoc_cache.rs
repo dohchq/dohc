@@ -51,8 +51,17 @@ fn cached_defer_and_drain_match_the_cold_path() {
                 }) => base_snapshot_sha,
                 other => panic!("unexpected claim: {other:?}"),
             };
-            dohc_engine_collab::record_local_update(store, cache, &key, &local, &NoFaults, 1_003)
-                .expect("warm local append");
+            dohc_engine_collab::record_local_update(
+                store,
+                cache,
+                &key,
+                &local,
+                dohc_engine_collab::LocalAppend::default(),
+                &NoFaults,
+                1_003,
+                |_tx, _outcome, _update_sha| Ok(()),
+            )
+            .expect("warm local append");
             claim
         };
     let warm_claim = setup(&mut warm_store, &mut warm_cache);
@@ -246,8 +255,10 @@ fn seed_warm_and_cold_remote_lineage(
         warm_cache,
         &key,
         &empty_base,
+        dohc_engine_collab::LocalAppend::default(),
         &NoFaults,
         2_001,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("warm cache seed");
     let cold_seed = dohc_engine_collab::record_local_update(
@@ -255,8 +266,10 @@ fn seed_warm_and_cold_remote_lineage(
         &mut cold_seed_cache,
         &key,
         &empty_base,
+        dohc_engine_collab::LocalAppend::default(),
         &NoFaults,
         2_001,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("cold cache seed");
     assert_eq!(warm_seed, cold_seed);
@@ -1641,8 +1654,17 @@ fn pulled_lineage_replacement_evicts_the_warmed_remote_path_entry() {
     .expect("local marker");
     let local = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "local draft");
     let mut cache = dohc_engine_collab::WriterDocCache::new();
-    dohc_engine_collab::record_local_update(&mut store, &mut cache, &key, &local, &NoFaults, 1_001)
-        .expect("warm local lineage");
+    dohc_engine_collab::record_local_update(
+        &mut store,
+        &mut cache,
+        &key,
+        &local,
+        dohc_engine_collab::LocalAppend::default(),
+        &NoFaults,
+        1_001,
+        |_tx, _outcome, _update_sha| Ok(()),
+    )
+    .expect("warm local lineage");
     assert!(cache.contains_for_test(&key));
     let before = cache.stats();
 

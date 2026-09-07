@@ -1,3 +1,6 @@
+import { formatChatTime } from "../time";
+import { basenameOf } from "../path";
+import { ipcErrorMessage } from "../ipcError";
 import { FileText, SmilePlus, Send } from "lucide-react";
 import {
   memo,
@@ -37,12 +40,6 @@ export function chatAuthorLabel(
 ): string {
   if (author.authorKind !== "agent") return author.authorDisplayName;
   return `${author.authorDisplayName}'s agent`;
-}
-
-export function ipcErrorMessage(error: unknown, fallback: string): string {
-  const raw = error instanceof Error ? error.message : "";
-  const message = raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
-  return message.trim().length > 0 ? message.trim() : fallback;
 }
 
 // Reaction toggle (WS-MU-C2), shared by both chat surfaces (the file-rail
@@ -140,26 +137,6 @@ export function runReactionToggle(
         ctx.onError(ipcErrorMessage(error, "Could not update that reaction."));
       }
     });
-}
-
-// One formatter for the one options shape this function uses.
-// `toLocaleString(undefined, options)` is specified as
-// `new Intl.DateTimeFormat(undefined, options).format(date)`, but constructing
-// the formatter costs far more than formatting — and message lists call this
-// per message per render.
-const chatTimeFormat = new Intl.DateTimeFormat(undefined, {
-  month: "short",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-});
-
-export function formatChatTime(createdAtMs: number): { label: string; iso: string } {
-  const createdAt = new Date(createdAtMs);
-  return {
-    label: chatTimeFormat.format(createdAt),
-    iso: createdAt.toISOString(),
-  };
 }
 
 interface FileMentionNavigationTarget {
@@ -283,7 +260,7 @@ export function MentionText(props: {
       const chipContent = (
         <>
           <FileText size={11} aria-hidden />
-          {fileToken.path.split("/").at(-1)}
+          {basenameOf(fileToken.path)}
           {fileToken.headingAnchor ? `#${fileToken.headingAnchor}` : ""}
         </>
       );
@@ -668,7 +645,7 @@ export function ChatComposer(props: {
             props.onEscape();
           }
         }}
-        className="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+        className="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
       />
       <button
         type="submit"

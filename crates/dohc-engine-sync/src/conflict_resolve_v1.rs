@@ -5106,8 +5106,10 @@ mod tests {
             &mut dohc_engine_collab::WriterDocCache::new(),
             &derived_key,
             &update,
+            dohc_engine_collab::LocalAppend::default(),
             &NoFaults,
             13,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("path-derived local draft");
 
@@ -5178,8 +5180,10 @@ mod tests {
             &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             &update,
+            dohc_engine_collab::LocalAppend::default(),
             &NoFaults,
             13,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("unclaimed receiver content");
         let derived_key = DocKey::new(
@@ -5214,8 +5218,10 @@ mod tests {
             &mut dohc_engine_collab::WriterDocCache::new(),
             &derived_key,
             &orphan_update,
+            dohc_engine_collab::LocalAppend::default(),
             &NoFaults,
             15,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("orphan receiver content");
 

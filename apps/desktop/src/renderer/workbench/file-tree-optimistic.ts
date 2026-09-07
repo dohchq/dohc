@@ -17,11 +17,6 @@ export type PendingTreeChange =
   | { id: string; kind: 'create-file' | 'create-folder'; path: string }
   | { id: string; kind: 'delete-file' | 'delete-folder'; path: string }
 
-export function parentDir(path: string): string {
-  const slash = path.lastIndexOf('/')
-  return slash < 0 ? '' : path.slice(0, slash)
-}
-
 // Not exported on the desktop (knip single-consumer rule): every caller
 // lives in this module.
 function pathInsideFolder(path: string, folderPath: string): boolean {

@@ -1,3 +1,4 @@
+import { isEditableEditor } from "./pmHelpers";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import type { Editor } from "@tiptap/core";
 import {
@@ -221,13 +222,6 @@ type SlashCommandChain = {
   toggleOrderedList: () => SlashCommandChain;
   toggleTaskList: () => SlashCommandChain;
 };
-
-function isEditableEditor(editor: Editor | null | undefined): boolean {
-  if (!editor) return false;
-  if ((editor as { isEditable?: boolean }).isEditable === false) return false;
-  if ((editor.view as { editable?: boolean }).editable === false) return false;
-  return true;
-}
 
 export function filterSlashCommands(query: string): SlashCommandItem[] {
   const normalized = query.trim().toLowerCase();

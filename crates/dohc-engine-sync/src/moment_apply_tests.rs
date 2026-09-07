@@ -572,17 +572,22 @@ fn moment_delete_with_unsettled_lineage_stays_unacked() {
     let key = DocKey::new("ws", "main", "unsettled-delete-object").expect("Y.Doc key");
     let doc = Ydoc::wire();
     let update = doc.plaintext_insert(0, "only durable draft");
-    dohc_engine_collab::record_local_update_creating_marker(
+    dohc_engine_collab::record_local_update(
         &mut store,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
-        Some("notes/unsettled.md"),
-        YdocContentKind::Plaintext,
-        Regime::LocalOnly,
         &update,
-        None,
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some("notes/unsettled.md"),
+                content_kind: YdocContentKind::Plaintext,
+                regime: Regime::LocalOnly,
+            }),
+            ..Default::default()
+        },
         &NoFaults,
         1_500,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("seed unsettled lineage");
     hydrate_texts(&mut store, &["remote head", ""]);
@@ -698,17 +703,22 @@ fn moment_delete_with_orphan_scene_lineage_stays_unacked() {
         .to_string(),
     )
     .expect("import scene");
-    dohc_engine_collab::record_local_update_creating_marker(
+    dohc_engine_collab::record_local_update(
         &mut store,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
-        Some("drawings/orphan.excalidraw"),
-        YdocContentKind::Scene,
-        Regime::LocalOnly,
         &imported.initial_update,
-        None,
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some("drawings/orphan.excalidraw"),
+                content_kind: YdocContentKind::Scene,
+                regime: Regime::LocalOnly,
+            }),
+            ..Default::default()
+        },
         &NoFaults,
         1_500,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("seed orphan scene lineage");
     hydrate_texts(&mut store, &["remote scene", ""]);
@@ -787,17 +797,22 @@ fn moment_delete_from_absent_sender_head_preserves_unsettled_lineage() {
     let key = DocKey::new("ws", "main", "absent-delete-object").expect("Y.Doc key");
     let doc = Ydoc::wire();
     let update = doc.plaintext_insert(0, "only durable draft");
-    dohc_engine_collab::record_local_update_creating_marker(
+    dohc_engine_collab::record_local_update(
         &mut store,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
-        Some("notes/absent.md"),
-        YdocContentKind::Plaintext,
-        Regime::LocalOnly,
         &update,
-        None,
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some("notes/absent.md"),
+                content_kind: YdocContentKind::Plaintext,
+                regime: Regime::LocalOnly,
+            }),
+            ..Default::default()
+        },
         &NoFaults,
         1_500,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("seed unsettled lineage");
     hydrate_texts(&mut store, &[""]);
@@ -1079,17 +1094,22 @@ fn moment_append_live_lease_blocks_all_mutations_and_write_waits_for_ydoc_rewrit
         let key = DocKey::new("ws", "main", &object_id).expect("Y.Doc key");
         let doc = Ydoc::wire();
         let update = doc.plaintext_insert(0, "before");
-        dohc_engine_collab::record_local_update_creating_marker(
+        dohc_engine_collab::record_local_update(
             &mut store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
-            Some("head.md"),
-            YdocContentKind::Plaintext,
-            Regime::LocalOnly,
             &update,
-            None,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some("head.md"),
+                    content_kind: YdocContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                ..Default::default()
+            },
             &NoFaults,
             1_500,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("seed live lineage");
         let op = envelope(
