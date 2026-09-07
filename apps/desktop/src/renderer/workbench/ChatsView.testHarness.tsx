@@ -435,6 +435,18 @@ afterEach(() => {
 
 type ExtraProps = Partial<Parameters<typeof ChatsView>[0]>;
 
+export function navigatorView(readRevision: number, extra: ExtraProps = {}) {
+  return (
+    <ChatsView
+      workspaceId="workspace-a"
+      onOpenFileChat={vi.fn()}
+      onError={vi.fn()}
+      readRevision={readRevision}
+      {...extra}
+    />
+  );
+}
+
 export function renderView(onOpenFileChat = vi.fn(), onError = vi.fn(), extra: ExtraProps = {}) {
   render(
     <ChatsView

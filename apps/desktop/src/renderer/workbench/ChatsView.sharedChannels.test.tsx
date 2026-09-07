@@ -13,6 +13,7 @@ import {
   emitWorkspaceActivity,
   emitCloudSessionChanged,
   renderView,
+  navigatorView,
 } from "./ChatsView.testHarness";
 
 // Real implementations, spied: every message-body render runs the file-token
@@ -243,14 +244,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
       }
       return Promise.resolve(shareListing());
     });
-    const navigator = (readRevision: number) => (
-      <ChatsView
-        workspaceId="workspace-a"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-        readRevision={readRevision}
-      />
-    );
+    const navigator = navigatorView;
     const view = render(navigator(0));
     await screen.findByTestId("chats-channel-name");
 
@@ -337,14 +331,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
       }
       return Promise.resolve(shareListing());
     });
-    const navigator = (readRevision: number) => (
-      <ChatsView
-        workspaceId="workspace-a"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-        readRevision={readRevision}
-      />
-    );
+    const navigator = navigatorView;
     const view = render(navigator(0));
     await screen.findByTestId("chats-channel-name");
 

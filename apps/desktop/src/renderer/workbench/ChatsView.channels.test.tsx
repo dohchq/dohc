@@ -11,6 +11,7 @@ import {
   shareListing,
   emitCloudSessionChanged,
   renderView,
+  navigatorView,
 } from "./ChatsView.testHarness";
 
 // Real implementations, spied: every message-body render runs the file-token
@@ -123,16 +124,7 @@ describe("ChatsView channels", () => {
 // at mount. The shell reports each landed read through readRevision.
 describe("ChatsView panel navigator unread badges", () => {
   function navigator(readRevision: number, threadRevision = 0) {
-    return (
-      <ChatsView
-        workspaceId="workspace-a"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-        onOpenInTab={vi.fn()}
-        readRevision={readRevision}
-        threadRevision={threadRevision}
-      />
-    );
+    return navigatorView(readRevision, { onOpenInTab: vi.fn(), threadRevision });
   }
 
   it("refetches the counts once the shell reports a landed read", async () => {

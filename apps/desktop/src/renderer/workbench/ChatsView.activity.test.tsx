@@ -22,6 +22,7 @@ import {
   workspaceActivityCallbacks,
   emitWorkspaceActivity,
   renderView,
+  navigatorView,
 } from "./ChatsView.testHarness";
 
 // Real implementations, spied: every message-body render runs the file-token
@@ -672,15 +673,8 @@ describe("ChatsView live activity refresh", () => {
       // The read the editor's mark-read triggers: the count is gone.
       return Promise.resolve({ channels: [channel({ unreadCount: 0 })], fileThreads: [] });
     });
-    const navigator = (readRevision: number) => (
-      <ChatsView
-        workspaceId="workspace-a"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-        onOpenInTab={vi.fn()}
-        readRevision={readRevision}
-      />
-    );
+    const navigator = (readRevision: number) =>
+      navigatorView(readRevision, { onOpenInTab: vi.fn() });
     const view = render(navigator(0));
     expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
 
@@ -736,15 +730,8 @@ describe("ChatsView live activity refresh", () => {
     bridgeMock.listJoinedSharedChannels.mockResolvedValue({
       joined: [{ ...joinedRow, ended: true }],
     });
-    const navigator = (readRevision: number) => (
-      <ChatsView
-        workspaceId="workspace-a"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-        onOpenInTab={vi.fn()}
-        readRevision={readRevision}
-      />
-    );
+    const navigator = (readRevision: number) =>
+      navigatorView(readRevision, { onOpenInTab: vi.fn() });
     const view = render(navigator(0));
     await screen.findByTestId("chats-channel-shared");
     expect(screen.queryByTestId("chats-join-shared")).toBeNull();
@@ -959,15 +946,8 @@ describe("ChatsView live activity refresh", () => {
   // and its Try again would never come back.
   it("leaves the retry on screen when a background refresh fails over an error", async () => {
     bridgeMock.listChatChannels.mockRejectedValue(new Error("offline"));
-    const navigator = (readRevision: number) => (
-      <ChatsView
-        workspaceId="workspace-a"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-        onOpenInTab={vi.fn()}
-        readRevision={readRevision}
-      />
-    );
+    const navigator = (readRevision: number) =>
+      navigatorView(readRevision, { onOpenInTab: vi.fn() });
     const view = render(navigator(0));
     // The mount refresh is the user's, so it reports its failure.
     expect(await screen.findByText("Try again")).toBeTruthy();
@@ -1008,14 +988,7 @@ describe("ChatsView live activity refresh", () => {
     });
     // No onOpenInTab: this instance navigates in place, so the channel view is
     // reachable. With it, clicking a channel hands off to the shell instead.
-    const navigator = (readRevision: number) => (
-      <ChatsView
-        workspaceId="workspace-a"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-        readRevision={readRevision}
-      />
-    );
+    const navigator = navigatorView;
     const user = userEvent.setup();
     const view = render(navigator(0));
     await waitFor(() => expect(shareReads).toBe(1));
@@ -1162,15 +1135,8 @@ describe("ChatsView live activity refresh", () => {
       }
       return Promise.reject(new Error("offline"));
     });
-    const navigator = (readRevision: number) => (
-      <ChatsView
-        workspaceId="workspace-a"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-        onOpenInTab={vi.fn()}
-        readRevision={readRevision}
-      />
-    );
+    const navigator = (readRevision: number) =>
+      navigatorView(readRevision, { onOpenInTab: vi.fn() });
     const view = render(navigator(0));
     await waitFor(() => expect(reads).toBe(1));
 
