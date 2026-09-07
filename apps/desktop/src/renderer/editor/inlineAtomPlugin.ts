@@ -14,30 +14,12 @@ import { isCodeBlock, isCodeMark } from "./pmHelpers";
 // Additive + flag-gated per the locked re-foundation principle: off by
 // default ⇒ no user-facing change until explicitly enabled.
 
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { parseInlineAtoms } from './inlineAtom'
 
 export const inlineAtomKey = new PluginKey('dohc-inline-atom')
-
-// Minimal structural shapes so the range logic is testable without a
-// real ProseMirror/jsdom instance.
-type PMMarkLike = { type: { name: string; spec?: { code?: boolean } } }
-export type PMNodeLike = {
-  isText?: boolean
-  text?: string | null
-  marks?: ReadonlyArray<PMMarkLike>
-  type: { name: string; spec?: { code?: boolean } }
-}
-export type PMDocLike = {
-  descendants: (
-    cb: (
-      node: PMNodeLike,
-      pos: number,
-      parent: PMNodeLike | null,
-    ) => boolean | void,
-  ) => void
-}
 
 type AtomRange = {
   from: number
@@ -45,21 +27,15 @@ type AtomRange = {
   kind: 'value'
 }
 
-/** A node is "code" (verbatim) if it is a code block or carries an
- *  inline-code mark. Tiptap's inline-code mark is `inlineCode`
- *  (not `code`); CommonMark presets may use `code`; some define
- *  `spec.code`. Check all three so atoms are never decorated inside
- *  code. */
-
 /** Pure: walk text nodes, skip code, return atom decoration ranges in
  *  absolute doc coordinates. Offsets map 1:1 because ProseMirror text
  *  node size === JS string length (UTF-16 units), same as the parser. */
-export function computeAtomRanges(doc: PMDocLike): AtomRange[] {
+export function computeAtomRanges(doc: ProseMirrorNode): AtomRange[] {
   const ranges: AtomRange[] = []
   doc.descendants((node, pos, parent) => {
     if (!node.isText || !node.text) return
     if (isCodeBlock(parent)) return
-    if ((node.marks ?? []).some(isCodeMark)) return
+    if (node.marks.some(isCodeMark)) return
     for (const atom of parseInlineAtoms(node.text)) {
       ranges.push({ from: pos + atom.start, to: pos + atom.end, kind: atom.kind })
     }
@@ -67,13 +43,13 @@ export function computeAtomRanges(doc: PMDocLike): AtomRange[] {
   return ranges
 }
 
-function buildAtomDecorations(doc: unknown): DecorationSet {
-  const decorations = computeAtomRanges(doc as PMDocLike).map((r) =>
+function buildAtomDecorations(doc: ProseMirrorNode): DecorationSet {
+  const decorations = computeAtomRanges(doc).map((r) =>
     Decoration.inline(r.from, r.to, {
       class: `dohc-atom dohc-atom-${r.kind}`,
     }),
   )
-  return DecorationSet.create(doc as never, decorations)
+  return DecorationSet.create(doc, decorations)
 }
 
 /** Build the plugin. Caller decides whether to register it (flag). */

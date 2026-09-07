@@ -1,7 +1,8 @@
 import { FileText } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import type { ResolvedPos } from "@tiptap/pm/model";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { TextSelection } from "@tiptap/pm/state";
+import type { EditorView } from "@tiptap/pm/view";
 import type { WikilinkFile } from "./wikilinkPlugin";
 import { resolveFloatingMenuPosition } from "./floatingMenuPosition";
 
@@ -23,27 +24,10 @@ export type WikilinkPickerState =
  *    immediately (no decoration/round-trip needed). */
 type WikilinkInsertMode = "text" | "node";
 
-type PickerView = {
-  coordsAtPos(pos: number): { left: number; top: number; bottom: number };
-  state: {
-    tr: {
-      replaceWith(from: number, to: number, content: unknown): unknown;
-      setSelection(s: unknown): unknown;
-    };
-    schema: {
-      text(s: string): unknown;
-      nodes: Record<string, { create(attrs?: Record<string, unknown>): unknown } | undefined>;
-    };
-    selection: { from: number };
-  };
-  dispatch(tr: unknown): void;
-  focus(): void;
-};
-
 type Props = {
   state: WikilinkPickerState;
   files: ReadonlyArray<WikilinkFile>;
-  view: PickerView | null;
+  view: EditorView | null;
   /** @default "text" */
   insertMode?: WikilinkInsertMode;
   onDismiss: () => void;
@@ -64,14 +48,14 @@ function defaultDisplayName(file: WikilinkFile): string {
  *  standalone (not a closure inside the component) so it's directly
  *  testable against a real Editor without rendering React. */
 export function applyWikilinkPick(
-  view: PickerView,
+  view: EditorView,
   from: number,
   file: WikilinkFile,
   insertMode: WikilinkInsertMode = "text",
 ): void {
   const cursorPos = view.state.selection.from;
   const pathNoExt = file.path.replace(/\.md$/i, "");
-  let content: unknown;
+  let content: ProseMirrorNode;
   let insertedSize: number;
   if (insertMode === "node") {
     const wikilinkNodeType = view.state.schema.nodes.wikilink;
@@ -86,10 +70,7 @@ export function applyWikilinkPick(
     content = view.state.schema.text(insert);
     insertedSize = insert.length;
   }
-  const tr = view.state.tr.replaceWith(from, cursorPos, content) as {
-    doc: { resolve(pos: number): ResolvedPos };
-    setSelection(s: unknown): unknown;
-  };
+  const tr = view.state.tr.replaceWith(from, cursorPos, content);
   const afterInsert = from + insertedSize;
   tr.setSelection(TextSelection.near(tr.doc.resolve(afterInsert)));
   view.dispatch(tr);

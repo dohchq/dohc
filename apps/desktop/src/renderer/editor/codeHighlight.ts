@@ -25,6 +25,7 @@ import typescript from 'highlight.js/lib/languages/typescript'
 import xml from 'highlight.js/lib/languages/xml'
 import yaml from 'highlight.js/lib/languages/yaml'
 import { createLowlight } from 'lowlight'
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 
@@ -114,17 +115,6 @@ export function highlightSpans(language: string, text: string): HighlightSpan[] 
   }
 }
 
-// Minimal structural shapes so the walk is testable without a real
-// ProseMirror/jsdom instance — same pattern as inlineAtomPlugin.ts.
-export type PMNodeLike = {
-  type: { name: string }
-  attrs?: Record<string, unknown>
-  textContent: string
-}
-export type PMDocLike = {
-  descendants: (cb: (node: PMNodeLike, pos: number) => boolean | void) => void
-}
-
 type CodeHighlightRange = { from: number; to: number; className: string }
 
 /** Pure: walk the doc, resolve each codeBlock's spans (via `cache` when the
@@ -132,13 +122,13 @@ type CodeHighlightRange = { from: number; to: number; className: string }
  *  hit means both identity and content are unchanged) and return absolute
  *  doc-coordinate ranges. */
 export function computeCodeHighlightRanges(
-  doc: PMDocLike,
-  cache: WeakMap<PMNodeLike, HighlightSpan[]>,
+  doc: ProseMirrorNode,
+  cache: WeakMap<ProseMirrorNode, HighlightSpan[]>,
 ): CodeHighlightRange[] {
   const ranges: CodeHighlightRange[] = []
   doc.descendants((node, pos) => {
     if (!isCodeBlockNode(node)) return
-    const language = normalizeLanguage(node.attrs?.language)
+    const language = normalizeLanguage(node.attrs.language)
     if (!isHighlightableLanguage(language)) return false
     const text = node.textContent
     if (text.length === 0 || text.length > MAX_HIGHLIGHT_CHARS) return false
@@ -159,11 +149,14 @@ export function computeCodeHighlightRanges(
   return ranges
 }
 
-function buildHighlightDecorations(doc: unknown, cache: WeakMap<PMNodeLike, HighlightSpan[]>): DecorationSet {
-  const decorations = computeCodeHighlightRanges(doc as PMDocLike, cache).map((range) =>
+function buildHighlightDecorations(
+  doc: ProseMirrorNode,
+  cache: WeakMap<ProseMirrorNode, HighlightSpan[]>,
+): DecorationSet {
+  const decorations = computeCodeHighlightRanges(doc, cache).map((range) =>
     Decoration.inline(range.from, range.to, { class: range.className }),
   )
-  return DecorationSet.create(doc as never, decorations)
+  return DecorationSet.create(doc, decorations)
 }
 
 /** Build the plugin. A fresh WeakMap per instance caches lowlight's (fairly
@@ -172,7 +165,7 @@ function buildHighlightDecorations(doc: unknown, cache: WeakMap<PMNodeLike, High
  *  a new node object for that block only, so unaffected blocks reuse their
  *  cached spans on every doc change instead of re-tokenizing. */
 export function makeCodeHighlightPlugin() {
-  const cache = new WeakMap<PMNodeLike, HighlightSpan[]>()
+  const cache = new WeakMap<ProseMirrorNode, HighlightSpan[]>()
   return new Plugin({
     key: codeHighlightKey,
     state: {

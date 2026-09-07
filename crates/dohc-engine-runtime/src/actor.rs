@@ -87,8 +87,8 @@ use dohc_engine_domain::{
     write_text_in_tx,
 };
 use dohc_engine_files::{
-    DurabilityPolicy, JobOutcome, MaterializeError, ProjectionTargetKind, ProjectionTargetState,
-    StdBackoff, StdReplacer, materialize_one, materialize_secret_delete_one,
+    DurabilityPolicy, JobOutcome, MaterializeError, MaterializeOptions, ProjectionTargetKind,
+    ProjectionTargetState, StdBackoff, StdReplacer, materialize_one, materialize_secret_delete_one,
     materialize_secret_one, probe_projection_target,
 };
 use dohc_engine_storage::{
@@ -5705,9 +5705,13 @@ fn replay_pending_materializations(
                     store,
                     root_dir,
                     &job,
-                    DurabilityPolicy::per_os(),
-                    now_ms,
-                    faults,
+                    &MaterializeOptions {
+                        policy: DurabilityPolicy::per_os(),
+                        replacer: &StdReplacer,
+                        backoff: &StdBackoff,
+                        now_ms,
+                        faults,
+                    },
                 ) {
                     Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
                         summary.completed += 1;
@@ -5753,11 +5757,13 @@ fn replay_pending_materializations(
                 root_dir,
                 &job,
                 plaintext.as_bytes(),
-                DurabilityPolicy::per_os(),
-                &StdReplacer,
-                &StdBackoff,
-                now_ms,
-                faults,
+                &MaterializeOptions {
+                    policy: DurabilityPolicy::per_os(),
+                    replacer: &StdReplacer,
+                    backoff: &StdBackoff,
+                    now_ms,
+                    faults,
+                },
             );
             match outcome {
                 Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
@@ -5847,11 +5853,13 @@ fn replay_pending_materializations(
                 store,
                 root_dir,
                 &job,
-                DurabilityPolicy::per_os(),
-                &StdReplacer,
-                &StdBackoff,
-                now_ms,
-                faults,
+                &MaterializeOptions {
+                    policy: DurabilityPolicy::per_os(),
+                    replacer: &StdReplacer,
+                    backoff: &StdBackoff,
+                    now_ms,
+                    faults,
+                },
             )
             .map_err(RuntimeError::from)
         };
@@ -7863,11 +7871,13 @@ fn ydoc_settle_on_store(
                 store,
                 root_dir,
                 &job,
-                DurabilityPolicy::per_os(),
-                &StdReplacer,
-                &StdBackoff,
-                now_ms,
-                faults,
+                &MaterializeOptions {
+                    policy: DurabilityPolicy::per_os(),
+                    replacer: &StdReplacer,
+                    backoff: &StdBackoff,
+                    now_ms,
+                    faults,
+                },
             );
             let replay_outcome = match replay_outcome {
                 Ok(outcome) => outcome,
@@ -8133,11 +8143,13 @@ fn ydoc_settle_on_store(
         store,
         root_dir,
         &job,
-        DurabilityPolicy::per_os(),
-        &StdReplacer,
-        &StdBackoff,
-        now_ms,
-        faults,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &StdBackoff,
+            now_ms,
+            faults,
+        },
     );
     let job_outcome = match job_outcome {
         Ok(outcome) => outcome,
@@ -8705,11 +8717,13 @@ fn materialize_pending_job(
         store,
         root_dir,
         job,
-        DurabilityPolicy::per_os(),
-        &StdReplacer,
-        &StdBackoff,
-        now_ms,
-        faults,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &StdBackoff,
+            now_ms,
+            faults,
+        },
     );
     let (materialized, reported) = match outcome {
         Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {

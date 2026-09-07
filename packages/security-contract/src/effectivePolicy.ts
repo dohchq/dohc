@@ -1,3 +1,4 @@
+import { isRecord } from "@dohc/workspace-core/records";
 import { parse as parseToml } from "smol-toml";
 import { classifyEngineFilePath } from "./enginePathFloor";
 
@@ -132,10 +133,6 @@ export function policyGlobMatches(pattern: string, path: string): boolean {
   );
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 // Real TOML parsing (smol-toml, pure JS): the policy files are TOML by
 // contract, so valid TOML must parse — the strictness lives in the shape
 // validation below, never in a private syntax subset. A syntax error is a
@@ -193,7 +190,7 @@ export function parseFilesPolicy(tomlText: string): PolicyParseResult<FilesPolic
     for (let index = 0; index < ruleValue.length; index += 1) {
       const label = `rule ${index + 1}`;
       const rule = ruleValue[index];
-      if (!isObject(rule)) {
+      if (!isRecord(rule)) {
         errors.push(`${label}: rule entry must be an object`);
         continue;
       }
@@ -236,7 +233,7 @@ export function parseVisibilityPolicy(
     for (let index = 0; index < ruleValue.length; index += 1) {
       const label = `rule ${index + 1}`;
       const rule = ruleValue[index];
-      if (!isObject(rule)) {
+      if (!isRecord(rule)) {
         errors.push(`${label}: rule entry must be an object`);
         continue;
       }

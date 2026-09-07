@@ -105,10 +105,12 @@ import { QuickOpenPalette } from "./QuickOpenPalette";
 import {
   classifyForView,
   FileInspector,
+} from "./FileInspector";
+import {
   preloadMarkdownEditor,
   type HeadingTarget,
   type ScrollTarget,
-} from "./FileInspector";
+} from "./MarkdownView";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
 import {
