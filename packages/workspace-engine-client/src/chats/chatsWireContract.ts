@@ -685,9 +685,8 @@ function pageSchema<const Fields extends Schema.Struct.Fields>(fields: Fields) {
   });
 }
 
-const RunRecordsPageSchema = mutableStruct({
+const RunRecordsPageSchema = pageSchema({
   runs: Schema.Record(Schema.String, Schema.mutableKey(ChatRunSchema)),
-  ...NextCursorFields,
 });
 
 const ThreadsPageSchema = pageSchema({
@@ -699,9 +698,8 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.channelEnsureAgent]: ChatChannelSchema,
   [CHATS_METHOD.channelEnsureGeneral]: ChatChannelSchema,
   [CHATS_METHOD.channelFindBySlug]: Schema.NullOr(ChatChannelSchema),
-  [CHATS_METHOD.channelsList]: mutableStruct({
+  [CHATS_METHOD.channelsList]: pageSchema({
     channels: Schema.mutable(Schema.Array(ChatChannelSummarySchema)),
-    ...NextCursorFields,
   }),
   [CHATS_METHOD.channelGetWireId]: mutableStruct({ wireId: NullableString }),
   [CHATS_METHOD.threadStart]: mutableStruct({
@@ -709,9 +707,8 @@ const ChatsResultSchemas = {
     message: ChatMessageSchema,
   }),
   [CHATS_METHOD.threadCreate]: ChatThreadSchema,
-  [CHATS_METHOD.threadsList]: mutableStruct({
+  [CHATS_METHOD.threadsList]: pageSchema({
     threads: Schema.mutable(Schema.Array(ChatThreadWireRecordSchema)),
-    ...NextCursorFields,
   }),
   [CHATS_METHOD.threadsListForFile]: ThreadsPageSchema,
   [CHATS_METHOD.threadsListForChannel]: pageSchema({
@@ -750,9 +747,8 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.agentReadListUnreadThreads]: ThreadsPageSchema,
   [CHATS_METHOD.agentReadMarkThreadRead]: ChatAgentReadStateSchema,
   [CHATS_METHOD.followsSet]: ChatFollowSchema,
-  [CHATS_METHOD.followsList]: mutableStruct({
+  [CHATS_METHOD.followsList]: pageSchema({
     follows: Schema.mutable(Schema.Array(ChatFollowSchema)),
-    ...NextCursorFields,
   }),
   [CHATS_METHOD.followsEnsureDefaults]: Schema.Null,
   [CHATS_METHOD.feedMarkSeen]: ChatFeedReadStateSchema,
@@ -763,9 +759,8 @@ const ChatsResultSchemas = {
     readState: Schema.NullOr(ChatFeedReadStateSchema),
   }),
   [CHATS_METHOD.bookmarkSave]: ChatBookmarkSchema,
-  [CHATS_METHOD.bookmarksList]: mutableStruct({
+  [CHATS_METHOD.bookmarksList]: pageSchema({
     bookmarks: Schema.mutable(Schema.Array(ChatBookmarkSchema)),
-    ...NextCursorFields,
   }),
   [CHATS_METHOD.bookmarkFind]: Schema.NullOr(ChatBookmarkSchema),
   [CHATS_METHOD.bookmarkListPending]: pageSchema({
@@ -787,9 +782,8 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.dispatchOpenRuns]: pageSchema({
     claims: Schema.mutable(Schema.Array(ChatDispatchClaimSchema)),
   }),
-  [CHATS_METHOD.dispatchListRunMessages]: mutableStruct({
+  [CHATS_METHOD.dispatchListRunMessages]: pageSchema({
     messageIds: Schema.mutable(Schema.Array(Schema.String)),
-    ...NextCursorFields,
   }),
   [CHATS_METHOD.dispatchRunIdForMessage]: Schema.NullOr(Schema.String),
   [CHATS_METHOD.dispatchRunRecordsForThread]: RunRecordsPageSchema,
