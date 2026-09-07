@@ -6,9 +6,11 @@ import {
   lineSpanInText,
   markdownEditorBody,
   mergeMarkdownEditorBody,
+} from "./FileInspector";
+import {
   resolveWorkspaceLinkNavigation,
   resolveWikilinkNavigation,
-} from "./FileInspector";
+} from "./wikilinkNavigation";
 
 setupFileInspectorTests();
 
