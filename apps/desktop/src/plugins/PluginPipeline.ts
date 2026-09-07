@@ -12,10 +12,7 @@ import {
   type InstalledPluginRecord,
 } from "./pluginDiscovery";
 import { buildPluginBundle } from "./pluginBuildRunner";
-import {
-  foldForCompare,
-  recoverOnDiskSegments,
-} from "./pluginCaseRecovery";
+import { foldForCompare } from "./pluginCaseRecovery";
 import { HOST_CHANGE_REFUSED_ERROR_CODE } from "./pluginCommandInvocation";
 import {
   isPluginHostCommandAuthority,
@@ -29,6 +26,7 @@ import {
 import { verifyPluginIcon } from "./pluginIcon";
 import { installPluginDependencies } from "./pluginInstallRunner";
 import { PluginJobQueues } from "./pluginJobQueue";
+import { PluginDoorWrites } from "./pluginDoorWrites";
 import { scanPluginLifecycleScripts } from "./pluginLifecycleScan";
 import {
   mutatePluginRecord,
@@ -52,20 +50,16 @@ import {
 } from "./pluginSettingsFile";
 import type { PluginRuntimeStatus } from "./pluginHostProtocol";
 import {
-  canonicalPluginSourceHash,
   hashPluginSourceFiles,
-  isExcludedSourceName,
   isPluginRootArtifact,
   pluginIdToSafePath,
   pluginStateRoot,
   snapshotPluginSource,
-  type PluginSourceFileDigest,
   type PluginSourceSnapshotResult,
 } from "./pluginSourceSnapshot";
 import {
   measurePluginDirectory,
   pluginUninstallPreflight,
-  readPluginBaselineManifest,
   summarizeUninstallPreflight,
   writePluginBaselineManifest,
   type PluginUninstallPreflightSummary,
@@ -344,7 +338,7 @@ interface FullBuildOptions {
   /**
    * The source hash this build is allowed to approve. A caller that already
    * decided this content is approvable — the door-write predicate
-   * (doorApprovedHash: the approved baseline plus the recorded door deltas)
+   * (doorWrites.approvedHash: the approved baseline plus the recorded door deltas)
    * or a verify pass that confirmed the tree still matches its approved
    * hash — passes what it verified. The build takes its own fresh snapshot,
    * so without this an out-of-band change landing between that verification
@@ -662,45 +656,6 @@ function uninstallConfirmationKey(pluginId: string, directoryName: string): stri
   return `${pluginId}\0${directoryName}`;
 }
 
-export interface DoorWrittenDelta {
-  sha256: string;
-  seq: number;
-  provisional?: boolean;
-  /**
-   * The write's original, caller-spelled absolute path. Set only when
-   * landing attributed this delta through sourceRelPath's case-insensitive
-   * fold, not an exact root match — an exact landing already proved
-   * ownership, so it has nothing left to re-confirm. retryProvisionalDeltaRecovery
-   * walks this path from the workspace root to confirm or disprove that
-   * guess; a rekeyed or landing-exact delta carries no origin because it
-   * needs none.
-   */
-  provisionalOrigin?: string;
-}
-
-export function overlayDoorWrittenSourceDeltas(
-  baselineFiles: readonly PluginSourceFileDigest[],
-  deltas: Iterable<readonly [string, DoorWrittenDelta]>,
-  platform: NodeJS.Platform = process.platform,
-): PluginSourceFileDigest[] {
-  const files = new Map(
-    baselineFiles.map((file) => [file.relPath, file.sha256]),
-  );
-  const baselineKeys = new Set(files.keys());
-  const byLowerCase = platform === "win32" || platform === "darwin"
-    ? new Map([...files.keys()].map((relPath) => [foldForCompare(relPath), relPath]))
-    : undefined;
-  for (
-    const [relPath, delta] of [...deltas].sort((a, b) => a[1].seq - b[1].seq)
-  ) {
-    const target = delta.provisional && byLowerCase && !baselineKeys.has(relPath)
-      ? byLowerCase.get(foldForCompare(relPath)) ?? relPath
-      : relPath;
-    files.set(target, delta.sha256);
-  }
-  return [...files].map(([relPath, sha256]) => ({ relPath, sha256 }));
-}
-
 export class PluginPipeline {
   private readonly workspaceRoot: string;
   private readonly dohcDir: string;
@@ -717,21 +672,7 @@ export class PluginPipeline {
   private readonly lastApprovedAttemptHash = new Map<string, string>();
   private readonly jobQueues: PluginJobQueues;
   private readonly uninstallConfirmations = new Map<string, UninstallConfirmation>();
-  /**
-   * Every door-written file since the approved baseline, per plugin:
-   * relPath (POSIX, root-relative) to the sha256 of the written bytes and
-   * the write's order in doorWriteSeq. See handleDoorWrittenSourceChange
-   * and doorApprovedHash — this overlay, applied to the persisted baseline
-   * manifest, is the only tree the door path may auto-approve. Overlay
-   * A landing-time key is provisional until pluginAuthoredWrite's async case
-   * recovery moves it to the spelling read from disk.
-   */
-  private readonly doorWrittenDeltas = new Map<
-    string,
-    Map<string, DoorWrittenDelta>
-  >();
-  /** Orders door writes against each build's snapshot; see runFullBuild. */
-  private doorWriteSeq = 0;
+  private readonly doorWrites: PluginDoorWrites;
   /**
    * The plugins whose first install is running right now, and the ones whose
    * source changed while that install ran. A fresh install hashes the tree,
@@ -757,6 +698,12 @@ export class PluginPipeline {
     this.dohcDir = pluginDataDir(options.stateDir, this.workspaceRoot);
     this.operations = { ...DEFAULT_OPERATIONS, ...options.operations };
     this.platform = options.platform ?? process.platform;
+    this.doorWrites = new PluginDoorWrites(
+      this.workspaceRoot,
+      this.dohcDir,
+      this.platform,
+      (pluginId) => this.validCandidate(pluginId)?.rootPath ?? null,
+    );
     this.jobQueues = new PluginJobQueues((pluginId, error) => {
       const candidate = this.validCandidate(pluginId);
       if (candidate) {
@@ -1052,44 +999,6 @@ export class PluginPipeline {
     return null;
   }
 
-  private sourceRelPathExact(
-    candidate: InstalledPluginRecord,
-    absolutePath: string,
-  ): string | null {
-    const root = resolve(candidate.rootPath);
-    const target = resolve(absolutePath);
-    if (target === root) return null;
-    if (!isInside(root, target)) return null;
-    return relative(root, target).replaceAll("\\", "/");
-  }
-
-  private sourceRelPath(
-    candidate: InstalledPluginRecord,
-    absolutePath: string,
-  ): string | null {
-    const exact = this.sourceRelPathExact(candidate, absolutePath);
-    if (exact !== null) return exact;
-    if (this.platform !== "win32" && this.platform !== "darwin") return null;
-    const root = resolve(candidate.rootPath);
-    const target = resolve(absolutePath);
-    const foldedRoot = foldForCompare(root);
-    const foldedTarget = foldForCompare(target);
-    if (foldedTarget === foldedRoot || !isInside(foldedRoot, foldedTarget)) return null;
-    const rootSegments = root.split(/[\\/]+/).filter(Boolean);
-    const targetSegments = target.split(/[\\/]+/).filter(Boolean);
-    if (
-      rootSegments.length >= targetSegments.length ||
-      rootSegments.some((segment, index) => {
-        const targetSegment = targetSegments[index];
-        return targetSegment === undefined ||
-          foldForCompare(segment) !== foldForCompare(targetSegment);
-      })
-    ) {
-      return null;
-    }
-    return targetSegments.slice(rootSegments.length).join("/");
-  }
-
   install(pluginId: string): Promise<PluginPipelineActionResult> {
     return this.enqueueAdoptedAction(pluginId, async (change) => {
       const candidate = this.requireValidCandidate(pluginId);
@@ -1364,7 +1273,7 @@ export class PluginPipeline {
    * attributes: the design doc's auto-approve predicate is attribution
    * through the door, not topology, so the refresh auto-approves only when
    * the live tree equals the approved baseline plus every recorded door
-   * delta (doorApprovedHash). Hashing the whole live tree here instead
+   * delta (doorWrites.approvedHash). Hashing the whole live tree here instead
    * folded ambient, watcher-class bytes already on disk — a git checkout, a
    * mirror delivery — into the door write's auto-approval. Deltas are
    * recorded synchronously and keyed per
@@ -1376,23 +1285,7 @@ export class PluginPipeline {
     pluginId: string,
     write: { absolutePath: string; text: string },
   ): void {
-    const candidate = this.validCandidate(pluginId);
-    if (!candidate) return;
-    const exactRelPath = this.sourceRelPathExact(candidate, write.absolutePath);
-    const relPath = exactRelPath ?? this.sourceRelPath(candidate, write.absolutePath);
-    if (relPath === null) return;
-    // node_modules and .dohc are excluded from every source digest, so a
-    // write under them cannot change the hash this predicate compares.
-    if (this.isExcludedRelPath(relPath)) return;
-    const deltas = this.doorWrittenDeltas.get(pluginId) ??
-      new Map<string, DoorWrittenDelta>();
-    deltas.set(relPath, {
-      sha256: createHash("sha256").update(write.text, "utf8").digest("hex"),
-      seq: ++this.doorWriteSeq,
-      provisional: true,
-      provisionalOrigin: exactRelPath === null ? write.absolutePath : undefined,
-    });
-    this.doorWrittenDeltas.set(pluginId, deltas);
+    if (!this.doorWrites.record(pluginId, write)) return;
     this.enqueueSourceRefresh(pluginId, (change) =>
       this.reconcileApprovedCandidate(pluginId, true, change));
   }
@@ -1407,49 +1300,9 @@ export class PluginPipeline {
     from: { absolutePath: string },
     to: { absolutePath: string },
   ): void {
-    const candidate = this.validCandidate(pluginId);
-    if (!candidate) return;
-    const fromRelPath = this.sourceRelPath(candidate, from.absolutePath);
-    if (fromRelPath === null) return;
-    const deltas = this.doorWrittenDeltas.get(pluginId);
-    const delta = deltas?.get(fromRelPath);
-    if (!deltas || !delta) return;
-
-    const toRelPath = this.sourceRelPathExact(candidate, to.absolutePath);
-    if (toRelPath === null) {
-      // Recovery resolved the write's true on-disk path, and it is not
-      // under the plugin's real root: the landing-time fold guessed
-      // ownership from spelling alone, and a case-sensitive volume just
-      // proved that guess wrong. Drop the provisional attribution — this
-      // is an ordinary out-of-band change to a distinct, real directory,
-      // not this plugin's own source.
-      deltas.delete(fromRelPath);
-      this.enqueueSourceRefresh(pluginId, (change) =>
-        this.reconcileApprovedCandidate(pluginId, true, change));
-      return;
-    }
-
-    if (this.isExcludedRelPath(toRelPath)) {
-      deltas.delete(fromRelPath);
-      this.enqueueSourceRefresh(pluginId, (change) =>
-        this.reconcileApprovedCandidate(pluginId, true, change));
-      return;
-    }
-
-    const destination = deltas.get(toRelPath);
-    const pathChanged = fromRelPath !== toRelPath;
-    if (pathChanged) deltas.delete(fromRelPath);
-    if (!destination || destination.seq <= delta.seq) {
-      deltas.set(toRelPath, { sha256: delta.sha256, seq: delta.seq });
-    }
-    if (pathChanged) {
-      this.enqueueSourceRefresh(pluginId, (change) =>
-        this.reconcileApprovedCandidate(pluginId, true, change));
-    }
-  }
-
-  private isExcludedRelPath(relPath: string): boolean {
-    return relPath.split("/").some((segment) => isExcludedSourceName(segment));
+    if (!this.doorWrites.rekey(pluginId, from, to)) return;
+    this.enqueueSourceRefresh(pluginId, (change) =>
+      this.reconcileApprovedCandidate(pluginId, true, change));
   }
 
   /**
@@ -2268,7 +2121,7 @@ export class PluginPipeline {
    * batches, and door writes. Verify the live tree against the approved
    * hash; when it changed, auto-approve iff the live tree equals the
    * approved baseline plus the accumulated door-written deltas
-   * (doorApprovedHash) — the design doc's predicate — and hold for approval
+   * (doorWrites.approvedHash) — the design doc's predicate — and hold for approval
    * otherwise. A queued watcher reconcile can be the only refresh that
    * survives enqueueSourceRefresh's dedup after a door write, so it must
    * consult the same predicate rather than holding a pure door-write
@@ -2319,7 +2172,7 @@ export class PluginPipeline {
         this.setStatus(candidate, priorStatus);
         return existingHostResult(undefined);
       }
-      const doorHash = await this.doorApprovedHash(pluginId, record.approvedHash);
+      const doorHash = await this.doorWrites.approvedHash(pluginId, record.approvedHash);
       if (doorHash === null || verified.sourceHash !== doorHash) {
         return mapHostResult(await this.holdForApproval(
           candidate,
@@ -2359,7 +2212,7 @@ export class PluginPipeline {
       // here restarted a plugin the app had turned off — and reset the crash
       // accounting that turned it off.
       const doorHash = priorDisabledReason === "approval"
-        ? await this.doorApprovedHash(pluginId, record.approvedHash)
+        ? await this.doorWrites.approvedHash(pluginId, record.approvedHash)
         : null;
       if (doorHash !== record.approvedHash) {
         this.setStatus(candidate, {
@@ -2432,7 +2285,7 @@ export class PluginPipeline {
       }
       await this.removePluginData(candidate.id);
       this.statuses.delete(candidate.id);
-      this.doorWrittenDeltas.delete(candidate.id);
+      this.doorWrites.forget(candidate.id);
       this.lastApprovedAttemptHash.delete(candidate.id);
       this.sourceChangedDuringInstall.delete(candidate.id);
       this.uninstallConfirmations.delete(
@@ -2564,89 +2417,6 @@ export class PluginPipeline {
     }));
   }
 
-  /**
-   * Retries case recovery for every still-provisional delta before
-   * doorApprovedHash hashes them: confirms a landing-time fold's guessed
-   * ownership, or recovers a leaf's on-disk spelling.
-   */
-  private async retryProvisionalDeltaRecovery(pluginId: string): Promise<void> {
-    if (this.platform !== "win32" && this.platform !== "darwin") return;
-    const deltas = this.doorWrittenDeltas.get(pluginId);
-    if (!deltas) return;
-    const candidate = this.validCandidate(pluginId);
-    if (!candidate) return;
-    const root = resolve(candidate.rootPath);
-    for (const [relPath, delta] of [...deltas]) {
-      if (!delta.provisional) continue;
-      const origin = delta.provisionalOrigin;
-      const { segments, fullyRecovered } = await recoverOnDiskSegments(
-        origin !== undefined ? this.workspaceRoot : root,
-        origin !== undefined
-          ? relative(this.workspaceRoot, origin).replaceAll("\\", "/")
-          : relPath,
-        undefined,
-      );
-      const current = deltas.get(relPath);
-      if (!current || current.seq !== delta.seq) continue;
-      if (!fullyRecovered) continue;
-      const recoveredRelPath = origin !== undefined
-        ? this.sourceRelPathExact(candidate, join(this.workspaceRoot, ...segments))
-        : segments.join("/");
-      if (recoveredRelPath === null) {
-        // Recovery resolved the write's true on-disk path, and it is not
-        // under this plugin's real root: the landing-time fold guessed
-        // ownership from spelling alone, and a case-sensitive volume just
-        // proved that guess wrong. Drop it — the same confirmation
-        // rekeyDoorWrittenSourceChange applies to a delta the writer's own
-        // recovery rekeys.
-        deltas.delete(relPath);
-        continue;
-      }
-      if (this.isExcludedRelPath(recoveredRelPath)) {
-        deltas.delete(relPath);
-        continue;
-      }
-      if (recoveredRelPath === relPath) {
-        deltas.set(relPath, { sha256: delta.sha256, seq: delta.seq });
-        continue;
-      }
-      deltas.delete(relPath);
-      const destination = deltas.get(recoveredRelPath);
-      if (!destination || destination.seq <= delta.seq) {
-        deltas.set(recoveredRelPath, { sha256: delta.sha256, seq: delta.seq });
-      }
-    }
-  }
-
-  /**
-   * The one tree the door path may auto-approve: the approved per-file
-   * baseline overlaid with every door-written delta recorded since. Null
-   * when no baseline verifies against the approved hash — a fresh
-   * install's first approval is user-driven, and a baseline that cannot be
-   * read or does not describe the approved content proves nothing, so
-   * nothing auto-approves. Only handleDoorWrittenSourceChange writes
-   * deltas, so any other byte on disk — an interloper file, a
-   * watcher-class edit, an out-of-band delete — makes the live tree miss
-   * this hash and hold for approval. The SDK write surface has no delete,
-   * so a delta only ever adds or replaces one file. The retry also confirms
-   * ownership for a delta attributed through the landing-time path fold.
-   */
-  private async doorApprovedHash(
-    pluginId: string,
-    approvedHash: string,
-  ): Promise<string | null> {
-    const baseline = await readPluginBaselineManifest(this.dohcDir, pluginId);
-    if (!baseline || baseline.sourceHash !== approvedHash) return null;
-    await this.retryProvisionalDeltaRecovery(pluginId);
-    return canonicalPluginSourceHash(
-      overlayDoorWrittenSourceDeltas(
-        baseline.files,
-        this.doorWrittenDeltas.get(pluginId) ?? [],
-        this.platform,
-      ),
-    );
-  }
-
   private async runFullBuild(
     input: FullBuildOptions,
     change?: PluginHostChangeAuthority,
@@ -2679,7 +2449,7 @@ export class PluginPipeline {
     // baseline, or a user gesture approved whatever superseded them); a
     // delta above it landed after the snapshot and must survive for its own
     // queued refresh.
-    const doorSeqAtSnapshot = this.doorWriteSeq;
+    const doorSeqAtSnapshot = this.doorWrites.checkpoint();
     if (input.freshInstall) this.freshInstallsInFlight.add(candidate.id);
     try {
       const snapshot = await this.snapshotOrThrow(validCandidate);
@@ -2852,15 +2622,7 @@ export class PluginPipeline {
       } catch (error) {
         throw failureFromUnknown("state", "state-write-failed", error);
       }
-      const settledDeltas = this.doorWrittenDeltas.get(candidate.id);
-      if (settledDeltas) {
-        for (const [relPath, delta] of settledDeltas) {
-          if (delta.seq <= doorSeqAtSnapshot) settledDeltas.delete(relPath);
-        }
-        if (settledDeltas.size === 0) {
-          this.doorWrittenDeltas.delete(candidate.id);
-        }
-      }
+      this.doorWrites.settle(candidate.id, doorSeqAtSnapshot);
       const warnings = [
         ...scan.warningLines,
         ...(published.cleanupWarning ? [published.cleanupWarning] : []),
@@ -3624,7 +3386,7 @@ export class PluginPipeline {
   ): void {
     for (const pluginId of cleanupIds) {
       this.statuses.delete(pluginId);
-      this.doorWrittenDeltas.delete(pluginId);
+      this.doorWrites.forget(pluginId);
       this.lastApprovedAttemptHash.delete(pluginId);
       this.uninstallConfirmations.delete(
         uninstallConfirmationKey(pluginId, directoryName),

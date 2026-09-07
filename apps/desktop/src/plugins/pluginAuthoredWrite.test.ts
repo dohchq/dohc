@@ -1,4 +1,5 @@
 import { symlinkSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -9,10 +10,8 @@ import {
   type PluginAuthoredWriteCapture,
   type PluginDoorWritePipeline,
 } from "./pluginAuthoredWrite";
-import {
-  type DoorWrittenDelta,
-  overlayDoorWrittenSourceDeltas,
-} from "./PluginPipeline";
+import { canonicalPluginSourceHash } from "./pluginSourceSnapshot";
+import { writePluginBaselineManifest } from "./pluginUninstallPreflight";
 
 const author: MomentAuthor = {
   kind: "agent",
@@ -683,24 +682,42 @@ describe("createPluginAuthoredTextWriter", () => {
   });
 
   it("keeps a landed path provisional when casing recovery cannot read a directory", async () => {
-    const workspaceRoot = join(tmpdir(), "dohc-authored-unreadable");
-    const originalRelPath = "SRC/file.ts";
-    const recoveredRelPath = "src/file.ts";
-    const deltas = new Map<string, DoorWrittenDelta>();
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-authored-unreadable-"));
+    const dohcDir = join(workspaceRoot, "state");
+    const fileDigest = (text: string) => ({
+      relPath: "src/File.ts",
+      sha256: createHash("sha256").update(text, "utf8").digest("hex"),
+    });
+    const baselineFiles = [fileDigest("baseline")];
+    const approvedHash = canonicalPluginSourceHash(baselineFiles);
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
     let readCount = 0;
-    const readdirMock = vi.fn(async () => {
+    const readdirMock = async () => {
       readCount += 1;
       if (readCount === 1) return ["plugins"];
       if (readCount === 2) return ["owned"];
       if (readCount === 3) return ["src"];
       throw new Error("simulated transient readdir failure");
-    });
+    };
     vi.resetModules();
-    vi.doMock("node:fs/promises", () => ({ readdir: readdirMock }));
+    vi.doMock("node:fs/promises", () => ({ ...actualFs, readdir: readdirMock }));
 
     try {
+      await writePluginBaselineManifest({
+        dohcDir,
+        pluginId: "owned-plugin",
+        baselineDigest: { sourceHash: approvedHash, files: baselineFiles },
+        installedBaselineHash: approvedHash,
+      });
       const { createPluginAuthoredTextWriter: createWriterWithUnreadablePath } =
         await import("./pluginAuthoredWrite");
+      const { PluginDoorWrites } = await import("./pluginDoorWrites");
+      const writes = new PluginDoorWrites(
+        workspaceRoot,
+        dohcDir,
+        "darwin",
+        () => join(workspaceRoot, "plugins", "owned"),
+      );
       const write = createWriterWithUnreadablePath(writerInput({
         platform: "darwin",
         workspaceRoot,
@@ -711,21 +728,11 @@ describe("createPluginAuthoredTextWriter", () => {
         },
         pipeline: {
           pluginIdForPath: () => "owned-plugin",
-          handleDoorWrittenSourceChange: () => {
-            deltas.set(originalRelPath, {
-              sha256: "written",
-              seq: 1,
-              provisional: true,
-            });
+          handleDoorWrittenSourceChange: (pluginId, written) => {
+            writes.record(pluginId, written);
           },
-          rekeyDoorWrittenSourceChange: () => {
-            const delta = deltas.get(originalRelPath);
-            if (!delta) return;
-            deltas.delete(originalRelPath);
-            deltas.set(recoveredRelPath, {
-              sha256: delta.sha256,
-              seq: delta.seq,
-            });
+          rekeyDoorWrittenSourceChange: (pluginId, from, to) => {
+            writes.rekey(pluginId, from, to);
           },
         },
       }));
@@ -736,18 +743,13 @@ describe("createPluginAuthoredTextWriter", () => {
         { overwrite: true, author },
       );
 
-      expect(deltas).toEqual(new Map([[
-        originalRelPath,
-        { sha256: "written", seq: 1, provisional: true },
-      ]]));
-      expect(overlayDoorWrittenSourceDeltas(
-        [{ relPath: "src/File.ts", sha256: "baseline" }],
-        deltas,
-        "darwin",
-      )).toEqual([{ relPath: "src/File.ts", sha256: "written" }]);
+      expect(await writes.approvedHash("owned-plugin", approvedHash)).toBe(
+        canonicalPluginSourceHash([fileDigest("text\n")]),
+      );
     } finally {
       vi.doUnmock("node:fs/promises");
       vi.resetModules();
+      await rm(workspaceRoot, { recursive: true, force: true });
     }
   });
 
