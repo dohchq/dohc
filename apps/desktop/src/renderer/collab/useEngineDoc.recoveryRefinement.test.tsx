@@ -3,10 +3,8 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { resetOrphanedDrafts, useOrphanedDrafts } from "../orphanedDrafts";
-import {
-  disposeEngineDocLeasesForTests,
-  useEngineDoc,
-} from "./useEngineDoc";
+import { disposeEngineDocLeasesForTests } from "./engineDocLease";
+import { useEngineDoc } from "./useEngineDoc";
 
 // A recovery draft is written twice: a lossless snapshot synchronously at the
 // failure, then faithful Markdown once the lazy projection answers. The second

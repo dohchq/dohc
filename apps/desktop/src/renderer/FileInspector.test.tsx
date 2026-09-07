@@ -59,7 +59,7 @@ import {
   resetSharedLocalDocumentsForTests,
 } from "./sharedLocalDocument";
 import { documentVersionKey } from "./documentVersionKey";
-import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
+import { disposeEngineDocLeasesForTests } from "./collab/engineDocLease";
 
 afterEach(async () => {
   vi.useRealTimers();

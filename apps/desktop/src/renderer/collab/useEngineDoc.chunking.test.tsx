@@ -5,10 +5,8 @@ import * as Y from "yjs";
 import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
 import { resetOrphanedDrafts, useOrphanedDrafts } from "../orphanedDrafts";
 import { ORPHANED_DRAFT_STORAGE_KEY } from "../orphanedDraftStorage";
-import {
-  disposeEngineDocLeasesForTests,
-  useEngineDoc,
-} from "./useEngineDoc";
+import { disposeEngineDocLeasesForTests } from "./engineDocLease";
+import { useEngineDoc } from "./useEngineDoc";
 
 // `useEngineDoc` backs every FileInspector. `@dohc/ydoc-projection`
 // statically pulls in the full Tiptap stack and builds its schema at module

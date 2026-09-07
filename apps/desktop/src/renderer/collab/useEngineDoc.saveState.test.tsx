@@ -14,10 +14,8 @@ import {
   resetOrphanedDrafts,
   useOrphanedDrafts,
 } from "../orphanedDrafts";
-import {
-  disposeEngineDocLeasesForTests,
-  useEngineDoc,
-} from "./useEngineDoc";
+import { disposeEngineDocLeasesForTests } from "./engineDocLease";
+import { useEngineDoc } from "./useEngineDoc";
 import { EngineYDocUpdateTooLargeError } from "./engineYDocProvider";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
 
