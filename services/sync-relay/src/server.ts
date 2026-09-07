@@ -43,13 +43,10 @@ import {
   DiscussionActivityCapacityError,
   DiscussionActivityHub,
 } from "./discussionActivity";
-import {
-  PresenceCapacityError,
-  PresenceHub,
-  presenceScopeKey,
-  type PresenceSnapshot,
-} from "./presence";
-import { filterOpForShare, filterOpForShareAppend, filterProposedChangeForShare, hasValidShareMomentShape, isChatChannelSelector, parseShareOpPayloadWithReferencedPaths, parseStoredAnyShareSelectorJson, presenceTopicAllowedForShare, targetVersionId, validateChatChannelShareSelector, validateChatShareAccess, validateFileShareAccess, validateShareSelector, type AnyShareSelector, type ChatShareChannelKind, type ChatShareThreadResolver, type ShareSelector, type ThreadFileBinding } from "./shareFilter";
+import { PresenceHub } from "./presence";
+import { createPresenceRoutes } from "./presenceRoutes";
+import { parseCursor, parseString, readJsonObject } from "./requestInputs";
+import { filterOpForShare, filterOpForShareAppend, filterProposedChangeForShare, hasValidShareMomentShape, isChatChannelSelector, parseShareOpPayloadWithReferencedPaths, parseStoredAnyShareSelectorJson, targetVersionId, validateChatChannelShareSelector, validateChatShareAccess, validateFileShareAccess, validateShareSelector, type AnyShareSelector, type ChatShareChannelKind, type ChatShareThreadResolver, type ShareSelector, type ThreadFileBinding } from "./shareFilter";
 import { SHARED_BLOB_CANDIDATE_LIMIT, LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT, LINK_DISCUSSION_PAGE_LIMIT, normalizeDiscussionDisplayName, SyncRelayBlobMissingError, type EnforceWorkspaceIdentityResult, type ObjectMomentRow, type ShareProposalOpRow, type SyncRelayLogInput, type SyncRelayLogRow, type SyncRelayIndependentGrantInventoryCursor, type SyncRelayLinkInventoryCursor, type SyncRelayShareDiscussionCursor, type SyncRelayShareDiscussionMessageRow, type SyncRelayShareDiscussionActivityPage, type SyncRelayShareDiscussionPage, type SyncRelayShareGrantRow, type SyncRelayShareWithGrantRow, type SyncRelayStorage } from "./storage";
 import {
   authorizeShareAction,
@@ -65,6 +62,12 @@ import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
 export { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 export { validateLinkCapability } from "./linkSecurity";
+export {
+  MAX_PRESENCE_TOPIC_CHARS,
+  MAX_CLIENT_ID_CHARS,
+  MAX_PRESENCE_STATE_BYTES,
+  DEFAULT_PRESENCE_HOLD_MS,
+} from "./presenceRoutes";
 
 export type SyncRelayHandler = (request: Request) => Promise<Response>;
 
@@ -232,13 +235,6 @@ const MAX_LINK_CURRENT_FILES = 5_000;
 export const MAX_RAW_ROWS_PER_LINK_PAGE = 10_000;
 // Freshness reads inspect at most 20 pages, or 10,000 rows at the default page size.
 export const LINK_FRESHNESS_PAGE_BUDGET = 20;
-// Presence (ephemeral awareness) transport limits.
-export const MAX_PRESENCE_TOPIC_CHARS = 1024;
-export const MAX_CLIENT_ID_CHARS = 128;
-export const MAX_PRESENCE_STATE_BYTES = 8 * 1024;
-export const DEFAULT_PRESENCE_HOLD_MS = 25_000;
-const MAX_PRESENCE_HOLD_MS = 30_000;
-
 const MAX_WORKSPACE_ID_CHARS = 256;
 const MAX_ORIGIN_ID_CHARS = 256;
 const MAX_OP_KIND_CHARS = 128;
@@ -387,56 +383,6 @@ export function createSyncRelayHandler({
     terminateLinkStreamsForGrant,
     terminateLinkStreamsForShare,
   } = createLinkResponseStreams(nowMs);
-
-  // Handle a publish (POST) or long-poll (GET) against an already-authorized
-  // presence scope. The actor's user id is the SERVER-DERIVED attribution;
-  // the client-supplied `state` is opaque display data only. `reauthorize`
-  // re-runs the caller's authorization after a long-poll park: a grant revoked
-  // while the poll was parked must fail closed on wake, never return a final
-  // snapshot for a scope the caller no longer has.
-  const respondPresence = async (
-    request: Request,
-    scopeKey: string,
-    userId: string,
-    reauthorize?: () => unknown,
-  ): Promise<Response> => {
-    if (request.method === "POST") {
-      const input = await readJsonObject(request);
-      const clientId = parseString(input.clientId, "clientId", MAX_CLIENT_ID_CHARS);
-      if (input.leave === true) {
-        return presenceResponse(presence.leave(scopeKey, userId, clientId, nowMs()));
-      }
-      assertPresenceStateSize(input.state);
-      try {
-        return presenceResponse(
-          presence.publish(scopeKey, userId, clientId, input.state ?? null, nowMs()),
-        );
-      } catch (error) {
-        throw presenceCapacityAs429(error);
-      }
-    }
-    if (request.method === "GET") {
-      const url = new URL(request.url);
-      const since = parseCursor(url.searchParams.get("since"));
-      const hold = parsePresenceHold(url.searchParams.get("hold"));
-      let snapshot: PresenceSnapshot;
-      try {
-        snapshot = await presence.wait(scopeKey, since, {
-          holdMs: hold,
-          nowMs: nowMs(),
-          signal: request.signal,
-          actorId: userId,
-        });
-      } catch (error) {
-        throw presenceCapacityAs429(error);
-      }
-      // A 25s park is long enough for a revoke to land mid-poll; re-run the
-      // route's authorization before returning anything.
-      if (reauthorize) await reauthorize();
-      return presenceResponse(snapshot);
-    }
-    throw relayError("method_not_allowed");
-  };
 
   // Whether a recipient may propose changes to the files this
   // selector shares. Edit and nothing else — and the refusal is the same
@@ -594,6 +540,15 @@ export function createSyncRelayHandler({
     }
     throw notFound();
   }
+
+  const { respondToSharePresence, respondToWorkspacePresence } = createPresenceRoutes(
+    presence,
+    nowMs,
+    storage,
+    claimPendingShares,
+    requireShareAction,
+    chatResolverFor,
+  );
 
   type DiscussionViewer = "public" | "named" | "owner";
 
@@ -3108,48 +3063,7 @@ export function createSyncRelayHandler({
       if (route.route === "share-proposal-withdraw") throw relayError("method_not_allowed");
 
       if (route.route === "share-presence") {
-        // Cross-user presence: a recipient joins the ephemeral scope for a
-        // topic their grant exposes. The share is loaded FAIL-CLOSED (generic
-        // 404 for no-grant / revoked / wrong-recipient), and the topic is
-        // gated by the same visibility check the durable filter uses, so a
-        // non-member can neither read nor even confirm presence for a
-        // channel/DM they lack a grant for. The scope key resolves to the
-        // granter's workspace, so the owner (workspace route) and recipients
-        // fan into one scope and see each other.
-        await claimPendingShares(actor.userId);
-        const topic = parsePresenceTopic(new URL(request.url).searchParams.get("topic"));
-        // The share + topic gate, run before joining and re-run after a parked
-        // long-poll wakes (respondPresence's reauthorize): a revoke that lands
-        // while a recipient's poll is parked fails closed on wake instead of
-        // leaking one final snapshot. The resolver lets a chat-channel grant
-        // admit a `chat:thread:<threadId>` topic for a thread BOUND (earliest
-        // binding, forge-resistant) to the granted channel — the same authority
-        // the durable chat filter uses; bare wire presence also resolves kind
-        // so an owner-only agent channel can never enter a share scope.
-        const authorizeShare = () => {
-          const authorized = requireShareAction(route.shareId, actor.userId, "presence");
-          const chatResolver = chatResolverFor(authorized.share.workspaceId);
-          if (
-            !presenceTopicAllowedForShare(
-              authorized.effectiveSelector,
-              topic,
-              chatResolver,
-            )
-          ) {
-            throw notFound();
-          }
-          return { ...authorized.share, selector: authorized.effectiveSelector };
-        };
-        const share = authorizeShare();
-        // `await` is load-bearing: respondPresence can reject long after this
-        // frame returns (a parked long-poll), and only an awaited rejection
-        // flows through the outer catch into errorResponse.
-        return await respondPresence(
-          request,
-          presenceScopeKey(share.workspaceId, topic),
-          actor.userId,
-          authorizeShare,
-        );
+        return await respondToSharePresence(request, route.shareId, actor.userId);
       }
 
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
@@ -3321,21 +3235,7 @@ export function createSyncRelayHandler({
       if (route.route === "workspace-proposal-settle") throw relayError("method_not_allowed");
 
       if (route.route === "presence") {
-        // The owner's own workspace presence (multi-device co-presence in
-        // their local channels/docs, and the owner side of a shared channel).
-        // Ownership was proven by the gate above; any topic in the owner's own
-        // workspace is theirs to join. Ownership is also re-proven after a
-        // parked long-poll wakes, mirroring the share route's posture.
-        const topic = parsePresenceTopic(new URL(request.url).searchParams.get("topic"));
-        // `await` is load-bearing: see the share-presence route above.
-        return await respondPresence(
-          request,
-          presenceScopeKey(route.workspaceId, topic),
-          actor.userId,
-          () => {
-            if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
-          },
-        );
+        return await respondToWorkspacePresence(request, route.workspaceId, actor.userId);
       }
 
       if (route.route === "bootstrap" && request.method === "GET") {
@@ -4458,19 +4358,6 @@ function parsePromotionExpectation(input: Record<string, unknown>): {
   };
 }
 
-async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
-  let value: unknown;
-  try {
-    value = await request.json();
-  } catch {
-    throw badRequest("request body must be valid JSON");
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw badRequest("request body must be a JSON object");
-  }
-  return value as Record<string, unknown>;
-}
-
 async function readOptionalJsonObject(
   request: Request,
 ): Promise<Record<string, unknown> | null> {
@@ -4503,25 +4390,6 @@ function parseWorkspaceId(value: unknown): string {
   // rather than strand it.
   if (workspaceId === "shares") throw badRequest("workspaceId is reserved");
   return workspaceId;
-}
-
-// C0 controls (including NUL) and DEL. Rejected in every parsed string field:
-// the presence scope key joins workspaceId/topic with NUL separators, so an
-// embedded NUL in one component could collide with a different workspace's
-// scope (workspace "a" + topic "b\0c" vs workspace "a\0b" + topic "c") and
-// leak presence across tenants. Refusing control characters at the parse
-// boundary makes the composite keys unambiguous.
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u;
-
-function parseString(value: unknown, name: string, maxChars: number): string {
-  if (typeof value !== "string" || !value.trim() || value !== value.trim()) {
-    throw badRequest(`${name} must be a non-empty trimmed string`);
-  }
-  if (value.length > maxChars) throw badRequest(`${name} is too long`);
-  if (CONTROL_CHARS.test(value)) {
-    throw badRequest(`${name} must not contain control characters`);
-  }
-  return value;
 }
 
 function parseWorkspaceIdentityValue(value: unknown, name: string): string {
@@ -4727,13 +4595,6 @@ function assertChatAuthorship(
   }
 }
 
-function parseCursor(value: string | null): number {
-  if (value === null || value === "") return 0;
-  const cursor = Number(value);
-  if (!Number.isInteger(cursor) || cursor < 0) throw badRequest("since must be a non-negative integer");
-  return cursor;
-}
-
 function parseLimit(value: string | null): number {
   if (value === null || value === "") return DEFAULT_LOG_PAGE_SIZE;
   const limit = Number(value);
@@ -4757,45 +4618,6 @@ function parseLinkLogHold(value: string | null): number {
     );
   }
   return hold;
-}
-
-function parsePresenceTopic(value: string | null): string {
-  if (value === null) throw badRequest("topic is required");
-  return parseString(value, "topic", MAX_PRESENCE_TOPIC_CHARS);
-}
-
-function parsePresenceHold(value: string | null): number {
-  if (value === null || value === "") return DEFAULT_PRESENCE_HOLD_MS;
-  const hold = Number(value);
-  if (!Number.isInteger(hold) || hold < 0) throw badRequest("hold must be a non-negative integer");
-  return Math.min(hold, MAX_PRESENCE_HOLD_MS);
-}
-
-function assertPresenceStateSize(state: unknown): void {
-  if (state === undefined || state === null) return;
-  let json: string | undefined;
-  try {
-    json = JSON.stringify(state);
-  } catch {
-    throw badRequest("presence state must be JSON-serializable");
-  }
-  if (json === undefined) throw badRequest("presence state must be JSON-serializable");
-  if (Buffer.byteLength(json, "utf8") > MAX_PRESENCE_STATE_BYTES) {
-    throw badRequest("presence state is too large");
-  }
-}
-
-function presenceResponse(snapshot: PresenceSnapshot): Response {
-  return jsonResponse({ ok: true, version: snapshot.version, peers: snapshot.peers });
-}
-
-// Capacity refusals (scope/entry/waiter caps) are a client-visible 429 so a
-// well-behaved client backs off; anything else re-throws unchanged.
-function presenceCapacityAs429(error: unknown): unknown {
-  if (error instanceof PresenceCapacityError) {
-    return relayError("presence_capacity", error.message);
-  }
-  return error;
 }
 
 function assertSha256(value: string): void {
