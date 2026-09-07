@@ -8,6 +8,7 @@ import { Client, Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createShareWebApplication } from "./server";
 import { createNamedLiveBrowserResolver } from "../../sync-relay/src/namedLiveBrowserAuth";
+import { createNamedLiveBrowserSessions } from "../../sync-relay/src/namedLiveBrowserSessions";
 import { closeTestStorages, testStorage } from "../../sync-relay/src/testing";
 
 const connectionString = process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc";
@@ -122,6 +123,14 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
     expect(await resolveBrowser(actorRequest(bobCookie), bobScope)).toEqual({ userId: bob.user.id, ...bobScope });
     expect(await resolveBrowser(actorRequest(aliceCookie), bobScope)).toBeNull();
     expect(await resolveBrowser(actorRequest(bobCookie), aliceScope)).toBeNull();
+    const sessions = createNamedLiveBrowserSessions({ storage, resolveActor: resolve, maxSessions: 2, retentionMs: 60_000 });
+    const aliceSession = sessions.create((await resolveBrowser(actorRequest(aliceCookie), aliceScope))!)!;
+    const bobSession = sessions.create((await resolveBrowser(actorRequest(bobCookie), bobScope))!)!;
+    expect(await sessions.resolve(actorRequest(aliceCookie), aliceSession.discriminator)).toEqual({ userId: alice.user.id, ...aliceScope });
+    expect(await sessions.resolve(actorRequest(bobCookie), bobSession.discriminator)).toEqual({ userId: bob.user.id, ...bobScope });
+    expect(await sessions.resolve(actorRequest(aliceCookie), bobSession.discriminator)).toBeNull();
+    expect(await sessions.resolve(actorRequest(bobCookie), aliceSession.discriminator)).toBeNull();
+    expect(await sessions.resolve(actorRequest("dohc_share_link=link-secret; dohc_profile=profile-secret"), aliceSession.discriminator)).toBeNull();
     expect(await resolveBrowser(actorRequest("dohc_share_link=link-secret; dohc_profile=profile-secret"), aliceScope)).toBeNull();
     await expect(resolve(actorRequest("dohc_share_link=link-secret; dohc_profile=profile-secret"), "workspace")).rejects.toBeInstanceOf(UnauthorizedError);
 
@@ -132,8 +141,11 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
     await expect(resolve(actorRequest(aliceCookie), "workspace")).rejects.toBeInstanceOf(UnauthorizedError);
     expect(await resolveBrowser(actorRequest(aliceCookie), aliceScope)).toBeNull();
     expect(await resolveBrowser(actorRequest(bobCookie), bobScope)).toEqual({ userId: bob.user.id, ...bobScope });
+    expect(await sessions.resolve(actorRequest(aliceCookie), aliceSession.discriminator)).toBeNull();
+    expect(await sessions.resolve(actorRequest(bobCookie), bobSession.discriminator)).toEqual({ userId: bob.user.id, ...bobScope });
     expect(storage.revokeShareGrant({ shareId: bobScope.shareId, grantId: bobScope.grantId, revokedAtMs: 2 }).ok).toBe(true);
     expect(await resolveBrowser(actorRequest(bobCookie), bobScope)).toBeNull();
+    expect(await sessions.resolve(actorRequest(bobCookie), bobSession.discriminator)).toBeNull();
     expect(await resolve(actorRequest(bobCookie), "workspace")).toEqual({ userId: bob.user.id, workspaceId: "workspace" });
     expect(await (await serve(browserRequest("session", undefined, aliceCookie))).json()).toEqual({ user: null });
   });
