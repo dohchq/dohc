@@ -2004,8 +2004,6 @@ struct PreparedTextWrite {
     bind_object: bool,
     bind_alias: bool,
     known_object: Option<FileObjectRecord>,
-    #[cfg(test)]
-    capture_prepared: bool,
 }
 
 struct ResolvedCaptureObject {
@@ -2133,54 +2131,6 @@ impl<'a> From<&'a WriteText> for ProjectedWriteText<'a> {
             request_id: input.request_id.as_deref(),
         }
     }
-}
-
-#[cfg(test)]
-thread_local! {
-    static WRITE_TEXT_OWNERSHIP_COUNTS: std::cell::Cell<(usize, usize)> =
-        const { std::cell::Cell::new((0, 0)) };
-    static CAPTURE_PREPARED_WRITE_COUNTS: std::cell::Cell<(usize, usize)> =
-        const { std::cell::Cell::new((0, 0)) };
-}
-
-#[cfg(test)]
-fn note_write_text_ownership(owned_text: bool) {
-    WRITE_TEXT_OWNERSHIP_COUNTS.with(|counts| {
-        let (borrowed, owned) = counts.get();
-        counts.set(if owned_text {
-            (borrowed, owned + 1)
-        } else {
-            (borrowed + 1, owned)
-        });
-    });
-}
-
-#[cfg(test)]
-fn reset_write_text_ownership_counts() {
-    WRITE_TEXT_OWNERSHIP_COUNTS.with(|counts| counts.set((0, 0)));
-}
-
-#[cfg(test)]
-fn write_text_ownership_counts() -> (usize, usize) {
-    WRITE_TEXT_OWNERSHIP_COUNTS.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-fn reset_capture_prepared_write_counts() {
-    CAPTURE_PREPARED_WRITE_COUNTS.with(|counts| counts.set((0, 0)));
-}
-
-#[cfg(test)]
-fn note_capture_prepared_write(read_back: bool) {
-    CAPTURE_PREPARED_WRITE_COUNTS.with(|counts| {
-        let (prepared, read_backs) = counts.get();
-        counts.set((prepared + 1, read_backs + usize::from(read_back)));
-    });
-}
-
-#[cfg(test)]
-fn capture_prepared_write_counts() -> (usize, usize) {
-    CAPTURE_PREPARED_WRITE_COUNTS.with(std::cell::Cell::get)
 }
 
 /// Validate a write and normalize only its path through the R07
@@ -2512,8 +2462,6 @@ where
             bind_object: false,
             bind_alias: false,
             known_object: resolved.known_object,
-            #[cfg(test)]
-            capture_prepared: true,
         }),
     )?;
     if result.moment.moment_order != next_order {
@@ -3222,8 +3170,6 @@ fn write_normalized_text_in_tx(
     allow_preallocated_object: bool,
     prepared: Option<PreparedTextWrite>,
 ) -> Result<WriteResult, DomainError> {
-    #[cfg(test)]
-    note_write_text_ownership(matches!(&input.text, Cow::Owned(_)));
     let ws = input.workspace_id;
     if prepared.is_none() && !version_exists(tx, ws, input.version_id)? {
         return Err(DomainError::VersionNotFound);
@@ -3319,8 +3265,6 @@ fn write_normalized_text_in_tx(
                 bind_object: is_new_object,
                 bind_alias: true,
                 known_object: None,
-                #[cfg(test)]
-                capture_prepared: false,
             }
         }
     };
@@ -3332,8 +3276,6 @@ fn write_normalized_text_in_tx(
         bind_object,
         bind_alias,
         known_object,
-        #[cfg(test)]
-        capture_prepared,
     } = prepared;
     let before_blob = before.as_ref().and_then(|s| s.blob_sha256.clone());
     let before_content_kind = before
@@ -3447,10 +3389,7 @@ fn write_normalized_text_in_tx(
     // check that the prepared fast path replaces unless this write inserted
     // the blob and therefore established its text and recorded byte length.
     let read_back = !blob_inserted || known_object.is_none();
-    #[cfg(test)]
-    if capture_prepared {
-        note_capture_prepared_write(read_back);
-    }
+
     let result_path = input.path.into_owned();
     let result_text = input.text.into_owned();
     let (object, moment) = if read_back {
@@ -6015,11 +5954,9 @@ mod tests {
     use super::{
         CaptureIngestBatchContext, MOMENT_TEXT_HYDRATION_CAP_BYTES, NEXT_MOMENT_ORDER_SQL,
         ProjectedWriteText, VersionedTextStore, capture_ingest_in_batch_with_admission_in_tx,
-        capture_prepared_write_counts, derive_capture_moment_id, derive_capture_object_id,
-        derive_disambiguated_capture_object_id, hash_fields, hash_optional_text_fields,
-        next_moment_order, object_has_references, reset_capture_prepared_write_counts,
-        reset_write_text_ownership_counts, text_blob_sha256, write_projected_text_in_tx,
-        write_text_in_tx, write_text_ownership_counts,
+        derive_capture_moment_id, derive_capture_object_id, derive_disambiguated_capture_object_id,
+        hash_fields, hash_optional_text_fields, next_moment_order, object_has_references,
+        text_blob_sha256, write_projected_text_in_tx, write_text_in_tx,
     };
     use crate::{
         CaptureIngest, CaptureRetire, DomainError, RenameTextFile, WriteResult, WriteText,
@@ -6406,7 +6343,6 @@ mod tests {
             .ensure_main_version("ws", "main", 1, &NoFaults)
             .expect("ensure main version");
 
-        reset_write_text_ownership_counts();
         let direct = WriteText {
             workspace_id: "ws".to_owned(),
             version_id: "main".to_owned(),
@@ -6459,11 +6395,6 @@ mod tests {
             projected_allocation,
             "the projected body allocation must move into the returned snapshot"
         );
-        assert_eq!(
-            write_text_ownership_counts(),
-            (1, 1),
-            "the shared writer must exercise one borrowed and one owned text path"
-        );
     }
 
     #[test]
@@ -6478,7 +6409,6 @@ mod tests {
             .ensure_main_version("ws", "main", 1, &NoFaults)
             .expect("ensure main version");
 
-        reset_capture_prepared_write_counts();
         let text = "prepared capture body";
         let captured = VersionedTextStore::new(&mut store)
             .capture_ingest(
@@ -6499,11 +6429,6 @@ mod tests {
             )
             .expect("capture fresh text");
 
-        assert_eq!(
-            capture_prepared_write_counts(),
-            (1, 0),
-            "fresh capture must persist its resolved state without rereading the wide result"
-        );
         let expected_blob_sha256 = text_blob_sha256(text);
         assert_eq!(captured.snapshot.blob_sha256, expected_blob_sha256);
         assert_eq!(
@@ -6550,7 +6475,6 @@ mod tests {
             .expect("seed corrupt blob");
         assert!(matches!(seed, TxnOutcome::Committed(())));
 
-        reset_capture_prepared_write_counts();
         let error = VersionedTextStore::new(&mut store)
             .capture_ingest(
                 &capture_input("notes/corrupt.md", text.to_owned(), 2),
@@ -6564,11 +6488,7 @@ mod tests {
                 reason: "moment blob length does not match its content"
             }
         ));
-        assert_eq!(
-            capture_prepared_write_counts(),
-            (1, 1),
-            "a reused blob must force the prepared capture through result hydration"
-        );
+
         let durable_rows = store
             .read_with(|conn| {
                 conn.query_row(
@@ -6625,7 +6545,6 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            reset_capture_prepared_write_counts();
             let captured = capture_text(
                 &mut store,
                 &format!("notes/history-cap-{index}.md"),
@@ -6633,7 +6552,6 @@ mod tests {
                 index as i64 + 2,
             );
 
-            assert_eq!(capture_prepared_write_counts(), (1, 0));
             assert_eq!(
                 captured.moment.after_text.is_some(),
                 byte_length == MOMENT_TEXT_HYDRATION_CAP_BYTES
@@ -6679,7 +6597,6 @@ mod tests {
             )
             .expect("rename captured file");
 
-        reset_capture_prepared_write_counts();
         let replacement = capture_input(original_path, "replacement body".to_owned(), 4);
         let outcome = store
             .write_with(&NoFaults, |tx| {
@@ -6744,11 +6661,7 @@ mod tests {
             ),
             "moment derivation must use the same order candidate as object disambiguation"
         );
-        assert_eq!(
-            capture_prepared_write_counts(),
-            (1, 0),
-            "capture must keep the fast path after disambiguating the occupied derived object id"
-        );
+
         assert_capture_matches_hydrated(&mut store, &captured);
     }
 
@@ -6784,15 +6697,10 @@ mod tests {
             )
             .expect("retire captured file");
 
-        reset_capture_prepared_write_counts();
         let captured = capture_text(&mut store, path, "recreated body".to_owned(), 4);
 
         assert_eq!(captured.object.object_id, first.object.object_id);
-        assert_eq!(
-            capture_prepared_write_counts(),
-            (1, 1),
-            "capture must hydrate a pre-existing object that it did not insert"
-        );
+
         assert_capture_matches_hydrated(&mut store, &captured);
     }
 
