@@ -1,13 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import {
-  chmodSync,
-  closeSync,
-  fchmodSync,
-  mkdirSync,
-  openSync,
-} from "node:fs";
-import { delimiter, dirname, join, resolve } from "node:path";
-import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+  createChatRunnerProcess,
+  RUNNER_KILL_GRACE_MS,
+  type RunnerProcess,
+  type ChatRunnerProcessOptions,
+} from "./chatRunnerProcess";
 import type {
   AgentDispatchClaim,
   AgentRunRecord,
@@ -16,10 +14,6 @@ import type {
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
 import type { RunnerSettings } from "../settings/userSettings";
-import {
-  killChildTreeWin32,
-  resolveSpawnCommand,
-} from "../process/windowsSpawn";
 import {
   AGENT_DISPATCH_RPC_DEADLINE_MS,
   type AgentDispatchRequestOptions,
@@ -31,8 +25,6 @@ export const CHAT_DISPATCH_PUMP_MS = 15_000;
 const CHAT_DISPATCH_BUDGET_WINDOW_MS = 10 * 60_000;
 export const CHAT_DISPATCH_BUDGET_MAX = 10;
 export const RUNNER_SELF_TEST_TIMEOUT_MS = 120_000;
-export const RUNNER_KILL_GRACE_MS = 10_000;
-export const APP_QUIT_KILL_GRACE_MS = 1_500;
 export const CHAT_DISPATCH_RECOVERY_BACKOFF_MS = 1_000;
 const CHAT_DISPATCH_RECOVERY_MAX_BACKOFF_MS = 30_000;
 export const RUN_ID_LOG_TOKEN = "{runId}";
@@ -58,34 +50,6 @@ export interface ChatDispatchIdentity {
   verifiedUserId?: string;
 }
 
-export interface RunnerProcess {
-  readonly pid: number | undefined;
-  readonly rawChild?: ChildProcess;
-  // Deliver the prompt. It rides stdin rather than argv because it carries
-  // the rendered thread — unbounded in length and content — and a cmd.exe
-  // command line can carry neither (~8191 characters, and no safe
-  // representation for a double quote).
-  writeStdin(text: string): void;
-  hasExited(): boolean;
-  onExit(listener: (exitCode: number | null, signal: NodeJS.Signals | null) => void): void;
-  onError(listener: (error: Error) => void): void;
-}
-
-export interface RunnerSpawnOptions {
-  cwd: string;
-  env: NodeJS.ProcessEnv;
-  detached: true;
-  stdio: ["pipe", number, number];
-  windowsHide: true;
-  windowsVerbatimArguments?: boolean;
-}
-
-export type SpawnRunner = (
-  command: string,
-  args: string[],
-  options: RunnerSpawnOptions,
-) => RunnerProcess;
-
 export interface ChatDispatchPresenceInput {
   workspaceId: string;
   attachmentId?: symbol;
@@ -104,7 +68,7 @@ export interface ChatDispatchRecovery {
   attemptCount: number;
 }
 
-interface ChatDispatchServiceOptions {
+interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   workspaceFor(workspaceId: string): ChatDispatchWorkspace | null;
   listOpenWorkspaces(): ChatDispatchWorkspace[];
   listSyncWorkspaces(): ChatDispatchWorkspace[];
@@ -117,10 +81,6 @@ interface ChatDispatchServiceOptions {
     workspace: ChatDispatchWorkspace,
     target?: { channelId: string } | { threadId: string },
   ): Promise<ChatDispatchIdentity>;
-  stateDir(): string;
-  appRoot(): string;
-  isPackaged(): boolean;
-  resourcesPath?: () => string | undefined;
   queueSync(workspace: ChatDispatchWorkspace): void | boolean | Promise<void | boolean>;
   prepareRunWorkspace?(
     workspace: ChatDispatchWorkspace,
@@ -150,9 +110,6 @@ interface ChatDispatchServiceOptions {
   listAppQuitRecoveries?(
     workspace: ChatDispatchWorkspace,
   ): ChatDispatchRecovery[] | Promise<ChatDispatchRecovery[]>;
-  spawnRunner?: SpawnRunner;
-  killProcessGroup?: (pid: number, signal: NodeJS.Signals) => void;
-  platform?: NodeJS.Platform;
   nowMs?: () => number;
   createId?: () => string;
   onError?: (error: unknown) => void;
@@ -181,11 +138,6 @@ interface LiveRun {
     | { kind: "fail"; exitCode?: number; reason: string }
     | null;
   terminalDurable: boolean;
-}
-
-interface SpawnedRun {
-  child: RunnerProcess;
-  logPath: string;
 }
 
 interface PendingPreRunFailure {
@@ -217,48 +169,6 @@ interface SelfTestState {
   resolve(result: { ok: boolean; detail: string }): void;
 }
 
-function defaultSpawnRunner(
-  command: string,
-  args: string[],
-  options: RunnerSpawnOptions,
-): RunnerProcess {
-  const spawnOptions: SpawnOptions = {
-    cwd: options.cwd,
-    env: options.env,
-    detached: options.detached,
-    stdio: options.stdio,
-    windowsHide: options.windowsHide,
-    ...(options.windowsVerbatimArguments
-      ? { windowsVerbatimArguments: true }
-      : {}),
-  };
-  const child = spawn(command, args, spawnOptions);
-  return {
-    get pid() {
-      return child.pid;
-    },
-    rawChild: child,
-    writeStdin: (text) => {
-      // A runner that exits before reading its prompt breaks this pipe. That
-      // is the runner's outcome, reported through its exit code and log, not
-      // a dispatch-time crash.
-      child.stdin?.on("error", () => undefined);
-      child.stdin?.end(text);
-    },
-    hasExited: () => child.exitCode !== null || child.signalCode !== null,
-    onExit: (listener) => {
-      child.once("exit", listener);
-    },
-    onError: (listener) => {
-      child.once("error", listener);
-    },
-  };
-}
-
-function validPid(pid: number | undefined): pid is number {
-  return pid !== undefined && Number.isSafeInteger(pid) && pid > 0;
-}
-
 function signalExitCode(signal: NodeJS.Signals | null): number {
   if (signal === "SIGTERM") return 143;
   if (signal === "SIGKILL") return 137;
@@ -267,141 +177,6 @@ function signalExitCode(signal: NodeJS.Signals | null): number {
 
 function runnerDisplayName(displayName: string): string {
   return `${displayName}'s agent`;
-}
-
-function appendPathPrefix(prefix: string, current: string | undefined): string {
-  return current ? `${prefix}${delimiter}${current}` : prefix;
-}
-
-export function resolveDohcCliBinDirectory(input: {
-  appRoot: string;
-  isPackaged: boolean;
-  resourcesPath?: string;
-}): string {
-  if (!input.isPackaged) {
-    return resolve(input.appRoot, "node_modules", ".bin");
-  }
-  return resolve(input.resourcesPath ?? dirname(process.execPath), "cli-bin");
-}
-
-/** True when this process is genuinely running from inside an AppImage's
- * own mount -- electron-builder's AppImage target exports this at a real,
- * non-empty path. Some launchers otherwise inherit an EMPTY APPIMAGE from
- * a parent process, which must not be mistaken for one -- boot's
- * stable-copy refresh and this file's command resolver must agree on the
- * same test, or a packaged, non-AppImage install with an empty APPIMAGE in
- * its environment gets treated as an AppImage with no stable copy, and MCP
- * becomes wrongly unavailable even though its ordinary resources/cli-bin
- * is perfectly stable. */
-export function isAppImageBoot(
-  env: Record<string, string | undefined> = process.env,
-): boolean {
-  return Boolean(env.APPIMAGE);
-}
-
-/**
- * The dohc-mcp command a chat session config points the user's AI tool at.
- *
- * A packaged install ships the launcher in its cli-bin extraResource
- * (build-cli-bin.mjs stages it; scripts/package-smoke.mjs asserts it), so
- * the resolved command is that file's absolute path -- a bare `dohc-mcp`
- * exists on no user's PATH. Dev keeps the bare name: the workspace's
- * node_modules/.bin provides it. DOHC_MCP_COMMAND stays the explicit
- * override either way.
- *
- * A packaged Linux AppImage returns null when its persistent cli-bin copy
- * is unavailable. The caller must not write a command in that case: the
- * fallback resources path is inside the AppImage's temporary FUSE mount and
- * must never reach a config file or a spawned process's environment.
- */
-export function resolveDohcMcpCommand(input: {
-  isPackaged: boolean;
-  resourcesPath?: string;
-  platform?: NodeJS.Platform;
-  env?: Record<string, string | undefined>;
-  linuxStableCliBinDir?: string;
-}): string | null {
-  const env = input.env ?? process.env;
-  const override = env.DOHC_MCP_COMMAND?.trim();
-  if (override) return override;
-  if (!input.isPackaged) return "dohc-mcp";
-  const platform = input.platform ?? process.platform;
-  let cliBinDir: string;
-  if (platform === "linux" && isAppImageBoot(env)) {
-    if (!input.linuxStableCliBinDir) return null;
-    cliBinDir = input.linuxStableCliBinDir;
-  } else {
-    cliBinDir = resolve(input.resourcesPath ?? dirname(process.execPath), "cli-bin");
-  }
-  return join(
-    cliBinDir,
-    platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp",
-  );
-}
-
-/**
- * The plugin host's own env, layered onto the ambient process env: the
- * resolved dohc-mcp command when one exists, or an explicit "unavailable"
- * marker when it doesn't -- never both, and never a stale leftover of
- * whichever one applied on a previous call (a workspace's plugin host can
- * respawn after this install's launcher availability changes, e.g. once a
- * boot's stable-copy refresh finally succeeds).
- */
-export function pluginHostEnvFor(
-  dohcMcpCommand: string | null,
-  baseEnv: NodeJS.ProcessEnv,
-): NodeJS.ProcessEnv {
-  const env = { ...baseEnv };
-  if (dohcMcpCommand === null) {
-    delete env.DOHC_MCP_COMMAND;
-    env.DOHC_MCP_COMMAND_UNAVAILABLE = "1";
-  } else {
-    env.DOHC_MCP_COMMAND = dohcMcpCommand;
-    delete env.DOHC_MCP_COMMAND_UNAVAILABLE;
-  }
-  return env;
-}
-
-export function tokenizeRunnerCommand(command: string): string[] {
-  const tokens: string[] = [];
-  let token = "";
-  let inDoubleQuotes = false;
-  let tokenStarted = false;
-  for (let index = 0; index < command.length; index += 1) {
-    const character = command[index]!;
-    if (character === '"') {
-      inDoubleQuotes = !inDoubleQuotes;
-      tokenStarted = true;
-      continue;
-    }
-    if (character === "\\") {
-      const next = command[index + 1];
-      if (next === '"' || next === "\\") {
-        token += next;
-        tokenStarted = true;
-        index += 1;
-        continue;
-      }
-    }
-    if (/\s/u.test(character) && !inDoubleQuotes) {
-      if (tokenStarted) {
-        tokens.push(token);
-        token = "";
-        tokenStarted = false;
-      }
-      continue;
-    }
-    token += character;
-    tokenStarted = true;
-  }
-  if (inDoubleQuotes) {
-    throw new Error("Runner command has an unterminated double quote.");
-  }
-  if (tokenStarted) tokens.push(token);
-  if (tokens.length === 0 || !tokens[0]) {
-    throw new Error("Configure a runner command before dispatching.");
-  }
-  return tokens;
 }
 
 function buildRunnerPrompt(threadMarkdown: string, threadId: string): string {
@@ -429,8 +204,11 @@ export function messageCanTrigger(
 export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   const nowMs = options.nowMs ?? (() => Date.now());
   const createId = options.createId ?? randomUUID;
-  const spawnRunner = options.spawnRunner ?? defaultSpawnRunner;
-  const platform = options.platform ?? process.platform;
+  const {
+    spawnConfiguredRunner,
+    terminateWithEscalation,
+    terminateForAppQuit,
+  } = createChatRunnerProcess(options, reportError);
   const liveRuns = new Map<string, LiveRun>();
   const runReservations = new Set<string>();
   const selfTests = new Map<string, SelfTestState>();
@@ -610,97 +388,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     return join(options.stateDir(), "run-logs", `${RUN_ID_LOG_TOKEN}.log`);
   }
 
-  function prepareLog(logPath: string): number {
-    const directory = dirname(logPath);
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    chmodSync(directory, 0o700);
-    const fd = openSync(logPath, "a", 0o600);
-    try {
-      fchmodSync(fd, 0o600);
-      return fd;
-    } catch (error) {
-      closeSync(fd);
-      throw error;
-    }
-  }
-
-  function runnerEnvironment(input: {
-    workspaceId: string;
-    threadId: string;
-    runId: string;
-  }): NodeJS.ProcessEnv {
-    const cliBin = resolveDohcCliBinDirectory({
-      appRoot: options.appRoot(),
-      isPackaged: options.isPackaged(),
-      resourcesPath: options.resourcesPath?.(),
-    });
-    return {
-      ...process.env,
-      DOHC_CHAT_THREAD: input.threadId,
-      DOHC_CHAT_ACTOR: "agent",
-      DOHC_RUN_ID: input.runId,
-      DOHC_STATE_DIR: options.stateDir(),
-      PATH: appendPathPrefix(cliBin, process.env.PATH),
-      ...(process.env.Path
-        ? { Path: appendPathPrefix(cliBin, process.env.Path) }
-        : {}),
-    };
-  }
-
-  function spawnConfiguredRunner(input: {
-    workspace: ChatDispatchWorkspace;
-    threadId: string;
-    runId: string;
-    logPath: string;
-    command: string;
-    prompt: string;
-  }): SpawnedRun {
-    const commandParts = tokenizeRunnerCommand(input.command);
-    const executable = commandParts[0]!;
-    // The prompt is DATA and rides stdin, never argv. It carries the rendered
-    // thread, so it is unbounded in both length and content, and a command
-    // line can carry neither safely:
-    //   - Length. A .cmd/.bat runner (the npm -g layout on Windows) must run
-    //     behind cmd.exe, which hard-fails past ~8191 characters with "The
-    //     command line is too long." Any thread of real size exceeds that, so
-    //     no amount of quoting would have made argv work.
-    //   - Content. quoteForCmd refuses a double quote outright, and the
-    //     dispatch prompt always contains one (`--as-agent "<report>"`), so
-    //     every dispatch through a shimmed runner threw before it spawned.
-    // stdin has neither limit and needs no escaping at all.
-    const args = commandParts.slice(1);
-    const env = runnerEnvironment({
-      workspaceId: input.workspace.workspaceId,
-      threadId: input.threadId,
-      runId: input.runId,
-    });
-    const logFd = prepareLog(input.logPath);
-    try {
-      // Inside the try: resolveSpawnCommand refuses some runner commands
-      // (a double quote or percent sign in the configured command itself),
-      // and it used to sit outside, so its throw escaped the spawn path
-      // entirely instead of failing this one dispatch.
-      const resolved = resolveSpawnCommand(executable, args, {
-        env,
-        cwd: input.workspace.rootPath,
-      });
-      const child = spawnRunner(resolved.command, resolved.args, {
-        cwd: input.workspace.rootPath,
-        env,
-        detached: true,
-        stdio: ["pipe", logFd, logFd],
-        windowsHide: true,
-        ...(resolved.windowsVerbatimArguments
-          ? { windowsVerbatimArguments: true }
-          : {}),
-      });
-      child.writeStdin(input.prompt);
-      return { child, logPath: input.logPath };
-    } finally {
-      closeSync(logFd);
-    }
-  }
-
   async function sendAgentMessage(
     workspace: ChatDispatchWorkspace,
     threadId: string,
@@ -804,57 +491,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (message.author.kind === "agent") return message.body === body;
     }
     return false;
-  }
-
-  function signalOwnedProcess(
-    processHandle: RunnerProcess,
-    signal: NodeJS.Signals,
-  ): void {
-    if (processHandle.hasExited() || !validPid(processHandle.pid)) return;
-    if (platform === "win32" && processHandle.rawChild) {
-      void killChildTreeWin32(processHandle.rawChild).catch(() => undefined);
-      return;
-    }
-    try {
-      (options.killProcessGroup ?? ((pid, nextSignal) => process.kill(pid, nextSignal)))(
-        -processHandle.pid,
-        signal,
-      );
-    } catch (error) {
-      reportError(error);
-    }
-  }
-
-  function terminateWithEscalation(
-    processHandle: RunnerProcess,
-    existing: ReturnType<typeof setTimeout> | null,
-  ): ReturnType<typeof setTimeout> | null {
-    if (existing || processHandle.hasExited()) return existing;
-    signalOwnedProcess(processHandle, "SIGTERM");
-    return setTimeout(() => {
-      if (!processHandle.hasExited()) signalOwnedProcess(processHandle, "SIGKILL");
-    }, RUNNER_KILL_GRACE_MS);
-  }
-
-  function terminateForAppQuit(processHandle: RunnerProcess): Promise<void> {
-    if (processHandle.hasExited()) return Promise.resolve();
-    signalOwnedProcess(processHandle, "SIGTERM");
-    return new Promise<void>((resolveTermination) => {
-      let settled = false;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(escalation);
-        resolveTermination();
-      };
-      const escalation = setTimeout(() => {
-        if (!processHandle.hasExited()) {
-          signalOwnedProcess(processHandle, "SIGKILL");
-        }
-        finish();
-      }, APP_QUIT_KILL_GRACE_MS);
-      processHandle.onExit(() => finish());
-    });
   }
 
   async function clearLiveAttribution(live: LiveRun): Promise<void> {
@@ -1086,8 +722,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (stopped) {
         throw new Error("dohc is quitting before the runner can start.");
       }
-      const spawned = spawnConfiguredRunner({
-        workspace,
+      const child = spawnConfiguredRunner({
+        rootPath: workspace.rootPath,
         threadId: claim.run.threadId,
         runId: claim.run.runId,
         logPath,
@@ -1100,8 +736,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const live: LiveRun = {
         workspace,
         claim,
-        child: spawned.child,
-        logPath: spawned.logPath,
+        child,
+        logPath,
         timeoutMinutes: runner.timeoutMinutes,
         timeout,
         presenceHeartbeat: null,
@@ -1113,14 +749,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       };
       liveRuns.set(workspace.workspaceId, live);
       runReservations.delete(workspace.workspaceId);
-      spawned.child.onExit((code, signal) => {
+      child.onExit((code, signal) => {
         void enqueue(workspace.workspaceId, async () => {
           if (await finishLiveRun(live, code, signal)) {
             await scanAndDrain(live.workspace);
           }
         });
       });
-      spawned.child.onError((error) => {
+      child.onError((error) => {
         reportError(error);
         void enqueue(workspace.workspaceId, async () => {
           if (await finishLiveRun(live, 1, null)) {
@@ -1818,8 +1454,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           onBehalfOf: "local",
           agentRunId: runId,
         });
-        const spawned = spawnConfiguredRunner({
-          workspace,
+        const child = spawnConfiguredRunner({
+          rootPath: workspace.rootPath,
           threadId: scratchThreadId,
           runId,
           logPath,
@@ -1907,7 +1543,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           }, RUNNER_SELF_TEST_TIMEOUT_MS);
           const state: SelfTestState = {
             workspace,
-            child: spawned.child,
+            child,
             threadId: scratchThreadId,
             runId,
             settled: false,
@@ -1917,14 +1553,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             resolve: resolveResult,
           };
           selfTests.set(workspaceId, state);
-          spawned.child.onError((error) => {
+          child.onError((error) => {
             reportError(error);
             void complete({
               ok: false,
               detail: `Runner self-test failed to start. Log: ${logPath}`,
             });
           });
-          spawned.child.onExit(() => {
+          child.onExit(() => {
             void (async () => {
               await check();
               const current = selfTests.get(workspaceId);
