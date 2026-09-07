@@ -34,7 +34,7 @@ if (fontComparison) {
       button.setAttribute('aria-pressed', String(button.dataset.fontChoice === choice));
     });
   };
-  applyFonts(root.dataset.fonts === 'recommended' ? 'recommended' : 'current');
+  applyFonts(choices.some((button) => button.dataset.fontChoice === root.dataset.fonts) ? root.dataset.fonts : 'current');
   choices.forEach((button) => {
     button.addEventListener('click', () => {
       const choice = button.dataset.fontChoice;

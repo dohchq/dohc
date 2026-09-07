@@ -19,8 +19,9 @@
     var saved = null;
     try {
       saved = localStorage.getItem('dohc-theme');
-      if (localStorage.getItem('dohc-fonts') === 'recommended') {
-        document.documentElement.dataset.fonts = 'recommended';
+      var savedFonts = localStorage.getItem('dohc-fonts');
+      if (savedFonts === 'recommended' || savedFonts === 'current-serif') {
+        document.documentElement.dataset.fonts = savedFonts;
       }
     } catch (_) {
       // Storage is optional in privacy-restricted browsers and embeds.
@@ -447,6 +448,7 @@
   <span class="font-comparison-label">Fonts</span>
   <button type="button" data-font-choice="current" aria-pressed="true">Current</button>
   <button type="button" data-font-choice="recommended" aria-pressed="false">Recommended</button>
+  <button type="button" data-font-choice="current-serif" aria-pressed="false" aria-label="C: Current fonts with Source Serif 4 headings" title="Current fonts with Source Serif 4 headings">C</button>
 </div>
 
 <script type="module" src="/src/main.tsx"></script>
