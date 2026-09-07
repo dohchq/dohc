@@ -32,7 +32,7 @@ import {
   resetOrphanedDraftsAndSettle,
   TEST_CONTENT_HASH,
 } from "./FileInspector.draft-fixture";
-import { type DraftFlush } from "./FileInspector";
+import { type DraftFlush } from "./useAutosavedTextDraft";
 
 setupFileInspectorTests();
 
