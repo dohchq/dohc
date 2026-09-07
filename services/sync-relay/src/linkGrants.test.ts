@@ -2021,7 +2021,7 @@ describe("owner link inventory and impact preconditions", () => {
       }
       fixture.exec("COMMIT");
     } catch (error) {
-      fixture.exec("ROLLBACK");
+      try { fixture.exec("ROLLBACK"); } catch { /* Preserve the setup failure. */ }
       throw error;
     } finally {
       fixture.close();

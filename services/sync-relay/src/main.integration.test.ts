@@ -861,6 +861,7 @@ describe("sync relay startup guards", () => {
     { label: "short key", origin: "https://share.example.test", key: "x".repeat(31), expected: "DOHC_RELAY_EXCHANGE_KEY must be at least 32 characters" },
     { label: "small request", origin: "https://share.example.test", key: "x".repeat(32), maxRequestBytes: 1037, expected: "DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS must contain" },
     { label: "small response", origin: "https://share.example.test", key: "x".repeat(32), maxResponseBytes: 4151, expected: "DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS must contain" },
+    { label: "unsafe expiry", origin: "https://share.example.test", key: "x".repeat(32), retentionMs: Number.MAX_SAFE_INTEGER, expected: "DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS must contain" },
   ])("refuses named browser configuration before opening storage: $label", async ({ label, origin, key, expected, ...overrides }) => {
     const dbPath = join(await tempRoot(`named-${label.replaceAll(" ", "-")}`), "relay.sqlite");
     const { code, stderr } = await spawnRelayExpectExit({

@@ -27,6 +27,7 @@ export function parseNamedLiveBrowserHttpLimits(value: unknown): NamedLiveBrowse
   }
   const limits = { ...value } as NamedLiveBrowserHttpLimits;
   if (Object.values(limits).some(number => !Number.isSafeInteger(number) || number <= 0) || limits.timeoutMs > 2_147_483_647 ||
+      !Number.isSafeInteger(Date.now() + limits.retentionMs) ||
       limits.maxRequestBytes < minimumRequestBytes || limits.maxResponseBytes < minimumResponseBytes) {
     throw new TypeError("Invalid named browser session limits.");
   }

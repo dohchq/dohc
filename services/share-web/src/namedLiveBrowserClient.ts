@@ -21,6 +21,11 @@ export interface NamedLiveBrowserSessionContext {
   grantId: string;
 }
 
+interface NamedLiveBrowserBootstrap {
+  discriminator: string;
+  expiresAtMs: number;
+}
+
 export function parseNamedLiveBrowserClientLimits(value: unknown): NamedLiveBrowserClientLimits {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
       Object.keys(value).sort().join(",") !== "maxPendingRequests,maxRequestBytes,maxResponseBytes,timeoutMs") {
@@ -52,7 +57,9 @@ export function createNamedLiveBrowserClient(options: {
   let pending = 0;
   const refusal = () => Response.json({ ok: false, error: "not found" }, { status: 404 });
 
-  async function exchange(request: Request, discriminator?: string): Promise<Record<string, unknown> | null> {
+  function exchange(request: Request): Promise<NamedLiveBrowserBootstrap | null>;
+  function exchange(request: Request, discriminator: string): Promise<NamedLiveBrowserSessionContext | null>;
+  async function exchange(request: Request, discriminator?: string): Promise<NamedLiveBrowserBootstrap | NamedLiveBrowserSessionContext | null> {
     if (request.signal.aborted || pending >= limits.maxPendingRequests) return null;
     pending++;
     const controller = new AbortController();
@@ -60,7 +67,7 @@ export function createNamedLiveBrowserClient(options: {
     request.signal.addEventListener("abort", abort, { once: true });
     const timer = setTimeout(abort, limits.timeoutMs);
     const cancelled = new Promise<null>(resolve => controller.signal.addEventListener("abort", () => resolve(null), { once: true }));
-    const work = (async () => {
+    const work = (async (): Promise<NamedLiveBrowserBootstrap | NamedLiveBrowserSessionContext | null> => {
       let response: Response | undefined;
       try {
         const cookies = new Map<string, string>();
@@ -101,11 +108,16 @@ export function createNamedLiveBrowserClient(options: {
           if (Object.keys(record).sort().join(",") !== "discriminator,expiresAtMs" ||
               typeof record.discriminator !== "string" || !/^[A-Za-z0-9_-]{12}$/u.test(record.discriminator) ||
               !Number.isSafeInteger(record.expiresAtMs) || Number(record.expiresAtMs) <= 0) return null;
+          return { discriminator: record.discriminator, expiresAtMs: Number(record.expiresAtMs) };
         } else {
           if (Object.keys(record).sort().join(",") !== "grantId,shareId,userId,workspaceId") return null;
-          for (const value of Object.values(record)) parseLiveUpdateIdentifier(value, "named session context");
+          return {
+            userId: parseLiveUpdateIdentifier(record.userId, "named session context"),
+            workspaceId: parseLiveUpdateIdentifier(record.workspaceId, "named session context"),
+            shareId: parseLiveUpdateIdentifier(record.shareId, "named session context"),
+            grantId: parseLiveUpdateIdentifier(record.grantId, "named session context"),
+          };
         }
-        return record;
       } catch { return null; }
       finally {
         await response?.body?.cancel().catch(() => undefined);
@@ -128,8 +140,7 @@ export function createNamedLiveBrowserClient(options: {
       return result ? Response.json(result) : refusal();
     },
     async resolve(request: Request, discriminator: string): Promise<NamedLiveBrowserSessionContext | null> {
-      const result = await exchange(request, discriminator);
-      return result as unknown as NamedLiveBrowserSessionContext | null;
+      return exchange(request, discriminator);
     },
   };
 }

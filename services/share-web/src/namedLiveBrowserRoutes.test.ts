@@ -241,4 +241,16 @@ describe("named browser HTTP bootstrap and private resolution", () => {
       expect(() => parse({ ...value, ports: {} })).toThrow(/limits/);
     }
   });
+
+  it("rejects retention that cannot form a safe session expiry at startup", () => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const retentionMs = Number.MAX_SAFE_INTEGER - now;
+      expect(parseNamedLiveBrowserHttpLimits({ ...relayLimits, retentionMs }).retentionMs).toBe(retentionMs);
+      for (const value of [retentionMs + 1, Number.MAX_SAFE_INTEGER]) {
+        expect(() => parseNamedLiveBrowserHttpLimits({ ...relayLimits, retentionMs: value })).toThrow(/limits/);
+      }
+    } finally { clock.mockRestore(); }
+  });
 });
