@@ -455,6 +455,21 @@ function createEngineDocSession(
     publish((current) => ({ ...current, outcome }));
   };
 
+  const boundOutcome = (
+    doc: Y.Doc,
+    bound: EngineYDocBinding,
+    artifactAssets: readonly ArtifactAssetDescriptor[],
+  ): EngineDocOpenOutcome => ({
+    token,
+    kind: "bound",
+    doc,
+    objectId: bound.objectId,
+    versionId: bound.versionId,
+    artifactAssets,
+    readArtifactAsset: (descriptor) => bound.readArtifactAsset(descriptor),
+    flushPendingLocalUpdates: () => bound.flushPendingLocalUpdates(),
+  });
+
   const reportSaveState = (
     state: EngineDocSaveState,
     error: string | null = null,
@@ -855,16 +870,7 @@ function createEngineDocSession(
     }));
     const bound = retiredBinding ?? binding;
     if (bound) {
-      setOutcome({
-        token,
-        kind: "bound",
-        doc: retired,
-        objectId: bound.objectId,
-        versionId: bound.versionId,
-        artifactAssets: [...bound.artifactAssets],
-        readArtifactAsset: (descriptor) => bound.readArtifactAsset(descriptor),
-        flushPendingLocalUpdates: () => bound.flushPendingLocalUpdates(),
-      });
+      setOutcome(boundOutcome(retired, bound, [...bound.artifactAssets]));
     }
     reportSaveState(
       "error",
@@ -1208,17 +1214,7 @@ function createEngineDocSession(
               reportSaveState("saved");
             }
             observeSaveState(replacement);
-            setOutcome({
-              token,
-              kind: "bound",
-              doc: replacement,
-              objectId: bound.objectId,
-              versionId: bound.versionId,
-              artifactAssets: bound.artifactAssets,
-              readArtifactAsset: (descriptor) =>
-                bound.readArtifactAsset(descriptor),
-              flushPendingLocalUpdates: () => bound.flushPendingLocalUpdates(),
-            });
+            setOutcome(boundOutcome(replacement, bound, bound.artifactAssets));
           });
           // An edit is unsaved the instant it happens. Only main's settle
           // report may clear it — nothing here guesses "saved". The seed apply
@@ -1227,17 +1223,7 @@ function createEngineDocSession(
           const doc = bound.doc;
           observeSaveState(doc);
           if (deletionPending) captureDeletion(doc);
-          setOutcome({
-            token,
-            kind: "bound",
-            doc,
-            objectId: bound.objectId,
-            versionId: bound.versionId,
-            artifactAssets: bound.artifactAssets,
-            readArtifactAsset: (descriptor) =>
-              bound.readArtifactAsset(descriptor),
-            flushPendingLocalUpdates: () => bound.flushPendingLocalUpdates(),
-          });
+          setOutcome(boundOutcome(doc, bound, bound.artifactAssets));
         } catch {
           if (!disposed) {
             setOutcome({ kind: "unavailable" });
