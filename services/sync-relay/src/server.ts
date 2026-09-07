@@ -65,6 +65,7 @@ import {
 import { destinationPath, proposalMomentPayload } from "./shareProposals";
 import { badRequest, errorResponse, notFound, RELAY_ERRORS, relayError, RelayError } from "./errors";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
+import { createNamedLiveBrowserHttp, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 
 export { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 export { validateLinkCapability } from "./linkSecurity";
@@ -124,6 +125,7 @@ export interface CreateSyncRelayHandlerOptions {
   linkKey?: string | Uint8Array;
   shareWebOrigin?: string;
   relayExchangeKey?: string;
+  namedBrowserSessionLimits?: NamedLiveBrowserHttpLimits;
   linkExchangeRateLimiter?: TokenBucketLimiter;
   linkRedeemRateLimiter?: TokenBucketLimiter;
   linkReadRateLimiter?: TokenBucketLimiter;
@@ -372,6 +374,7 @@ export function createSyncRelayHandler({
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
+  namedBrowserSessionLimits,
   linkExchangeRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_BUCKET_CAPACITY, LINK_EXCHANGE_REFILL_PER_SECOND, LINK_EXCHANGE_MAX_IPS),
   linkRedeemRateLimiter = new TokenBucketLimiter(LINK_READ_BUCKET_CAPACITY, LINK_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
   linkReadRateLimiter = new TokenBucketLimiter(LINK_READ_BUCKET_CAPACITY, LINK_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
@@ -396,6 +399,12 @@ export function createSyncRelayHandler({
   newLinkBearer = () => mintLinkBearer(),
   newLinkHandoffCode = () => mintLinkHandoffCode(),
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler {
+  if (namedBrowserSessionLimits && (!shareWebOrigin || !relayExchangeKey)) {
+    throw new TypeError("Named browser sessions require configured viewer origin and relay exchange.");
+  }
+  const namedBrowser = namedBrowserSessionLimits ? createNamedLiveBrowserHttp({
+    storage, resolveActor, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, now: nowMs,
+  }) : undefined;
   const relayExchangeKeyHash =
     relayExchangeKey === undefined ? undefined : hashRelayExchangeKey(relayExchangeKey);
 
@@ -2310,6 +2319,10 @@ export function createSyncRelayHandler({
 
   return async (request) => {
     try {
+      const pathname = new URL(request.url).pathname;
+      if (pathname === "/sync/live/named-sessions" || pathname === "/sync/live/named-sessions/resolve") {
+        return namedBrowser ? await namedBrowser(request) : refused();
+      }
       const route = parseRoute(request);
       if (route.route === "link-exchange") {
         if (request.method !== "POST") throw relayError("method_not_allowed");

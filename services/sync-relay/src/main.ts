@@ -14,6 +14,7 @@ import { errorBody } from "./errors";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
+import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
@@ -140,6 +141,7 @@ if (!testAuthSeam && secret.length < 32) {
   );
 }
 
+const namedBrowserSessionLimits = loadNamedBrowserSessionLimits();
 const dbPath = process.env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay.sqlite");
 const storage = openSyncRelayStorage(dbPath, { workspaceQuotaBytes });
 
@@ -235,6 +237,7 @@ const relayHandler = createSyncRelayHandler({
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
+  namedBrowserSessionLimits,
 });
 const fetchHandler = async (request: Request): Promise<Response> => {
   if (new URL(request.url).pathname === "/health") {
@@ -254,6 +257,23 @@ const fetchHandler = async (request: Request): Promise<Response> => {
 // adapter refuses anything larger as it arrives, before it is buffered.
 const MAX_BODY_BYTES = MAX_BLOB_BYTES + 1024 * 1024;
 const MAX_LINK_EXCHANGE_BODY_BYTES = 4096;
+
+function loadNamedBrowserSessionLimits(): NamedLiveBrowserHttpLimits | undefined {
+  const value = process.env.DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS;
+  if (value === undefined) return undefined;
+  if (!shareWebOrigin || !shareWebOrigin.startsWith("https://")) {
+    fatal("FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must be an HTTPS origin when named browser sessions are enabled.");
+  }
+  if (!relayExchangeKey) {
+    fatal("FATAL: DOHC_RELAY_EXCHANGE_KEY must be set when named browser sessions are enabled.");
+  }
+  try { return parseNamedLiveBrowserHttpLimits(JSON.parse(value)); }
+  catch { fatal("FATAL: DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS must contain all explicit positive limits with capacity for the named session envelopes."); }
+}
+
+function isNamedBrowserSessionPath(pathname: string): boolean {
+  return pathname === "/sync/live/named-sessions" || pathname === "/sync/live/named-sessions/resolve";
+}
 
 function isLinkExchangePath(pathname: string): boolean {
   try {
@@ -284,11 +304,12 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
 const server = serveFetchHandler({
   handler: fetchHandler,
   maxBodyBytes: (url) =>
+    isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? MAX_LINK_EXCHANGE_BODY_BYTES
       : MAX_BODY_BYTES,
   oversized: (url) =>
-    isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
+    isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? errorBody("not_found")
       : errorBody("payload_too_large"),
   // Never echo internal error details (or anything derived from the request)

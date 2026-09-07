@@ -9,6 +9,9 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createShareWebApplication } from "./server";
 import { createNamedLiveBrowserResolver } from "../../sync-relay/src/namedLiveBrowserAuth";
 import { createNamedLiveBrowserSessions } from "../../sync-relay/src/namedLiveBrowserSessions";
+import { createSyncRelayHandler } from "../../sync-relay/src/server";
+import { serveFetchHandler } from "@dohc/service-http";
+import { request as requestHttp, type Server } from "node:http";
 import { closeTestStorages, testStorage } from "../../sync-relay/src/testing";
 
 const connectionString = process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc";
@@ -186,4 +189,122 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
       clock.mockRestore();
     }
   });
+
+  it("bootstraps named sessions through real share-web and relay HTTP with account cookies and durable grants", async () => {
+    const storage = await testStorage();
+    storage.claimWorkspace({ workspaceId: "route-workspace", ownerUserId: "route-owner", createdAtMs: 1 });
+    const users = await Promise.all(["alice", "bob"].map(name => auth.api.signUpEmail({
+      body: { email: `route-${name}@example.test`, password, name },
+    })));
+    for (const [index, result] of users.entries()) storage.createShare({
+      share: { shareId: `route-share-${index}`, workspaceId: "route-workspace", granterUserId: "route-owner",
+        selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }), createdAtMs: 1 },
+      grant: { grantId: `route-grant-${index}`, shareId: `route-share-${index}`, principalKind: "user", principalUserId: result.user.id,
+        principalEmail: null, access: "edit", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null },
+    });
+    const servers: Server[] = [];
+    const limits = { maxRequestBytes: 2048, maxResponseBytes: 4152, maxPendingRequests: 4, timeoutMs: 10000 };
+    const exchangeKey = "real-named-bootstrap-exchange-key-at-least-32";
+    async function listen(handler: (request: Request) => Promise<Response>) {
+      const server = serveFetchHandler({ handler, maxBodyBytes: () => limits.maxRequestBytes,
+        oversized: () => Response.json({ ok: false }, { status: 404 }), failure: () => Response.json({ ok: false }, { status: 500 }) });
+      servers.push(server);
+      await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Missing owned HTTP listener.");
+      return `http://127.0.0.1:${address.port}`;
+    }
+    try {
+      const authUrl = await listen(request => auth.handler(request));
+      const relayUrl = await listen(createSyncRelayHandler({ storage, resolveActor: createSessionActorResolver(relayAuth),
+        relayExchangeKey: exchangeKey, shareWebOrigin: origin,
+        namedBrowserSessionLimits: { ...limits, maxSessions: 4, retentionMs: 60000 } }));
+      const web = createShareWebApplication({ relayUrl, publicRelayUrl: "https://relay.example.test", relayExchangeKey: exchangeKey,
+        publicHosts: new Set(["share.example.test"]), accountAuth: { upstreamUrl: authUrl, publicOrigin: origin },
+        namedBrowserSessionLimits: limits });
+      const viewerUrl = await listen(web.handle);
+      function post(path: string, body: unknown, cookie?: string): Promise<Response> {
+        return new Promise((resolve, reject) => {
+          // Node fetch replaces Host with the loopback authority; use the HTTP client to exercise the configured viewer Host.
+          const outgoing = requestHttp(viewerUrl + path, { method: "POST", headers: { host: "share.example.test", origin,
+            "content-type": "application/json", ...(cookie ? { cookie } : {}) } }, incoming => {
+            const chunks: Buffer[] = [];
+            incoming.on("data", chunk => chunks.push(Buffer.from(chunk)));
+            incoming.once("error", reject);
+            incoming.once("end", () => {
+              const headers = new Headers();
+              for (let index = 0; index < incoming.rawHeaders.length; index += 2) headers.append(incoming.rawHeaders[index]!, incoming.rawHeaders[index + 1]!);
+              resolve(new Response(Buffer.concat(chunks), { status: incoming.statusCode, headers }));
+            });
+          });
+          outgoing.once("error", reject);
+          outgoing.setTimeout(10000, () => outgoing.destroy(new Error("Owned HTTP request timed out.")));
+          outgoing.end(JSON.stringify(body));
+        });
+      }
+      const browserCookies: string[] = [];
+      for (const name of ["alice", "bob"]) {
+        const signed = await post("/api/account/sign-in", { email: `route-${name}@example.test`, password });
+        expect(signed.status).toBe(200);
+        const cookieName = getCookies({ baseURL: origin }).sessionToken.name;
+        const line = signed.headers.getSetCookie().find(value => value.startsWith(`${cookieName}=`));
+        expect(line).toBeDefined();
+        browserCookies.push(line!.split(";", 1)[0]!);
+        await signed.body?.cancel();
+      }
+      // The public sign-in has no rememberMe input. Preserve an existing signed preference from account auth.
+      const temporarySignIn = await auth.handler(new Request(`${authOrigin}/api/auth/sign-in/email`, {
+        method: "POST", headers: { origin, "content-type": "application/json" },
+        body: JSON.stringify({ email: "route-bob@example.test", password, rememberMe: false }),
+      }));
+      expect(temporarySignIn.status).toBe(200);
+      const accountCookies = getCookies({ baseURL: origin });
+      const temporaryCookies = temporarySignIn.headers.getSetCookie().map(line => line.split(";", 1)[0]!);
+      const sessionCookie = temporaryCookies.find(pair => pair.startsWith(`${accountCookies.sessionToken.name}=`))!;
+      const preferenceCookie = temporaryCookies.find(pair => pair.startsWith(`${accountCookies.dontRememberToken.name}=`))!;
+      expect(sessionCookie).toBeDefined(); expect(preferenceCookie).toBeDefined();
+      browserCookies[1] = `${sessionCookie}; ${preferenceCookie}`;
+      const { token } = await temporarySignIn.json() as { token: string };
+      const agedExpiry = new Date(Date.now() + 60_000);
+      await pool.query('UPDATE "session" SET "expiresAt" = $1, "updatedAt" = $2 WHERE "token" = $3',
+        [agedExpiry, new Date(Date.now() - 3 * 24 * 60 * 60 * 1000), token]);
+      const sessionExpiry = async () => (await pool.query<{ expiresAt: Date }>('SELECT "expiresAt" FROM "session" WHERE "token" = $1', [token])).rows[0]!.expiresAt.getTime();
+      expect(await sessionExpiry()).toBe(agedExpiry.getTime());
+      const issued: string[] = [];
+      for (const [index, cookie] of browserCookies.entries()) {
+        const response = await post("/api/live/named-session", { grantId: `route-grant-${index}` }, cookie);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("set-cookie")).toBeNull();
+        const result = await response.json() as { discriminator: string; expiresAtMs: number };
+        expect(Object.keys(result).sort()).toEqual(["discriminator", "expiresAtMs"]);
+        issued.push(result.discriminator);
+      }
+      const browser = (index: number) => new Request(`${origin}/api/live`, { headers: { cookie: browserCookies[index]! } });
+      expect(await sessionExpiry()).toBe(agedExpiry.getTime());
+      expect(await web.resolveNamedBrowserSession(browser(1), issued[1]!)).not.toBeNull();
+      expect(await sessionExpiry()).toBe(agedExpiry.getTime());
+      // The same aged session refreshes without the preference, proving the cookie affects the real dependency.
+      expect(await web.resolveNamedBrowserSession(new Request(`${origin}/api/live`, { headers: { cookie: sessionCookie } }), issued[1]!)).not.toBeNull();
+      expect(await sessionExpiry()).toBeGreaterThan(agedExpiry.getTime());
+      expect(await web.resolveNamedBrowserSession(browser(0), issued[0]!)).toEqual({
+        userId: users[0]!.user.id, workspaceId: "route-workspace", shareId: "route-share-0", grantId: "route-grant-0" });
+      expect(await web.resolveNamedBrowserSession(browser(1), issued[0]!)).toBeNull();
+      const crossed = await post("/api/live/named-session", { grantId: "route-grant-1" }, browserCookies[0]);
+      expect(crossed.status).toBe(404); await crossed.body?.cancel();
+      const forged = await post("/api/live/named-session", { grantId: "route-grant-0", userId: users[1]!.user.id, workspaceId: "forged" }, browserCookies[0]);
+      expect(forged.status).toBe(404); await forged.body?.cancel();
+      const signedOut = await post("/api/account/sign-out", {}, browserCookies[0]);
+      expect(signedOut.status).toBe(200); await signedOut.body?.cancel();
+      expect(await web.resolveNamedBrowserSession(browser(0), issued[0]!)).toBeNull();
+      expect(await web.resolveNamedBrowserSession(browser(1), issued[1]!)).not.toBeNull();
+      expect(storage.revokeShareGrant({ shareId: "route-share-1", grantId: "route-grant-1", revokedAtMs: 2 }).ok).toBe(true);
+      expect(await web.resolveNamedBrowserSession(browser(1), issued[1]!)).toBeNull();
+      expect(storage.getLiveHostControl()).toBeNull();
+    } finally {
+      for (const server of servers.reverse()) {
+        server.closeAllConnections();
+        await new Promise<void>(resolve => server.close(() => resolve()));
+      }
+    }
+  }, 30000);
 });
