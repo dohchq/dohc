@@ -1,4 +1,5 @@
 import { PostCard, BookmarkAction, ThreadMessages, type FeedPostData } from "./ChatPosts";
+import { usePersonalChatFeed } from "./usePersonalChatFeed";
 import {
   AgentPresenceHint,
   UnreadPill,
@@ -58,7 +59,6 @@ import type {
   ChatDispatchStateForThreadResult,
   ChatMessageRecord,
   ChatBookmarkRecord,
-  ChatFeedItemRecord,
   ChatReactionRecord,
   ChatRunRecord,
   DmRequestRow,
@@ -377,9 +377,6 @@ export function ChatsView(props: {
   const [nav, setNav] = useState<Nav>({ level: "channels" });
   const [channelThreads, setChannelThreads] = useState<ChannelThreadRecord[]>([]);
   const [feedPosts, setFeedPosts] = useState<Record<string, FeedPostData>>({});
-  const [personalFeed, setPersonalFeed] = useState<ChatFeedItemRecord[]>([]);
-  const [personalFeedLoading, setPersonalFeedLoading] = useState(false);
-  const [personalFeedNextCursor, setPersonalFeedNextCursor] = useState<string | undefined>();
   const [bookmarks, setBookmarks] = useState<ChatBookmarkRecord[]>([]);
   const [bookmarkBusy, setBookmarkBusy] = useState<Set<string>>(() => new Set());
   // Bookmark list reads and mutations are independent request streams. A
@@ -473,12 +470,21 @@ export function ChatsView(props: {
   const inFlightSendByContext = useRef(new Map<string, number>());
   const startingThreadRef = useRef(false);
   const liveToken = useRef(0);
+  const {
+    personalFeed,
+    personalFeedLoading,
+    personalFeedNextCursor,
+    loadPersonalFeed,
+    resetForWorkspace,
+    prepareOpen,
+    clearRows,
+    invalidate,
+  } = usePersonalChatFeed({ workspaceId, liveToken, onError: props.onError });
   // A live thread can refresh repeatedly without changing navigation. Keep a
   // request sequence separate from the workspace/navigation liveness token so
   // an older activity response can never overwrite a newer one.
   const threadRefreshSeq = useRef(0);
   const channelRefreshSeq = useRef(0);
-  const feedRefreshSeq = useRef(0);
   const dmRefreshSeq = useRef(0);
   const paintedDmRevision = useRef<{
     workspaceId: string;
@@ -1079,7 +1085,7 @@ export function ChatsView(props: {
     liveToken.current += 1;
     dmRefreshSeq.current += 1;
     paintedDmRevision.current = null;
-    feedRefreshSeq.current += 1;
+    resetForWorkspace();
     bookmarkWorkspaceGeneration.current += 1;
     bookmarkListGeneration.current += 1;
     bookmarkMutationGeneration.current += 1;
@@ -1087,9 +1093,6 @@ export function ChatsView(props: {
     setNav({ level: "channels" });
     setChannelThreads([]);
     setFeedPosts({});
-    setPersonalFeed([]);
-    setPersonalFeedLoading(false);
-    setPersonalFeedNextCursor(undefined);
     setMessages([]);
     setReactions([]);
     setDecisions([]);
@@ -1142,14 +1145,14 @@ export function ChatsView(props: {
     void refreshFollows();
     return () => {
       liveToken.current += 1;
-      feedRefreshSeq.current += 1;
+      invalidate();
       bookmarkWorkspaceGeneration.current += 1;
       bookmarkListGeneration.current += 1;
       bookmarkMutationGeneration.current += 1;
       bookmarkMutationByKey.current.clear();
       followRequest.current += 1;
     };
-  }, [refreshBookmarks, refreshDms, refreshFollows, refreshOverview]);
+  }, [invalidate, refreshBookmarks, refreshDms, refreshFollows, refreshOverview, resetForWorkspace]);
 
   const bookmarkFor = useCallback(
     (targetKind: "message" | "thread", targetId: string) =>
@@ -1625,43 +1628,6 @@ export function ChatsView(props: {
     [applyThreadSnapshot, channelIsLocked, loadThreadSnapshot, props.onError],
   );
 
-  const loadPersonalFeed = useCallback(
-    async (cursor?: string) => {
-      const token = liveToken.current;
-      const refreshSeq = ++feedRefreshSeq.current;
-      const requestIsCurrent = () =>
-        token === liveToken.current && refreshSeq === feedRefreshSeq.current;
-      setPersonalFeedLoading(true);
-      try {
-        const page = await bridge().listPersonalChatFeed({
-          workspaceId,
-          ...(cursor ? { cursor } : {}),
-          limit: 30,
-        });
-        if (!requestIsCurrent()) return;
-        setPersonalFeed((current) => (cursor ? [...current, ...page.items] : page.items));
-        setPersonalFeedNextCursor(page.nextCursor);
-        if (!cursor && page.headCursor) {
-          void bridge()
-            .markPersonalChatFeedSeen({
-              workspaceId,
-              headCursor: page.headCursor,
-            })
-            .catch(() => {
-              // Best-effort cursor: the next Feed open can retry.
-            });
-        }
-      } catch (error) {
-        if (requestIsCurrent()) {
-          props.onError(ipcErrorMessage(error, "Could not load your Feed."));
-        }
-      } finally {
-        if (requestIsCurrent()) setPersonalFeedLoading(false);
-      }
-    },
-    [props.onError, workspaceId],
-  );
-
   // Main emits workspaceActivity for CLI writes, follow mutations, runner
   // reports/failures, and run-record completion. Treat it as an invalidation
   // for every mounted Chats surface. Every response carries the follow request
@@ -2120,11 +2086,9 @@ export function ChatsView(props: {
       return;
     }
     liveToken.current += 1;
-    feedRefreshSeq.current += 1;
+    prepareOpen();
     setNav(target);
-    setPersonalFeed([]);
-    setPersonalFeedNextCursor(undefined);
-  }, [props.onOpenInTab, variant]);
+  }, [prepareOpen, props.onOpenInTab, variant]);
 
   useEffect(() => {
     if (nav.level === "feed") void loadPersonalFeed();
@@ -2921,7 +2885,7 @@ export function ChatsView(props: {
       setNav({ level: "channels" });
       setChannelThreads([]);
       setFeedPosts({});
-      setPersonalFeed([]);
+      clearRows();
       void refreshOverview();
     } else if (nav.level === "dm" || nav.level === "dm-new") {
       setNav({ level: "channels" });
@@ -2933,7 +2897,7 @@ export function ChatsView(props: {
       setDmDraft("");
       void refreshDms();
     }
-  }, [nav, openChannel, props.onNavCommand, refreshDms, refreshOverview]);
+  }, [clearRows, nav, openChannel, props.onNavCommand, refreshDms, refreshOverview]);
 
   // Ends the DM's registry row through the exact leaveSharedChannel mechanism.
   // The conversation drops out of `dms` immediately; the next
