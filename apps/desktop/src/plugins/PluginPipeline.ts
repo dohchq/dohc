@@ -13,10 +13,7 @@ import type { WatcherEvent } from "@dohc/workspace-core";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, readdir, rm } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import {
-  PLUGIN_PIPELINE_ERROR_STAGES,
-  PLUGIN_PIPELINE_STATUSES,
-} from "../ipc/channels";
+import type { PLUGIN_PIPELINE_ERROR_STAGES } from "../ipc/channels";
 import type { PluginHost, PluginHostStartEvidence } from "./PluginHost";
 import {
   discoverInstalledPlugins,
@@ -80,8 +77,6 @@ import {
   PLUGIN_HOST_DRAIN_DEADLINE_MS,
   errorMessage,
 } from "./pluginShared";
-
-export { PLUGIN_PIPELINE_ERROR_STAGES, PLUGIN_PIPELINE_STATUSES };
 
 type PluginPipelineErrorStage =
   typeof PLUGIN_PIPELINE_ERROR_STAGES[number];
@@ -163,16 +158,12 @@ interface PluginPipelineOperations {
   discover: typeof discoverInstalledPlugins;
   snapshot: typeof snapshotPluginSource;
   install: typeof installPluginDependencies;
-  scan: typeof scanPluginLifecycleScripts;
   build: typeof buildPluginBundle;
-  readLocalState: typeof readPluginLocalState;
   mutateRecord: typeof mutatePluginRecord;
-  writeBaseline: typeof writePluginBaselineManifest;
   uninstallPreflight: typeof pluginUninstallPreflight;
   hashSource: typeof hashPluginSourceFiles;
   removePath: typeof rm;
   inspectPath: typeof lstat;
-  readFile: typeof readFile;
 }
 
 interface PluginPipelineOptions {
@@ -189,9 +180,8 @@ interface PluginPipelineOptions {
   /** Whether this workspace's engine capture is running right now — used
    * only to keep uninstall preflight's recovery promises honest (a file
    * under the capture size cap is not actually recoverable if capture
-   * wasn't running to record it). Defaults to true so existing callers and
-   * tests that don't care about this keep their current behavior. */
-  isEngineCaptureAvailable?: () => boolean;
+   * wasn't running to record it). */
+  isEngineCaptureAvailable: () => boolean;
   platform?: NodeJS.Platform;
   operations?: Partial<PluginPipelineOperations>;
 }
@@ -329,16 +319,12 @@ const DEFAULT_OPERATIONS: PluginPipelineOperations = {
   discover: discoverInstalledPlugins,
   snapshot: snapshotPluginSource,
   install: installPluginDependencies,
-  scan: scanPluginLifecycleScripts,
   build: buildPluginBundle,
-  readLocalState: readPluginLocalState,
   mutateRecord: mutatePluginRecord,
-  writeBaseline: writePluginBaselineManifest,
   uninstallPreflight: pluginUninstallPreflight,
   hashSource: hashPluginSourceFiles,
   removePath: rm,
   inspectPath: lstat,
-  readFile,
 };
 
 function failureFromUnknown(
@@ -2294,7 +2280,7 @@ export class PluginPipeline {
       this.unwrap("install", installResult);
 
       this.setStatus(candidate, { status: "scanning" });
-      const scan = this.unwrap("scan", await this.operations.scan({
+      const scan = this.unwrap("scan", await scanPluginLifecycleScripts({
         snapshotRoot: snapshot.snapshotRoot,
         manifest,
       }));
@@ -2381,7 +2367,7 @@ export class PluginPipeline {
       // of the installed source, not an approval gate: a failure here cannot
       // let unapproved bytes run.
       try {
-        await this.operations.writeBaseline({
+        await writePluginBaselineManifest({
           dohcDir: this.dohcDir,
           pluginId: candidate.id,
           baselineDigest,
@@ -2670,7 +2656,7 @@ export class PluginPipeline {
       );
       const [manifestStats, manifestBody] = await Promise.all([
         this.operations.inspectPath(manifestPath),
-        this.operations.readFile(manifestPath, "utf8"),
+        readFile(manifestPath, "utf8"),
       ]);
       if (manifestStats.isFile()) {
         const parsed = DohcPluginManifestSchema.safeParse(
@@ -2731,7 +2717,7 @@ export class PluginPipeline {
   }
 
   private async localState(): Promise<PluginLocalState> {
-    const result = await this.operations.readLocalState(
+    const result = await readPluginLocalState(
       this.options.stateDir,
       this.workspaceRoot,
     );
@@ -3283,7 +3269,7 @@ export class PluginPipeline {
   }
 
   private engineCaptureAvailable(): boolean {
-    return this.options.isEngineCaptureAvailable?.() ?? true;
+    return this.options.isEngineCaptureAvailable();
   }
 
   private liveRoot(pluginId: string): string {
@@ -3345,7 +3331,7 @@ export class PluginPipeline {
     try {
       const [manifest, bundleBytes] = await Promise.all([
         this.operations.inspectPath(join(liveRoot, "dohc-plugin.generated.json")),
-        this.operations.readFile(join(liveRoot, "bundle.mjs")),
+        readFile(join(liveRoot, "bundle.mjs")),
       ]);
       if (!manifest.isFile()) return false;
       const bundleHash = createHash("sha256").update(bundleBytes).digest("hex");

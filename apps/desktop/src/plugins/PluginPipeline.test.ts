@@ -510,6 +510,7 @@ async function createAliasUninstallFixture(options: {
     drainTimeoutMs: options.drainTimeoutMs,
   });
   pipeline = new PluginPipeline({
+    isEngineCaptureAvailable: () => true,
     workspaceRoot: fixture.workspaceRoot,
     stateDir: fixture.stateDir,
     hostOwnership,
@@ -587,6 +588,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     });
     const hostOwnership = new PluginHostOwnership(host);
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot,
       stateDir,
       hostOwnership,
@@ -656,6 +658,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     });
     const hostOwnership = new PluginHostOwnership(host);
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot,
       stateDir,
       hostOwnership,
@@ -736,6 +739,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot,
       stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -853,6 +857,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot,
       stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -946,6 +951,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot,
       stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -1073,6 +1079,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       });
     const newPipeline = () =>
       new PluginPipeline({
+        isEngineCaptureAvailable: () => true,
         workspaceRoot,
         stateDir,
         hostOwnership: new PluginHostOwnership(newHost()),
@@ -1273,6 +1280,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       });
     const newPipeline = () =>
       new PluginPipeline({
+        isEngineCaptureAvailable: () => true,
         workspaceRoot,
         stateDir,
         hostOwnership: new PluginHostOwnership(newHost()),
@@ -1379,6 +1387,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -1468,6 +1477,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot,
       stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -1606,6 +1616,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     });
     const hostOwnership = new PluginHostOwnership(host);
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot,
       stateDir,
       hostOwnership,
@@ -1816,6 +1827,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     });
     const hostOwnership = new PluginHostOwnership(host);
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership,
@@ -2340,6 +2352,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot,
       stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -2452,6 +2465,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot,
       stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -2546,6 +2560,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot,
       stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -2630,6 +2645,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       });
     const newPipeline = (host: PluginHost) =>
       new PluginPipeline({
+        isEngineCaptureAvailable: () => true,
         workspaceRoot: fixture.workspaceRoot,
         stateDir: fixture.stateDir,
         hostOwnership: new PluginHostOwnership(host),
@@ -2759,6 +2775,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       });
     const newPipeline = (host: PluginHost) =>
       new PluginPipeline({
+        isEngineCaptureAvailable: () => true,
         workspaceRoot: fixture.workspaceRoot,
         stateDir: fixture.stateDir,
         hostOwnership: new PluginHostOwnership(host),
@@ -2889,6 +2906,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -3002,6 +3020,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -3084,6 +3103,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot,
       stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -3145,6 +3165,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot,
       stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -3236,6 +3257,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot,
       stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -3390,6 +3412,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -3440,6 +3463,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -3529,6 +3553,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot,
       stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -3637,6 +3662,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -3687,6 +3713,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -3737,6 +3764,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           },
         });
         pipeline = new PluginPipeline({
+          isEngineCaptureAvailable: () => true,
           workspaceRoot: fixture.workspaceRoot,
           stateDir: fixture.stateDir,
           hostOwnership: new PluginHostOwnership(host),
@@ -3825,6 +3853,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -3930,6 +3959,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -4059,6 +4089,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -4177,6 +4208,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -4253,7 +4285,15 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         () => installCalls === 3 && pipeline.list()[0]?.status === "ready",
         "The coalesced hot-reload follow-up did not finish.",
       );
-      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      await settleWithin(
+        (pipeline as unknown as {
+          enqueueActionValue: (
+            pluginId: string,
+            run: () => Promise<void>,
+          ) => Promise<void>;
+        }).enqueueActionValue("example-plugin", async () => undefined),
+        "Queued hot reloads did not finish.",
+      );
       expect(installCalls).toBe(3);
       expect(pipeline.list()[0]?.approvedHash).not.toBe(firstHash);
       expect(await readFile(
@@ -4382,6 +4422,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -4450,6 +4491,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -4539,6 +4581,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -4598,6 +4641,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -4670,6 +4714,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -4770,6 +4815,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -4817,6 +4863,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -4904,6 +4951,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -5007,6 +5055,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -5055,7 +5104,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         packageManager: "pnpm@11.20.0",
       }, null, 2)}\n`);
       await rm(fixture.pluginRoot, { recursive: true, force: true });
-      pipeline.handleWatcherEvents([
+      const identityReplacement = pipeline.handleWatcherEvents([
         { path: "plugins/aaa-renamed", operation: "update" },
         { path: "plugins/zzz-original", operation: "delete" },
       ]);
@@ -5064,9 +5113,19 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         () => pipeline.list().some((p) => p.id === "bar" && p.rootPath === renamedRoot),
         "The renamed identity was never rediscovered at its new root.",
       );
-      // Give any (buggy) auto-approval a real chance to happen before
-      // asserting it didn't.
-      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      await settleWithin(
+        identityReplacement,
+        "The identity replacement watcher batch did not finish.",
+      );
+      await settleWithin(
+        (pipeline as unknown as {
+          enqueueActionValue: (
+            pluginId: string,
+            run: () => Promise<void>,
+          ) => Promise<void>;
+        }).enqueueActionValue("bar", async () => undefined),
+        "The replacement identity refresh did not finish.",
+      );
       const moved = pipeline.list().find((p) => p.id === "bar" && p.rootPath === renamedRoot);
       expect(moved).toMatchObject({ status: "discovered", approvedHash: null });
       expect(host.getStatus("bar")).toBeUndefined();
@@ -5090,6 +5149,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -5185,6 +5245,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -5304,6 +5365,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -5386,6 +5448,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -5456,6 +5519,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -5530,6 +5594,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     };
     const newPipeline = (host: PluginHost) =>
       new PluginPipeline({
+        isEngineCaptureAvailable: () => true,
         workspaceRoot: fixture.workspaceRoot,
         stateDir: fixture.stateDir,
         hostOwnership: new PluginHostOwnership(host),
@@ -5619,6 +5684,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -5725,6 +5791,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -5778,6 +5845,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -5854,6 +5922,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -5935,6 +6004,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -6013,6 +6083,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       });
     const newPipeline = (host: PluginHost) =>
       new PluginPipeline({
+        isEngineCaptureAvailable: () => true,
         workspaceRoot: fixture.workspaceRoot,
         stateDir: fixture.stateDir,
         hostOwnership: new PluginHostOwnership(host),
@@ -6100,6 +6171,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       });
     const newPipeline = (host: PluginHost) =>
       new PluginPipeline({
+        isEngineCaptureAvailable: () => true,
         workspaceRoot: fixture.workspaceRoot,
         stateDir: fixture.stateDir,
         hostOwnership: new PluginHostOwnership(host),
@@ -6208,6 +6280,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       });
     const newPipeline = (host: PluginHost) =>
       new PluginPipeline({
+        isEngineCaptureAvailable: () => true,
         workspaceRoot: fixture.workspaceRoot,
         stateDir: fixture.stateDir,
         hostOwnership: new PluginHostOwnership(host),
@@ -6280,6 +6353,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -6349,6 +6423,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -6433,6 +6508,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -6580,6 +6656,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         drainTimeoutMs: options.drainTimeoutMs,
       });
       pipeline = new PluginPipeline({
+        isEngineCaptureAvailable: () => true,
         workspaceRoot: fixture.workspaceRoot,
         stateDir: fixture.stateDir,
         hostOwnership,
@@ -7362,12 +7439,18 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     it("rejects rebuild when the plugin has no failed approved build", async () => {
       const setup = await setupEstablishedPlugin();
       try {
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        await waitFor(
+          () => setup.statuses.at(-1) === "ready",
+          "The initial ready status event was not delivered.",
+        );
         const buildsBefore = setup.buildCalls();
         const statusesBefore = setup.statuses.length;
 
         const rebuilt = await setup.pipeline.rebuild("example-plugin");
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        await waitFor(
+          () => setup.statuses.length > statusesBefore,
+          "The rejected rebuild status event was not delivered.",
+        );
 
         expect(rebuilt).toMatchObject({
           ok: false,
@@ -8157,6 +8240,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       });
       const hostOwnership = new PluginHostOwnership(host);
       pipeline = new PluginPipeline({
+        isEngineCaptureAvailable: () => true,
         workspaceRoot: fixture.workspaceRoot,
         stateDir: fixture.stateDir,
         hostOwnership,
@@ -8796,6 +8880,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -8896,6 +8981,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -9031,6 +9117,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -9149,6 +9236,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
     // Session 1: a normal install records the approval.
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(newHost()),
@@ -9183,6 +9271,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     // exactly between the two.
     let snapshotCalls = 0;
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(newHost()),
@@ -9239,6 +9328,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -9351,6 +9441,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -9364,8 +9455,12 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
     try {
       await pipeline.start();
-      // Status events emit through queueMicrotask; let them drain.
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await waitFor(
+        () => events.some((event) =>
+          event.kind === "changed" && event.plugin.id === "noisy-plugin"
+        ),
+        "The noisy plugin status event was not delivered.",
+      );
 
       const row = pipeline.list().find((entry) => entry.id === "noisy-plugin");
       expect(row?.error?.message).toContain("characters elided");
@@ -9405,6 +9500,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -9486,6 +9582,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -9576,6 +9673,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -9649,6 +9747,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -9786,6 +9885,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -9887,6 +9987,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -9949,6 +10050,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -10019,6 +10121,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -10098,6 +10201,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     });
     const startSpy = vi.spyOn(host, "start");
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -10208,6 +10312,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     });
     const resetCrashAccounting = vi.spyOn(host, "resetCrashAccounting");
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -10319,6 +10424,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -10420,6 +10526,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -10515,6 +10622,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -10589,6 +10697,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -10599,8 +10708,12 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
     try {
       await pipeline.start();
-      // Status events emit through queueMicrotask; let them drain.
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await waitFor(
+        () => events.some((event) =>
+          event.kind === "changed" && event.plugin.id === "seeded-plugin"
+        ),
+        "The seeded plugin diagnostic status event was not delivered.",
+      );
 
       const listed = pipeline.list();
       expect(listed).toHaveLength(2);
@@ -10661,6 +10774,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -10718,6 +10832,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -10828,6 +10943,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -10897,6 +11013,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     });
     const told = vi.spyOn(host, "notifySettingsChanged");
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
@@ -10945,6 +11062,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
+      isEngineCaptureAvailable: () => true,
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       hostOwnership: new PluginHostOwnership(host),
