@@ -4,9 +4,7 @@ export * from "./collectionValues";
 export * from "./domain";
 export * from "./liveDocuments";
 export type {
-  KeyEnvelopeDownloadParams,
   KeyEnvelopeDownloadResult,
-  KeyEnvelopeUploadParams,
   KeyEnvelopeUploadResult,
   MomentAuthor,
 } from "./engine";
