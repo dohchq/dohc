@@ -78,11 +78,9 @@ export function registerEstablishedPluginRecoveryTests(): void {
       const host = new PluginHost({
         stateDir: fixture.stateDir,
         workspaceRoot: fixture.workspaceRoot,
-        // Wraps the base transport's dispose() so a test can make
-        // PluginHost.stop() itself reject — shutdown() awaits dispose()
-        // outside any catch, unlike the deactivate RPC beside it, so this
-        // is the one seam that reaches stopOldRuntime's own stop() call
-        // as a genuine rejection (round-12 finding 3).
+        // Wrap transport dispose() to make PluginHost.stop() reject. shutdown()
+        // awaits it outside a catch, unlike the deactivate RPC, so this reaches
+        // stopOldRuntime's stop() call as a rejection.
         spawnTransport: (params) => {
           const transport = baseSpawnTransport(params);
           return {
@@ -663,7 +661,7 @@ export function registerEstablishedPluginRecoveryTests(): void {
       }
     }, 60_000);
 
-    it("never resurrects a superseded hold's own status for different content that only happens to hash the same as a much earlier failed attempt (round-21 finding 3, A-fail then B-hold then back-to-A)", async () => {
+    it("evaluates A again after A fails, B is held for approval, and the source returns to A", async () => {
       const setup = await setupEstablishedPlugin();
       try {
         const key = "example-plugin";
@@ -963,17 +961,13 @@ export function registerEstablishedPluginRecoveryTests(): void {
         );
 
         await setup.failEstablishedBuild();
-        // hasFailedReplacement reports recoveryState's own has(), true
-        // regardless of its value: the manifest above could not be
-        // parsed, so the value stays null — only the palette's own
-        // preview of what the recovered build contains is missing (#779
-        // round 22 finding 2).
+        // hasFailedReplacement checks recoveryState.has(), even when its value
+        // is null because the generated manifest could not be parsed. Retry stays
+        // available without a recovered manifest for the palette preview.
         expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
 
-        // A crash-loop respawn between the failure and the fix — the
-        // host's own health reporting, not a rebuild — flips status back
-        // to "ready" even though the replacement this failure owes was
-        // never built (mirrors round-8 finding 3's own respawn).
+        // A crash-loop respawn can report "ready" without rebuilding the failed
+        // replacement. Recovery must survive that runtime status change.
         setup.pipeline.noteRuntimeStatus("example-plugin", "crashed");
         setup.pipeline.noteRuntimeStatus("example-plugin", "starting");
         setup.pipeline.noteRuntimeStatus("example-plugin", "ready");
@@ -1008,10 +1002,8 @@ export function registerEstablishedPluginRecoveryTests(): void {
         expect(setup.pipeline.list()[0]?.status).toBe("failed");
         expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
 
-        // Nothing was ever running to crash-loop respawn, but the same
-        // durable fact must survive whatever else can still reset status
-        // for a stopped plugin — simulated directly here the way round-8's
-        // own respawn test simulates its own status flip.
+        // No host was running, but the failed replacement must survive other
+        // status resets too. Simulate a reset directly, as in the respawn case.
         setup.pipeline.noteRuntimeStatus("example-plugin", "ready");
         expect(setup.pipeline.list()[0]?.status).toBe("ready");
 

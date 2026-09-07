@@ -74,56 +74,15 @@ export async function stagePluginTools(): Promise<void> {
   if (process.platform !== "win32") await chmod(destinationBinary, 0o755);
 }
 
-export async function createPluginWorkspace(): Promise<{
-  root: string;
-  workspaceRoot: string;
-  pluginRoot: string;
-  entryPath: string;
-  stateDir: string;
-}> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-plugin-pipeline-"));
-  roots.push(root);
-  const workspaceRoot = join(root, "workspace");
-  const pluginRoot = join(workspaceRoot, "plugins", "example-plugin");
-  const entryPath = join(pluginRoot, "src", "index.ts");
-  const stateDir = join(root, "state");
-  await Promise.all([
-    mkdir(dirname(entryPath), { recursive: true }),
-    mkdir(stateDir, { recursive: true }),
-  ]);
-  await Promise.all([
-    writeFile(join(pluginRoot, "dohc-plugin.json"), `${JSON.stringify({
-      version: 1,
-      name: "example-plugin",
-      displayName: "Example plugin",
-      entry: "src/index.ts",
-    }, null, 2)}\n`),
-    writeFile(join(pluginRoot, "package.json"), `${JSON.stringify({
-      name: "example-plugin",
-      version: "1.0.0",
-      private: true,
-      type: "module",
-      packageManager: "pnpm@11.20.0",
-    }, null, 2)}\n`),
-    writeFile(join(pluginRoot, "pnpm-lock.yaml"), [
-      "lockfileVersion: '9.0'",
-      "settings:",
-      "  autoInstallPeers: true",
-      "  excludeLinksFromLockfile: false",
-      "importers:",
-      "  .: {}",
-      "",
-    ].join("\n")),
-    writeFile(entryPath, [
-      'export const marker = "one";',
-      "export default { activate() {} };",
-      "",
-    ].join("\n")),
-  ]);
-  return { root, workspaceRoot, pluginRoot, entryPath, stateDir };
-}
-
-export async function createNamedPluginWorkspace(directoryName: string, pluginId: string): Promise<{
+export async function createPluginWorkspace({
+  directoryName,
+  pluginId,
+  displayName,
+} = {
+  directoryName: "example-plugin",
+  pluginId: "example-plugin",
+  displayName: "Example plugin",
+}): Promise<{
   root: string;
   workspaceRoot: string;
   pluginRoot: string;
@@ -144,7 +103,7 @@ export async function createNamedPluginWorkspace(directoryName: string, pluginId
     writeFile(join(pluginRoot, "dohc-plugin.json"), `${JSON.stringify({
       version: 1,
       name: pluginId,
-      displayName: pluginId,
+      displayName,
       entry: "src/index.ts",
     }, null, 2)}\n`),
     writeFile(join(pluginRoot, "package.json"), `${JSON.stringify({
@@ -172,9 +131,8 @@ export async function createNamedPluginWorkspace(directoryName: string, pluginId
   return { root, workspaceRoot, pluginRoot, entryPath, stateDir };
 }
 
-// Matches PluginPipeline's own dohcDir computation exactly: derived plugin
-// artifacts live under <stateDir>/plugin-data/<workspaceStateKey>, never
-// inside the workspace folder (CERT779).
+// Match PluginPipeline's dohcDir: derived plugin artifacts live under
+// <stateDir>/plugin-data/<workspaceStateKey>, outside the workspace folder.
 export function pluginsDataRoot(
   fixture: { stateDir: string; workspaceRoot: string },
 ): string {
@@ -290,9 +248,9 @@ export async function cleanupPluginWorkspaces(): Promise<void> {
 }
 
 export async function cleanupPluginTools(): Promise<void> {
-  // R7 fix: real builds above spawn esbuild's shared service process from
-  // the staged binary under resourcesParent, which holds the executable
-  // open until stopped — that blocks deleting it on Windows.
+  // Real builds use esbuild's shared service from the staged binary under
+  // resourcesParent. Stop it before deleting that directory to release the
+  // executable handle on Windows.
   await stop();
   await rm(resourcesParent, {
     recursive: true,

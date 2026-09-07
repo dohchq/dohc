@@ -2,7 +2,6 @@ import { registerEstablishedPluginRecoveryTests } from "./pluginPipelineRecovery
 import {
   cleanupPluginTools,
   cleanupPluginWorkspaces,
-  createNamedPluginWorkspace,
   createPluginWorkspace,
   ensureFromCommand,
   ensureFromSurface,
@@ -204,12 +203,16 @@ async function createAliasUninstallFixture(options: {
   drainTimeoutMs?: number;
   onRuntimeStopped?: (pluginId: string) => void | Promise<void>;
 } = {}): Promise<{
-  fixture: Awaited<ReturnType<typeof createNamedPluginWorkspace>>;
+  fixture: Awaited<ReturnType<typeof createPluginWorkspace>>;
   host: PluginHost;
   hostOwnership: PluginHostOwnership<PluginHost>;
   pipeline: PluginPipeline;
 }> {
-  const fixture = await createNamedPluginWorkspace("shared-dir", "runtime-id");
+  const fixture = await createPluginWorkspace({
+    directoryName: "shared-dir",
+    pluginId: "runtime-id",
+    displayName: "runtime-id",
+  });
   await mutatePluginRecord(
     fixture.stateDir,
     fixture.workspaceRoot,
@@ -259,9 +262,6 @@ afterEach(cleanupPluginWorkspaces);
 afterAll(cleanupPluginTools);
 
 describe("PluginPipeline real filesystem lifecycle", () => {
-  // The following block is unique to feat/offer-builtin-driver-plugins
-  // (offer/install, rename, and round-24 collision-disambiguation coverage),
-  // grafted in whole during the merge with origin/main.
 
   it("discovers an added offer unapproved and installs it through the ordinary pipeline", async () => {
     const sourceFixture = await createPluginWorkspace();
@@ -516,7 +516,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  // Round 8 finding 4: uninstallableCandidate() only fell back to a
+  // uninstallableCandidate() only fell back to a
   // discovery entry for a plugin that had some prior installation —
   // validCandidate() rejects an invalid manifest outright, so a copy added
   // by Add and never installed had no candidate at all, and Remove's
@@ -612,7 +612,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  // Round 9 finding 3: a directory installed as "agent-chat" whose install never
+  // A directory installed as "agent-chat" whose install never
   // finished (no approvedHash) can still have left state and plugin data
   // filed under "agent-chat" before its manifest broke. A broken manifest gives
   // discovery a directory-derived fallback id — "my-chat-copy" here, never
@@ -637,9 +637,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     );
     await writeFile(join(pluginRoot, "src", "main.ts"), "export default {};\n");
 
-    // A partial install left state under the manifest id "agent-chat" —
-    // directoryName is the join #779 round 9 B3 already relies on to find
-    // it again once the manifest breaks — but approval never completed.
+    // A partial install left state under the manifest id "agent-chat" before
+    // approval completed. directoryName must still find it after the manifest
+    // breaks.
     await mutatePluginRecord(stateDir, workspaceRoot, "agent-chat", () => ({
       directoryName: "my-chat-copy",
     }));
@@ -689,7 +689,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       if (!preflight.ok) {
         throw new Error(`${preflight.error.stage}/${preflight.error.code}: ${preflight.error.message}`);
       }
-      // Round 10 finding 1: cleanup deletes state under both identities, so
+      // Cleanup deletes state under both identities, so
       // the confirmation the user actually sees has to name that data
       // before they confirm — not only the fallback id's own (empty) state.
       expect(preflight.preflight.stateData).toMatchObject({ fileCount: 1 });
@@ -717,7 +717,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  // Round 11 finding 3: a discovered (never-installed) row's own id is only
+  // A discovered (never-installed) row's own id is only
   // ever a broken manifest's directory-derived fallback — a plain string
   // that can coincide with some other, unrelated, valid plugin's real
   // manifest id. classifyInstalledPlugins's own duplicate-id detection
@@ -775,7 +775,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     // re-resolves the same identity twice and probes only the source hash.
     const preflightStateRoots: (string | null)[] = [];
     const revalidatedSourceRoots: string[] = [];
-    // #779-offers round 24 finding 4: the "removed" event this uninstall
+    // The "removed" event this uninstall
     // emits must name the row that actually left — never the id alone,
     // which the still-installed survivor shares.
     const events: PluginPipelineStatusEvent[] = [];
@@ -870,7 +870,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // row.
       const preflight = await pipeline.uninstallPreflight("target-dir", "target-dir");
       if (!preflight.ok) throw new Error(preflight.error.message);
-      // Round 13: the dialog must not threaten data cleanup already
+      // The dialog must not threaten data cleanup already
       // excludes. The survivor's real stored data planted above is not
       // named here at all — the invalid row genuinely has none of its
       // own — and the comparison never claims the invalid row's source
@@ -887,7 +887,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       if (!removed.ok) throw new Error(removed.error.message);
       expect(removed.identity).toBe("retained");
 
-      // Round 24 finding 4: the emitted event names the invalid row's own
+      // The emitted event names the invalid row's own
       // directory — never "other-dir", the survivor this id also names.
       // main's forgetUninstalledPlugin relies on exactly this to apply the
       // standing trace-to-directory rule and never forget the survivor's
@@ -933,7 +933,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  // Round 22 finding 4: two id-colliding rows can each have their own
+  // Two id-colliding rows can each have their own
   // Remove dialog open at once — one tab per row. Keying
   // uninstallConfirmations by pluginId alone let the second row's
   // preflight silently overwrite the first's still-open confirmation:
@@ -1078,7 +1078,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  // Round 14 finding 5: the row-resolution fix above protects a pair the
+  // The row-resolution fix above protects a pair the
   // renderer would actually send (a row's own id with its own directory,
   // even when that id happens to collide with an unrelated plugin's real
   // one). A pair that names two genuinely unrelated rows — this plugin's
@@ -1152,7 +1152,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  // Round 15 finding 1: the pair check above only ever verified that
+  // The pair check above only ever verified that
   // pluginId belongs to whatever candidate got resolved — never that the
   // resolved candidate is even the row this call was actually asked about.
   // A directory that vanishes between the click and this call makes
@@ -1271,15 +1271,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  // Round 14 finding 6: additionalCleanupIds used to exclude candidate.id
-  // from its own scan — meant to avoid double-adding it when it equals
-  // pluginId, but pluginId and candidate.id can genuinely differ (a broken
-  // manifest's fallback id vs. the original id its record is filed under,
-  // #779 round 9 B3), and a separate, real record filed directly under
-  // candidate.id's own key was silently skipped either way it happened to
-  // sit. The cleanupIds Set already dedupes any overlap, so including
-  // candidate.id unconditionally is never redundant work, only ever a
-  // correctness gap when omitted.
+  // Cleanup must include both the broken manifest's fallback id and records
+  // whose directoryName names this directory. They can have different keys,
+  // and candidate.id can also own a separate record. cleanupIds deduplicates
+  // any overlap; skipping candidate.id would strand its state.
   it("cleans up a record filed under candidate.id's own key, distinct from pluginId", async () => {
     const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-candidate-id-edge-"));
     roots.push(targetRoot);
@@ -1352,9 +1347,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       transient.statuses.set("mixed-dir", trackedStatus!);
       transient.lastApprovedAttemptHash.set("original-id", "a".repeat(64));
       transient.lastApprovedAttemptHash.set("mixed-dir", "b".repeat(64));
-      // "original-id" is a valid pair for "mixed-dir": its own record
-      // positively names this directory (#779 round 9 B3's own preserved
-      // case, restated in round 14 finding 5's mismatch gate).
+      // "original-id" is a valid pair for "mixed-dir": its persisted record
+      // names this directory.
       const preflight = await pipeline.uninstallPreflight("original-id", "mixed-dir");
       if (!preflight.ok) throw new Error(preflight.error.message);
       const reserveChange = vi.spyOn(hostOwnership, "reserveChange");
@@ -1509,7 +1503,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   }, 60_000);
 
   it("rejects an uninstall when earlier alias work changes the confirmed target", async () => {
-    const fixture = await createNamedPluginWorkspace("shared-dir", "runtime-id");
+    const fixture = await createPluginWorkspace({
+      directoryName: "shared-dir",
+      pluginId: "runtime-id",
+      displayName: "runtime-id",
+    });
     await mutatePluginRecord(
       fixture.stateDir,
       fixture.workspaceRoot,
@@ -2107,10 +2105,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // clean, successful add.
       expect(copied?.valid).toBe(true);
 
-      // The fixed handler's side-agnostic detection: the structured
-      // supersededPluginId marker, never diagnostic prose (that text is
-      // bounded and re-worded for display, not a stable machine-checked
-      // signal — #779-offers round 8 finding 5).
+      // Find the displaced directory through supersededPluginId. Diagnostic
+      // prose is bounded and can change for display, so it cannot identify the
+      // other side of the collision.
       const displaced = pipeline.findDirectorySupersededBy("agent-chat");
       expect(displaced).toBe("z-chat");
 
@@ -2142,12 +2139,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  // Round 15 finding 3, through the real conflict path this rollback
-  // actually runs on: a slow rescan is exactly the window real work can
-  // land in — an agent or a user editing the copy's README, say — before
-  // the conflict this test sets up is even detected. The rollback's own
-  // identity check passes regardless (a directory's inode does not change
-  // when a file inside it is edited), so only a content check catches it.
+  // A user or agent can edit the copy while a slow rescan detects its
+  // conflict. Editing a file leaves the directory's inode unchanged, so
+  // rollback must check content as well as directory identity.
 
   it("preserves a post-publish edit instead of deleting it, when a conflict rolls the add back", async () => {
     const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-offer-conflict-edit-"));
@@ -2321,17 +2315,16 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  // Round 23 finding 4: startup associates a renamed directory with its
-  // persisted record by id alone (installedRecord's ordinary join) — it
-  // never corrected the record's own stale directoryName field to match.
-  // pluginIdTracesDirectory compares that stale field against the
-  // candidate's real, current directoryName and reads the mismatch as
-  // proof this id's own data belongs to some other, unrelated
-  // installation — disowning everything a Remove would otherwise clean
-  // up, and leaving settings stranded under the vacated key the same way
-  // a live watcher rename would without round 22 finding 1's fix.
+  // An offline rename is first joined to its persisted record by plugin id.
+  // The record's directoryName and saved settings must follow the new source
+  // directory, or pluginIdTracesDirectory will disown this plugin's data and
+  // settings will remain under a key the plugin no longer reads.
   it("owns its data and carries its settings across an offline directory rename", async () => {
-    const fixture = await createNamedPluginWorkspace("old-dir", "offline-rename-id");
+    const fixture = await createPluginWorkspace({
+      directoryName: "old-dir",
+      pluginId: "offline-rename-id",
+      displayName: "offline-rename-id",
+    });
     await writeFile(
       join(fixture.pluginRoot, "dohc-plugin.json"),
       `${JSON.stringify({
@@ -2452,7 +2445,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 120_000);
 
-  // Round 24 finding 2: startup has no discovery history the way
+  // Startup has no discovery history the way
   // processWatcherBatch does, so an id-only mismatch alone cannot tell a
   // genuine offline rename apart from a coexisting duplicate directory
   // promoted into the vacated id because the original directory is simply
@@ -2460,7 +2453,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   // equal live source hash may retarget the record and migrate settings.
 
   it("does not adopt a duplicate promoted while closed as an offline rename", async () => {
-    const fixture = await createNamedPluginWorkspace("old-dir", "foo");
+    const fixture = await createPluginWorkspace({
+      directoryName: "old-dir",
+      pluginId: "foo",
+      displayName: "foo",
+    });
     await writeFile(
       join(fixture.pluginRoot, "dohc-plugin.json"),
       `${JSON.stringify({
@@ -2586,14 +2583,18 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 120_000);
 
-  // Round 22 finding 1: settings are keyed by directoryName. A genuine
+  // Settings are keyed by directoryName. A genuine
   // rename — this exact id reappearing, in one watcher batch, at a new
   // directory — is the one case the pipeline itself can prove; without
   // this, the user's saved answers are filed under a key nothing reads
   // anymore and silently read back as the manifest's defaults.
 
   it("carries a plugin's saved settings across a same-batch directory rename", async () => {
-    const fixture = await createNamedPluginWorkspace("old-dir", "shared-id");
+    const fixture = await createPluginWorkspace({
+      directoryName: "old-dir",
+      pluginId: "shared-id",
+      displayName: "shared-id",
+    });
     await writeFile(
       join(fixture.pluginRoot, "dohc-plugin.json"),
       `${JSON.stringify({
@@ -2678,7 +2679,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  // Round 23 finding 1: sameId reappearing under a new directoryName is
+  // sameId reappearing under a new directoryName is
   // only ever a rename when that directory is new to discovery this batch.
   // A duplicate that already existed — a second directory declaring the
   // same manifest name, demoted to its own directoryName as id by
@@ -2687,7 +2688,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   // winner's own content arriving there. Settings must not follow.
 
   it("does not carry settings to a duplicate promoted by the installed winner's removal", async () => {
-    const fixture = await createNamedPluginWorkspace("aaa-dir", "foo");
+    const fixture = await createPluginWorkspace({
+      directoryName: "aaa-dir",
+      pluginId: "foo",
+      displayName: "foo",
+    });
     await writeFile(
       join(fixture.pluginRoot, "dohc-plugin.json"),
       `${JSON.stringify({
@@ -2789,7 +2794,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  // Round 23 finding 3: an invalid, never-installed candidate (a broken
+  // An invalid, never-installed candidate (a broken
   // manifest, or none at all) gets no status entry — seedCandidateStatus
   // returns early with nothing to set — so its own arrival or departure
   // fires no "changed"/"removed" event either. Anything reading discovery
@@ -2852,7 +2857,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  // Round 24 finding 3: comparing only the invalid set's directoryNames
+  // Comparing only the invalid set's directoryNames
   // misses a malformed manifest replaced by a differently malformed one —
   // the directory NAME set never changes, but the row's own diagnostics
   // (what the Plugins view actually shows for it) did.
@@ -2922,7 +2927,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  // Round 10 finding 2: the sourceless retry (this same pattern, but for a
+  // The sourceless retry (this same pattern, but for a
   // never-approved install whose manifest broke under a directory name
   // different from its record's key) used to resolve cleanup by pluginId
   // alone — the fallback id finishSourcelessUninstall's synthetic candidate
@@ -3031,7 +3036,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       failChatDataRemoval = false;
       const retryPreflight = await pipeline.uninstallPreflight(pluginId, pluginId);
       if (!retryPreflight.ok) throw new Error(retryPreflight.error.message);
-      // Round 11 finding 1: this retry's own preflight — the sourceless
+      // This retry's own preflight — the sourceless
       // path, with no discovery candidate left at all — must still name
       // the original "agent-chat" key's data before the user confirms deleting
       // it, not only report on pluginId's own (empty) state.
@@ -3078,7 +3083,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  // Round 18 finding 4: settings used to route by id alone, and two
+  // Settings used to route by id alone, and two
   // directories can share an id (a duplicate manifest name — discovery's
   // own tie-break degrades one side, but both still carry the same id).
   // Reading and saving must name the exact directory a caller selected,
@@ -3156,7 +3161,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   });
 
   it("keeps a built registration on its exact root when an invalid fallback id collides", async () => {
-    const fixture = await createNamedPluginWorkspace("zzz", "aaa");
+    const fixture = await createPluginWorkspace({
+      directoryName: "zzz",
+      pluginId: "aaa",
+      displayName: "aaa",
+    });
     const invalidRoot = join(fixture.workspaceRoot, "plugins", "aaa");
     await mkdir(invalidRoot, { recursive: true });
     await writeFile(
@@ -3212,7 +3221,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  // Round 19 finding 3: dohc's own build and state storage (liveRoot,
+  // dohc's own build and state storage (liveRoot,
   // pluginStateRoot) is keyed by pluginId, not directoryName — an id an
   // invalid, never-installed collision loser shares with a genuinely
   // installed row's real id. Presence of an id alone must not report the
@@ -3317,16 +3326,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  // Round 20 finding 1: PluginHost.start() used to derive directoryName from
-  // basename(pluginRoot) — correct for a test that passes the SOURCE
-  // directory straight in, wrong for production, which starts a plugin
-  // from its built root (dohc's own.dohc/plugins/<safe-path> staging).
-  // basename(builtRoot) reads pluginIdToSafePath(pluginId) — the id, not
-  // the folder discovery found it at — so a plugin whose manifest name
-  // differs from its folder got the wrong directoryName at every real
-  // activation. Pinned through a real build and start, where the built
-  // root's own basename ("foo") and the source folder ("my-copy") visibly
-  // differ.
+  // Production starts a plugin from its built root, whose basename follows
+  // the plugin id rather than the source directory. A real build and start
+  // must carry the source directory "my-copy" through activation even though
+  // the built root's basename is "foo".
 
   it("activates with the source directory's own name, never the built root's basename", async () => {
     const fixture = await createPluginWorkspace();
@@ -3410,10 +3413,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   it("identifies an NFC-spelled path under an NFD plugin root", async () => {
     const nfdDirectory = "caf\u0065\u0301";
     const nfcDirectory = "caf\u00e9";
-    const fixture = await createNamedPluginWorkspace(
-      nfdDirectory,
-      "unicode-plugin",
-    );
+    const fixture = await createPluginWorkspace({
+      directoryName: nfdDirectory,
+      pluginId: "unicode-plugin",
+      displayName: "unicode-plugin",
+    });
     let pipeline: PluginPipeline;
     const host = new PluginHost({
       stateDir: fixture.stateDir,
@@ -4040,10 +4044,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         "Plugin did not reach ready after approval.",
       );
 
-      // CERT779 A4 PoC: renaming an approved plugin's manifest identity must
-      // not carry its approval forward. "renamed-plugin" is an identity this
-      // pipeline has never approved, even though "example-plugin" at the
-      // same root was fully approved and running a moment ago.
+      // Renaming an approved manifest identity must not carry its approval
+      // forward. "renamed-plugin" has never been approved, even though
+      // "example-plugin" was approved and running at this same root.
       await writeFile(join(fixture.pluginRoot, "dohc-plugin.json"), `${JSON.stringify({
         version: 1,
         name: "renamed-plugin",
@@ -4160,9 +4163,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       );
       const approvedHashBeforeTamper = pipeline.list()[0]?.approvedHash;
 
-      // The exact CERT779 attack: tamper bundle.mjs directly on disk. The
-      // plugin's source under plugins/ is never touched, so its hash — and
-      // therefore approvedHash — does not change either.
+      // Tamper bundle.mjs directly without editing the source under plugins/.
+      // The source hash and approvedHash stay unchanged; bundle verification
+      // must still reject the changed executable.
       const bundlePath = liveBundlePath(fixture, "example-plugin");
       const builtBundle = await readFile(bundlePath, "utf8");
       expect(builtBundle).toContain("one");
@@ -4543,9 +4546,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.start();
       const installed = await pipeline.install("example-plugin");
 
-      // The hook never gets the chance to run: the snapshot refuses to stage
-      // package-manager configuration at all, so pnpm's cwd never contains a.
-      // Pnpmfile.cjs (CERT779H). --ignore-pnpmfile stays as depth behind it.
+      // The snapshot refuses package-manager configuration, so pnpm's cwd never
+      // contains a .Pnpmfile.cjs. --ignore-pnpmfile provides another check.
       await expect(lstat(canaryPath)).rejects.toMatchObject({ code: "ENOENT" });
       expect(installed).toMatchObject({
         ok: false,
@@ -4629,9 +4631,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await expect(lstat(fixture.pluginRoot)).resolves.toBeDefined();
       expect(preflightCalls).toBe(1);
       expect(hashSourceCalls).toBe(2);
-      // And not a stuck "uninstalling" spinner: the status set on the way in
-      // is restored to an actionable one the user can retry from (#779 round
-      // 7 B6).
+      // Restore an actionable status the user can retry from; the plugin must
+      // not stay on the "uninstalling" spinner.
       expect(pipeline.list()[0]).toMatchObject({
         status: "disabled",
         disabledReason: "user",
@@ -4731,7 +4732,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     // "bar"@zzz-original's own departure is fully applied would let the
     // replacement read the departing identity's still-present, about-to-
     // be-deleted approvedHash under the very id it's claiming.
-    const fixture = await createNamedPluginWorkspace("zzz-original", "bar");
+    const fixture = await createPluginWorkspace({
+      directoryName: "zzz-original",
+      pluginId: "bar",
+      displayName: "bar",
+    });
     const renamedRoot = join(fixture.workspaceRoot, "plugins", "aaa-renamed");
     await mkdir(join(renamedRoot, "src"), { recursive: true });
     await writeFile(join(renamedRoot, "dohc-plugin.json"), `${JSON.stringify({
@@ -5781,7 +5786,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   }, 60_000);
 
   it("keeps uninstall available for a scoped plugin in a differently named directory whose manifest broke", async () => {
-    const fixture = await createNamedPluginWorkspace("foo", "@scope/bar");
+    const fixture = await createPluginWorkspace({
+      directoryName: "foo",
+      pluginId: "@scope/bar",
+      displayName: "@scope/bar",
+    });
     let pipeline: PluginPipeline;
     const newHost = () =>
       new PluginHost({
@@ -5869,7 +5878,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   }, 60_000);
 
   it("keeps an installation with its own directory when a second root claims its id", async () => {
-    const fixture = await createNamedPluginWorkspace("zeta", "shared-id");
+    const fixture = await createPluginWorkspace({
+      directoryName: "zeta",
+      pluginId: "shared-id",
+      displayName: "shared-id",
+    });
     let pipeline: PluginPipeline;
     const newHost = () =>
       new PluginHost({
@@ -5978,7 +5991,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   }, 120_000);
 
   it("keeps an installation when its directory is renamed", async () => {
-    const fixture = await createNamedPluginWorkspace("zeta", "shared-id");
+    const fixture = await createPluginWorkspace({
+      directoryName: "zeta",
+      pluginId: "shared-id",
+      displayName: "shared-id",
+    });
     let pipeline: PluginPipeline;
     const newHost = () =>
       new PluginHost({
@@ -6188,9 +6205,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const surface = await ensureFromSurface(pipeline, "example-plugin");
       const started = surface.result;
 
-      // Fail-closed, and no staged bytes left beside the live root: the
-      // rejected discard is retried by the same job's cleanup (#779 round
-      // 10 A5).
+      // Reject the start and leave no staging bytes beside the live root. The
+      // same job's cleanup retries the rejected discard.
       expect(started.ok).toBe(false);
       expect(discards).toHaveLength(2);
       expect(await stagingLeftovers(fixture, "example-plugin")).toEqual([]);
@@ -7031,8 +7047,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         "Plugin did not reach ready after install.",
       );
 
-      // First: a door write raced by a disk-only interloper, so the refresh
-      // holds for approval (the round-3 finding-1 behavior).
+      // A disk-only write races the door write, so the refresh holds for approval.
       const approvePromise = pipeline.approve("example-plugin");
       await waitFor(() => installCalls === 2, "approve() never reached the gated install.");
       await doorWrite(pipeline, "example-plugin", fixture.entryPath, [
@@ -7463,7 +7478,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   }, 120_000);
 
   it("reconciles a scoped plugin in a differently named directory when its manifest returns", async () => {
-    const fixture = await createNamedPluginWorkspace("foo", "@scope/bar");
+    const fixture = await createPluginWorkspace({
+      directoryName: "foo",
+      pluginId: "@scope/bar",
+      displayName: "@scope/bar",
+    });
     let pipeline: PluginPipeline;
     const host = new PluginHost({
       stateDir: fixture.stateDir,
@@ -7690,9 +7709,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       tamperOnPublish = true;
       const rebuilt = await pipeline.install("example-plugin");
 
-      // Nothing may run out of the live root while it is being replaced:
-      // the stop precedes both publishes (#779 round 13 D4 — recording only
-      // the bundle publish let the stop slide between the two).
+      // Stop the runtime before publishing either the snapshot or the bundle.
+      // Checking only bundle publication would allow the stop between publishes.
       expect(order).toEqual(["stop", "snapshot-publish", "publish"]);
       // The published bytes are not the bytes the record just approved, so
       // the start is refused and they never execute.

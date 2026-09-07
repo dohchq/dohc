@@ -433,12 +433,11 @@ export class PluginPipeline {
   private readonly operations: PluginPipelineOperations;
   private readonly platform: NodeJS.Platform;
   private readonly statuses = new Map<string, PluginPipelinePluginStatus>();
-  // A key's presence is the fact a build failed with an old runtime still
-  // standing in for it — set whenever captureRecoveredManifest runs, keyed
-  // by has(). The value is the generated manifest it also tries to cache,
-  // or null when that read wasn't readable; hasRecoverableFailure only
-  // needs the key, the palette needs the value too (#779 round 21 finding
-  // 5, merged #779 round 26 simplification 8).
+  // A recoveryState key records an unreplaced build failure, even if no host
+  // is running. hasRecoverableFailure checks key presence. The value starts
+  // as null; a successful read caches the generated manifest, and a failed
+  // reread keeps that cache. Without a cached manifest, Retry stays available
+  // and the projector keeps current contributions.
   private readonly recoveryState = new Map<string, DohcPluginManifest | null>();
   private readonly lastApprovedAttemptHash = new Map<string, string>();
   private readonly jobQueues: PluginJobQueues;
@@ -982,10 +981,8 @@ export class PluginPipeline {
   ): Promise<PluginPipelineActionResult> {
     return this.enqueueAdoptedAction(pluginId, async (change) => {
         const candidate = this.requireValidCandidate(pluginId);
-        // A crash-loop respawn between the failure and this call flips
-        // status back to whatever the still-running old build reports;
-        // hasRecoverableFailure is the fact that survives it (round-8
-        // finding 3, round-21 finding 1).
+        // A crash-loop respawn can reset status to the old build's runtime status.
+        // hasRecoverableFailure preserves the failed replacement across that reset.
         if (!this.hasRecoverableFailure(pluginId)) {
           return existingHostResult(this.failure(
             pluginId,
@@ -1085,13 +1082,9 @@ export class PluginPipeline {
     const candidate = this.validCandidate(pluginId);
     if (!candidate) return;
     if (runtimeStatus === "disabled") {
-      // recoveryState staying set is what keeps hasFailedReplacement true
-      // through this transition: a build that failed and was never
-      // replaced is still owed one whether or not the old runtime that
-      // outlived it just gave up crash-looping. Clearing it here hid Retry
-      // build and routed Enable through an approval hold instead (round-9
-      // finding 2) — the one path a build failure can leave with no running
-      // host left to preserve the fact for later.
+      // Keep recoveryState when the old runtime stops crash-looping. Its failed
+      // replacement still needs a retry with no host running; clearing the entry
+      // would hide Retry build and route Enable through an approval hold.
       this.setStatus(candidate, {
         status: "disabled",
         disabledReason: "crash-loop",
@@ -1986,11 +1979,9 @@ export class PluginPipeline {
       }, change), () => undefined);
     }
     if (!startRuntime || this.host.getStatus(pluginId)) {
-      // A no-op reconcile (nothing to rebuild, nothing to start) must
-      // restore the status this function's own snapshotOrThrow set to
-      // "snapshotting" at the top — otherwise a watcher event for an
-      // already-running, unchanged plugin left it permanently stuck
-      // reading "Checking source" (fixround Section B item 12).
+      // A no-op reconcile must restore the status snapshotOrThrow changed to
+      // "snapshotting". Otherwise an unchanged, running plugin stays stuck on
+      // "Checking source" after a watcher event.
       const runtimeStatus = this.host.getStatus(pluginId);
       this.setStatus(candidate, {
         status: runtimeStatus ?? "queued",
@@ -2234,12 +2225,10 @@ export class PluginPipeline {
           change,
         );
       }
-      // snapshotOrThrow's own digest is reused for the install baseline
-      // manifest below instead of re-hashing the whole tree a second time
-      // (fixround Section C F1) — writePluginBaselineManifest already
-      // enforces canonicalPluginSourceHash(digest.files) === digest.sourceHash
-      // and digest.sourceHash === installedBaselineHash, which is the same
-      // invariant a second hash pass would have re-verified.
+      // Reuse snapshotOrThrow's digest for the install baseline. The baseline
+      // writer already checks canonicalPluginSourceHash(digest.files) against
+      // digest.sourceHash and digest.sourceHash against installedBaselineHash;
+      // another full-tree hash would repeat those checks.
       const baselineDigest = snapshot.digest;
 
       // candidate.manifest was parsed from the live root at an earlier
@@ -2408,18 +2397,9 @@ export class PluginPipeline {
       }
 
       this.recoveryState.delete(candidate.id);
-      // Discovery's own cached candidate for this id can be stale by now —
-      // a source edit made again right after discovery's last scan (but
-      // before this exact snapshot was taken) still lands in the snapshot,
-      // just not in that cache. Refreshed here so pluginRegistration()
-      // (and anything else that reads this.discovery) is accurate right
-      // away instead of only after the next watcher rescan happens to run.
-      // A later rescan still wins normally, the same as any other edit.
-      // IconPath is manifest-derived the same
-      // way discovery's own scan computes it — left at its stale value, a
-      // build that added, removed or changed a plugin's icon would keep
-      // showing whatever discovery's last scan found instead (#779 round
-      // 25 finding 2).
+      // The built snapshot can include manifest and icon edits made after discovery.
+      // Refresh the cached candidate so pluginRegistration() immediately reports
+      // what was built. A later discovery scan can replace this cache normally.
       const builtIcon = manifest.icon
         ? (await verifyPluginIcon(candidate.rootPath, manifest.icon)).icon
         : null;
@@ -2484,8 +2464,6 @@ export class PluginPipeline {
           runtimeStatus: currentRuntimeStatus,
           sourceHash,
           error: detail,
-          // priorStatus: see its own definition above (#779 round 22
-          // finding 5).
           ...(!recovered && priorStatus
             ? {
               settings: priorStatus.settings,
@@ -2612,12 +2590,9 @@ export class PluginPipeline {
         ? error.detail
         : pipelineError("snapshot", "snapshot-failed", errorMessage(error));
       const runtimeStatus = this.host.getStatus(candidate.id) ?? null;
-      // This verify pass never touched the live root, so whatever it was
-      // running is still running — the same "old runtime still serving a
-      // failed candidate" case runFullBuild's own catch recovers from, and
-      // it needs the same recovery cache write, or the not-yet-trusted
-      // candidate this pass just rejected becomes authoritative everywhere
-      // setStatus derives from it (round-8 finding 1).
+      // Verification left the live root untouched. Recover its manifest as
+      // runFullBuild does on failure, so status contributions still describe the
+      // running build instead of the rejected candidate.
       if (runtimeStatus !== null) {
         await this.captureRecoveredManifest(candidate.id);
       }
@@ -2636,16 +2611,13 @@ export class PluginPipeline {
   }
 
   /**
-   * Populates the recovery cache from the live root's own generated
-   * manifest, so setStatus keeps deriving commands/panels/webApps/settings
-   * from the build actually running rather than a candidate manifest a
-   * failure just meant not to trust. Shared by every failure path that can
-   * land with an old runtime still serving — one entry point missing this
-   * call is how round-8 finding 1 escaped runFullBuild's own version of it.
+   * Cache the live root's generated manifest so status contributions follow
+   * the build that remains available after a replacement fails. Every failure
+   * path that leaves the old build available uses this recovery state.
    *
-   * Marks recoveryState's own key (has(), value null) before attempting
-   * the read: an unreadable or missing generated manifest must not cost
-   * Retry its own availability, only the palette's manifest to show.
+   * Record the failed replacement before reading the manifest. A missing or
+   * unreadable manifest must not remove Retry. Retain any cached manifest;
+   * leave the value null if none has been recovered.
    */
   private async captureRecoveredManifest(pluginId: string): Promise<void> {
     if (!this.recoveryState.has(pluginId)) this.recoveryState.set(pluginId, null);
@@ -2667,13 +2639,15 @@ export class PluginPipeline {
         }
       }
     } catch {
-      // The existing candidate-manifest fallback remains the best available
-      // answer when the live manifest cannot be read.
+      // Keep the existing recovery entry when the read fails. It is null if no
+      // manifest has been recovered; the projector then keeps current contributions.
     }
   }
 
-  /** Retry's own precondition: a failed build with an old runtime still
-   * standing in for it, whether or not its manifest could be cached. */
+  /**
+   * Retry is available for a failed status or a recorded failed replacement,
+   * whether or not a host is running or its manifest could be cached.
+   */
   private hasRecoverableFailure(pluginId: string): boolean {
     return this.statuses.get(pluginId)?.status === "failed" ||
       this.recoveryState.has(pluginId);
@@ -2702,10 +2676,6 @@ export class PluginPipeline {
     return snapshot;
   }
 
-  // assertInstall/assertScan/assertBuild were the same body three times —
-  // "if !result.ok, throw PipelineFailure(pipelineError(stage,
-  // result.error.code, result.error.message))" — differing only in which
-  // stage name they threw with (fixround Section C F4).
   private unwrap<T extends { ok: true }, E extends { code: string; message: string }>(
     stage: PluginPipelineErrorStage,
     result: T | { ok: false; error: E },
@@ -3505,15 +3475,10 @@ export class PluginPipeline {
   private setStatus(
     candidate: InstalledPluginRecord,
     patch: Partial<PluginPipelinePluginStatus>,
-    // The manifest (and its own derived icon) a build actually installed,
-    // scanned and built, when this call reports on one. Discovery's own
-    // candidate.manifest/iconPath can be stale by then — a plugin's own
-    // on-disk manifest (and the icon it declares) can change again after
-    // discovery scanned it but before this exact snapshot was taken and
-    // built, and only that snapshot is what is now running. Left
-    // undefined, every derivation below falls back to candidate's own
-    // fields exactly as it always has (#779 round 23 finding 5, round 25
-    // finding 2).
+    // Pass the manifest and icon from the built snapshot when reporting a build;
+    // discovery can be stale if the source changed after its scan. The projector
+    // uses these for built metadata and, unless recovery overrides it, for
+    // contributions. Without built data, its candidate/recovery rules apply.
     built?: { manifest: DohcPluginManifest; iconPath: string | null },
   ): PluginPipelinePluginStatus {
     const current = this.statuses.get(candidate.id) ?? this.baseStatus(candidate);
