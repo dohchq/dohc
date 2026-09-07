@@ -1433,6 +1433,7 @@ CREATE TABLE sync_relay_session_host_control (
 `;
 
 function normalizedSchemaSql(value: string): string {
+  // Preserve quoted values: changing 'main' to 'MAIN' changes the constraint.
   return value.trim().replace(/;$/, "").replace(/\s+/g, " ");
 }
 
@@ -1602,15 +1603,13 @@ function assertLiveDocumentAuthoritySchema(db: SqliteDb): void {
   const same = (actual: unknown, expected: unknown): void => {
     if (JSON.stringify(actual) !== JSON.stringify(expected)) fail();
   };
-  // Preserve quoted values: changing 'main' to 'MAIN' changes the constraint.
-  const sqlText = (sql: string): string => sql.trim().replace(/;$/, "").replace(/\s+/g, " ");
   for (const [name, sql] of Object.entries(LIVE_DOCUMENT_AUTHORITY_SCHEMA)) {
     const rows = db.prepare("SELECT type, tbl_name, sql FROM sqlite_schema WHERE name = ?").all(name);
     const row = rows[0];
     const table = name === "sync_relay_live_documents" || name === "idx_sync_relay_live_documents_current"
       ? "sync_relay_live_documents" : "sync_relay_live_document_baseline_ranges";
     if (rows.length !== 1 || !row || row.type !== (name.startsWith("idx_") ? "index" : "table")
-      || row.tbl_name !== table || typeof row.sql !== "string" || sqlText(row.sql) !== sqlText(sql)) fail();
+      || row.tbl_name !== table || typeof row.sql !== "string" || normalizedSchemaSql(row.sql) !== normalizedSchemaSql(sql)) fail();
   }
   const documentKey = ["workspace_id", "main_version_id", "object_id", "lineage_claim_id"];
   for (const [table, columns] of Object.entries(LIVE_DOCUMENT_AUTHORITY_COLUMNS)) {
@@ -1743,12 +1742,11 @@ function assertLiveTicketSchema(db: SqliteDb): void {
   const same = (actual: unknown, expected: unknown): void => {
     if (JSON.stringify(actual) !== JSON.stringify(expected)) fail();
   };
-  const sqlText = (sql: string): string => sql.trim().replace(/;$/, "").replace(/\s+/g, " ");
   for (const [name, sql] of Object.entries(LIVE_TICKET_SCHEMA)) {
     const rows = db.prepare("SELECT type, tbl_name, sql FROM sqlite_schema WHERE name = ?").all(name);
     const row = rows[0];
     if (rows.length !== 1 || !row || row.type !== (name === LIVE_TICKET_TABLE ? "table" : "index") ||
-      row.tbl_name !== LIVE_TICKET_TABLE || typeof row.sql !== "string" || sqlText(row.sql) !== sqlText(sql)) fail();
+      row.tbl_name !== LIVE_TICKET_TABLE || typeof row.sql !== "string" || normalizedSchemaSql(row.sql) !== normalizedSchemaSql(sql)) fail();
   }
   same(db.prepare(`PRAGMA table_info(${LIVE_TICKET_TABLE})`).all().map(row =>
     [row.cid, row.name, row.type, row.notnull, row.dflt_value, row.pk]),
@@ -2727,30 +2725,9 @@ function parseHostControlTimestamp(value: unknown, name: string): number {
   return value as number;
 }
 
-function snapshotAuthorityRecord(value: unknown, fields: readonly string[]): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || nodeTypes.isProxy(value) || Array.isArray(value) ||
-      (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
-    throw new TypeError("live authority input must be a record");
-  }
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const keys = Reflect.ownKeys(descriptors);
-  if (keys.length !== fields.length || keys.some(key => typeof key !== "string" || !fields.includes(key))) {
-    throw new TypeError("live authority input has unexpected fields");
-  }
-  const copy: Record<string, unknown> = {};
-  for (const field of fields) {
-    const descriptor = descriptors[field];
-    if (!descriptor || !Object.hasOwn(descriptor, "value")) {
-      throw new TypeError("live authority input must contain own data fields");
-    }
-    copy[field] = descriptor.value;
-  }
-  return copy;
-}
-
 function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest): CurrentLiveBindingRequest {
-  const outer = snapshotAuthorityRecord(input, ["document", "actor"]);
-  const document = parseLiveDocumentKey(snapshotAuthorityRecord(outer.document,
+  const outer = ticketRecord(input, ["document", "actor"]);
+  const document = parseLiveDocumentKey(ticketRecord(outer.document,
     ["workspaceId", "mainVersionId", "objectId", "lineageClaimId"]));
   if (document.mainVersionId !== "main") throw new TypeError("live authority requires main");
   parseLiveUpdateDigest(document.lineageClaimId);
@@ -2760,7 +2737,7 @@ function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest): Curren
   if (!kind || !Object.hasOwn(kind, "value") || (kind.value !== "owner" && kind.value !== "named")) {
     throw new TypeError("live authority requires an owner or named actor");
   }
-  const actor = snapshotAuthorityRecord(outer.actor,
+  const actor = ticketRecord(outer.actor,
     kind.value === "owner" ? ["kind", "userId", "shareId"] : ["kind", "userId", "grantId"]);
   if (actor.kind !== kind.value) throw new TypeError("live authority actor changed during capture");
   const userId = parseLiveUpdateIdentifier(actor.userId, "actor user ID");
