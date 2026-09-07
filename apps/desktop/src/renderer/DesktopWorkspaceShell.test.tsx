@@ -15965,6 +15965,8 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+
     vi.useFakeTimers();
     try {
       const listings = bridge.listWorkspaceFiles.mock.calls.length;
@@ -16066,6 +16068,8 @@ describe("workbench render cost", () => {
     const bridge = makeBridge(Promise.resolve(null));
     renderShell(bridge);
     await screen.findAllByTestId("tree-row");
+
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
