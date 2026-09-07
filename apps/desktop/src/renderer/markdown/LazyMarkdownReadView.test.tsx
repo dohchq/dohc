@@ -16,10 +16,12 @@ afterEach(() => {
 describe("LazyMarkdownReadView", () => {
   it("contains a rejected import and retries with a fresh lazy component", async () => {
     let attempt = 0;
+    let retryImport!: Promise<typeof import("./IncrementalMarkdownDocument")>;
     const loader = vi.fn(async () => {
       attempt += 1;
       if (attempt === 1) throw new Error("markdown chunk unavailable");
-      return import("./IncrementalMarkdownDocument");
+      retryImport = import("./IncrementalMarkdownDocument");
+      return retryImport;
     });
     const onRendered = vi.fn();
 
@@ -44,10 +46,13 @@ describe("LazyMarkdownReadView", () => {
       screen.getByTestId("error-boundary-markdown-read-view-retry"),
     );
 
+    expect(loader).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await retryImport;
+    });
     expect(
       await screen.findByRole("heading", { name: "Recovered document" }),
     ).toBeTruthy();
-    expect(loader).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(onRendered).toHaveBeenCalledOnce());
   });
 
