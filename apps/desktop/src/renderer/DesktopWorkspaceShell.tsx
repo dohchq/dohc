@@ -28,7 +28,6 @@ import type {
   AutomationFailureNotice,
   ChatFileMentionRecord,
   ChatThreadRecord,
-  CloudStatusResult,
   DesktopUserSettingsResult,
   DmRecord,
   EngineMomentRecord,
@@ -64,7 +63,8 @@ import {
   hasUnacknowledgedShareSkips,
   shareSkipNoticeLines,
 } from "./shareSkipNotice";
-import { buildChatCollaboration } from "./collab/chatCollaboration";
+import { useCloudPresence } from "./shell/useCloudPresence";
+import { useTabTitles } from "./shell/useTabTitles";
 import type { SearchResultsEventEntry } from "../ipc/bridgeContract";
 import {
   fileOpenStartMark,
@@ -659,7 +659,6 @@ const LazySitePreviewPage = lazy(() =>
 const LazyPluginPanelPage = lazy(() =>
   import("./PluginPanelPage").then((mod) => ({ default: mod.PluginPanelPage })),
 );
-const EMPTY_TAB_LABELS: ReadonlyMap<string, string> = new Map();
 
 const LazyPluginWebAppPage = lazy(() =>
   import("./PluginWebAppPage").then((mod) => ({ default: mod.PluginWebAppPage })),
@@ -882,13 +881,6 @@ export function DesktopWorkspaceShell(props: {
     captureDecidedRef.current = decidedFor;
     setCaptureDecidedForState(decidedFor);
   }, []);
-  // MU-C5 presence: the signed-in relay session, if any. Drives whether Chats
-  // gets a live presence transport (connected + relayUrl) or stays dormant.
-  const [cloudStatus, setCloudStatus] = useState<CloudStatusResult | null>(null);
-  // Stable per-session client id so this device's own presence entry is
-  // identifiable and filtered out of "others". Lazily minted once — a fresh id
-  // per render would churn the presence channel.
-  const [presenceClientId] = useState(() => crypto.randomUUID());
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
   // The New collection dialog: null = closed, otherwise the folder to
@@ -1323,65 +1315,7 @@ export function DesktopWorkspaceShell(props: {
     setShellError(null);
   }, [workspaceId]);
 
-  // MU-C5 presence: track the signed-in relay session for this workspace. The
-  // request token + workspaceId key uphold the no-repaint invariant — a slow
-  // cloud-status response for workspace A must never set state after a switch
-  // to B. `refreshCloudStatus` is also called when the cloud dialog closes so a
-  // fresh sign-in lights presence up without waiting for a workspace switch.
-  const cloudStatusToken = useRef(0);
-  const refreshCloudStatus = useCallback(() => {
-    const token = ++cloudStatusToken.current;
-    bridge()
-      .cloudStatus({ workspaceId })
-      .then((status) => {
-        if (token === cloudStatusToken.current) setCloudStatus(status);
-      })
-      .catch(() => {
-        if (token === cloudStatusToken.current) setCloudStatus(null);
-      });
-  }, [workspaceId]);
-  useEffect(() => {
-    setCloudStatus(null);
-    refreshCloudStatus();
-    return () => {
-      // A pending response after unmount / switch must never repaint.
-      cloudStatusToken.current += 1;
-    };
-  }, [refreshCloudStatus]);
-  // The session signal reaches the SHELL too: cloudStatus derives the
-  // presence collaboration, so a sign-out must tear the old account's
-  // presence down now — dropping the status rebuilds the collaboration
-  // dormant and aborts its long poll — not when some later refresh notices.
-  // The token bump also stops a stale connected response from repainting;
-  // the refresh then reports the new session's truth.
-  useEffect(() => {
-    return bridge().onCloudSessionChanged(() => {
-      cloudStatusToken.current += 1;
-      setCloudStatus(null);
-      refreshCloudStatus();
-    });
-  }, [refreshCloudStatus]);
-
-  // The presence collaboration for the active workspace, rebuilt per workspace
-  // (keyed by workspaceId) so a switch tears the old transport down and aborts
-  // its in-flight poll — dormant (null) when signed out / no relay.
-  const chatCollaboration = useMemo(
-    () =>
-      buildChatCollaboration({
-        connected: cloudStatus?.connected ?? false,
-        relayUrl: cloudStatus?.relayUrl,
-        email: cloudStatus?.email,
-        workspaceId,
-        clientId: presenceClientId,
-      }),
-    [
-      cloudStatus?.connected,
-      cloudStatus?.relayUrl,
-      cloudStatus?.email,
-      workspaceId,
-      presenceClientId,
-    ],
-  );
+  const { chatCollaboration, refreshCloudStatus } = useCloudPresence(workspaceId);
 
   // @-mention roster + agent notifications (Agent Notifications & Mentions).
   // The renderer has no identity source yet, so the user shows as "You" —
@@ -1444,53 +1378,12 @@ export function DesktopWorkspaceShell(props: {
       ),
     [dirtyRevision, openTabs],
   );
-  // Display labels that do not belong in tab identity. Plugin pages report
-  // their manifest titles after mount; moment pages report the durable path
-  // returned with their record. Reading plugin manifests from here instead
-  // failed the desktop e2e in 4 of 6 runs because that request races startup.
-  const [knownTabTitles, setKnownTabTitles] = useState<{
-    workspaceId: string;
-    titles: ReadonlyMap<string, string>;
-  }>({ workspaceId: "", titles: EMPTY_TAB_LABELS });
-  const rememberTabTitle = useCallback(
-    (tabPath: string, title: string) => {
-      setKnownTabTitles((previous) => {
-        // A title learned for another workspace never labels this one's tabs.
-        const known =
-          previous.workspaceId === workspaceId ? previous.titles : EMPTY_TAB_LABELS;
-        if (known.get(tabPath) === title) return previous;
-        return { workspaceId, titles: new Map(known).set(tabPath, title) };
-      });
-    },
-    [workspaceId],
-  );
-  const rememberWebAppTitle = useCallback(
-    (
-      pluginId: string,
-      webAppId: string,
-      instanceKey: string | null,
-      title: string,
-    ) =>
-      rememberTabTitle(
-        pluginWebAppTabPath(pluginId, webAppId, instanceKey),
-        title,
-      ),
-    [rememberTabTitle],
-  );
-  const rememberPluginDetailsTitle = useCallback(
-    (pluginId: string, directoryName: string, title: string) =>
-      rememberTabTitle(pluginDetailsTabPath(pluginId, directoryName), title),
-    [rememberTabTitle],
-  );
-  const rememberMomentDiffPath = useCallback(
-    (momentId: string, filePath: string) =>
-      rememberTabTitle(momentDiffTabPath(momentId), filePath),
-    [rememberTabTitle],
-  );
-  const tabLabels =
-    knownTabTitles.workspaceId === workspaceId
-      ? knownTabTitles.titles
-      : EMPTY_TAB_LABELS;
+  const {
+    tabLabels,
+    rememberWebAppTitle,
+    rememberPluginDetailsTitle,
+    rememberMomentDiffPath,
+  } = useTabTitles(workspaceId);
   const anyTabDirty = dirtyPaths.size > 0;
   const activeDocumentPath = isVirtualTabPath(focusedTabPath)
     ? null
