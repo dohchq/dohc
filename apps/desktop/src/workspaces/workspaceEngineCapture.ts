@@ -1,3 +1,4 @@
+import { errorMessage } from "./workspaceError";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import {
   validateUserMaterializePath,
@@ -2674,9 +2675,7 @@ export function createWorkspaceEngineCapture(
       } catch (error) {
         cancel();
         throw new Error(
-          `Could not update ${operation.path} on disk: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+          `Could not update ${operation.path} on disk: ${errorMessage(error)}`,
           { cause: error },
         );
       }
