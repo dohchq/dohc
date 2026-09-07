@@ -12,7 +12,8 @@
     "dev": "tsx watch src/main.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "host:credential": "node dist/device-host-credential.js"
   },
   "dependencies": {
     "@dohc/live-session-contract": "workspace:*",
