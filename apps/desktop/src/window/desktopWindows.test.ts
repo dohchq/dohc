@@ -1,0 +1,418 @@
+import { EventEmitter } from "node:events";
+import type { BrowserWindow, Menu, MenuItem, MenuItemConstructorOptions, WebContents, KeyboardEvent } from "electron";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDesktopWindows } from "./desktopWindows";
+import { RendererWorkspaceSessionOwner } from "./rendererWorkspaceSessionOwner";
+import { CHANNELS } from "../ipc/channels";
+import type { WorkspaceSummary } from "../ipc/bridgeContract";
+import { DEFAULT_USER_SETTINGS, type DesktopUserSettingsResult } from "../settings/userSettings";
+import { deferred } from "../testing/deferred";
+import * as windowZoom from "./windowZoom";
+
+let nextSender = 1;
+class Contents extends EventEmitter {
+  readonly id = nextSender++;
+  destroyed = false;
+  setZoomLevel = vi.fn();
+  send = vi.fn();
+  isDestroyed() { return this.destroyed; }
+  get native(): WebContents { return this as unknown as WebContents; }
+}
+
+class Window extends EventEmitter {
+  readonly webContents = new Contents();
+  destroyed = false;
+  minimized = false;
+  show = vi.fn(); focus = vi.fn(); restore = vi.fn();
+  isDestroyed() { return this.destroyed; }
+  isMinimized() { return this.minimized; }
+  destroy() { this.destroyed = true; this.emit("closed"); }
+  get native(): BrowserWindow { return this as unknown as BrowserWindow; }
+}
+
+type Dependencies = Parameters<typeof createDesktopWindows>[0];
+const workspace = (workspaceId: string, rootPath = `C:\\work\\${workspaceId}`): WorkspaceSummary => ({
+  workspaceId, rootPath, kind: "personal", mode: "local-first",
+});
+const settings = (zoomLevel = 0): DesktopUserSettingsResult => ({
+  settings: { ...structuredClone(DEFAULT_USER_SETTINGS), appearance: {
+    ...DEFAULT_USER_SETTINGS.appearance, zoomLevel,
+  } }, source: "stored",
+});
+
+function fixture(platform: NodeJS.Platform = "win32") {
+  let stored = settings();
+  let read: Dependencies["readCachedUserSettingsFile"] = async () => structuredClone(stored);
+  let write: Dependencies["writeUserSettingsFile"] = async (_directory, value) => {
+    stored = { settings: structuredClone(value), source: "stored" };
+  };
+  let ready = true;
+  let canInstall = false;
+  let rows = [workspace("a"), workspace("b")];
+  let retirement: () => Promise<void> = async () => undefined;
+  const sessions = new RendererWorkspaceSessionOwner<WebContents>({
+    retirement: {
+      retireSender: () => ({ requiredForAdmission: retirement(), detachedFromAdmission: Promise.resolve() }),
+      retireWorkspace: async () => undefined,
+    },
+  });
+  let currentSessions = sessions;
+  const all: Window[] = [];
+  const createdOptions: Array<Parameters<Dependencies["createMainWindow"]>[0]> = [];
+  const templates: MenuItemConstructorOptions[][] = [];
+  const guests: Contents[] = [];
+  const applyGuests = vi.fn((level: number) => { for (const guest of guests) guest.setZoomLevel(level); });
+  let pluginSurfaces: Dependencies["pluginSurfaces"] = { applyWebAppZoom: applyGuests };
+  const dependencies: Dependencies = {
+    app: {
+      isReady: () => ready, isPackaged: false, getVersion: () => "1.2.3",
+      clearRecentDocuments: vi.fn(), addRecentDocument: vi.fn(), setUserTasks: vi.fn(() => true),
+    },
+    BrowserWindow: { getAllWindows: () => all.map((item) => item.native) },
+    Menu: {
+      buildFromTemplate: vi.fn((template) => { templates.push(template); return { template } as unknown as Menu; }),
+      setApplicationMenu: vi.fn(),
+    },
+    dialog: {
+      showErrorBox: vi.fn(),
+      showMessageBox: vi.fn(async () => ({ response: 0, checkboxChecked: false })),
+    },
+    process: { platform, execPath: "C:\\dohc\\dohc.exe" },
+    workspaceSummaries: vi.fn(() => rows),
+    currentUpdateState: vi.fn(() => ({ canInstall })),
+    stateDir: () => "state",
+    readCachedUserSettingsFile: vi.fn((directory) => read(directory)),
+    writeUserSettingsFile: vi.fn((directory, value) => write(directory, value)),
+    createMainWindow: vi.fn((options) => {
+      createdOptions.push(options);
+      const window = new Window(); all.push(window); return window.native;
+    }),
+    get pluginSurfaces() { return pluginSurfaces; },
+    get rendererWorkspaceSessions() { return currentSessions; },
+  };
+  const windows = createDesktopWindows(dependencies);
+  return {
+    windows, dependencies, sessions, all, templates, createdOptions, guests, applyGuests,
+    setRead: (value: typeof read) => { read = value; },
+    setWrite: (value: typeof write) => { write = value; },
+    setStored: (value: typeof stored) => { stored = value; },
+    setRows: (value: typeof rows) => { rows = value; },
+    setReady: (value: boolean) => { ready = value; },
+    setCanInstall: (value: boolean) => { canInstall = value; },
+    setRetirement: (value: typeof retirement) => { retirement = value; },
+    setSessions: (value: typeof sessions) => { currentSessions = value; },
+    setPluginSurfaces: (value: typeof pluginSurfaces) => { pluginSurfaces = value; },
+  };
+}
+
+function submenu(item: MenuItemConstructorOptions): MenuItemConstructorOptions[] {
+  if (!Array.isArray(item.submenu)) throw new Error("Expected menu template submenu");
+  return item.submenu;
+}
+function item(f: ReturnType<typeof fixture>, menu: string, label: string) {
+  const root = f.templates.at(-1)!.find((entry) => entry.label === menu)!;
+  const entry = submenu(root).find((child) => child.label === label);
+  if (!entry) throw new Error(`Missing ${menu}/${label}`);
+  return entry;
+}
+function click(entry: MenuItemConstructorOptions, window?: BrowserWindow) {
+  entry.click!({} as MenuItem, window, {} as KeyboardEvent);
+}
+
+function observePersistedZoomReconciliations(expected = 1): Promise<void> {
+  const completed = deferred();
+  const resolve = windowZoom.resolvePersistedZoomApplication;
+  let remaining = expected;
+  vi.spyOn(windowZoom, "resolvePersistedZoomApplication").mockImplementation((...args) => {
+    const application = resolve(...args);
+    if (--remaining === 0) completed.resolve();
+    return application;
+  });
+  return completed.promise;
+}
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("desktop workspace windows", () => {
+  it("tracks workspace windows separately from utility windows and forgets closed windows", () => {
+    const f = fixture(); const utility = new Window(); const first = new Window(); const second = new Window();
+    f.all.push(utility, first, second);
+    f.windows.trackWorkspaceWindow(first.native); f.windows.trackWorkspaceWindow(second.native);
+    expect(f.windows.liveWorkspaceWindow()).toBe(first.native);
+    expect(f.windows.targetWindow(undefined)).toBe(first.native);
+    expect(f.windows.targetWindow(utility.native)).toBe(utility.native);
+    first.destroy();
+    expect(f.windows.workspaceWindows.allLive()).toEqual([second.native]);
+    second.destroy();
+    expect(f.windows.liveWorkspaceWindow()).toBeUndefined();
+    expect(f.windows.targetWindow(undefined)).toBe(utility.native);
+  });
+
+  it("activates the target window and prioritizes that workspace without changing the input list", () => {
+    const f = fixture(); const window = new Window(); f.windows.trackWorkspaceWindow(window.native);
+    const rows = [workspace("a"), workspace("b"), workspace("c")];
+    expect(f.windows.prioritizePreferredWorkspace(rows)).toBe(rows);
+    f.windows.sendWorkspaceActivated(undefined, rows[1]!);
+    expect(window.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, rows[1]);
+    expect(f.windows.prioritizePreferredWorkspace(rows)).toEqual([rows[1], rows[0], rows[2]]);
+    expect(rows.map((row) => row.workspaceId)).toEqual(["a", "b", "c"]);
+    f.windows.setPreferredWorkspaceId("absent");
+    expect(f.windows.prioritizePreferredWorkspace(rows)).toBe(rows);
+    f.windows.setPreferredWorkspaceId("a");
+    expect(f.windows.prioritizePreferredWorkspace(rows)).toBe(rows);
+  });
+
+  it("remembers activation even when there is no window yet", () => {
+    const f = fixture(); const rows = [workspace("a"), workspace("b")];
+    f.windows.sendWorkspaceActivated(undefined, rows[1]!);
+    expect(f.windows.prioritizePreferredWorkspace(rows)[0]).toBe(rows[1]);
+  });
+
+  it("focuses an existing window and creates a tracked window only when none exists", async () => {
+    const f = fixture(); const existing = new Window(); existing.minimized = true; f.all.push(existing);
+    expect(await f.windows.showOrCreateMainWindow()).toBe(existing.native);
+    expect(existing.restore).toHaveBeenCalledOnce(); expect(existing.show).toHaveBeenCalledOnce(); expect(existing.focus).toHaveBeenCalledOnce();
+    expect(f.dependencies.createMainWindow).not.toHaveBeenCalled();
+    f.all.length = 0;
+    f.windows.seedZoomLevel(2);
+    const created = await f.windows.showOrCreateMainWindow(); const native = f.all[0]!;
+    expect(f.windows.workspaceWindows.allLive()).toEqual([created]);
+    expect(f.createdOptions[0]?.beforeRendererReload).toBe(f.windows.prepareAfterRendererCrash);
+    expect(native.webContents.setZoomLevel).toHaveBeenCalledWith(2);
+    expect(native.show).not.toHaveBeenCalled();
+    native.emit("ready-to-show");
+    expect(native.show).toHaveBeenCalledOnce(); expect(native.focus).toHaveBeenCalledOnce();
+  });
+
+  it("re-prioritizes an accepted reload only after the actual renderer retirement drains", async () => {
+    const f = fixture(); const sender = new Contents(); const held = deferred();
+    const rows = [workspace("a"), workspace("b")];
+    await f.sessions.open(sender.native, { workspaceId: "b", attachmentId: Symbol("b") }, "document");
+    f.windows.setPreferredWorkspaceId("a"); f.setRetirement(() => held.promise);
+    const pending = f.windows.prepareForRendererReload(sender.native, "document");
+    try {
+      expect(f.sessions.current(sender.native)).toBeUndefined();
+      expect(f.windows.prioritizePreferredWorkspace(rows)[0]).toBe(rows[0]);
+      held.resolve(); expect(await pending).toBe(true);
+      expect(f.windows.prioritizePreferredWorkspace(rows)[0]).toBe(rows[1]);
+    } finally { held.resolve(); await pending; }
+  });
+
+  it("leaves preference and the active renderer intact when the reload document is stale", async () => {
+    const f = fixture(); const sender = new Contents();
+    const session = await f.sessions.open(sender.native, { workspaceId: "b", attachmentId: Symbol("b") }, "current");
+    f.windows.setPreferredWorkspaceId("a");
+    expect(await f.windows.prepareForRendererReload(sender.native, "old")).toBe(false);
+    expect(f.sessions.current(sender.native)).toBe(session);
+    expect(f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")])[0]!.workspaceId).toBe("a");
+    await f.sessions.retireAfterCrash(sender.native);
+  });
+
+  it("reads the current session owner and remembers a crashed renderer before retirement finishes", async () => {
+    const f = fixture(); const sender = new Contents(); const held = deferred();
+    const sessions = new RendererWorkspaceSessionOwner<WebContents>({ retirement: {
+      retireSender: () => ({ requiredForAdmission: held.promise, detachedFromAdmission: Promise.resolve() }),
+      retireWorkspace: async () => undefined,
+    } });
+    f.setSessions(sessions);
+    await sessions.open(sender.native, { workspaceId: "b", attachmentId: Symbol("b") }, "document");
+    f.windows.setPreferredWorkspaceId("a");
+    const pending = f.windows.prepareAfterRendererCrash(sender.native);
+    try {
+      expect(sessions.current(sender.native)).toBeUndefined();
+      expect(f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")])[0]!.workspaceId).toBe("b");
+    } finally { held.resolve(); await pending; }
+    await f.windows.prepareAfterRendererCrash(sender.native);
+    expect(f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")])[0]!.workspaceId).toBe("b");
+  });
+});
+
+describe("desktop window zoom", () => {
+  it("seeds before window creation and never overwrites a newer applied zoom with a later seed", () => {
+    const f = fixture(); const window = new Window();
+    f.windows.seedZoomLevel(1); f.windows.seedZoomLevel(3);
+    f.windows.trackWorkspaceWindow(window.native);
+    expect(window.webContents.setZoomLevel).toHaveBeenCalledWith(1);
+    f.windows.applyZoomLevelToWindows(2); f.windows.seedZoomLevel(4);
+    const guest = new Contents(); f.windows.bindGuestZoom(guest);
+    expect(guest.setZoomLevel).toHaveBeenCalledWith(2);
+  });
+
+  it("applies the first persisted zoom to tracked hosts and attached guests", async () => {
+    const f = fixture(); const held = deferred<DesktopUserSettingsResult>(); const window = new Window(); const utility = new Window(); const guest = new Contents();
+    f.all.push(window, utility); f.guests.push(guest); f.setRead(() => held.promise);
+    f.windows.trackWorkspaceWindow(window.native); f.windows.bindGuestZoom(guest);
+    const reconciled = observePersistedZoomReconciliations();
+    try {
+      window.emit("ready-to-show");
+      expect(window.webContents.setZoomLevel).not.toHaveBeenCalled(); expect(guest.setZoomLevel).not.toHaveBeenCalled();
+      held.resolve(settings(3)); await reconciled;
+      expect(window.webContents.setZoomLevel).toHaveBeenCalledWith(3);
+      expect(guest.setZoomLevel).toHaveBeenCalledWith(3);
+      expect(utility.webContents.setZoomLevel).not.toHaveBeenCalled();
+      expect(f.applyGuests).toHaveBeenCalledWith(3);
+    } finally { held.resolve(settings(3)); await reconciled; }
+  });
+
+  it("keeps a user zoom ahead of a stale persisted read and skips a destroyed window", async () => {
+    const f = fixture(); const held = deferred<DesktopUserSettingsResult>(); const live = new Window(); const closed = new Window();
+    f.setRead(() => held.promise); f.windows.trackWorkspaceWindow(live.native); f.windows.trackWorkspaceWindow(closed.native);
+    const reconciled = observePersistedZoomReconciliations(2);
+    try {
+      live.emit("ready-to-show"); closed.emit("ready-to-show");
+      f.windows.applyZoomLevelToWindows(2); closed.destroy();
+      closed.webContents.setZoomLevel.mockClear(); live.webContents.setZoomLevel.mockClear(); f.applyGuests.mockClear();
+      held.resolve(settings(-2)); await reconciled;
+      expect(live.webContents.setZoomLevel).toHaveBeenCalledWith(2);
+      expect(closed.webContents.setZoomLevel).not.toHaveBeenCalled();
+      expect(f.applyGuests).not.toHaveBeenCalled();
+    } finally { held.resolve(settings(-2)); await reconciled; }
+  });
+
+  it("reconciles on renderer load and ignores an unavailable persisted setting", async () => {
+    const f = fixture(); const window = new Window(); const held = deferred<DesktopUserSettingsResult>();
+    f.setRead(() => held.promise); f.windows.trackWorkspaceWindow(window.native);
+    const reconciled = observePersistedZoomReconciliations();
+    try {
+      window.webContents.emit("did-finish-load");
+      held.reject(new Error("settings unavailable"));
+      await reconciled;
+      expect(window.webContents.setZoomLevel).not.toHaveBeenCalled();
+      expect(f.applyGuests).not.toHaveBeenCalled();
+    } finally { held.resolve(settings()); await reconciled; }
+  });
+
+  it("binds guest loads to the latest zoom and reads the current plugin surface owner", () => {
+    const f = fixture(); const guest = new Contents();
+    f.windows.seedZoomLevel(1); f.windows.bindGuestZoom(guest);
+    const replacement = { applyWebAppZoom: vi.fn() }; f.setPluginSurfaces(replacement);
+    f.windows.applyZoomLevelToWindows(4); guest.emit("did-finish-load");
+    expect(guest.setZoomLevel.mock.calls).toEqual([[1], [4]]);
+    expect(replacement.applyWebAppZoom).toHaveBeenCalledWith(4); expect(f.applyGuests).not.toHaveBeenCalled();
+    guest.destroyed = true; f.windows.applyZoomLevelToWindows(2); guest.emit("did-finish-load");
+    expect(guest.setZoomLevel.mock.calls).toEqual([[1], [4]]);
+  });
+
+  it("shares one queue between full settings work and zoom steps, persisting before application", async () => {
+    const f = fixture(); const held = deferred(); const entered = deferred(); const window = new Window();
+    f.windows.trackWorkspaceWindow(window.native);
+    const save = f.windows.enqueueUserSettingsWrite(async () => {
+      entered.resolve(); await held.promise; f.setStored(settings(2)); f.windows.applyZoomLevelToWindows(2);
+    });
+    const first = f.windows.stepWindowZoom("in"); const second = f.windows.stepWindowZoom("in");
+    try {
+      await entered.promise;
+      expect(f.dependencies.writeUserSettingsFile).not.toHaveBeenCalled();
+      expect(window.webContents.setZoomLevel).not.toHaveBeenCalled();
+      held.resolve(); await save;
+      expect((await first).settings.appearance.zoomLevel).toBe(3);
+      expect((await second).settings.appearance.zoomLevel).toBe(4);
+      expect(vi.mocked(f.dependencies.writeUserSettingsFile).mock.calls.map((call) => call[1].appearance.zoomLevel)).toEqual([3, 4]);
+      expect(window.webContents.setZoomLevel.mock.calls).toEqual([[2], [3], [4]]);
+      expect(window.webContents.send.mock.calls.map((call) => [call[0], call[1].settings.appearance.zoomLevel])).toEqual([
+        [CHANNELS.userSettingsChanged, 3], [CHANNELS.userSettingsChanged, 4],
+      ]);
+    } finally { held.resolve(); await Promise.allSettled([save, first, second]); }
+  });
+
+  it("waits for the real zoom write and leaves zoom unchanged after write rejection", async () => {
+    const f = fixture(); const held = deferred(); const entered = deferred(); const window = new Window();
+    f.windows.trackWorkspaceWindow(window.native);
+    f.setWrite(async () => { entered.resolve(); await held.promise; throw new Error("write failed"); });
+    const pending = f.windows.stepWindowZoom("in").catch((error: unknown) => error);
+    try {
+      await entered.promise;
+      expect(window.webContents.setZoomLevel).not.toHaveBeenCalled(); expect(window.webContents.send).not.toHaveBeenCalled();
+      held.resolve(); expect(await pending).toMatchObject({ message: "write failed" });
+      expect(window.webContents.setZoomLevel).not.toHaveBeenCalled(); expect(window.webContents.send).not.toHaveBeenCalled();
+      expect(f.applyGuests).not.toHaveBeenCalled();
+      expect(await f.windows.enqueueUserSettingsWrite(async () => "next write")).toBe("next write");
+    } finally { held.resolve(); await pending; }
+  });
+});
+
+describe("desktop native menus", () => {
+  it("does no native work before ready and reads current update availability when rebuilding", () => {
+    const f = fixture(); f.setReady(false);
+    f.windows.refreshNativeWorkspaceSurfaces(); f.windows.refreshApplicationMenu();
+    expect(f.dependencies.Menu.setApplicationMenu).not.toHaveBeenCalled();
+    expect(f.dependencies.app.clearRecentDocuments).not.toHaveBeenCalled();
+    expect(f.windows.applicationMenuCanInstallUpdate).toBeNull();
+    f.setReady(true); f.windows.refreshApplicationMenu();
+    expect(item(f, "Help", "Update and Restart").enabled).toBe(false);
+    f.setCanInstall(true); f.windows.refreshApplicationMenu();
+    expect(item(f, "Help", "Update and Restart").enabled).toBe(true);
+    expect(f.windows.applicationMenuCanInstallUpdate).toBe(true);
+  });
+
+  it("routes commands to the live target and opens recent workspaces through activation", () => {
+    const f = fixture(); const first = new Window(); const explicit = new Window();
+    f.windows.trackWorkspaceWindow(first.native); f.windows.refreshApplicationMenu();
+    click(item(f, "File", "New File"));
+    expect(first.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "new-file");
+    click(item(f, "Go", "Settings"), explicit.native);
+    expect(explicit.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "settings");
+    const recent = submenu(item(f, "File", "Open Recent"))[1]!;
+    click(recent, explicit.native);
+    expect(explicit.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, workspace("b"));
+    expect(f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")])[0]!.workspaceId).toBe("b");
+    expect(f.dependencies.app.clearRecentDocuments).toHaveBeenCalledOnce();
+  });
+
+  it("uses current native windows when an older menu callback fires", () => {
+    const f = fixture(); const first = new Window(); const second = new Window();
+    f.windows.trackWorkspaceWindow(first.native); f.windows.refreshApplicationMenu(); const command = item(f, "Go", "Settings");
+    first.destroy(); f.windows.trackWorkspaceWindow(second.native); click(command);
+    expect(first.webContents.send).not.toHaveBeenCalled();
+    expect(second.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "settings");
+  });
+
+  it("reverses native recents, limits Windows tasks, and quotes roots exactly", () => {
+    const f = fixture(); const rows = Array.from({ length: 12 }, (_, index) => workspace(`w${index}`));
+    rows[0] = workspace("quoted", "C:\\say\"hi\\"); f.setRows(rows);
+    f.windows.refreshNativeWorkspaceSurfaces();
+    expect(vi.mocked(f.dependencies.app.addRecentDocument).mock.calls).toEqual([...rows].reverse().map((row) => [row.rootPath]));
+    const tasks = vi.mocked(f.dependencies.app.setUserTasks).mock.calls[0]![0];
+    expect(tasks).toHaveLength(10);
+    expect(tasks[0]).toEqual({ program: "C:\\dohc\\dohc.exe", iconPath: "C:\\dohc\\dohc.exe", iconIndex: 0,
+      arguments: '--open-workspace "C:\\say\\"hi\\\\"', title: 'Open say"hi', description: rows[0].rootPath });
+    expect(submenu(item(f, "File", "Open Recent"))).toHaveLength(10);
+  });
+
+  it("tolerates a malformed registry for native menus while leaving strict reads with their caller", () => {
+    const f = fixture(); vi.mocked(f.dependencies.workspaceSummaries).mockImplementation(() => { throw new Error("registry failed"); });
+    f.windows.refreshNativeWorkspaceSurfaces();
+    expect(f.dependencies.app.addRecentDocument).not.toHaveBeenCalled();
+    expect(f.dependencies.app.setUserTasks).toHaveBeenCalledWith([]);
+    expect(submenu(item(f, "File", "Open Recent"))).toEqual([{ label: "No Recent Workspaces", enabled: false }]);
+    expect(() => f.dependencies.workspaceSummaries()).toThrow("registry failed");
+  });
+
+  it("still rebuilds the menu if native recent-document storage fails on Linux", () => {
+    const f = fixture("linux"); vi.mocked(f.dependencies.app.clearRecentDocuments).mockImplementation(() => { throw new Error("unsupported"); });
+    f.windows.refreshNativeWorkspaceSurfaces();
+    expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledOnce();
+    expect(f.dependencies.app.setUserTasks).not.toHaveBeenCalled();
+  });
+
+  it.each([new Error("unreadable settings"), "unreadable settings"])("reports accelerator zoom rejection %s", async (error) => {
+    const f = fixture(); const reported = deferred();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    f.setRead(async () => { throw error; });
+    vi.mocked(f.dependencies.dialog.showErrorBox).mockImplementation(() => { reported.resolve(); });
+    f.windows.refreshApplicationMenu(); click(item(f, "View", "Zoom In"));
+    try {
+      await reported.promise;
+      expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith("Zoom", error instanceof Error
+        ? "unreadable settings Open Settings to repair or reset it." : "dohc could not change the window zoom.");
+      expect(f.dependencies.writeUserSettingsFile).not.toHaveBeenCalled();
+    } finally { await f.windows.enqueueUserSettingsWrite(async () => undefined); }
+  });
+
+  it("uses the existing About dialog content", () => {
+    const f = fixture(); f.windows.refreshApplicationMenu(); click(item(f, "Help", "About dohc"));
+    expect(f.dependencies.dialog.showMessageBox).toHaveBeenCalledWith({
+      title: "About dohc", message: "dohc", detail: "Version 1.2.3\nYour workspace is a folder.",
+    });
+  });
+});
