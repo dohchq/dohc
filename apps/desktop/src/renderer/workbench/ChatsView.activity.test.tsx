@@ -25,10 +25,6 @@ import {
   navigatorView,
 } from "./ChatsView.testHarness";
 
-// Real implementations, spied: every message-body render runs the file-token
-// scan, so its call count is the render-cost probe for the memo boundaries.
-vi.mock("./chatFileMentions", { spy: true });
-
 describe("ChatsView live activity refresh", () => {
   it("refreshes the open Feed with fresh workspace activity content", async () => {
     let refreshed = false;

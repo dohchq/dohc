@@ -16,10 +16,6 @@ import {
   navigatorView,
 } from "./ChatsView.testHarness";
 
-// Real implementations, spied: every message-body render runs the file-token
-// scan, so its call count is the render-cost probe for the memo boundaries.
-vi.mock("./chatFileMentions", { spy: true });
-
 // --- Shared channels (MU-C4) -----------------------------------------------
 
 describe("ChatsView shared channels (MU-C4)", () => {

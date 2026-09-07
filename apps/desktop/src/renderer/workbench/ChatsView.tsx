@@ -168,8 +168,6 @@ export type ChatsNav =
   | { level: "dm"; dm: DmRecord; focusMessageId?: string }
   | { level: "dm-new" };
 
-type Nav = ChatsNav;
-
 // Unsent input, one field per composer surface, plus the composer's MODE
 // (replying to a message / resolving a decision) — without the mode a reply
 // drafted in the panel would post as a top-level comment after expanding.
@@ -374,7 +372,7 @@ export function ChatsView(props: {
   // Page variant: cap the list-like surfaces at the thread column's width.
   const pageColumn = variant === "page" ? "mx-auto w-full max-w-[640px]" : "";
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
-  const [nav, setNav] = useState<Nav>({ level: "channels" });
+  const [nav, setNav] = useState<ChatsNav>({ level: "channels" });
   const [channelThreads, setChannelThreads] = useState<ChannelThreadRecord[]>([]);
   const [feedPosts, setFeedPosts] = useState<Record<string, FeedPostData>>({});
   const [bookmarks, setBookmarks] = useState<ChatBookmarkRecord[]>([]);

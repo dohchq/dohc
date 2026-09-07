@@ -17,10 +17,6 @@ import {
   renderView,
 } from "./ChatsView.testHarness";
 
-// Real implementations, spied: every message-body render runs the file-token
-// scan, so its call count is the render-cost probe for the memo boundaries.
-vi.mock("./chatFileMentions", { spy: true });
-
 // Expand-to-tab (chats/expand-to-tab): the panel reports where it is via
 // onNavChange, and a freshly expanded tab (variant "page") starts at that
 // conversation via initialNav — consumed once, loaded through the same

@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import type { JoinedChannelAnswer } from "../../ipc/bridgeContract";
 import { answerLocally, emptyJoinedLaneOrder, planJoinedCommit } from "./chatShareLanes";

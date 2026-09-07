@@ -20,7 +20,7 @@ import {
   type ChatReactionControls,
 } from "./chatMessages";
 import { UnreadPill } from "./ChatsControls";
-import type { ChatsNav, ChatsNav as Nav } from "./ChatsView";
+import type { ChatsNav } from "./ChatsView";
 
 type FeedOpeningMessage = Omit<
   NonNullable<ChannelThreadRecord["openingMessage"]>,
@@ -492,7 +492,7 @@ export function BookmarkAction(props: {
 // keeps each prop referentially stable across draft and typing renders; the
 // transcript re-renders only when the conversation data itself changes.
 export const ThreadMessages = memo(function ThreadMessages(props: {
-  nav: Extract<Nav, { level: "thread" }>;
+  nav: Extract<ChatsNav, { level: "thread" }>;
   messages: ChatMessageRecord[];
   messagesLoading: boolean;
   threadLocked: boolean;

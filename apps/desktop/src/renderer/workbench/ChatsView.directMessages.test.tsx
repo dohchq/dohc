@@ -14,10 +14,6 @@ import {
   renderView,
 } from "./ChatsView.testHarness";
 
-// Real implementations, spied: every message-body render runs the file-token
-// scan, so its call count is the render-cost probe for the memo boundaries.
-vi.mock("./chatFileMentions", { spy: true });
-
 // Direct messages (WS-MU-C3): participants-only conversations behind the
 // collaboration gate. Solo (available:false, no DMs) renders nothing — the
 // zero-bloat rule — and the DM conversation is one running thread whose

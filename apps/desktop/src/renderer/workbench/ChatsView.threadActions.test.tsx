@@ -11,10 +11,6 @@ import {
   renderView,
 } from "./ChatsView.testHarness";
 
-// Real implementations, spied: every message-body render runs the file-token
-// scan, so its call count is the render-cost probe for the memo boundaries.
-vi.mock("./chatFileMentions", { spy: true });
-
 describe("ChatsView decisions", () => {
   it("resolves from composer mode and uses the literal fallback for an empty reply", async () => {
     const user = userEvent.setup();
