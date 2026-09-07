@@ -12,12 +12,14 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { isInside } from "../security/pathContainment";
 import {
   resolveWorkspaceFile,
+  prepareWorkspaceFileRead,
   type PreparedWorkspaceFileRead,
 } from "./workspaceAssets";
+import type { OwnedWorkspaceDatabaseReader } from "./ownedWorkspaceFileReader";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import type {
@@ -261,4 +263,83 @@ export async function importToDatabase(
     Buffer.from(result.bytesBase64, "base64"),
   );
   return { path, tableName: result.tableName, rowCount: result.rowCount };
+}
+
+export function createWorkspaceDatabaseAccess(workspaceDatabaseWorker: WorkspaceDatabaseWorkerOwner) {
+  function workerDatabaseReader(
+    signal?: AbortSignal,
+  ): OwnedWorkspaceDatabaseReader {
+    return {
+      readPrepared: (path, source) =>
+        source.withVerifiedPath((absolutePath) =>
+          workspaceDatabaseWorker.readPath({ absolutePath, path, signal }),
+        ),
+      readBytes: (path, bytes) =>
+        workspaceDatabaseWorker.readBytes({ bytes, path, signal }),
+      readPagePrepared: (path, source, table, offset) =>
+        source.withVerifiedPath((absolutePath) =>
+          workspaceDatabaseWorker.readPagePath({
+            absolutePath,
+            path,
+            table,
+            offset,
+            signal,
+          }),
+        ),
+      readPageBytes: (path, bytes, table, offset) =>
+        workspaceDatabaseWorker.readPageBytes({
+          bytes,
+          path,
+          table,
+          offset,
+          signal,
+        }),
+    };
+  }
+
+  async function editWorkspaceDatabaseInWorker(input: {
+    rootPath: string;
+    relativePath: string;
+    edit: DatabaseEdit;
+    author: ChangeAuthor;
+    nowMs: number;
+    operationId?: string;
+    signal?: AbortSignal;
+  }) {
+    const resolved = await resolveWorkspaceFile(
+      input.rootPath,
+      input.relativePath,
+    );
+    if (input.signal?.aborted) throw new Error("Database edit was cancelled.");
+    const source = await prepareWorkspaceFileRead(
+      input.rootPath,
+      resolved.resolvedPath,
+    );
+    const logPath = join(
+      input.rootPath,
+      databaseOpLogPath(resolved.normalized),
+    );
+    return source.withVerifiedPath((absolutePath) =>
+      workspaceDatabaseWorker.editPath({
+        absolutePath,
+        path: resolved.normalized,
+        logPath,
+        statePath: join(dirname(logPath), "state.sqlite"),
+        edit: input.edit,
+        operation: {
+          operationId: input.operationId ?? randomUUID(),
+          databasePath: resolved.normalized,
+          table: input.edit.table,
+          op: input.edit.op,
+          rowId: String(input.edit.rowId),
+          payload: input.edit.payload ?? {},
+          appliedAt: input.nowMs,
+          author: input.author,
+        },
+        signal: input.signal,
+      }),
+    );
+  }
+
+  return { workerDatabaseReader, editWorkspaceDatabaseInWorker };
 }
