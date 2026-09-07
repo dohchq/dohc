@@ -1,12 +1,12 @@
 use super::ActorHandle;
 use super::journal::journal_version_create_outbound_in_tx;
 use super::materialization::{
-    MaterializationReplayScope, SelfWriteRecorder, load_projection_secret_key,
-    replay_pending_materializations, rollback_job_matches_active, secret_ciphertext_sha,
+    MaterializationReplayScope, SelfWriteRecorder, replay_pending_materializations,
+    rollback_job_matches_active,
 };
 use crate::error::RuntimeError;
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
-use dohc_engine_crypto::SecretDataKey;
+use dohc_engine_crypto::{SecretDataKey, load_key_file};
 use dohc_engine_domain::{
     CreateNamedVersion, DomainError, ListMomentsQuery, MomentPage, MomentRecord, SecretFileStore,
     SecretMomentRecord, SnapshotContent, SnapshotMetadata, VersionFileChangePage, VersionRecord,
@@ -17,7 +17,7 @@ use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, MaterializationOperation, Preimage,
     StorageError, TxnOutcome, hex_sha256, put_binary_blob, upsert_projection_job,
 };
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -504,6 +504,40 @@ fn plan_plaintext_switch(
         }
     }
     Ok(projections)
+}
+
+fn secret_ciphertext_sha(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<String, RuntimeError> {
+    let ciphertext_base64: Option<String> = store.read_with(|connection| {
+        connection
+            .query_row(
+                "SELECT ciphertext_base64 FROM secret_files \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+                params![workspace_id, version_id, path],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::corrupt_public)
+    })?;
+    let ciphertext_base64 = ciphertext_base64.ok_or(DomainError::StateCorrupt {
+        reason: "secret tip has no ciphertext identity",
+    })?;
+    let ciphertext = dohc_engine_crypto::base64::forgiving_decode(&ciphertext_base64);
+    Ok(hex_sha256(&ciphertext))
+}
+
+fn load_projection_secret_key(root_dir: &std::path::Path) -> Result<SecretDataKey, RuntimeError> {
+    load_key_file(root_dir)
+        .map_err(DomainError::from)?
+        .ok_or_else(|| {
+            RuntimeError::from(DomainError::StateCorrupt {
+                reason: "workspace secret key is unavailable",
+            })
+        })
 }
 
 #[allow(

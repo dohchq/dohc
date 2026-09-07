@@ -1,6 +1,4 @@
 use super::ActorHandle;
-#[cfg(test)]
-use super::Command;
 use super::journal::{
     journal_moment_outbound_in_tx, journal_moment_outbound_with_batch_in_tx,
     journal_secret_delete_outbound_in_tx, journal_secret_put_outbound_in_tx,
@@ -13,14 +11,8 @@ use super::versioned::{
 use super::versions::ensure_mutation_version_on_store;
 use crate::error::RuntimeError;
 use crate::search::index::update_file_search_index_for_capture;
-#[cfg(test)]
-use crate::search::read_engine_search_policy;
 use crate::search::{SearchPolicySnapshot, delete_file_search_index, upsert_file_search_index};
 use dohc_engine_collab::{DocKey, LeaseRegistry};
-#[cfg(test)]
-use dohc_engine_collab::{
-    OwnerDeliveryReceipt, OwnerOutboxAppendInput, OwnerOutboxQuarantineInput, append_owner_outbox,
-};
 use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
     CaptureIngest, CaptureIngestBatchContext, CaptureIngestBinary, CaptureIngestBinaryResult,
@@ -31,16 +23,10 @@ use dohc_engine_domain::{
     capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
     ensure_main_version_in_tx,
 };
-#[cfg(test)]
-use dohc_engine_domain::{derive_capture_object_id, secret_file_len_keyless};
-#[cfg(test)]
-use dohc_engine_storage::NoFaults;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
 use rusqlite::Transaction;
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(test)]
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 /// Maximum work accepted by one capture batch actor command. Keeping both
@@ -705,6 +691,9 @@ fn capture_ingest_batch_with_item_savepoints_in_tx(
 #[cfg(test)]
 mod capture_batch_fast_path_tests {
     use super::*;
+    use crate::search::read_engine_search_policy;
+    use dohc_engine_domain::derive_capture_object_id;
+    use dohc_engine_storage::NoFaults;
     use dohc_engine_testkit::ScratchDir;
     use rusqlite::hooks::{AuthAction, Authorization, TransactionOperation};
     use std::sync::Mutex;
@@ -1144,12 +1133,21 @@ fn capture_retire_on_store(
 
 #[cfg(test)]
 mod capture_secret_root_guard_tests {
+    use super::super::Command;
     use super::*;
     use crate::WorkspaceSupervisor;
+    use crate::search::read_engine_search_policy;
+    use dohc_engine_collab::{
+        OwnerDeliveryReceipt, OwnerOutboxAppendInput, OwnerOutboxQuarantineInput,
+        append_owner_outbox,
+    };
+    use dohc_engine_domain::secret_file_len_keyless;
+    use dohc_engine_storage::NoFaults;
     use dohc_engine_testkit::ScratchDir;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Condvar, Mutex};
     use std::time::Duration;
+    use tokio::sync::oneshot;
 
     const WORKSPACE_ID: &str = "workspace";
     const VERSION_ID: &str = "main";

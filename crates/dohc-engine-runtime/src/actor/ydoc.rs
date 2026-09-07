@@ -4,8 +4,6 @@ use super::journal::journal_moment_outbound_in_tx;
 use super::materialization::{
     MaterializationReplayScope, SelfWriteRecorder, replay_pending_materializations,
 };
-#[cfg(test)]
-use super::materialization::{PostCommitMaterializeOutcome, worse_materialize_outcome};
 use super::search::search_domain;
 use super::versions::ensure_mutation_version_on_store;
 use crate::error::RuntimeError;
@@ -29,8 +27,6 @@ use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, MaterializeError, MaterializeOptions, ProjectionTargetKind,
     ProjectionTargetState, StdBackoff, StdReplacer, materialize_one, probe_projection_target,
 };
-#[cfg(test)]
-use dohc_engine_storage::FaultPoint;
 use dohc_engine_storage::{
     EngineStore, FaultInjector, JobStatus, NoFaults, Preimage, StorageError, TxnOutcome,
     hex_sha256, put_binary_blob,
@@ -2455,7 +2451,9 @@ fn drain_deferred_ydoc_for_live_session_rpc(
 
 #[cfg(test)]
 mod scene_seed_transaction_tests {
+    use super::super::materialization::{PostCommitMaterializeOutcome, worse_materialize_outcome};
     use super::*;
+    use dohc_engine_storage::FaultPoint;
     use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 
     #[test]

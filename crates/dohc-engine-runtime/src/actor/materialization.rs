@@ -2,8 +2,6 @@ use super::ActorHandle;
 use super::versions::switch_projection_job_id;
 use crate::error::RuntimeError;
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
-#[cfg(test)]
-use dohc_engine_domain::binary_rollback_job_identity;
 use dohc_engine_domain::{
     DomainError, SecretFileStore, VersionedTextStore, binary_rename_write_job_id,
     decode_binary_rollback_job_identity,
@@ -12,8 +10,6 @@ use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, MaterializeOptions, StdBackoff, StdReplacer, materialize_one,
     materialize_secret_delete_one, materialize_secret_one,
 };
-#[cfg(test)]
-use dohc_engine_storage::Preimage;
 use dohc_engine_storage::{
     EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJob,
     MaterializationOperation, NoFaults, StorageError, hex_sha256,
@@ -251,42 +247,6 @@ fn secret_plaintext_for_job(
             &coordinates.path,
         )
         .map_err(RuntimeError::from)
-}
-
-pub(super) fn secret_ciphertext_sha(
-    store: &EngineStore,
-    workspace_id: &str,
-    version_id: &str,
-    path: &str,
-) -> Result<String, RuntimeError> {
-    let ciphertext_base64: Option<String> = store.read_with(|connection| {
-        connection
-            .query_row(
-                "SELECT ciphertext_base64 FROM secret_files \
-                 WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
-                params![workspace_id, version_id, path],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(StorageError::corrupt_public)
-    })?;
-    let ciphertext_base64 = ciphertext_base64.ok_or(DomainError::StateCorrupt {
-        reason: "secret tip has no ciphertext identity",
-    })?;
-    let ciphertext = dohc_engine_crypto::base64::forgiving_decode(&ciphertext_base64);
-    Ok(hex_sha256(&ciphertext))
-}
-
-pub(super) fn load_projection_secret_key(
-    root_dir: &std::path::Path,
-) -> Result<SecretDataKey, RuntimeError> {
-    load_key_file(root_dir)
-        .map_err(DomainError::from)?
-        .ok_or_else(|| {
-            RuntimeError::from(DomainError::StateCorrupt {
-                reason: "workspace secret key is unavailable",
-            })
-        })
 }
 
 fn active_projection_coordinates(
@@ -901,6 +861,8 @@ const fn materialize_outcome_severity(outcome: PostCommitMaterializeOutcome) -> 
 #[cfg(test)]
 mod rollback_identity_tests {
     use super::*;
+    use dohc_engine_domain::binary_rollback_job_identity;
+    use dohc_engine_storage::Preimage;
     use dohc_engine_testkit::ScratchDir;
 
     fn pending_write(job_id: &str, workspace_id: &str) -> MaterializationJob {

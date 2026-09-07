@@ -1,15 +1,11 @@
 use super::ActorHandle;
 use super::capture::{WorkspaceRootGuard, validate_workspace_root};
 use super::materialization::SelfWriteRecorder;
-#[cfg(test)]
-use super::versions::ensure_mutation_version_on_store;
 use super::ydoc::{ydoc_open_state_on_store, ydoc_record_update_on_store, ydoc_settle_on_store};
 use crate::error::RuntimeError;
 use dohc_engine_collab::{
     CollabError, ContentKind, DocKey, LeaseRegistry, Regime, WriterDocCache, Ydoc,
 };
-#[cfg(test)]
-use dohc_engine_domain::WriteText;
 use dohc_engine_domain::{
     CollectionAdoptionCandidate, CollectionDetails, CollectionListPage,
     CollectionPendingAdoptionCursor, CollectionPendingAdoptionPage, CollectionQuery,
@@ -21,8 +17,6 @@ use dohc_engine_domain::{
     query_collection_records, reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
     synchronize_collection_frontmatter_index_in_tx,
 };
-#[cfg(test)]
-use dohc_engine_storage::NoFaults;
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome, hex_sha256};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -818,7 +812,10 @@ fn reconcile_collections_on_store(
 
 #[cfg(test)]
 mod collection_relation_cleanup_tests {
+    use super::super::versions::ensure_mutation_version_on_store;
     use super::*;
+    use dohc_engine_domain::WriteText;
+    use dohc_engine_storage::NoFaults;
     use dohc_engine_testkit::ScratchDir;
 
     const WORKSPACE_ID: &str = "workspace";

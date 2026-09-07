@@ -11,8 +11,6 @@ use super::versions::{
 };
 use crate::error::RuntimeError;
 use crate::search::{delete_file_search_index, upsert_file_search_index};
-#[cfg(test)]
-use dohc_engine_collab::{ContentKind, Regime, Ydoc};
 use dohc_engine_collab::{DocKey, LeaseRegistry, WriterDocCache};
 use dohc_engine_domain::{
     BinaryHead, BinaryWriteResult, CompareTextFileVersions, DeleteResult, DeleteTextFile,
@@ -24,8 +22,6 @@ use dohc_engine_domain::{
     enqueue_binary_delete, enqueue_binary_rename, insert_text_conflict_if_absent,
     rollback_compensating_moment_id, write_binary_in_tx, write_text_in_tx,
 };
-#[cfg(test)]
-use dohc_engine_storage::NoFaults;
 use dohc_engine_storage::{
     EngineStore, FaultAction, FaultInjector, FaultPoint, JobStatus, Preimage, StorageError,
     TxnOutcome, hex_sha256,
@@ -2045,6 +2041,8 @@ fn map_fold_error(error: dohc_engine_sync::SyncError) -> dohc_engine_domain::Dom
 #[cfg(test)]
 mod doc_cache_reset_tests {
     use super::*;
+    use dohc_engine_collab::{ContentKind, Regime, Ydoc};
+    use dohc_engine_storage::NoFaults;
     use dohc_engine_testkit::ScratchDir;
 
     #[test]
