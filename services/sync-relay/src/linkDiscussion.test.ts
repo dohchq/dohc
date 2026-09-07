@@ -124,35 +124,9 @@ async function fixture(
     },
   });
 
-  const addLink = (
-    access: LinkFixture["access"],
-    suffix: string,
-    secretCharacter: string,
-    capabilityCharacter: string,
-  ): LinkFixture => {
-    const grantId = `link-${suffix}-grant-sentinel`;
-    const linkSecret = secret(secretCharacter);
-    const capabilityToken = secret(capabilityCharacter);
-    seedLinkGrant(storage, {
-      grantId,
-      shareId: SHARE,
-      access,
-      createdAtMs: 1_010,
-      credentialId: `credential-${suffix}-sentinel`,
-      secretHash: hashLinkBearer(linkSecret, LINK_KEY),
-    });
-    seedLinkSession(storage, {
-      grantId,
-      capabilityHash: hashLinkBearer(capabilityToken, LINK_KEY),
-      sessionId: `session-${suffix}-sentinel`,
-      mintedAtMs: 1_011,
-    });
-    return { access, grantId, secret: linkSecret, capabilityToken };
-  };
-
-  const view = addLink("view", "view", "a", "d");
-  const comment = addLink("comment", "comment", "b", "e");
-  const edit = addLink("edit", "edit", "c", "f");
+  const view = seedDiscussionLink(storage, "view", "view", "a", "d", 1_010);
+  const comment = seedDiscussionLink(storage, "comment", "comment", "b", "e", 1_010);
+  const edit = seedDiscussionLink(storage, "edit", "edit", "c", "f", 1_010);
   expect(
     seedDependentGrant(storage, {
       shareId: SHARE,
@@ -208,25 +182,32 @@ async function fixture(
   };
 }
 
-function addIndependentCommentLink(storage: SyncRelayStorage): LinkFixture {
-  const grantId = "link-comment-peer-grant-sentinel";
-  const linkSecret = secret("g");
-  const capabilityToken = secret("h");
+function seedDiscussionLink(
+  storage: SyncRelayStorage,
+  access: LinkFixture["access"],
+  suffix: string,
+  secretCharacter: string,
+  capabilityCharacter: string,
+  createdAtMs: number,
+): LinkFixture {
+  const grantId = `link-${suffix}-grant-sentinel`;
+  const linkSecret = secret(secretCharacter);
+  const capabilityToken = secret(capabilityCharacter);
   seedLinkGrant(storage, {
     grantId,
     shareId: SHARE,
-    access: "comment",
-    createdAtMs: 1_012,
-    credentialId: "credential-comment-peer-sentinel",
+    access,
+    createdAtMs,
+    credentialId: `credential-${suffix}-sentinel`,
     secretHash: hashLinkBearer(linkSecret, LINK_KEY),
   });
   seedLinkSession(storage, {
     grantId,
     capabilityHash: hashLinkBearer(capabilityToken, LINK_KEY),
-    sessionId: "session-comment-peer-sentinel",
-    mintedAtMs: 1_013,
+    sessionId: `session-${suffix}-sentinel`,
+    mintedAtMs: createdAtMs + 1,
   });
-  return { access: "comment", grantId, secret: linkSecret, capabilityToken };
+  return { access, grantId, secret: linkSecret, capabilityToken };
 }
 
 function request(
@@ -4859,7 +4840,7 @@ describe("share discussion HTTP boundary", () => {
 
   it("pauses only link-authored writes and resumes without rotating authority or charging debt", async () => {
     const test = await fixture();
-    const commentPeer = addIndependentCommentLink(test.storage);
+    const commentPeer = seedDiscussionLink(test.storage, "comment", "comment-peer", "g", "h", 1_012);
     const seeded = await test.handler(
       trustedAppend(test.comment, {
         body: "pause seed",

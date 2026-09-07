@@ -1,0 +1,178 @@
+{
+  "description": "Literal big-endian DLIV v1 vectors, constructed from the grammar independently of liveFrame.ts. bytes fields are decimal JSON arrays.",
+  "frames": [
+    {
+      "name": "welcome",
+      "hex": "444c495601010000000000280000000000000001000000000000024a000000000000004000000000000004000000000000000800",
+      "frame": {
+        "kind": "welcome",
+        "hostEpoch": 1,
+        "receivePolicy": {
+          "maxFrameBytes": 586,
+          "maxStateVectorBytes": 64,
+          "maxUpdateBytes": 1024,
+          "maxSyncBytes": 2048
+        }
+      }
+    },
+    {
+      "name": "hello",
+      "hex": "444c49560102000000000020000000000000024a000000000000004000000000000004000000000000000800",
+      "frame": {
+        "kind": "hello",
+        "receivePolicy": {
+          "maxFrameBytes": 586,
+          "maxStateVectorBytes": 64,
+          "maxUpdateBytes": 1024,
+          "maxSyncBytes": 2048
+        }
+      }
+    },
+    {
+      "name": "client-vector",
+      "hex": "444c4956010300000000003100000000000000010100000000000000020000000000000000000000000000000000000000000000000000000000000000",
+      "frame": {
+        "kind": "begin",
+        "transferId": 1,
+        "purpose": "client-vector",
+        "totalBytes": 2,
+        "digest": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "initial-sync",
+      "hex": "444c49560103000000000039000000000000000102000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "frame": {
+        "kind": "begin",
+        "transferId": 1,
+        "purpose": "initial-sync",
+        "totalBytes": 2,
+        "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "appliedThroughJournalCursor": 0
+      }
+    },
+    {
+      "name": "submit-update",
+      "hex": "444c49560103000000000036000000000000000103000000000000000200000000000000000000000000000000000000000000000000000000000000000000000164",
+      "frame": {
+        "kind": "begin",
+        "transferId": 1,
+        "purpose": "submit-update",
+        "totalBytes": 2,
+        "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "deliveryId": "d"
+      }
+    },
+    {
+      "name": "applied-update",
+      "hex": "444c49560103000000000039000000000000000104000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000009",
+      "frame": {
+        "kind": "begin",
+        "transferId": 1,
+        "purpose": "applied-update",
+        "totalBytes": 2,
+        "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "journalCursor": 9
+      }
+    },
+    {
+      "name": "chunk",
+      "hex": "444c495601040000000000120000000000000001000000000000000000ff",
+      "frame": {
+        "kind": "chunk",
+        "transferId": 1,
+        "offset": 0,
+        "bytes": [
+          0,
+          255
+        ]
+      }
+    },
+    {
+      "name": "credit",
+      "hex": "444c49560105000000000010000000000000024a0000000000000002",
+      "frame": {
+        "kind": "credit",
+        "grantedBytes": 586,
+        "grantedFrames": 2
+      }
+    },
+    {
+      "name": "sync-applied",
+      "hex": "444c495601060000000000080000000000000000",
+      "frame": {
+        "kind": "sync-applied",
+        "appliedThroughJournalCursor": 0
+      }
+    },
+    {
+      "name": "success",
+      "hex": "444c4956010700000000003f000000016400000000000000000000000000000000000000000000000000000000000000000100000000000000090000000000000002000000000000000301",
+      "frame": {
+        "kind": "result",
+        "result": "success",
+        "ack": {
+          "deliveryId": "d",
+          "updateDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+          "journalCursor": 9,
+          "acceptingHostEpoch": 2,
+          "localYDocSequence": 3,
+          "applicationReplayed": true
+        }
+      }
+    },
+    {
+      "name": "refused",
+      "hex": "444c49560107000000000027000000016400000000000000000000000000000000000000000000000000000000000000000209",
+      "frame": {
+        "kind": "result",
+        "result": "refused",
+        "deliveryId": "d",
+        "updateDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "reason": "capacity-refused"
+      }
+    },
+    {
+      "name": "retry",
+      "hex": "444c49560107000000000027000000016400000000000000000000000000000000000000000000000000000000000000000303",
+      "frame": {
+        "kind": "result",
+        "result": "retry",
+        "deliveryId": "d",
+        "updateDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "reason": "application-pending"
+      }
+    },
+    {
+      "name": "close",
+      "hex": "444c4956010800000000000102",
+      "frame": {
+        "kind": "close",
+        "reason": "route-fenced"
+      }
+    }
+  ],
+  "sync": {
+    "hex": "0000000177000000046d61696e000000016f000000016c00000004612e6d640000000100000004612e6d64000000000000000000000000000000010000000000000000020000",
+    "value": {
+      "binding": {
+        "workspaceId": "w",
+        "mainVersionId": "main",
+        "objectId": "o",
+        "lineageClaimId": "l",
+        "currentPath": "a.md",
+        "selectorPaths": [
+          "a.md"
+        ],
+        "restoreFenceGeneration": 0
+      },
+      "hostVector": [
+        0
+      ],
+      "missingStateUpdate": [
+        0,
+        0
+      ]
+    }
+  }
+}

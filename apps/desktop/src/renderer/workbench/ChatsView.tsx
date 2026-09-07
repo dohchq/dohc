@@ -1,3 +1,7 @@
+import { SectionLabel } from "../ui/controls";
+import { formatChatTime } from "../time";
+import { basenameOf } from "../path";
+import { ipcErrorMessage } from "../ipcError";
 import {
   ArrowLeft,
   AtSign,
@@ -52,8 +56,6 @@ import {
   MessageReactions,
   MentionText,
   chatAuthorLabel,
-  formatChatTime,
-  ipcErrorMessage,
   runReactionToggle,
   type ChatReactionControls,
 } from "./chatMessages";
@@ -539,7 +541,7 @@ type ComposerReplyTarget = ChatsComposerReplyTarget;
 
 function pathBasename(pathHint: string | undefined): string {
   if (!pathHint) return "attachment";
-  return pathHint.split(/[\\/]/).filter(Boolean).at(-1) ?? "attachment";
+  return basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment";
 }
 
 function AgentBadge(props: { testIdPrefix: string }) {
@@ -605,7 +607,7 @@ function DecisionStatus(props: {
           type="button"
           data-testid={`${props.testIdPrefix}-decision-resolve`}
           onClick={props.onResolve}
-          className="rounded px-1 py-0.5 font-mono text-[10px] text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          className="rounded px-1 py-0.5 font-mono text-[10px] text-subtle hover:text-ink dohc-focus-visible"
         >
           Resolve
         </button>
@@ -649,7 +651,7 @@ function AttachmentChip(props: {
             props.onOpenPath?.(path);
           }
         }}
-        className={`${className} cursor-pointer hover:border-muted/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent`}
+        className={`${className} cursor-pointer hover:border-muted/50 hover:text-ink dohc-focus-visible`}
       >
         {content}
       </button>
@@ -703,7 +705,7 @@ function RunChip(props: { run: ChatRunRecord }) {
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => setOpen((current) => !current)}
-        className="rounded border border-line px-1.5 font-mono text-[10px] text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+        className="rounded border border-line px-1.5 font-mono text-[10px] text-subtle hover:text-ink dohc-focus-visible"
       >
         run {props.run.runId.slice(0, 7)}
       </button>
@@ -755,7 +757,7 @@ function RunChip(props: { run: ChatRunRecord }) {
                       .writeClipboardText({ text: props.run.logPath ?? "" })
                       .catch(() => undefined);
                   }}
-                  className="grid size-6 shrink-0 place-items-center rounded border border-line text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                  className="grid size-6 shrink-0 place-items-center rounded border border-line text-subtle hover:text-ink dohc-focus-visible"
                 >
                   <Copy size={11} aria-hidden />
                 </button>
@@ -812,7 +814,7 @@ function PostCard(props: {
           ? { borderLeftColor: "color-mix(in oklab, var(--dohc-agent) 55%, var(--dohc-line))" }
           : undefined
       }
-      className={`group cursor-pointer rounded-xl border border-line bg-panel px-4 py-3 text-left transition-[border-color,transform] hover:-translate-y-px hover:border-muted/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent ${
+      className={`group cursor-pointer rounded-xl border border-line bg-panel px-4 py-3 text-left transition-[border-color,transform] hover:-translate-y-px hover:border-muted/50 dohc-focus-visible ${
         isAgent ? "border-l-2" : ""
       }`}
     >
@@ -917,7 +919,7 @@ function BookmarkAction(props: {
             event.stopPropagation();
             props.onOpen?.();
           }}
-          className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink dohc-focus-visible"
         >
           <FileText size={12} aria-hidden />
         </button>
@@ -939,7 +941,7 @@ function BookmarkAction(props: {
               event.stopPropagation();
               props.onToggle?.("live");
             }}
-            className={`grid size-6 place-items-center rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50 ${
+            className={`grid size-6 place-items-center rounded dohc-focus-visible disabled:opacity-50 ${
               props.active
                 ? "text-accent hover:bg-line/50"
                 : "text-subtle hover:bg-line/50 hover:text-ink"
@@ -958,7 +960,7 @@ function BookmarkAction(props: {
                 event.stopPropagation();
                 props.onToggle?.("snapshot");
               }}
-              className="rounded px-1.5 py-1 font-mono text-[9px] text-subtle hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50"
+              className="rounded px-1.5 py-1 font-mono text-[9px] text-subtle hover:bg-line/50 hover:text-ink dohc-focus-visible disabled:opacity-50"
             >
               snapshot
             </button>
@@ -1139,9 +1141,9 @@ function AddressedToMe(props: { notifications: readonly AgentNotification[] }) {
       aria-label="Addressed to me"
       className="border-b border-line bg-panel-2/40"
     >
-      <p className="mb-0 px-3 pt-2 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+      <SectionLabel as="p" className="mb-0 px-3 pt-2">
         Addressed to me
-      </p>
+      </SectionLabel>
       <ul className="m-0 list-none p-0">
         {waiting.map((notification) => (
           <li key={notification.id}>
@@ -1542,7 +1544,7 @@ const ThreadMessages = memo(function ThreadMessages(props: {
               props.onNavCommand?.(nav);
               scrollToMessage(parent.id);
             }}
-            className="mb-1 w-fit rounded px-2 text-left font-mono text-[10px] text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            className="mb-1 w-fit rounded px-2 text-left font-mono text-[10px] text-subtle hover:text-ink dohc-focus-visible"
           >
             ↳ replying to {chatAuthorLabel(parent)}
           </button>
@@ -1623,7 +1625,7 @@ const ThreadMessages = memo(function ThreadMessages(props: {
               type="button"
               data-testid="chats-comment-reply"
               onClick={() => beginReply(comment)}
-              className="rounded hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+              className="rounded hover:text-ink dohc-focus-visible"
             >
               Reply
             </button>
@@ -1909,7 +1911,7 @@ export function ChatsView(props: {
         .filter((file) => file.kind === "file" && /\.md$/i.test(file.path))
         .map((file) => ({
           path: file.path,
-          label: file.path.split("/").at(-1)?.replace(/\.md$/i, "") ?? file.path,
+          label: basenameOf(file.path).replace(/\.md$/i, ""),
         })),
     [props.workspaceFiles],
   );
@@ -2892,7 +2894,7 @@ export function ChatsView(props: {
         }
       }
     },
-    [applyChannelSnapshot, loadChannelSnapshot, props],
+    [applyChannelSnapshot, loadChannelSnapshot, props.onError],
   );
 
   const loadThreadSnapshot = useCallback(
@@ -3170,7 +3172,7 @@ export function ChatsView(props: {
         }
       }
     },
-    [applyThreadSnapshot, channelIsLocked, loadThreadSnapshot, props],
+    [applyThreadSnapshot, channelIsLocked, loadThreadSnapshot, props.onError],
   );
 
   const loadPersonalFeed = useCallback(
@@ -3387,7 +3389,7 @@ export function ChatsView(props: {
       startingThreadRef.current = false;
       setStartingThread(false);
     }
-  }, [nav, newThreadBody, props, startingThread, workspaceId]);
+  }, [nav, newThreadBody, props.onError, props.onNavCommand, props.onThreadStarted, startingThread, workspaceId]);
 
   const sendMessage = useCallback(async () => {
     if (nav.level !== "thread") return;
@@ -3524,7 +3526,7 @@ export function ChatsView(props: {
   }, [
     composer,
     nav,
-    props,
+    props.onError,
     replyTarget,
     resolveTargetMessageId,
     sendContextKey,
@@ -3559,7 +3561,7 @@ export function ChatsView(props: {
         input,
       );
     },
-    [nav, props, viewerAuthorId, workspaceId],
+    [nav, props.onError, viewerAuthorId, workspaceId],
   );
 
   const toggleFeedReaction = useCallback(
@@ -3658,7 +3660,7 @@ export function ChatsView(props: {
         }
       }
     },
-    [loadDmConversation, props],
+    [loadDmConversation, props.onError],
   );
 
   const openFeed = useCallback(() => {
@@ -3947,7 +3949,7 @@ export function ChatsView(props: {
         setSending(false);
       }
     }
-  }, [composer, nav, props, sendContextKey, sending, workspaceId]);
+  }, [composer, nav, props.onError, sendContextKey, sending, workspaceId]);
 
   // Starting a DM = pick who + say something, one step. Starting one with
   // someone you already message opens the existing conversation.
@@ -3984,7 +3986,7 @@ export function ChatsView(props: {
       startingDmRef.current = false;
       setStartingDm(false);
     }
-  }, [dmDraft, dmRecipients, openDm, props, startingDm, workspaceId]);
+  }, [dmDraft, dmRecipients, openDm, props.onError, props.onNavCommand, startingDm, workspaceId]);
 
   const acceptDmRequest = useCallback(
     async (request: DmRequestRow, chosenWorkspaceId: string) => {
@@ -4021,7 +4023,7 @@ export function ChatsView(props: {
         );
       }
     },
-    [openConversation, props, refreshDms, workspaceId],
+    [openConversation, props.onError, props.workspaces, refreshDms, workspaceId],
   );
 
   const setDmRequestDeclined = useCallback(
@@ -4050,7 +4052,7 @@ export function ChatsView(props: {
         if (token === liveToken.current) setDmRequestBusy(null);
       }
     },
-    [dmRequestBusy, props, refreshDms],
+    [dmRequestBusy, props.onError, refreshDms],
   );
 
   const grantedByWire = useMemo(() => {
@@ -4317,7 +4319,7 @@ export function ChatsView(props: {
     }
   }, [
     nav,
-    props,
+    props.onError,
     refreshShares,
     shareBusy,
     shareEmail,
@@ -4367,7 +4369,7 @@ export function ChatsView(props: {
         props.onError(ipcErrorMessage(error, "Could not remove that person."));
       }
     },
-    [claimLanes, props, refreshShares, takeCommitTicket],
+    [claimLanes, props.onError, refreshShares, takeCommitTicket],
   );
 
   const joinShared = useCallback(
@@ -4392,7 +4394,7 @@ export function ChatsView(props: {
         setJoiningShareId(null);
       }
     },
-    [joiningShareId, props, refreshOverview, workspaceId],
+    [joiningShareId, props.onError, refreshOverview, workspaceId],
   );
 
   const leaveShared = useCallback(
@@ -4410,7 +4412,7 @@ export function ChatsView(props: {
         props.onError(ipcErrorMessage(error, "Could not leave that channel."));
       }
     },
-    [props, refreshOverview, workspaceId],
+    [props.onError, props.onNavCommand, refreshOverview, workspaceId],
   );
 
   const createChannel = useCallback(
@@ -4446,7 +4448,7 @@ export function ChatsView(props: {
         props.onError(ipcErrorMessage(error, "Could not create that channel."));
       }
     },
-    [openChannel, props, workspaceId],
+    [openChannel, props.onError, props.onNavCommand, workspaceId],
   );
 
   const goBack = useCallback(() => {
@@ -4528,7 +4530,7 @@ export function ChatsView(props: {
         );
       }
     },
-    [goBack, presence.leave, presence.restart, props, workspaceId],
+    [goBack, presence.leave, presence.restart, props.onError, workspaceId],
   );
 
   const reactionsByMessage = useMemo(() => {
@@ -4674,7 +4676,7 @@ export function ChatsView(props: {
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
-  }, [dispatchActionBusy, dispatchState.liveRunId, nav, props, workspaceId]);
+  }, [dispatchActionBusy, dispatchState.liveRunId, nav, props.onError, workspaceId]);
 
   const resumeThreadDispatch = useCallback(async () => {
     if (nav.level !== "thread" || !dispatchState.paused || dispatchActionBusy) {
@@ -4708,7 +4710,7 @@ export function ChatsView(props: {
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
-  }, [dispatchActionBusy, dispatchState.paused, nav, props, workspaceId]);
+  }, [dispatchActionBusy, dispatchState.paused, nav, props.onError, workspaceId]);
 
   // Escape walks back up one level — but never steals Escape from a composer
   // holding a draft (that Escape reads as "leave my text alone").
@@ -4982,7 +4984,7 @@ export function ChatsView(props: {
               value={dmRecipients}
               placeholder="To: email@example.com"
               onChange={(event) => setDmRecipients(event.target.value)}
-              className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+              className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
             />
             <p className="m-0 px-1 text-[10px] leading-4 text-subtle">
               Separate several people with commas. They&apos;ll see the conversation on
@@ -5164,7 +5166,7 @@ export function ChatsView(props: {
                   title="Stop agent run"
                   disabled={dispatchActionBusy}
                   onClick={() => void stopThreadRun()}
-                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 font-mono text-[10px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-default disabled:opacity-50"
+                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 font-mono text-[10px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-50"
                 >
                   <Square size={8} fill="currentColor" aria-hidden />
                   Stop
@@ -5199,7 +5201,7 @@ export function ChatsView(props: {
                 data-testid="chats-resume-dispatch"
                 disabled={dispatchActionBusy}
                 onClick={() => void resumeThreadDispatch()}
-                className="rounded px-1 text-muted underline decoration-line underline-offset-2 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-default disabled:opacity-50"
+                className="rounded px-1 text-muted underline decoration-line underline-offset-2 hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-50"
               >
                 Resume
               </button>
@@ -5282,7 +5284,7 @@ export function ChatsView(props: {
                     }
                     setResolveTargetMessageId(null);
                   }}
-                  className="rounded px-1 text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                  className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
                 >
                   ×
                 </button>
@@ -5306,7 +5308,7 @@ export function ChatsView(props: {
                     }
                     setReplyTarget(null);
                   }}
-                  className="rounded px-1 text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                  className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
                 >
                   ×
                 </button>
@@ -5536,7 +5538,7 @@ export function ChatsView(props: {
                 maxLength={320}
                 placeholder="teammate@example.com"
                 onChange={(event) => setShareEmail(event.target.value)}
-                className="h-6 min-w-0 flex-1 rounded border border-line bg-bg px-2 text-[11px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+                className="h-6 min-w-0 flex-1 rounded border border-line bg-bg px-2 text-[11px] text-ink placeholder:text-subtle dohc-focus-input"
               />
               <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted">
                 <input
@@ -5702,9 +5704,9 @@ export function ChatsView(props: {
         </section>
         {agentChannel ? (
           <section data-testid="chats-my-agent-section" aria-label="My agent">
-            <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+            <SectionLabel as="p" className="mb-0 mt-3 px-3">
               My agent
-            </p>
+            </SectionLabel>
             <button
               type="button"
               data-testid="chats-my-agent"
@@ -5739,12 +5741,12 @@ export function ChatsView(props: {
             </button>
           </section>
         ) : null}
-        <p
+        <SectionLabel as="p"
           data-testid="chats-channels-heading"
-          className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle"
+          className="mb-0 mt-3 px-3"
         >
           Channels
-        </p>
+        </SectionLabel>
         <ul className="m-0 list-none p-0">
           {overview.channels
             .filter((channel) => channel.kind === "channel")
@@ -5822,9 +5824,9 @@ export function ChatsView(props: {
         </ul>
         {dmAvailable || dms.length > 0 ? (
           <div data-testid="chats-dms-section">
-            <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+            <SectionLabel as="p" className="mb-0 mt-3 px-3">
               Direct messages
-            </p>
+            </SectionLabel>
             <ul className="m-0 list-none p-0">
               {dms.map((dm) => (
                 <li key={dm.channelId} className="border-b border-line">
@@ -5904,9 +5906,9 @@ export function ChatsView(props: {
         ) : null}
         {pendingDmRequests.length > 0 || declinedDmRequests.length > 0 ? (
           <div data-testid="chats-dm-requests-section">
-            <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+            <SectionLabel as="p" className="mb-0 mt-3 px-3">
               Direct message requests
-            </p>
+            </SectionLabel>
             <ul className="m-0 list-none p-0">
               {pendingDmRequests.map((request) => (
                 <DmRequestListItem
@@ -5921,9 +5923,9 @@ export function ChatsView(props: {
             </ul>
             {declinedDmRequests.length > 0 ? (
               <div className="border-t border-line/60 bg-panel-2/40">
-                <p className="m-0 px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+                <SectionLabel as="p" className="m-0 px-3 pb-1 pt-2">
                   Declined
-                </p>
+                </SectionLabel>
                 <ul className="m-0 list-none p-0">
                   {declinedDmRequests.map((request) => (
                     <DmRequestListItem
@@ -5943,9 +5945,9 @@ export function ChatsView(props: {
         ) : null}
         {receivedNotJoined.length > 0 || shareReadFailure !== null ? (
           <div data-testid="chats-shared-with-you">
-            <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+            <SectionLabel as="p" className="mb-0 mt-3 px-3">
               Shared with you
-            </p>
+            </SectionLabel>
             {/* The section stays even with nothing to list. Hiding it on an
                 unreadable listing was the whole of #618: the invitations
                 vanished with no copy anywhere saying dohc could not read
@@ -5990,9 +5992,9 @@ export function ChatsView(props: {
         ) : null}
         {overview.fileThreads.length > 0 ? (
           <div data-testid="chats-files-section">
-            <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+            <SectionLabel as="p" className="mb-0 mt-3 px-3">
               Files
-            </p>
+            </SectionLabel>
             <ul className="m-0 list-none p-0">
               {overview.fileThreads.map((thread) => (
                 <li key={thread.id} className="border-b border-line">
@@ -6059,7 +6061,7 @@ export function ChatsView(props: {
                   setCreatingChannel(null);
                 }
               }}
-              className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+              className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
             />
             <p className="mb-0 mt-1 px-1 text-[10px] leading-4 text-subtle">
               Press Enter to create the channel.

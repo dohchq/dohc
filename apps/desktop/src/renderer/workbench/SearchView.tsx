@@ -1,3 +1,4 @@
+import { basenameOf, dirnameOf } from "../path";
 import {
   CaseSensitive,
   ChevronDown,
@@ -10,7 +11,7 @@ import {
   WholeWord,
 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import type { SearchResultsEventEntry } from "../../ipc/channels";
+import type { SearchResultsEventEntry } from "../../ipc/bridgeContract";
 import { rendererMarks } from "../../performance/rendererMarks";
 import { SectionLabel } from "../ui/controls";
 import {
@@ -39,16 +40,6 @@ const RESULT_CAP = 2000;
 
 function isBlankSearchQuery(value: string): boolean {
   return value.trim().length === 0;
-}
-
-function basenameOf(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash === -1 ? path : path.slice(slash + 1);
-}
-
-function dirnameOf(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash === -1 ? "" : path.slice(0, slash);
 }
 
 // Offset-based match highlighting: slice the preview at matchStart/matchEnd.

@@ -1,3 +1,5 @@
+import { formatChatTime } from "../time";
+import { basenameOf } from "../path";
 import { ChevronDown, ChevronRight, FileArchive, FileText, Lock, RotateCcw, Search, X } from "lucide-react";
 import { Fragment, useMemo, useState } from "react";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
@@ -17,22 +19,17 @@ interface EngineHistoryGroup {
   moments: EngineMomentRecord[];
 }
 
-function basename(path: string): string {
-  const index = path.lastIndexOf("/");
-  return index >= 0 ? path.slice(index + 1) : path;
-}
-
 // The list label for one moment: its real engine summary when it has one,
 // else calm product copy derived from the operation.
 export function engineMomentSummary(
   moment: Pick<EngineMomentRecord, "summary" | "operation" | "path" | "contentKind" | "byteLength">,
 ): string {
   if (moment.summary) return moment.summary;
-  if (moment.operation === "delete") return `Deleted ${basename(moment.path)}`;
+  if (moment.operation === "delete") return `Deleted ${basenameOf(moment.path)}`;
   if (moment.contentKind === "binary") {
-    return `Updated ${basename(moment.path)} (${moment.byteLength ?? 0} bytes)`;
+    return `Updated ${basenameOf(moment.path)} (${moment.byteLength ?? 0} bytes)`;
   }
-  return `Edited ${basename(moment.path)}`;
+  return `Edited ${basenameOf(moment.path)}`;
 }
 
 function engineOperationLabel(moment: EngineMomentRecord): string {
@@ -127,19 +124,6 @@ function engineHistorySearchText(group: EngineHistoryGroup): string {
     .toLowerCase();
 }
 
-function formatRecordedAt(recordedAtMs: number): { label: string; iso: string } {
-  const recordedAt = new Date(recordedAtMs);
-  return {
-    label: recordedAt.toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    }),
-    iso: recordedAt.toISOString(),
-  };
-}
-
 function dayKey(recordedAtMs: number): string {
   const recordedAt = new Date(recordedAtMs);
   const month = String(recordedAt.getMonth() + 1).padStart(2, "0");
@@ -147,15 +131,17 @@ function dayKey(recordedAtMs: number): string {
   return `${recordedAt.getFullYear()}-${month}-${day}`;
 }
 
+const dayFormat = new Intl.DateTimeFormat(undefined, {
+  weekday: "short",
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+});
+
 function formatDay(recordedAtMs: number): { label: string; dateTime: string } {
   const recordedAt = new Date(recordedAtMs);
   return {
-    label: recordedAt.toLocaleDateString(undefined, {
-      weekday: "short",
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    }),
+    label: dayFormat.format(recordedAt),
     dateTime: dayKey(recordedAtMs),
   };
 }
@@ -166,7 +152,7 @@ function MomentRow(props: {
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const { moment } = props;
-  const recordedAt = formatRecordedAt(moment.recordedAtMs);
+  const recordedAt = formatChatTime(moment.recordedAtMs);
   // Agent-authored moments speak in the olive attribution voice; everything
   // else is a neutral origin in ink.
   const isAgent = moment.agentAuthorName !== undefined;
@@ -250,7 +236,7 @@ function GroupRow(props: {
 }) {
   const { group } = props;
   const [expanded, setExpanded] = useState(false);
-  const recordedAt = formatRecordedAt(group.recordedAtMs);
+  const recordedAt = formatChatTime(group.recordedAtMs);
   // Uniform agent authorship surfaces on the group row itself; mixed or
   // neutral groups show no author (never a guess).
   const agentAuthorName = groupAgentAuthorName(group.moments);
@@ -405,7 +391,7 @@ export function EngineHistoryView(props: {
                   <time
                     data-testid="engine-history-day-heading"
                     dateTime={day.dateTime}
-                    className="text-[10px] font-semibold uppercase tracking-wide text-subtle"
+                    className="dohc-section-label"
                   >
                     {day.label}
                   </time>

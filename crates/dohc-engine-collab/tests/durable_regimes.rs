@@ -13,12 +13,11 @@ use dohc_engine_collab::{
     apply_remote_update, apply_remote_update_in_transaction_with_projection, claim_base,
     claim_base_at_relay, close_session, ensure_marker, fresh_successor_base, load_persisted,
     maybe_compact, read_marker, record_base_coordinate, record_local_update,
-    record_local_update_creating_marker_guarded,
-    record_local_update_creating_marker_guarded_for_lineage, record_local_update_with_origin,
     replace_lineage_with_successor, settle, BaseCoordinateRecord, BaseRelayCoordinate,
     ClaimOutcome, CloseOutcome, CollabError, CompactOutcome, DocKey, LeaseRegistry,
-    LineageClaimStatus, Regime, RemoteUpdate, ReplicationApplyOutcome, SettleOutcome,
-    SuccessorIdentity, SuccessorIdentityInput, SuccessorInstallOutcome, SuccessorReplacement, Ydoc,
+    LineageClaimStatus, LineageGuard, LocalAppend, MarkerCreation, Regime, RemoteUpdate,
+    ReplicationApplyOutcome, SettleOutcome, SuccessorIdentity, SuccessorIdentityInput,
+    SuccessorInstallOutcome, SuccessorReplacement, Ydoc,
 };
 use dohc_engine_collab::{RemoteAppendProbe, WriterDocCache};
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
@@ -231,6 +230,156 @@ fn record_update_transaction_fingerprint(store: &EngineStore, key: &DocKey) -> V
 }
 
 #[test]
+fn local_append_defaults_validate_before_transaction_and_require_a_marker() {
+    let mut ts = fresh_store("local-append-defaults");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    let before = record_update_transaction_fingerprint(&ts.store, &key);
+
+    ts.store
+        .read_with(|conn| conn.execute_batch("BEGIN IMMEDIATE"))
+        .expect("hold a transaction so another BEGIN would fail");
+    let error = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &[],
+        LocalAppend::default(),
+        &NoFaults,
+        1_100,
+        |_, _, _| panic!("invalid bytes must not reach post-append"),
+    )
+    .expect_err("validate before attempting BEGIN");
+    ts.store
+        .read_with(|conn| conn.execute_batch("ROLLBACK"))
+        .expect("release transaction");
+    assert!(matches!(error, CollabError::EmptyUpdate));
+
+    let update = Ydoc::wire().plaintext_insert(0, "hello");
+    let error = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &update,
+        LocalAppend::default(),
+        &NoFaults,
+        1_100,
+        |_, _, _| panic!("a missing marker must not reach post-append"),
+    )
+    .expect_err("default append requires an existing marker");
+    assert!(matches!(error, CollabError::NoMarker));
+    assert_eq!(
+        record_update_transaction_fingerprint(&ts.store, &key),
+        before
+    );
+}
+
+#[test]
+fn local_append_request_replay_distinguishes_all_lineage_guards() {
+    let mut ts = fresh_store("local-append-guard-identity");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    let (base, update) = plaintext_base_and_delta();
+    let claim_id = match committed(
+        claim_base(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &base,
+            &NoFaults,
+            1_050,
+        )
+        .expect("claim active lineage"),
+    ) {
+        ClaimOutcome::Claimed { base_snapshot_sha } => base_snapshot_sha,
+        other => panic!("unexpected claim outcome: {other:?}"),
+    };
+    let marker = Some(MarkerCreation {
+        path: Some("notes/guard.md"),
+        content_kind: ContentKind::Plaintext,
+        regime: Regime::LocalOnly,
+    });
+
+    for (request_id, original_guard, other_guards) in [
+        (
+            "unchecked-request",
+            LineageGuard::Unchecked,
+            [
+                LineageGuard::Expect(None),
+                LineageGuard::Expect(Some(claim_id.as_str())),
+            ],
+        ),
+        (
+            "claimed-request",
+            LineageGuard::Expect(Some(claim_id.as_str())),
+            [LineageGuard::Unchecked, LineageGuard::Expect(None)],
+        ),
+    ] {
+        committed(
+            record_local_update(
+                &mut ts.store,
+                &mut ts.cache,
+                &key,
+                &update,
+                LocalAppend {
+                    marker,
+                    lineage_guard: original_guard,
+                    request_id: Some(request_id),
+                    ..Default::default()
+                },
+                &NoFaults,
+                1_100,
+                |_, _, _| Ok(()),
+            )
+            .expect("record request"),
+        );
+        let before = record_update_transaction_fingerprint(&ts.store, &key);
+        for guard in other_guards {
+            let error = record_local_update(
+                &mut ts.store,
+                &mut ts.cache,
+                &key,
+                &update,
+                LocalAppend {
+                    marker,
+                    lineage_guard: guard,
+                    request_id: Some(request_id),
+                    ..Default::default()
+                },
+                &NoFaults,
+                1_200,
+                |_, _, _| panic!("a changed guard must not reach post-append"),
+            )
+            .expect_err("request replay binds the original lineage guard");
+            assert!(matches!(error, CollabError::Corrupt { reason }
+                if reason == "idempotency key reused with different content"));
+        }
+        let error = record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &[],
+            LocalAppend {
+                marker,
+                lineage_guard: original_guard,
+                request_id: Some(request_id),
+                ..Default::default()
+            },
+            &NoFaults,
+            1_200,
+            |_, _, _| panic!("a changed request must not reach post-append"),
+        )
+        .expect_err("request mismatch precedes byte validation");
+        assert!(matches!(error, CollabError::Corrupt { reason }
+            if reason == "idempotency key reused with different content"));
+        assert_eq!(
+            record_update_transaction_fingerprint(&ts.store, &key),
+            before
+        );
+    }
+}
+
+#[test]
 fn record_update_request_identity_binds_path_before_any_mutation() {
     const FIRST_PATH: &str = "notes/first.md";
     const OTHER_PATH: &str = "notes/other.md";
@@ -242,22 +391,24 @@ fn record_update_request_identity_binds_path_before_any_mutation() {
     let update = Ydoc::wire().plaintext_insert(0, "hello");
 
     let first = committed(
-        record_local_update_creating_marker_guarded(
+        record_local_update(
             &mut ts.store,
             &mut ts.cache,
             &key,
-            Some(FIRST_PATH),
-            ContentKind::Plaintext,
-            Regime::LocalOnly,
             &update,
-            None,
-            None,
-            false,
-            true,
-            Some(REQUEST_ID),
+            LocalAppend {
+                marker: Some(MarkerCreation {
+                    path: Some(FIRST_PATH),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                require_empty_lineage: true,
+                request_id: Some(REQUEST_ID),
+                ..Default::default()
+            },
             &NoFaults,
             1_100,
-            |_tx, _outcome| Ok(()),
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("first recordUpdate"),
     );
@@ -265,22 +416,24 @@ fn record_update_request_identity_binds_path_before_any_mutation() {
     let committed_state = record_update_transaction_fingerprint(&ts.store, &key);
 
     let replay = committed(
-        record_local_update_creating_marker_guarded(
+        record_local_update(
             &mut ts.store,
             &mut ts.cache,
             &key,
-            Some(FIRST_PATH),
-            ContentKind::Plaintext,
-            Regime::LocalOnly,
             &update,
-            None,
-            None,
-            false,
-            true,
-            Some(REQUEST_ID),
+            LocalAppend {
+                marker: Some(MarkerCreation {
+                    path: Some(FIRST_PATH),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                require_empty_lineage: true,
+                request_id: Some(REQUEST_ID),
+                ..Default::default()
+            },
             &NoFaults,
             1_200,
-            |_tx, _outcome| Ok(()),
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("exact recordUpdate replay"),
     );
@@ -291,22 +444,24 @@ fn record_update_request_identity_binds_path_before_any_mutation() {
         "an exact same-path replay must not mutate durable state"
     );
 
-    let error = record_local_update_creating_marker_guarded(
+    let error = record_local_update(
         &mut ts.store,
         &mut ts.cache,
         &key,
-        Some(OTHER_PATH),
-        ContentKind::Plaintext,
-        Regime::LocalOnly,
         &update,
-        None,
-        None,
-        false,
-        true,
-        Some(REQUEST_ID),
+        LocalAppend {
+            marker: Some(MarkerCreation {
+                path: Some(OTHER_PATH),
+                content_kind: ContentKind::Plaintext,
+                regime: Regime::LocalOnly,
+            }),
+            require_empty_lineage: true,
+            request_id: Some(REQUEST_ID),
+            ..Default::default()
+        },
         &NoFaults,
         1_300,
-        |_tx, _outcome| Ok(()),
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect_err("a request id cannot be reused for another path");
     assert!(matches!(
@@ -346,21 +501,23 @@ fn record_update_lineage_guard_refuses_stale_sessions_before_any_mutation() {
     let update = peer.plaintext_insert(6, "session edit");
     let before = record_update_transaction_fingerprint(&ts.store, &key);
 
-    let error = record_local_update_creating_marker_guarded_for_lineage(
+    let error = record_local_update(
         &mut ts.store,
         &mut ts.cache,
         &key,
-        Some("notes/stale-session.md"),
-        ContentKind::Plaintext,
-        Regime::LocalOnly,
         &update,
-        Some("local-origin"),
-        None,
-        Some(&"0".repeat(64)),
-        true,
-        false,
-        None,
-        Some("stale-session-request"),
+        LocalAppend {
+            marker: Some(MarkerCreation {
+                path: Some("notes/stale-session.md"),
+                content_kind: ContentKind::Plaintext,
+                regime: Regime::LocalOnly,
+            }),
+            actor_origin_id: Some("local-origin"),
+            lineage_guard: LineageGuard::Expect(Some(&"0".repeat(64))),
+            ensure_parent_row: true,
+            request_id: Some("stale-session-request"),
+            ..Default::default()
+        },
         &NoFaults,
         1_100,
         |_tx, _outcome, _update_sha| panic!("a stale lineage must not reach post-append"),
@@ -414,8 +571,17 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "mine");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_000)
-            .expect("rec"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &delta,
+            LocalAppend::default(),
+            &NoFaults,
+            1_000,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("rec"),
     );
     let settle_outcome =
         committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
@@ -510,8 +676,10 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
             &mut ts2.cache,
             &key2,
             &delta2,
+            LocalAppend::default(),
             &NoFaults,
             1_000,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("rec"),
     );
@@ -612,8 +780,17 @@ fn assert_pending_job_of_kind_blocks_close(job_id_prefix: &str) {
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "mine");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_000)
-            .expect("rec"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &delta,
+            LocalAppend::default(),
+            &NoFaults,
+            1_000,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("rec"),
     );
     let settle_outcome =
         committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
@@ -711,8 +888,17 @@ fn local_only_close_prunes_the_cache() {
     for i in 0..3 {
         let d = doc.plaintext_insert((i * 2) as u32, "ab");
         committed(
-            record_local_update(&mut ts.store, &mut ts.cache, &key, &d, &NoFaults, 1_000)
-                .expect("rec"),
+            record_local_update(
+                &mut ts.store,
+                &mut ts.cache,
+                &key,
+                &d,
+                LocalAppend::default(),
+                &NoFaults,
+                1_000,
+                |_tx, _outcome, _update_sha| Ok(()),
+            )
+            .expect("rec"),
         );
     }
     assert_eq!(count(&ts.store, "ydoc_updates", &key), 3);
@@ -843,8 +1029,17 @@ fn a_captured_head_lets_a_never_settled_local_close_prune() {
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "what the user typed");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_100)
-            .expect("rec"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &delta,
+            LocalAppend::default(),
+            &NoFaults,
+            1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("rec"),
     );
     seed_head(&mut ts.store, &key, "what the user typed", None);
 
@@ -881,8 +1076,17 @@ fn a_head_holding_other_bytes_still_refuses_the_local_close() {
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "what the user typed");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_100)
-            .expect("rec"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &delta,
+            LocalAppend::default(),
+            &NoFaults,
+            1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("rec"),
     );
     seed_head(&mut ts.store, &key, "something else entirely", None);
 
@@ -937,8 +1141,17 @@ fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "what the user typed");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_100)
-            .expect("rec"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &delta,
+            LocalAppend::default(),
+            &NoFaults,
+            1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("rec"),
     );
     seed_head(&mut ts.store, &key, "what the user typed", Some("conflict"));
 
@@ -980,8 +1193,10 @@ fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
             &mut settled.cache,
             &key2,
             &delta2,
+            LocalAppend::default(),
             &NoFaults,
             1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("rec"),
     );
@@ -1031,8 +1246,17 @@ fn a_captured_reversion_discharges_despite_a_leftover_completed_job_row() {
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "what the user typed");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_100)
-            .expect("rec"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &delta,
+            LocalAppend::default(),
+            &NoFaults,
+            1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("rec"),
     );
 
     // The earlier engine settle: a completed job for this exact content and
@@ -1083,8 +1307,17 @@ fn a_binary_head_refuses_the_close_by_name_instead_of_failing_internally() {
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "what the user typed");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_100)
-            .expect("rec"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &delta,
+            LocalAppend::default(),
+            &NoFaults,
+            1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("rec"),
     );
     ts.store
         .write_with(&NoFaults, |tx| {
@@ -1137,8 +1370,17 @@ fn replicated_close_never_prunes_the_lineage() {
     );
     assert!(matches!(claim, ClaimOutcome::Claimed { .. }));
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_100)
-            .expect("rec"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &delta,
+            LocalAppend::default(),
+            &NoFaults,
+            1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("rec"),
     );
 
     let before = load_persisted(&ts.store, &key)
@@ -1254,8 +1496,17 @@ fn append_self_bounds_the_log_at_threshold() {
     for i in 0..(threshold + 1) {
         let d = doc.plaintext_insert(i as u32, "x");
         committed(
-            record_local_update(&mut ts.store, &mut ts.cache, &key, &d, &NoFaults, 1_000 + i)
-                .expect("rec"),
+            record_local_update(
+                &mut ts.store,
+                &mut ts.cache,
+                &key,
+                &d,
+                LocalAppend::default(),
+                &NoFaults,
+                1_000 + i,
+                |_tx, _outcome, _update_sha| Ok(()),
+            )
+            .expect("rec"),
         );
     }
     // The log folded itself: far fewer than threshold+1 update rows remain, and a
@@ -1315,8 +1566,10 @@ fn forced_compaction_with_nothing_pending_still_validates_the_snapshot() {
             &mut ts.cache,
             &key,
             &update,
+            LocalAppend::default(),
             &NoFaults,
             1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("rec"),
     );
@@ -1401,8 +1654,10 @@ fn forced_close_on_a_compacted_lineage_skips_without_reminting() {
                 &mut ts.cache,
                 &key,
                 &update,
+                LocalAppend::default(),
                 &NoFaults,
                 1_001 + i64::from(i),
+                |_tx, _outcome, _update_sha| Ok(()),
             )
             .expect("rec"),
         );
@@ -1597,28 +1852,34 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
     let bob = peer_b.frontmatter_set("status", "done");
 
     committed(
-        record_local_update_with_origin(
+        record_local_update(
             &mut a.store,
             &mut a.cache,
             &key,
             &alice,
-            Some("alice"),
-            None,
+            LocalAppend {
+                actor_origin_id: Some("alice"),
+                ..Default::default()
+            },
             &NoFaults,
             1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("Alice local edit"),
     );
     committed(
-        record_local_update_with_origin(
+        record_local_update(
             &mut b.store,
             &mut b.cache,
             &key,
             &bob,
-            Some("bob"),
-            None,
+            LocalAppend {
+                actor_origin_id: Some("bob"),
+                ..Default::default()
+            },
             &NoFaults,
             1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("Bob local edit"),
     );
@@ -1693,28 +1954,34 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
     let bob = peer_b.frontmatter_set("title", "Bob title");
 
     committed(
-        record_local_update_with_origin(
+        record_local_update(
             &mut a.store,
             &mut a.cache,
             &key,
             &alice,
-            Some("alice"),
-            None,
+            LocalAppend {
+                actor_origin_id: Some("alice"),
+                ..Default::default()
+            },
             &NoFaults,
             1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("Alice local edit"),
     );
     committed(
-        record_local_update_with_origin(
+        record_local_update(
             &mut b.store,
             &mut b.cache,
             &key,
             &bob,
-            Some("bob"),
-            None,
+            LocalAppend {
+                actor_origin_id: Some("bob"),
+                ..Default::default()
+            },
             &NoFaults,
             1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("Bob local edit"),
     );
@@ -1797,15 +2064,18 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
     let alice = peer_a.frontmatter_set("title", "Alice title");
 
     committed(
-        record_local_update_with_origin(
+        record_local_update(
             &mut a.store,
             &mut a.cache,
             &key,
             &alice,
-            Some("alice"),
-            None,
+            LocalAppend {
+                actor_origin_id: Some("alice"),
+                ..Default::default()
+            },
             &NoFaults,
             1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("Alice local edit"),
     );
@@ -1833,15 +2103,18 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
     peer_b.apply(&alice).expect("peer B receives Alice edit");
     let bob = peer_b.frontmatter_set("title", "Bob title");
     committed(
-        record_local_update_with_origin(
+        record_local_update(
             &mut b.store,
             &mut b.cache,
             &key,
             &bob,
-            Some("bob"),
-            None,
+            LocalAppend {
+                actor_origin_id: Some("bob"),
+                ..Default::default()
+            },
             &NoFaults,
             1_300,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("Bob later local edit"),
     );
@@ -2813,8 +3086,17 @@ fn local_edit_on_replicated_lineage_requests_broadcast() {
         .expect("base"),
     );
     let out = committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_100)
-            .expect("rec"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &delta,
+            LocalAppend::default(),
+            &NoFaults,
+            1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("rec"),
     );
     assert!(
         out.emit_outbound,
@@ -2844,7 +3126,17 @@ fn replicated_edit_before_base_is_not_broadcast() {
     let doc = Ydoc::wire();
     let d = doc.plaintext_insert(0, "premature");
     let out = committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &d, &NoFaults, 1_100).expect("rec"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &d,
+            LocalAppend::default(),
+            &NoFaults,
+            1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("rec"),
     );
     assert!(
         !out.emit_outbound,
@@ -2875,8 +3167,17 @@ fn resettle_of_edited_doc_expects_prior_content_preimage() {
     let doc = Ydoc::wire();
     let d1 = doc.plaintext_insert(0, "first");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &d1, &NoFaults, 1_000)
-            .expect("rec1"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &d1,
+            LocalAppend::default(),
+            &NoFaults,
+            1_000,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("rec1"),
     );
     let s1 = committed(settle(&mut ts.store, &key, "n.md", &NoFaults, 5_000).expect("settle1"));
     let j1 = ts
@@ -2893,8 +3194,17 @@ fn resettle_of_edited_doc_expects_prior_content_preimage() {
     // Edit and re-settle: the new job must expect the first content as preimage.
     let d2 = doc.plaintext_insert(5, " second");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &d2, &NoFaults, 6_000)
-            .expect("rec2"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &d2,
+            LocalAppend::default(),
+            &NoFaults,
+            6_000,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("rec2"),
     );
     let s2 = committed(settle(&mut ts.store, &key, "n.md", &NoFaults, 7_000).expect("settle2"));
     assert!(!s2.deduped, "changed content is a new job");
@@ -2940,8 +3250,10 @@ fn truncated_update_is_rejected_and_never_journaled() {
             &mut ts.cache,
             &key,
             truncated,
+            LocalAppend::default(),
             &NoFaults,
             1_000,
+            |_tx, _outcome, _update_sha| Ok(()),
         ) {
             Err(_) => rejected += 1,
             Ok(TxnOutcome::Committed(app)) => {
@@ -2957,14 +3269,32 @@ fn truncated_update_is_rejected_and_never_journaled() {
     assert!(rejected > 0, "truncated prefixes must be rejected");
     // The empty update is rejected too.
     assert!(matches!(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &[], &NoFaults, 1_000),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &[],
+            LocalAppend::default(),
+            &NoFaults,
+            1_000,
+            |_tx, _outcome, _update_sha| Ok(()),
+        ),
         Err(CollabError::EmptyUpdate)
     ));
     // The genuine update still lands cleanly afterward (rejection left no torn
     // state).
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &good, &NoFaults, 1_000)
-            .expect("good"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &good,
+            LocalAppend::default(),
+            &NoFaults,
+            1_000,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("good"),
     );
     let persisted = load_persisted(&ts.store, &key).expect("load").expect("m");
     assert_eq!(
@@ -2991,8 +3321,8 @@ fn yrs_abort_witness_is_rejected_fail_closed_on_both_ingestion_paths() {
         0xf6, 0xfc, 0xae, 0x1d, 0xbd, 0x17, 0xee, 0x48, 0x42, 0xb4, 0x02,
     ];
 
-    // Local edit path: `record_local_update_creating_marker` /
-    // `record_local_update` -> `validate_update_bytes` -> the pre-validator.
+    // Local edit path: `record_local_update` -> `validate_update_bytes`
+    // -> the pre-validator.
     let mut local = fresh_store("yrs-abort-witness-local");
     let local_key = test_key();
     seed_parents(&mut local.store, &local_key, 1_000);
@@ -3012,8 +3342,10 @@ fn yrs_abort_witness_is_rejected_fail_closed_on_both_ingestion_paths() {
         &mut local.cache,
         &local_key,
         &WITNESS,
+        LocalAppend::default(),
         &NoFaults,
         1_000,
+        |_tx, _outcome, _update_sha| Ok(()),
     );
     assert!(
         local_result.is_err(),
@@ -3170,8 +3502,10 @@ fn unknown_marker_content_kind_cannot_project_append_or_settle_as_richdoc() {
             &mut ts.cache,
             &key,
             &first_update,
+            LocalAppend::default(),
             &NoFaults,
             1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("richdoc update"),
     );
@@ -3205,8 +3539,10 @@ fn unknown_marker_content_kind_cannot_project_append_or_settle_as_richdoc() {
             &mut ts.cache,
             &key,
             &rejected_update,
+            LocalAppend::default(),
             &NoFaults,
             1_200,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect_err("append must refuse"),
     );
@@ -3266,7 +3602,17 @@ fn settle_projects_and_enqueues_an_idempotent_job() {
     let doc = Ydoc::wire();
     let d = doc.plaintext_insert(0, "the settled markdown body");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &d, &NoFaults, 1_000).expect("rec"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &d,
+            LocalAppend::default(),
+            &NoFaults,
+            1_000,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("rec"),
     );
 
     let first =
@@ -3326,8 +3672,10 @@ mod crash {
                 &mut WriterDocCache::new(),
                 &key,
                 &update,
+                LocalAppend::default(),
                 &faults,
                 1_000,
+                |_tx, _outcome, _update_sha| Ok(()),
             )
             .expect("rec");
             assert_eq!(out, TxnOutcome::Crashed { committed: true });
@@ -3345,8 +3693,10 @@ mod crash {
                 &mut WriterDocCache::new(),
                 &key,
                 &update,
+                LocalAppend::default(),
                 &NoFaults,
                 1_000,
+                |_tx, _outcome, _update_sha| Ok(()),
             )
             .expect("retry");
             assert!(
@@ -3387,8 +3737,10 @@ mod crash {
                 &mut WriterDocCache::new(),
                 &key,
                 &update,
+                LocalAppend::default(),
                 &faults,
                 1_000,
+                |_tx, _outcome, _update_sha| Ok(()),
             )
             .expect("rec");
             assert_eq!(out, TxnOutcome::Crashed { committed: false });
@@ -3400,8 +3752,10 @@ mod crash {
                 &mut WriterDocCache::new(),
                 &key,
                 &update,
+                LocalAppend::default(),
                 &NoFaults,
                 1_000,
+                |_tx, _outcome, _update_sha| Ok(()),
             )
             .expect("retry");
             assert!(matches!(retry, TxnOutcome::Committed(a) if !a.deduped));
@@ -3435,8 +3789,10 @@ mod crash {
                     &mut WriterDocCache::new(),
                     &key,
                     &d,
+                    LocalAppend::default(),
                     &NoFaults,
                     1_000,
+                    |_tx, _outcome, _update_sha| Ok(()),
                 )
                 .expect("rec"),
             );
@@ -3475,15 +3831,18 @@ fn local_collection_apply_derives_field_facts_and_the_created_transition() {
     // created, and the fact mirrors the history row it inserted.
     let first = peer.frontmatter_set("title", "Renamed");
     let outcome = committed(
-        record_local_update_with_origin(
+        record_local_update(
             &mut a.store,
             &mut a.cache,
             &key,
             &first,
-            Some("alice"),
-            None,
+            LocalAppend {
+                actor_origin_id: Some("alice"),
+                ..Default::default()
+            },
             &NoFaults,
             1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("first field edit"),
     );
@@ -3511,15 +3870,18 @@ fn local_collection_apply_derives_field_facts_and_the_created_transition() {
     // changed, and the new fact's history id advances past the first.
     let second = peer.frontmatter_set("status", "done");
     let outcome = committed(
-        record_local_update_with_origin(
+        record_local_update(
             &mut a.store,
             &mut a.cache,
             &key,
             &second,
-            Some("alice"),
-            None,
+            LocalAppend {
+                actor_origin_id: Some("alice"),
+                ..Default::default()
+            },
             &NoFaults,
             1_200,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("second field edit"),
     );
@@ -3534,15 +3896,18 @@ fn local_collection_apply_derives_field_facts_and_the_created_transition() {
 
     // A byte-identical replay dedupes and derives no second fact set.
     let replay = committed(
-        record_local_update_with_origin(
+        record_local_update(
             &mut a.store,
             &mut a.cache,
             &key,
             &second,
-            Some("alice"),
-            None,
+            LocalAppend {
+                actor_origin_id: Some("alice"),
+                ..Default::default()
+            },
             &NoFaults,
             1_300,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("replayed edit"),
     );
@@ -3754,15 +4119,19 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
     // the facts carry no replication coordinate.
     let edit = peer.frontmatter_set("title", "Renamed");
     let outcome = committed(
-        record_local_update_with_origin(
+        record_local_update(
             &mut a.store,
             &mut a.cache,
             &key,
             &edit,
-            Some("alice"),
-            Some(&attribution),
+            LocalAppend {
+                actor_origin_id: Some("alice"),
+                attribution: Some(&attribution),
+                ..Default::default()
+            },
             &NoFaults,
             1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("attributed local edit"),
     );
@@ -3819,15 +4188,18 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
     // An unattributed write stays NULL on every column: absent means absent.
     let plain = peer.frontmatter_set("status", "done");
     let outcome = committed(
-        record_local_update_with_origin(
+        record_local_update(
             &mut a.store,
             &mut a.cache,
             &key,
             &plain,
-            Some("alice"),
-            None,
+            LocalAppend {
+                actor_origin_id: Some("alice"),
+                ..Default::default()
+            },
             &NoFaults,
             1_300,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("unattributed local edit"),
     );
@@ -3844,15 +4216,18 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         on_behalf_of: Some(String::new()),
         depth: 0,
     };
-    record_local_update_with_origin(
+    record_local_update(
         &mut a.store,
         &mut a.cache,
         &key,
         &peer.frontmatter_set("title", "Again"),
-        None,
-        Some(&bad),
+        LocalAppend {
+            attribution: Some(&bad),
+            ..Default::default()
+        },
         &NoFaults,
         1_400,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect_err("an empty onBehalfOf is refused");
 }
