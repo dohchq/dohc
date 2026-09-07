@@ -430,6 +430,23 @@ it("ignores a later pinned moment and permits a later valid same-path main edit"
   });
 });
 
+it.each([
+  { blob_sha256: null }, { byte_length: -1 }, { recorded_at_ms: -1 },
+])("refuses malformed latest-main facts without changing registered authority: %j", async change => {
+  await withBindingFixture((storage, path) => {
+    const before = raw(path, db => db.prepare(`SELECT * FROM ${documents}`).all());
+    raw(path, db => {
+      db.exec("PRAGMA ignore_check_constraints = ON");
+      seedReadMoment(db, { relay_seq: 2, moment_id: "malformed-latest", ...change });
+    });
+    for (const actor of [ownerActor, namedActor]) {
+      expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor }))
+        .toEqual({ kind: "refused", reason: "stale-document" });
+    }
+    expect(raw(path, db => db.prepare(`SELECT * FROM ${documents}`).all())).toEqual(before);
+  });
+});
+
 it.each(["absent", "closed", "retired", "another-lineage"] as const)("classifies current authority history as stale: %s", async state => {
   await withBindingFixture((storage, path) => {
     raw(path, db => {
