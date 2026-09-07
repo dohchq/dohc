@@ -169,7 +169,7 @@ The Rust gate retains its build budget and mandatory summary-verdict checks in b
 - Combine correctness and simplification in that review. Give the reviewer the diff, relevant source, and required behavior.
 - Authorization, isolation, security, privacy, migration, durability, and major integration changes need a second independent reviewer of those risks.
 - Add a second reviewer for a disputed blocking finding. Give that reviewer the disputed behavior and source.
-- Name the required reviewers and their scopes in the PR. Follow the shared model-routing policy for model selection.
+- Name the required reviewers and their scopes in the PR.
 
 Keep each appointed reviewer through the fix rounds. Replace an unavailable reviewer once and record the reason.
 The replacement owns the remaining review, including necessary checks of later fixes.
