@@ -19,7 +19,7 @@
 // What a guard learned from lstat. Structural, so node:fs Stats satisfies it
 // and this module stays free of a filesystem import. lstat only: a symlink
 // must read as a link, never as what it points at.
-export interface SquattedPathStats {
+interface SquattedPathStats {
   isSymbolicLink(): boolean;
   isFile(): boolean;
 }

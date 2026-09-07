@@ -4,8 +4,8 @@ import {
   createDebouncer,
   EMPTY_WORD_CHAR_COUNT,
   getDocText,
-  type PMTextDocLike,
 } from "./wordCount";
+import { doc, hardBreak, heading, paragraph, schema } from "./testDocs";
 
 describe("countWordsAndCharacters", () => {
   it("returns zero for an empty string", () => {
@@ -54,30 +54,24 @@ describe("countWordsAndCharacters", () => {
 });
 
 describe("getDocText", () => {
-  function fakeDoc(text: string): PMTextDocLike {
-    return {
-      content: { size: text.length || 0 },
-      textBetween: () => text,
-    };
-  }
-
-  it("returns empty string for an empty doc (size 0), without calling textBetween", () => {
-    const textBetween = vi.fn();
-    const doc: PMTextDocLike = { content: { size: 0 }, textBetween };
-    expect(getDocText(doc)).toBe("");
-    expect(textBetween).not.toHaveBeenCalled();
+  it("returns empty string for an empty doc (content size 0)", () => {
+    // NodeType.create skips content validation, so this is a genuinely
+    // empty doc node — the size-0 short-circuit's input.
+    expect(getDocText(schema.nodes.doc.create())).toBe("");
   });
 
-  it("delegates to textBetween with block-separator newlines for a non-empty doc", () => {
-    const textBetween = vi.fn().mockReturnValue("Title\nBody text");
-    const doc: PMTextDocLike = { content: { size: 20 }, textBetween };
-    expect(getDocText(doc)).toBe("Title\nBody text");
-    expect(textBetween).toHaveBeenCalledWith(0, 20, "\n", "\n");
+  it("separates blocks and non-text leaves with newlines", () => {
+    expect(getDocText(doc(heading(1, "Title"), paragraph("Body text")))).toBe(
+      "Title\nBody text",
+    );
+    expect(getDocText(doc(paragraph("Hello", hardBreak(), "World")))).toBe("Hello\nWorld");
   });
 
   it("composes with countWordsAndCharacters end to end", () => {
-    const doc = fakeDoc("Hello world");
-    expect(countWordsAndCharacters(getDocText(doc))).toEqual({ words: 2, characters: 11 });
+    expect(countWordsAndCharacters(getDocText(doc(paragraph("Hello world"))))).toEqual({
+      words: 2,
+      characters: 11,
+    });
   });
 });
 

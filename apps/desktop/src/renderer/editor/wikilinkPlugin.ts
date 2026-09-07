@@ -26,9 +26,9 @@ import { isCodeBlock, isCodeMark } from "./pmHelpers";
 //      to the editor to replace the `[[query` with the chosen
 //      path + close brackets.
 
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
-import type { PMDocLike, PMNodeLike } from './inlineAtomPlugin'
 
 export const wikilinkPluginKey = new PluginKey('dohc-wikilink')
 
@@ -74,12 +74,12 @@ const WIKILINK_RE = /\\?\[\\?\[(!?)([^\]\n[]+)\\?\]\\?\]/g
 
 /** Pure: walk text nodes, return wikilink decoration ranges +
  *  resolved targets. Offsets are absolute doc coordinates. */
-export function computeWikilinkRanges(doc: PMDocLike): WikilinkRange[] {
+export function computeWikilinkRanges(doc: ProseMirrorNode): WikilinkRange[] {
   const ranges: WikilinkRange[] = []
   doc.descendants((node, pos, parent) => {
     if (!node.isText || !node.text) return
     if (isCodeBlock(parent)) return
-    if ((node.marks ?? []).some(isCodeMark)) return
+    if (node.marks.some(isCodeMark)) return
     const text = node.text
     WIKILINK_RE.lastIndex = 0
     let m: RegExpExecArray | null
@@ -101,14 +101,14 @@ export function computeWikilinkRanges(doc: PMDocLike): WikilinkRange[] {
  *  trailing characters match `\?[\?[query` (no closing `]]`), we
  *  emit the autocomplete state. */
 export function detectAutocomplete(
-  doc: PMDocLike,
+  doc: ProseMirrorNode,
   cursorPos: number,
 ): AutocompleteState {
   let found: AutocompleteState = { active: false }
   doc.descendants((node, pos, parent) => {
     if (!node.isText || !node.text) return
     if (isCodeBlock(parent)) return
-    if ((node.marks ?? []).some(isCodeMark)) return
+    if (node.marks.some(isCodeMark)) return
     const nodeStart = pos
     const nodeEnd = pos + node.text.length
     if (cursorPos < nodeStart || cursorPos > nodeEnd) return
@@ -183,11 +183,11 @@ function displayFor(
 }
 
 function buildWikilinkDecorations(
-  doc: unknown,
+  doc: ProseMirrorNode,
   knownFiles: ReadonlyMap<string, WikilinkFile>,
   cursorPos: number,
 ): DecorationSet {
-  const ranges = computeWikilinkRanges(doc as PMDocLike)
+  const ranges = computeWikilinkRanges(doc)
   const decorations: Decoration[] = []
   for (const r of ranges) {
     // D4.8c — Obsidian-style live preview toggle. When the cursor
@@ -224,7 +224,7 @@ function buildWikilinkDecorations(
       } as Record<string, string>),
     )
   }
-  return DecorationSet.create(doc as never, decorations)
+  return DecorationSet.create(doc, decorations)
 }
 
 /** Build the plugin.

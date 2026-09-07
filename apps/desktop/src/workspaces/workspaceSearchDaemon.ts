@@ -1,5 +1,5 @@
 import {
-  decodeSearchQueryPageResult,
+  decodeWorkspaceResult,
   WORKSPACE_METHOD,
   WorkspaceDaemonRequester,
   type JsonValue,
@@ -51,7 +51,8 @@ export async function queryWorkspaceSearchDaemon(
 
   for (;;) {
     if (!input.isCurrent()) return null;
-    const page = decodeSearchQueryPageResult(
+    const page = decodeWorkspaceResult(
+      WORKSPACE_METHOD.searchQueryPage,
       await input.daemon.queryPage({
         query: input.query,
         limit: input.limit,
