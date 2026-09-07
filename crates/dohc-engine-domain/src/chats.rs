@@ -1697,22 +1697,6 @@ fn normalize_mention_handle(handle: &str) -> Result<String, DomainError> {
         .ok_or_else(|| DomainError::chat("invalid-message-body", "Mention handle is invalid."))
 }
 
-fn normalize_verified_user_id(value: Option<&str>) -> Result<Option<String>, DomainError> {
-    match value {
-        None => Ok(None),
-        Some(value)
-            if !value.is_empty()
-                && value.encode_utf16().count() <= MAX_DISPATCH_ID_UTF16_UNITS
-                && !value.contains('\0') =>
-        {
-            Ok(Some(value.to_owned()))
-        }
-        Some(_) => Err(DomainError::InvalidInput {
-            reason: "verified user id is invalid",
-        }),
-    }
-}
-
 // ----------------------------------------------------------------------- store
 
 /// The chats domain bound to one workspace store. Cheap to construct per call;

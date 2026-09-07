@@ -1,8 +1,8 @@
 use super::{
     AgentRunRecord, DispatchClaim, DispatchRecord, DispatchRecovery, LinkedChatStore,
     MAX_DISPATCH_ID_UTF16_UNITS, RunRecordLink, ThreadDispatchPause, chat_after, collect,
-    committed, dispatch_corrupt, is_js_trim_ws, non_empty, normalize_verified_user_id,
-    persisted_nonnegative_safe, persisted_safe_integer, validate_chat_page_limit,
+    committed, dispatch_corrupt, is_js_trim_ws, non_empty, persisted_nonnegative_safe,
+    persisted_safe_integer, validate_chat_page_limit,
 };
 use crate::error::DomainError;
 use dohc_engine_storage::FaultInjector;
@@ -70,6 +70,22 @@ fn normalize_failure_reason(reason: &str) -> Result<String, DomainError> {
         })
     } else {
         Ok(reason.to_owned())
+    }
+}
+
+fn normalize_verified_user_id(value: Option<&str>) -> Result<Option<String>, DomainError> {
+    match value {
+        None => Ok(None),
+        Some(value)
+            if !value.is_empty()
+                && value.encode_utf16().count() <= MAX_DISPATCH_ID_UTF16_UNITS
+                && !value.contains('\0') =>
+        {
+            Ok(Some(value.to_owned()))
+        }
+        Some(_) => Err(DomainError::InvalidInput {
+            reason: "verified user id is invalid",
+        }),
     }
 }
 
