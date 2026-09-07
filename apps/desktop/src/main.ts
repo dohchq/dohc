@@ -72,11 +72,7 @@ import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
-import {
-  createCollectionRecord,
-  setCollectionRecordFields,
-  type CollectionRecordEditContext,
-} from "./workspaces/collectionRecordEdits";
+import type { CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { registerWorkspaceSearchIpcHandlers } from "./ipc/workspaceSearchIpc";
 
@@ -295,18 +291,12 @@ import {
   createPluginPanelSurfaceHostLease,
   createPluginWebAppHostLease,
 } from "./plugins/pluginHostStart";
-import { createPluginAuthoredTextWriter } from "./plugins/pluginAuthoredWrite";
-import {
-  invokePluginSdkHost,
-  type PluginAutomationRunAuthority,
-} from "./plugins/pluginSdkHost";
+import { createDesktopPluginSdk } from "./plugins/desktopPluginSdk";
 import { createOwnedWorkspaceSdkReads } from "./workspaces/ownedWorkspaceSdkReads";
-import { createPluginPanelSdkEventEmitter } from "./plugins/pluginPanelSdkEvent";
 import type { RegisteredPlugin } from "./plugins/pluginPanelRegistration";
 import { PluginWorkspaceRuntimes } from "./plugins/pluginWorkspaceRuntimes";
 import {
   type PluginSurfaces,
-  type PluginPanelSdkAuthorization,
 } from "./plugins/pluginSurfaces";
 
 import {
@@ -3011,203 +3001,15 @@ async function collectionEditContextFor(
   };
 }
 
-async function invokeWorkspacePluginSdk(input: {
-  workspaceId: string;
-  pluginId: string;
-  spawnId: string;
-  requestPath: "panel" | "plugin-process";
-  isWritable: () => boolean;
-  signal?: AbortSignal;
-  /** The claim id the plugin-process request declared (see SdkRequestParams). */
-  automationClaimId?: string;
-  invokeChildProcess?: (method: string, params?: unknown) => Promise<unknown>;
-  subscribeFileWatch?: (params: unknown) => { subscriptionId: string };
-  subscribeRecordWatch?: (
-    params: unknown,
-    readable?: ReadonlySet<string>,
-  ) => { subscriptionId: string };
-  unsubscribeWorkspaceEvents?: (params: unknown) => boolean;
-  method: string;
-  params?: unknown;
-}): Promise<unknown> {
-  return withPhysicalWorkspaceOperation(input.workspaceId, async (operation) => {
-    const workspace = operation.workspace;
-    const signal = input.signal
-      ? AbortSignal.any([input.signal, operation.signal])
-      : operation.signal;
-    // Resolve a request-declared automation claim against the runs this
-    // workspace's executor actually started on this plugin — main-derived
-    // authority, like the author; the plugin's tag grants nothing.
-    const automationRun: PluginAutomationRunAuthority | undefined =
-      input.automationClaimId === undefined
-        ? undefined
-        : operation.state.pluginRuntimes
-            .current(input.workspaceId)
-            ?.automations.activeRun({
-              claimId: input.automationClaimId,
-              pluginId: input.pluginId,
-            });
-    return invokePluginSdkHost(
-      {
-        pluginId: input.pluginId,
-        workspaceRoot: workspace.rootPath,
-        spawnId: input.spawnId,
-        requestPath: input.requestPath,
-        ...(input.automationClaimId === undefined
-          ? {}
-          : { automationClaimId: input.automationClaimId }),
-        ...(automationRun === undefined ? {} : { automationRun }),
-        // Read from the registration main holds, never from the request: what a
-        // plugin may open is what its approved manifest declares.
-        declaredWebApps: operation.state.pluginRuntimes
-          .current(input.workspaceId)
-          ?.registeredPlugin(input.pluginId)
-          ?.manifest.webApps,
-        isWritable: input.isWritable,
-        /** Main supplies this read authority. Plugins cannot select or widen it. */
-        reads: ownedWorkspaceReadsFor(workspace, workerDatabaseReader(signal)),
-        editDatabase: ({ path, edit, author, nowMs, operationId, signal: editSignal }) =>
-          editWorkspaceDatabaseInWorker({
-            rootPath: workspace.rootPath,
-            relativePath: path,
-            edit,
-            author,
-            nowMs,
-            ...(operationId ? { operationId } : {}),
-            ...(editSignal ? { signal: editSignal } : {}),
-          }),
-        writeAvailable: async () => {
-          try {
-            await openWorkspaceActivityForOperation(
-              operation,
-              {},
-              ensureWorkspaceActivityOpen,
-            );
-            operation.assertCurrent();
-            return Boolean(activity.engineCaptureFor(input.workspaceId));
-          } catch {
-            return false;
-          }
-        },
-        signal,
-        invokeChildProcess: input.invokeChildProcess,
-        subscribeFileWatch: input.subscribeFileWatch,
-        // The one main-side collection write seam. Authority mirrors
-        // writeAuthoredText: a writable workspace and a running engine
-        // capture, resolved when the write happens, never cached.
-        editCollections: {
-          // The idempotency key is the automation run's claim-id-plus-ordinal:
-          // it must reach the seam, or a reaper re-run could write twice.
-          setRecordFields: async ({
-            recordPath,
-            fields,
-            author,
-            idempotencyKey,
-            signal: editSignal,
-          }) =>
-            setCollectionRecordFields(
-              await collectionEditContextFor(operation, editSignal),
-              {
-                recordPath,
-                fields,
-                author,
-                ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
-              },
-            ),
-          createRecord: async ({
-            collectionPath,
-            name,
-            fields,
-            author,
-            idempotencyKey,
-            signal: editSignal,
-          }) =>
-            createCollectionRecord(
-              await collectionEditContextFor(operation, editSignal),
-              {
-                collectionPath,
-                name,
-                ...(fields === undefined ? {} : { fields }),
-                author,
-                ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
-              },
-            ),
-        },
-        subscribeRecordWatch: input.subscribeRecordWatch,
-        unsubscribeWorkspaceEvents: input.unsubscribeWorkspaceEvents,
-        writeAuthoredText: createPluginAuthoredTextWriter({
-          signal,
-          requireWritableCapture: async () => {
-            const { workspace: workspaceForWrite, capture } =
-              await requirePluginEngineCaptureForOperation(operation);
-            assertWritableWorkspace(workspaceForWrite);
-            return { workspaceRoot: workspaceForWrite.rootPath, capture };
-          },
-          pipeline: () =>
-            operation.state.pluginRuntimes.current(input.workspaceId)?.pipeline,
-        }),
-      },
-      input.method,
-      input.params,
-    );
+const { invokeWorkspacePluginSdk, routePluginPanelSdk } =
+  createDesktopPluginSdk<DesktopWorkspaceOperation>({
+    withPhysicalWorkspaceOperation, ownedWorkspaceReadsFor, workerDatabaseReader,
+    editWorkspaceDatabaseInWorker, openWorkspaceActivityForOperation,
+    ensureWorkspaceActivityOpen, activity, collectionEditContextFor,
+    requirePluginEngineCaptureForOperation, assertWritableWorkspace,
+    workspaceAuthorities, pluginWorkspaceRuntimes, sharedViewOf,
+    notifyPluginPanelSdkEvent,
   });
-}
-
-async function routePluginPanelSdk(input: {
-  authorization: PluginPanelSdkAuthorization;
-  method: string;
-  params?: unknown;
-}): Promise<unknown> {
-  const { authority, surfaceId, isPushLive } = input.authorization;
-  return workspaceAuthorities.withAuthority(authority.workspaceId, async () => {
-    const workspaceEvents = pluginWorkspaceRuntimes.current(
-      authority.workspaceId,
-    )?.workspaceEvents;
-    const owner = {
-      kind: "panel" as const,
-      workspaceId: authority.workspaceId,
-      pluginId: authority.pluginId,
-      panelId: authority.panelId,
-      surfaceId,
-    };
-    const emitEvent = workspaceEvents
-      ? createPluginPanelSdkEventEmitter({
-          workspaceId: authority.workspaceId,
-          pluginId: authority.pluginId,
-          panelId: authority.panelId,
-          isPanelRunning: isPushLive,
-          send: notifyPluginPanelSdkEvent,
-        })
-      : undefined;
-    return invokeWorkspacePluginSdk({
-      workspaceId: authority.workspaceId,
-      pluginId: authority.pluginId,
-      spawnId: authority.spawnId,
-      requestPath: "panel",
-      isWritable: () => !sharedViewOf(authority.workspaceId),
-      signal: authority.signal,
-      subscribeFileWatch:
-        workspaceEvents && emitEvent
-          ? (watchParams) =>
-              workspaceEvents.subscribe({ owner, emitEvent }, watchParams)
-          : undefined,
-      subscribeRecordWatch:
-        workspaceEvents && emitEvent
-          ? (watchParams, readable) =>
-              workspaceEvents.subscribeRecords(
-                { owner, emitEvent },
-                watchParams,
-                readable,
-              )
-          : undefined,
-      unsubscribeWorkspaceEvents: workspaceEvents
-        ? (watchParams) => workspaceEvents.unsubscribe({ owner }, watchParams)
-        : undefined,
-      method: input.method,
-      params: input.params,
-    });
-  });
-}
 
 // A plugin this workspace can serve panels for. The pipeline's current
 // discovery owns the manifest. The registration map is only a fallback for a
