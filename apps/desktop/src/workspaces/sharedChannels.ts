@@ -42,6 +42,8 @@ export function createKeyedSerializer(): <T>(key: string, run: () => Promise<T>)
   };
 }
 
+export const RELAY_FETCH_TIMEOUT_MS = 15_000;
+
 // Bounds every relay request in a shared-channel pass:
 // listChatChannels awaits the pass, so a hung relay socket must abort after
 // the timeout instead of blocking the Chats surface indefinitely. Errors ride

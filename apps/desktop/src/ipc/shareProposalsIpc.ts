@@ -17,8 +17,7 @@ import { requireCredentials } from "../workspaces/credentialScopedOperation";
 import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
 import { relayUrlsMatch } from "../workspaces/syncCode";
 import { assertShareChangesJournalable } from "../workspaces/shareViewRecords";
-import { relayFetchWithTimeout } from "../workspaces/sharedChannels";
-import { SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS } from "../workspaces/desktopSharedChannelSync";
+import { relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
 import type { ShareProposal, ShareProposalOp, SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -149,7 +148,7 @@ export function registerShareProposalsIpcHandlers<
             relay: {
               baseUrl: normalizeServerUrl(credentials.relayUrl),
               token: credentials.token,
-              fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+              fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
             },
             credentialGeneration: currentCredentialGeneration(),
           };
@@ -245,7 +244,7 @@ export function registerShareProposalsIpcHandlers<
             relay: {
               baseUrl: normalizeServerUrl(credentials.relayUrl),
               token: credentials.token,
-              fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+              fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
             },
             credentialGeneration: currentCredentialGeneration(),
           };
