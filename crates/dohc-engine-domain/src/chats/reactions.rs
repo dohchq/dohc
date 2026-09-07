@@ -1,6 +1,6 @@
 use super::{
     ChatActorKind, ChatReaction, ChatReactionState, LinkedChatStore, MAX_MESSAGE_PAGE, SetReaction,
-    base32_lowercase_no_padding, bump_chat_conversation_revision, collect, committed,
+    base32_lowercase_no_padding, bump_chat_conversation_revision, chat_after, collect, committed,
     insert_local_replication_op, is_js_trim_ws, local_replication_coordinate, lookup_request,
     map_reaction_row, nfc, non_empty, normalize_display_name, normalize_replicated_chat_id,
     persisted_safe_integer, record_request, relay_log_has_authored_message, require_thread,
@@ -537,10 +537,7 @@ impl<'a> LinkedChatStore<'a> {
         }
         self.store.read_with(|conn| {
             let thread = require_thread(conn, workspace_id, thread_id)?;
-            let (has_after, after_ms, after_id) = match after {
-                Some((at_ms, id)) => (1, at_ms, id),
-                None => (0, 0, String::new()),
-            };
+            let (has_after, after_ms, after_id) = chat_after(after);
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT r.reaction_id, r.thread_id, r.message_id, r.emoji, r.author_id, \

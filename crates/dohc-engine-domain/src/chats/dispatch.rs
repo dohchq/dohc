@@ -1,7 +1,7 @@
 use super::{
     AgentRunRecord, DispatchClaim, DispatchRecord, DispatchRecovery, LinkedChatStore,
-    MAX_DISPATCH_ID_UTF16_UNITS, RunRecordLink, ThreadDispatchPause, collect, committed,
-    dispatch_corrupt, is_js_trim_ws, non_empty, normalize_verified_user_id,
+    MAX_DISPATCH_ID_UTF16_UNITS, RunRecordLink, ThreadDispatchPause, chat_after, collect,
+    committed, dispatch_corrupt, is_js_trim_ws, non_empty, normalize_verified_user_id,
     persisted_nonnegative_safe, persisted_safe_integer, validate_chat_page_limit,
 };
 use crate::error::DomainError;
@@ -70,13 +70,6 @@ fn normalize_failure_reason(reason: &str) -> Result<String, DomainError> {
         })
     } else {
         Ok(reason.to_owned())
-    }
-}
-
-fn dispatch_after(after: Option<(i64, String)>) -> (i64, i64, String) {
-    match after {
-        Some((timestamp, id)) => (1, timestamp, id),
-        None => (0, 0, String::new()),
     }
 }
 
@@ -351,7 +344,7 @@ impl<'a> LinkedChatStore<'a> {
         limit: i64,
     ) -> Result<Vec<DispatchRecord>, DomainError> {
         validate_chat_page_limit(limit)?;
-        let (has_after, after_created_at_ms, after_trigger) = dispatch_after(after);
+        let (has_after, after_created_at_ms, after_trigger) = chat_after(after);
         self.store.read_with(|conn| {
             let mut stmt = conn
                 .prepare_cached(
@@ -389,7 +382,7 @@ impl<'a> LinkedChatStore<'a> {
         limit: i64,
     ) -> Result<Vec<DispatchClaim>, DomainError> {
         validate_chat_page_limit(limit)?;
-        let (has_after, after_updated_at_ms, after_trigger) = dispatch_after(after);
+        let (has_after, after_updated_at_ms, after_trigger) = chat_after(after);
         self.store.read_with(|conn| {
             let broken_running: i64 = conn
                 .query_row(
@@ -869,7 +862,7 @@ impl<'a> LinkedChatStore<'a> {
         limit: i64,
     ) -> Result<Vec<DispatchRecovery>, DomainError> {
         validate_chat_page_limit(limit)?;
-        let (has_after, after_started_at_ms, after_run_id) = dispatch_after(after);
+        let (has_after, after_started_at_ms, after_run_id) = chat_after(after);
         self.store.read_with(|conn| {
             let duplicate: i64 = conn
                 .query_row(

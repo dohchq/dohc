@@ -969,6 +969,13 @@ fn validate_chat_page_limit(limit: i64) -> Result<(), DomainError> {
     }
 }
 
+fn chat_after(after: Option<(i64, String)>) -> (i64, i64, String) {
+    match after {
+        Some((timestamp, id)) => (1, timestamp, id),
+        None => (0, 0, String::new()),
+    }
+}
+
 fn non_empty(value: &str, code: &'static str, reason: &'static str) -> Result<(), DomainError> {
     if value.is_empty() {
         Err(DomainError::chat(code, reason))
@@ -2749,10 +2756,7 @@ impl<'a> LinkedChatStore<'a> {
         }
         self.store.read_with(|conn| {
             let thread = require_thread(conn, workspace_id, thread_id)?;
-            let (has_after, after_ms, after_id) = match after {
-                Some((at_ms, id)) => (1, at_ms, id),
-                None => (0, 0, String::new()),
-            };
+            let (has_after, after_ms, after_id) = chat_after(after);
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT d.thread_id, d.message_id, d.state, d.resolved_by_message_id, d.at_ms \
@@ -2838,10 +2842,7 @@ impl<'a> LinkedChatStore<'a> {
         limit: i64,
     ) -> Result<Vec<ChannelThreadSummary>, DomainError> {
         validate_chat_page_limit(limit)?;
-        let (has_after, after_updated_at_ms, after_thread_id) = match after {
-            Some((updated_at_ms, thread_id)) => (1_i64, updated_at_ms, thread_id),
-            None => (0_i64, 0_i64, String::new()),
-        };
+        let (has_after, after_updated_at_ms, after_thread_id) = chat_after(after);
         self.store.read_with(|conn| {
             let channel = require_channel(conn, workspace_id, channel_id)?;
             // One page query carries every per-thread aggregate as a correlated
@@ -3017,10 +3018,7 @@ impl<'a> LinkedChatStore<'a> {
             ));
         }
         validate_chat_page_limit(limit)?;
-        let (has_after, after_created_at_ms, after_thread_id) = match after {
-            Some((created_at_ms, thread_id)) => (1_i64, created_at_ms, thread_id),
-            None => (0_i64, 0_i64, String::new()),
-        };
+        let (has_after, after_created_at_ms, after_thread_id) = chat_after(after);
         self.store.read_with(|conn| {
             let mut stmt = conn
                 .prepare_cached(
@@ -3089,10 +3087,7 @@ impl<'a> LinkedChatStore<'a> {
         limit: i64,
     ) -> Result<Vec<ChatAttachment>, DomainError> {
         validate_chat_page_limit(limit)?;
-        let (has_after, after_created_at_ms, after_attachment_id) = match after {
-            Some((created_at_ms, attachment_id)) => (1_i64, created_at_ms, attachment_id),
-            None => (0_i64, 0_i64, String::new()),
-        };
+        let (has_after, after_created_at_ms, after_attachment_id) = chat_after(after);
         self.store.read_with(|conn| {
             require_thread(conn, workspace_id, thread_id)?;
             let mut stmt = conn
@@ -3149,10 +3144,7 @@ impl<'a> LinkedChatStore<'a> {
             .as_deref()
             .or(path_hint.as_deref())
             .unwrap_or_default();
-        let (has_after, after_created_at_ms, after_attachment_id) = match after {
-            Some((created_at_ms, attachment_id)) => (1_i64, created_at_ms, attachment_id),
-            None => (0_i64, 0_i64, String::new()),
-        };
+        let (has_after, after_created_at_ms, after_attachment_id) = chat_after(after);
         self.store.read_with(|conn| {
             let predicate = if object_id.is_some() {
                 "a.object_id = ?2"
@@ -3371,10 +3363,7 @@ impl<'a> LinkedChatStore<'a> {
         limit: i64,
     ) -> Result<Vec<AgentUnreadThreadRow>, DomainError> {
         validate_chat_page_limit(limit)?;
-        let (has_after, after_created_at_ms, after_message_id) = match after {
-            Some((created_at_ms, message_id)) => (1_i64, created_at_ms, message_id),
-            None => (0_i64, 0_i64, String::new()),
-        };
+        let (has_after, after_created_at_ms, after_message_id) = chat_after(after);
         self.store.read_with(|conn| {
             let mut stmt = conn
                 .prepare_cached(
@@ -4445,10 +4434,7 @@ impl<'a> LinkedChatStore<'a> {
                 "Bookmark limit is invalid.",
             ));
         }
-        let (has_after, after_updated_at_ms, after_bookmark_id) = match after {
-            Some((updated_at_ms, bookmark_id)) => (1_i64, updated_at_ms, bookmark_id),
-            None => (0_i64, 0_i64, String::new()),
-        };
+        let (has_after, after_updated_at_ms, after_bookmark_id) = chat_after(after);
         self.store.read_with(|conn| {
             let mut stmt = conn
                 .prepare_cached(&format!(
