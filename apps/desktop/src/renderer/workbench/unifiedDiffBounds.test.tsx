@@ -14,7 +14,7 @@ vi.mock("./unifiedDiff", async (importOriginal) => {
   return { ...actual, computeTextDiff: computeTextDiffSpy };
 });
 
-const { EngineMomentDiffPage } = await import("../DesktopWorkspaceShell");
+const { EngineMomentDiffPage } = await import("./EngineMomentDiffPage");
 const { VersionComparePage } = await import("./WorkspaceVersions");
 const { momentDiffTabPath } = await import("./workbenchState");
 const noop = () => {};
