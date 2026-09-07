@@ -4,15 +4,17 @@ import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorTabs } from "./EditorTabs";
 import { Explorer, type ExplorerProps } from "./Explorer";
-import { buildTree, leafOf } from "./path-tree";
+import { buildTree } from "./path-tree";
+import { basenameOf } from "../path";
 import { isSingletonEditorTabPath } from "./workbenchState";
 
 // Real implementations, spied: every TreeRow render names its row through
-// leafOf, so its call count shows which rows actually re-rendered (the
-// chatFileMentions precedent). The fixtures keep every other leafOf caller
+// basenameOf, so its call count shows which rows actually re-rendered (the
+// chatFileMentions precedent). The fixtures keep every other basenameOf caller
 // quiet — no open editors, no pins, no inline edit, no delete dialog — so a
 // delta is TreeRow renders and nothing else.
 vi.mock("./path-tree", { spy: true });
+vi.mock("../path", { spy: true });
 vi.mock("./workbenchState", { spy: true });
 
 beforeEach(() => {
@@ -76,8 +78,8 @@ function rowButton(path: string): HTMLElement {
   return row;
 }
 
-function leafOfCalls(): number {
-  return vi.mocked(leafOf).mock.calls.length;
+function basenameOfCalls(): number {
+  return vi.mocked(basenameOf).mock.calls.length;
 }
 
 describe("Explorer render cost", () => {
@@ -125,15 +127,15 @@ describe("Explorer render cost", () => {
   // flags changed re-render, never the whole tree via new callback identities.
   it("re-renders only the rows a selection change touches", () => {
     render(<Explorer {...explorerProps()} />);
-    const baseline = leafOfCalls();
+    const baseline = basenameOfCalls();
 
     // First selection: only b.md gains selected + focused flags.
     fireEvent.click(rowButton("b.md"));
-    expect(leafOfCalls()).toBe(baseline + 1);
+    expect(basenameOfCalls()).toBe(baseline + 1);
 
     // Moving the selection: b.md clears, d.md gains — two rows, not four.
     fireEvent.click(rowButton("d.md"));
-    expect(leafOfCalls()).toBe(baseline + 3);
+    expect(basenameOfCalls()).toBe(baseline + 3);
   });
 
   it("mounts only a bounded window for a large tree", () => {

@@ -1,5 +1,5 @@
 import { forwardRef } from "react";
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from "react";
 import { DohcMark } from "@dohc/brand";
 
 // The dohc control primitives — the canonical implementations of the recipes
@@ -20,23 +20,29 @@ const secondaryButtonClass =
 const iconButtonClass =
   "grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:pointer-events-none disabled:opacity-40";
 
+type ActionButtonProps = NativeButtonProps & { size?: "default" | "compact" };
+const compactPrimaryButtonClass =
+  "h-7 cursor-pointer rounded-md bg-accent px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 dohc-focus-visible focus-visible:outline-offset-1 disabled:cursor-wait disabled:opacity-50";
+const compactSecondaryButtonClass =
+  "h-7 cursor-pointer rounded-md border border-line px-2.5 text-[11px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-50";
+
 /** Filled brand-accent CTA — at most one per surface. */
-export function PrimaryButton({ className, type, ...rest }: NativeButtonProps) {
+export function PrimaryButton({ className, type, size, ...rest }: ActionButtonProps) {
   return (
     <button
       type={type ?? "button"}
-      className={cx(primaryButtonClass, className)}
+      className={cx(size === "compact" ? compactPrimaryButtonClass : primaryButtonClass, className)}
       {...rest}
     />
   );
 }
 
 /** Quiet bordered action — the default button. */
-export function SecondaryButton({ className, type, ...rest }: NativeButtonProps) {
+export function SecondaryButton({ className, type, size, ...rest }: ActionButtonProps) {
   return (
     <button
       type={type ?? "button"}
-      className={cx(secondaryButtonClass, className)}
+      className={cx(size === "compact" ? compactSecondaryButtonClass : secondaryButtonClass, className)}
       {...rest}
     />
   );
@@ -81,21 +87,24 @@ export function Pill({
 
 /** Uppercase section label for panel groups. */
 export function SectionLabel({
+  as: Element = "span",
   className,
   children,
+  ...rest
 }: {
-  className?: string;
+  as?: "span" | "p" | "div" | "header" | "h3";
   children: ReactNode;
-}) {
+} & HTMLAttributes<HTMLElement>) {
   return (
-    <span
+    <Element
+      {...rest}
       className={cx(
-        "text-[10px] font-semibold uppercase tracking-wide text-subtle",
+        "dohc-section-label",
         className,
       )}
     >
       {children}
-    </span>
+    </Element>
   );
 }
 

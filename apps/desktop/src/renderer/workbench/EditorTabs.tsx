@@ -1,3 +1,4 @@
+import { basenameOf } from "../path";
 import { ChevronDown, Columns2, X } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
 import { prefersReducedMotion } from "../reducedMotion";
@@ -17,7 +18,7 @@ import {
 } from "./workbenchState";
 
 export function momentDiffName(label?: string): string {
-  const name = label?.split("/").pop();
+  const name = label === undefined ? undefined : basenameOf(label);
   return name ? `Diff: ${name}` : "History change";
 }
 
@@ -47,7 +48,7 @@ function fileName(path: string, label?: string): string {
     return momentDiffName(label);
   }
   if (isVersionCompareTabPath(path)) return "Compare with Main";
-  return path.split("/").pop() ?? path;
+  return basenameOf(path);
 }
 
 function tabTitle(path: string, label?: string): string {

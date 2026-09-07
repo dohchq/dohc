@@ -4,11 +4,12 @@ import {
   DismissShareHandoffPayload,
   ShareHandoffStatus,
 } from "./ipc/bridgeContract";
-import { parseShareHandoffStatus, SHARE_HANDOFF_STATUSES } from "./ipc/channels";
+
+const STATUSES = ShareHandoffStatus.options.map((option) => option.shape.status.value);
 
 describe("share handoff status bridge", () => {
   it("accepts only the closed status union with a bounded identity while visible", () => {
-    for (const status of SHARE_HANDOFF_STATUSES) {
+    for (const status of STATUSES) {
       const value =
         status === "idle"
           ? { status }
@@ -27,33 +28,28 @@ describe("share handoff status bridge", () => {
           : status === "done"
             ? { status, statusId: "status-1", shareId: "share-1" }
             : { status, statusId: "status-1" };
-      expect(parseShareHandoffStatus(value)).toEqual(value);
       expect(ShareHandoffStatus.parse(value)).toEqual(value);
     }
 
-    for (const status of SHARE_HANDOFF_STATUSES.filter(
+    for (const status of STATUSES.filter(
       (value) =>
         value !== "idle" &&
         value !== "done" &&
         value !== "failed-wrong-server",
     )) {
-      expect(parseShareHandoffStatus({ status })).toBeNull();
       expect(ShareHandoffStatus.safeParse({ status }).success).toBe(false);
     }
-    expect(
-      parseShareHandoffStatus({ status: "idle", statusId: "status-1" }),
-    ).toBeNull();
     expect(
       ShareHandoffStatus.safeParse({ status: "idle", statusId: "status-1" })
         .success,
     ).toBe(false);
     expect(
-      parseShareHandoffStatus({
+      ShareHandoffStatus.safeParse({
         status: "waiting-for-acceptance",
         statusId: "status-1",
         email: "",
-      }),
-    ).toBeNull();
+      }).success,
+    ).toBe(false);
     expect(
       ShareHandoffStatus.safeParse({
         status: "waiting-for-acceptance",
@@ -62,23 +58,10 @@ describe("share handoff status bridge", () => {
       }).success,
     ).toBe(false);
     expect(
-      parseShareHandoffStatus({
-        status: "done",
-        statusId: "status-1",
-      }),
-    ).toBeNull();
-    expect(
       ShareHandoffStatus.safeParse({ status: "done", statusId: "status-1" })
         .success,
     ).toBe(false);
     for (const linkRelayUrl of ["", "x".repeat(2049)]) {
-      expect(
-        parseShareHandoffStatus({
-          status: "failed-wrong-server",
-          statusId: "status-1",
-          linkRelayUrl,
-        }),
-      ).toBeNull();
       expect(
         ShareHandoffStatus.safeParse({
           status: "failed-wrong-server",
@@ -87,12 +70,6 @@ describe("share handoff status bridge", () => {
         }).success,
       ).toBe(false);
     }
-    expect(
-      parseShareHandoffStatus({
-        status: "failed-wrong-server",
-        statusId: "status-1",
-      }),
-    ).toBeNull();
     expect(
       ShareHandoffStatus.safeParse({
         status: "failed-wrong-server",
@@ -105,7 +82,6 @@ describe("share handoff status bridge", () => {
     "rejects the forbidden %s field from snapshots and events",
     (field) => {
       const raw = { status: "idle", [field]: "secret" };
-      expect(parseShareHandoffStatus(raw)).toBeNull();
       expect(ShareHandoffStatus.safeParse(raw).success).toBe(false);
       const acceptance = {
         status: "waiting-for-acceptance",
@@ -113,7 +89,6 @@ describe("share handoff status bridge", () => {
         email: "current@dohc.test",
         [field]: "secret",
       };
-      expect(parseShareHandoffStatus(acceptance)).toBeNull();
       expect(ShareHandoffStatus.safeParse(acceptance).success).toBe(false);
     },
   );
@@ -124,7 +99,6 @@ describe("share handoff status bridge", () => {
       statusId: "status-1",
       linkRelayUrl: "https://relay-a.example",
     };
-    expect(parseShareHandoffStatus(mismatch)).toEqual(mismatch);
     expect(ShareHandoffStatus.parse(mismatch)).toEqual(mismatch);
 
     for (const status of ["idle", "waiting-for-sign-in", "redeeming"] as const) {
@@ -133,39 +107,33 @@ describe("share handoff status bridge", () => {
         ...(status === "idle" ? {} : { statusId: "status-1" }),
         linkRelayUrl: "https://relay-a.example",
       };
-      expect(parseShareHandoffStatus(raw)).toBeNull();
       expect(ShareHandoffStatus.safeParse(raw).success).toBe(false);
     }
     const genericRelay = { ...mismatch, relayUrl: mismatch.linkRelayUrl };
-    expect(parseShareHandoffStatus(genericRelay)).toBeNull();
     expect(ShareHandoffStatus.safeParse(genericRelay).success).toBe(false);
   });
 
-  it("rejects unknown fields, states, inherited fields, and malformed share ids", () => {
-    expect(parseShareHandoffStatus({ status: "idle", extra: true })).toBeNull();
-    expect(parseShareHandoffStatus({ status: "unknown" })).toBeNull();
-    expect(parseShareHandoffStatus(Object.create({ status: "idle" }))).toBeNull();
-    expect(parseShareHandoffStatus({ status: new String("idle") })).toBeNull();
+  it("rejects unknown fields, states, impostors, and malformed share ids", () => {
+    expect(ShareHandoffStatus.safeParse({ status: "idle", extra: true }).success).toBe(false);
+    expect(ShareHandoffStatus.safeParse({ status: "unknown" }).success).toBe(false);
     expect(
-      parseShareHandoffStatus({
-        status: "redeeming",
-        statusId: "x".repeat(201),
-      }),
-    ).toBeNull();
+      ShareHandoffStatus.safeParse({ status: new String("idle") }).success,
+    ).toBe(false);
     expect(
-      parseShareHandoffStatus({
-        status: "done",
-        statusId: "status-1",
-        shareId: "",
-      }),
-    ).toBeNull();
+      ShareHandoffStatus.safeParse({ status: "redeeming", statusId: "x".repeat(201) })
+        .success,
+    ).toBe(false);
     expect(
-      parseShareHandoffStatus({
+      ShareHandoffStatus.safeParse({ status: "done", statusId: "status-1", shareId: "" })
+        .success,
+    ).toBe(false);
+    expect(
+      ShareHandoffStatus.safeParse({
         status: "done",
         statusId: "status-1",
         shareId: "x".repeat(201),
-      }),
-    ).toBeNull();
+      }).success,
+    ).toBe(false);
   });
 
   it("requires only the captured status identity in action payloads", () => {

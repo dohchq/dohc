@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
-import { Overlay } from "./Overlay";
+import { ConfirmDialog } from "./ui/ConfirmDialog";
 
 type Ask = (url: string) => Promise<boolean>;
 
@@ -58,20 +58,15 @@ export function ExternalLinkConfirm(props: { workspaceId: string }) {
 
   if (url === null) return null;
   return (
-    <Overlay onClose={() => settle(false)}>
-      <div
-        data-testid="external-link-confirm"
-        className="w-[min(420px,calc(100vw-32px))] rounded border border-line bg-panel p-4 shadow-xl"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="external-link-confirm-title"
-      >
-        <h3
-          id="external-link-confirm-title"
-          className="m-0 text-sm font-semibold text-ink"
-        >
-          Open this link outside dohc?
-        </h3>
+    <ConfirmDialog
+      title="Open this link outside dohc?"
+      confirmLabel="Open link"
+      onCancel={() => settle(false)}
+      onConfirm={() => settle(true)}
+      testId="external-link-confirm"
+      cancelTestId="external-link-confirm-cancel"
+      confirmTestId="external-link-confirm-open"
+    >
         <p
           data-testid="external-link-confirm-url"
           className="mb-0 mt-2 break-all font-mono text-xs leading-5 text-ink"
@@ -82,25 +77,6 @@ export function ExternalLinkConfirm(props: { workspaceId: string }) {
           dohc opens this link in another app. Turn off Confirm external links
           in Settings to open links without asking.
         </p>
-        <div className="mt-4 flex justify-end gap-2">
-          <button
-            type="button"
-            data-testid="external-link-confirm-cancel"
-            onClick={() => settle(false)}
-            className="h-8 cursor-pointer rounded border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            data-testid="external-link-confirm-open"
-            onClick={() => settle(true)}
-            className="h-8 cursor-pointer rounded bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90"
-          >
-            Open link
-          </button>
-        </div>
-      </div>
-    </Overlay>
+    </ConfirmDialog>
   );
 }
