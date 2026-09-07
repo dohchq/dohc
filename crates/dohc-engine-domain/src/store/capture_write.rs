@@ -2258,7 +2258,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_capture_reuses_prepared_state_without_result_readback() {
+    fn fresh_capture_result_matches_persisted_moment_and_snapshot() {
         let scratch = ScratchDir::new().expect("scratch");
         let mut store = EngineStore::open(
             &dohc_engine_testkit::engine_db_path(&scratch).expect("db"),
@@ -2387,7 +2387,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_capture_fast_path_matches_hydration_at_history_text_cap() {
+    fn fresh_capture_result_matches_hydration_at_history_text_cap() {
         let scratch = ScratchDir::new().expect("scratch");
         let mut store = EngineStore::open(
             &dohc_engine_testkit::engine_db_path(&scratch).expect("db"),
@@ -2421,7 +2421,7 @@ mod tests {
     }
 
     #[test]
-    fn renamed_capture_path_uses_disambiguated_object_fast_path() {
+    fn renamed_capture_path_uses_disambiguated_object() {
         let scratch = ScratchDir::new().expect("scratch");
         let mut store = EngineStore::open(
             &dohc_engine_testkit::engine_db_path(&scratch).expect("db"),
@@ -2526,7 +2526,7 @@ mod tests {
     }
 
     #[test]
-    fn retired_capture_reuses_unaliased_object_with_result_hydration() {
+    fn retired_capture_reuses_unaliased_object() {
         let scratch = ScratchDir::new().expect("scratch");
         let mut store = EngineStore::open(
             &dohc_engine_testkit::engine_db_path(&scratch).expect("db"),
