@@ -1,3 +1,4 @@
+import { ipcErrorMessage } from "../ipcError";
 import { useEffect, useRef, useState } from "react";
 import type {
   RelayShareReceivedRow,
@@ -46,11 +47,6 @@ type LoadState =
 // and the one thing left for the user to do.
 const FOLDER_LEFT_NOTICE =
   "Removed the share from this workspace. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.";
-
-function errorMessage(cause: unknown): string {
-  const text = cause instanceof Error ? cause.message : String(cause);
-  return text.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
-}
 
 function selectorLabel(share: RelayShareReceivedRow): string {
   if (!share.selector) return "Unreadable share";
@@ -196,7 +192,7 @@ export function SharedWithMeList(props: {
       });
     } catch (cause) {
       if (token !== refreshToken.current) return;
-      setLoad({ status: "error", message: errorMessage(cause) });
+      setLoad({ status: "error", message: ipcErrorMessage(cause) });
     }
   }
 
@@ -245,7 +241,7 @@ export function SharedWithMeList(props: {
       await refresh();
       if (live()) props.onWorkspaceFilesChanged?.();
     } catch (cause) {
-      if (live()) setLoad({ status: "error", message: errorMessage(cause) });
+      if (live()) setLoad({ status: "error", message: ipcErrorMessage(cause) });
     } finally {
       if (live()) setBusyShareId(null);
     }
@@ -268,7 +264,7 @@ export function SharedWithMeList(props: {
       await refresh();
     } catch (cause) {
       if (epoch !== workspaceEpoch.current) return;
-      setLoad({ status: "error", message: errorMessage(cause) });
+      setLoad({ status: "error", message: ipcErrorMessage(cause) });
     }
   }
 
@@ -296,7 +292,7 @@ export function SharedWithMeList(props: {
         );
       }
     } catch (cause) {
-      if (live()) setLoad({ status: "error", message: errorMessage(cause) });
+      if (live()) setLoad({ status: "error", message: ipcErrorMessage(cause) });
     } finally {
       if (live()) setBusyShareId(null);
     }

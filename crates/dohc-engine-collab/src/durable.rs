@@ -434,197 +434,50 @@ pub fn rewrite_bare_marker_content_kind(
     })
 }
 
-/// Append a locally-produced update to the durable log (advancing the head).
-/// Validates the bytes before any blob put / journal (constraint 5: never
-/// journal bytes that fail validation); content-addresses them; and dedups on
-/// the blob sha so a crash-retry is exactly-once. Self-bounds the log: a
-/// genuinely-new append triggers compaction once the pending count reaches the
-/// default threshold, so a long-lived session that never explicitly compacts
-/// still keeps a finite log (the "everything bounded" invariant).
-pub fn record_local_update(
-    store: &mut EngineStore,
-    cache: &mut WriterDocCache,
-    key: &DocKey,
-    update: &[u8],
-    faults: &dyn FaultInjector,
-    now_ms: i64,
-) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
-    record_local_update_with_origin(store, cache, key, update, None, None, faults, now_ms)
+/// The active lineage a local append must still belong to.
+#[derive(Debug, Default, Clone, Copy)]
+pub enum LineageGuard<'a> {
+    #[default]
+    Unchecked,
+    /// `None` requires an unclaimed lineage; it does not skip the guard.
+    Expect(Option<&'a str>),
 }
 
-/// [`record_local_update`] with the requesting client's actor origin id
-/// persisted onto the appended row (`ydoc_updates.actor_origin_id`) —
-/// provenance/echo-filter parity with the TS driver, which stores the
-/// caller-supplied origin rather than dropping it.
-#[allow(clippy::too_many_arguments)]
-pub fn record_local_update_with_origin(
-    store: &mut EngineStore,
-    cache: &mut WriterDocCache,
-    key: &DocKey,
-    update: &[u8],
-    actor_origin_id: Option<&str>,
-    attribution: Option<&ChangeAttribution>,
-    faults: &dyn FaultInjector,
-    now_ms: i64,
-) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
-    validate_update_bytes(update)?;
-    let sha = crate::hex_sha256(update);
-
-    let mut probe = GateBaseProbe::default();
-    let mut pending_after_append = None;
-    let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
-        let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
-        let outcome = append_local_update_cached(
-            tx,
-            key,
-            &marker,
-            update,
-            &sha,
-            true,
-            actor_origin_id,
-            attribution,
-            now_ms,
-            cache,
-            &mut probe,
-        )?;
-        if !outcome.deduped {
-            pending_after_append = Some(outcome.seq - marker.head_snapshot_seq);
-        }
-        probe.capture_commit(tx, key);
-        Ok(outcome)
-    });
-    let outcome = match outcome {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            cache.finish_local_gate_error(key, &probe);
-            return Err(error);
-        }
-    };
-    finalize_local_append(
-        store,
-        cache,
-        key,
-        outcome,
-        pending_after_append,
-        update,
-        &sha,
-        probe,
-        faults,
-        now_ms,
-    )
+/// Marker metadata for an append that may create the document.
+#[derive(Debug, Clone, Copy)]
+pub struct MarkerCreation<'a> {
+    pub path: Option<&'a str>,
+    pub content_kind: ContentKind,
+    pub regime: Regime,
 }
 
-/// Create a marker when needed and append a locally-produced update in one
-/// transaction. Validation, replay parity, blob storage, journal append, and
-/// first-marker creation therefore share one rollback boundary.
-#[allow(clippy::too_many_arguments)]
-pub fn record_local_update_creating_marker(
-    store: &mut EngineStore,
-    cache: &mut WriterDocCache,
-    key: &DocKey,
-    path: Option<&str>,
-    content_kind: ContentKind,
-    regime: Regime,
-    update: &[u8],
-    actor_origin_id: Option<&str>,
-    faults: &dyn FaultInjector,
-    now_ms: i64,
-) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
-    record_local_update_creating_marker_guarded(
-        store,
-        cache,
-        key,
-        path,
-        content_kind,
-        regime,
-        update,
-        actor_origin_id,
-        None,
-        false,
-        false,
-        None,
-        faults,
-        now_ms,
-        |_tx, _outcome| Ok(()),
-    )
+/// Options for one local append. Defaults require an existing marker.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LocalAppend<'a> {
+    pub marker: Option<MarkerCreation<'a>>,
+    pub actor_origin_id: Option<&'a str>,
+    pub attribution: Option<&'a ChangeAttribution>,
+    pub lineage_guard: LineageGuard<'a>,
+    pub ensure_parent_row: bool,
+    pub require_empty_lineage: bool,
+    /// Captured artifact imported by a client-declared first seed.
+    /// Other first updates must leave this unset so settlement writes the file.
+    pub seed_source_sha256: Option<&'a str>,
+    pub request_id: Option<&'a str>,
 }
 
-/// The full first-seed form: optionally ensures the `file_objects` parent row
-/// and enforces the empty-lineage seed guard — all in one transaction with the
-/// append, so a crash cannot strand a bare parent row and a timed-out-commit
-/// retry of the same seed bytes dedupes (the blob check precedes the guard)
-/// instead of refusing seed-onto-existing-lineage.
+/// Append a local update with content deduplication and bounded compaction.
+/// Without marker creation, validate bytes before opening the transaction.
+/// With marker creation, replay requests and check lineage before validation.
+/// Parent creation, marker changes, append, and the hook share one transaction.
+/// The hook receives the journaled update's SHA-256 and runs only for new rows.
 #[allow(clippy::too_many_arguments)]
-pub fn record_local_update_creating_marker_guarded<F>(
+pub fn record_local_update<F>(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
     key: &DocKey,
-    path: Option<&str>,
-    content_kind: ContentKind,
-    regime: Regime,
     update: &[u8],
-    actor_origin_id: Option<&str>,
-    attribution: Option<&ChangeAttribution>,
-    ensure_parent_row: bool,
-    require_empty_lineage: bool,
-    request_id: Option<&str>,
-    faults: &dyn FaultInjector,
-    now_ms: i64,
-    post_append: F,
-) -> Result<TxnOutcome<AppendOutcome>, CollabError>
-where
-    F: FnOnce(&Transaction<'_>, &mut AppendOutcome) -> Result<(), CollabError>,
-{
-    record_local_update_creating_marker_guarded_inner(
-        store,
-        cache,
-        key,
-        path,
-        content_kind,
-        regime,
-        update,
-        actor_origin_id,
-        attribution,
-        None,
-        ensure_parent_row,
-        require_empty_lineage,
-        None,
-        request_id,
-        faults,
-        now_ms,
-        |tx, outcome, _update_sha| post_append(tx, outcome),
-    )
-}
-
-/// [`record_local_update_creating_marker_guarded`] with an active-lineage CAS.
-/// `None` means the caller is bound to an unclaimed lineage, not "skip the
-/// guard". The idempotency hash binds the expected claim before replay.
-///
-/// The post-append hook also receives the update's hex sha256 — the digest
-/// this append journals — so a caller journaling an outbound op keyed by the
-/// blob sha does not hash the bytes a second time.
-///
-/// `seed_source_sha256` is the captured head whose content this update
-/// imports, recorded on the marker with the append. Pass it only for a
-/// client-declared seed; any other first update (a crash-replayed prior
-/// state, for example) must leave it `None` so settle and close never treat
-/// the file as already holding the doc.
-#[allow(clippy::too_many_arguments)]
-pub fn record_local_update_creating_marker_guarded_for_lineage<F>(
-    store: &mut EngineStore,
-    cache: &mut WriterDocCache,
-    key: &DocKey,
-    path: Option<&str>,
-    content_kind: ContentKind,
-    regime: Regime,
-    update: &[u8],
-    actor_origin_id: Option<&str>,
-    attribution: Option<&ChangeAttribution>,
-    expected_lineage_claim_id: Option<&str>,
-    ensure_parent_row: bool,
-    require_empty_lineage: bool,
-    seed_source_sha256: Option<&str>,
-    request_id: Option<&str>,
+    append: LocalAppend<'_>,
     faults: &dyn FaultInjector,
     now_ms: i64,
     post_append: F,
@@ -632,50 +485,20 @@ pub fn record_local_update_creating_marker_guarded_for_lineage<F>(
 where
     F: FnOnce(&Transaction<'_>, &mut AppendOutcome, &str) -> Result<(), CollabError>,
 {
-    record_local_update_creating_marker_guarded_inner(
-        store,
-        cache,
-        key,
-        path,
-        content_kind,
-        regime,
-        update,
+    let LocalAppend {
+        marker,
         actor_origin_id,
         attribution,
-        Some(expected_lineage_claim_id),
+        lineage_guard,
         ensure_parent_row,
         require_empty_lineage,
         seed_source_sha256,
         request_id,
-        faults,
-        now_ms,
-        post_append,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record_local_update_creating_marker_guarded_inner<F>(
-    store: &mut EngineStore,
-    cache: &mut WriterDocCache,
-    key: &DocKey,
-    path: Option<&str>,
-    content_kind: ContentKind,
-    regime: Regime,
-    update: &[u8],
-    actor_origin_id: Option<&str>,
-    attribution: Option<&ChangeAttribution>,
-    lineage_guard: Option<Option<&str>>,
-    ensure_parent_row: bool,
-    require_empty_lineage: bool,
-    seed_source_sha256: Option<&str>,
-    request_id: Option<&str>,
-    faults: &dyn FaultInjector,
-    now_ms: i64,
-    post_append: F,
-) -> Result<TxnOutcome<AppendOutcome>, CollabError>
-where
-    F: FnOnce(&Transaction<'_>, &mut AppendOutcome, &str) -> Result<(), CollabError>,
-{
+    } = append;
+    if marker.is_none() {
+        validate_update_bytes(update)?;
+    }
+    let path = marker.and_then(|marker| marker.path);
     // Hashed once per append: the idempotency key, the seed-retry dedupe
     // probe, the blob row, and the caller's post-append hook all reuse this
     // digest instead of re-walking the update bytes.
@@ -698,9 +521,9 @@ where
                 key.object_id,
                 update_sha,
                 match lineage_guard {
-                    None => "unguarded".to_owned(),
-                    Some(None) => "unclaimed".to_owned(),
-                    Some(Some(claim)) => format!("claim:{claim}"),
+                    LineageGuard::Unchecked => "unguarded".to_owned(),
+                    LineageGuard::Expect(None) => "unclaimed".to_owned(),
+                    LineageGuard::Expect(Some(claim)) => format!("claim:{claim}"),
                 },
                 sep = char::from(0),
             )
@@ -734,7 +557,7 @@ where
                 });
             }
         }
-        if let Some(expected) = lineage_guard {
+        if let LineageGuard::Expect(expected) = lineage_guard {
             let observed = query_marker(tx, key)?.and_then(|marker| marker.lineage_claim_id);
             if observed.as_deref() != expected {
                 return Err(CollabError::LineageWriteStale {
@@ -776,47 +599,56 @@ where
             }
             return Err(CollabError::SeedOntoExistingLineage);
         }
-        validate_update_bytes(update)?;
-        let marker = match query_marker(tx, key)? {
-            Some(marker) => {
-                if marker.content_kind != content_kind {
-                    return Err(CollabError::ContentKindMismatch);
+        let marker = if let Some(MarkerCreation {
+            content_kind,
+            regime,
+            ..
+        }) = marker
+        {
+            validate_update_bytes(update)?;
+            match query_marker(tx, key)? {
+                Some(marker) => {
+                    if marker.content_kind != content_kind {
+                        return Err(CollabError::ContentKindMismatch);
+                    }
+                    marker
                 }
-                marker
-            }
-            None => {
-                tx.execute(
-                    "INSERT INTO ydoc_docs \
-                     (workspace_id, version_id, object_id, content_kind, regime, \
-                      head_update_seq, head_snapshot_seq, lineage_claim_status, updated_at_ms, path) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 'unclaimed', ?6, ?7)",
-                    rusqlite::params![
-                        key.workspace_id,
-                        key.version_id,
-                        key.object_id,
-                        content_kind.as_str(),
-                        regime.as_str(),
-                        now_ms,
-                        path,
-                    ],
-                )
-                .map_err(map_sql)?;
-                Marker {
-                    content_kind,
-                    regime,
-                    head_update_seq: 0,
-                    head_snapshot_seq: 0,
-                    lineage_claim_status: LineageClaimStatus::Unclaimed,
-                    lineage_claim_id: None,
-                    lineage_parent_claim_id: None,
-                    lineage_epoch_tag: None,
-                    path: path.map(str::to_owned),
-                    base_origin_id: None,
-                    base_origin_seq: None,
-                    base_relay_seq: None,
-                    base_relay_confirmed_absent: false,
+                None => {
+                    tx.execute(
+                        "INSERT INTO ydoc_docs \
+                         (workspace_id, version_id, object_id, content_kind, regime, \
+                          head_update_seq, head_snapshot_seq, lineage_claim_status, updated_at_ms, path) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 'unclaimed', ?6, ?7)",
+                        rusqlite::params![
+                            key.workspace_id,
+                            key.version_id,
+                            key.object_id,
+                            content_kind.as_str(),
+                            regime.as_str(),
+                            now_ms,
+                            path,
+                        ],
+                    )
+                    .map_err(map_sql)?;
+                    Marker {
+                        content_kind,
+                        regime,
+                        head_update_seq: 0,
+                        head_snapshot_seq: 0,
+                        lineage_claim_status: LineageClaimStatus::Unclaimed,
+                        lineage_claim_id: None,
+                        lineage_parent_claim_id: None,
+                        lineage_epoch_tag: None,
+                        path: path.map(str::to_owned),
+                        base_origin_id: None,
+                        base_origin_seq: None,
+                        base_relay_seq: None,
+                        base_relay_confirmed_absent: false,
+                    }
                 }
             }
+        } else {
+            query_marker(tx, key)?.ok_or(CollabError::NoMarker)?
         };
         {
             // Collection reconciliation already indexed the captured artifact.
@@ -3242,8 +3074,10 @@ mod append_compaction_query_tests {
             &mut WriterDocCache::new(),
             &key,
             &update,
+            LocalAppend::default(),
             &NoFaults,
             3,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("append");
         assert!(matches!(append, TxnOutcome::Committed(_)));

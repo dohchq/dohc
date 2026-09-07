@@ -1,3 +1,5 @@
+import { makeTriggerPlugin } from "./triggerPlugin";
+import { isCodeBlock, isCodeMark } from "./pmHelpers";
 // `:shortcode:` emoji autocomplete trigger.
 //
 // A third trigger surface alongside `[[` wikilinks (wikilinkPlugin.ts) and
@@ -25,10 +27,10 @@
 // inside `view.update`) so the replacement is folded into the same
 // transaction cycle instead of racing a second dispatch.
 
-import { Plugin, PluginKey, type Transaction } from '@tiptap/pm/state'
+import { PluginKey, type Transaction } from '@tiptap/pm/state'
 import { ReplaceStep } from '@tiptap/pm/transform'
 import type { PMDocLike } from './inlineAtomPlugin'
-import { isCodeBlock, isCodeMark, type AutocompleteState } from './wikilinkPlugin'
+import { type AutocompleteState } from './wikilinkPlugin'
 import { EMOJI_DATA, type EmojiEntry } from './emojiData'
 
 export const emojiPluginKey = new PluginKey('dohc-emoji')
@@ -166,17 +168,7 @@ function insertedClosingColonAtCursor(
  *  - `view.update` handles the open-picker notification, same pattern as
  *    makeMentionPlugin / makeWikilinkPlugin. */
 export function makeEmojiPlugin(onAutocompleteChange: (s: AutocompleteState) => void) {
-  let last: AutocompleteState = { active: false }
-  function notify(next: AutocompleteState) {
-    if (next.active && last.active) {
-      if (next.from === last.from && next.query === last.query) return
-    } else if (!next.active && !last.active) {
-      return
-    }
-    last = next
-    onAutocompleteChange(next)
-  }
-  return new Plugin({
+  return makeTriggerPlugin({
     key: emojiPluginKey,
     appendTransaction(transactions, _oldState, newState) {
       if (!transactions.some((tr) => tr.docChanged)) return null
@@ -195,24 +187,6 @@ export function makeEmojiPlugin(onAutocompleteChange: (s: AutocompleteState) => 
       if (!entry) return null
       return newState.tr.insertText(entry.emoji, found.from, found.to)
     },
-    view(view) {
-      function recompute() {
-        const state = view.state
-        const s = detectEmojiAutocomplete(
-          state.doc as unknown as PMDocLike,
-          state.selection.from,
-        )
-        notify(s)
-      }
-      recompute()
-      return {
-        update() {
-          recompute()
-        },
-        destroy() {
-          notify({ active: false })
-        },
-      }
-    },
-  })
+
+  }, detectEmojiAutocomplete, onAutocompleteChange)
 }

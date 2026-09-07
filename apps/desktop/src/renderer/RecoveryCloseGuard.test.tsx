@@ -12,7 +12,7 @@ import userEvent from "@testing-library/user-event";
 import type { Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import type { EngineYDocSaveStateEvent } from "../ipc/channels";
+import type { EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
 import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
 import {
   CollectionFieldWriteHost,
