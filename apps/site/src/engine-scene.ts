@@ -92,14 +92,13 @@ export async function mountEngine(host: HTMLElement) {
   renderer.shadowMap.autoUpdate = false;
   renderer.shadowMap.needsUpdate = true;
   const motion = matchMedia("(prefers-reduced-motion: reduce)");
-  let openingHold = 1.6;
   let dragging = false;
   let visible = true;
   let frame = 0;
   let last = 0;
   let disposed = false;
   function syncRotation() {
-    controls.autoRotate = !motion.matches && !dragging && openingHold <= 0;
+    controls.autoRotate = !motion.matches && !dragging;
     requestDraw();
   }
   function draw(time: number) {
@@ -107,14 +106,9 @@ export async function mountEngine(host: HTMLElement) {
     if (disposed || !visible || document.hidden) return;
     const dt = Math.min((time - last) / 1000, 0.05);
     last = time;
-    if (!motion.matches && !dragging && openingHold > 0) {
-      openingHold = Math.max(0, openingHold - dt);
-      controls.autoRotate = openingHold === 0;
-    }
     controls.update(dt);
     renderer.render(scene, camera);
-    if (controls.autoRotate || (!motion.matches && !dragging && openingHold > 0))
-      frame = requestAnimationFrame(draw);
+    if (controls.autoRotate) frame = requestAnimationFrame(draw);
   }
   function requestDraw() {
     if (!frame && !disposed && visible && !document.hidden) {
@@ -166,7 +160,6 @@ export async function mountEngine(host: HTMLElement) {
   );
   motion.addEventListener("change", syncRotation, { signal });
   controls.addEventListener("start", () => {
-    openingHold = 0;
     dragging = true;
     syncRotation();
   });
@@ -191,7 +184,6 @@ export async function mountEngine(host: HTMLElement) {
       )
         return;
       event.preventDefault();
-      openingHold = 0;
       const spherical = new THREE.Spherical().setFromVector3(
         camera.position.clone().sub(center),
       );
