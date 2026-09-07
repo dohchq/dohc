@@ -32,14 +32,12 @@ export function useShareMounts(
   // state updater side-effectful (StrictMode replays updaters).
   const shareMountsRef = useRef(shareMounts);
   shareMountsRef.current = shareMounts;
-  // Latest-wins token (cloudStatusToken/engineHistoryToken precedent): a
-  // slower, earlier-started reload must never clobber a fresher one — a
-  // stale registry snapshot could resurrect a just-removed mount or fire a
-  // spurious delete-folder projection against a still-valid one.
   // Shares this shell removed whose FOLDER stayed on disk. Their records are
   // gone, so the next reload sees them vanish; without this it would project
   // a folder delete over files that are still there.
   const foldersLeftBehind = useRef(new Set<string>());
+  // A slower reload must not restore a removed mount or project a folder
+  // deletion from an outdated registry snapshot.
   const shareMountsToken = useRef(0);
   const commitShareMounts = useCallback(
     (next: NonNullable<WorkspaceSummary["shareMounts"]>) => {
