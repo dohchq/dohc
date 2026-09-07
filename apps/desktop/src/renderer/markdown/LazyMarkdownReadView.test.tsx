@@ -16,12 +16,10 @@ afterEach(() => {
 describe("LazyMarkdownReadView", () => {
   it("contains a rejected import and retries with a fresh lazy component", async () => {
     let attempt = 0;
-    let retryImport!: Promise<typeof import("./IncrementalMarkdownDocument")>;
     const loader = vi.fn(async () => {
       attempt += 1;
       if (attempt === 1) throw new Error("markdown chunk unavailable");
-      retryImport = import("./IncrementalMarkdownDocument");
-      return retryImport;
+      return import("./IncrementalMarkdownDocument");
     });
     const onRendered = vi.fn();
 
@@ -48,7 +46,7 @@ describe("LazyMarkdownReadView", () => {
 
     expect(loader).toHaveBeenCalledTimes(2);
     await act(async () => {
-      await retryImport;
+      await loader.mock.results[1]!.value;
     });
     expect(
       await screen.findByRole("heading", { name: "Recovered document" }),

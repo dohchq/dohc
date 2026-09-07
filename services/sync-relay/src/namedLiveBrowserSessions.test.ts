@@ -94,6 +94,49 @@ describe("private named browser route sessions", () => {
     expect(await state.sessions.resolve(request("bob"), issued.discriminator)).toBeNull();
   });
 
+  it.each(["before", "during"])("invalidates the old grant generation %s authentication without disturbing other mappings", async timing => {
+    const state = fixture();
+    const old = state.sessions.create(alice)!;
+    const other = state.sessions.create(bob)!;
+    const advanceGeneration = () => { state.grants.get(alice.grantId)!.generation += 1; };
+    if (timing === "before") advanceGeneration();
+    else state.resolveActor.mockImplementationOnce(async (_request, workspaceId) => {
+      advanceGeneration();
+      return { userId: "alice", workspaceId };
+    });
+    expect(await state.sessions.resolve(request(), old.discriminator)).toBeNull();
+    expect(state.sessions.remove(old.discriminator)).toBe(false);
+    expect(await state.sessions.resolve(request("bob"), other.discriminator)).toEqual(bob);
+    const fresh = state.sessions.create(alice)!;
+    expect(await state.sessions.resolve(request(), fresh.discriminator)).toEqual(alice);
+    expect(await state.sessions.resolve(request(), old.discriminator)).toBeNull();
+  });
+
+  it("rejects invalid or inconsistent stored grant snapshots at creation", () => {
+    for (const generation of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      const state = fixture();
+      state.grants.get(alice.grantId)!.generation = generation;
+      expect(() => state.sessions.create(alice)).toThrow("Invalid named session grant");
+    }
+    for (const change of [
+      (state: ReturnType<typeof fixture>) => state.grants.delete(alice.grantId),
+      (state: ReturnType<typeof fixture>) => { state.grants.get(alice.grantId)!.grantId = "other"; },
+      (state: ReturnType<typeof fixture>) => { state.grants.get(alice.grantId)!.principalUserId = "bob"; },
+      (state: ReturnType<typeof fixture>) => { state.grants.get(alice.grantId)!.shareId = bob.shareId; },
+      (state: ReturnType<typeof fixture>) => { state.grants.get(alice.grantId)!.access = "comment"; },
+      (state: ReturnType<typeof fixture>) => { state.grants.get(alice.grantId)!.status = "revoked"; },
+      (state: ReturnType<typeof fixture>) => { state.shares.get(alice.shareId)!.workspaceId = "other"; },
+    ]) {
+      const state = fixture();
+      change(state);
+      expect(() => state.sessions.create(alice)).toThrow("Invalid named session grant");
+    }
+    const state = fixture();
+    const failure = new Error("grant storage unavailable");
+    state.storage.getShareGrant.mockImplementationOnce(() => { throw failure; });
+    expect(() => state.sessions.create(alice)).toThrow(failure);
+  });
+
   it("does not resolve absent, removed, or restarted mappings or disturb another mapping", async () => {
     const state = fixture();
     const first = state.sessions.create(alice)!;
@@ -177,12 +220,13 @@ describe("private named browser route sessions", () => {
       return { userId: "alice", workspaceId };
     });
     expect(await state.sessions.resolve(request(), issued.discriminator)).toBeNull();
-    expect(await state.sessions.resolve(request(), state.sessions.create(alice)!.discriminator)).toBeNull();
+    expect(() => state.sessions.create(alice)).toThrow("Invalid named session grant");
   });
 
   it("refuses missing and link sessions without consuming the named mapping", async () => {
     const state = fixture();
     const issued = state.sessions.create(alice)!;
+    state.storage.getShareGrant.mockClear();
     for (const cookie of [null, "dohc_share_link=secret; dohc_profile=secret"]) {
       const incoming = request();
       if (cookie === null) incoming.headers.delete("cookie"); else incoming.headers.set("cookie", cookie);
