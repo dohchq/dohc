@@ -223,10 +223,8 @@ export function createChatRunnerProcess(
     });
     const logFd = prepareLog(input.logPath);
     try {
-      // Inside the try: resolveSpawnCommand refuses some runner commands
-      // (a double quote or percent sign in the configured command itself),
-      // and it used to sit outside, so its throw escaped the spawn path
-      // entirely instead of failing this one dispatch.
+      // Resolve inside the try so an invalid command fails this dispatch
+      // and the log descriptor closes in finally.
       const resolved = resolveSpawnCommand(executable, args, {
         env,
         cwd: input.workspace.rootPath,
