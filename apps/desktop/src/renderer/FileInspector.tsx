@@ -1,3 +1,14 @@
+import { DrawingView } from "./DrawingView";
+import {
+  AffordanceCard,
+  DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
+  ENGINE_CHIP,
+  EngineArtifactAssetsInvalidNotice,
+  EngineMayHoldDocumentNotice,
+  READ_ONLY_TRANSITION_CHIP,
+  ViewHeader,
+  type FileSaveState,
+} from "./fileInspectorUi";
 import { TextEditorView } from "./TextEditorView";
 import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
 import type { PendingFileUndo, PendingTextUndo } from "./fileEditorUndo";
@@ -16,13 +27,10 @@ import {
 } from "./wikilinkNavigation";
 import { CopyButton } from "./ui/CopyButton";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
-import type { BinaryFileData } from "@excalidraw/excalidraw/types";
 import {
   FileText,
   Image as ImageIcon,
   Music,
-  Share2,
-  Shapes,
   Table,
 } from "lucide-react";
 import {
@@ -31,7 +39,6 @@ import {
   memo,
   useCallback,
   useEffect,
-  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -45,10 +52,8 @@ import type * as Y from "yjs";
 import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
-import { binaryFileDataFromArtifact } from "./excalidrawAssets";
 import {
   useEngineDoc,
-  type EngineDocSaveState,
   type EngineRemovalInProgress,
   type UseEngineDoc,
 } from "./collab/useEngineDoc";
@@ -76,22 +81,14 @@ import {
 import { DismissDraftControls } from "./RecoveryList";
 import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
-import { IconButton, SecondaryButton, SectionLabel } from "./ui/controls";
+import { SecondaryButton } from "./ui/controls";
 import { DocumentMenu } from "./DocumentMenu";
 import { EditorErrorBoundary } from "./editor/EditorErrorBoundary";
 import {
   extractWorkspaceHeadings,
   resolveWorkspaceHeadingAnchorTarget,
 } from "../workspaces/workspaceHeadings";
-import {
-  EMPTY_EXCALIDRAW_DOCUMENT,
-  parseExcalidrawDocument,
-} from "./excalidrawDocument";
-import type { ExcalidrawCanvasProps } from "./ExcalidrawCanvas";
-import {
-  excalidrawPresenceTopic,
-  type ExcalidrawPresenceFactory,
-} from "./collab/excalidrawPresence";
+import type { ExcalidrawPresenceFactory } from "./collab/excalidrawPresence";
 import {
   acquireSharedLocalDocument,
   getSharedLocalDocument,
@@ -243,8 +240,7 @@ const LazyDatabaseStudioView = lazy(() =>
     default: mod.DatabaseStudioView,
   })),
 );
-const LazyExcalidrawCanvas = lazy(() => import("./ExcalidrawCanvas")) as
-  LazyExoticComponent<(props: ExcalidrawCanvasProps) => React.ReactElement>;
+
 // The source view needs editor/import-export only on demand. Cache the module
 // after the first toggle so later toggles reuse it.
 let importExportPromise: Promise<typeof import("./editor/import-export")> | null = null;
@@ -491,43 +487,7 @@ function useTextContent(
   };
 }
 
-// `actions` puts a view's controls (edit toggle, save state, presence) in the
-// one document header — views never stack a second near-empty toolbar.
-function ViewHeader(props: {
-  icon: React.ReactNode;
-  path: string;
-  label: string;
-  onShare?: () => void;
-  actions?: React.ReactNode;
-}) {
-  // Breadcrumb weighting: the folder path recedes, the file name carries ink.
-  const slash = props.path.lastIndexOf("/");
-  const dir = slash >= 0 ? props.path.slice(0, slash + 1) : "";
-  const leaf = slash >= 0 ? props.path.slice(slash + 1) : props.path;
-  return (
-    <header className="flex items-center gap-2 border-b border-line px-4 py-1.5 text-[13px]">
-      {props.icon}
-      <span className="min-w-0 truncate font-mono">
-        {dir ? <span className="text-subtle">{dir}</span> : null}
-        <span className="font-medium text-ink">{leaf}</span>
-      </span>
-      <SectionLabel className="ml-auto shrink-0">
-        {props.label}
-      </SectionLabel>
-      {props.onShare ? (
-        <IconButton
-          data-testid="file-share"
-          aria-label="Share file"
-          title="Share file"
-          onClick={props.onShare}
-        >
-          <Share2 size={13} aria-hidden />
-        </IconButton>
-      ) : null}
-      {props.actions}
-    </header>
-  );
-}
+
 
 // The restore half of the cancel-and-restore: one row per set-aside
 // draft, oldest first, because a second reopen must not cost the first draft
@@ -536,8 +496,7 @@ function ViewHeader(props: {
 // not-in-version refusal — can show the same recovery.
 const DELETED_WITH_SET_ASIDE_EDIT_NOTICE =
   "This file was deleted while you had it open. Copy your set-aside edit to keep it.";
-const DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
-  "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.";
+
 
 function OrphanedDraftNotices(props: {
   workspaceId: string;
@@ -603,62 +562,11 @@ function PropertiesFallback() {
   );
 }
 
-export type FileSaveState = SaveState | "deleted";
 
 
-// Document + source-mode editor. Edits autosave on a short settle (and
-// Ctrl/Cmd+S) through the bounded write IPC; the watcher then records the
-// change into history like any other file change — the editor is just another
-// writer, never a privileged one. Live co-editing (Yjs) layers onto this
-// surface for shared workspaces in the collab step.
-// What the engine save-state chip says, one row per state. A `Record` over the
-// state union rather than a ternary chain, so a new save state is a
-// compile-time omission instead of one that silently renders "Couldn't save".
-// `recovery` is the shell's own state, not an engine one: an unresolved
-// set-aside draft beside a settled document.
-//
-// `title` is absent where the label already says everything.
-const ENGINE_CHIP: Record<
-  EngineDocSaveState | "recovery",
-  { label: string; title?: string }
-> = {
-  saved: { label: "Saved" },
-  saving: { label: "Saving…" },
-  error: {
-    label: "Couldn't save",
-    title:
-      "Your edits are still here, but dohc can't confirm the file on disk matches them. Keep this document open and try another edit.",
-  },
-  "file-locked": {
-    label: "File in use",
-    title:
-      "Another program has this file open, so dohc can't update it on disk. dohc has your edits saved and retries until the file is free.",
-  },
-  "read-only": {
-    label: "Read-only",
-    title:
-      "This document is shared with you to read. Your changes stay on screen but are not saved.",
-  },
-  "changed-on-disk": {
-    label: "Changed on disk",
-    title:
-      "This file changed outside dohc while it was open. Open History to restore your text.",
-  },
-  deleted: {
-    label: "Deleted",
-    title: DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
-  },
-  recovery: {
-    label: "Edit set aside",
-    title:
-      "A set-aside edit is not saved. Copy or dismiss it in the notice below.",
-  },
-};
-const READ_ONLY_TRANSITION_CHIP = {
-  label: "Read-only",
-  title:
-    "This document became read-only. Your edit was set aside in the notice below.",
-};
+
+
+
 
 function MarkdownRenderCommitted(props: { onRendered: () => void }) {
   useEffect(() => props.onRendered(), [props.onRendered]);
@@ -2768,362 +2676,7 @@ function MarkdownView(props: {
 
 
 
-function DrawingView({
-  body,
-  contentHash,
-  contentRequestId,
-  contentReadTicket,
-  latestContentRequestId,
-  refreshAfterConflict,
-  workspaceId,
-  path,
-  readOnly,
-  autoFocus,
-  truncated,
-  reopenKey,
-  switchReadPending,
-  switchUnresyncedRef,
-  onSaveStateChange,
-  registerDraftFlush,
-  onShare,
-  notice,
-  recoveryNotices,
-  engine,
-  onRetryEngineOpen,
-  presenceFactory,
-  localBuffer,
-}: {
-  body: string;
-  contentHash: string | null;
-  contentRequestId: number;
-  contentReadTicket: number;
-  latestContentRequestId: number;
-  refreshAfterConflict: () => void;
-  workspaceId: string;
-  path: string;
-  readOnly: boolean;
-  autoFocus?: boolean;
-  truncated: boolean;
-  reopenKey?: number;
-  switchReadPending: boolean;
-  switchUnresyncedRef: { current: boolean };
-  registerDraftFlush?: (flush: DraftFlush | null) => void;
-  onShare?: () => void;
-  notice?: React.ReactNode;
-  recoveryNotices: React.ReactNode;
-  engine: UseEngineDoc;
-  onRetryEngineOpen: () => void;
-  presenceFactory?: ExcalidrawPresenceFactory | null;
-  onSaveStateChange?: (state: FileSaveState) => void;
-  localBuffer: SharedLocalDocument;
-}) {
-  const engineMode = engine.available && engine.doc !== null;
-  const engineReadOnly =
-    engine.opening ||
-    engine.deletedWhileEditing ||
-    engine.readOnlyWhileEditing ||
-    engine.permanentFailureWhileEditing ||
-    engine.engineMayHoldDocument ||
-    engine.artifactAssetsInvalid ||
-    engine.removalInProgress !== null;
-  const editor = useAutosavedTextDraft({
-    body,
-    contentHash,
-    contentRequestId,
-    contentReadTicket,
-    latestContentRequestId,
-    refreshAfterConflict,
-    workspaceId,
-    path,
-    disabled: readOnly || truncated || engineMode || engineReadOnly,
-    reopenKey,
-    switchReadPending,
-    switchUnresyncedRef,
-    onSaveStateChange: engineMode || engine.opening ? undefined : onSaveStateChange,
-    registerDraftFlush,
-    localBuffer,
-  });
-  const blankFile = !engineMode && editor.getDraft().trim() === "";
-  const [assetRefused, setAssetRefused] = useState(false);
-  const [assetHydrationFailures, setAssetHydrationFailures] = useState(0);
-  const [assetHydrationAttempt, setAssetHydrationAttempt] = useState(0);
-  useEffect(() => {
-    setAssetRefused(false);
-    setAssetHydrationFailures(0);
-  }, [path, engine.doc]);
-  useEffect(() => {
-    if (!blankFile || readOnly || truncated || engine.opening) return;
-    editor.setDraft(EMPTY_EXCALIDRAW_DOCUMENT);
-    // The accepted disk revision is the trigger. setDraft is intentionally
-    // omitted: the autosave hook returns a fresh closure on every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editor.valueRevision, blankFile, readOnly, truncated, engine.opening]);
-  // Local Excalidraw changes update the autosave draft but the mounted canvas
-  // already owns that scene. Parse again only when a disk read replaces the
-  // draft; this avoids restoring the whole scene on every pointer update.
-  const document = useMemo(() => {
-    if (truncated) {
-      return {
-        value: null,
-        error: "dohc cannot open a partial Excalidraw file.",
-      };
-    }
-    try {
-      return {
-        value: parseExcalidrawDocument(
-          blankFile ? EMPTY_EXCALIDRAW_DOCUMENT : editor.getDraft(),
-        ),
-        error: null,
-      };
-    } catch (cause) {
-      return {
-        value: null,
-        error: cause instanceof Error ? cause.message : "The drawing is invalid.",
-      };
-    }
-    // valueRevision advances only when the hook accepts a new disk snapshot.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editor.valueRevision, truncated]);
 
-  useEffect(() => {
-    if (!engineMode) return;
-    onSaveStateChange?.(
-      engine.saveState === "saved" ||
-        engine.saveState === "saving" ||
-        engine.saveState === "deleted"
-        ? engine.saveState
-        : "error",
-    );
-  }, [engineMode, engine.saveState, onSaveStateChange]);
-
-  const canvasReadOnly = readOnly || engineReadOnly;
-  const drawingReady = engineMode || document.value !== null;
-  // Two panes of one drawing share a session but must not share a relay
-  // presence entry: entries are keyed by client id, so a shared id makes one
-  // pane's leave erase the user while the other pane is still open. Each
-  // pane derives its own client id; peers merge the awareness states.
-  const presencePaneId = useId();
-  const presence = useMemo(() => {
-    if (
-      !engineMode ||
-      !engine.objectId ||
-      !engine.versionId ||
-      !presenceFactory
-    ) {
-      return undefined;
-    }
-    try {
-      return {
-        transport: presenceFactory.transportForScope({
-          kind: "workspace",
-          workspaceId,
-        }),
-        topic: excalidrawPresenceTopic({
-          workspaceId,
-          versionId: engine.versionId,
-          objectId: engine.objectId,
-        }),
-        clientId: `${presenceFactory.clientId}#${presencePaneId}`,
-        displayName: presenceFactory.displayName,
-      };
-    } catch {
-      // Presence is optional. A transport failure cannot affect the drawing.
-      return undefined;
-    }
-  }, [
-    engine.objectId,
-    engine.versionId,
-    engineMode,
-    presenceFactory,
-    presencePaneId,
-    workspaceId,
-  ]);
-  const hydrationSession = useMemo(() => {
-    if (!engineMode || !engine.doc || engine.artifactAssets.length === 0) {
-      return null;
-    }
-    return {
-      workspaceId,
-      path,
-      doc: engine.doc,
-      descriptors: engine.artifactAssets,
-      read: engine.readArtifactAsset,
-    };
-  }, [
-    engine.artifactAssets,
-    engine.doc,
-    engine.readArtifactAsset,
-    engineMode,
-    path,
-    workspaceId,
-  ]);
-  const activeHydrationSession = useRef(hydrationSession);
-  useLayoutEffect(() => {
-    activeHydrationSession.current = hydrationSession;
-    return () => {
-      if (activeHydrationSession.current === hydrationSession) {
-        activeHydrationSession.current = null;
-      }
-    };
-  }, [hydrationSession]);
-  const hydrateAssets = useMemo<ExcalidrawCanvasProps["hydrateAssets"]>(() => {
-    if (!hydrationSession) return undefined;
-    return async () => {
-      const files: BinaryFileData[] = [];
-      let failures = 0;
-      if (activeHydrationSession.current === hydrationSession) {
-        setAssetHydrationFailures(0);
-      }
-      for (const descriptor of hydrationSession.descriptors) {
-        if (activeHydrationSession.current !== hydrationSession) return [];
-        try {
-          const loaded = await hydrationSession.read(descriptor);
-          if (activeHydrationSession.current !== hydrationSession) continue;
-          const file = binaryFileDataFromArtifact(descriptor, loaded);
-          // A read that succeeds but cannot convert (a changed descriptor, a
-          // mime type outside the allowlist) is still a missing image — it
-          // must surface the hydration warning, not vanish silently.
-          if (file) files.push(file);
-          else failures += 1;
-        } catch {
-          // One missing asset cannot stop the drawing or its other assets.
-          failures += 1;
-        }
-      }
-      if (activeHydrationSession.current !== hydrationSession) return [];
-      setAssetHydrationFailures(failures);
-      return files;
-    };
-  }, [assetHydrationAttempt, hydrationSession]);
-  const drawingChipState =
-    engineMode && engine.saveState === "deleted"
-      ? "deleted"
-      : readOnly || (truncated && !engineMode) || engineReadOnly
-        ? "read-only"
-        : engineMode
-          ? engine.saveState
-          : editor.saveState;
-  const drawingChip = engine.readOnlyWhileEditing
-    ? READ_ONLY_TRANSITION_CHIP
-    : ENGINE_CHIP[drawingChipState];
-
-  return (
-    <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-      <ViewHeader
-        icon={<Shapes size={13} aria-hidden />}
-        path={path}
-        label="drawing"
-        onShare={onShare}
-        actions={
-          <span
-            data-testid="drawing-save-state"
-            data-state={drawingChipState}
-            title={
-              drawingChipState === "error" && engine.saveError
-                ? engine.saveError
-                : drawingChip.title
-            }
-            className={`text-[11px] ${
-              drawingChipState === "saved" ||
-              drawingChipState === "saving" ||
-              drawingChipState === "read-only"
-                ? "text-subtle"
-                : "text-danger"
-            }`}
-          >
-            {drawingChip.label}
-          </span>
-        }
-      />
-      {engineMode || engine.opening ? null : notice}
-      {recoveryNotices}
-      {engine.engineMayHoldDocument ? (
-        <EngineMayHoldDocumentNotice
-          onRetry={onRetryEngineOpen}
-          contentShown={document.value !== null}
-        />
-      ) : null}
-      {engine.artifactAssetsInvalid ? (
-        <EngineArtifactAssetsInvalidNotice workspaceId={workspaceId} path={path} />
-      ) : null}
-      {assetRefused ? (
-        <div
-          className="border-b border-line bg-panel-2 px-4 py-2 text-xs text-warning"
-          data-testid="drawing-assets-refused"
-        >
-          This image was not added. Collaborative drawings cannot add images
-          yet.
-        </div>
-      ) : null}
-      {assetHydrationFailures > 0 ? (
-        <div
-          className="flex items-center justify-between gap-3 border-b border-line bg-panel-2 px-4 py-2 text-xs text-warning"
-          data-testid="drawing-asset-hydration-error"
-        >
-          <span>
-            dohc could not load {assetHydrationFailures}{" "}
-            {assetHydrationFailures === 1 ? "image" : "images"}.
-          </span>
-          <button
-            type="button"
-            className="shrink-0 text-text underline underline-offset-2"
-            onClick={() => setAssetHydrationAttempt((attempt) => attempt + 1)}
-          >
-            Try again
-          </button>
-        </div>
-      ) : null}
-      {engine.opening ? (
-        <div
-          className="flex min-h-0 flex-1 items-center justify-center text-sm text-subtle"
-          data-testid="view-drawing-opening"
-        >
-          Loading drawing…
-        </div>
-      ) : truncated && !engineMode ? (
-        <AffordanceCard
-          testId="view-drawing-truncated"
-          title="Drawing too large"
-          body="dohc cannot open a partial Excalidraw file."
-        />
-      ) : drawingReady ? (
-        <div
-          className="relative min-h-0 flex-1 overflow-hidden"
-          data-testid="view-drawing"
-        >
-          <Suspense
-            fallback={
-              <div className="flex h-full items-center justify-center text-sm text-subtle">
-                Loading drawing…
-              </div>
-            }
-          >
-            <LazyExcalidrawCanvas
-              key={engineMode ? "engine-scene" : editor.valueRevision}
-              document={
-                document.value ?? parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)
-              }
-              sceneDoc={engine.doc ?? undefined}
-              hydrateAssets={hydrateAssets}
-              presence={presence}
-              readOnly={canvasReadOnly}
-              autoFocus={autoFocus}
-              onAssetRefusedChange={setAssetRefused}
-              onChange={canvasReadOnly || engineMode ? undefined : editor.setDraft}
-            />
-          </Suspense>
-        </div>
-      ) : (
-        <AffordanceCard
-          testId="view-drawing-error"
-          title="Couldn't open drawing"
-          body={document.error ?? "The drawing is invalid."}
-          openExternally={{ workspaceId, path }}
-        />
-      )}
-    </div>
-  );
-}
 
 
 function Empty({ children }: { children: React.ReactNode }) {
@@ -3134,72 +2687,9 @@ function Empty({ children }: { children: React.ReactNode }) {
   );
 }
 
-// The engine open hit its retry deadline. The document stays read-only
-// — never the writable plain editor — with the reason stated and the retry
-// offered where the user is looking.
-function EngineMayHoldDocumentNotice(props: {
-  onRetry: () => void;
-  // Is the document's content on screen? When the read failed too, it is
-  // not — and "It is read-only for now" would promise read access to
-  // content the user cannot see.
-  contentShown: boolean;
-}) {
-  return (
-    <div
-      data-testid="engine-may-hold-document-notice"
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
-    >
-      {/* "document", the noun the editing controls beside this already use
-          ("You can edit this document when it finishes opening.").
 
-          No "in time": this notice answers every refusal `main` maps to
-          `engineMayHoldDocument`, and only one of them is a timeout. A session
-          the daemon would not release refuses immediately, and naming a cause
-          the user did not hit sends them looking for a slow machine (#564,
-          codex r20). What is true of all of them is the sentence below, and
-          the retry is the same either way. */}
-      <span>
-        dohc could not open this document for editing.
-        {props.contentShown ? " It is read-only for now." : ""}
-      </span>
-      <button
-        type="button"
-        onClick={props.onRetry}
-        className="text-subtle hover:text-ink"
-      >
-        Try again
-      </button>
-    </div>
-  );
-}
 
-function EngineArtifactAssetsInvalidNotice(props: {
-  workspaceId: string;
-  path: string;
-}) {
-  return (
-    <div
-      data-testid="engine-artifact-assets-invalid-notice"
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
-    >
-      <span>
-        dohc could not verify this drawing's images. The drawing is read-only.
-      </span>
-      <button
-        type="button"
-        onClick={() =>
-          void bridge().openFileExternally({
-            workspaceId: props.workspaceId,
-            relativePath: props.path,
-          })
-        }
-        className="text-subtle hover:text-ink"
-      >
-        Open externally
-      </button>
-    </div>
-  );
-}
+
 
 function EngineRemovalInProgressNotice(props: {
   removal: EngineRemovalInProgress;
@@ -3246,36 +2736,7 @@ function TruncatedNotice(props: { workspaceId: string; path: string }) {
   );
 }
 
-function AffordanceCard(props: {
-  testId: string;
-  title: string;
-  body: string;
-  openExternally?: { workspaceId: string; path: string };
-}) {
-  return (
-    <div
-      data-testid={props.testId}
-      className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
-    >
-      <span className="text-sm text-ink">{props.title}</span>
-      <span className="max-w-md text-xs text-muted">{props.body}</span>
-      {props.openExternally ? (
-        <button
-          type="button"
-          onClick={() =>
-            void bridge().openFileExternally({
-              workspaceId: props.openExternally!.workspaceId,
-              relativePath: props.openExternally!.path,
-            })
-          }
-          className="rounded border border-line bg-panel-2 px-2.5 py-1 text-xs text-muted hover:text-ink"
-        >
-          Open externally
-        </button>
-      ) : null}
-    </div>
-  );
-}
+
 
 type FileInspectorProps = {
   workspaceId: string;

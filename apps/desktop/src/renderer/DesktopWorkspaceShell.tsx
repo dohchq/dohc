@@ -1,3 +1,4 @@
+import type { FileSaveState } from "./fileInspectorUi";
 import type { DraftFlush, DraftFlushOptions } from "./useAutosavedTextDraft";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
@@ -93,7 +94,6 @@ import {
   classifyForView,
   FileInspector,
   preloadMarkdownEditor,
-  type FileSaveState,
   type HeadingTarget,
   type ScrollTarget,
 } from "./FileInspector";
