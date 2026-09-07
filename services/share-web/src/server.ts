@@ -1123,7 +1123,7 @@ export function createShareWebApplication({
 
       const profileSecret = parseCookies(request.headers.get("cookie")).get(
         profileCookieName(authenticated.discriminator),
-      ) ?? null;
+      );
       if (!profileSecret || !LINK_SECRET_PATTERN.test(profileSecret)) return refused();
       let appendBody: string | null = null;
       if (request.method === "POST") {
