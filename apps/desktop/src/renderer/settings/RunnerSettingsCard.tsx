@@ -1,3 +1,4 @@
+import { useRequestSequence } from "../useRequestSequence";
 import {
   useCallback,
   useEffect,
@@ -75,7 +76,7 @@ export function RunnerSettingsCard(props: {
   const [timeoutDraft, setTimeoutDraft] = useState(String(runner.timeoutMinutes));
   const [selfTest, setSelfTest] = useState<SelfTestState>({ status: "idle" });
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const requestVersionRef = useRef(0);
+  const requestVersionRef = useRequestSequence();
 
   useEffect(() => {
     setCommandDraft(runner.command);
@@ -86,10 +87,10 @@ export function RunnerSettingsCard(props: {
   }, [runner.timeoutMinutes]);
 
   useEffect(() => {
-    requestVersionRef.current += 1;
+    requestVersionRef.next();
     setSelfTest({ status: "idle" });
     return () => {
-      requestVersionRef.current += 1;
+      requestVersionRef.next();
     };
   }, [workspaceId]);
 
@@ -133,20 +134,20 @@ export function RunnerSettingsCard(props: {
   );
 
   const runSelfTest = useCallback(async () => {
-    const version = requestVersionRef.current;
+    const version = requestVersionRef.current();
     setSelfTest({ status: "running" });
     try {
       await commitDrafts();
       const result: RunnerSelfTestResult = await bridge().runnerSelfTest({
         workspaceId,
       });
-      if (requestVersionRef.current !== version) return;
+      if (!requestVersionRef.isCurrent(version)) return;
       setSelfTest({
         status: result.ok ? "success" : "error",
         detail: result.detail,
       });
     } catch (cause) {
-      if (requestVersionRef.current !== version) return;
+      if (!requestVersionRef.isCurrent(version)) return;
       setSelfTest({
         status: "error",
         detail:

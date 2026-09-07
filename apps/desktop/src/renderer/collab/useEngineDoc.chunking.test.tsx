@@ -2,7 +2,7 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
+import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
 import { resetOrphanedDrafts, useOrphanedDrafts } from "../orphanedDrafts";
 import { ORPHANED_DRAFT_STORAGE_KEY } from "../orphanedDraftStorage";
 import {

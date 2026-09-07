@@ -14,7 +14,9 @@ use dohc_engine_domain::{
     insert_text_conflict_if_absent, live_state_matches_conflict_current, store::text_blob_sha256,
     write_binary_file_in_tx,
 };
-use dohc_engine_files::{DurabilityPolicy, JobOutcome, NoBackoff, StdReplacer, run_pending_jobs};
+use dohc_engine_files::{
+    DurabilityPolicy, JobOutcome, MaterializeOptions, NoBackoff, StdReplacer, run_pending_jobs,
+};
 use dohc_engine_storage::{
     EngineStore, FaultPoint, JobStatus, MaterializationOperation, Preimage, hex_sha256,
     put_binary_blob,
@@ -546,11 +548,13 @@ fn merge_materialization_is_gated_to_the_active_target_version_across_reopen() {
         run_pending_jobs(
             &store,
             scratch.path(),
-            DurabilityPolicy::per_os(),
-            &StdReplacer,
-            &NoBackoff,
-            81,
-            &NO_FAULTS,
+            &MaterializeOptions {
+                policy: DurabilityPolicy::per_os(),
+                replacer: &StdReplacer,
+                backoff: &NoBackoff,
+                now_ms: 81,
+                faults: &NO_FAULTS
+            },
         )
         .expect("startup replay")
         .is_empty()
@@ -1399,11 +1403,13 @@ fn merge_job_crash_then_external_edit_is_preserved_on_recovery() {
     let first = run_pending_jobs(
         &store,
         scratch.path(),
-        DurabilityPolicy::per_os(),
-        &StdReplacer,
-        &NoBackoff,
-        600,
-        faults.as_ref(),
+        &MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 600,
+            faults: faults.as_ref(),
+        },
     )
     .expect("crash run");
     assert!(matches!(first[0].outcome, JobOutcome::Crashed(_)));
@@ -1415,11 +1421,13 @@ fn merge_job_crash_then_external_edit_is_preserved_on_recovery() {
     let recovered = run_pending_jobs(
         &store,
         scratch.path(),
-        DurabilityPolicy::per_os(),
-        &StdReplacer,
-        &NoBackoff,
-        800,
-        &NO_FAULTS,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 800,
+            faults: &NO_FAULTS,
+        },
     )
     .expect("recover");
     assert_eq!(recovered[0].outcome, JobOutcome::Conflict);

@@ -1,3 +1,6 @@
+import { pluginKey } from "./workbench/pluginCatalog";
+import { useRequestSequence } from "./useRequestSequence";
+import { ipcErrorMessage } from "./ipcError";
 import { AlertTriangle, Blocks, ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { PluginSizesRecord, PluginStatusRecord } from "../ipc/bridgeContract";
@@ -65,12 +68,7 @@ type ReadmeState =
 // Electron wraps a rejected handler's error; the workspace surfaces strip the
 // wrapper before showing the reason (WorkspaceVersions precedent).
 function readableReason(error: unknown): string {
-  const raw = error instanceof Error ? error.message : "";
-  const stripped = raw.replace(
-    /^Error invoking remote method '[^']+': (?:Error: )?/,
-    "",
-  );
-  return stripped.length > 0 ? stripped : "Try again.";
+  return ipcErrorMessage(error, "Try again.");
 }
 
 // ENOENT is the file system's own answer to "is it there", carried out on the
@@ -200,12 +198,12 @@ function PluginSettingsSection(props: {
   // One token guards every response: the effect re-runs for each workspace or
   // plugin, and its cleanup raises the token, so an answer for the plugin this
   // page no longer shows can never repaint it.
-  const requestToken = useRef(0);
+  const requestToken = useRequestSequence();
 
   const declaredCount = plugin.settings.length;
 
   useEffect(() => {
-    const request = ++requestToken.current;
+    const request = requestToken.next();
     setValues(null);
     setFailure(null);
     // A plugin with no settings has no controls to fill, so main is never
@@ -223,16 +221,16 @@ function PluginSettingsSection(props: {
         directoryName: plugin.directoryName,
       })
       .then((result) => {
-        if (request !== requestToken.current) return;
+        if (!requestToken.isCurrent(request)) return;
         if (result.ok) setValues(result.values);
         else setFailure(result.message);
       })
       .catch((error: unknown) => {
-        if (request !== requestToken.current) return;
+        if (!requestToken.isCurrent(request)) return;
         setFailure(readableReason(error));
       });
     return () => {
-      requestToken.current += 1;
+      requestToken.next();
     };
   }, [props.workspaceId, plugin.id, plugin.directoryName, declaredCount]);
 
@@ -240,7 +238,7 @@ function PluginSettingsSection(props: {
     // Shown at once so a control never feels stuck, then replaced by whatever
     // main actually stored.
     setValues((current) => (current ? { ...current, [key]: value } : current));
-    const request = requestToken.current;
+    const request = requestToken.current();
     void bridge()
       .setPluginSettings({
         workspaceId: props.workspaceId,
@@ -249,7 +247,7 @@ function PluginSettingsSection(props: {
         values: { [key]: value },
       })
       .then((result) => {
-        if (request !== requestToken.current) return;
+        if (!requestToken.isCurrent(request)) return;
         if (result.ok) {
           setValues(result.values);
           setFailure(null);
@@ -258,7 +256,7 @@ function PluginSettingsSection(props: {
         setFailure(result.message);
       })
       .catch((error: unknown) => {
-        if (request !== requestToken.current) return;
+        if (!requestToken.isCurrent(request)) return;
         setFailure(readableReason(error));
       });
   };
@@ -808,9 +806,9 @@ function PluginDetailsHeader(props: {
   workspaceId: string;
 }) {
   const { plugin, catalog } = props;
-  const busyAction = catalog.busy[plugin.id];
+  const busyAction = catalog.busy[pluginKey(plugin)];
   const disabled = busyAction !== undefined || isPipelineBusy(plugin);
-  const actionError = catalog.errors[plugin.id];
+  const actionError = catalog.errors[pluginKey(plugin)];
 
   return (
     <header className="px-6 pb-5 pt-6">
@@ -894,7 +892,9 @@ function PluginDetailsHeader(props: {
                   key={webApp.id}
                   data-testid="plugin-open-web-app"
                   data-web-app-id={webApp.id}
-                  disabled={disabled || catalog.openingWebApp !== null}
+                  disabled={
+                    disabled || catalog.openingWebApp !== null || catalog.webAppRootPending(plugin)
+                  }
                   onClick={() => catalog.openWebApp(plugin, webApp.id)}
                 >
                   {catalog.openingWebApp === key
@@ -1050,7 +1050,7 @@ function PluginUninstallDialog(props: {
   const { catalog } = props;
   const confirmation = catalog.confirmation;
   if (!confirmation) return null;
-  const uninstalling = catalog.busy[confirmation.plugin.id] === "uninstall";
+  const uninstalling = catalog.busy[pluginKey(confirmation.plugin)] === "uninstall";
   const warning = confirmation.preflight.warning;
   // The same dialog and the same bridge call either way: this plugin was
   // either running (Uninstall) or never approved (Remove) — the wording

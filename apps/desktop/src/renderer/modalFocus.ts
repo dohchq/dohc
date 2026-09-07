@@ -6,13 +6,7 @@ export function trapModalTabKey(
   container: HTMLElement | null,
 ): void {
   if (event.key !== "Tab" || !container) return;
-  const focusable = [
-    ...container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
-  ].filter(
-    (element) =>
-      element.closest('[aria-hidden="true"]') === null &&
-      !element.matches(":disabled"),
-  );
+  const focusable = modalFocusableElements(container);
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
   if (!first || !last) {
@@ -32,4 +26,20 @@ export function trapModalTabKey(
     event.preventDefault();
     first.focus();
   }
+}
+
+export function modalFocusableElements(container: HTMLElement): HTMLElement[] {
+  return [
+    ...container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+  ].filter(
+    (element) =>
+      element.closest('[aria-hidden="true"]') === null &&
+      !element.matches(":disabled"),
+  );
+}
+
+const BLOCKING_MODAL_SELECTOR = "[role='dialog'], [data-dohc-modal='true']";
+
+export function hasBlockingModal() {
+  return document.querySelector(BLOCKING_MODAL_SELECTOR) !== null;
 }

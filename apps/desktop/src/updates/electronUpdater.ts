@@ -1,12 +1,10 @@
 import {
   initialUpdateState,
   transition,
+  type UpdateChannel,
   type UpdateEvent,
   type UpdateState,
 } from "./updateMachine";
-
-export const UPDATE_CHANNELS = ["latest", "nightly"] as const;
-export type UpdateChannel = (typeof UPDATE_CHANNELS)[number];
 
 export type PublicUpdateState = {
   status: UpdateState["status"];

@@ -124,7 +124,7 @@ export function MentionComposer(props: {
       setMenuOpen(false);
       props.onChange(result.value);
     },
-    [caret, props],
+    [caret, props.onChange, props.value],
   );
 
   const completeFile = useCallback(
@@ -139,7 +139,7 @@ export function MentionComposer(props: {
       setMenuOpen(false);
       props.onChange(next);
     },
-    [caret, props],
+    [caret, props.onChange, props.value],
   );
 
   const chooseFile = useCallback(
@@ -230,7 +230,7 @@ export function MentionComposer(props: {
         props.onEscape();
       }
     },
-    [chooseFile, complete, completeFile, fileMatches, fileStage, highlight, matches, menuLength, props, showMenu],
+    [chooseFile, complete, completeFile, fileMatches, fileStage, highlight, matches, menuLength, props.onEscape, props.onSend, showMenu],
   );
 
   const listboxId = `${props.composerId}-mentions`;
@@ -414,7 +414,7 @@ export function MentionComposer(props: {
           setMenuOpen(false);
           setFileStage(null);
         }}
-        className="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+        className="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
       />
       <button
         type="button"

@@ -1,3 +1,4 @@
+import { useRequestSequence } from "./useRequestSequence";
 import { ArrowLeft } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ShareHandoffStatus } from "../ipc/bridgeContract";
@@ -61,16 +62,14 @@ export function ShareHandoffSurface(props: {
   const [receivedShare, setReceivedShare] = useState<ReceivedShareState>({
     kind: "idle",
   });
-  const lookupRequest = useRef(0);
+  const lookupRequest = useRequestSequence();
 
   useEffect(() => {
-    const request = ++lookupRequest.current;
-    let active = true;
+    const request = lookupRequest.next();
     if (shareId === null) {
       setReceivedShare({ kind: "idle" });
       return () => {
-        active = false;
-        lookupRequest.current += 1;
+        lookupRequest.next();
       };
     }
 
@@ -78,7 +77,7 @@ export function ShareHandoffSurface(props: {
     void bridge()
       .getRelayReceivedShare({ shareId })
       .then((result) => {
-        if (!active || request !== lookupRequest.current) return;
+        if (!lookupRequest.isCurrent(request)) return;
         setReceivedShare(
           result.found
             ? { kind: "ready", shareId, shareCode: result.share.shareCode }
@@ -86,13 +85,12 @@ export function ShareHandoffSurface(props: {
         );
       })
       .catch(() => {
-        if (!active || request !== lookupRequest.current) return;
+        if (!lookupRequest.isCurrent(request)) return;
         setReceivedShare({ kind: "failed", shareId });
       });
 
     return () => {
-      active = false;
-      lookupRequest.current += 1;
+      lookupRequest.next();
     };
   }, [lookupAttempt, shareId]);
 
