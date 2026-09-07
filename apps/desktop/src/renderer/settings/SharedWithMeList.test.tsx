@@ -109,11 +109,11 @@ describe("SharedWithMeList", () => {
     // project a folder delete over files that are still on disk.
     expect(
       onFilesChanged,
-      "MUTATION: the shell never learns the folder stayed",
+      "the shell never learns the folder stayed",
     ).toHaveBeenCalledWith({ folderLeftShareId: "share-1" });
     expect(
       notice.textContent,
-      "MUTATION: dropping folderLeft leaves the files on disk with nothing said",
+      "dropping folderLeft leaves the files on disk with nothing said",
     ).toBe(
       "Removed the share from this workspace. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.",
     );
@@ -193,7 +193,7 @@ describe("SharedWithMeList", () => {
     const badge = await screen.findByTestId("share-access-badge");
     expect(
       badge.textContent,
-      "MUTATION: the relay's wider level must not display over the pin",
+      "the relay's wider level must not display over the pin",
     ).toBe("View");
   });
 
@@ -265,7 +265,7 @@ describe("SharedWithMeList", () => {
     expect(skipped.getAttribute("data-kind")).toBe("boundary");
     expect(
       skipped.textContent,
-      "MUTATION: a mount's refusals stay console-only and the recipient never learns the content is missing",
+      "a mount's refusals stay console-only and the recipient never learns the content is missing",
     ).toContain("dohc skipped 1 update outside what this share covers");
     expect(skipped.getAttribute("title")).toContain("version-other");
   });
@@ -298,7 +298,7 @@ describe("SharedWithMeList", () => {
 
     expect(
       bridgeMock.dismissShareSkips,
-      "MUTATION: without the mount's shareId the notice can only be cleared by removing the mount",
+      "without the mount's shareId the notice can only be cleared by removing the mount",
     ).toHaveBeenCalledWith({
       workspaceId: WORKSPACE_ID,
       shareId: "share-1",
@@ -340,18 +340,18 @@ describe("SharedWithMeList", () => {
 
     expect(
       await screen.findByTestId("shared-with-me-skipped"),
-      "MUTATION: a one-time snapshot leaves the open row silent while content goes missing",
+      "a one-time snapshot leaves the open row silent while content goes missing",
     ).toBeTruthy();
     // The registry only. Workspace activity fires on every settled watcher
     // batch, and a full refresh would put a /sync/shares request on the wire
     // for each one — the token stops a stale answer landing, not the request.
     expect(
       bridgeMock.listRelayShares,
-      "MUTATION: following activity with a full refresh puts a relay listing on the wire per watcher batch",
+      "following activity with a full refresh puts a relay listing on the wire per watcher batch",
     ).toHaveBeenCalledTimes(1);
   });
 
-  // Activity fires while the INITIAL load is still waiting on the relay
+  // Activity fires while the initial load is still waiting on the relay
   // listing. The registry-only reload must not cancel that lookup: one
   // counter answering both "may this response land?" and "is that reader
   // superseded?" left the panel stuck on "Loading shares sent to you…" until
@@ -392,7 +392,7 @@ describe("SharedWithMeList", () => {
 
     expect(
       await screen.findByTestId("shared-with-me-row"),
-      "MUTATION: sharing one token lets an activity reload cancel the initial relay lookup, and the panel never leaves Loading",
+      "sharing one token lets an activity reload cancel the initial relay lookup, and the panel never leaves Loading",
     ).toBeTruthy();
     expect(screen.getByTestId("shared-with-me-skipped")).toBeTruthy();
   });
@@ -410,7 +410,7 @@ describe("SharedWithMeList", () => {
           releaseShares = resolve;
         }),
     );
-    // The registry the INITIAL refresh reads: healthy.
+    // The registry the initial refresh reads: healthy.
     let mounts: Array<Record<string, unknown>> = [
       { shareId: "share-1", label: "alex", granterEmail: "alex@dohc.test" },
     ];
@@ -439,7 +439,7 @@ describe("SharedWithMeList", () => {
 
     expect(
       await screen.findByTestId("shared-with-me-skipped"),
-      "MUTATION: a registry read dropped during loading consumes the only signal that refusal gets",
+      "a registry read dropped during loading consumes the only signal that refusal gets",
     ).toBeTruthy();
   });
 
@@ -480,7 +480,7 @@ describe("SharedWithMeList", () => {
     activity?.();
     await screen.findByTestId("shared-with-me-skipped");
 
-    // The stalled listing lands with the OLDER registry snapshot behind it,
+    // The stalled listing lands with the older registry snapshot behind it,
     // carrying a share that only IT can render — so the assertion below runs
     // after that state landed, not before it.
     releaseShares({
@@ -501,7 +501,7 @@ describe("SharedWithMeList", () => {
 
     expect(
       screen.queryByTestId("shared-with-me-skipped"),
-      "MUTATION: the slower lane republishes its stale mounts and the warning blinks out",
+      "the slower lane republishes its stale mounts and the warning blinks out",
     ).not.toBeNull();
   });
 
@@ -541,7 +541,7 @@ describe("SharedWithMeList", () => {
     expect(line.getAttribute("data-kind")).toBe("malformed");
     expect(
       line.textContent,
-      "MUTATION: a malformed envelope rendered as 'outside what this share covers' is a false cause and a false instruction",
+      "a malformed envelope rendered as 'outside what this share covers' is a false cause and a false instruction",
     ).toContain("dohc couldn't apply 1 update this share sent.");
     expect(line.textContent).not.toContain("alex@dohc.test");
     expect(line.getAttribute("title")).toContain("offered 200 bytes");

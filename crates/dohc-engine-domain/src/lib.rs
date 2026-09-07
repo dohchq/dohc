@@ -1,18 +1,17 @@
-//! dohc engine domain — CAL-2 calibration slice.
+//! dohc engine domain: what a version, moment, fork, and restore mean.
 //!
 //! The versioning domain: stable object identity, versioned text write/read,
 //! moment history with keyset pagination, text delete/rename/rollback,
-//! named-version fork, and restore (set-active-version), built ON the CAL-1
-//! storage core
+//! named-version fork, and restore (set-active-version), built on the storage
+//! core
 //! (`dohc-engine-storage`) rather than around it. Storage owns the connection,
 //! the open ritual, the single-transaction boundary, and the crash-injection
 //! fault seam; this crate owns what a version, a moment, a fork, and a restore
 //! *mean* (`plan §Target architecture`: `dohc-engine-domain` = version/merge
 //! semantics; `dohc-engine-storage` = SQLite ownership + transactions).
 //!
-//! - **Compound commits.** Every mutation and its replication-journal entry (and
-//!   idempotency-ledger row) commit in ONE transaction via
-//!   [`dohc_engine_storage::EngineStore::write_with`] (`PORTING.md` §9).
+//! - **Compound commits.** Every mutation and its idempotency-ledger row commit
+//!   in one transaction via [`dohc_engine_storage::EngineStore::write_with`].
 //! - **Identity, not paths.** [`records::SnapshotView`]/[`records::TextSnapshot`]/
 //!   [`records::MomentRecord`] carry a stable `object_id`; a `path` is an alias
 //!   onto it.
@@ -23,8 +22,6 @@
 //! - **Differential surface.** [`normalize::NormalizedState`] is a deterministic
 //!   projection of the version graph, moment order, active version, and
 //!   snapshot blob hashes for the TS-vs-Rust comparison.
-//!
-//! The crate is dormant: nothing here is reachable from product code.
 
 #![forbid(unsafe_code)]
 
@@ -41,12 +38,11 @@ pub mod store;
 
 pub use automations::{
     AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_RECLAIM_EXHAUSTED,
-    AutomationClaim, AutomationClaimState, AutomationFailure, AutomationSettle, AutomationTrigger,
-    MAX_AUTOMATION_ERROR_BYTES, claim_automation_triggers_in_tx, claim_next_pending_automation,
-    claim_next_pending_automation_in_tx, list_automation_failures, list_automation_failures_in_tx,
-    reclaim_running_automations, reclaim_running_automations_in_tx, settle_automation_claim,
-    settle_automation_claim_in_tx, subscribe_automation, subscribe_automation_in_tx,
-    unsubscribe_automation, unsubscribe_automation_in_tx,
+    AutomationClaim, AutomationClaimAttempt, AutomationClaimState, AutomationFailure,
+    AutomationSettle, AutomationTrigger, MAX_AUTOMATION_ERROR_BYTES,
+    claim_automation_triggers_in_tx, claim_next_pending_automation, list_automation_failures,
+    list_running_automation_attempts, reclaim_running_automations, settle_automation_claim,
+    subscribe_automation, subscribe_automation_in_tx, unsubscribe_automation,
 };
 pub use chats::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, AgentRunRecord, AgentUnreadThreadRow, BookmarkMode,
@@ -77,9 +73,9 @@ pub use collections::{
     COLLECTION_SCHEMA_FILENAME, ChangeActorKind, ChangeAttribution, CollectionAdoptionCandidate,
     CollectionDetails, CollectionFieldChangeFact, CollectionFieldHistoryEntry, CollectionFieldType,
     CollectionFieldValue, CollectionFilter, CollectionFilterOperator, CollectionHistoryValue,
-    CollectionIndexedValue, CollectionIndexedValueValidation, CollectionPendingAdoption,
-    CollectionPendingAdoptionCursor, CollectionPendingAdoptionPage, CollectionQuery,
-    CollectionQueryCursor, CollectionQueryCursorValue, CollectionQueryResult,
+    CollectionIndexedValue, CollectionIndexedValueValidation, CollectionListPage,
+    CollectionPendingAdoption, CollectionPendingAdoptionCursor, CollectionPendingAdoptionPage,
+    CollectionQuery, CollectionQueryCursor, CollectionQueryCursorValue, CollectionQueryResult,
     CollectionReconcileResult, CollectionRecord, CollectionRecordApplyFacts,
     CollectionRecordDetails, CollectionRecordGroup, CollectionRelationCleanupCandidate,
     CollectionResolvedRelation, CollectionSchema, CollectionSchemaParseResult,
@@ -119,27 +115,25 @@ pub use merge::{
 };
 pub use normalize::NormalizedState;
 pub use records::{
-    ApplySecretFileFromVersion, BinaryBlobRead, BinaryHead, BinaryHeadMeta, BinaryWriteResult,
-    CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire,
-    CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord,
-    InbandBinary, InbandSecret, InbandText, ListMomentsQuery, MomentOp, MomentPage, MomentRecord,
-    RenameResult, RenameTextFile, RollbackTextFileMutation, SnapshotContent, SnapshotMetadata,
-    SnapshotView, TextBlobRead, TextSnapshot, VersionKind, VersionRecord, WriteBinary, WriteResult,
-    WriteText,
+    ApplySecretFileFromVersion, BinaryBlobRead, BinaryHead, BinaryWriteResult, CaptureIngest,
+    CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire, CaptureRetireResult,
+    CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord, InbandBinary, InbandSecret,
+    InbandText, ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
+    RollbackTextFileMutation, SnapshotContent, SnapshotMetadata, SnapshotView, TextBlobRead,
+    TextSnapshot, VersionKind, VersionRecord, WriteBinary, WriteResult, WriteText,
 };
 pub use secrets::{
     CaptureSecret, CaptureSecretRetire, SecretCompareEntry, SecretComparePage, SecretDelete,
     SecretDiskIntent, SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord,
-    SecretOp, SecretRestoreResult, SecretWrite, SecretWriteResult, apply_secret_file_from_version,
-    apply_secret_file_from_version_with, capture_secret_retire, capture_secret_retire_with,
-    compare_secret_files_page_keyless, delete_secret_file_keyless, delete_secret_file_keyless_with,
-    derive_capture_secret_moment_id, derive_capture_secret_retire_moment_id, fork_version_keyless,
+    SecretOp, SecretRestoreResult, SecretWrite, SecretWriteResult,
+    apply_secret_file_from_version_with, capture_secret_retire_with,
+    compare_secret_files_page_keyless, delete_secret_file_keyless_with,
+    derive_capture_secret_moment_id, derive_capture_secret_retire_moment_id,
     fork_version_keyless_with, get_secret_moment_keyless, has_secret_state,
     list_secret_files_keyless, list_secret_files_keyless_page,
     list_secret_moments_in_time_window_keyless, list_secret_moments_keyless,
-    list_secret_moments_page_keyless, restore_secret_file_verbatim,
-    restore_secret_file_verbatim_with_metadata,
-    restore_secret_file_verbatim_with_metadata_and_after, secret_file_len_keyless,
+    list_secret_moments_page_keyless, restore_secret_file_verbatim_with_metadata_and_after,
+    secret_file_len_keyless,
 };
 pub use store::{
     CaptureIngestBatchContext, CaptureManifestSeedEntry, INBAND_CONTENT_CAP_BYTES,
@@ -150,15 +144,16 @@ pub use store::{
     capture_ingest_in_tx, capture_ingest_with_admission_in_tx, capture_manifest_seed,
     capture_retire_in_tx, decode_binary_rollback_job_identity, delete_text_in_tx,
     derive_capture_moment_id, derive_capture_object_id, derive_capture_retire_moment_id,
-    ensure_main_version_in_tx, object_has_live_alias, rollback_compensating_moment_id,
-    validate_addressable_plaintext_path, validate_delete_input, validate_plaintext_storable_path,
-    validate_write_input, write_binary_in_tx, write_projected_text_in_tx, write_text_in_tx,
+    ensure_main_version_in_tx, normalize_tracked_workspace_path, object_has_live_alias,
+    rollback_compensating_moment_id, validate_addressable_plaintext_path, validate_delete_input,
+    validate_plaintext_storable_path, validate_write_input, write_binary_in_tx,
+    write_projected_text_in_tx, write_text_in_tx,
 };
 
 // Re-export the storage surface a domain caller needs on the common path.
 pub use dohc_engine_storage::{EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome};
 
 /// The secret domain's ciphertext shape and plaintext/ciphertext size cap.
-/// Re-exported so replication appliers bind to the SAME values the local
+/// Re-exported so replication appliers bind to the same values the local
 /// seal/open and secret write paths use instead of restating them.
 pub use dohc_engine_crypto::aead::{MAX_SECRET_FILE_BYTES, SECRET_IV_BYTES, SECRET_TAG_BYTES};

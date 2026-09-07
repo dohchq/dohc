@@ -13,14 +13,14 @@ import {
 // Two order-based designs were tried and both produced exactly that:
 //   1. a scalar, overwritten by the newest start;
 //   2. a FIFO, which assumed completion order matched start order.
-// It does not. An ABORTING settle throws before it reaches `settleChain`, so
+// It does not. An aborting settle throws before it reaches `settleChain`, so
 // it completes ahead of settles that queued earlier; and `settleChain` is per
 // generation while this state is per session. Pairing is by TOKEN now, and
 // these tests are written so any order-based implementation fails them.
 
 describe("engine Y.Doc save-seq bookkeeping", () => {
   it("pairs OUT-OF-ORDER completions correctly (announce A,B,C; complete C,A,B)", () => {
-    // THE case a FIFO cannot survive. C aborts pre-barrier and completes
+    // The case a FIFO cannot survive. C aborts pre-barrier and completes
     // first while A and B are still queued on settleChain.
     const state = createEngineYDocSaveSeqState();
 
@@ -56,7 +56,7 @@ describe("engine Y.Doc save-seq bookkeeping", () => {
     ).toEqual([3, 2, 1]);
   });
 
-  it("pairs each completing settle with ITS OWN start, not the newest one", () => {
+  it("pairs each completing settle with its own start, not the newest one", () => {
     const state = createEngineYDocSaveSeqState();
     noteLocalEdit(state, 1);
     noteSettleStart(state, 1);
@@ -92,7 +92,7 @@ describe("engine Y.Doc save-seq bookkeeping", () => {
     expect(noteSettleOutcome(state, 7)).toBe(0);
   });
 
-  it("does not let an edit typed DURING a settle be claimed by it", () => {
+  it("does not let an edit typed during a settle be claimed by it", () => {
     const state = createEngineYDocSaveSeqState();
     noteLocalEdit(state, 1);
     noteSettleStart(state, 1);

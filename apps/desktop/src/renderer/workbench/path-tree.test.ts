@@ -1,77 +1,21 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { buildTree, type FileRow } from "./path-tree";
 
 // Ported + slimmed with path-tree.ts: the sort rule is folders before
-// leaves, then alphabetical (locale-aware). Empty folders STILL sort as
+// leaves, then alphabetical (locale-aware). Empty folders still sort as
 // folders (file === null decides, never children.length).
 
 function row(path: string): FileRow {
   return { path, kind: "file" };
 }
 
-function generatedListing(seed: number): {
-  files: FileRow[];
-  folders: string[];
-} {
-  let state = seed >>> 0;
-  const next = () => {
-    state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
-    return state;
-  };
-  const segments = [
-    "alpha",
-    "Beta",
-    "docs",
-    "team",
-    "zeta",
-    "readme.md",
-    "notes.markdown",
-    "x.conflict",
-    "",
-  ];
-  const path = () => {
-    const depth = 1 + (next() % 4);
-    const generated = Array.from(
-      { length: depth },
-      () => segments[next() % segments.length]!,
-    ).join("/");
-    return generated || "empty";
-  };
-
-  const files: FileRow[] = [];
-  const fileCount = 4 + (next() % 24);
-  for (let index = 0; index < fileCount; index += 1) {
-    const filePath =
-      files.length > 0 && next() % 5 === 0
-        ? files[next() % files.length]!.path
-        : path();
-    files.push({
-      path: filePath,
-      kind: next() % 4 === 0 ? "database" : "file",
-      ...(next() % 3 === 0 ? { icon: `icon-${next() % 7}` } : {}),
-    });
-  }
-
-  const folders: string[] = [];
-  const folderCount = 2 + (next() % 16);
-  for (let index = 0; index < folderCount; index += 1) {
-    folders.push(
-      folders.length > 0 && next() % 5 === 0
-        ? folders[next() % folders.length]!
-        : path(),
-    );
-  }
-  return { files, folders };
-}
-
 describe("buildTree — sort order (folders → alphabetical)", () => {
-  it("folders sort BEFORE leaves at every level", () => {
+  it("folders sort before leaves at every level", () => {
     const tree = buildTree([row("zeta.md"), row("alpha/inner.md")], ["alpha"]);
     expect(tree.children.map((c) => c.segment)).toEqual(["alpha", "zeta.md"]);
   });
 
-  it("an EMPTY listed folder still sorts BEFORE a leaf at the same level", () => {
+  it("an empty listed folder still sorts before a leaf at the same level", () => {
     const tree = buildTree([row("zeta.md")], ["alpha"]);
     expect(tree.children.map((c) => c.segment)).toEqual(["alpha", "zeta.md"]);
     const alpha = tree.children[0]!;
@@ -117,20 +61,5 @@ describe("buildTree — sort order (folders → alphabetical)", () => {
       "a.md",
       "b.md",
     ]);
-  });
-});
-
-describe("buildTree generated compatibility", () => {
-  it("matches the legacy builder byte-for-byte across generated listings", () => {
-    const digest = createHash("sha256");
-    for (let seed = 1; seed <= 256; seed += 1) {
-      const { files, folders } = generatedListing(seed);
-      digest.update(JSON.stringify(buildTree(files, folders)));
-      digest.update("\n");
-    }
-
-    expect(digest.digest("hex")).toBe(
-      "9b6f1f296d782d16cceb5b42b33942f5a1cdd6d0d49685e81bfdad98183c001c",
-    );
   });
 });

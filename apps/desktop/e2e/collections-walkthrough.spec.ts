@@ -7,11 +7,10 @@ import {
   createTempWorkspace,
   openWorkspaceFromFirstRun,
   seedWorkspaceManifest,
-  seedWorkspaceSettings,
 } from "./helpers/workspace";
 
 // The Phase 2 collections gate walkthrough (docs/plans/collections.md),
-// driven through the REAL app: create two collections from the File menu's
+// driven through the real app: create two collections from the File menu's
 // New Collection command, add a field of every v1 type through the Fields
 // dialog, create records with New record, edit every field type inline in
 // the table, drag a board card and read the write back from the record's
@@ -198,9 +197,6 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
 
   try {
     await seedWorkspaceManifest(temp, "collections-walkthrough-e2e");
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
@@ -350,6 +346,12 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     await expect(
       boardColumn(page, "Doing").locator('[role="listitem"][aria-label="Website"]'),
     ).toBeVisible({ timeout: 30_000 });
+    // A virtualized column mounts only the cards near its viewport; the
+    // header count is what tells the user the rest exist. After the drag
+    // the Doing column holds both records.
+    await expect(
+      boardColumn(page, "Doing").locator("> div").first().locator("span.font-mono"),
+    ).toHaveText("2");
     // The md file IS the record: the grouped-field write settles into its
     // frontmatter on disk.
     await expect
@@ -368,7 +370,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
         { timeout: 30_000, intervals: [500] },
       )
       .toBe(true);
-    // A completed drag is not a click: the record tab must NOT have opened.
+    // A completed drag is not a click: the record tab must not have opened.
     await expect(page.getByTestId("tab-projects/Untitled.md")).toHaveCount(0);
 
     // --- Calendar rekey: keyed to Due only Website renders (day 10); keyed

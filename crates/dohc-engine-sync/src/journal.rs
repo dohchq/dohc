@@ -68,7 +68,7 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 /// Whether `workspace_id` actually replicates with a relay, read inside the
 /// caller's transaction.
 ///
-/// A `sync_identity` row does NOT answer this. `local_replication_coordinate`
+/// A `sync_identity` row does not answer this. `local_replication_coordinate`
 /// (`dohc-engine-domain/src/chats.rs`) mints one with `INSERT OR IGNORE` from
 /// `randomblob(16)` on every ordinary chat write, including the
 /// `ensure_general_channel` bootstrap, so a workspace that has never seen a
@@ -86,41 +86,18 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 /// [`workspace_journals_file_moments_in_tx`] holds the share-lane term, and
 /// only the file-moment journal reads it.
 ///
-/// These two tables are a SUBSET of what `adopt_join_identity` below calls
-/// pristine local replication state. That check is deliberately wider — it also
-/// rejects `replication_log`, `replication_peers`, the `shared_channel_*`
-/// tables, `share_view_cursors`, `chat_pending_replication` and
-/// `ydoc_deferred_updates` and the Y.Doc arbitration tables, because adoption
-/// must refuse on ANY prior replication activity. This predicate wants the
-/// narrower question: has THIS
-/// workspace exchanged data with a relay. Do not widen one to match the other.
+/// This is narrower than `adopt_join_identity`'s "pristine local replication
+/// state" check, which must refuse on any prior replication activity. Do not
+/// widen one to match the other. The identity is checked as well because
+/// [`journal_local_op_in_tx`] refuses without one, and that refusal would roll
+/// the user's edit back with it.
 ///
-/// The identity is checked as well, because Y.Doc base origination consults
-/// this BEFORE it claims a base: [`journal_local_op_in_tx`] refuses without an
-/// identity, and a refusal raised inside the append transaction would roll the
-/// user's edit back with it.
-///
-/// No `bounded` guard, unlike its neighbours here. Every caller passes a
-/// `DocKey`'s `workspace_id`, which `DocKey::new` already bounds by
-/// `MAX_IDENTIFIER_BYTES`. Re-checking it would add a rejection path that runs
-/// inside an append transaction and can only fire on input the type forbids.
-///
-/// KNOWN WINDOW, and a known LATCH. This reads past contact, not current
-/// enrolment.
-///
-/// The window: a freshly enrolled workspace answers `false` until its first
-/// push or pull commits, so an edit inside that window does not originate.
-/// The deferred drain, non-leased apply path, and enrolment backfill now retry
-/// the origination (#548). Before that retrigger, the window cost at most one
-/// edit: the next append asked again, the base carried the complete state, and
-/// a local-only close refused until the Markdown artifact was durable
-/// (`close_session` raises `UnsettledClose`), so reopening seeded from that
-/// Markdown and originated then.
-///
-/// The latch: nothing deletes a position row, so this keeps answering `true`
-/// after the user signs out or unbinds the workspace. #558 owns that. Both come
-/// from the same root — the engine has no durable, revocable record of current
-/// enrolment — and one such record replaces this predicate and closes both.
+/// This reads past contact, not current enrolment. A freshly enrolled
+/// workspace answers `false` until its first push or pull commits; the
+/// deferred drain, the non-leased apply path, and the enrolment backfill retry
+/// origination after that. Nothing deletes a position row, so the answer stays
+/// `true` after sign-out or unbind until the engine has a durable, revocable
+/// record of enrolment.
 pub fn workspace_replicates_with_relay_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -139,18 +116,18 @@ pub fn workspace_replicates_with_relay_in_tx(
 /// relay lane, or an Edit share view's proposal lane.
 ///
 /// Deliberately narrower than [`workspace_replicates_with_relay_in_tx`]. A
-/// Edit can carry file moments through proposals and nothing else (#646), so
+/// Edit can carry file moments through proposals and nothing else, so
 /// the Y.Doc lanes, the conflict outbox and cursor advancement keep the
 /// owner-lane answer. Journaling anything a proposal cannot carry would leave
 /// rows in the recipient's database that nothing ever drains: a
 /// `ydoc.update` there would accumulate forever.
 ///
-/// The share-lane term is `share_view_file_lane`, and it is a FACT rather
+/// The share-lane term is `share_view_file_lane`, and it is a fact rather
 /// than a proxy: [`record_share_view_identity`] writes that row only for an
 /// Edit grant, which is the only level whose file changes a share can drain.
 /// View and Comment record neither an identity nor a lane row.
 ///
-/// `EXISTS(sync_identity)` must NEVER stand in for that. The doc on
+/// `EXISTS(sync_identity)` must never stand in for that. The doc on
 /// [`workspace_replicates_with_relay_in_tx`] above says why, and it predicted
 /// this exact mistake: an identity row alone cannot tell a share view that
 /// may send file changes from one that may not. An earlier revision of this
@@ -158,8 +135,8 @@ pub fn workspace_replicates_with_relay_in_tx(
 /// share carrying an unrelated identity.
 ///
 /// The identity a journal append needs still exists whenever this answers
-/// true, because the lane row and the identity are written in ONE
-/// transaction. That matters: `journal_local_payload_json_in_tx` REFUSES
+/// true, because the lane row and the identity are written in one
+/// transaction. That matters: `journal_local_payload_json_in_tx` Refuses
 /// without an identity, and the refusal rolls the user's edit back with it.
 pub fn workspace_journals_file_moments_in_tx(
     tx: &rusqlite::Transaction<'_>,
@@ -177,7 +154,7 @@ pub fn workspace_journals_file_moments_in_tx(
 }
 
 /// Transaction-composable local journal append for callers that must commit
-/// an op in the SAME transaction as a domain mutation (the live-session
+/// an op in the same transaction as a domain mutation (the live-session
 /// `ydoc.update` delta: blob-before-log holds because the CRDT append stored
 /// the blob earlier in this transaction). This requires an existing sync
 /// identity. An exact replicated lineage cannot exist without one.
@@ -538,7 +515,7 @@ pub fn record_share_view_identity(
             )
             .map_err(SyncError::persist)?;
         }
-        // The lane fact, in the SAME transaction as the identity, which is
+        // The lane fact, in the same transaction as the identity, which is
         // what lets `workspace_journals_file_moments_in_tx` read this row
         // alone and still know an identity is there for the append.
         //

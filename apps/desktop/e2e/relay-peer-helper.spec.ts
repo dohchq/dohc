@@ -1,5 +1,5 @@
-// Pins helpers/relayPeer.ts against a REAL relay, because the specs that use it
-// cannot: workspace-sync-rejoin fails earlier at cloudEnableSync (#434), so the
+// Pins helpers/relayPeer.ts against a real relay, because the specs that use it
+// cannot: workspace-sync-rejoin fails earlier at cloudEnableSync, so the
 // assertion built on this helper is unreachable there. Without this, a helper two
 // specs depend on would have no test at all.
 //
@@ -30,17 +30,17 @@ test("relayPeer helper: 404 absent, 409 without identity, 200 with it", async ()
   try {
     relay = await spawnSyncRelay({ dbPath: relayDb });
 
-    // 1. An unclaimed workspace is ABSENT, not an error.
+    // 1. An unclaimed workspace is absent, not an error.
     expect(await relayServesWorkspace(relay.baseUrl, TOKEN, "never-claimed")).toBe(false);
 
-    // 2. A claim WITHOUT identity (what claimRelayWorkspace sends) leaves the
+    // 2. A claim without identity (what claimRelayWorkspace sends) leaves the
     //    workspace un-adopted, so an identity-free read still succeeds.
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: TOKEN, workspaceId: "plain" });
     expect(await relayServesWorkspace(relay.baseUrl, TOKEN, "plain")).toBe(true);
     expect(relayAdoptedIdentity(relayDb, "plain")).toBeNull();
 
-    // 3. A claim WITH identity — what the app's cloudEnableSync does — makes the
-    //    relay adopt it, and then an identity-free read must NOT read as absent.
+    // 3. A claim with identity — what the app's cloudEnableSync does — makes the
+    //    relay adopt it, and then an identity-free read must not read as absent.
     const adopted = await relayJson(relay.baseUrl, TOKEN, "/sync/workspaces", {
       method: "POST",
       body: JSON.stringify({

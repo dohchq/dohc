@@ -318,7 +318,7 @@ const SCENE_ASSET_FORMATS: [(&str, &str); 10] = [
 ];
 
 pub fn scene_asset_extension(mime_type: &str) -> Result<&'static str, SceneImportError> {
-    // BinaryFileData's validated MIME owns the native dataURL and canonical
+    // BinaryFileData's validated mime owns the native dataURL and canonical
     // extension; SHA-256 authenticates the exact bytes. The engine does not
     // sniff or transform provider-owned image formats.
     SCENE_ASSET_FORMATS

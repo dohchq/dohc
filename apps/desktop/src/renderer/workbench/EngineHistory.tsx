@@ -1,26 +1,22 @@
+import { formatChatTime } from "../time";
+import { basenameOf } from "../path";
 import { ChevronDown, ChevronRight, FileArchive, FileText, Lock, RotateCcw, Search, X } from "lucide-react";
 import { Fragment, useMemo, useState } from "react";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
 import { chatAuthorLabel } from "./LinkedChats";
 
-// Engine history timeline (PR 0M-5, workspace-engine alpha). Flagged
-// workspaces read ENGINE moments instead of legacy change sets; this renders
-// them with their real summaries ("Saved latest edits", "Merged version X
-// into Main", "Reconciled offline edits", ...) and groups a multi-file pass
-// (reconcile, switch, merge, restore) into one expandable item via its
-// correlationId. Product vocabulary only — no git terms.
+// Engine history timeline. Renders engine moments with their summaries
+// ("Saved latest edits", "Merged version X into Main", "Reconciled offline
+// edits", ...) and groups a multi-file pass (reconcile, switch, merge,
+// restore) into one expandable item via its correlationId. Product
+// vocabulary only, no git terms.
 
-export interface EngineHistoryGroup {
+interface EngineHistoryGroup {
   key: string;
   summary: string;
   recordedAtMs: number;
   correlationId?: string;
   moments: EngineMomentRecord[];
-}
-
-function basename(path: string): string {
-  const index = path.lastIndexOf("/");
-  return index >= 0 ? path.slice(index + 1) : path;
 }
 
 // The list label for one moment: its real engine summary when it has one,
@@ -29,11 +25,11 @@ export function engineMomentSummary(
   moment: Pick<EngineMomentRecord, "summary" | "operation" | "path" | "contentKind" | "byteLength">,
 ): string {
   if (moment.summary) return moment.summary;
-  if (moment.operation === "delete") return `Deleted ${basename(moment.path)}`;
+  if (moment.operation === "delete") return `Deleted ${basenameOf(moment.path)}`;
   if (moment.contentKind === "binary") {
-    return `Updated ${basename(moment.path)} (${moment.byteLength ?? 0} bytes)`;
+    return `Updated ${basenameOf(moment.path)} (${moment.byteLength ?? 0} bytes)`;
   }
-  return `Edited ${basename(moment.path)}`;
+  return `Edited ${basenameOf(moment.path)}`;
 }
 
 function engineOperationLabel(moment: EngineMomentRecord): string {
@@ -61,8 +57,8 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
   }
 }
 
-// PR 0N-1: a moment authored by a dohc-tracked agent run displays as
-// "<User Name>'s agent" (the SAME formatting rule the chat rail uses via
+// A moment authored by a dohc-tracked agent run displays as
+// "<User Name>'s agent" (the same formatting rule the chat rail uses via
 // chatAuthorLabel); everything else keeps its actor-neutral origin label.
 export function engineMomentSourceLabel(
   moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName">,
@@ -85,7 +81,7 @@ export function groupAgentAuthorName(
     : undefined;
 }
 
-// Groups CONSECUTIVE moments that share a correlationId (the list is newest
+// Groups consecutive moments that share a correlationId (the list is newest
 // first, and one pass records its per-file moments contiguously on the
 // capture chain). Moments without a correlationId stay singletons.
 export function groupEngineMoments(
@@ -128,19 +124,6 @@ function engineHistorySearchText(group: EngineHistoryGroup): string {
     .toLowerCase();
 }
 
-function formatRecordedAt(recordedAtMs: number): { label: string; iso: string } {
-  const recordedAt = new Date(recordedAtMs);
-  return {
-    label: recordedAt.toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    }),
-    iso: recordedAt.toISOString(),
-  };
-}
-
 function dayKey(recordedAtMs: number): string {
   const recordedAt = new Date(recordedAtMs);
   const month = String(recordedAt.getMonth() + 1).padStart(2, "0");
@@ -148,15 +131,17 @@ function dayKey(recordedAtMs: number): string {
   return `${recordedAt.getFullYear()}-${month}-${day}`;
 }
 
+const dayFormat = new Intl.DateTimeFormat(undefined, {
+  weekday: "short",
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+});
+
 function formatDay(recordedAtMs: number): { label: string; dateTime: string } {
   const recordedAt = new Date(recordedAtMs);
   return {
-    label: recordedAt.toLocaleDateString(undefined, {
-      weekday: "short",
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    }),
+    label: dayFormat.format(recordedAt),
     dateTime: dayKey(recordedAtMs),
   };
 }
@@ -167,7 +152,7 @@ function MomentRow(props: {
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const { moment } = props;
-  const recordedAt = formatRecordedAt(moment.recordedAtMs);
+  const recordedAt = formatChatTime(moment.recordedAtMs);
   // Agent-authored moments speak in the olive attribution voice; everything
   // else is a neutral origin in ink.
   const isAgent = moment.agentAuthorName !== undefined;
@@ -186,7 +171,7 @@ function MomentRow(props: {
     >
       <span className="flex min-w-0 items-start gap-2">
         {moment.protected ? (
-          // Secret-backed file moment (PR 08): the lock is the affordance —
+          // Secret-backed file moment: the lock is the affordance —
           // the row is metadata-only and its page shows no contents.
           <Lock
             size={12}
@@ -251,7 +236,7 @@ function GroupRow(props: {
 }) {
   const { group } = props;
   const [expanded, setExpanded] = useState(false);
-  const recordedAt = formatRecordedAt(group.recordedAtMs);
+  const recordedAt = formatChatTime(group.recordedAtMs);
   // Uniform agent authorship surfaces on the group row itself; mixed or
   // neutral groups show no author (never a guess).
   const agentAuthorName = groupAgentAuthorName(group.moments);
@@ -320,8 +305,8 @@ function GroupRow(props: {
   );
 }
 
-// The timeline body for flagged workspaces (side panel History view, history
-// tab render this over the same root-owned page state).
+// The timeline body (side panel History view and the history tab render
+// this over the same root-owned page state).
 export function EngineHistoryView(props: {
   moments: EngineMomentRecord[];
   hasMore: boolean;
@@ -343,8 +328,8 @@ export function EngineHistoryView(props: {
     [groups, normalizedQuery],
   );
 
-  // A KNOWN page with no moments. The caller renders this view only when it
-  // HAS a page (#593): "No changes yet" states something about the workspace,
+  // A known page with no moments. The caller renders this view only when it
+  // has a page: "No changes yet" states something about the workspace,
   // and a read still in flight or a read that failed may not state it.
   if (props.moments.length === 0) {
     return (
@@ -406,7 +391,7 @@ export function EngineHistoryView(props: {
                   <time
                     data-testid="engine-history-day-heading"
                     dateTime={day.dateTime}
-                    className="text-[10px] font-semibold uppercase tracking-wide text-subtle"
+                    className="dohc-section-label"
                   >
                     {day.label}
                   </time>

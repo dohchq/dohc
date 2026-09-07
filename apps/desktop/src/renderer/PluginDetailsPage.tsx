@@ -1,3 +1,6 @@
+import { pluginKey } from "./workbench/pluginCatalog";
+import { useRequestSequence } from "./useRequestSequence";
+import { ipcErrorMessage } from "./ipcError";
 import { AlertTriangle, Blocks, ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { PluginSizesRecord, PluginStatusRecord } from "../ipc/bridgeContract";
@@ -65,12 +68,7 @@ type ReadmeState =
 // Electron wraps a rejected handler's error; the workspace surfaces strip the
 // wrapper before showing the reason (WorkspaceVersions precedent).
 function readableReason(error: unknown): string {
-  const raw = error instanceof Error ? error.message : "";
-  const stripped = raw.replace(
-    /^Error invoking remote method '[^']+': (?:Error: )?/,
-    "",
-  );
-  return stripped.length > 0 ? stripped : "Try again.";
+  return ipcErrorMessage(error, "Try again.");
 }
 
 // ENOENT is the file system's own answer to "is it there", carried out on the
@@ -88,7 +86,7 @@ function readmePath(directoryName: string): string {
 // Following a rename used to be a heuristic — id-only matching, guarded by
 // a window and a collision history, guessing that a same-id arrival was the
 // tab's own row moving. It now follows the fact instead: catalog.renamed
-// fires only where the pipeline has itself PROVEN a rename, and this tab
+// fires only where the pipeline has itself proven a rename, and this tab
 // retargets on that fact directly (see the component body below) rather
 // than inferring one from the list's own shape.
 function findTabPlugin(
@@ -200,12 +198,12 @@ function PluginSettingsSection(props: {
   // One token guards every response: the effect re-runs for each workspace or
   // plugin, and its cleanup raises the token, so an answer for the plugin this
   // page no longer shows can never repaint it.
-  const requestToken = useRef(0);
+  const requestToken = useRequestSequence();
 
   const declaredCount = plugin.settings.length;
 
   useEffect(() => {
-    const request = ++requestToken.current;
+    const request = requestToken.next();
     setValues(null);
     setFailure(null);
     // A plugin with no settings has no controls to fill, so main is never
@@ -223,16 +221,16 @@ function PluginSettingsSection(props: {
         directoryName: plugin.directoryName,
       })
       .then((result) => {
-        if (request !== requestToken.current) return;
+        if (!requestToken.isCurrent(request)) return;
         if (result.ok) setValues(result.values);
         else setFailure(result.message);
       })
       .catch((error: unknown) => {
-        if (request !== requestToken.current) return;
+        if (!requestToken.isCurrent(request)) return;
         setFailure(readableReason(error));
       });
     return () => {
-      requestToken.current += 1;
+      requestToken.next();
     };
   }, [props.workspaceId, plugin.id, plugin.directoryName, declaredCount]);
 
@@ -240,7 +238,7 @@ function PluginSettingsSection(props: {
     // Shown at once so a control never feels stuck, then replaced by whatever
     // main actually stored.
     setValues((current) => (current ? { ...current, [key]: value } : current));
-    const request = requestToken.current;
+    const request = requestToken.current();
     void bridge()
       .setPluginSettings({
         workspaceId: props.workspaceId,
@@ -249,7 +247,7 @@ function PluginSettingsSection(props: {
         values: { [key]: value },
       })
       .then((result) => {
-        if (request !== requestToken.current) return;
+        if (!requestToken.isCurrent(request)) return;
         if (result.ok) {
           setValues(result.values);
           setFailure(null);
@@ -258,7 +256,7 @@ function PluginSettingsSection(props: {
         setFailure(result.message);
       })
       .catch((error: unknown) => {
-        if (request !== requestToken.current) return;
+        if (!requestToken.isCurrent(request)) return;
         setFailure(readableReason(error));
       });
   };
@@ -446,7 +444,7 @@ function usePluginSizes(
       // The exact row this rail is about, never pluginId alone — two rows
       // can share an id (a broken manifest's directory-derived fallback
       // colliding with some other, unrelated plugin's real id), and dohc's
-      // own build and state storage answers only ever what THIS id
+      // own build and state storage answers only ever what this id
       // actually built and ran, which the pipeline refuses to report for a
       // directory it does not belong to.
       return bridge()
@@ -624,7 +622,7 @@ export function PluginDetailsPage(props: {
   pluginId: string;
   /** The exact row this tab opened for. A discovered row's id is only ever
    * a broken manifest's directory-derived fallback, which can coincide
-   * with some OTHER, unrelated plugin's real id — matching by id alone
+   * with some other, unrelated plugin's real id — matching by id alone
    * found whichever row sorted first, never the second-sorting one a user
    * actually clicked. */
   directoryName: string;
@@ -644,7 +642,7 @@ export function PluginDetailsPage(props: {
   ) => void;
 }) {
   const catalog = usePluginCatalog(props.workspaceId);
-  // The directoryName this tab is CURRENTLY following. Starts at
+  // The directoryName this tab is currently following. Starts at
   // props.directoryName, the tab's own opened identity, and moves only when
   // catalog.renamed proves this exact row moved — never guessed from the
   // list's own shape.
@@ -653,15 +651,15 @@ export function PluginDetailsPage(props: {
   // report to onDirectoryRenamed — reporting it directly here would call a
   // parent setter mid-render. Cleared alongside the tracking above on a
   // genuinely new tab, so a previous tab's own in-flight rename can never
-  // reach a DIFFERENT tab this instance goes on to show.
+  // reach a different tab this instance goes on to show.
   const pendingRenameRef = useRef<{ from: string; to: string } | null>(null);
   // The catalog.renamed object this tab has already applied (or ruled out).
-  // catalog.renamed is a fresh object per rename but is NOT cleared once
+  // catalog.renamed is a fresh object per rename but is not cleared once
   // consumed, so without this, a component instance reused for a brand new
   // tab (same pluginId and directoryName as a plugin renamed a while ago)
   // would re-apply a stale fact that has nothing to do with this tab.
   // Baselined to whatever fact already exists on identity change, below —
-  // only a rename that happens WHILE this tab is open is ever this tab's.
+  // only a rename that happens while this tab is open is ever this tab's.
   const lastHandledRenameRef = useRef<PluginRenamedFact | null>(null);
   // Whose identity trackedDirectoryNameRef/pendingRenameRef/
   // lastHandledRenameRef currently belong to — a tab is one virtual path
@@ -808,9 +806,9 @@ function PluginDetailsHeader(props: {
   workspaceId: string;
 }) {
   const { plugin, catalog } = props;
-  const busyAction = catalog.busy[plugin.id];
+  const busyAction = catalog.busy[pluginKey(plugin)];
   const disabled = busyAction !== undefined || isPipelineBusy(plugin);
-  const actionError = catalog.errors[plugin.id];
+  const actionError = catalog.errors[pluginKey(plugin)];
 
   return (
     <header className="px-6 pb-5 pt-6">
@@ -894,7 +892,9 @@ function PluginDetailsHeader(props: {
                   key={webApp.id}
                   data-testid="plugin-open-web-app"
                   data-web-app-id={webApp.id}
-                  disabled={disabled || catalog.openingWebApp !== null}
+                  disabled={
+                    disabled || catalog.openingWebApp !== null || catalog.webAppRootPending(plugin)
+                  }
                   onClick={() => catalog.openWebApp(plugin, webApp.id)}
                 >
                   {catalog.openingWebApp === key
@@ -1050,7 +1050,7 @@ function PluginUninstallDialog(props: {
   const { catalog } = props;
   const confirmation = catalog.confirmation;
   if (!confirmation) return null;
-  const uninstalling = catalog.busy[confirmation.plugin.id] === "uninstall";
+  const uninstalling = catalog.busy[pluginKey(confirmation.plugin)] === "uninstall";
   const warning = confirmation.preflight.warning;
   // The same dialog and the same bridge call either way: this plugin was
   // either running (Uninstall) or never approved (Remove) — the wording
@@ -1059,7 +1059,7 @@ function PluginUninstallDialog(props: {
   const installed = isInstalled(confirmation.plugin);
   // A directoryName matching a built-in only means Add can offer this slot
   // again — it says nothing about what's actually IN the folder right now.
-  // A user or an agent can put anything at plugins/codex; Add always
+  // A user or an agent can put anything at plugins/agent-chat; Add always
   // restores dohc's own packaged source, never whatever this specific copy
   // held. Anything else has no such path at all, and dohc's own delete here
   // is permanent either way (PluginPipeline.uninstall removes the source

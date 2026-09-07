@@ -41,6 +41,7 @@ import {
   pluginIdToSafePath,
 } from "./pluginSourceSnapshot";
 
+import { deferred } from "../testing/deferred";
 interface BuildFixture {
   root: string;
   dohcDir: string;
@@ -51,28 +52,9 @@ interface BuildFixture {
   input: BuildPluginBundleInput;
 }
 
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve(value: T): void;
-}
-
 const roots: string[] = [];
 let stagedResourcesRoot: string;
 let stagedResourcesParent: string;
-
-function deferred<T>(): Deferred<T> {
-  let resolvePromise: ((value: T) => void) | undefined;
-  const promise = new Promise<T>((resolveValue) => {
-    resolvePromise = resolveValue;
-  });
-  return {
-    promise,
-    resolve: (value) => {
-      if (!resolvePromise) throw new Error("Deferred promise was not initialized.");
-      resolvePromise(value);
-    },
-  };
-}
 
 async function stageCurrentEsbuildBinary(resourcesRoot: string): Promise<void> {
   const platformKey = `${process.platform}-${process.arch}`;
@@ -228,7 +210,7 @@ describe("buildPluginBundle", () => {
     expect(published.cleanupWarning).toBeNull();
   });
 
-  it("leaves the live root untouched until publish is called (#779 round 6 F5)", async () => {
+  it("leaves the live root untouched until publish is called", async () => {
     const fixture = await createBuildFixture();
     const oldBundlePath = join(fixture.liveRoot, "bundle.mjs");
     await writeFile(oldBundlePath, "old bundle bytes\n");
@@ -247,7 +229,7 @@ describe("buildPluginBundle", () => {
     await expectNoStaging(fixture.liveRoot);
   });
 
-  it("keeps the live root complete, snapshot included, for the whole build (#779 round 7 A1)", async () => {
+  it("keeps the live root complete, snapshot included, for the whole build", async () => {
     const fixture = await createBuildFixture();
     const oldBundlePath = join(fixture.liveRoot, "bundle.mjs");
     await writeFile(oldBundlePath, "old bundle bytes\n");
@@ -377,7 +359,6 @@ describe("buildPluginBundle", () => {
   });
 
   it("accepts an entry under a '..'-prefixed directory NAME inside the snapshot", async () => {
-    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     const fixture = await createBuildFixture({
       entry: "..cache/index.ts",
       entrySource: 'export const marker = "dot-dot-run";\nexport default { marker };\n',
@@ -385,10 +366,10 @@ describe("buildPluginBundle", () => {
 
     const success = requireSuccess(await buildPluginBundle(fixture.input));
     await success.publish();
-    expect(await readFile(success.bundlePath, "utf8")).toContain("dot-dot-run");
+    expect(await readFile(success.bundlePath, "utf8"), "..-segment: a bare '..-prefix' isInside refuses this real contained name.").toContain("dot-dot-run");
   });
 
-  it("refuses a source root that belongs to another plugin (CERT779J B3.1)", async () => {
+  it("refuses a source root that belongs to another plugin", async () => {
     const fixture = await createBuildFixture();
     const neighbourRoot = join(
       dirname(fixture.liveRoot),
@@ -421,7 +402,7 @@ describe("buildPluginBundle", () => {
     await expectMissing(join(fixture.liveRoot, "bundle.mjs"));
   });
 
-  it("accepts a staged source tree beside the live root (#779 round 9 B1)", async () => {
+  it("accepts a staged source tree beside the live root", async () => {
     const fixture = await createBuildFixture();
     const stagedRoot = `${fixture.liveRoot}.snap-staging-${randomUUID()}`;
     await mkdir(join(stagedRoot, "src"), { recursive: true });

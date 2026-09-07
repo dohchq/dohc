@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   SECRET_FILE_STORE_RELATIVE_PATH,
@@ -9,7 +9,7 @@ import type {
   Request,
   Response,
 } from "@dohc/workspace-engine-client";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   EngineWorkspaceSessions,
   type EngineDaemonClient,
@@ -20,23 +20,9 @@ import {
 } from "./workspaceSecretEnrollmentState";
 import { createReceivedShareEngineAccess } from "./receivedShareEngineAccess";
 import type { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
+
 import { createTestScratch } from "./testTemp";
-
 const WORKSPACE_ID = "workspace-secret-enrollment-state";
-const roots: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
-
-async function tempRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-secret-enrollment-");
-  roots.push(root);
-  return root;
-}
-
 async function createEngineDb(root: string): Promise<void> {
   const path = join(root, SECRET_FILE_STORE_RELATIVE_PATH);
   await mkdir(dirname(path), { recursive: true });
@@ -66,7 +52,7 @@ class SecretStateDaemon implements EngineDaemonClient {
 
 describe("desktop workspace secret enrollment state", () => {
   it("returns clean cloud-status state for a daemon-owned engine database", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-secret-enrollment-");
     await createEngineDb(root);
     const daemon = new SecretStateDaemon();
     const sessions = new EngineWorkspaceSessions({
@@ -91,7 +77,7 @@ describe("desktop workspace secret enrollment state", () => {
   });
 
   it("keeps an exact received share capture-disabled for cloud status", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-secret-enrollment-");
     await createEngineDb(root);
     const daemon = new SecretStateDaemon();
     const sessions = new EngineWorkspaceSessions({
@@ -129,7 +115,7 @@ describe("desktop workspace secret enrollment state", () => {
   });
 
   it("keeps enrollment key reads on disk after the daemon reports protected state", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-secret-enrollment-");
     await createEngineDb(root);
     const daemon = new SecretStateDaemon();
     daemon.protectedRowsExist = true;
@@ -155,13 +141,13 @@ describe("desktop workspace secret enrollment state", () => {
     await sessions.closeAll();
   });
 
-  // The relay route table is keyed by the registry's rootPath as an EXACT
+  // The relay route table is keyed by the registry's rootPath as an exact
   // string, and registry paths are forward-slashed even on Windows. A
   // `resolve()`d copy reaches the daemon as backslashes, misses the route, and
   // opens the workspace with no relay configuration. The scratch helper returns
   // native separators, so only a deliberately forward-slashed root shows this.
   it("opens the daemon with the caller's rootPath spelling, not a resolved copy", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-secret-enrollment-");
     await createEngineDb(root);
     const forwardSlashed = root.replaceAll("\\", "/");
     const daemon = new SecretStateDaemon();
@@ -181,8 +167,8 @@ describe("desktop workspace secret enrollment state", () => {
     await sessions.closeAll();
   });
 
-  it("does not open the daemon or create engine.db for an opted-out workspace", async () => {
-    const root = await tempRoot();
+  it("does not open the daemon or create engine.db for a workspace with no secret state", async () => {
+    const root = await createTestScratch("dohc-secret-enrollment-");
     const daemon = new SecretStateDaemon();
     const sessions = new EngineWorkspaceSessions({
       currentClient: () => daemon,

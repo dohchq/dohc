@@ -1,3 +1,4 @@
+import { modalFocusableElements, trapModalTabKey } from "./modalFocus";
 import { Smile } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type * as Y from "yjs";
@@ -29,7 +30,7 @@ const EMOJI_CHOICES = [
 
 // Page identity above the document body: a large serif title and an emoji
 // icon, both stored as reserved `title` / `icon` frontmatter keys. This is a
-// sibling React surface — NOT part of the ProseMirror doc — so it never
+// sibling React surface — not part of the ProseMirror doc — so it never
 // touches the editor schema. It reuses the same read/write plumbing as
 // PropertiesPanel: a plain markdown body with YAML frontmatter (local mode,
 // via applyFrontmatter through onChange) OR the frontmatter Y.Map (collab /
@@ -49,15 +50,6 @@ export type PageIdentityProps = (
 
 function mapToObject(map: Y.Map<unknown>): Record<string, unknown> {
   return Object.fromEntries(map.entries());
-}
-
-// Elements a keyboard user can land on inside the picker — used both to seed
-// focus on open and to loop Tab/Shift+Tab within the dialog.
-const FOCUSABLE_SELECTOR =
-  'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-function getFocusable(container: HTMLElement): HTMLElement[] {
-  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
 }
 
 export function PageIdentity(props: PageIdentityProps) {
@@ -85,7 +77,7 @@ export function PageIdentity(props: PageIdentityProps) {
   const icon =
     typeof meta.icon === "string" ? meta.icon : displayFrontmatterValue(meta.icon);
 
-  // Reserved-key writes go through the SAME pathway PropertiesPanel uses so
+  // Reserved-key writes go through the same pathway PropertiesPanel uses so
   // there is no second save cycle: a Y.Map transaction for collab, or a
   // frontmatter rewrite handed back through onChange for local markdown.
   function writeField(key: "title" | "icon", value: string | undefined) {
@@ -129,7 +121,7 @@ export function PageIdentity(props: PageIdentityProps) {
   useEffect(() => {
     if (!pickerOpen) return;
     const container = pickerRef.current;
-    getFocusable(container ?? document.createElement("div"))[0]?.focus();
+    if (container) modalFocusableElements(container)[0]?.focus();
 
     function onPointerDown(event: MouseEvent) {
       if (pickerRef.current && !pickerRef.current.contains(event.target as Node)) {
@@ -141,18 +133,7 @@ export function PageIdentity(props: PageIdentityProps) {
         setPickerOpen(false);
         return;
       }
-      if (event.key !== "Tab" || !pickerRef.current) return;
-      const focusable = getFocusable(pickerRef.current);
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
+      trapModalTabKey(event, pickerRef.current);
     }
     document.addEventListener("mousedown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);

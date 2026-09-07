@@ -1,58 +1,23 @@
 //! RPC-A acceptance: the read surface (versions/moments/text-list/binary/
 //! secrets) end to end through the transport, against state produced by the
-//! REAL write paths (RPC writes + autonomous capture) — never by seeding the
+//! real write paths (RPC writes + autonomous capture) — never by seeding the
 //! DB directly, so the RPCs are proven against the daemon's own semantics.
 
+mod common;
+
+use common::*;
 use dohc_engine_protocol::{
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
-use serde_json::{Value, json};
-use std::path::Path;
+use dohc_workspace_engine::EngineService;
+use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const WORKSPACE_ID: &str = "ws-rpc-read-surface";
 const WAIT: Duration = Duration::from_secs(20);
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
-
-async fn call(
-    transport: &InProcessTransport<EngineService>,
-    handle: &WorkspaceHandle,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> Value {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
-        .result
-}
-
-fn write_file(root: &Path, path: &str, bytes: &[u8]) {
-    let absolute = root.join(path);
-    if let Some(parent) = absolute.parent() {
-        std::fs::create_dir_all(parent).expect("create parent");
-    }
-    std::fs::write(absolute, bytes).expect("write file");
-}
 
 /// Flush until the given path's captured state satisfies `check`.
 async fn flush_until(
@@ -81,7 +46,6 @@ async fn flush_until(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_state_probe_tracks_workspace_wide_protected_rows() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
@@ -143,14 +107,16 @@ async fn secret_state_probe_tracks_workspace_wide_protected_rows() {
         json!({ "workspaceId": WORKSPACE_ID }),
     )
     .await;
-    // MUTATION: invert or hard-code either probe result and this pair fails.
-    assert_eq!(populated, json!(true));
+    assert_eq!(
+        populated,
+        json!(true),
+        "invert or hard-code either probe result and this pair fails."
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     // Pre-open disk content: the startup baseline captures text, binary and
     // a secret before the first read RPC ever runs.
     write_file(scratch.path(), "notes/a.md", b"captured text");
@@ -234,7 +200,7 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
             "path": "rpc/written.md",
             "text": "written via rpc",
             "momentId": "rpc-moment-1",
-            "metadataOrigin": "api",
+            "origin": "api",
             "nowMs": 5
         }),
     )
@@ -509,9 +475,11 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         json!({ "versionId": "main", "path": "%2eenv" }),
     )
     .await;
-    // MUTATION: classify normalized but key by the verbatim spelling -> this
-    // becomes null and recreates the alias/clobber split.
-    assert_eq!(disguised["text"], json!("TOKEN=rpc-read"));
+    assert_eq!(
+        disguised["text"],
+        json!("TOKEN=rpc-read"),
+        "classify normalized but key by the verbatim spelling -> this becomes null and recreates the alias/clobber split."
+    );
     id += 1;
     let absent = call(
         &transport,
@@ -536,7 +504,7 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     .await;
     assert_eq!(big["text"], json!(big_secret));
 
-    // FAIL CLOSED: live secret state with a MISSING key file is
+    // Fail closed: live secret state with a missing key file is
     // corrupt/misrestored — materialize must error, never read as empty.
     std::fs::remove_file(
         scratch
@@ -574,7 +542,6 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     // versions.active answers null when neither active nor main resolves;
     // keyless materialize still answers null when no secret state exists.
     let fresh = ScratchDir::new().expect("fresh scratch");
-    write_shadow_marker_for_harness(fresh.path(), TOKEN).expect("marker");
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -592,7 +559,6 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         .expect("fresh open");
     let fresh_handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("fresh handle");
-    // MUTATION: synthesize main or map WorkspaceNotFound to state-corrupt -> this is not null.
     let active = call(
         &transport,
         &fresh_handle,
@@ -632,7 +598,7 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
             "path": "fresh.md",
             "text": "fresh",
             "momentId": "fresh-moment",
-            "metadataOrigin": "api",
+            "origin": "api",
             "nowMs": 7
         }),
     )

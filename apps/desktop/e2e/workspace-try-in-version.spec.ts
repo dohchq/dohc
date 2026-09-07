@@ -8,13 +8,12 @@ import {
   createTempWorkspace,
   openHistoryView,
   openWorkspaceFromFirstRun,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
   type WorkspaceFileWrite,
 } from "./helpers/workspace";
 
-// PR 0N-2 — THE AGENT LOOP AS A TEST. One gesture hands a task to an agent in
+// THE AGENT LOOP AS A TEST. One gesture hands a task to an agent in
 // a fresh version: the version menu's "Try in a version…" creates and
 // switches to "Try: <task>", starts a dohc-tracked run (0N-1 attribution),
 // shows an honest banner while the agent works, and turns the run's end into
@@ -27,8 +26,6 @@ import {
 // perf measure include agent-process startup, which the budget excludes.
 const NO_AGENT_TOOLS_ENV = {
   DOHC_AGENT_CODEX_COMMAND: "/nonexistent/dohc-e2e-no-agent",
-  DOHC_AGENT_CLAUDE_ACP_COMMAND: "/nonexistent/dohc-e2e-no-agent",
-  DOHC_AGENT_GENERIC_ACP_COMMAND: "/nonexistent/dohc-e2e-no-agent",
 };
 
 const requireModule = createRequire(import.meta.url);
@@ -87,7 +84,7 @@ async function expectActiveVersion(page: Page, name: string): Promise<void> {
   await expect(page.getByTestId("version-menu-button")).toBeEnabled();
 }
 
-// Drives the REAL gesture end to end through the product UI: version menu ->
+// Drives the real gesture end to end through the product UI: version menu ->
 // "Try in a version…" -> task -> Start. Resolves once the running banner is
 // visible, returning the wall-clock milliseconds from Start to banner.
 async function startTryGesture(page: Page, task: string): Promise<number> {
@@ -141,9 +138,6 @@ test("the loop: try a task in a version, review, and merge lands on Main", async
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     // The perf-budget corpus: 200 engine-ownable text files.
     const corpus: WorkspaceFileWrite[] = Array.from({ length: 199 }, (_, i) => ({
       path: `notes/file-${String(i).padStart(3, "0")}.md`,
@@ -251,7 +245,7 @@ test("the loop: try a task in a version, review, and merge lands on Main", async
     ).toBeVisible({ timeout: 20_000 });
     await expect(page.getByTestId("try-review-card")).toBeVisible();
 
-    // Merge into Main through the EXISTING merge flow; after Done, dohc
+    // Merge into Main through the existing merge flow; after Done, dohc
     // returns to Main so the folder shows the merged result.
     await page.getByTestId("try-review-merge").click();
     await expect(page.getByTestId("version-merge-dialog")).toBeVisible();
@@ -286,9 +280,6 @@ test("a run that changes nothing says so, and set-aside returns to Main with the
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await writeWorkspaceFiles(temp, [
       { path: "docs/readme.md", contents: "hello\n" },
     ]);

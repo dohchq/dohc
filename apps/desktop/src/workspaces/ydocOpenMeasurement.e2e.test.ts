@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
@@ -110,12 +110,7 @@ function bodyText(doc: Y.Doc): Y.XmlText {
 }
 
 it("keeps the bound clear of the recorded healthy range", () => {
-  // MUTATION: tighten YDOC_OPEN_DEADLINE_MS below
-  // RECORDED_WIDEST_HEALTHY_OPEN_MS * SLOWEST_HEALTHY_MACHINE_FACTOR and this
-  // fails by name. It runs without a daemon on purpose: the measurement suite
-  // below skips where none is built, and a bound nobody checks is how a limit
-  // drifts back into the range it rejects.
-  expect(YDOC_OPEN_DEADLINE_MS).toBeGreaterThanOrEqual(
+  expect(YDOC_OPEN_DEADLINE_MS, "tighten YDOC_OPEN_DEADLINE_MS below RECORDED_WIDEST_HEALTHY_OPEN_MS * SLOWEST_HEALTHY_MACHINE_FACTOR and this fails by name. It runs without a daemon on purpose: the measurement suite below skips where none is built, and a bound nobody checks is how a limit drifts back into the range it rejects.").toBeGreaterThanOrEqual(
     RECORDED_WIDEST_HEALTHY_OPEN_MS * SLOWEST_HEALTHY_MACHINE_FACTOR,
   );
 });
@@ -124,12 +119,6 @@ it.skipIf(engine.missing)(
   "measures healthy ydoc.open against the real daemon and stays well inside the bound",
   async () => {
     const root = await createTestScratch("dohc-ydoc-open-measurement-");
-    await mkdir(join(root, ".dohc", "engine"), { recursive: true });
-    await writeFile(
-      join(root, ".dohc", "engine", "SHADOW_CLONE"),
-      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "utf8",
-    );
     const measured: { case: string; ms: number }[] = [];
     let lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
@@ -146,7 +135,6 @@ it.skipIf(engine.missing)(
     let capture = createWorkspaceEngineCapture({
       ...workspace,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
     try {
       // 47 KiB: just under the 48 KiB in-band cap the daemon refuses a seeded
@@ -247,7 +235,6 @@ it.skipIf(engine.missing)(
       capture = createWorkspaceEngineCapture({
         ...workspace,
         rustEngineSessions: sessions,
-        daemonOwnsCapture: true,
       });
       await measure(
         `resurrected lineage, ${appends} unsettled appends`,
@@ -273,8 +260,6 @@ it.skipIf(engine.missing)(
 
     expect(measured).toHaveLength(4);
     for (const entry of measured) {
-      // MUTATION: tighten the bound under the measured range and every case
-      // named here fails with the number it measured.
       expect(
         entry.ms,
         `${entry.case} took ${entry.ms.toFixed(1)}ms against a ${YDOC_OPEN_DEADLINE_MS}ms bound`,

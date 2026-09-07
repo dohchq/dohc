@@ -4,7 +4,7 @@ import {
 } from "../../workspaces/workspaceTextLimits";
 
 // What one conflict side is allowed to paint, and what a combined copy is
-// allowed to hold (#536).
+// allowed to hold.
 //
 // PR #524 made a 2 MB - 10 MiB conflict side listable, which was right: those
 // conflicts used to be unrecoverable. The conflict panes then painted whatever
@@ -23,7 +23,7 @@ import {
 /// Lines bound the line boxes it lays them out into, which characters alone do
 /// not — 200,000 line feeds is 200,000 line boxes and 200,000 characters.
 ///
-/// "Line" means LF, and ONLY LF. That is not an assumption, it is a
+/// "Line" means LF, and only LF. That is not an assumption, it is a
 /// measurement: a `<pre>` with the pane's own `white-space: pre-wrap` and
 /// `overflow-wrap: break-word`, 2,000 two-character segments joined by each
 /// candidate, in the Chromium this app ships (`playwright` chromium-1223):
@@ -40,8 +40,8 @@ import {
 /// CSS resolves segment breaks to LF, and the CR of a CRLF is normalized away
 /// by the HTML parser — but React writes text nodes directly, so a lone CR
 /// reaching this pane stays a lone CR and lays out as an ordinary character.
-/// A body broken only by any of the "soft wrap only" rows is ONE line to the
-/// line window, and the CHARACTER window is what holds it. That is correct,
+/// A body broken only by any of the "soft wrap only" rows is one line to the
+/// line window, and the character window is what holds it. That is correct,
 /// not a gap: those bodies cost soft wrapping over a bounded 200,000
 /// characters, which is the thing the character window exists to bound.
 ///
@@ -49,7 +49,7 @@ import {
 /// as a boundary, one wanted U+2028 and U+2029 — both from reading the spec
 /// rather than the renderer. Measure before adding a third.
 ///
-/// MEASURED by conflictPane.measure.test.ts against this repository's tracked
+/// Measured by conflictPane.measure.test.ts against this repository's tracked
 /// text (`.md`, `.ts`, `.tsx`, `.rs`; 919 files), the stand-in for the
 /// documents a workspace holds — dohc has no user corpus yet:
 ///
@@ -68,34 +68,34 @@ import {
 export const CONFLICT_PREVIEW_MAX_CHARS = 200_000;
 export const CONFLICT_PREVIEW_MAX_LINES = 5_000;
 
-/// The largest combined copy this surface will EDIT, in UTF-8 bytes.
+/// The largest combined copy this surface will edit, in UTF-8 bytes.
 ///
 /// This is a renderer bound, not the engine's. #569 replaced the old
 /// merged-text cap with a frame budget: `conflicts.resolve` succeeds when the
 /// whole JSON-ENCODED request fits `RESOLVE_REQUEST_FRAME_BYTES` (8 MiB), so
 /// what a body may weigh is whatever the rest of its request leaves.
 ///
-/// WHAT BINDS IT is that frame, not responsiveness. JSON escaping costs at
+/// What binds IT is that frame, not responsiveness. JSON escaping costs at
 /// most six bytes per raw byte — a body of control characters is the worst
 /// case — so a body must stay under about (8 MiB minus the envelope) / 6.
 /// `engineTextLimits.test.ts` proves this value clears that with the imported
 /// contract rather than a restated number: at this bound the worst case is
 /// 6 MiB encoded, leaving about 2 MiB of the frame spare.
 ///
-/// RESPONSIVENESS TURNED OUT NOT TO BIND, and the first version of this
+/// RESPONSIVENESS TURNED OUT NOT TO bind, and the first version of this
 /// constant was wrong about that. Its benchmark assigned `textarea.value`
 /// directly and reported 26-36 ms per keystroke here, which set the bound at
 /// half this. That measured a write the shipping path does not make: on an
 /// ordinary keystroke the browser applies the edit itself, and React's
 /// controlled input skips the value write because the DOM already holds what
-/// it wanted. Driving the REAL path — native input event, `onChange`,
+/// it wanted. Driving the real path — native input event, `onChange`,
 /// `applyCombinedChange`, commit — costs about 1 ms per MiB:
 ///
 ///     495,878 characters   0.6 ms
 ///   1,048,576 characters   1.1 ms
 ///   8,388,608 characters   9.0 ms
 ///
-/// The one expensive keystroke is the REFUSED one, about 28 ms at half a
+/// The one expensive keystroke is the refused one, about 28 ms at half a
 /// megabyte and rising with the draft: a refusal leaves React holding a value
 /// the DOM disagrees with, so it writes the whole string back. That lands once
 /// when the user reaches the bound, which is the price of not letting the
@@ -106,14 +106,14 @@ export const CONFLICT_PREVIEW_MAX_LINES = 5_000;
 ///
 ///   DOHC_MEASURE_CONFLICT=1 pnpm --filter @dohc/desktop exec vitest run conflictPane.measure
 ///
-/// WHY THIS VALUE. It is the largest round value that provably fits the frame
+/// Why this VALUE. It is the largest round value that provably fits the frame
 /// in the worst case, and it clears `CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES` by
 /// more than double — which matters, because that corpus figure grew by 6%
 /// during the writing of this change alone. UTF-8 never spends less than one
-/// byte per UTF-16 code unit, so a bound in BYTES caps the code units that
+/// byte per UTF-16 code unit, so a bound in bytes caps the code units that
 /// drive the cost above for every script.
 ///
-/// WHAT IT HOLDS, per script, because bytes are not characters. About
+/// What IT holds, per script, because bytes are not characters. About
 /// 1,048,576 characters of ASCII; about 524,288 of Latin-1 accented text or
 /// Greek or Cyrillic at two bytes; about 349,525 of CJK or most other
 /// three-byte text; about 262,144 emoji. The corpus behind the healthy figure
@@ -126,22 +126,17 @@ export const CONFLICT_PREVIEW_MAX_LINES = 5_000;
 /// edit the file in the editor, which is incremental and pays none of this.
 export const CONFLICT_COMBINED_EDIT_MAX_BYTES = 1024 * 1024;
 
-/// The largest document in the measured corpus, in UTF-8 BYTES — the healthy
-/// maximum the bound above has to clear (AGENTS.md: set a limit that rejects
-/// work beyond the measured healthy range).
+/// The largest document in the measured corpus, in UTF-8 bytes: the healthy
+/// maximum the bound above has to clear. Bytes, because that is the unit the
+/// bound is enforced in; a 400,000-character CJK document is about 1.2 MiB and
+/// this surface refuses it, which `engineTextLimits.test.ts` pins.
 ///
-/// BYTES, because that is the unit the bound is enforced in. Recording it in
-/// characters compared two different things and proved nothing for any
-/// multi-byte script: a 400,000-character CJK document is comfortably under
-/// the character maximum and about 1.2 MiB of UTF-8, which this surface
-/// refuses. `engineTextLimits.test.ts` now pins that case directly.
-///
-/// A SNAPSHOT, re-read by conflictPane.measure.test.ts, which prints the
-/// current corpus every run. It drifts as the repository grows; when it passes
-/// the bound, re-measure both rather than nudging this number.
+/// A snapshot, re-read by conflictPane.measure.test.ts, which prints the
+/// current corpus every run. When it passes the bound, re-measure both rather
+/// than nudging this number.
 export const CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES = 496_029;
 
-export type ConflictPreview = {
+type ConflictPreview = {
   /// The text the pane paints.
   text: string;
   /// How much the window held back, in UTF-16 code units. Zero means the pane
@@ -150,7 +145,7 @@ export type ConflictPreview = {
   /// Code units, not lines and not characters, and both of those are
   /// deliberate. Counting the LINES of what we are not painting would walk the
   /// whole body, which is the cost this bound exists to remove. Counting
-  /// CHARACTERS would too: `.length` counts code units, so a body of astral
+  /// characters would too: `.length` counts code units, so a body of astral
   /// characters — emoji, rare CJK, the mathematical alphabets — reports twice
   /// the count a reader would count, because each of those spends two units.
   /// The label the pane shows says "characters" because that is the reader's
@@ -163,7 +158,7 @@ export type ConflictPreview = {
 
 /// The first `windows` preview windows of one conflict side.
 ///
-/// The cut PREFERS a line boundary but never requires one: a window that could
+/// The cut prefers a line boundary but never requires one: a window that could
 /// not fit the next whole line fills to the character bound instead, inside
 /// that line. Requiring the boundary made `Show more` stop making progress —
 /// a six-character line followed by a 1 MiB line revealed nothing for the
@@ -203,7 +198,7 @@ function isHighSurrogate(code: number): boolean {
 
 /// What one change to the combined copy does: it is taken, or it is refused
 /// for being past the editing bound and the attempted size is reported.
-export type CombinedChange =
+type CombinedChange =
   | { accepted: true; text: string }
   | { accepted: false; refusedBytes: number };
 
@@ -211,7 +206,7 @@ export type CombinedChange =
 ///
 /// Exported as a pure function so the thing that runs per keystroke is one
 /// piece of code with one set of tests — and so the browser benchmark in
-/// conflictPane.measure.test.ts can drive the SHIPPING decision rather than a
+/// conflictPane.measure.test.ts can drive the shipping decision rather than a
 /// copy of it that could quietly disagree.
 export function applyCombinedChange(next: string): CombinedChange {
   if (exceedsUtf8Bytes(next, CONFLICT_COMBINED_EDIT_MAX_BYTES)) {

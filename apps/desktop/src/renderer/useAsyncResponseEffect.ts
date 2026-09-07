@@ -1,6 +1,6 @@
 import { useEffect, type DependencyList } from "react";
 
-export interface AsyncResponseHandlers<T> {
+interface AsyncResponseHandlers<T> {
   onSuccess: (value: T) => void;
   onError: (error: unknown) => void;
 }

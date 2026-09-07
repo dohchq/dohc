@@ -716,7 +716,7 @@ fn create_recovery_in_tx(
         )?;
         enqueue_write(tx, &result, Preimage::Absent, "sync").map_err(map_domain_hard_error)?;
         // A recovered moment is a FILE moment, so it reads the same lane
-        // question the ordinary moment journal reads (#646 PR3-1): for an
+        // question the ordinary moment journal reads: for an
         // edit share view it is drainable through the proposal submit, and
         // the two sites must agree or a recovery would strand a change the
         // recipient can see but never send.

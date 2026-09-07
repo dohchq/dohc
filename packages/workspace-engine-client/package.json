@@ -5,13 +5,15 @@
   "exports": {
     ".": "./src/index.ts",
     "./daemon": "./src/daemon/index.ts",
-    "./limits": "./src/versioned/engineTextLimits.ts"
+    "./limits": "./src/versioned/engineTextLimits.ts",
+    "./testing": "./src/testing/index.ts"
   },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@dohc/live-session-contract": "workspace:*",
     "@dohc/security-contract": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",

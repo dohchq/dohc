@@ -6,7 +6,7 @@ export const CHAT_AGENT_PRESENCE_TOPIC = "chat:agent";
 
 export type AgentPresenceActivity = "working" | "idle";
 
-export interface AgentPresencePeer {
+interface AgentPresencePeer {
   clientId: string;
   state: unknown;
 }
@@ -16,7 +16,7 @@ export function agentPresenceClientId(workspaceId: string): string {
 }
 
 // The relay state is untrusted/opaque at this boundary. Only the reserved
-// client for THIS workspace and the exact published payload shape can become
+// client for this workspace and the exact published payload shape can become
 // visible UI; missing or malformed state means no hint.
 export function resolveAgentPresenceActivity(
   peers: readonly AgentPresencePeer[],

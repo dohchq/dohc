@@ -174,7 +174,7 @@ describe("MarkdownEditor heading navigation", () => {
   });
 });
 
-// #661: the seam a search line jump lands on. FileInspector maps its pending
+// The seam a search line jump lands on. FileInspector maps its pending
 // Markdown line to a top-level block index; this reveals that block.
 describe("MarkdownEditor block navigation", () => {
   const VALUE = "# Intro\n\nFirst para\n\nSecond para\n\nThird para";
@@ -200,9 +200,7 @@ describe("MarkdownEditor block navigation", () => {
     const view = render(renderEditor({ index: 2, nonce: 1 }));
     await screen.findByTestId("markdown-editor");
 
-    // MUTATION: drop the blockTarget effect -> nothing scrolls, and an
-    // engine-backed search result opens at the top of the document again.
-    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(scrollIntoView, "drop the blockTarget effect -> nothing scrolls, and an engine-backed search result opens at the top of the document again.").toHaveBeenCalledTimes(1));
     await waitFor(() =>
       expect(
         view.container.querySelector(".dohc-outline-target-flash")?.textContent,
@@ -246,7 +244,7 @@ describe("MarkdownEditor block navigation", () => {
 
   // `document.activeElement` cannot answer this: setTextSelection never moves
   // focus, so asserting on it passed with the cursor move left IN. The
-  // SELECTION is the thing, and revealDocPosition only touches it when the
+  // selection is the thing, and revealDocPosition only touches it when the
   // caller asks — which the block seam never does.
   it("leaves the selection where it is unless the caller asks", () => {
     const editor = new Editor({
@@ -267,7 +265,7 @@ describe("MarkdownEditor block navigation", () => {
     editor.destroy();
   });
 
-  // #688: the block a search result lands on can be a hundred items long.
+  // The block a search result lands on can be a hundred items long.
   // The target carries the block's own source, and the reveal lands the line
   // inside it — proven here through the DOM the reader would be looking at.
   describe("landing inside a long block", () => {
@@ -309,11 +307,8 @@ describe("MarkdownEditor block navigation", () => {
       await screen.findByTestId("markdown-editor");
       await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
 
-      // MUTATION: return null from intraBlockRange -> the flash covers the
-      // whole <ul> and the scrolled element is the list, so the reader lands
-      // on "Item 1" with the match 46 items below the fold.
       const { elements, text } = revealDom(view);
-      expect(text).toBe("Item 47");
+      expect(text, "return null from intraBlockRange -> the flash covers the whole <ul> and the scrolled element is the list, so the reader lands on 'Item 1' with the match 46 items below the fold.").toBe("Item 47");
       expect(scrollIntoView.mock.instances[0]).toBe(elements[0]);
       expect(elements[0]?.closest("li")?.textContent).toBe("Item 47");
     });
@@ -414,9 +409,7 @@ describe("MarkdownEditor block navigation", () => {
       expect(view.container.querySelector(".dohc-outline-target-flash")).toBeTruthy(),
     );
 
-    // MUTATION: pass `pos + 1` as moveCursorTo in scrollToBlock -> the reveal
-    // takes the caret over, and this records the argument that did it.
-    expect(revealCalls.length).toBeGreaterThan(0);
+    expect(revealCalls.length, "pass `pos + 1` as moveCursorTo in scrollToBlock -> the reveal takes the caret over, and this records the argument that did it.").toBeGreaterThan(0);
     for (const call of revealCalls) expect(call).toBeUndefined();
   });
 });

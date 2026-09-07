@@ -1,3 +1,6 @@
+import { SecondaryButton, PrimaryButton } from "../ui/controls";
+import { useRequestSequence } from "../useRequestSequence";
+import { ipcErrorMessage } from "../ipcError";
 import { Bot, Check, ChevronDown, FileArchive, FileText, Layers, Lock, RefreshCw, Share2 } from "lucide-react";
 import {
   useCallback,
@@ -27,26 +30,15 @@ import {
 } from "./conflictPane";
 import { UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "./unifiedDiff";
 
-// Named versions surface (PR 0M-4, workspace-engine alpha). Product
-// vocabulary only: Version, Main, compare, merge, keep — never git terms.
-// The whole surface is flag-gated by the shell (unflagged workspaces never
-// mount it), and every async response is gated by a liveness token before it
+// Named versions surface. Product vocabulary only: Version, Main, compare,
+// merge, keep — never git terms. The shell mounts it only for a workspace
+// with a capture, and every async response is gated by a liveness token before it
 // touches state (plan-level non-negotiable: a slow response for one
 // workspace must never repaint another).
 
 export interface WorkspaceVersionsSnapshot {
   versions: WorkspaceVersionRecord[];
   activeVersionId: string;
-}
-
-// Electron wraps handler rejections as
-// "Error invoking remote method 'channel': Error: <real message>" — show the
-// real message, or the fallback when there is none. Shared with the
-// try-in-version surfaces (TryInVersion.tsx).
-export function ipcErrorMessage(error: unknown, fallback: string): string {
-  const raw = error instanceof Error ? error.message : "";
-  const message = raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
-  return message.trim().length > 0 ? message.trim() : fallback;
 }
 
 function versionName(
@@ -60,7 +52,7 @@ function versionName(
 }
 
 const MENU_ITEM_CLASS =
-  "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50";
+  "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50";
 const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
 const VERSION_LOAD_RETRY_MS = 1_000;
 const VERSION_LOAD_FAILURE_ATTEMPTS = 5;
@@ -78,22 +70,27 @@ function isWorkspaceUpdatingInvokeError(error: unknown): boolean {
 export function VersionMenu(props: {
   workspaceId: string;
   activeTabDirty: boolean;
-  flushActiveDraft: () => Promise<void>;
+  // Settles drafts and queued collection writes, and pauses new cell edits
+  // until the returned release runs. Each operation holds the release across
+  // its version IPCs so no cell edit lands between the drain and the
+  // lineage change; a rejection means an unresolved write refused the
+  // operation, with the user-facing line as the error message.
+  beginLineageOperation: () => Promise<() => void>;
   onOpenCompare: (versionId: string) => void;
   // Fired after any operation that may have changed disk or history state so
   // the shell refreshes files/history and reloads open editors.
-  // Pass the version that is active NOW when this operation set it. The
+  // Pass the version that is active now when this operation set it. The
   // shell needs the boundary before it can judge answers still in flight,
   // and a lookup it has to await is a window those answers slip through.
   // Omit it only when the operation did not change the active version, or
   // when it failed and nobody knows what stuck.
-  onWorkspaceStateChanged: (activeVersionId?: string) => void;
+  onWorkspaceStateChanged: (activeVersionId?: string, lineageChanged?: boolean) => void;
   onError: (message: string) => void;
-  // Bumped by the shell when ANOTHER surface switched versions (PR 0N-2's
+  // Bumped by the shell when another surface switched versions (PR 0N-2's
   // review card switches back to Main) so the selector re-reads the active
   // version instead of showing a stale name.
   refreshKey?: number;
-  // "Share this version…" (PR 18): present only when the shell can open the
+  // "Share this version…": present only when the shell can open the
   // share dialog (synced, non-shared-view workspaces).
   onShareVersion?: (version: { id: string; name: string }) => void;
 }) {
@@ -112,26 +109,20 @@ export function VersionMenu(props: {
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   // Two questions, and they are not the same one.
   //
-  // May THIS read still write the snapshot? A newer read answers no — from a
+  // May this read still write the snapshot? A newer read answers no — from a
   // re-key, an unmount, or a mutation about to change what the read describes.
   const snapshotToken = useRef(0);
-  // Is THIS mutation still the one running? Only another mutation or an
-  // unmount answers no. A re-key must NOT: the announcement that a switch
+  // Is this mutation still the one running? Only another mutation or an
+  // unmount answers no. A re-key must not: the announcement that a switch
   // succeeded is itself what re-keys this component, so a shared counter let
   // the switch invalidate its own token — its finally then skipped, and the
   // selector sat disabled on "Switching…" for the rest of the session.
-  const operationToken = useRef(0);
-  useEffect(
-    () => () => {
-      operationToken.current += 1;
-    },
-    [],
-  );
+  const operationToken = useRequestSequence();
   // A mutation supersedes both: it is the running operation now, and any read
   // issued before it describes the world it is about to change.
   const beginOperation = useCallback(() => {
     snapshotToken.current += 1;
-    return ++operationToken.current;
+    return operationToken.next();
   }, []);
 
   const refresh = useCallback(async () => {
@@ -206,13 +197,13 @@ export function VersionMenu(props: {
       const token = beginOperation();
       const before = activeVersionIdRef.current;
       // Did the switch IPC start? The failure path below keys on this, not
-      // on whether the version moved: main settles and CLOSES live Y.Doc
+      // on whether the version moved: main settles and closes live Y.Doc
       // sessions before it sets the active version, so a switch that failed
-      // mid-way leaves the version unchanged AND the sessions dead — only
-      // the reopen re-binds them (#579 review, r7).
+      // mid-way leaves the version unchanged and the sessions dead — only
+      // the reopen re-binds them.
       let switchIssued = false;
-      // The success path announces BEFORE its selector refresh, so a refresh
-      // that fails must not announce again (#579 review, r18). A second
+      // The success path announces before its selector refresh, so a refresh
+      // that fails must not announce again. A second
       // announcement bumps the version epoch a second time, and that
       // same-version reopen moves a freshly typed edit into set-aside
       // recovery — a notice the user then has to answer — for a
@@ -220,17 +211,18 @@ export function VersionMenu(props: {
       let announced = false;
       setBusy("switch");
       setInlineError(null);
+      let releaseOperation: (() => void) | null = null;
       try {
-        await props.flushActiveDraft();
-        // Re-check liveness after EVERY awaited step: the flush (or the
+        releaseOperation = await props.beginLineageOperation();
+        // Re-check liveness after every awaited step: the begin (or the
         // switch) may resolve after this panel was unmounted or superseded,
         // and a stale continuation must not mutate or repaint.
-        if (token !== operationToken.current) return;
+        if (!operationToken.isCurrent(token)) return;
         switchIssued = true;
         await bridge().switchWorkspaceVersion({ workspaceId, versionId });
-        if (token !== operationToken.current) return;
+        if (!operationToken.isCurrent(token)) return;
         // The switch succeeded, so this IS the active version now — say so
-        // before awaiting anything else. Main notifies the renderer BEFORE
+        // before awaiting anything else. Main notifies the renderer before
         // this invoke returns, so a history refresh for the old version can
         // already be in flight, and every await between here and the
         // announcement is a window it can answer in.
@@ -238,21 +230,21 @@ export function VersionMenu(props: {
         announced = true;
         await refresh();
       } catch (error) {
-        if (token !== operationToken.current) return;
+        if (!operationToken.isCurrent(token)) return;
         props.onError(ipcErrorMessage(error, "Could not switch versions."));
         // The switch may have partially applied before failing; make the
         // selector and editors reflect reality. Whatever stuck is what the
         // re-read reports, and if that read fails too, nobody knows.
         const recovered = await refresh().catch(() => null);
-        if (token !== operationToken.current) return;
-        // Suppress the reopen ONLY when the failure happened BEFORE the
+        if (!operationToken.isCurrent(token)) return;
+        // Suppress the reopen only when the failure happened before the
         // switch IPC started (the pre-switch flush): nothing main-side ran,
         // the live sessions are untouched, and a reopen would set the
         // pending draft aside on the same version for nothing (#579 review,
         // r4). Once the switch IPC has started, announce even if the version
         // never moved — main may have closed the live sessions on its way to
         // the failure, and without the reopen the editor keeps a Y.Doc whose
-        // session is gone (#579 review, r7). An unknown outcome (the re-read
+        // session is gone. An unknown outcome (the re-read
         // failed too) also announces: showing an uncertain reality beats
         // staying blind.
         if (announced) return;
@@ -263,12 +255,16 @@ export function VersionMenu(props: {
         ) {
           return;
         }
-        props.onWorkspaceStateChanged(recovered?.activeVersionId);
+        props.onWorkspaceStateChanged(
+          recovered?.activeVersionId,
+          recovered === null ? switchIssued : recovered.activeVersionId !== before,
+        );
       } finally {
-        if (token === operationToken.current) setBusy(null);
+        releaseOperation?.();
+        if (operationToken.isCurrent(token)) setBusy(null);
       }
     },
-    [beginOperation, props, refresh, workspaceId],
+    [beginOperation, props.beginLineageOperation, props.onError, props.onWorkspaceStateChanged, refresh, workspaceId],
   );
 
   const requestSwitch = useCallback(
@@ -279,7 +275,7 @@ export function VersionMenu(props: {
       }
       closeMenu(false);
       if (props.activeTabDirty) {
-        // Save-first prompt: switching always saves into the CURRENT version
+        // Save-first prompt: switching always saves into the current version
         // first, and the user should know that before it happens.
         setPendingSwitch(versionId);
         return;
@@ -299,26 +295,28 @@ export function VersionMenu(props: {
       const token = beginOperation();
       setBusy("create");
       setInlineError(null);
+      let releaseOperation: (() => void) | null = null;
       try {
-        await props.flushActiveDraft();
-        if (token !== operationToken.current) return;
+        releaseOperation = await props.beginLineageOperation();
+        if (!operationToken.isCurrent(token)) return;
         const result = await bridge().createWorkspaceVersion({
           workspaceId,
           name: trimmed,
         });
-        if (token !== operationToken.current) return;
+        if (!operationToken.isCurrent(token)) return;
         setSnapshot(result);
         // Create-and-switch: the new version is the active one.
         props.onWorkspaceStateChanged(result.activeVersionId);
         closeMenu();
       } catch (error) {
-        if (token !== operationToken.current) return;
+        if (!operationToken.isCurrent(token)) return;
         setInlineError(ipcErrorMessage(error, "Could not create that version."));
       } finally {
-        if (token === operationToken.current) setBusy(null);
+        releaseOperation?.();
+        if (operationToken.isCurrent(token)) setBusy(null);
       }
     },
-    [beginOperation, closeMenu, props, workspaceId],
+    [beginOperation, closeMenu, props.beginLineageOperation, props.onWorkspaceStateChanged, workspaceId],
   );
 
   // Keyboard-navigable menu: arrows move focus, Home/End jump, Escape closes
@@ -377,7 +375,7 @@ export function VersionMenu(props: {
         title={`You're working in the ${activeName} version`}
         disabled={busy !== null}
         onClick={() => (menuOpen ? closeMenu() : setMenuOpen(true))}
-        className="flex h-7 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-wait disabled:opacity-60"
+        className="flex h-7 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60"
       >
         <Layers size={13} aria-hidden className="shrink-0" />
         <span data-testid="version-menu-active" className="min-w-0 truncate">
@@ -404,9 +402,9 @@ export function VersionMenu(props: {
             onKeyDown={onMenuKeyDown}
             className="dohc-popover dohc-pop-in absolute right-0 top-full z-30 mt-1 w-64 rounded-lg border border-line bg-panel p-1"
           >
-            <div className="px-2 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+            <SectionLabel as="div" className="px-2 pb-1 pt-1.5">
               Versions
-            </div>
+            </SectionLabel>
             {namedVersions.map((version) => {
               const isActive = version.id === snapshot.activeVersionId;
               return (
@@ -518,7 +516,7 @@ export function VersionMenu(props: {
                       setInlineError(null);
                     }
                   }}
-                  className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+                  className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
                 />
                 <p className="mb-0 mt-1 text-[11px] leading-4 text-subtle">
                   {busy === "create"
@@ -640,7 +638,7 @@ export function VersionMenu(props: {
           workspaceId={workspaceId}
           source={mergeSource}
           activeTabDirty={props.activeTabDirty}
-          flushActiveDraft={props.flushActiveDraft}
+          beginLineageOperation={props.beginLineageOperation}
           onWorkspaceStateChanged={props.onWorkspaceStateChanged}
           onClose={() => {
             setMergeSource(null);
@@ -653,7 +651,7 @@ export function VersionMenu(props: {
         <TryTaskDialog
           workspaceId={workspaceId}
           activeTabDirty={props.activeTabDirty}
-          flushActiveDraft={props.flushActiveDraft}
+          beginLineageOperation={props.beginLineageOperation}
           onStarted={(activeVersionId) => {
             setTryOpen(false);
             // The gesture switched into the new version; refresh the selector
@@ -678,7 +676,8 @@ export function VersionMenu(props: {
 export function TryTaskDialog(props: {
   workspaceId: string;
   activeTabDirty: boolean;
-  flushActiveDraft: () => Promise<void>;
+  // VersionMenu's contract: drain writes, hold the release across the IPC.
+  beginLineageOperation: () => Promise<() => void>;
   /** The version the gesture created and switched into. */
   onStarted: (activeVersionId: string) => void;
   onClose: () => void;
@@ -692,20 +691,14 @@ export function TryTaskDialog(props: {
     | { status: "driver"; driverId: string; driverName: string }
     | { status: "none" }
   >({ status: "checking" });
-  const liveToken = useRef(0);
-  useEffect(
-    () => () => {
-      liveToken.current += 1;
-    },
-    [],
-  );
+  const liveToken = useRequestSequence();
 
   useEffect(() => {
-    const token = liveToken.current;
+    const token = liveToken.current();
     void bridge()
       .probeAgentDrivers({ workspaceId })
       .then((panel) => {
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         // Which driver does the work is dohc's choice, not this dialog's: it
         // reads the workspace's own default and falls back for us.
         const selected = panel.drivers.find(
@@ -722,7 +715,7 @@ export function TryTaskDialog(props: {
         );
       })
       .catch(() => {
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         setHelper({ status: "none" });
       });
   }, [workspaceId]);
@@ -734,25 +727,28 @@ export function TryTaskDialog(props: {
       return;
     }
     if (helper.status === "checking" || busy) return;
-    const token = ++liveToken.current;
+    const token = liveToken.next();
     setBusy(true);
     setError(null);
+    let releaseOperation: (() => void) | null = null;
     try {
-      await props.flushActiveDraft();
-      if (token !== liveToken.current) return;
+      releaseOperation = await props.beginLineageOperation();
+      if (!liveToken.isCurrent(token)) return;
       const started = await bridge().tryInWorkspaceVersion({
         workspaceId,
         task: trimmed,
         ...(helper.status === "driver" ? { driverId: helper.driverId } : {}),
       });
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       props.onStarted(started.versionId);
     } catch (caught) {
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       setError(ipcErrorMessage(caught, "Could not start trying this."));
       setBusy(false);
+    } finally {
+      releaseOperation?.();
     }
-  }, [busy, helper, props, task, workspaceId]);
+  }, [busy, helper, props.beginLineageOperation, props.onStarted, task, workspaceId]);
 
   return (
     <Overlay onClose={() => (busy ? undefined : props.onClose())}>
@@ -794,7 +790,7 @@ export function TryTaskDialog(props: {
               void start();
             }
           }}
-          className="mt-1 w-full resize-none rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] leading-5 text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+          className="mt-1 w-full resize-none rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] leading-5 text-ink placeholder:text-subtle dohc-focus-input"
         />
         <p
           data-testid="try-task-helper"
@@ -844,7 +840,7 @@ type MergeStage =
   | { stage: "confirm" }
   | { stage: "running" }
   | { stage: "clean"; mergedFileCount: number }
-  // One loaded window of the open-conflict listing (#562): the rows shown so
+  // One loaded window of the open-conflict listing: the rows shown so
   // far, and the continuation for the rest. Resolving replaces the window
   // with the first page of what remains.
   | {
@@ -855,14 +851,15 @@ type MergeStage =
   | { stage: "resolved-all" }
   | { stage: "error"; message: string };
 
-// Exported for the try-in-version review card (PR 0N-2), which reuses THIS
+// Exported for the try-in-version review card (PR 0N-2), which reuses this
 // dialog for its "Merge into Main" action — one merge flow everywhere.
 export function VersionMergeDialog(props: {
   workspaceId: string;
   source: WorkspaceVersionRecord;
   activeTabDirty: boolean;
-  flushActiveDraft: () => Promise<void>;
-  // Pass the version that is active NOW when this operation set it. The
+  // VersionMenu's contract: drain writes, hold the release across the IPC.
+  beginLineageOperation: () => Promise<() => void>;
+  // Pass the version that is active now when this operation set it. The
   // shell needs the boundary before it can judge answers still in flight,
   // and a lookup it has to await is a window those answers slip through.
   // Omit it only when the operation did not change the active version, or
@@ -876,34 +873,29 @@ export function VersionMergeDialog(props: {
 }) {
   const { workspaceId, source } = props;
   const [stage, setStage] = useState<MergeStage>({ stage: "confirm" });
-  const liveToken = useRef(0);
+  const liveToken = useRequestSequence();
   // Which loaded conflict window a "Show more" answer belongs to. Every
-  // REPLACEMENT of the window (the merge result, each resolution's remaining
+  // replacement of the window (the merge result, each resolution's remaining
   // page) advances it: a stale page for a replaced window would append rows
   // the replacement already repositioned (the renderer async-state
   // invariant).
   const windowGeneration = useRef(0);
-  useEffect(
-    () => () => {
-      liveToken.current += 1;
-    },
-    [],
-  );
 
   const runMerge = useCallback(async () => {
-    const token = ++liveToken.current;
+    const token = liveToken.next();
     setStage({ stage: "running" });
+    let releaseOperation: (() => void) | null = null;
     try {
-      await props.flushActiveDraft();
-      if (token !== liveToken.current) return;
+      releaseOperation = await props.beginLineageOperation();
+      if (!liveToken.isCurrent(token)) return;
       const result = await bridge().mergeWorkspaceVersion({
         workspaceId,
         versionId: source.id,
       });
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       props.onWorkspaceStateChanged();
       // The merge's own count decides the stage: the rows are the first page
-      // of ALL open conflicts, and a lingering sync conflict must not turn a
+      // of all open conflicts, and a lingering sync conflict must not turn a
       // clean merge into a conflicted one. The rows gate it too: a count
       // with an empty terminal page means every conflict was already
       // resolved elsewhere between the merge and the listing — painting a
@@ -925,17 +917,18 @@ export function VersionMergeDialog(props: {
         setStage({ stage: "clean", mergedFileCount: result.mergedFileCount });
       }
     } catch (error) {
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       setStage({
         stage: "error",
         message: ipcErrorMessage(error, "Could not merge this version into Main."),
       });
+    } finally {
+      releaseOperation?.();
     }
-  }, [props, source.id, workspaceId]);
+  }, [props.beginLineageOperation, props.onWorkspaceStateChanged, source.id, workspaceId]);
 
   const onResolved = useCallback(
     (remaining: ResolveWorkspaceVersionConflictResult) => {
-      props.onWorkspaceStateChanged();
       windowGeneration.current += 1;
       setStage(
         remaining.conflicts.length > 0 || remaining.nextAfterConflictId !== null
@@ -947,18 +940,18 @@ export function VersionMergeDialog(props: {
           : { stage: "resolved-all" },
       );
     },
-    [props],
+    [],
   );
 
   const loadMoreConflicts = useCallback(async () => {
     if (stage.stage !== "conflicts" || stage.nextAfterConflictId === null) return;
-    const token = liveToken.current;
+    const token = liveToken.current();
     const generation = windowGeneration.current;
     const page = await bridge().listWorkspaceVersionConflicts({
       workspaceId,
       afterConflictId: stage.nextAfterConflictId,
     });
-    if (token !== liveToken.current) return;
+    if (!liveToken.isCurrent(token)) return;
     // A resolution replaced the window while this page was in flight; its
     // rows belong to the window that asked, not the one that remains.
     if (generation !== windowGeneration.current) return;
@@ -974,7 +967,7 @@ export function VersionMergeDialog(props: {
   }, [stage, workspaceId]);
 
   // Closing while merging is never allowed. While conflicts are open, closing
-  // is EXPLICIT only ("Finish later"): a stray backdrop click or Escape must
+  // is explicit only ("Finish later"): a stray backdrop click or Escape must
   // not unmount ConflictResolver and discard a hand-written combined copy.
   const canCloseExplicitly = stage.stage !== "running";
   const canCloseFromBackdrop =
@@ -990,7 +983,7 @@ export function VersionMergeDialog(props: {
           : ("cancelled" as const);
     props.onOutcome?.(outcome);
     props.onClose();
-  }, [props, stage.stage]);
+  }, [props.onClose, props.onOutcome, stage.stage]);
 
   return (
     <Overlay onClose={() => (canCloseFromBackdrop ? finish() : undefined)}>
@@ -1076,6 +1069,8 @@ export function VersionMergeDialog(props: {
               <div className="mt-3">
                 <ConflictList
                   workspaceId={workspaceId}
+                  beginLineageOperation={props.beginLineageOperation}
+                  onWorkspaceStateChanged={props.onWorkspaceStateChanged}
                   conflicts={stage.conflicts}
                   hasMore={stage.nextAfterConflictId !== null}
                   onLoadMore={loadMoreConflicts}
@@ -1134,7 +1129,7 @@ function ConflictSidePane(props: {
 }) {
   // How many preview windows this side is showing. One press of "Show more"
   // adds one, so the pane paints a bounded amount per press and the rest of
-  // the side stays reachable (#536).
+  // the side stays reachable.
   const [windows, setWindows] = useState(1);
   const preview = useMemo(
     () => (props.text === null ? null : conflictPreview(props.text, windows)),
@@ -1142,9 +1137,9 @@ function ConflictSidePane(props: {
   );
   return (
     <div className="flex min-w-0 flex-col overflow-hidden rounded-md border border-line">
-      <div className="border-b border-line bg-panel-2 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+      <SectionLabel as="div" className="border-b border-line bg-panel-2 px-2 py-1">
         {props.heading}
-      </div>
+      </SectionLabel>
       {preview === null ? (
         <p className="m-0 px-2 py-2 text-[11px] italic leading-4 text-subtle">
           {props.note}
@@ -1259,7 +1254,7 @@ type CombineSeed = { text: string; startedFrom: string };
 /// that the engine could actually apply — or an empty copy, which it always
 /// can.
 ///
-/// There is no unavailable case, because `apply-merged` measures the SUBMITTED
+/// There is no unavailable case, because `apply-merged` measures the submitted
 /// text and nothing else (`lib.rs:7587-7594`). Whatever the two sides weigh, a
 /// user writing a short replacement by hand is posting a body the engine
 /// takes. So the sides only decide what the box is PREFILLED with, never
@@ -1298,10 +1293,12 @@ function chooseCombineSeed(candidates: SeedCandidate[]): CombineSeed {
 
 // One conflict card. Expanded, it paints two side panes; collapsed, only its
 // header row — so a workspace with many open conflicts paints two panes, not
-// two per conflict (#536). The card stays MOUNTED while collapsed, so a
+// two per conflict. The card stays MOUNTED while collapsed, so a
 // hand-written combined copy survives being collapsed.
 function ConflictResolver(props: {
   workspaceId: string;
+  beginLineageOperation: () => Promise<() => void>;
+  onWorkspaceStateChanged: () => void;
   conflict: WorkspaceVersionConflict;
   sourceName: string;
   expanded: boolean;
@@ -1321,7 +1318,7 @@ function ConflictResolver(props: {
   const { currentName, incomingName, currentMissing, incomingMissing } = labels;
   // What "Combine by hand" would start from, and whether the engine could
   // apply it. The seed prefers the incoming side, as it always has, but a side
-  // the engine would refuse is not a usable seed — so a side that FITS wins
+  // the engine would refuse is not a usable seed — so a side that fits wins
   // over the preference, and the affordance only disappears when no side does.
   //
   // Gated on `expanded` because it is only read there, and because it is not
@@ -1358,30 +1355,14 @@ function ConflictResolver(props: {
       incomingMissing,
     ],
   );
-  const liveToken = useRef(0);
-  useEffect(
-    () => () => {
-      liveToken.current += 1;
-    },
-    [],
-  );
+  const liveToken = useRequestSequence([workspaceId, conflict.conflictId]);
 
-  // The combined copy in state is NEVER over the apply cap. Every value it can
+  // The combined copy in state is never over the apply cap: every value it can
   // hold comes from here or from a seed that already fits, so the controlled
-  // textarea can never be handed a body larger than the cap.
-  //
-  // This is what stops a paste from recreating the whole defect: an unguarded
-  // handler stored a multi-megabyte paste first, and the next render both
-  // counted every byte of it and assigned the whole string to the textarea's
-  // value. Refusing the change keeps the box at its last good content, so
-  // nothing the user already wrote is lost, and names the size they tried.
-  // OPENING the box clears the last refusal, and that is the only place that
-  // needs to. The warning names a size the user TRIED; carrying it onto a box
-  // they have just reopened, holding a seed that fits, describes nothing that
-  // is true. Clearing on Cancel as well reads as tidier and is dead: the
-  // warning only renders inside the box, so between a cancel and the next open
-  // there is nothing to show — and two clears that cover the same path mean
-  // neither can be tested, because each masks the other.
+  // textarea is never handed an oversized body. A refused change keeps the box
+  // at its last good content and names the size the user tried. Opening the
+  // box is the one place that clears the last refusal; the warning only
+  // renders inside the box, so a clear on Cancel would be dead code.
   const startCombine = useCallback((seed: string) => {
     setRefusedBytes(null);
     setCombined(seed);
@@ -1404,24 +1385,30 @@ function ConflictResolver(props: {
         | { kind: "keep-incoming" }
         | { kind: "keep-combined"; text: string },
     ) => {
-      const token = ++liveToken.current;
+      const token = liveToken.next();
       setBusy(true);
       setError(null);
+      let releaseOperation: (() => void) | null = null;
       try {
+        releaseOperation = await props.beginLineageOperation();
+        if (!liveToken.isCurrent(token)) return;
         const result = await bridge().resolveWorkspaceVersionConflict({
           workspaceId,
           conflictId: conflict.conflictId,
           resolution,
         });
-        if (token !== liveToken.current) return;
+        props.onWorkspaceStateChanged();
+        if (!liveToken.isCurrent(token)) return;
         props.onResolved(result);
       } catch (caught) {
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         setError(ipcErrorMessage(caught, "Could not apply that choice."));
         setBusy(false);
+      } finally {
+        releaseOperation?.();
       }
     },
-    [conflict.conflictId, props, workspaceId],
+    [conflict.conflictId, props.beginLineageOperation, props.onResolved, props.onWorkspaceStateChanged, workspaceId],
   );
 
   return (
@@ -1477,15 +1464,15 @@ function ConflictResolver(props: {
                 text={conflict.currentText}
                 note={sideNote(conflict.currentBinary, labels.currentMissing)}
               />
-              <button
+              <SecondaryButton size="compact"
                 type="button"
                 data-testid="version-conflict-keep-current"
                 disabled={busy}
                 onClick={() => void resolve({ kind: "keep-current" })}
-                className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+                className="px-2"
               >
                 {labels.keepCurrent}
-              </button>
+              </SecondaryButton>
             </div>
             <div className="flex min-w-0 flex-col gap-1.5">
               <ConflictSidePane
@@ -1493,15 +1480,15 @@ function ConflictResolver(props: {
                 text={conflict.incomingText}
                 note={sideNote(conflict.incomingBinary, labels.incomingMissing)}
               />
-              <button
+              <SecondaryButton size="compact"
                 type="button"
                 data-testid="version-conflict-keep-incoming"
                 disabled={busy}
                 onClick={() => void resolve({ kind: "keep-incoming" })}
-                className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+                className="px-2"
               >
                 {labels.keepIncoming}
-              </button>
+              </SecondaryButton>
             </div>
           </div>
           {combined === null && combineSeed !== null ? (
@@ -1517,7 +1504,7 @@ function ConflictResolver(props: {
           ) : !isBinary ? (
             <div className="mt-2 flex flex-col gap-1.5">
               <label
-                className="text-[10px] font-semibold uppercase tracking-wide text-subtle"
+                className="dohc-section-label"
                 htmlFor={`combined-${conflict.conflictId}`}
               >
                 Combined copy for Main
@@ -1537,7 +1524,7 @@ function ConflictResolver(props: {
                 disabled={busy}
                 rows={6}
                 onChange={(event) => onCombinedChange(event.target.value)}
-                className="w-full resize-y rounded-md border border-line bg-bg px-2 py-1.5 font-mono text-[11px] leading-4 text-ink focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+                className="w-full resize-y rounded-md border border-line bg-bg px-2 py-1.5 font-mono text-[11px] leading-4 text-ink dohc-focus-input"
               />
               {refusedBytes !== null ? (
                 <p
@@ -1562,22 +1549,22 @@ function ConflictResolver(props: {
                 >
                   Cancel
                 </button>
-                <button
+                <PrimaryButton size="compact"
                   type="button"
                   data-testid="version-conflict-apply-combined"
                   disabled={busy}
                   onClick={() => void resolve({ kind: "keep-combined", text: combined ?? "" })}
-                  className="h-7 cursor-pointer rounded-md bg-accent px-2 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
+                  className="px-2"
                 >
                   Use this combined copy
-                </button>
+                </PrimaryButton>
               </div>
             </div>
           ) : null}
         </div>
       ) : null}
       {/*
-        OUTSIDE the collapsible region on purpose. A resolution can be running,
+        outside the collapsible region on purpose. A resolution can be running,
         or can have failed, while the card is collapsed — nothing stops the
         user opening another conflict mid-request — and a refusal that renders
         only inside the expanded body tells them nothing at all.
@@ -1604,13 +1591,15 @@ function ConflictResolver(props: {
   );
 }
 
-// The loaded window of open conflicts, one card each, ONE of them expanded
-// (#536). Both conflict surfaces render through this: the merge dialog and
-// the standalone review dialog. The window is one or more engine pages
-// (#562): "Show more files" fetches the next page, and resolving replaces
+// The loaded window of open conflicts, one card each, one of them expanded.
+// Both conflict surfaces render through this: the merge dialog and
+// the standalone review dialog. The window is one or more engine pages:
+// "Show more files" fetches the next page, and resolving replaces
 // the window with the first page of what remains.
 function ConflictList(props: {
   workspaceId: string;
+  beginLineageOperation: () => Promise<() => void>;
+  onWorkspaceStateChanged: () => void;
   conflicts: WorkspaceVersionConflict[];
   // Whether a continuation exists past the loaded window.
   hasMore: boolean;
@@ -1626,9 +1615,9 @@ function ConflictList(props: {
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const openId = openConflictId(props.conflicts, chosenId);
   const { conflicts, onLoadMore } = props;
-  // The pending flag belongs to the loaded window (#602 review): when the
+  // The pending flag belongs to the loaded window: when the
   // window changes identity (a resolution replaced it, or a page appended),
-  // any in-flight Show more belongs to the OLD window — clear the flag now
+  // any in-flight Show more belongs to the old window — clear the flag now
   // rather than when the abandoned request settles (indefinitely, if it
   // never does), and let its settle repaint nothing.
   const loadToken = useRef(0);
@@ -1659,6 +1648,8 @@ function ConflictList(props: {
         <ConflictResolver
           key={conflict.conflictId}
           workspaceId={props.workspaceId}
+          beginLineageOperation={props.beginLineageOperation}
+          onWorkspaceStateChanged={props.onWorkspaceStateChanged}
           conflict={conflict}
           sourceName={props.sourceNameFor(conflict)}
           expanded={conflict.conflictId === openId}
@@ -1670,15 +1661,15 @@ function ConflictList(props: {
       ))}
       {props.hasMore ? (
         <div className="flex flex-col items-start gap-1">
-          <button
+          <SecondaryButton size="compact"
             type="button"
             data-testid="conflict-list-show-more"
             disabled={loadingMore}
             onClick={loadMore}
-            className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+            className="px-2"
           >
             {loadingMore ? "Loading…" : "Show more files"}
-          </button>
+          </SecondaryButton>
           {loadMoreError ? (
             <p className="m-0 text-[11px] leading-4 text-danger" role="alert">
               {loadMoreError}
@@ -1691,7 +1682,7 @@ function ConflictList(props: {
 }
 
 /// The count sentence both conflict surfaces open with. The loaded window may
-/// not be the whole listing (#562): while a continuation is open more
+/// not be the whole listing: while a continuation is open more
 /// conflicts exist past the window, so the sentence says "more than" — never
 /// a number that could be under the truth.
 export function conflictCountCopy(count: number, hasMore: boolean): string {
@@ -1754,7 +1745,7 @@ export function VersionComparePage(props: {
     | {
         status: "ready";
         versionName: string;
-        // The loaded window of the comparison (#562): one or more pages, and
+        // The loaded window of the comparison: one or more pages, and
         // the continuation for the rest.
         files: WorkspaceVersionFileChange[];
         nextAfterPath: string | null;
@@ -1763,7 +1754,7 @@ export function VersionComparePage(props: {
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
-  // Which loaded window a page answer belongs to. Every REPLACEMENT of the
+  // Which loaded window a page answer belongs to. Every replacement of the
   // window (a refresh, a new version) advances it, and a "Show more" answer
   // may only append to the window that asked — a cursor value alone cannot
   // tell two generations apart, because a refreshed comparison can hand out
@@ -1774,7 +1765,7 @@ export function VersionComparePage(props: {
     async () => {
       windowGeneration.current += 1;
       setState({ status: "loading" });
-      // The pending flag belongs to the window too (#602 review): without this
+      // The pending flag belongs to the window too: without this
       // reset, a replaced window inherits an abandoned page's "Loading…" until
       // the stale request settles — indefinitely, if it never does.
       setLoadingMore(false);
@@ -1929,7 +1920,7 @@ export function VersionComparePage(props: {
                   </span>
                 </div>
                 {file.protected ? (
-                  // Secret-backed file (PR 08): the comparison is metadata-only.
+                  // Secret-backed file: the comparison is metadata-only.
                   <div
                     data-testid="version-compare-protected"
                     className="flex flex-col items-center gap-1 px-4 py-8 text-center"
@@ -1986,15 +1977,16 @@ export function VersionComparePage(props: {
   );
 }
 
-// Standalone review of every OPEN conflict (0P-C). The merge dialog handles
+// Standalone review of every open conflict (0P-C). The merge dialog handles
 // conflicts born inside a merge; this dialog is how conflicts reach the user
-// OUTSIDE that flow — two machines editing the same file while apart, or a
+// outside that flow — two machines editing the same file while apart, or a
 // merge closed with "Finish later". Opened from the notice center's conflict
 // notice; reuses the exact ConflictResolver cards so choosing what stays
 // looks the same everywhere.
 export function ConflictReviewDialog(props: {
   workspaceId: string;
-  // Pass the version that is active NOW when this operation set it. The
+  beginLineageOperation: () => Promise<() => void>;
+  // Pass the version that is active now when this operation set it. The
   // shell needs the boundary before it can judge answers still in flight,
   // and a lookup it has to await is a window those answers slip through.
   // Omit it only when the operation did not change the active version, or
@@ -2014,20 +2006,14 @@ export function ConflictReviewDialog(props: {
       }
   >({ status: "loading" });
   const [versionNames, setVersionNames] = useState<Map<string, string>>(new Map());
-  const liveToken = useRef(0);
+  const liveToken = useRequestSequence();
   // Same rule as the merge dialog: a "Show more" answer may only append to
   // the window that asked, and every window replacement (the initial load,
   // each resolution's remaining page) advances this.
   const windowGeneration = useRef(0);
-  useEffect(
-    () => () => {
-      liveToken.current += 1;
-    },
-    [],
-  );
 
   useEffect(() => {
-    const token = liveToken.current;
+    const token = liveToken.current();
     void (async () => {
       try {
         const [result, versions] = await Promise.all([
@@ -2038,7 +2024,7 @@ export function ConflictReviewDialog(props: {
             .listWorkspaceVersions({ workspaceId })
             .catch(() => null),
         ]);
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         setVersionNames(
           new Map(
             (versions?.versions ?? []).map((version) => [version.id, version.name]),
@@ -2052,7 +2038,7 @@ export function ConflictReviewDialog(props: {
           resolvedAny: false,
         });
       } catch (error) {
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         setState({
           status: "error",
           message: ipcErrorMessage(error, "Couldn't load the conflicting files."),
@@ -2063,7 +2049,6 @@ export function ConflictReviewDialog(props: {
 
   const onResolved = useCallback(
     (remaining: ResolveWorkspaceVersionConflictResult) => {
-      props.onWorkspaceStateChanged();
       windowGeneration.current += 1;
       setState({
         status: "ready",
@@ -2072,18 +2057,18 @@ export function ConflictReviewDialog(props: {
         resolvedAny: true,
       });
     },
-    [props],
+    [],
   );
 
   const loadMoreConflicts = useCallback(async () => {
     if (state.status !== "ready" || state.nextAfterConflictId === null) return;
-    const token = liveToken.current;
+    const token = liveToken.current();
     const generation = windowGeneration.current;
     const page = await bridge().listWorkspaceVersionConflicts({
       workspaceId,
       afterConflictId: state.nextAfterConflictId,
     });
-    if (token !== liveToken.current) return;
+    if (!liveToken.isCurrent(token)) return;
     // A resolution replaced the window while this page was in flight; its
     // rows belong to the window that asked, not the one that remains.
     if (generation !== windowGeneration.current) return;
@@ -2156,6 +2141,8 @@ export function ConflictReviewDialog(props: {
           {state.status === "ready" && conflicts.length > 0 ? (
             <ConflictList
               workspaceId={workspaceId}
+              beginLineageOperation={props.beginLineageOperation}
+              onWorkspaceStateChanged={props.onWorkspaceStateChanged}
               conflicts={conflicts}
               hasMore={hasMoreConflicts}
               onLoadMore={loadMoreConflicts}

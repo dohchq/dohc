@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // @dnd-kit/dom references ResizeObserver while its module evaluates and
 // tracks droppable geometry with IntersectionObserver. jsdom implements
@@ -40,8 +40,30 @@ window.matchMedia = (query: string): MediaQueryList =>
     dispatchEvent: () => false,
   }) as MediaQueryList;
 
+// The column virtualizer measures its scroll element through offsetWidth
+// and offsetHeight, which jsdom reports as 0. Give every element a nonzero
+// box so cards render (TableView.test.tsx precedent).
+const offsetDescriptors = {
+  offsetHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight"),
+  offsetWidth: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth"),
+};
+
+beforeEach(() => {
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+    configurable: true,
+    value: 600,
+  });
+  Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
+    configurable: true,
+    value: 900,
+  });
+});
+
 afterEach(() => {
   cleanup();
+  for (const [name, descriptor] of Object.entries(offsetDescriptors)) {
+    if (descriptor) Object.defineProperty(HTMLElement.prototype, name, descriptor);
+  }
 });
 
 /**
@@ -120,6 +142,14 @@ function layOutBoard(): void {
       .queryAllByRole("listitem")
       .forEach((card, cardIndex) => {
         setRect(card, index * COLUMN_PITCH + 20, 40 + cardIndex * 90, 220, 80);
+        // The virtual-item wrappers between the card and its column read as
+        // 0x0 clipping ancestors to @dnd-kit/dom; viewport-sized rects keep
+        // them from hiding the card.
+        let wrapper: Element | null = card.parentElement;
+        while (wrapper && wrapper !== column) {
+          setRect(wrapper, 0, 0, 1024, 768);
+          wrapper = wrapper.parentElement;
+        }
       });
   });
 }
@@ -303,6 +333,68 @@ describe("BoardView", () => {
     onOpenRecord.mockClear();
     await keyboardDrag(card, []);
     expect(onOpenRecord).not.toHaveBeenCalled();
+  });
+
+  it("mounts only the cards near the column's viewport, and more on scroll", () => {
+    const records = Array.from({ length: 60 }, (_, index) =>
+      makeRecord(`rec-${index}`, [
+        indexedValue("title", `Task ${index}`),
+        indexedValue("status", "todo"),
+      ]),
+    );
+    render(
+      <BoardView schema={makeSchema()} groups={[makeGroup("todo", records)]} groupBy="status" />,
+    );
+    const column = screen.getByRole("list");
+    // The stubbed 600px viewport holds a handful of cards; the rest of the
+    // 60 stay unmounted.
+    expect(within(column).getAllByRole("listitem").length).toBeLessThan(records.length);
+    expect(within(column).queryByRole("listitem", { name: "Task 59" })).toBeNull();
+
+    // Scrolling to the bottom mounts the late cards and unmounts the early.
+    column.scrollTop = 60 * 600;
+    fireEvent.scroll(column);
+    expect(within(column).getByRole("listitem", { name: "Task 59" })).toBeDefined();
+    expect(within(column).queryByRole("listitem", { name: "Task 0" })).toBeNull();
+  });
+
+  it("keeps a lifted card mounted while its column scrolls it out of view", async () => {
+    const onCellChange = vi.fn();
+    const records = Array.from({ length: 60 }, (_, index) =>
+      makeRecord(`rec-${index}`, [
+        indexedValue("title", `Task ${index}`),
+        indexedValue("status", "todo"),
+      ]),
+    );
+    render(
+      <BoardView
+        schema={makeSchema()}
+        groups={[makeGroup("todo", records), makeGroup("doing", [])]}
+        groupBy="status"
+        onCellChange={onCellChange}
+      />,
+    );
+    layOutBoard();
+    const column = screen.getAllByRole("list")[0]!;
+    const card = within(column).getByRole("listitem", { name: "Task 0" });
+    card.focus();
+    fireEvent.keyDown(card, { key: "Enter", code: "Enter" });
+    await waitForLift(card, true);
+
+    // Autoscroll or a long keyboard drag can carry the column past the
+    // lifted card's slot; the card must survive it, or the drag dies.
+    column.scrollTop = 60 * 600;
+    fireEvent.scroll(column);
+    expect(within(column).getByRole("listitem", { name: "Task 0" })).toBe(card);
+    expect(within(column).queryByRole("listitem", { name: "Task 1" })).toBeNull();
+
+    // The drag still finishes: the drop lands (in place, so no change), and
+    // with nothing lifted the far-scrolled card unmounts like any other.
+    fireEvent.keyDown(card.ownerDocument, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(within(column).queryByRole("listitem", { name: "Task 0" })).toBeNull();
+    });
+    expect(onCellChange).not.toHaveBeenCalled();
   });
 
   it("opens the record from the card's focusable Open button", () => {

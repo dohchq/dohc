@@ -8,7 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
   DEFAULT_PLUGIN_LOCAL_STATE,
@@ -18,18 +18,8 @@ import {
   readPluginLocalState,
 } from "./pluginLocalState";
 
-const roots: string[] = [];
-
-async function workspaceRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-plugin-workspace-");
-  roots.push(root);
-  return root;
-}
-
-async function stateDir(): Promise<string> {
-  const root = await createTestScratch("dohc-plugin-state-");
-  roots.push(root);
-  return root;
+function stateDir(): Promise<string> {
+  return createTestScratch("dohc-plugin-state-");
 }
 
 function statePath(localStateDir: string, root: string): string {
@@ -50,15 +40,9 @@ function mutateDisabledState(
   );
 }
 
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
-
 describe("plugin local state", () => {
   it("derives a deterministic safe filename from the resolved workspace path", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-workspace-");
     const equivalentRoot = join(root, "child", "..");
     const fileName = pluginStateFileName(root);
 
@@ -69,7 +53,7 @@ describe("plugin local state", () => {
   it.runIf(process.platform === "win32")(
     "uses one state file for Windows path casing",
     async () => {
-      const root = await workspaceRoot();
+      const root = await createTestScratch("dohc-plugin-workspace-");
       const differentlySpelledRoot = root.toUpperCase();
       const localStateDir = await stateDir();
       const [rootStats, differentlySpelledStats] = await Promise.all([
@@ -99,9 +83,8 @@ describe("plugin local state", () => {
   );
 
   it("uses one state file for a workspace root alias", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-workspace-");
     const aliasContainer = await createTestScratch("dohc-plugin-alias-");
-    roots.push(aliasContainer);
     const aliasPath = join(aliasContainer, "workspace-alias");
     const markerPath = join(root, "marker.txt");
     const localStateDir = await stateDir();
@@ -133,7 +116,7 @@ describe("plugin local state", () => {
   });
 
   it("returns defaults when the file and state directory are missing", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-workspace-");
     const localStateDir = await stateDir();
     const pluginStateDir = join(localStateDir, "plugin-state");
 
@@ -146,7 +129,7 @@ describe("plugin local state", () => {
   });
 
   it("round-trips a disabled plugin", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-workspace-");
     const localStateDir = await stateDir();
 
     await mutateDisabledState(localStateDir, root, "hello-plugin", true);
@@ -161,7 +144,7 @@ describe("plugin local state", () => {
   });
 
   it("round-trips the installed baseline hash without a version bump", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-workspace-");
     const localStateDir = await stateDir();
     const installedBaselineHash = "a".repeat(64);
 
@@ -182,7 +165,7 @@ describe("plugin local state", () => {
   });
 
   it("removes a plugin record when the updater returns undefined", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-workspace-");
     const localStateDir = await stateDir();
 
     await mutateDisabledState(localStateDir, root, "hello-plugin", true);
@@ -200,8 +183,8 @@ describe("plugin local state", () => {
   });
 
   it("keeps different workspaces isolated under one state directory", async () => {
-    const firstRoot = await workspaceRoot();
-    const secondRoot = await workspaceRoot();
+    const firstRoot = await createTestScratch("dohc-plugin-workspace-");
+    const secondRoot = await createTestScratch("dohc-plugin-workspace-");
     const localStateDir = await stateDir();
 
     await mutateDisabledState(localStateDir, firstRoot, "first-plugin", true);
@@ -233,7 +216,7 @@ describe("plugin local state", () => {
   });
 
   it("creates the plugin-state directory and writes only outside the workspace", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-workspace-");
     const localStateDir = await stateDir();
     const metadataRoot = join(root, ".dohc");
     const pluginStateDir = join(localStateDir, "plugin-state");
@@ -250,7 +233,7 @@ describe("plugin local state", () => {
   });
 
   it("fails closed when the file is malformed", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-workspace-");
     const localStateDir = await stateDir();
     const path = statePath(localStateDir, root);
     await mkdir(dirname(path));
@@ -266,7 +249,7 @@ describe("plugin local state", () => {
   });
 
   it("fails closed when the file does not match its schema", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-workspace-");
     const localStateDir = await stateDir();
     const path = statePath(localStateDir, root);
     await mkdir(dirname(path));
@@ -286,7 +269,7 @@ describe("plugin local state", () => {
     ["non-hex", "g".repeat(64)],
     ["wrong-length", "a".repeat(63)],
   ])("fails closed for a %s approvedHash", async (_case, approvedHash) => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-workspace-");
     const localStateDir = await stateDir();
     const path = statePath(localStateDir, root);
     await mkdir(dirname(path));
@@ -305,7 +288,7 @@ describe("plugin local state", () => {
   });
 
   it("reads a 64-character lowercase hex approvedHash", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-workspace-");
     const localStateDir = await stateDir();
     const path = statePath(localStateDir, root);
     const approvedHash = "0123456789abcdef".repeat(4);
@@ -325,7 +308,7 @@ describe("plugin local state", () => {
   });
 
   it("fails closed when the file is over 256 KiB", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-workspace-");
     const localStateDir = await stateDir();
     const path = statePath(localStateDir, root);
     const size = MAX_PLUGIN_LOCAL_STATE_FILE_BYTES + 1;
@@ -339,7 +322,7 @@ describe("plugin local state", () => {
   });
 
   it("does not overwrite a corrupt file when disabling a plugin", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-workspace-");
     const localStateDir = await stateDir();
     const path = statePath(localStateDir, root);
     await mkdir(dirname(path));
@@ -363,7 +346,7 @@ describe("plugin local state", () => {
   });
 
   it("writes a 501st plugin entry, which fits the file limit", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-workspace-");
     const localStateDir = await stateDir();
     const path = statePath(localStateDir, root);
     const plugins = Object.fromEntries(
@@ -386,7 +369,7 @@ describe("plugin local state", () => {
   });
 
   it("refuses to write a state file the read gate could not read back", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-workspace-");
     const localStateDir = await stateDir();
     const path = statePath(localStateDir, root);
     // Fewer records than the deleted count cap allowed, and already over the
@@ -416,7 +399,7 @@ describe("plugin local state", () => {
     if (!(thrown instanceof Error)) throw new Error("expected an Error");
     expect(thrown.message).toContain("plugin records");
     // The constraint is named, not just "the configured limit": the agent
-    // reading this error has to know which limit it hit (#779 round 10 A2).
+    // reading this error has to know which limit it hit.
     expect(thrown.message).toContain(
       `the plugin local-state size limit is ${MAX_PLUGIN_LOCAL_STATE_FILE_BYTES} bytes`,
     );
@@ -424,7 +407,7 @@ describe("plugin local state", () => {
   });
 
   it("queues overlapping mutations so each updater sees the previous result", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-workspace-");
     const localStateDir = await stateDir();
     const approvedHash = "a".repeat(64);
     const installedBaselineHash = "b".repeat(64);

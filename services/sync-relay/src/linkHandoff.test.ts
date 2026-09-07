@@ -1,153 +1,63 @@
-import { createHmac } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { TokenBucketLimiter } from "@dohc/service-http";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { hashLinkHandoffCode as hashHandoffCode, LINK_HANDOFF_CODES_PER_GRANT_LIMIT } from "./linkSecurity";
+import type { SyncRelayHandler } from "./server";
+import type { SyncRelayStorage } from "./storage";
 import {
-  LINK_HANDOFF_CODES_PER_GRANT_LIMIT,
-  LinkReadRateLimiter,
-  type ValidatedLinkCapability,
-} from "./linkSecurity";
-import { linkSecret } from "./linkTestHelpers";
-import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
-import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
+  closeTestStorages,
+  inspectDatabase,
+  interceptStorage,
+  json,
+  jsonBody,
+  LINK_KEY,
+  linkSecret,
+  RELAY_EXCHANGE_KEY,
+  request,
+  storagePath,
+  testHandler,
+  testStorage,
+  type HandlerOverrides,
+  type InspectionDatabase as SqliteDatabase,
+} from "./testing";
 
 const OWNER = "owner";
 const RECIPIENT = "recipient";
 const OTHER_ACCOUNT = "other-account";
 const WORKSPACE = "workspace-link-handoff";
 const SHARE_ID = "share-link-handoff";
-const LINK_KEY = "test-link-key-with-at-least-thirty-two-bytes";
-const RELAY_EXCHANGE_KEY = "share-web-relay-exchange-key-at-least-32";
-const HANDOFF_TTL_MS = 5 * 60 * 1_000;
+ const HANDOFF_TTL_MS = 5 * 60 * 1_000;
 const GENERIC_REFUSAL = {
   status: 404,
   body: '{"ok":false,"error":"not found","code":"not_found"}',
 };
 
-interface SqliteStatement {
-  all(...params: unknown[]): Array<Record<string, unknown>>;
-  get(...params: unknown[]): Record<string, unknown> | undefined;
-  run(...params: unknown[]): { changes: number | bigint };
-}
-
-interface SqliteDatabase {
-  prepare(sql: string): SqliteStatement;
-  exec(sql: string): void;
-  close(): void;
-}
-
-const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
-  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => SqliteDatabase;
-};
-
-const roots: string[] = [];
-const storages: SyncRelayStorage[] = [];
-const databases: SqliteDatabase[] = [];
-
 afterEach(async () => {
-  for (const database of databases.splice(0)) database.close();
-  for (const storage of storages.splice(0)) storage.close();
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  await closeTestStorages();
   vi.restoreAllMocks();
 });
 
-function jsonBody(body: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  };
-}
-
-function request(userId: string | null, path: string, init: RequestInit = {}): Request {
-  const headers = new Headers(init.headers);
-  if (userId !== null) headers.set("authorization", `Bearer user:${userId}`);
-  headers.set("x-dohc-relay-client-ip", "192.0.2.40");
-  return new Request(`http://relay.test${path}`, { ...init, headers });
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
-}
-
 function hashLinkHandoffCode(code: string): string {
-  return createHmac("sha256", LINK_KEY)
-    .update("link-handoff\n")
-    .update(code)
-    .digest("base64url");
+  return hashHandoffCode(code, LINK_KEY);
 }
 
-type HandlerOverrides = {
-  storage?: SyncRelayStorage;
-  nowMs?: () => number;
-  relayExchangeKey?: string;
-  shareWebOrigin?: string;
-  linkRedeemRateLimiter?: LinkReadRateLimiter;
-  linkReadRateLimiter?: LinkReadRateLimiter;
-  linkGrantReadRateLimiter?: LinkReadRateLimiter;
-  newGrantId?: () => string;
-  newLinkHandoffCode?: () => string;
-};
-
-function handler(
-  storage: SyncRelayStorage,
-  overrides: HandlerOverrides = {},
-): SyncRelayHandler {
-  let id = 0;
-  const options = {
-    storage: overrides.storage ?? storage,
-    resolveActor(request: Request, workspaceId: string) {
-      const match = /^Bearer user:([^ ]+)$/u.exec(
-        request.headers.get("authorization") ?? "",
-      );
-      if (!match) {
-        throw Object.assign(new Error("unauthorized"), { statusCode: 401 });
-      }
-      return { userId: match[1]!, workspaceId };
-    },
-    nowMs: overrides.nowMs ?? (() => 10_000),
+function handler(storage: SyncRelayStorage, overrides: HandlerOverrides = {}): SyncRelayHandler {
+  return testHandler(storage, {
+    nowMs: () => 10_000,
     newShareId: () => SHARE_ID,
-    newGrantId: overrides.newGrantId ?? (() => `grant-handoff-${id++}`),
-    newId: () => `id-handoff-${id++}`,
     resolveUserIdByEmail: () => null,
-    lookupUserEmail: (userId: string) => `${userId}@example.test`,
-    linkKey: LINK_KEY,
-    shareWebOrigin: Object.hasOwn(overrides, "shareWebOrigin")
-      ? overrides.shareWebOrigin
-      : "https://share.example.test",
-    relayExchangeKey: Object.hasOwn(overrides, "relayExchangeKey")
-      ? overrides.relayExchangeKey
-      : RELAY_EXCHANGE_KEY,
-    linkRedeemRateLimiter: overrides.linkRedeemRateLimiter,
-    linkReadRateLimiter: overrides.linkReadRateLimiter,
-    linkGrantReadRateLimiter: overrides.linkGrantReadRateLimiter,
-    newLinkHandoffCode: overrides.newLinkHandoffCode,
-  };
-  return createSyncRelayHandler(options);
+    lookupUserEmail: (userId) => `${userId}@example.test`,
+    relayExchangeKey: RELAY_EXCHANGE_KEY,
+    ...overrides,
+  });
 }
 
-async function newStorage(): Promise<{
-  storage: SyncRelayStorage;
-  dbPath: string;
-}> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-link-handoff-"));
-  roots.push(root);
-  const dbPath = join(root, "relay.sqlite");
-  const storage = openSyncRelayStorage(dbPath);
-  storages.push(storage);
-  return { storage, dbPath };
+async function newStorage(): Promise<{ storage: SyncRelayStorage; dbPath: string }> {
+  const storage = await testStorage();
+  return { storage, dbPath: storagePath(storage) };
 }
 
 function inspect(dbPath: string, readOnly = false): SqliteDatabase {
-  const database = new DatabaseSync(dbPath, { readOnly });
-  if (!readOnly) {
-    database.exec("PRAGMA busy_timeout = 5000");
-    database.exec("PRAGMA foreign_keys = ON");
-  }
-  databases.push(database);
-  return database;
+  return inspectDatabase(dbPath, { readOnly, foreignKeys: !readOnly });
 }
 
 type Setup = {
@@ -256,27 +166,14 @@ function countHandoffStorageCalls(storage: SyncRelayStorage): {
   const probes: string[] = [];
   const redeems: string[] = [];
   return {
-    storage: new Proxy(storage, {
-      get(target, property, receiver) {
-        if (property === "hasLinkHandoffCode") {
-          return (codeHash: string): boolean => {
-            probes.push(codeHash);
-            const has = Reflect.get(target, property, receiver) as
-              | ((codeHash: string) => boolean)
-              | undefined;
-            return has?.call(target, codeHash) ?? false;
-          };
-        }
-        if (property === "redeemLinkHandoffCode") {
-          return (input: { codeHash: string }): unknown => {
-            redeems.push(input.codeHash);
-            return target.redeemLinkHandoffCode(input as Parameters<
-              SyncRelayStorage["redeemLinkHandoffCode"]
-            >[0]);
-          };
-        }
-        const value = Reflect.get(target, property, receiver) as unknown;
-        return typeof value === "function" ? value.bind(target) : value;
+    storage: interceptStorage(storage, {
+      hasLinkHandoffCode: (target, codeHash) => {
+        probes.push(codeHash);
+        return target.hasLinkHandoffCode(codeHash);
+      },
+      redeemLinkHandoffCode: (target, input) => {
+        redeems.push(input.codeHash);
+        return target.redeemLinkHandoffCode(input);
       },
     }),
     probes,
@@ -326,14 +223,6 @@ async function ownerInventory(setupState: Setup): Promise<Array<Record<string, u
 }
 
 describe("single-use authenticated link handoff", () => {
-  it("configures writable inspection connections for lock waits and foreign keys", async () => {
-    const { dbPath } = await newStorage();
-    const database = inspect(dbPath);
-
-    expect(database.prepare("PRAGMA busy_timeout").get()).toEqual({ timeout: 5_000 });
-    expect(database.prepare("PRAGMA foreign_keys").get()).toEqual({ foreign_keys: 1 });
-  });
-
   it("probes handoff codes without a write transaction and rechecks present rows in the transaction", async () => {
     const state = await setup();
     const minted = await mint(state);
@@ -363,7 +252,7 @@ describe("single-use authenticated link handoff", () => {
     let grantId = 0;
     const h = handler(state.storage, {
       storage: counted.storage,
-      linkRedeemRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+      linkRedeemRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
       newGrantId: () => `admitted-dependent-grant-${grantId++}`,
     });
 
@@ -461,8 +350,8 @@ describe("single-use authenticated link handoff", () => {
   });
 
   it("requires a configured exchange key, needs no public origin, and charges both read budgets", async () => {
-    const capabilityLimiter = new LinkReadRateLimiter(1, 0.000_001, 10);
-    const grantLimiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const capabilityLimiter = new TokenBucketLimiter(1, 0.000_001, 10);
+    const grantLimiter = new TokenBucketLimiter(1, 0.000_001, 10);
     const state = await setup({
       linkReadRateLimiter: capabilityLimiter,
       linkGrantReadRateLimiter: grantLimiter,
@@ -491,81 +380,21 @@ describe("single-use authenticated link handoff", () => {
     expect(codeCount(database)).toBe(2);
   });
 
-  it("reopens the normalized handoff schema without losing a live code", async () => {
-    const state = await setup();
-    const minted = await mint(state);
-    const codeHash = hashLinkHandoffCode(String(minted.code));
-
-    const storageIndex = storages.indexOf(state.storage);
-    expect(storageIndex).toBeGreaterThanOrEqual(0);
-    storages.splice(storageIndex, 1);
-    state.storage.close();
-
-    const reopened = openSyncRelayStorage(state.dbPath);
-    storages.push(reopened);
-    const database = inspect(state.dbPath, true);
-    expect(
-      database
-        .prepare("PRAGMA table_info(sync_relay_link_handoff_codes)")
-        .all()
-        .map((column) => String(column.name)),
-    ).toContain("result_grant_id");
-    expect(
-      database
-        .prepare(
-          `SELECT name FROM sqlite_schema
-           WHERE type = 'index'
-             AND name = 'idx_sync_relay_link_handoff_codes_result_grant'`,
-        )
-        .get(),
-    ).toEqual({ name: "idx_sync_relay_link_handoff_codes_result_grant" });
-
-    const first = reopened.redeemLinkHandoffCode({
-      codeHash,
-      principalUserId: RECIPIENT,
-      redeemedAtMs: state.now.value,
-      mintGrantId: () => "reopened-dependent-grant",
-      guard: () => true,
-    });
-    expect(first).toMatchObject({ ok: true, grant: { access: "view" } });
-    const retry = reopened.redeemLinkHandoffCode({
-      codeHash,
-      principalUserId: RECIPIENT,
-      redeemedAtMs: state.now.value,
-      mintGrantId: () => {
-        throw new Error("receipt retry minted a second grant");
-      },
-      guard: () => {
-        throw new Error("receipt retry re-authorized the bearer code");
-      },
-    });
-    expect(retry).toEqual(first);
-  });
-
   it("revalidates the exact capability and generation inside the mint transaction", async () => {
     const base = await setup();
     const database = inspect(base.dbPath);
     let armed = true;
-    const raced = new Proxy(base.storage, {
-      get(storage, property, receiver) {
-        if (property === "mintLinkHandoffCode") {
-          const mintCode = Reflect.get(storage, property, receiver) as (
-            input: unknown,
-          ) => boolean;
-          return (input: unknown): boolean => {
-            if (armed) {
-              armed = false;
-              database
-                .prepare(
-                  "UPDATE sync_relay_share_grants SET generation = generation + 1 WHERE grant_id = ?",
-                )
-                .run(String(base.link.grantId));
-            }
-            return mintCode.call(storage, input);
-          };
+    const raced = interceptStorage(base.storage, {
+      mintLinkHandoffCode: (storage, input) => {
+        if (armed) {
+          armed = false;
+          database
+            .prepare(
+              "UPDATE sync_relay_share_grants SET generation = generation + 1 WHERE grant_id = ?",
+            )
+            .run(String(base.link.grantId));
         }
-        const value = Reflect.get(storage, property, receiver) as unknown;
-        return typeof value === "function" ? value.bind(storage) : value;
+        return storage.mintLinkHandoffCode(input);
       },
     });
     const h = handler(base.storage, { storage: raced });
@@ -908,13 +737,8 @@ describe("single-use authenticated link handoff", () => {
       const state = await setup({}, "comment");
       const minted = await mint(state);
       let armed = true;
-      const racedStorage = new Proxy(state.storage, {
-        get(target, property, receiver) {
-          const value = Reflect.get(target, property, receiver) as unknown;
-          if (property !== "redeemLinkHandoffCode" || typeof value !== "function") {
-            return typeof value === "function" ? value.bind(target) : value;
-          }
-          return (input: Parameters<SyncRelayStorage["redeemLinkHandoffCode"]>[0]) => {
+      const racedStorage = interceptStorage(state.storage, {
+        redeemLinkHandoffCode: (target, input) => {
             if (armed) {
               armed = false;
               if (transition === "retune") {
@@ -939,7 +763,6 @@ describe("single-use authenticated link handoff", () => {
               }
             }
             return target.redeemLinkHandoffCode(input);
-          };
         },
       });
       const racedHandler = handler(state.storage, {

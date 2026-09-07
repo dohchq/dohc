@@ -32,7 +32,7 @@ const LABELS: Record<ViewId, string> = {
   explorer: "Explorer",
   search: "Search",
   graph: "Graph",
-  sites: "Sites",
+  sites: "Apps",
   history: "History",
   plugins: "Plugins",
 };
@@ -121,7 +121,7 @@ export function ActivityBar(props: {
   activeView: ActivityViewId;
   sidebarVisible: boolean;
   hasConflict: boolean;
-  // Content-search results count (Phase E5.0); undefined = no badge.
+  // Content-search results count; undefined = no badge.
   searchResultCount?: number;
   // The views plugins contribute, after dohc's own. A plugin that is gone or
   // turned off contributes none, so its button leaves the rail with it.

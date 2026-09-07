@@ -50,15 +50,10 @@ extraResources:
     to: plugin-tools
     filter:
       - "**/*"
-  # Built-in driver plugin sources stay outside app.asar so main can read
+  # The built-in driver plugin's source stays outside app.asar so main can read
   # them through the same plain-directory resolver used for plugin tools.
-  - from: plugins/codex
-    to: builtin-plugins/codex
-    filter:
-      - "**/*"
-      - "!node_modules/**"
-  - from: plugins/claude-code
-    to: builtin-plugins/claude-code
+  - from: plugins/agent-chat
+    to: builtin-plugins/agent-chat
     filter:
       - "**/*"
       - "!node_modules/**"
@@ -119,8 +114,7 @@ protocols:
 # Auto-update feed baked into packaged app-update.yml. GitHub Releases is the
 # first dogfood update host because it is available immediately from the
 # release workflow. DOHC_UPDATE_URL remains an explicit packaged/mock override
-# in src/updates/electronUpdater.ts. Move to https://updates.dohc.com/desktop
-# only after the bridge-release runbook in the desktop update plan is complete.
+# in src/updates/electronUpdater.ts.
 publish:
   provider: github
   owner: dohc-ai

@@ -1,6 +1,6 @@
-//! The local append path validates update bytes ONCE, in the durable layer's
+//! The local append path validates update bytes once, in the durable layer's
 //! `validate_update_bytes`, inside the append transaction. A malformed first
-//! seed must still be rejected end-to-end through the actor AND must not
+//! seed must still be rejected end-to-end through the actor and must not
 //! strand a bare `file_objects` row for the deterministic object id (which
 //! regular writes then treat as already existing). Mutation check: move
 //! `validate_update_bytes` after the transaction's parent-row insert commits,
@@ -9,7 +9,7 @@
 use dohc_engine_collab::{CollabError, ContentKind, Regime, Ydoc};
 use dohc_engine_runtime::{CancellationToken, NoFaults, RuntimeError, WorkspaceSupervisor};
 use dohc_engine_storage::EngineStore;
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::sync::Arc;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -17,7 +17,7 @@ async fn malformed_seed_is_rejected_without_stranding_the_parent_row() {
     const WS: &str = "ws-malformed-seed";
     const PATH: &str = "notes/malformed-seed.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("actor").actor;
@@ -75,7 +75,7 @@ async fn malformed_seed_is_rejected_without_stranding_the_parent_row() {
     );
     supervisor.close(&db).expect("close actor");
 
-    // The rejection rolled the WHOLE transaction back: no parent row, no
+    // The rejection rolled the whole transaction back: no parent row, no
     // marker, no journaled update.
     let object_id = open.key.object_id.clone();
     {
@@ -138,7 +138,7 @@ async fn direct_record_update_refuses_invalid_actor_origins_before_journaling() 
     const WS: &str = "ws-invalid-actor-origin";
     const PATH: &str = "notes/invalid-actor-origin.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("actor").actor;

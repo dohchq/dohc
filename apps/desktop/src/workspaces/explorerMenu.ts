@@ -5,11 +5,11 @@ import { shareViewTakesLocalWrites, type ShareViewWriteScope } from "./shareWrit
 //
 // main owns this menu, so the renderer cannot add an item back; that is why
 // the reduction below is a security surface and not a convenience. It lives
-// here rather than inside main's IPC closure for the reason `shareChatGate.ts`
-// states: a menu built inline in a 9,000-line closure can only be pinned by
-// reading the source, and a source pin proves position, never behaviour.
+// here rather than inside main's IPC closure because a menu built inline in a
+// 9,000-line closure can only be pinned by reading the source, and a source
+// pin proves position, never behaviour.
 //
-// The menu MIRRORS the write gates behind it. It must offer exactly what those
+// The menu mirrors the write gates behind it. It must offer exactly what those
 // handlers accept, because an item that is refused when clicked is the surface
 // lying about what it can do.
 
@@ -27,8 +27,6 @@ export interface ExplorerMenuScope {
   hasMountRecord: boolean;
   // Sharing onward is offered only from a synced workspace this account owns.
   canShare: boolean;
-  // Collection creation requires the workspace engine.
-  engineEnabled: boolean;
   // The share view this workspace IS, or null for an ordinary workspace.
   shareView: ShareViewWriteScope | null;
 }
@@ -42,7 +40,7 @@ const separator: ExplorerMenuEntry = { kind: "separator" };
 
 export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry[] {
   const isSharedView = scope.shareView !== null;
-  // The four routed operations — create, rename, delete, import (#802) —
+  // The four routed operations — create, rename, delete, import —
   // offered exactly where their handlers accept them: everywhere in an
   // ordinary workspace, and in a share view only at the level
   // `shareViewTakesLocalWrites` names. One rule, asked once, by the menu and
@@ -54,7 +52,6 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
   const canCreateFolder = canWrite && !isSharedView;
   // A collection is a folder with a schema file, plus an engine-backed
   // surface. It needs both the folder write and the workspace engine.
-  const canCreateCollection = canCreateFolder && scope.engineEnabled;
 
   if (scope.isMountPath) {
     return [
@@ -80,7 +77,7 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
             ...(canCreateFolder
               ? [
                   item("New Folder", "new-folder"),
-                  ...(canCreateCollection
+                  ...(canCreateFolder
                     ? [item("New Collection…", "new-collection")]
                     : []),
                 ]
@@ -94,7 +91,7 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
   }
 
   return [
-    // Sharing onward is refused in a share view HERE, not only wherever
+    // Sharing onward is refused in a share view here, not only wherever
     // `canShare` is computed: someone else's files are not this account's to
     // grant, and a defense a comment claims but no code performs is not one.
     ...(scope.canShare && !isSharedView ? [item("Share…", "share"), separator] : []),
@@ -104,7 +101,7 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
           ...(canCreateFolder
             ? [
                 item("New Folder", "new-folder"),
-                ...(canCreateCollection
+                ...(canCreateFolder
                   ? [item("New Collection…", "new-collection")]
                   : []),
               ]

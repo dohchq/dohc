@@ -6,14 +6,14 @@ export type FloatingMenuPosition = {
   maxHeight: number;
   placement: FloatingMenuPlacement;
   // CSS `bottom` offset for "above" placement. `y` assumes the menu fills
-  // maxHeight, so a top-anchored menu whose content is SHORTER than maxHeight
+  // maxHeight, so a top-anchored menu whose content is shorter than maxHeight
   // hangs detached above the cursor and leaps up/down as filtering changes its
   // height. Anchoring the bottom edge here keeps it glued to the cursor while
   // content grows upward. Undefined for "below" (top-anchored at the cursor).
   bottom?: number;
 };
 
-export type FloatingMenuPositionInput = {
+type FloatingMenuPositionInput = {
   cursorRect: { left: number; top: number; bottom: number };
   viewportWidth?: number;
   viewportHeight?: number;

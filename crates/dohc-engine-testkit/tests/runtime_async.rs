@@ -1,24 +1,41 @@
-//! Async actor-loop traces (CAL-2 calibration signal): the tokio command path,
-//! cooperative cancellation BETWEEN bounded units leaving consistent state, and
-//! a deadline that trips to `DEADLINE_EXCEEDED` without tearing an in-flight
-//! unit. The synchronous CAL-1 traces (see `runtime_actor.rs`) still exercise
-//! the blocking call sites; these drive the same actor through its async API.
+//! Async actor-loop traces: the tokio command path round-trips a write while
+//! the blocking writer thread owns the connection, and close lands in bounded
+//! time under sustained submission.
 
-use dohc_engine_runtime::{
-    CancellationToken, CompoundWrite, FaultInjector, FaultPoint, NoFaults, WorkspaceSupervisor,
-    WriteOutcome,
-};
-use dohc_engine_testkit::{GateFaults, ScratchDir, ScriptedFaults};
+use dohc_engine_domain::WriteText;
+use dohc_engine_runtime::{ActorHandle, CancellationToken, NoFaults, WorkspaceSupervisor};
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-fn unit(i: usize) -> CompoundWrite {
-    CompoundWrite {
-        request_id: format!("r{i}"),
-        doc_id: format!("d{i}"),
-        body: format!("body-{i}"),
-        op_kind: "text.write".to_owned(),
-        now_ms: i as i64,
+const WS: &str = "ws";
+
+async fn seed(handle: &ActorHandle) {
+    handle
+        .ensure_main_version(
+            WS.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main version");
+}
+
+fn unit(path: &str, text: &str, now_ms: i64) -> WriteText {
+    WriteText {
+        workspace_id: WS.to_owned(),
+        version_id: "main".to_owned(),
+        object_id: format!("object-{path}"),
+        path: path.to_owned(),
+        text: text.to_owned(),
+        moment_id: format!("moment-{path}-{now_ms}"),
+        metadata_origin: "user".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms,
+        request_id: None,
     }
 }
 
@@ -27,28 +44,32 @@ fn unit(i: usize) -> CompoundWrite {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn async_write_read_round_trip() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let sup = WorkspaceSupervisor::new();
     let handle = sup.open(&db, 1).expect("open").actor;
+    seed(&handle).await;
 
-    let outcome = handle
-        .write_async(unit(1), Arc::new(NoFaults))
+    let written = handle
+        .versioned_text_write(
+            unit("d1.md", "body-1", 1),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
         .await
         .expect("write");
-    assert_eq!(
-        outcome,
-        WriteOutcome::Acked {
-            seq: 1,
-            deduped: false
-        }
-    );
+    assert!(!written.deduped);
 
-    let doc = handle
-        .read_async("d1")
+    let snapshot = handle
+        .versioned_text_read(
+            WS.to_owned(),
+            "main".to_owned(),
+            "d1.md".to_owned(),
+            CancellationToken::new(),
+        )
         .await
         .expect("read")
         .expect("present");
-    assert_eq!(doc.body, "body-1");
+    assert_eq!(snapshot.text, "body-1");
 
     sup.close(&db).expect("close");
 }
@@ -59,11 +80,12 @@ async fn async_write_read_round_trip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn close_returns_promptly_under_sustained_submission() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let sup = Arc::new(WorkspaceSupervisor::new());
     let handle = sup.open(&db, 1).expect("open").actor;
+    seed(&handle).await;
 
-    // Many producers hammer write_async; when the bounded queue is full they
+    // Many producers hammer the writer; when the bounded queue is full they
     // park in the fair send() queue, exactly the condition that could starve a
     // spinning close().
     let mut producers = Vec::new();
@@ -72,15 +94,13 @@ async fn close_returns_promptly_under_sustained_submission() {
         producers.push(tokio::spawn(async move {
             let mut i = 0u64;
             loop {
-                let w = CompoundWrite {
-                    request_id: format!("t{t}-{i}"),
-                    doc_id: format!("t{t}-d{i}"),
-                    body: "x".to_owned(),
-                    op_kind: "text.write".to_owned(),
-                    now_ms: i as i64,
-                };
+                let write = unit(&format!("t{t}-d{i}.md"), "x", i as i64 + 1);
                 // Stop once the actor is gone (channel closed by close()).
-                if handle.write_async(w, Arc::new(NoFaults)).await.is_err() {
+                if handle
+                    .versioned_text_write(write, Arc::new(NoFaults), CancellationToken::new())
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 i += 1;
@@ -109,108 +129,4 @@ async fn close_returns_promptly_under_sustained_submission() {
     for p in producers {
         let _ = p.await;
     }
-}
-
-// oracle: a long op cancels cooperatively at a between-unit boundary and leaves
-// exactly the committed prefix (consistent state). The gate deterministically
-// parks the worker inside unit 0's transaction so the cancel lands at the next
-// boundary — no timing race.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancellation_stops_between_units_leaving_consistent_state() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
-    let sup = WorkspaceSupervisor::new();
-    let handle = sup.open(&db, 1).expect("open").actor;
-
-    let units: Vec<CompoundWrite> = (0..5).map(unit).collect();
-    let gate = GateFaults::at(FaultPoint::StorageBeforePersist);
-    let gate_faults: Arc<dyn FaultInjector> = gate.clone();
-    let token = CancellationToken::new();
-
-    // Drive the run concurrently; it parks inside unit 0 at the gate.
-    let run = {
-        let handle = handle.clone();
-        let token = token.clone();
-        tokio::spawn(async move { handle.run_units(units, gate_faults, token).await })
-    };
-
-    // Wait (off the async threads) until the worker is parked in unit 0.
-    let gate_wait = gate.clone();
-    tokio::task::spawn_blocking(move || gate_wait.wait_until_reached())
-        .await
-        .expect("join wait");
-
-    // Cancel at the boundary, then release the gate so unit 0 commits and the
-    // loop hits the cancelled token before unit 1.
-    token.cancel();
-    gate.release();
-
-    let outcome = run.await.expect("join run").expect("run ok");
-    assert_eq!(outcome.committed, 1, "exactly the committed prefix");
-    assert!(outcome.cancelled, "run reports the cooperative stop");
-
-    // Consistency: unit 0 is durable, unit 1 never ran.
-    assert!(handle.read_async("d0").await.expect("read").is_some());
-    assert!(handle.read_async("d1").await.expect("read").is_none());
-
-    sup.close(&db).expect("close");
-}
-
-// oracle: run_units counts an after-commit-before-ack crash as committed — the
-// unit is durable, so UnitsOutcome.committed must match what the DB holds.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn run_units_counts_after_commit_crash_as_committed() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
-    let sup = WorkspaceSupervisor::new();
-    let handle = sup.open(&db, 1).expect("open").actor;
-
-    // Crash after unit 0 commits durably but before its ack.
-    let faults: Arc<dyn FaultInjector> =
-        ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
-    let units: Vec<CompoundWrite> = (0..3).map(unit).collect();
-    let token = CancellationToken::new();
-
-    let outcome = handle
-        .run_units(units, faults, token)
-        .await
-        .expect("run ok");
-    // Unit 0 committed durably → counted; the run stopped at that boundary.
-    assert_eq!(outcome.committed, 1);
-    assert!(handle.read_async("d0").await.expect("read").is_some());
-
-    sup.close(&db).expect("close");
-}
-
-// oracle: a deadline trips to DEADLINE_EXCEEDED while a unit is mid-transaction;
-// the in-flight unit still runs to COMMIT (never torn), and the store stays
-// consistent (`PORTING.md` §12).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn deadline_trips_without_tearing_a_unit() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
-    let sup = WorkspaceSupervisor::new();
-    let handle = sup.open(&db, 1).expect("open").actor;
-
-    let units: Vec<CompoundWrite> = (0..3).map(unit).collect();
-    let gate = GateFaults::at(FaultPoint::StorageBeforePersist);
-    let gate_faults: Arc<dyn FaultInjector> = gate.clone();
-    let token = CancellationToken::new();
-
-    // The worker parks in unit 0 at the gate; the deadline elapses first.
-    let err = handle
-        .run_units_with_deadline(units, gate_faults, token, Duration::from_millis(50))
-        .await
-        .expect_err("deadline must trip");
-    assert_eq!(err.code(), "deadline-exceeded");
-
-    // Release the parked worker so unit 0 finishes its transaction (never torn)
-    // and the loop stops at the deadline-cancelled boundary.
-    gate.release();
-
-    // The store is consistent: unit 0 committed durably, the rest were cut off.
-    assert!(handle.read_async("d0").await.expect("read").is_some());
-    assert!(handle.read_async("d2").await.expect("read").is_none());
-
-    sup.close(&db).expect("close");
 }

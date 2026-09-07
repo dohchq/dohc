@@ -18,13 +18,11 @@ import {
   defaultWorkbenchState,
   DEFAULT_EDITOR_GROUP_ID,
   CHATS_DEFAULT_WIDTH,
-  historyDiffTabPath,
   CHATS_MAX_WIDTH,
   CHATS_MIN_WIDTH,
   HISTORY_TAB_PATH,
   CHATS_TAB_PATH,
   isChatsTabPath,
-  isHistoryDiffTabPath,
   isHistoryTabPath,
   isMomentDiffTabPath,
   momentDiffTabPath,
@@ -45,7 +43,6 @@ import {
   isVirtualTabPath,
   moveTab,
   openTab,
-  parseHistoryDiffTabPath,
   parseSiteTabPath,
   parsePluginPanelTabPath,
   parsePluginViewId,
@@ -69,10 +66,12 @@ import {
   toggleSidebar,
   MAX_EDITOR_GROUPS,
   MAX_OPEN_TABS,
+  MAX_COLLECTION_VIEWS,
   MAX_EXPANDED_FOLDERS,
   MAX_PINNED_PATHS,
   MAX_RECENT_FILES,
   recordRecentFile,
+  setCollectionActiveView,
   remapWorkbenchPaths,
   resizeEditorGroups,
   setFolderExpanded,
@@ -121,10 +120,10 @@ describe("tabs", () => {
     expect(activeTabPath(state)).toBe("new.md");
   });
 
-  it("openTab at the cap NEVER evicts the active tab (the only one that can hold a dirty draft)", () => {
+  it("openTab at the cap never evicts the active tab (the only one that can hold a dirty draft)", () => {
     let state = defaultWorkbenchState();
     for (let i = 0; i < MAX_OPEN_TABS; i++) state = openTab(state, `f${i}.md`);
-    // Make the OLDEST tab the active one — the naive evict-index-0 would
+    // Make the oldest tab the active one — the naive evict-index-0 would
     // drop the exact tab whose mounted editor may hold an unsaved draft.
     state = activateTab(state, DEFAULT_EDITOR_GROUP_ID, "f0.md");
     state = openTab(state, "new.md");
@@ -343,7 +342,7 @@ describe("tabs", () => {
   });
 
   it.each([
-    ["site preview", siteTabPath("client-portal"), "dohc://site/%63lient-portal"],
+    ["site preview", siteTabPath("client-portal"), "dohc://app/%63lient-portal"],
     [
       "plugin panel",
       pluginPanelTabPath("hello-plugin", "main"),
@@ -566,18 +565,6 @@ describe("tabs", () => {
     expect(isVirtualTabPath(CHATS_TAB_PATH)).toBe(true);
   });
 
-  it("recognizes history file diffs as virtual tabs with encoded file identity", () => {
-    const path = historyDiffTabPath("change 1", "notes/today plan.md");
-    expect(isHistoryDiffTabPath(path)).toBe(true);
-    expect(isVirtualTabPath(path)).toBe(true);
-    expect(parseHistoryDiffTabPath(path)).toEqual({
-      changeSetId: "change 1",
-      filePath: "notes/today plan.md",
-    });
-    expect(parseHistoryDiffTabPath("dohc://history-diff/change-only")).toBeNull();
-    expect(parseHistoryDiffTabPath("notes/today.md")).toBeNull();
-  });
-
   it("recognizes engine moment diffs by their encoded moment id", () => {
     const path = momentDiffTabPath("moment id/with strange chars");
     expect(isMomentDiffTabPath(path)).toBe(true);
@@ -634,7 +621,7 @@ describe("tabs", () => {
     expect(isSiteTabPath(path)).toBe(true);
     expect(isVirtualTabPath(path)).toBe(true);
     expect(parseSiteTabPath(path)).toBe("clients/acme website");
-    expect(parseSiteTabPath("dohc://site/")).toBeNull();
+    expect(parseSiteTabPath("dohc://app/")).toBeNull();
     expect(parseSiteTabPath(null)).toBeNull();
     expect(parseSiteTabPath("not-a-site-path")).toBeNull();
 
@@ -670,10 +657,6 @@ describe("tabs", () => {
     }
   });
 
-  // MUTATION (drop the bound here and lean on the IPC schema): a persisted
-  // over-long key would restore and mount, and the boundary's refusal would
-  // reach the user as a raw schema error instead of the shell's one sentence
-  // for a tab path that names no app.
   it("refuses an instance key past the bound the boundary enforces", () => {
     const atBound = "s".repeat(MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS);
     const pastBound = "s".repeat(MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS + 1);
@@ -706,9 +689,6 @@ describe("tabs", () => {
     });
   });
 
-  // MUTATION (canonicalize an instanced path back to its keyless form): every
-  // instance of one web app would fold onto one tab, so opening a second site
-  // would just re-activate the first one's tab.
   it("makes each instance its own singleton, distinct from its siblings", () => {
     const a = pluginWebAppTabPath("acme", "preview", "sites/a");
     const b = pluginWebAppTabPath("acme", "preview", "sites/b");
@@ -847,7 +827,7 @@ describe("tabs", () => {
     expect(parsePluginPanelTabPath(null)).toBeNull();
   });
 
-  it("activateTab only activates an OPEN tab", () => {
+  it("activateTab only activates an open tab", () => {
     const state = withTabs("a.md", "b.md");
     expect(activateTab(state, DEFAULT_EDITOR_GROUP_ID, "a.md").editorGroups[0].activeTab).toBe("a.md");
     expect(activateTab(state, DEFAULT_EDITOR_GROUP_ID, "ghost.md")).toBe(state);
@@ -860,7 +840,7 @@ describe("tabs", () => {
     expect(next.editorGroups[0].activeTab).toBe("c.md");
   });
 
-  it("closing the LAST active tab falls back to the new last tab, then null", () => {
+  it("closing the last active tab falls back to the new last tab, then null", () => {
     const last = withTabs("a.md", "b.md"); // active: b.md
     const afterLast = closeTab(last, DEFAULT_EDITOR_GROUP_ID, "b.md");
     expect(activeTabPath(afterLast)).toBe("a.md");
@@ -917,7 +897,7 @@ describe("views and panels", () => {
   it("toggleSidebar and toggleChats flip independently", () => {
     const state = toggleSidebar(defaultWorkbenchState());
     expect(state.sidebarVisible).toBe(false);
-    // The Chats panel is HIDDEN by default (VS Code secondary-sidebar
+    // The Chats panel is hidden by default (VS Code secondary-sidebar
     // grammar) — unlike the old always-on history rail.
     expect(state.chatsVisible).toBe(false);
     expect(toggleChats(state).chatsVisible).toBe(true);
@@ -1045,7 +1025,7 @@ describe("rail widths", () => {
 });
 
 describe("ui-state persistence round-trip", () => {
-  it("restores Sites tabs and drops tabs from genuinely removed surfaces", () => {
+  it("restores Apps tabs and drops tabs from genuinely removed surfaces", () => {
     const sitePath = siteTabPath("client-portal");
     const removedPath = "dohc://retired-dashboard/client-portal";
     const restored = parseUiState({
@@ -1068,11 +1048,11 @@ describe("ui-state persistence round-trip", () => {
     expect(isRemovedVirtualTabPath(sitePath)).toBe(false);
     expect(isRemovedVirtualTabPath(removedPath)).toBe(true);
     expect(isRemovedVirtualTabPath(GRAPH_TAB_PATH)).toBe(false);
-    expect(isRemovedVirtualTabPath("notes/dohc://site/a.md")).toBe(false);
+    expect(isRemovedVirtualTabPath("notes/dohc://app/a.md")).toBe(false);
     expect(isRemovedVirtualTabPath("notes/a.md")).toBe(false);
   });
 
-  it("restores the built-in Sites view", () => {
+  it("restores the built-in Apps view", () => {
     expect(
       parseUiState({
         ...serializeUiState(defaultWorkbenchState()),
@@ -1209,7 +1189,7 @@ describe("ui-state persistence round-trip", () => {
   });
 
   it.each([
-    ["site preview", siteTabPath("client-portal"), "dohc://site/%63lient-portal"],
+    ["site preview", siteTabPath("client-portal"), "dohc://app/%63lient-portal"],
     [
       "plugin panel",
       pluginPanelTabPath("hello-plugin", "main"),
@@ -1269,7 +1249,7 @@ describe("ui-state persistence round-trip", () => {
     expect(state.editorGroups[1].tabs.at(-1)?.path).toBe(realFiles.at(-1));
   });
 
-  it("parse reads only OWN fields — inherited (prototype) fields never become state", () => {
+  it("parse reads only own fields — inherited (prototype) fields never become state", () => {
     // A crafted object inheriting every field from its prototype must parse
     // as if the fields were absent: pure defaults, no tabs.
     const inherited = parseUiState(
@@ -1353,7 +1333,7 @@ describe("ui-state persistence round-trip", () => {
   });
 });
 
-describe("explorer expansion + pins (Phase E3)", () => {
+describe("explorer expansion + pins", () => {
   it("toggleFolderExpanded flips membership; setFolderExpanded no-ops on no change", () => {
     let state = defaultWorkbenchState();
     state = toggleFolderExpanded(state, "notes");
@@ -1402,7 +1382,7 @@ describe("explorer expansion + pins (Phase E3)", () => {
   });
 });
 
-describe("recent files (Phase E5.0 quick-open ranking)", () => {
+describe("recent files", () => {
   it("records most-recent-first with dedupe; re-opening the head no-ops", () => {
     let state = defaultWorkbenchState();
     state = recordRecentFile(state, "a.md");
@@ -1429,6 +1409,92 @@ describe("recent files (Phase E5.0 quick-open ranking)", () => {
     expect(
       parseUiState({ version: 1, tabs: ["a.md"], activeTab: "a.md" }).recentFiles,
     ).toEqual([]);
+  });
+});
+
+describe("collection views", () => {
+  it("stores, overwrites, and clears the view per collection path", () => {
+    let state = defaultWorkbenchState();
+    state = setCollectionActiveView(state, "tasks", "Board");
+    state = setCollectionActiveView(state, "people", "Table");
+    expect(state.collectionViews).toEqual({ tasks: "Board", people: "Table" });
+    // Re-storing the same view is a no-op (same reference).
+    expect(setCollectionActiveView(state, "tasks", "Board")).toBe(state);
+    state = setCollectionActiveView(state, "tasks", "Calendar");
+    expect(state.collectionViews.tasks).toBe("Calendar");
+    state = setCollectionActiveView(state, "tasks", null);
+    expect(state.collectionViews).toEqual({ people: "Table" });
+    // Clearing an absent entry is a no-op (same reference).
+    expect(setCollectionActiveView(state, "tasks", null)).toBe(state);
+  });
+
+  it("caps at MAX_COLLECTION_VIEWS (oldest gives way)", () => {
+    let state = defaultWorkbenchState();
+    for (let i = 0; i < MAX_COLLECTION_VIEWS + 3; i++) {
+      state = setCollectionActiveView(state, `c-${i}`, "Board");
+    }
+    const paths = Object.keys(state.collectionViews);
+    expect(paths).toHaveLength(MAX_COLLECTION_VIEWS);
+    expect(paths).not.toContain("c-0");
+    expect(paths).toContain(`c-${MAX_COLLECTION_VIEWS + 2}`);
+  });
+
+  it("round-trips through ui-state; files written before it parse to empty", () => {
+    let state = withTabs("a.md");
+    state = setCollectionActiveView(state, "tasks", "Board");
+    expect(parseUiState(serializeUiState(state)).collectionViews).toEqual({
+      tasks: "Board",
+    });
+    const { collectionViews: _dropped, ...withoutField } =
+      serializeUiState(state);
+    expect(parseUiState(withoutField).collectionViews).toEqual({});
+  });
+
+  it("parse drops foreign entries and stops collecting at the cap", () => {
+    const serialized = serializeUiState(defaultWorkbenchState());
+    expect(
+      parseUiState({ ...serialized, collectionViews: ["Board"] }).collectionViews,
+    ).toEqual({});
+    expect(
+      parseUiState({
+        ...serialized,
+        collectionViews: {
+          tasks: 3,
+          "": "Board",
+          ok: "Board",
+          huge: "x".repeat(5000),
+        },
+      }).collectionViews,
+    ).toEqual({ ok: "Board" });
+    const flood: Record<string, string> = {};
+    for (let i = 0; i < MAX_COLLECTION_VIEWS + 50; i++) flood[`c-${i}`] = "Board";
+    expect(
+      Object.keys(
+        parseUiState({ ...serialized, collectionViews: flood }).collectionViews,
+      ),
+    ).toHaveLength(MAX_COLLECTION_VIEWS);
+  });
+
+  it("parse keeps a collection folder named __proto__", () => {
+    const serialized = serializeUiState(defaultWorkbenchState());
+    const views = JSON.parse('{"__proto__":"Board","tasks":"Table"}') as Record<
+      string,
+      string
+    >;
+    const parsed = parseUiState({ ...serialized, collectionViews: views }).collectionViews;
+    expect(Object.hasOwn(parsed, "__proto__")).toBe(true);
+    expect(parsed["__proto__"]).toBe("Board");
+    expect(parsed.tasks).toBe("Table");
+  });
+
+  it("follows a collection rename through the remap projection and drops deletions", () => {
+    let state = defaultWorkbenchState();
+    state = setCollectionActiveView(state, "tasks", "Board");
+    state = setCollectionActiveView(state, "junk", "Table");
+    const remapped = remapWorkbenchPaths(state, (path) =>
+      path === "tasks" ? "org/tasks" : path === "junk" ? null : path,
+    );
+    expect(remapped.collectionViews).toEqual({ "org/tasks": "Board" });
   });
 });
 
@@ -1503,6 +1569,68 @@ describe("remapWorkbenchPaths (rename/move/delete projection)", () => {
     expect(remapped.editorGroups.map((group) => group.activeTab)).toEqual([
       "renamed.md",
       "renamed.md",
+    ]);
+  });
+
+  // A collection tab's path encodes the folder path behind dohc://collection/.
+  // The projection speaks filesystem paths, so the tab must project the
+  // DECODED folder and re-encode the result — treating the whole tab path as
+  // a filesystem path matches no rename and strands the tab.
+  it("a collection tab follows its folder's rename, view preference included", () => {
+    let state = withTabs(collectionTabPath("tasks"), "readme.md");
+    state = setCollectionActiveView(state, "tasks", "Board");
+    const remapped = remapWorkbenchPaths(state, (path) =>
+      path === "tasks" ? "org tasks" : path.startsWith("tasks/") ? `org tasks/${path.slice("tasks/".length)}` : path,
+    );
+    expect(allTabs(remapped).map((tab) => tab.path)).toEqual([
+      collectionTabPath("org tasks"),
+      "readme.md",
+    ]);
+    expect(remapped.collectionViews).toEqual({ "org tasks": "Board" });
+  });
+
+  it("a collection tab follows an ancestor folder's move in every split group", () => {
+    let state = createEditorGroupRight(
+      withTabs(collectionTabPath("team/tasks")),
+      DEFAULT_EDITOR_GROUP_ID,
+      "right",
+    );
+    state = setCollectionActiveView(state, "team/tasks", "Calendar");
+    const remapped = remapWorkbenchPaths(state, (path) =>
+      path === "team" ? "org/team" : path.startsWith("team/") ? `org/${path}` : path,
+    );
+    expect(
+      remapped.editorGroups.map((group) => group.tabs.map((tab) => tab.path)),
+    ).toEqual([
+      [collectionTabPath("org/team/tasks")],
+      [collectionTabPath("org/team/tasks")],
+    ]);
+    expect(remapped.editorGroups.map((group) => group.activeTab)).toEqual([
+      collectionTabPath("org/team/tasks"),
+      collectionTabPath("org/team/tasks"),
+    ]);
+    expect(remapped.collectionViews).toEqual({ "org/team/tasks": "Calendar" });
+  });
+
+  it("a deleted collection folder closes its tab and the neighbor takes over", () => {
+    const state = withTabs("readme.md", collectionTabPath("tasks"));
+    const remapped = remapWorkbenchPaths(state, (path) =>
+      path === "tasks" || path.startsWith("tasks/") ? null : path,
+    );
+    expect(allTabs(remapped).map((tab) => tab.path)).toEqual(["readme.md"]);
+    expect(activeTabPath(remapped)).toBe("readme.md");
+  });
+
+  it("a move that collides two collection tabs onto one folder dedupes them", () => {
+    const state = withTabs(
+      collectionTabPath("tasks"),
+      collectionTabPath("org/tasks"),
+    );
+    const remapped = remapWorkbenchPaths(state, (path) =>
+      path === "tasks" ? "org/tasks" : path.startsWith("tasks/") ? `org/${path}` : path,
+    );
+    expect(allTabs(remapped).map((tab) => tab.path)).toEqual([
+      collectionTabPath("org/tasks"),
     ]);
   });
 });
@@ -1581,7 +1709,7 @@ describe("pruneMissingRestoredTabs (restored tabs whose file is gone)", () => {
     expect(activeTabPath(pruned)).toBe(HISTORY_TAB_PATH);
   });
 
-  it("leaves pins, expansion, and recents alone — those name FOLDERS too", () => {
+  it("leaves pins, expansion, and recents alone — those name folders too", () => {
     let state = withTabs("a.md");
     state = setFolderExpanded(state, "assets", true);
     state = togglePinned(state, "assets");

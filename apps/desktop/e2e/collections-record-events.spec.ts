@@ -36,7 +36,7 @@ import {
 
 const TOKEN = "test:e2e-user";
 
-// Valid record ids (rec_ + 26 chars of a-z2-7) seeded up front, so BOTH
+// Valid record ids (rec_ + 26 chars of a-z2-7) seeded up front, so both
 // engines adopt the same identity instead of each minting its own.
 const APOLLO_ID = "rec_apolloe2e234567abcdefgh234";
 const ZEPHYR_ID = "rec_zephyre2e234567abcdefgh234";
@@ -140,7 +140,6 @@ test("a synced field edit reaches a plugin's collections.watch subscription on t
     capture = createWorkspaceEngineCapture({
       ...deviceA.workspace,
       rustEngineSessions: deviceA.sessions,
-      daemonOwnsCapture: true,
     });
     const deviceARelay = deviceA.relay.bind({
       ...deviceA.workspace,
@@ -269,7 +268,7 @@ test("a synced field edit reaches a plugin's collections.watch subscription on t
 
     // The plugin's subscription must have received the pulled apply as record
     // events. The report command writes what arrived so far; poll it until
-    // the field change shows up, reporting refusals and the events that DID
+    // the field change shows up, reporting refusals and the events that did
     // arrive instead of timing out silently.
     let received: ReceivedRecordEvent[] = [];
     await expect
@@ -319,7 +318,7 @@ test("a synced field edit reaches a plugin's collections.watch subscription on t
     }
     throw error;
   } finally {
-    // Stop the daemon and relay children BEFORE removing the temp tree they
+    // Stop the daemon and relay children before removing the temp tree they
     // hold open — Windows refuses to unlink open files (EBUSY).
     await capture?.stop().catch(() => undefined);
     await deviceA?.close().catch(() => undefined);

@@ -128,7 +128,7 @@ export type MarkdownEditorHandle = {
   replaceMarkdown: (markdown: string) => void;
 };
 
-export type MarkdownEditorCollab = {
+type MarkdownEditorCollab = {
   ydoc: Y.Doc;
   status: "disabled" | "connecting" | "connected" | "disconnected";
   peerCount: number;
@@ -141,7 +141,7 @@ export type MarkdownEditorCollab = {
   awareness?: Awareness;
 };
 
-export type MarkdownEditorPendingUndo = {
+type MarkdownEditorPendingUndo = {
   token: number;
   restoredText: string;
   undoText: string;
@@ -154,7 +154,7 @@ export type MarkdownEditorPendingUndo = {
  *
  * `match` carries the block's own source lines and which of them matched, so
  * a hundred-item list or a long fence reveals the matched line rather than
- * its top (#688). The refinement is resolved against the live nodes at reveal
+ * its top. The refinement is resolved against the live nodes at reveal
  * time and drops to the block start whenever it cannot be proven — the same
  * one-shot target either way. */
 export type BlockNavigationTarget = {
@@ -245,7 +245,7 @@ const DROP_CURSOR_OPTIONS = { color: "var(--dohc-accent)", width: 2 };
 // FenceWideningCodeBlock below (in STATIC_EDITOR_EXTENSIONS, so it applies
 // regardless of which starter kit is active) instead of StarterKit's default,
 // which hardcodes a three-backtick fence and truncates a code block whose own
-// content contains a ``` line on export (#704) — the same rule import-export.ts
+// content contains a ``` line on export — the same rule import-export.ts
 // registers for engine-driven saves.
 const LOCAL_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
@@ -333,7 +333,7 @@ function BubbleButton(props: {
  *  seam navigates the same way).
  *
  *  A matched line inside the block is revealed instead when intraBlock.ts can
- *  prove where it sits (#688). Two ways that refinement is dropped: it says
+ *  prove where it sits. Two ways that refinement is dropped: it says
  *  so, or it resolved to a range that rendered nothing to scroll. Both leave
  *  the block start, which is what this did before it could refine anything. */
 function scrollToBlock(
@@ -345,7 +345,7 @@ function scrollToBlock(
   const child = Math.min(Math.max(target.index, 0), doc.childCount - 1);
   let pos = 0;
   for (let before = 0; before < child; before += 1) pos += doc.child(before).nodeSize;
-  // A CLAMPED index is a different block from the one the lines were sliced
+  // A clamped index is a different block from the one the lines were sliced
   // from, so the refinement no longer speaks for it.
   const range =
     target.match && child === target.index
@@ -452,7 +452,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     }, []);
 
     // Refs (not props) so the editorProps closures below — created once with
-    // the editor — always resolve/write against the CURRENT document, even if
+    // the editor — always resolve/write against the current document, even if
     // the same editor instance is reused across a path change.
     const imageContextRef = useRef<ImageSrcContext>({
       workspaceId,
@@ -482,7 +482,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       // without this editor ever remounting — a cached copy would keep saving to
       // the old location — and it is per-workspace, so a copy taken before a
       // workspace switch would be the wrong workspace's. Reading through
-      // imageContextRef (kept current below) makes the CURRENT workspace's
+      // imageContextRef (kept current below) makes the current workspace's
       // setting the only one this can ever apply. A failed read falls back to
       // the per-document default inside placeImageFiles.
       readAttachments: async () => {
@@ -641,7 +641,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                   field: "body",
                   yUndoOptions: { undoManager: collaborationHistory! },
                 }),
-                // Additive: only wired when the caller hands us an Awareness
+                // Only wired when the caller hands us an Awareness
                 // bound to this same ydoc (docPresence.ts's bindDocPresence).
                 // No awareness (today's only caller, or a peer that dropped
                 // off the presence channel) means no carets, never a crash —
@@ -673,7 +673,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     );
 
     const collabActive = Boolean(collab?.ydoc && collaborationExtensions);
-    // Recomputed on the SAME deps as useEditor's own rebuild trigger below
+    // Recomputed on the same deps as useEditor's own rebuild trigger below
     // ([extensions, collabActive]), not just [collab?.ydoc]: extensions
     // changes (and useEditor tears down and rebuilds the editor) whenever
     // awareness is added, removed, or swapped — a stale seed keyed on ydoc
@@ -700,7 +700,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         content: collabActive ? collabInitialContent : value,
         contentType: collabActive ? undefined : "markdown",
         editable: !readOnly,
-        // Register the image node view's per-editor context BEFORE the
+        // Register the image node view's per-editor context before the
         // ProseMirror view is built (createView reads the extension's storage),
         // so workspace-relative image srcs resolve on the very first paint.
         // Node views themselves are registered through their extensions'
@@ -735,7 +735,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         // `applyingPendingUndoRef`. What reaches here after those is the user's
         // own edit, so it is reported. There is deliberately no window in which
         // updates are ignored — one used to exist, keyed on an animation frame,
-        // and it dropped keystrokes that arrived first (#797).
+        // and it dropped keystrokes that arrived first.
         onUpdate({ editor, transaction }) {
           if (collabActive) return;
           if (applyingPendingUndoRef.current) return;
@@ -763,7 +763,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       return () => cancelAnimationFrame(frame);
     }, [editor]);
 
-    // The whole document PANE is the image drop zone, not just the ProseMirror
+    // The whole document pane is the image drop zone, not just the ProseMirror
     // element inside it. ProseMirror's handleDrop only fires for drops that land
     // on view.dom (it is also the only thing that preventDefaults `dragover`),
     // which left the page top-matter — icon, title, properties — dead to file
@@ -939,7 +939,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     // runs), and the instance that replaces it has no memory of having applied
     // anything — a target still held above would land a second time, on a
     // document the reader did not search. The caller retires it instead.
-    // The flash is deliberately NOT torn down here, unlike the heading seam.
+    // The flash is deliberately not torn down here, unlike the heading seam.
     // Reporting the jump retires the target, which re-runs this effect — a
     // cleanup that cancelled the flash would erase the highlight in the frame
     // it was drawn. revealDocPosition's own timer owns it, and a second jump
@@ -1043,10 +1043,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             </span>
           </div>
         ) : null}
-        {/* .dohc-editor-surface — NOT .dohc-tiptap-editor — is the CSS
+        {/* .dohc-editor-surface — not.dohc-tiptap-editor — is the CSS
          * container-query context for the outline/word-count grid trick.
          * Every position: fixed popover below (slash menu, block menu,
-         * wikilink/@-mention/emoji pickers, link menu) MUST stay a sibling
+         * wikilink/@-mention/emoji pickers, link menu) must stay a sibling
          * of this wrapper, never a descendant: container-type makes an
          * element the containing block for fixed descendants too, which
          * would turn their view.coordsAtPos(...) viewport coordinates into

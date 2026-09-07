@@ -1,6 +1,9 @@
 //! Collection reads through the real in-process daemon request path.
 
+mod common;
+
 use base64::Engine as _;
+use common::*;
 use dohc_engine_collab::{
     BaseRelayCoordinate, ClaimOutcome, ContentKind, DocKey, Ydoc, claim_base_at_relay,
 };
@@ -13,23 +16,21 @@ use dohc_engine_protocol::{
     transport::{
         EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
     },
-    wire::{Envelope, Request, WorkspaceHandle, encode_control},
+    wire::{Envelope, WorkspaceHandle, encode_control},
 };
 use dohc_engine_storage::{EngineStore, hex_sha256};
 use dohc_engine_sync::{
-    ApplyOutcome, LeaseProbe, NoLiveLeases, ReplicationEnvelope, apply_replication_envelope,
-    apply_ydoc_envelope,
+    AlwaysLive, ApplyDisposition, ApplyOutcome, NoLiveLeases, ReplicationEnvelope,
+    apply_replication_envelope, apply_ydoc_envelope,
 };
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::{
     AUTOMATION_CLAIMED_EVENT, EngineEventNotice, EngineService, RECORD_CREATED_EVENT,
-    RECORD_FIELD_CHANGED_EVENT, RECORD_UPDATED_EVENT,
-    shadow_fence::write_shadow_marker_for_harness,
+    RECORD_FIELD_CHANGED_EVENT, RECORD_UPDATED_EVENT, root_binding::write_root_binding,
 };
 use serde_json::{Value, json};
 use std::{fmt::Write as _, sync::Arc};
 
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const WORKSPACE_ID: &str = "ws-rpc-collections";
 const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -55,9 +56,9 @@ fn seed_text(store: &mut EngineStore, path: &str, text: &str, sequence: i64) {
 }
 
 fn seed_collection_state(scratch: &ScratchDir) {
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -78,9 +79,9 @@ fn seed_collection_state(scratch: &ScratchDir) {
 }
 
 fn seed_schema(scratch: &ScratchDir, schema: &str) {
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -94,34 +95,6 @@ fn seed_schema(scratch: &ScratchDir, schema: &str) {
     let collection_dir = scratch.path().join("tasks");
     std::fs::create_dir_all(&collection_dir).expect("collection directory");
     std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
-}
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
-
-async fn call(
-    transport: &InProcessTransport<EngineService>,
-    handle: &WorkspaceHandle,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> Value {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
-        .result
 }
 
 async fn call_ydoc_with_blob(
@@ -163,7 +136,7 @@ async fn reconcile_capture(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_collection_request_answers_for_a_degraded_schema() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_collection_state(&scratch);
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
@@ -281,7 +254,7 @@ async fn every_collection_request_answers_for_a_degraded_schema() {
 async fn collections_get_caps_schema_arrays_at_the_wire_collection_limit() {
     const SCHEMA_LIMIT: usize = WireLimits::SPIKE_DEFAULTS.max_collection_len as usize;
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let mut schema = String::from("fields:\n");
     for index in 0..=SCHEMA_LIMIT {
         writeln!(schema, "  field{index:05}:\n    type: text").expect("append field");
@@ -361,10 +334,10 @@ async fn collections_get_caps_schema_arrays_at_the_wire_collection_limit() {
 async fn get_record_pages_all_history_past_the_per_request_limit() {
     const SEEDED_HISTORY: usize = 501;
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_collection_state(&scratch);
 
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut connection = rusqlite::Connection::open(&db).expect("open history database");
     let tx = connection.transaction().expect("begin history seed");
     for recorded_at_ms in 0..SEEDED_HISTORY as i64 {
@@ -453,7 +426,7 @@ async fn get_record_pages_all_history_past_the_per_request_limit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
@@ -616,15 +589,15 @@ async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
 async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
     const EDITED_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
     );
     let markdown = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n");
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
     store
         .write_with(&NoFaults, |tx| {
@@ -843,15 +816,6 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
     const EDITED_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
     const REMOTE_ORIGIN: &str = "remote-collection-editor";
 
-    #[derive(Debug, Clone, Copy)]
-    struct AlwaysLive;
-
-    impl LeaseProbe for AlwaysLive {
-        fn is_live(&self, _key: &DocKey) -> bool {
-            true
-        }
-    }
-
     let markdown = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n");
     let seed_doc = Ydoc::wire();
     seed_doc
@@ -862,14 +826,14 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
 
     for device in ["a", "b"] {
         let scratch = ScratchDir::new().expect("scratch");
-        write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+        write_root_binding(scratch.path(), TOKEN).expect("root binding");
         seed_schema(
             &scratch,
             "name: Tasks\nfields:\n  status:\n    type: text\n",
         );
-        let db = scratch.engine_db_path().expect("engine db path");
+        let db = engine_db_path(&scratch).expect("engine db path");
         let mut store = EngineStore::open(&db, 1).expect("open store");
-        store.bind_shadow_clone_token(TOKEN).expect("bind token");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
         seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
         store
             .write_with(&NoFaults, |tx| {
@@ -1036,10 +1000,16 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
                 }),
                 recorded_at_ms: 200 + i64::try_from(origin_seq).expect("recorded time"),
             };
-            let applied = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLive)
-                .expect("queue remote collection update");
+            let applied = apply_ydoc_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &envelope,
+                &NoFaults,
+                &AlwaysLive,
+            )
+            .expect("queue remote collection update");
             assert!(
-                matches!(applied, dohc_engine_sync::ApplyOutcome::Applied(result) if result.deferred),
+                matches!(applied, dohc_engine_sync::ApplyOutcome { primary: dohc_engine_sync::ApplyDisposition::Applied(result), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (result.deferred)),
                 "the live device must defer the remote update"
             );
         }
@@ -1094,7 +1064,7 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_adopts_whitespace_delimited_frontmatter_without_losing_fields() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
         &scratch,
         "name: Tasks\nfields:\n  done:\n    type: checkbox\n  priority:\n    type: number\n  status:\n    type: text\n",
@@ -1152,7 +1122,7 @@ async fn capture_adopts_whitespace_delimited_frontmatter_without_losing_fields()
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_adopts_uppercase_markdown_extension_without_rewriting_structure() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
         &scratch,
         "name: Tasks\nfields:\n  done:\n    type: checkbox\n  priority:\n    type: number\n  status:\n    type: text\n",
@@ -1215,7 +1185,7 @@ async fn capture_adopts_uppercase_markdown_extension_without_rewriting_structure
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_adoption_leaves_rich_markdown_unmodified_until_shared_import() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
@@ -1296,10 +1266,10 @@ async fn collection_larger_than_frame_cap_pages_completely_in_sorted_order() {
     );
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
-    let db = scratch.engine_db_path().expect("engine db path");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -1395,10 +1365,10 @@ async fn overdepth_sort_values_page_without_gaps_or_duplicates() {
     ];
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
-    let db = scratch.engine_db_path().expect("engine db path");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -1545,10 +1515,10 @@ async fn big_collection_numbers_cross_every_request_and_response_surface() {
         },
     ];
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
-    let db = scratch.engine_db_path().expect("engine db path");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -1784,10 +1754,10 @@ async fn big_collection_numbers_cross_every_request_and_response_surface() {
 async fn near_limit_record_round_trips_via_query_and_get_record_blob_egress() {
     const LARGE_FIELD_BYTES: usize = dohc_engine_domain::MAX_TEXT_BYTES - 1024;
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
-    let db = scratch.engine_db_path().expect("engine db path");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -1928,10 +1898,10 @@ async fn collection_get_uses_blob_egress_only_above_inband_limit() {
     assert!(over_schema.len() < dohc_engine_domain::MAX_TEXT_BYTES);
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
-    let db = scratch.engine_db_path().expect("engine db path");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -2041,7 +2011,7 @@ async fn collection_get_uses_blob_egress_only_above_inband_limit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn collection_query_refuses_a_ninth_sort_clause() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(&scratch, "fields:\n  title:\n    type: text\n");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
@@ -2093,14 +2063,14 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
     let edited = format!("---\nid: {RECORD_ID}\nstatus: remote\n---\n\nAlpha\n");
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
     );
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
     store
         .write_with(&NoFaults, |tx| {
@@ -2202,13 +2172,26 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
         recorded_at_ms: 2_000,
     };
     let mut store = EngineStore::open(&db, 2).expect("open replication store");
-    let applied = apply_replication_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
-        .expect("apply remote moment");
+    let applied = apply_replication_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply remote moment");
     // A file-authored edit derives the same field facts a frontmatter-map
     // edit does: the record events and history ride this apply too.
-    let ApplyOutcome::Applied(routed) = &applied else {
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(routed),
+        refusals: outcome_refusals,
+        sharing_declined: outcome_sharing_declined,
+    } = &applied
+    else {
         panic!("the remote moment must fast-forward the seeded head: {applied:?}");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     let facts = routed
         .record_facts
         .first()
@@ -2251,7 +2234,7 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
     );
 }
 
-/// A replicated write that REMOVES parseable frontmatter must clear the
+/// A replicated write that removes parseable frontmatter must clear the
 /// record's indexed values in the same apply. The materialized disk write is a
 /// suppressed self-write, so no capture pass or reconciliation runs later —
 /// without an apply-time clear the old field values stay queryable forever.
@@ -2261,14 +2244,14 @@ async fn remote_moment_append_without_frontmatter_clears_the_collection_index() 
     let edited = "Alpha without frontmatter\n".to_owned();
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
     );
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
     store
         .write_with(&NoFaults, |tx| {
@@ -2368,10 +2351,23 @@ async fn remote_moment_append_without_frontmatter_clears_the_collection_index() 
         recorded_at_ms: 2_000,
     };
     let mut store = EngineStore::open(&db, 2).expect("open replication store");
-    let applied = apply_replication_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
-        .expect("apply remote moment");
+    let applied = apply_replication_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply remote moment");
     assert!(
-        matches!(applied, ApplyOutcome::Applied(_)),
+        matches!(
+            applied,
+            ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ),
         "the remote moment must fast-forward the seeded head: {applied:?}"
     );
     drop(store);
@@ -2394,7 +2390,7 @@ async fn remote_moment_append_without_frontmatter_clears_the_collection_index() 
     );
 }
 
-/// #1002 harness: an adopted, replicated collection record whose one synced
+/// Harness: an adopted, replicated collection record whose one synced
 /// `status` update is durably parked behind the live session's lease, with an
 /// automation subscribed to the collection so the drain's no-claim rule
 /// (ADR 0008) is observable.
@@ -2409,25 +2405,16 @@ struct ParkedRecordUpdate {
 const PARKED_REMOTE_ORIGIN: &str = "remote-parked-editor";
 
 async fn park_remote_status_update() -> ParkedRecordUpdate {
-    #[derive(Debug, Clone, Copy)]
-    struct AlwaysLive;
-
-    impl LeaseProbe for AlwaysLive {
-        fn is_live(&self, _key: &DocKey) -> bool {
-            true
-        }
-    }
-
     let markdown = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n");
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
     );
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
     store
         .write_with(&NoFaults, |tx| {
@@ -2580,14 +2567,20 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
         }),
         recorded_at_ms: 200,
     };
-    let applied = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLive)
-        .expect("queue remote collection update");
+    let applied = apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("queue remote collection update");
     assert!(
-        matches!(applied, ApplyOutcome::Applied(result) if result.deferred),
+        matches!(applied, ApplyOutcome { primary: ApplyDisposition::Applied(result), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (result.deferred)),
         "the live device must defer the remote update"
     );
-    // ADR 0008 pin: a subscribed automation must NOT be claimed by the drain
-    // of this SYNCED update; only its origin device claims.
+    // ADR 0008 pin: a subscribed automation must not be claimed by the drain
+    // of this synced update; only its origin device claims.
     store
         .write_with(&NoFaults, |tx| {
             subscribe_automation_in_tx(tx, WORKSPACE_ID, "plugin:triage", "tasks", 20)
@@ -2664,7 +2657,7 @@ fn assert_parked_drain_events(notices: &[EngineEventNotice]) {
 }
 
 fn assert_no_automation_claims(scratch: &ScratchDir) {
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(scratch).expect("engine db path");
     let store = EngineStore::open(&db, 9).expect("open claim probe store");
     let claims: i64 = store
         .read_with(|conn| {
@@ -2681,7 +2674,7 @@ fn assert_no_automation_claims(scratch: &ScratchDir) {
     );
 }
 
-/// #1002: a parked synced update drained by `ydoc.open` fires its record
+/// A parked synced update drained by `ydoc.open` fires its record
 /// events on the daemon event channel — the previous session ended with
 /// `workspace.close`, which skips the per-session drain.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2736,7 +2729,7 @@ async fn a_parked_update_drained_on_open_fires_record_events() {
     .await;
 }
 
-/// #1002: a parked synced update drained by `ydoc.close` (no settle) fires
+/// A parked synced update drained by `ydoc.close` (no settle) fires
 /// its record events on the daemon event channel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_parked_update_drained_on_close_fires_record_events() {
@@ -2763,7 +2756,7 @@ async fn a_parked_update_drained_on_close_fires_record_events() {
     .await;
 }
 
-/// #1002: a settle whose drain lands remote content refuses with
+/// A settle whose drain lands remote content refuses with
 /// `ydoc-remote-updates-pending` — and still fires the drained updates'
 /// record events, whose queue rows the drain already consumed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2806,7 +2799,7 @@ async fn a_parked_update_drained_on_settle_fires_record_events_with_the_refusal(
 }
 
 fn deferred_update_rows(scratch: &ScratchDir) -> i64 {
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(scratch).expect("engine db path");
     let store = EngineStore::open(&db, 8).expect("open deferred probe store");
     store
         .read_with(|conn| {
@@ -2819,9 +2812,9 @@ fn deferred_update_rows(scratch: &ScratchDir) -> i64 {
         .expect("count deferred updates")
 }
 
-/// #1008: the engine-internal collection reconcile pass (record-id adoption,
+/// The engine-internal collection reconcile pass (record-id adoption,
 /// relation cleanup) has no event route for drained record facts, so its open
-/// and settle must LEAVE a parked synced update queued. The next `ydoc.open`
+/// and settle must leave a parked synced update queued. The next `ydoc.open`
 /// drains it and fires the events.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_parked_update_survives_the_collection_reconcile_pass_and_fires_record_events() {
@@ -2838,7 +2831,7 @@ async fn a_parked_update_survives_the_collection_reconcile_pass_and_fires_record
     // Reopen the adoption so the reconcile pass processes the parked record's
     // document again, and touch the schema so the next capture pass runs
     // collection reconciliation at all.
-    let db = parked.scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&parked.scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 5).expect("open adoption reset store");
     store
         .write_with(&NoFaults, |tx| {
@@ -2929,4 +2922,466 @@ async fn a_parked_update_survives_the_collection_reconcile_pass_and_fires_record
         json!({}),
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_record_history_pages_cut_by_bytes_and_continue_from_the_cursor() {
+    const SEEDED_HISTORY: usize = 32;
+    const VALUE_BYTES: usize = 32 * 1024;
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    seed_collection_state(&scratch);
+
+    let db = engine_db_path(&scratch).expect("engine db path");
+    let mut connection = rusqlite::Connection::open(&db).expect("open history database");
+    let tx = connection.transaction().expect("begin history seed");
+    let next_value = serde_json::to_string(&"x".repeat(VALUE_BYTES)).expect("history value");
+    for recorded_at_ms in 0..SEEDED_HISTORY as i64 {
+        tx.execute(
+            "INSERT INTO collection_field_history \
+             (workspace_id,version_id,record_id,field_name,previous_value_json,\
+              next_value_json,author_origin_id,recorded_at_ms) \
+             VALUES (?1,'main',?2,'Raw',NULL,?3,'origin',?4)",
+            rusqlite::params![WORKSPACE_ID, RECORD_ID, next_value, recorded_at_ms],
+        )
+        .expect("seed history row");
+    }
+    tx.commit().expect("commit history seed");
+    drop(connection);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let first = call(
+        &transport,
+        &handle,
+        100,
+        "collections.getRecord",
+        json!({
+            "collectionPath": "broken",
+            "recordId": RECORD_ID,
+            "historyLimit": 500,
+        }),
+    )
+    .await;
+    let first_page = first["history"].as_array().expect("first history page");
+    assert!(
+        first_page.len() < SEEDED_HISTORY,
+        "the byte budget must cut a page whose {SEEDED_HISTORY} rows exceed it, got {}",
+        first_page.len()
+    );
+    assert!(!first_page.is_empty(), "a cut page still makes progress");
+    let serialized = serde_json::to_string(&first["history"]).expect("serialize history page");
+    assert!(
+        serialized.len() <= 512 * 1024,
+        "a cut history page must stay well under the frame: {} bytes",
+        serialized.len()
+    );
+    assert_eq!(
+        first["nextBeforeHistoryId"],
+        first_page.last().expect("last row")["historyId"],
+        "the cursor must point at the cut"
+    );
+
+    let mut history = first_page.clone();
+    let mut before_history_id = first["nextBeforeHistoryId"].clone();
+    for request_id in 101..110 {
+        if before_history_id.is_null() {
+            break;
+        }
+        let page = call(
+            &transport,
+            &handle,
+            request_id,
+            "collections.getRecord",
+            json!({
+                "collectionPath": "broken",
+                "recordId": RECORD_ID,
+                "historyLimit": 500,
+                "beforeHistoryId": before_history_id,
+            }),
+        )
+        .await;
+        history.extend(
+            page["history"]
+                .as_array()
+                .expect("history page")
+                .iter()
+                .cloned(),
+        );
+        before_history_id = page["nextBeforeHistoryId"].clone();
+    }
+
+    assert!(before_history_id.is_null(), "paging must terminate");
+    assert_eq!(
+        history.len(),
+        SEEDED_HISTORY,
+        "byte-cut pages must cover every seeded row without loss"
+    );
+    assert!(
+        history.windows(2).all(|entries| {
+            let left = entries[0]["historyId"].as_i64().expect("left id");
+            let right = entries[1]["historyId"].as_i64().expect("right id");
+            left > right
+        }),
+        "pages must stay newest-first without duplicates"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collections_list_pages_with_the_exclusive_cursor() {
+    const COLLECTIONS: [&str; 3] = ["alpha", "beta", "gamma"];
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let db = engine_db_path(&scratch).expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    for (index, name) in COLLECTIONS.iter().enumerate() {
+        let schema = format!("name: {name}\n");
+        seed_text(
+            &mut store,
+            &format!("{name}/collection.yaml"),
+            &schema,
+            2 + index as i64,
+        );
+        let collection_dir = scratch.path().join(name);
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+    }
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
+        })
+        .expect("reconcile collections");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+    drop(store);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                99,
+                "collections.list",
+                Some(handle.clone()),
+                json!({ "limit": 501 }),
+            ),
+        )
+        .await
+        .expect_err("an over-limit collections.list must be refused");
+    assert_eq!(refused.message, "collection-list-limit-out-of-range");
+
+    let mut paths = Vec::new();
+    let mut cursor = Value::Null;
+    for request_id in 100..105 {
+        let mut params = json!({ "limit": 1 });
+        if !cursor.is_null() {
+            params["cursor"] = cursor.clone();
+        }
+        let page = call(&transport, &handle, request_id, "collections.list", params).await;
+        let collections = page["collections"].as_array().expect("collections page");
+        assert!(
+            collections.len() <= 1,
+            "the requested page bound must be honored"
+        );
+        paths.extend(
+            collections
+                .iter()
+                .map(|summary| summary["path"].as_str().expect("path").to_owned()),
+        );
+        cursor = page["nextCursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+
+    assert_eq!(paths, COLLECTIONS);
+    assert!(cursor.is_null(), "the final page must terminate the cursor");
+
+    let unpaged = call(&transport, &handle, 110, "collections.list", json!({})).await;
+    assert_eq!(
+        unpaged["collections"]
+            .as_array()
+            .expect("collections")
+            .len(),
+        COLLECTIONS.len(),
+        "the default limit returns every collection in one page"
+    );
+    assert_eq!(unpaged["nextCursor"], Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collections_list_byte_bounds_degradation_reasons_and_the_page() {
+    const COLLECTIONS: [&str; 6] = ["alpha", "beta", "delta", "epsilon", "gamma", "zeta"];
+    const REASONS_PER_COLLECTION: usize = 700;
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let db = engine_db_path(&scratch).expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    // A pathological but honestly parsed degradation: each unknown root key
+    // yields one UnknownProperty reason with a long path, so the reason COUNT
+    // cap alone cannot bound the serialized reasons - the shape.
+    for (index, name) in COLLECTIONS.iter().enumerate() {
+        let mut schema = format!(
+            "name: {name}
+"
+        );
+        for reason in 0..REASONS_PER_COLLECTION {
+            let _ = writeln!(schema, "unknown{}{reason}: x", "p".repeat(120));
+        }
+        seed_text(
+            &mut store,
+            &format!("{name}/collection.yaml"),
+            &schema,
+            2 + index as i64,
+        );
+        let collection_dir = scratch.path().join(name);
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+    }
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
+        })
+        .expect("reconcile collections");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+    let stored_reasons = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT degradation_reasons_json FROM collections                  WHERE workspace_id=?1 AND version_id='main' AND collection_path='alpha'",
+                rusqlite::params![WORKSPACE_ID],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .expect("stored reasons");
+    assert!(
+        stored_reasons.len() > 80 * 1024,
+        "the fixture must exceed the per-summary reason budget: {} bytes",
+        stored_reasons.len()
+    );
+    drop(store);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let mut paths = Vec::new();
+    let mut cursor = Value::Null;
+    let mut saw_page_cut = false;
+    for request_id in 100..110 {
+        let mut params = json!({ "limit": 500 });
+        if !cursor.is_null() {
+            params["cursor"] = cursor.clone();
+        }
+        let page = call(&transport, &handle, request_id, "collections.list", params).await;
+        let serialized = serde_json::to_string(&page).expect("serialize list page");
+        assert!(
+            serialized.len() <= 512 * 1024,
+            "a byte-bounded page must stay well under the frame: {} bytes",
+            serialized.len()
+        );
+        let collections = page["collections"].as_array().expect("collections page");
+        saw_page_cut |= !collections.is_empty() && collections.len() < COLLECTIONS.len();
+        for summary in collections {
+            let kept = summary["reasons"].as_array().expect("reasons").len();
+            let omitted = summary["omittedReasons"]
+                .as_u64()
+                .expect("omitted reason count") as usize;
+            assert!(
+                kept > 0,
+                "a truncated reason list keeps a diagnostic prefix"
+            );
+            assert_eq!(
+                kept + omitted,
+                REASONS_PER_COLLECTION,
+                "the omitted count must complete the stored reason list"
+            );
+            paths.push(summary["path"].as_str().expect("path").to_owned());
+        }
+        cursor = page["nextCursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+
+    assert!(
+        saw_page_cut,
+        "the fixture must force a byte cut below the row limit"
+    );
+    assert!(cursor.is_null(), "paging must terminate");
+    assert_eq!(
+        paths, COLLECTIONS,
+        "byte-cut pages must cover every collection in order"
+    );
+
+    // The full stored reason list stays readable through collections.get.
+    let details = call(
+        &transport,
+        &handle,
+        120,
+        "collections.get",
+        json!({ "collectionPath": "alpha" }),
+    )
+    .await;
+    assert_eq!(
+        details["reasons"].as_array().expect("full reasons").len(),
+        REASONS_PER_COLLECTION
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collection_responses_honor_a_negotiated_frame_limit_below_the_default() {
+    const LARGE_FIELD_BYTES: usize = 2 * 1024 * 1024;
+    const NEGOTIATED: u32 = dohc_engine_protocol::limits::MIN_NEGOTIABLE_FRAME_BYTES;
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let db = engine_db_path(&scratch).expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    let schema = "fields:\n  notes:\n    type: text\n";
+    let large_value = "x".repeat(LARGE_FIELD_BYTES);
+    let record = format!("---\nid: {RECORD_ID}\nnotes: {large_value}\n---\n");
+    seed_text(&mut store, "negotiated/collection.yaml", schema, 2);
+    seed_text(&mut store, "negotiated/record.md", &record, 3);
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
+        })
+        .expect("reconcile negotiated collection");
+    drop(store);
+    let collection_dir = scratch.path().join("negotiated");
+    std::fs::create_dir_all(&collection_dir).expect("collection directory");
+    std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+    std::fs::write(collection_dir.join("record.md"), &record).expect("record file");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+    let params = json!({ "collectionPath": "negotiated", "limit": 1 });
+
+    // At the daemon default the 2 MiB record travels in band.
+    let in_band = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded(),
+        request(
+            10,
+            "collections.query",
+            Some(handle.clone()),
+            params.clone(),
+        ),
+    )
+    .await
+    .expect("default-limit query");
+    assert!(in_band.blob_egress.is_none());
+
+    // At a negotiated 1 MiB frame the same response must ride blob egress
+    // sized to the negotiated cap, not the daemon default.
+    let negotiated_cap = NEGOTIATED as usize - 64 * 1024;
+    let over = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded()
+            .with_capability("blobs")
+            .with_max_frame_bytes(NEGOTIATED),
+        request(
+            11,
+            "collections.query",
+            Some(handle.clone()),
+            params.clone(),
+        ),
+    )
+    .await
+    .expect("negotiated-limit query with blobs");
+    let egress = over.blob_egress.expect("negotiated blob egress");
+    assert!(egress.bytes.len() > negotiated_cap);
+    assert_eq!(
+        over.response.result["inbandLimitBytes"].as_u64(),
+        Some(negotiated_cap as u64)
+    );
+    let parsed: Value = serde_json::from_slice(&egress.bytes).expect("blob-backed collection JSON");
+    assert_eq!(parsed["records"][0]["id"], json!(RECORD_ID));
+
+    // Without blobs the negotiated limit refuses rather than over-framing.
+    let refusal = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded().with_max_frame_bytes(NEGOTIATED),
+        request(12, "collections.query", Some(handle.clone()), params),
+    )
+    .await
+    .expect_err("a response past the negotiated limit without blobs must be refused");
+    assert_eq!(refusal.message, "collection-response-exceeds-wire-limit");
 }

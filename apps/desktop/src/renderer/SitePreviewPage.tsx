@@ -22,6 +22,11 @@ import type {
 import { bridge } from "./bridge";
 import { openLinkExternally } from "./linkActivation";
 import { isLoopbackOrigin } from "./sdkFrame";
+import { APP_CHECK_FALLBACK_MESSAGE } from "./appCopy";
+
+const APP_MISSING_MESSAGE = "This app is no longer part of the workspace.";
+const NO_SHARE_OUTPUT_MESSAGE =
+  "This app has no static entry file or build output to share.";
 
 type WorkspacePreviewMode =
   WorkspaceSettingsResult["settings"]["sites"]["defaultPreviewMode"];
@@ -70,7 +75,7 @@ function availableModes(
   return modes;
 }
 
-// Reference-stable no-op for the 1s dev-log poll: an unchanged log ring MUST
+// Reference-stable no-op for the 1s dev-log poll: an unchanged log ring must
 // keep the previous array so setState bails out instead of re-rendering the
 // page every second. Compare every entry: once the ring is at its cap the
 // length stays pinned, and multi-line chunks share one `at`, so length plus
@@ -176,7 +181,7 @@ function shareRefusalMessage(
   result: Extract<SitePackageInfo["shareManifest"], { ok: false }>,
 ): string {
   if (result.reason === "byte-budget") {
-    return `dohc scanned ${formatMiB(result.observedBytes)} for sharing. The configured limit is ${formatMiB(result.limitBytes)}. Reduce the site's referenced files and try again.`;
+    return `dohc scanned ${formatMiB(result.observedBytes)} for sharing. The configured limit is ${formatMiB(result.limitBytes)}. Reduce the app's referenced files and try again.`;
   }
   if (result.reason === "file-count") {
     return `dohc found ${result.observedFiles} files for sharing. The configured limit is ${result.limitFiles} files. Remove referenced files and try again.`;
@@ -190,7 +195,7 @@ function shareRefusalMessage(
   if (result.reason === "non-file-reference") {
     return `dohc found a shared reference that is not a file: ${result.path}. Replace the reference, then try again.`;
   }
-  return "This site does not have a runnable static artifact to share.";
+  return NO_SHARE_OUTPUT_MESSAGE;
 }
 
 export function SitePreviewPage(props: {
@@ -261,7 +266,7 @@ export function SitePreviewPage(props: {
       if (!isCurrent()) return;
       setLoad({
         status: "error",
-        message: error instanceof Error ? error.message : "Could not load this site.",
+        message: error instanceof Error ? error.message : "Could not load this app.",
       });
     }
   }, [props.workspaceId, props.siteRoot, siteContext]);
@@ -284,7 +289,7 @@ export function SitePreviewPage(props: {
   }, [props.workspaceId, props.siteRoot]);
 
 
-  // getSitePackage intentionally returns the deepest CONTAINING site for a
+  // getSitePackage intentionally returns the deepest containing site for a
   // path (see requireExactSiteRoot's doc comment), so a stale tab whose own
   // root stopped being a detected site can still get back a detected
   // ANCESTOR above it — offering that ancestor's modes here would let this
@@ -360,14 +365,14 @@ export function SitePreviewPage(props: {
         effectivePreviewMode: preview?.mode ?? runningMode ?? null,
       });
       if (!isCurrent()) return;
-      // getSitePackage intentionally returns the deepest CONTAINING site for
+      // getSitePackage intentionally returns the deepest containing site for
       // a path (see requireExactSiteRoot's doc comment), so a stale tab whose
       // own root stopped being a detected site can still get back a detected
       // ANCESTOR above it. Sharing that ancestor would offer someone else's
       // site under this tab's name, so both refresh points here require an
       // exact root match before exposing a target.
       if (!fresh || fresh.root !== props.siteRoot) {
-        setActionError("This site is no longer part of the workspace.");
+        setActionError(APP_MISSING_MESSAGE);
         return;
       }
       let latest = fresh;
@@ -378,7 +383,7 @@ export function SitePreviewPage(props: {
       ) {
         if (!latest.configuredScripts.build && !latest.scripts.build) {
           if (isCurrent()) {
-            setActionError("This site needs a static build before it can be shared.");
+            setActionError("This app needs a static build before it can be shared.");
           }
           return;
         }
@@ -393,7 +398,7 @@ export function SitePreviewPage(props: {
         });
         if (!isCurrent()) return;
         if (refreshedAfterBuild && refreshedAfterBuild.root !== props.siteRoot) {
-          setActionError("This site is no longer part of the workspace.");
+          setActionError(APP_MISSING_MESSAGE);
           return;
         }
         if (refreshedAfterBuild) latest = refreshedAfterBuild;
@@ -403,7 +408,7 @@ export function SitePreviewPage(props: {
         if (isCurrent()) {
           setActionError(
             latest.shareManifest.ok
-              ? "This site does not have a runnable static artifact to share."
+              ? NO_SHARE_OUTPUT_MESSAGE
               : shareRefusalMessage(latest.shareManifest),
           );
         }
@@ -412,7 +417,7 @@ export function SitePreviewPage(props: {
       if (isCurrent()) props.onShareSite?.(target);
     } catch (error) {
       if (isCurrent()) {
-        setActionError(error instanceof Error ? error.message : "Could not prepare this site for sharing.");
+        setActionError(error instanceof Error ? error.message : "Could not prepare this app for sharing.");
       }
     }
   }, [preview, props.onShareSite, props.siteRoot, props.workspaceId, runningMode, siteContext, start]);
@@ -574,8 +579,8 @@ export function SitePreviewPage(props: {
           {canShare ? (
             <IconButton
               data-testid="site-preview-share"
-              aria-label="Share site"
-              title="Share site"
+              aria-label="Share app"
+              title="Share app"
               disabled={runningMode !== null}
               onClick={() => site && void prepareShare()}
               className="size-7"
@@ -635,16 +640,16 @@ export function SitePreviewPage(props: {
 
       {load.status === "loading" ? (
         <div className="flex flex-1 items-center justify-center text-sm text-subtle">
-          Loading site…
+          Loading app…
         </div>
       ) : load.status === "missing" ? (
-        <EmptyState title="Site not detected" body="The folder no longer looks like a website." />
+        <EmptyState title="App not detected" body="dohc no longer detects an app in this folder." />
       ) : load.status === "error" ? (
-        <EmptyState title="Could not load site" body={load.message} />
+        <EmptyState title="Could not load app" body={load.message} />
       ) : load.status === "ready" && !site ? (
         <EmptyState
-          title="Site not detected"
-          body="This site is no longer part of the workspace."
+          title="App not detected"
+          body={APP_MISSING_MESSAGE}
         />
       ) : site ? (
         <>
@@ -658,7 +663,7 @@ export function SitePreviewPage(props: {
                   <AlertTriangle size={12} aria-hidden />
                   <span className="font-mono">{diagnostic.code}</span>
                   <span>
-                    {diagnostic.message || "Could not check this site fully."}
+                    {diagnostic.message || APP_CHECK_FALLBACK_MESSAGE}
                   </span>
                 </div>
               ))}
@@ -673,7 +678,7 @@ export function SitePreviewPage(props: {
 
           {preview && !previewUrlAllowed ? (
             <div data-testid="site-preview-error" className="border-b border-line bg-panel px-4 py-2 text-[12px] text-danger">
-              This site tried to preview from an address dohc does not trust. Reload the preview.
+              This app tried to preview from an address dohc does not trust. Reload the preview.
             </div>
           ) : null}
 
@@ -714,8 +719,8 @@ export function SitePreviewPage(props: {
                     ? "Preview stopped. Use Preview options to run it again."
                     : runningMode
                     ? `Starting ${modeLabel(runningMode).toLowerCase()} preview…`
-                    : "This site did not start automatically. Choose another mode in Preview options."
-                  : "This site has no previewable entry, dev script, or build output yet."}
+                    : "This app did not start automatically. Choose another mode in Preview options."
+                  : "This app has no previewable entry, dev script, or build output yet."}
               </div>
               {idleReason === "exited" && previewLogs.length > 0 ? (
                 <LogsDetails

@@ -30,7 +30,6 @@ import {
   seedCloudCredentials,
   seedWorkspaceManifest,
   seedWorkspaceRegistry,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   waitForWorkspaceReady,
   activeWorkspace,
@@ -159,7 +158,6 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     const capture = createWorkspaceEngineCapture({
       ...liveSource.workspace,
       rustEngineSessions: liveSource.sessions,
-      daemonOwnsCapture: true,
     });
     sourceCapture = capture;
     const sourceRelay = liveSource.relay.bind({
@@ -568,7 +566,6 @@ test("protected join rolls back for a missing passphrase, then restores exact se
     sourceCapture = createWorkspaceEngineCapture({
       ...sourceWorkspace.workspace,
       rustEngineSessions: sourceWorkspace.sessions,
-      daemonOwnsCapture: true,
     });
     const sourceRelay = sourceWorkspace.relay.bind({
       ...sourceWorkspace.workspace,
@@ -695,10 +692,9 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, { experimental: { workspaceEngineAlpha: true } });
     await writeWorkspaceFiles(temp, [{ path: "notes/plan.md", contents: "local draft\n" }]);
 
-    // A real relay is the ONLY cloud service. The workspace is NOT pre-claimed:
+    // A real relay is the only cloud service. The workspace is not pre-claimed:
     // cloudEnableSync must be the first and sole claimant.
     const relayDb = join(temp.baseDir, "relay.sqlite");
     relay = await spawnSyncRelay({ dbPath: relayDb });
@@ -745,13 +741,13 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
       }
     }, workspaceId);
     // The renderer already captured the failure message; assert on the whole
-    // object so a refusal reports WHY instead of just `ok: false`.
+    // object so a refusal reports why instead of just `ok: false`.
     expect(enableResult, `cloudEnableSync refused: ${JSON.stringify(enableResult)}`).toMatchObject(
       { ok: true },
     );
 
     // The workspace is now bound and pushing. A claimed bucket answers its log
-    // with 200, while an unclaimed bucket answers 404. WITH the adopted
+    // with 200, while an unclaimed bucket answers 404. With the adopted
     // identity: `cloudEnableSync` claims through
     // execute_relay_operation, which supplies both identity fields, so the relay
     // adopts them and an identity-free log read answers 409 rather than 200.

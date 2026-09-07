@@ -120,6 +120,7 @@ function collectionReadsScopedTo(prefix: string): CollectionReadPort {
           values: [],
         },
         history: [],
+        nextBeforeHistoryId: null,
       };
     },
   };
@@ -404,8 +405,6 @@ describe("workspace SDK host authority", () => {
     await expect(
       invokeWorkspaceSdkHost(context, "files.read", { path: "notes/today.md" }),
     ).resolves.toBeDefined();
-    // MUTATION (write authority): drop either gate and a read-only surface
-    // writes the workspace.
     await expect(
       invokeWorkspaceSdkHost(context, "files.write", { path: "notes/no.md", text: "no" }),
     ).rejects.toThrow(/read-only workspace authority/);

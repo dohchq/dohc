@@ -36,7 +36,7 @@ interface JsonRpcResponse {
 
 type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcResponse;
 
-export interface JsonRpcTransportOptions {
+interface JsonRpcTransportOptions {
   command: string;
   args: string[];
   cwd: string;
@@ -77,8 +77,6 @@ function normalizeError(error: unknown): JsonRpcError {
   if (error instanceof Error) return new JsonRpcError(-32603, error.message);
   return new JsonRpcError(-32603, "JSON-RPC handler failed.");
 }
-
-export { resolveSpawnCommand } from "../process/windowsSpawn";
 
 export class JsonRpcTransport {
   private readonly child: ChildProcessWithoutNullStreams;

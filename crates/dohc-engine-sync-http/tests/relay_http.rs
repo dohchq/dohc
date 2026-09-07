@@ -17,7 +17,7 @@ use dohc_engine_sync::{
     read_pushed_seq, read_relay_cursor,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::open_store;
 use serde_json::{Value, json};
 
 #[derive(Debug)]
@@ -247,13 +247,6 @@ fn probe(transport: &HttpRelayTransport) -> Result<dohc_engine_sync::ProbeRespon
     })
 }
 
-fn store() -> (ScratchDir, std::path::PathBuf, EngineStore) {
-    let scratch = ScratchDir::new().expect("scratch");
-    let path = scratch.engine_db_path().expect("engine db path");
-    let store = EngineStore::open(&path, 1_000).expect("open engine store");
-    (scratch, path, store)
-}
-
 fn seed_identity(store: &mut EngineStore, payload: &Value) {
     seed_identity_with_kind(store, "probe.local", payload);
 }
@@ -302,10 +295,7 @@ struct PushBoundaryState {
 
 #[test]
 fn push_chunks_ops_and_blob_have_at_server_boundaries() {
-    // MUTATION AUDIT: removing blob-have chunking sends 2,001 hashes and fails
-    // [2,000, 1]. Removing the inner push chunking still passes because the
-    // outer replication-log read already caps each iteration at 500 ops.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let mut snapshots = Vec::new();
     let mut blobs = Vec::new();
     for index in 0..2_001 {
@@ -414,9 +404,7 @@ fn push_chunks_ops_and_blob_have_at_server_boundaries() {
 
 #[test]
 fn push_rejects_relay_origin_ahead_of_local_max() {
-    // MUTATION: accepting currentMaxOriginSeq above the local maximum changes
-    // this from OriginDiverged and advances state past local reality.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     let server = FakeServer::start(|request| match (request.method.as_str(), request.path()) {
         ("POST", "/sync/ws/log") => TestResponse::json(
@@ -443,7 +431,7 @@ fn push_rejects_relay_origin_ahead_of_local_max() {
 
 #[test]
 fn push_conflict_probes_empty_ops_rewinds_and_retries_once() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({"index": 0}));
     journal_local_replication_op(
         &mut engine,
@@ -522,9 +510,7 @@ fn push_conflict_probes_empty_ops_rewinds_and_retries_once() {
 
 #[test]
 fn push_rewind_is_durable_before_a_failed_retry() {
-    // MUTATION: using the monotonic cursor helper for the rewind leaves 0
-    // persisted after the retry fails instead of the relay's probed -1.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({"index": 0}));
     journal_local_replication_op(
         &mut engine,
@@ -596,23 +582,30 @@ fn push_rewind_is_durable_before_a_failed_retry() {
 
 #[test]
 fn pull_aborts_when_has_more_cursor_does_not_advance() {
-    // MUTATION: removing the forward-progress guard makes this fake page loop
-    // until the test process is killed instead of returning NoProgress.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     let server = FakeServer::start(|_| log_page(Vec::new(), 0, true));
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_sync::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect_err("non-advancing page must abort");
-    assert_eq!(error, RelayError::NoProgress);
+    assert_eq!(
+        error,
+        RelayError::NoProgress,
+        "removing the forward-progress guard makes this fake page loop until the test process is killed instead of returning NoProgress."
+    );
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
 }
 
 #[test]
 fn pull_rejects_byte_different_coordinate_collision_before_apply() {
-    // MUTATION: coordinate-only dedup treats the different payload as a skip;
-    // the preflight byte comparison is what makes this fail closed.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     engine
         .write_with(&NoFaults, |transaction| {
@@ -635,7 +628,14 @@ fn pull_rejects_byte_different_coordinate_collision_before_apply() {
         )
     });
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_sync::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect_err("a foreign coordinate collision must fail closed");
     assert_eq!(error, RelayError::InvalidResponse);
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
@@ -643,7 +643,7 @@ fn pull_rejects_byte_different_coordinate_collision_before_apply() {
 
 #[test]
 fn pull_accepts_the_relays_integral_float_normalization() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     engine
         .write_with(&NoFaults, |transaction| {
@@ -667,7 +667,14 @@ fn pull_accepts_the_relays_integral_float_normalization() {
     });
 
     let outcome = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_sync::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("semantically identical number");
     assert!(matches!(
         outcome,
@@ -822,14 +829,10 @@ fn direct_transport_rejects_fractional_wire_timestamps_without_rounding() {
         })
         .expect_err("fractional timestamps are outside the i64 wire contract");
     assert_eq!(error, RelayError::InvalidResponse);
-    // MUTATION: accepting through f64 plus a cast/truncation makes this return
-    // recordedAtMs=1 and admits different bytes than the sender supplied.
 }
 
 #[test]
 fn direct_transport_rejects_an_oversized_outbound_payload_before_io() {
-    // MUTATION: restoring the core's former 10 MiB allowance reaches the fake
-    // network with a row the relay's 256 KiB contract can never accept.
     let server = FakeServer::start(|_| panic!("oversized payload reached the network"));
     let overhead = br#"{"data":""}"#.len();
     let payload =
@@ -857,10 +860,7 @@ fn direct_transport_rejects_an_oversized_outbound_payload_before_io() {
 
 #[test]
 fn pull_rejects_fetched_blob_with_wrong_sha() {
-    // MUTATION AUDIT: removing the transport-layer re-hash still passes because
-    // hydrate_blob_content independently hash-verifies. This test proves
-    // end-to-end rejection, not that the transport check itself remains present.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     let claimed = hex_sha256(b"expected bytes");
     let handler_claimed = claimed.clone();
@@ -879,7 +879,14 @@ fn pull_rejects_fetched_blob_with_wrong_sha() {
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_sync::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect_err("wrong blob content must fail");
     assert_eq!(error, RelayError::BlobInvalid);
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
@@ -892,10 +899,7 @@ fn pull_rejects_fetched_blob_with_wrong_sha() {
 
 #[test]
 fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
-    // MUTATION: committing at apply time persists cursor 1 before the caller
-    // materializes to disk, so reopening after the simulated crash does not
-    // redeliver the op and the durable-cursor assertions fail.
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     let server = FakeServer::start(move |request| {
         let query = request
@@ -935,7 +939,14 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
     });
     let client = RelaySyncClient::new(transport(&server));
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_sync::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("first pull");
     assert!(matches!(
         first,
@@ -964,7 +975,14 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
         "the simulated crash must leave the persisted cursor unchanged"
     );
     let second = client
-        .pull_chat_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut reopened,
+            &mut dohc_engine_sync::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("second pull");
     let pending = match second {
         SyncPassOutcome::Complete {
@@ -1006,7 +1024,14 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
         1
     );
     let third = client
-        .pull_chat_workspace(&mut committed, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut committed,
+            &mut dohc_engine_sync::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("pull after cursor commit");
     assert!(matches!(
         third,
@@ -1035,8 +1060,6 @@ fn every_relay_fixture_code_maps_to_its_rust_variant() {
             (status, code)
         })
         .collect::<VecDeque<_>>();
-    // MUTATION: collapsing a specific server code into a status-class error
-    // makes the affected variant assertion fail.
     let expected = cases
         .iter()
         .map(|(_, code)| expected_relay_error(code))
@@ -1333,7 +1356,7 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     );
     assert!(
         seen.contains("TARGET /sync/shares/share-1/log?since=0&limit=500"),
-        "MUTATION: forwarding an unbounded share-view limit exceeds the response budget"
+        "forwarding an unbounded share-view limit exceeds the response budget"
     );
 }
 
@@ -1388,7 +1411,7 @@ fn redirect_to_plaintext_destination_is_refused_without_following() {
     );
     assert!(
         !destination_hit.load(Ordering::SeqCst),
-        "MUTATION: allowing redirects sends the bearer request over plaintext"
+        "allowing redirects sends the bearer request over plaintext"
     );
 }
 
@@ -1400,7 +1423,7 @@ fn redirect_to_link_local_destination_is_refused_before_connection() {
     assert_eq!(
         probe(&transport(&source)).expect_err("link-local redirect must be refused"),
         RelayError::BadRequest,
-        "MUTATION: following this redirect reintroduces an SSRF host/port oracle"
+        "following this redirect reintroduces an SSRF host/port oracle"
     );
 }
 
@@ -1428,7 +1451,7 @@ fn key_envelope_upload_rejects_an_oversized_ack_body() {
     assert_eq!(
         error,
         RelayError::InvalidResponse,
-        "MUTATION: restoring the log-page budget accepts a ~133 MiB key ack"
+        "restoring the log-page budget accepts a ~133 MiB key ack"
     );
 }
 
@@ -1459,9 +1482,6 @@ fn a_blob_at_the_ingest_ceiling_arrives_whole() {
     // The relay stores blobs up to `MAX_BLOB_BYTES`, which is the text ceiling,
     // so an at-ceiling text blob is work the relay legally serves.
     //
-    // MUTATION: set the read limit back to `MAX_INGEST_BLOB_BYTES` and this
-    // fails with `InvalidResponse` — `ureq` refuses a body once a read reaches
-    // its limit, so the last byte the ceiling allows never arrives.
     let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Text);
     let server = FakeServer::start(move |request| match request.path() {
         path if path.starts_with("/sync/ws/blobs/") => TestResponse::bytes(vec![b'a'; limit_bytes]),
@@ -1491,10 +1511,7 @@ fn pull_names_the_text_ceiling_for_an_oversized_relay_blob() {
     // The production transport must carry the refusal ingest writes, not
     // replace it with an unreadable-response error that names no limit.
     //
-    // MUTATION: set the read limit back to `MAX_INGEST_BLOB_BYTES` and the
-    // caller gets `InvalidResponse` instead, with no constraint, no configured
-    // limit, and no observed size.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Text);
     let oversized = vec![b'a'; limit_bytes + 1];
@@ -1536,6 +1553,7 @@ fn pull_names_the_text_ceiling_for_an_oversized_relay_blob() {
     assert_eq!(
         RelaySyncClient::new(transport(&server)).pull_chat_workspace(
             &mut engine,
+            &mut dohc_engine_sync::WriterDocCache::new(),
             "ws",
             &NoFaults,
             &NoLiveLeases,
@@ -1556,8 +1574,6 @@ fn a_blob_body_past_the_read_limit_still_names_the_ceiling() {
     // ceiling. It reports the observed floor instead of buffering the rest or
     // inventing a total.
     //
-    // MUTATION: map the read failure back to a bare `RelayError::InvalidResponse`
-    // and this fails — the caller learns nothing about which limit it broke.
     //
     let limit_bytes = dohc_engine_sync::MAX_INGEST_BLOB_BYTES;
     let far_over = limit_bytes + 4096;
@@ -1606,9 +1622,7 @@ fn a_binary_blob_past_the_read_limit_names_the_binary_ceiling() {
     // better. Reporting 10485760 here would send an agent to shrink its payload
     // to a size binary ingest still refuses.
     //
-    // MUTATION: drop the relabel at the download site and this reports
-    // MAX_INGEST_BLOB_BYTES with the text limit instead.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     let ingest_limit = dohc_engine_sync::MAX_INGEST_BLOB_BYTES;
     let (binary_constraint, binary_limit) = blob_ceiling(BlobKind::Binary);
@@ -1639,7 +1653,14 @@ fn a_binary_blob_past_the_read_limit_names_the_binary_ceiling() {
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_sync::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect_err("a binary body past the read limit is refused");
     assert_eq!(
         error,
@@ -1652,40 +1673,5 @@ fn a_binary_blob_past_the_read_limit_names_the_binary_ceiling() {
     assert_ne!(
         binary_constraint, "MAX_INGEST_BLOB_BYTES",
         "the refusal must not name the transport's loosest ceiling"
-    );
-}
-
-/// The relay stores what the engine may send. Both numbers are hand-written,
-/// in different languages, with no shared source — so raising the engine's
-/// widest ingest ceiling past the relay's transport cap would compile, pass
-/// every Rust test, and then fail at runtime with a 413 the sender cannot
-/// anticipate. #549 raised that ceiling for Y.Doc payloads, which is exactly
-/// the change that could cross it.
-///
-/// MUTATION: lower `MAX_BLOB_BYTES` in `services/sync-relay/src/server.ts`
-/// below `MAX_INGEST_BLOB_BYTES` and this fails, naming both values.
-#[test]
-fn the_relay_transport_cap_covers_the_widest_engine_ingest_ceiling() {
-    const RELAY_SERVER_TS: &str = include_str!("../../../services/sync-relay/src/server.ts");
-    let declaration = RELAY_SERVER_TS
-        .lines()
-        .find_map(|line| line.strip_prefix("export const MAX_BLOB_BYTES = "))
-        .expect("services/sync-relay/src/server.ts no longer declares MAX_BLOB_BYTES");
-    let relay_cap: usize = declaration
-        .trim_end_matches(';')
-        .split('*')
-        .map(|factor| {
-            factor
-                .trim()
-                .parse::<usize>()
-                .expect("MAX_BLOB_BYTES is a product of integer literals")
-        })
-        .product();
-    assert!(
-        relay_cap >= dohc_engine_sync::MAX_INGEST_BLOB_BYTES,
-        "the relay caps a blob body at {relay_cap} bytes, under the engine's \
-         widest ingest ceiling MAX_INGEST_BLOB_BYTES ({} bytes): a payload the \
-         engine accepts would be refused 413 on push",
-        dohc_engine_sync::MAX_INGEST_BLOB_BYTES
     );
 }

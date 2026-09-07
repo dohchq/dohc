@@ -3,7 +3,7 @@ import {
   type SdkAuthorityAuthorization,
 } from "../workspaces/sdkAuthorityRegistry";
 
-export interface PluginPanelSdkGrantInput {
+interface PluginPanelSdkGrantInput {
   senderId: number;
   generation: number;
   workspaceId: string;
@@ -60,7 +60,3 @@ export function createPluginPanelSdkAuthorityRegistry() {
     revokeAll: registry.revokeAll,
   };
 }
-
-export type PluginPanelSdkAuthorityRegistry = ReturnType<
-  typeof createPluginPanelSdkAuthorityRegistry
->;

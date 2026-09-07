@@ -17,20 +17,20 @@ import {
 } from "./helpers/workspace";
 
 // The Phase 2 two-instance gate (docs/plans/collections.md): a board drag on
-// one device updates the other device's OPEN board. Device B is the real
+// one device updates the other device's open board. Device B is the real
 // Electron app with the collection's board on screen. Device A is a real
 // daemon-backed workspace over the same relay — the serial single-display
 // harness cannot run two Electron instances (the 0P-C pattern), so device A
 // applies exactly what its drag applies: the grouped field written through
 // the record's file, captured and pushed. The proof is B's board moving the
-// card WITHOUT any UI refresh — the view re-renders from the index when the
+// card without any UI refresh — the view re-renders from the index when the
 // pulled write applies. (Sync-nudge writes only wake B's pull-based sync
 // engine, the same idiom the other sync specs use; they touch nothing in
 // the collection.)
 
 const TOKEN = "test:e2e-user";
 
-// Valid record ids (rec_ + 26 chars of a-z2-7) seeded up front, so BOTH
+// Valid record ids (rec_ + 26 chars of a-z2-7) seeded up front, so both
 // engines adopt the same identity instead of each minting its own.
 const APOLLO_ID = "rec_apolloe2e234567abcdefgh234";
 const ZEPHYR_ID = "rec_zephyre2e234567abcdefgh234";
@@ -80,7 +80,6 @@ test("a drag's field write on one device moves the card on the other device's op
     capture = createWorkspaceEngineCapture({
       ...deviceA.workspace,
       rustEngineSessions: deviceA.sessions,
-      daemonOwnsCapture: true,
     });
     const deviceARelay = deviceA.relay.bind({
       ...deviceA.workspace,
@@ -145,7 +144,7 @@ test("a drag's field write on one device moves the card on the other device's op
     // Open the collection in three separately-named layers: the tree row
     // exposes data-collection once the engine lists the folder as a
     // collection (the state arrives on the same activity cadence as the
-    // files), then ONE click routes to the views. A failure names whether
+    // files), then one click routes to the views. A failure names whether
     // the collection state, the click, or the routing broke.
     const tasksRow = page.locator('[data-testid="tree-row"][data-path="tasks"]');
     await expect(tasksRow).toHaveAttribute("data-collection", "true", {
@@ -238,13 +237,13 @@ test("a drag's field write on one device moves the card on the other device's op
       )
       .toBe("Doing");
 
-    // Device B's OPEN board moves the card with no manual refresh: the
+    // Device B's open board moves the card with no manual refresh: the
     // pulled apply fires the collection's activity refresh and the board
     // re-renders from the index.
     await expect(doingApollo).toBeVisible({ timeout: 30_000 });
     await expect(todoApollo).toHaveCount(0);
   } finally {
-    // Stop the daemon and relay children BEFORE removing the temp tree they
+    // Stop the daemon and relay children before removing the temp tree they
     // hold open — Windows refuses to unlink open files (EBUSY).
     await capture?.stop().catch(() => undefined);
     await deviceA?.close().catch(() => undefined);

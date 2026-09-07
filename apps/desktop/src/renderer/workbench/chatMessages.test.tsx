@@ -1,3 +1,4 @@
+import { formatChatTime } from "../time";
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createRef, useState, type Dispatch, type SetStateAction } from "react";
@@ -8,7 +9,6 @@ import {
   ChatMessageList,
   MentionText,
   chatAuthorLabel,
-  formatChatTime,
   runReactionToggle,
   type ReactionToggleContext,
 } from "./chatMessages";
@@ -19,7 +19,7 @@ import { extractChatFileReferenceTokens } from "./chatFileMentions";
 vi.mock("./chatFileMentions", { spy: true });
 
 // Shared Chats pieces (PR 13, WS-E): both the file-rail panel and the Chats
-// view send through THIS composer, so its Enter semantics are load-bearing
+// view send through this composer, so its Enter semantics are load-bearing
 // for every chat surface at once.
 
 afterEach(() => {
@@ -53,10 +53,10 @@ describe("ChatComposer Enter-to-send", () => {
     expect(onSend).toHaveBeenCalledTimes(1);
   });
 
-  it("does NOT send on Enter during IME composition", () => {
+  it("does not send on Enter during IME composition", () => {
     const { onSend } = renderComposer();
     const composer = screen.getByTestId("test-chat-composer");
-    // A CJK/IME user pressing Enter to CONFIRM composed characters: the
+    // A CJK/IME user pressing Enter to confirm composed characters: the
     // keydown arrives with isComposing = true and must never submit.
     fireEvent.keyDown(composer, { key: "Enter", isComposing: true });
     expect(onSend).not.toHaveBeenCalled();
@@ -79,9 +79,6 @@ describe("chat authorship display", () => {
   it("renders agent messages as \"<Name>'s agent\" and humans by name", () => {
     expect(
       chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Ice" }),
-    ).toBe("Ice's agent");
-    expect(
-      chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Ice's agent" }),
     ).toBe("Ice's agent");
     expect(
       chatAuthorLabel({ authorKind: "human", authorDisplayName: "Ice" }),
@@ -595,7 +592,7 @@ describe("runReactionToggle (rollback + per-cell ordering)", () => {
     expect(bridgeMock.listChatReactions).not.toHaveBeenCalled();
   });
 
-  it("converges two rapid toggles on the same cell to the LATEST intent despite out-of-order responses", async () => {
+  it("converges two rapid toggles on the same cell to the latest intent despite out-of-order responses", async () => {
     const h = harness();
     bridgeMock.setChatReaction.mockResolvedValue(undefined);
     // Controlled reconcile responses so we can resolve them out of order.
@@ -604,7 +601,7 @@ describe("runReactionToggle (rollback + per-cell ordering)", () => {
       () => new Promise((resolve) => resolvers.push(resolve)),
     );
 
-    // Toggle ADD then REMOVE — the user's LATEST intent is "removed".
+    // Toggle add then remove — the user's latest intent is "removed".
     runReactionToggle(h.ctx, { messageId: "m1", emoji: "👍", nextState: "added" });
     runReactionToggle(h.ctx, { messageId: "m1", emoji: "👍", nextState: "removed" });
     // Optimistic latest intent: removed.
@@ -621,13 +618,13 @@ describe("runReactionToggle (rollback + per-cell ordering)", () => {
       authorKind: "human",
       authorDisplayName: "you@x",
     };
-    // The STALE (first, add) reconcile lands LAST — the ordering guard must drop
+    // The stale (first, add) reconcile lands last — the ordering guard must drop
     // it so it can't revive the reaction the newer remove already cleared.
     resolvers[1]?.({ reactions: [], viewerAuthorId: "you@x" });
     resolvers[0]?.({ reactions: [addRecord], viewerAuthorId: "you@x" });
     await tick();
 
-    // Final state reflects the LATEST toggle (removed), not the late add reconcile.
+    // Final state reflects the latest toggle (removed), not the late add reconcile.
     expect(h.mineOn("👍")).toBe(false);
     expect(h.reactions).toEqual([]);
     expect(h.onError).not.toHaveBeenCalled();

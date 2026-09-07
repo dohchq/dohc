@@ -29,7 +29,7 @@ export type SitePreviewExecutionInput = {
   sharedView: boolean;
 };
 
-export interface SitePreviewRendererSession {
+interface SitePreviewRendererSession {
   isCurrent(): boolean;
 }
 
@@ -66,12 +66,12 @@ function assertPreviewModeAllowed(
 ): void {
   if (mode !== "static" && sharedView) {
     throw new Error(
-      "Live and built site previews run the site's own code, so they're disabled in a shared view. Use the static preview.",
+      "Live and built app previews run the app's own code, so they're disabled in a shared view. Use the static preview.",
     );
   }
   if (mode !== "static" && isSharedWithMePath(siteRoot)) {
     throw new Error(
-      "Sites opened from shared-with-me use the static preview. Copy it into your own files to run dev or build commands.",
+      "Apps opened from shared-with-me use the static preview. Copy it into your own files to run dev or build commands.",
     );
   }
 }
@@ -89,7 +89,7 @@ export function createStartSitePreviewHandler<
     return dependencies.authority.withActiveWorkspace(
       sender,
       payload.workspaceId,
-      "Site preview request",
+      "app preview request",
       "start the preview again",
       async ({ workspace, session }) => {
         const isCurrent = () => session.isCurrent();

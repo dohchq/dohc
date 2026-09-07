@@ -8,10 +8,8 @@ import {
   insertElementRevision,
   putSceneAsset,
 } from "@dohc/excalidraw-scene";
-import {
-  ENGINE_YDOC_UPDATE_MAX_BYTES,
-  type EngineYDocSaveStateEvent,
-} from "../../ipc/channels";
+import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
+import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 import {
   resetOrphanedDrafts,
   useOrphanedDrafts,
@@ -1229,7 +1227,7 @@ it("does not report Saved while an earlier delivery is still unanswered", async 
   });
   await flushLocalBatch();
 
-  // Main echoes a settle covering the newest seq while the FIRST delivery has
+  // Main echoes a settle covering the newest seq while the first delivery has
   // not answered. It must not vouch for the whole mirror yet.
   harness.emit("saved", 2);
   expect(screen.getByTestId("state").textContent).toBe("saving");
@@ -1459,15 +1457,15 @@ it("keeps one recovery draft when deletion lands during a lineage replacement ha
 });
 
 it("freezes the deleted doc's bytes at the event, immune to a remote edit that lands before serialization resolves", async () => {
-  // #697 P1-A: the boundary capture snapshots the doc SYNCHRONOUSLY at the
+  // The boundary capture snapshots the doc synchronously at the
   // deletion event and defers only the markdown PROJECTION (the part that
   // needs the lazy Tiptap module). Nothing before this pin distinguished
   // that from deferring the snapshot too — both pass every earlier test,
   // because unmount alone does not corrupt a Y.Doc's encodable state.
   //
-  // A remote update is the real discriminator: it is NOT gated by
+  // A remote update is the real discriminator: it is not gated by
   // `writesRefused` (only LOCAL writes are refused after deletion), so it
-  // can still land on the SAME doc while the projection is in flight. A
+  // can still land on the same doc while the projection is in flight. A
   // synchronous snapshot is immune to it; a deferred one would pick it up.
   await mountBound();
 
@@ -1761,7 +1759,7 @@ it("keeps invalid scene asset authority as a distinct unavailable outcome", asyn
 });
 
 it("passes a file-locked report through, and a real settle clears it", async () => {
-  // #554: the transient lock is its own state so the surface can name the
+  // The transient lock is its own state so the surface can name the
   // blocker. Like "error" it never decays on a timer — only a real settle
   // report walks it back, which is what the engine's own retry produces.
   await mountBound();
@@ -1789,8 +1787,6 @@ it("does not claim File in use for a lock refusal that predates the newest keyst
   // promise safety for a keystroke the settle never carried, so it is held to
   // the same sequence guard "saved" uses.
   //
-  // MUTATION: accept `file-locked` unconditionally -> this reads
-  // "file-locked" while an edit is still in flight.
   await mountBound();
 
   act(() => {
@@ -1809,7 +1805,7 @@ it("does not claim File in use for a lock refusal that predates the newest keyst
   harness.emit("file-locked", firstSeq);
   expect(screen.getByTestId("state").textContent).toBe("saving");
 
-  // A refusal that DOES cover the newest edit names the blocker.
+  // A refusal that does cover the newest edit names the blocker.
   await flushLocalBatch();
   const secondSeq = harness.applied.at(-1)!.seq;
   expect(secondSeq).toBeGreaterThan(firstSeq);
@@ -1829,7 +1825,7 @@ it("does not claim Saved for a settle that predates the newest keystroke", async
     screen.getByTestId("type").click();
   });
 
-  // A settle that STARTED before the second keystroke reports success. It
+  // A settle that started before the second keystroke reports success. It
   // never carried that staged, not-yet-sent edit, so the indicator must keep
   // saying "saving".
   harness.emit("saved", firstSeq);

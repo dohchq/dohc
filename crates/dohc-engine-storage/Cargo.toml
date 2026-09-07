@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 publish.workspace = true
-description = "CAL-1/CAL-2 calibration slice: one writable rusqlite connection per workspace, the day-one v2 engine schema (migration + request/idempotency ledgers + versioning tables), the compound transactional write API, and the v1-vs-v2 fingerprint fence. Dormant; not wired into the product."
+description = "SQLite storage for the workspace engine: one writable connection per workspace, the engine schema and migrations, and the transactional write seam."
 
 [features]
 # The crash-injection seam. OFF by default so a release build that links this

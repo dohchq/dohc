@@ -17,8 +17,8 @@
 // the steps' verdicts are not the subject here, the artifact is.
 
 import assert from "node:assert/strict";
-import test from "node:test";
-import { spawnSync } from "node:child_process";
+import test, { after } from "node:test";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   mkdtempSync,
   writeFileSync,
@@ -26,6 +26,8 @@ import {
   rmSync,
   existsSync,
   chmodSync,
+  cpSync,
+  mkdirSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -35,7 +37,32 @@ import { arch, platform } from "node:os";
 import { RUST_ARCH, RUST_OS } from "../tools/rust-engine-program/native-target.mjs";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const sourceHeadLog = () => execFileSync("git", ["rev-list", "--walk-reflogs", "--count", "HEAD"], { cwd: sourceRoot, encoding: "utf8" });
+const originalHeadLog = sourceHeadLog();
+const repoRoot = mkdtempSync(join(tmpdir(), "dohc-gate-repo-"));
+try {
+  cpSync(join(sourceRoot, "tools/rust-engine-program"), join(repoRoot, "tools/rust-engine-program"), { recursive: true });
+  cpSync(join(sourceRoot, ".gitignore"), join(repoRoot, ".gitignore"));
+  mkdirSync(join(repoRoot, ".hooks"));
+  const git = (...args) => execFileSync("git", args, { cwd: repoRoot, stdio: "ignore" });
+  git("init", "-b", "main");
+  git("config", "core.logAllRefUpdates", "true");
+  git("config", "core.hooksPath", join(repoRoot, ".hooks"));
+  git("config", "commit.gpgsign", "false");
+  git("config", "user.name", "Gate fixture");
+  git("config", "user.email", "gate-fixture@example.invalid");
+  git("add", "--force", "tools", ".gitignore");
+  git("commit", "-m", "Gate fixture");
+  git("commit", "--allow-empty", "-m", "Second commit for the HEAD-move probe");
+} catch (error) {
+  rmSync(repoRoot, { recursive: true, force: true });
+  throw error;
+}
+after(() => {
+  try { assert.equal(sourceHeadLog(), originalHeadLog, "gate tests must not move the source checkout's HEAD"); }
+  finally { rmSync(repoRoot, { recursive: true, force: true }); }
+});
 const gate = "tools/rust-engine-program/run-rust-checks.mjs";
 
 // What the native-target probe must see to agree with this host, so the run
@@ -116,10 +143,8 @@ function stubToolchain({ writes, movesHead } = {}) {
 // checkout of a sha) would have left this probe doing nothing and the test
 // asserting against a run that never had a defect.
 //
-// The two entries stay in this checkout's reflog afterwards, so `pnpm test`
-// adds two to whatever the developer's log already holds. Nothing else about
-// the checkout is touched: HEAD ends on the commit it started on, and the
-// restore runs even when the away step fails.
+// Both entries belong to the disposable fixture repository. The developer's
+// checkout and HEAD log are never changed by this probe.
 const headProbe = `import { spawnSync } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 const [marker, repoRoot] = process.argv.slice(2);

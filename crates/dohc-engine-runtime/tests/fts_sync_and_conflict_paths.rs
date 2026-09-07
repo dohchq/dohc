@@ -6,31 +6,23 @@ use dohc_engine_domain::{
     CreateNamedVersion, ResolveConflictKind, ResolveTextConflict, TextConflict, TextSnapshot,
     VersionedTextStore, WriteText,
 };
-use dohc_engine_runtime::search::{ensure_search_index_for_version, search_workspace};
+use dohc_engine_runtime::search::{ensure_search_index_for_version, search_workspace_page};
 use dohc_engine_runtime::{CancellationToken, NoFaults, SearchResult, WorkspaceSupervisor};
 use dohc_engine_storage::{EngineStore, StorageError, hex_sha256, put_binary_blob};
 use dohc_engine_sync::{
-    ApplyOutcome, LeaseProbe, NoLiveLeases, ReplicationEnvelope, SyncError, apply_envelope_with,
-    apply_ydoc_envelope, drain_deferred_ydoc_for_key,
+    AlwaysLive, ApplyDisposition, ApplyOutcome, NoLiveLeases, ReplicationEnvelope, SyncError,
+    apply_envelope_with, apply_ydoc_envelope, drain_deferred_ydoc_for_key,
 };
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::params;
 use serde_json::json;
 
 const WS: &str = "ws";
 const VERSION: &str = "main";
 
-struct AlwaysLive;
-
-impl LeaseProbe for AlwaysLive {
-    fn is_live(&self, _key: &dohc_engine_collab::DocKey) -> bool {
-        true
-    }
-}
-
 fn open_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let mut store = EngineStore::open(&db, 1_000).expect("open store");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WS, VERSION, 1_000, &NoFaults)
@@ -93,9 +85,23 @@ fn search_store_version(
 ) -> Vec<SearchResult> {
     store
         .read_with(|connection| {
-            search_workspace(connection, root, WS, version_id, query, Some(100), now_ms)
+            search_workspace_page(
+                connection,
+                root,
+                WS,
+                version_id,
+                query,
+                Some(100),
+                now_ms,
+                None,
+                None,
+            )
         })
         .expect("search workspace")
+        .results
+        .into_iter()
+        .map(|keyed| keyed.result)
+        .collect()
 }
 
 fn envelope(
@@ -145,8 +151,18 @@ fn replicated_ydoc_base_projection_updates_certified_search_index() {
     );
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut store, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let hits = search_store(&store, scratch.path(), NEEDLE, 1_300);
     assert_eq!(
@@ -199,8 +215,8 @@ fn retained_ydoc_drain_replay_keeps_current_search_content() {
         1_110,
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut store, &base_operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(result)) if !result.deferred
+        apply_ydoc_envelope(&mut store,&mut dohc_engine_collab::WriterDocCache::new(), &base_operation, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome { primary: ApplyDisposition::Applied(result), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (!result.deferred)
     ));
     let update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, HISTORICAL);
     let update_sha = store.put_binary_blob(&update).expect("store update");
@@ -220,13 +236,18 @@ fn retained_ydoc_drain_replay_keeps_current_search_content() {
         1_120,
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut store, &operation, &NoFaults, &AlwaysLive),
-        Ok(ApplyOutcome::Applied(result)) if result.deferred
+        apply_ydoc_envelope(&mut store,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &AlwaysLive),
+        Ok(ApplyOutcome { primary: ApplyDisposition::Applied(result), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (result.deferred)
     ));
     assert_eq!(
-        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults)
-            .expect("first drain")
-            .drained,
+        drain_deferred_ydoc_for_key(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults
+        )
+        .expect("first drain")
+        .drained,
         1
     );
 
@@ -280,9 +301,14 @@ fn retained_ydoc_drain_replay_keeps_current_search_content() {
         .expect("activate replay version");
 
     assert_eq!(
-        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults)
-            .expect("historical replay drain")
-            .drained,
+        drain_deferred_ydoc_for_key(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults
+        )
+        .expect("historical replay drain")
+        .drained,
         1
     );
     assert_eq!(
@@ -343,7 +369,14 @@ fn refused_replicated_mutation_rolls_back_fts_writes() {
         })
     })
     .expect("refusal is acknowledged");
-    assert!(matches!(outcome, ApplyOutcome::Refused(_)));
+    assert!(matches!(
+        outcome,
+        ApplyOutcome {
+            primary: ApplyDisposition::Refused(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
 
     assert_eq!(
         search_store(&store, scratch.path(), BASELINE, 1_400)
@@ -382,17 +415,23 @@ async fn search_actor(
     now_ms: i64,
 ) -> Vec<SearchResult> {
     actor
-        .search(
+        .search_page(
             root.to_path_buf(),
             WS.to_owned(),
             VERSION.to_owned(),
             query.to_owned(),
             Some(100),
             now_ms,
+            None,
+            None,
             CancellationToken::new(),
         )
         .await
         .expect("actor search")
+        .results
+        .into_iter()
+        .map(|keyed| keyed.result)
+        .collect()
 }
 
 fn local_conflict(
@@ -445,7 +484,7 @@ async fn local_conflict_resolution_actor_indexes_text_and_deletion() {
     const OLD: &str = "localconflictoldneedle";
     const NEW: &str = "localconflictnewneedle";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1_000).expect("open actor").actor;
 
@@ -568,7 +607,7 @@ async fn named_version_creation_leaves_search_uncertified_for_lazy_first_build()
     const NEEDLE: &str = "namedversionlazysearchneedle";
     const NAMED: &str = "named-version";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1_000).expect("open actor").actor;
 
@@ -629,20 +668,23 @@ async fn named_version_creation_leaves_search_uncertified_for_lazy_first_build()
         .expect("reopen actor for lazy search")
         .actor;
     let hits = actor
-        .search(
+        .search_page(
             scratch.path().to_path_buf(),
             WS.to_owned(),
             NAMED.to_owned(),
             NEEDLE.to_owned(),
             Some(100),
             1_500,
+            None,
+            None,
             CancellationToken::new(),
         )
         .await
         .expect("first named-version search");
     assert_eq!(
-        hits.iter()
-            .map(|result| result.path.as_str())
+        hits.results
+            .iter()
+            .map(|keyed| keyed.result.path.as_str())
             .collect::<Vec<_>>(),
         [PATH],
         "the first search must lazily build the copied version's complete index"
@@ -651,10 +693,10 @@ async fn named_version_creation_leaves_search_uncertified_for_lazy_first_build()
     supervisor.close(&db).expect("close reopened actor");
 }
 
-/// A path resolved onto BYTES must stop answering searches for the text it
+/// A path resolved onto bytes must stop answering searches for the text it
 /// used to hold. Clicking such a hit would open a binary file.
 ///
-/// The guarantee is the search READER's, not this resolve path's: the index
+/// The guarantee is the search reader's, not this resolve path's: the index
 /// freezes the stale row and `search::query::live_head_is_binary` drops the
 /// candidate. This pins that the new binary-resolve path leaves a head that
 /// filter recognizes -- a resolution that wrote its bytes under a head the
@@ -664,7 +706,7 @@ async fn resolving_onto_a_binary_side_drops_the_indexed_text() {
     const PATH: &str = "notes/becomes-binary.md";
     const OLD: &str = "becomesbinaryoldneedle";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
 
     // The incoming side references bytes that are already hydrated -- the shape
     // a merge or a replicated open records. Seed the blob before the actor

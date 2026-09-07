@@ -348,7 +348,6 @@ body {
 }
 
 .dohc-readable-text,
-.dohc-code-textarea,
 .dohc-code-editor,
 .dohc-code-editor .cm-content,
 .dohc-code-editor .cm-line,
@@ -1607,7 +1606,6 @@ body {
 .dohc-table-node:hover .dohc-table-append,
 .dohc-table-node:focus-within .dohc-table-menu-btn,
 .dohc-table-node:focus-within .dohc-table-append,
-.dohc-table-grip.is-visible,
 .dohc-table-grip.is-open,
 .dohc-table-grip.is-dragging,
 .dohc-table-grip.is-drop-target,
@@ -1644,7 +1642,6 @@ body {
 }
 
 .dohc-table-grip.is-active,
-.dohc-table-grip.is-visible,
 .dohc-table-grip.is-open,
 .dohc-table-grip.is-dragging,
 .dohc-table-grip.is-drop-target,
@@ -1839,18 +1836,18 @@ body {
   transition: opacity 100ms ease-out;
 }
 
-.dohc-table-row-resize.is-visible,
+.dohc-table-row-resize.is-active,
 .dohc-table-row-resize:focus-visible,
 .dohc-table-row-resize.is-resizing {
   opacity: 1;
   pointer-events: auto;
 }
 
-.dohc-table-row-resize.is-visible::after {
+.dohc-table-row-resize.is-active::after {
   opacity: 0.28;
 }
 
-.dohc-table-row-resize.is-visible:hover::after,
+.dohc-table-row-resize.is-active:hover::after,
 .dohc-table-row-resize:focus-visible::after,
 .dohc-table-row-resize.is-resizing::after {
   opacity: 1;
@@ -2462,7 +2459,6 @@ body {
   border-color: color-mix(in srgb, var(--dohc-line) 80%, transparent);
 }
 
-
 /* ===========================================================================
  * Page identity — Notion-style title + emoji icon above the document body.
  * A serif page title on warm paper, an emoji icon that reveals a quiet "Add
@@ -2637,7 +2633,6 @@ body {
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
 }
 
-
 /* ===========================================================================
  * Inline document properties — Notion-style rows in the document flow, sitting
  * directly under the title (below PageIdentity, above the body) and aligned to
@@ -2782,7 +2777,6 @@ body {
 .dohc-page-properties__add--empty:focus-visible {
   opacity: 1;
 }
-
 
 /* ===================================================================== *
  * Obsidian callouts + ==highlight== mark.
@@ -3252,7 +3246,6 @@ mark.dohc-highlight,
   font-weight: 600;
 }
 
-
 /* `:shortcode:` emoji autocomplete picker — same floating-popover
  * conventions as .dohc-wikilink-picker (border/shadow/pop-in shared via
  * that rule's selector group; this file only adds emoji-specific layout). */
@@ -3492,4 +3485,21 @@ textarea.dohc-math__source {
 }
 input.dohc-math__source {
   min-width: 8ch;
+}
+
+@utility dohc-focus-visible {
+  &:focus-visible {
+    outline: 2px solid var(--dohc-accent);
+  }
+}
+
+@utility dohc-focus-input {
+  &:focus {
+    outline: 2px solid var(--dohc-accent);
+    outline-offset: -1px;
+  }
+}
+
+@utility dohc-section-label {
+  @apply text-[10px] font-semibold uppercase tracking-wide text-subtle;
 }

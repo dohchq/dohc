@@ -22,7 +22,7 @@ export type AgentSessionStatus =
   | "failed"
   | "stopped";
 
-export interface AgentDriverProbeSummary {
+interface AgentDriverProbeSummary {
   id: AgentDriverId;
   displayName: string;
   installed: boolean;
@@ -32,13 +32,13 @@ export interface AgentDriverProbeSummary {
   errorMessage?: string;
 }
 
-export interface AgentSessionMessage {
+interface AgentSessionMessage {
   id: string;
   role: "assistant" | "reasoning";
   text: string;
 }
 
-export interface AgentSessionItem {
+interface AgentSessionItem {
   id: string;
   type: "tool_call" | "command" | "file_change" | "mcp_tool_call" | "web_search" | "plan" | "other";
   title: string;
@@ -47,7 +47,7 @@ export interface AgentSessionItem {
   locations: string[];
 }
 
-export interface AgentPermissionRequestSnapshot {
+interface AgentPermissionRequestSnapshot {
   requestId: string;
   requestType: "command" | "file-change" | "file-read" | "tool" | "other";
   title: string;
@@ -56,7 +56,7 @@ export interface AgentPermissionRequestSnapshot {
   options: PermissionOption[];
 }
 
-export interface AgentSessionSnapshot {
+interface AgentSessionSnapshot {
   driverId: AgentDriverId;
   driverName: string;
   status: AgentSessionStatus;
@@ -93,11 +93,9 @@ export interface AgentWorkspaceDefaults {
   defaultModel: string | null;
 }
 
-export interface AgentSessionManagerOptions {
-  /** The drivers dohc ships. */
-  registry: AgentDriverRegistry;
-  /** The drivers this workspace's plugins contribute, if any. */
-  pluginDriversFor?: (workspaceId: string) => AgentDriver[];
+interface AgentSessionManagerOptions {
+  /** The drivers this workspace's plugins contribute. */
+  pluginDriversFor: (workspaceId: string) => AgentDriver[];
   agentDefaultsFor?: (
     workspaceId: string,
   ) => AgentWorkspaceDefaults | Promise<AgentWorkspaceDefaults>;
@@ -204,7 +202,7 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
   const sessions = new Map<string, ManagedSession>();
   const finalizedRuns = new Set<string>();
   // Per-workspace start mutex. startSession does stop-then-create, so two
-  // CONCURRENT starts for the same workspace would race into duplicate sessions
+  // concurrent starts for the same workspace would race into duplicate sessions
   // (each stopping the other's half-built session). This set marks a workspace
   // whose start is in flight; a second concurrent start is rejected outright.
   const startingWorkspaces = new Set<string>();
@@ -212,19 +210,9 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
   const cachedDrivers = new Map<string, AgentDriverProbeSummary[]>();
   const selectedDrivers = new Map<string, AgentDriverId | null>();
 
-  /**
-   * The drivers this workspace can use: the ones dohc ships plus the ones its
-   * plugins contribute. Built through the same registry constructor the
-   * built-in list uses, so a duplicate id is refused the same way here as it
-   * is there.
-   */
+  /** The drivers this workspace's plugins contribute; a duplicate id is refused. */
   function registryFor(workspaceId: string): AgentDriverRegistry {
-    const contributed = options.pluginDriversFor?.(workspaceId) ?? [];
-    if (contributed.length === 0) return options.registry;
-    return createAgentDriverRegistry([
-      ...options.registry.list(),
-      ...contributed,
-    ]);
+    return createAgentDriverRegistry(options.pluginDriversFor(workspaceId));
   }
 
   function selectDriver(

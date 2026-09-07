@@ -104,7 +104,7 @@ Name the reader before adding a document to main. If nobody will use it to make 
 
 Read [`.agents/skills/dohc-writing/SKILL.md`](.agents/skills/dohc-writing/SKILL.md) before writing docs, specs, plans, PR bodies, commit messages, or skills. Use [`.agents/skills/dohc-interface/SKILL.md`](.agents/skills/dohc-interface/SKILL.md) for anything a person sees inside the app.
 
-Use one name for one thing. Check terms against the surrounding code before defining them. If a paragraph-long code comment is needed to defend a workaround, fix the code instead.
+Use one name for one thing. [`CONTEXT.md`](CONTEXT.md) is the canonical term list; check terms against it and the surrounding code before defining them. If a paragraph-long code comment is needed to defend a workaround, fix the code instead.
 
 ## Where code lives
 
@@ -127,11 +127,14 @@ Use Node 24.14 or newer and pnpm 11.20.0, as pinned in `package.json`.
 
 ## Verification
 
+Use [the agent verification procedure](docs/how-to/verify-agent-work.md) for worktree setup, desktop QA, debug access, and PR evidence.
+Start with `pnpm doctor`. Run `pnpm qa:smoke` for desktop boot, editing, persistence, and restart.
+
 Run the smallest check that proves the change.
 
 - `pnpm typecheck` and `pnpm test:desktop` cover most TypeScript desktop work.
 - Root `pnpm test` runs brand checks, repository Node tests, and every package suite. It is slow; prefer targeted commands while iterating.
-- `pnpm test:desktop:e2e` requires the engine binary at `apps/desktop/target/debug`. A fresh checkout without it fails inside `electron.launch`, which can hide the real cause in Playwright's log.
+- `pnpm test:desktop:e2e` prepares and verifies the desktop and native engine before launching Playwright.
 - For Rust work, use the [`rust-gate` skill](.agents/skills/rust-gate/SKILL.md), never a bare `cargo` command. Read the gate's `== summary ==` block rather than its exit code.
 - A test that needs a sleep to pass is wrong. Wait for the actual condition.
 

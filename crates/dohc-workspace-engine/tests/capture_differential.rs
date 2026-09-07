@@ -1,36 +1,36 @@
-//! The Rust side of the E-shard capture DIFFERENTIAL: replay the shared
-//! fixtures against the REAL daemon (workspace.open → autonomous capture →
-//! capture.flush → workspace.close) and compare normalized per-path state
-//! against the goldens the TypeScript oracle emitted
-//! (`apps/desktop/src/workspaces/captureOracleGoldens.test.ts`).
+//! The capture differential: replay the shared fixtures against the real
+//! daemon (workspace.open → autonomous capture → capture.flush →
+//! workspace.close) and compare normalized per-path state against the frozen
+//! goldens the TypeScript oracle emitted.
 //!
 //! Projection rules mirror the TS emitter exactly: ids/timestamps excluded;
 //! text = { text, sha256(utf8), byteLength }; binary = { sha256, byteLength };
 //! secret = { byteLength } only; absence carries `everTracked` (any
-//! moments/secret_moments rows) so RETIRED and NEVER-TRACKED stay distinct.
+//! moments/secret_moments rows) so retired and NEVER-TRACKED stay distinct.
 //!
 //! Fixtures are DISK-DRIVEN only — the ratified delta: TS `writeIfChanged`
 //! ignores `metadata_origin` (safe there because the desktop materializes API
 //! writes to disk), while this daemon enforces capture ownership. RPC-vs-disk
 //! interleavings are covered by Rust-only acceptance tests instead.
 
+mod common;
+
 use base64::Engine as _;
+use common::*;
 use dohc_engine_protocol::{
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
-use dohc_engine_storage::EngineStore;
-use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_engine_storage::{EngineStore, hex_sha256};
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
+use dohc_workspace_engine::EngineService;
 use serde::Deserialize;
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const WORKSPACE_ID: &str = "capture-differential-rust";
 /// Generous: watcher settle + drive interval + scan/hash time per step.
 const WAIT: Duration = Duration::from_secs(20);
@@ -74,17 +74,6 @@ struct Projection {
     byte_length: Option<u64>,
     #[serde(rename = "everTracked")]
     ever_tracked: bool,
-}
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
 }
 
 async fn open_workspace(
@@ -162,7 +151,7 @@ fn apply_to_disk(root: &Path, step: &Step) {
 }
 
 /// The state one applied step must become visible as, so steps cannot
-/// coalesce (a write must be OBSERVED before its delete lands).
+/// coalesce (a write must be observed before its delete lands).
 fn expected_after(step: &Step) -> Projection {
     match step.op.as_str() {
         "delete" => Projection {
@@ -187,7 +176,7 @@ fn expected_after(step: &Step) -> Projection {
                 Projection {
                     kind: "text".to_owned(),
                     text: Some(text.clone()),
-                    sha256: Some(hex(bytes)),
+                    sha256: Some(hex_sha256(bytes)),
                     byte_length: Some(bytes.len() as u64),
                     ever_tracked: true,
                 }
@@ -200,7 +189,7 @@ fn expected_after(step: &Step) -> Projection {
             Projection {
                 kind: "binary".to_owned(),
                 text: None,
-                sha256: Some(hex(&bytes)),
+                sha256: Some(hex_sha256(&bytes)),
                 byte_length: Some(bytes.len() as u64),
                 ever_tracked: true,
             }
@@ -216,22 +205,10 @@ fn is_secret_path(path: &str) -> bool {
     )
 }
 
-fn hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
-}
-
 /// (everTracked, secret byte length, head (content_kind, binary sha)).
 type RawProjection = (bool, Option<u64>, Option<(String, Option<String>)>);
 
-/// Project one path from the persisted engine.db — the SAME source a fresh
+/// Project one path from the persisted engine.db — the same source a fresh
 /// process would read, mirroring the TS emitter's projection exactly.
 fn project_path(db: &Path, path: &str) -> Projection {
     use rusqlite::OptionalExtension;
@@ -304,7 +281,7 @@ fn project_path(db: &Path, path: &str) -> Projection {
             Projection {
                 kind: "text".to_owned(),
                 text: Some(snapshot.text.clone()),
-                sha256: Some(hex(bytes)),
+                sha256: Some(hex_sha256(bytes)),
                 byte_length: Some(bytes.len() as u64),
                 ever_tracked: tracked,
             }
@@ -319,7 +296,7 @@ fn project_path(db: &Path, path: &str) -> Projection {
     }
 }
 
-/// Drive one step to VISIBILITY: flush until the persisted projection shows
+/// Drive one step to visibility: flush until the persisted projection shows
 /// the step's effect. The only nondeterminism is the watcher noticing the
 /// disk write; once it has, one settled flush suffices — no blind sleeps.
 async fn drive_step_to_visibility(
@@ -354,7 +331,7 @@ async fn rust_capture_matches_the_typescript_oracle_goldens() {
     let fixtures: Fixtures = serde_json::from_str(FIXTURES).expect("fixtures parse");
     let goldens: Goldens = serde_json::from_str(GOLDENS).expect("goldens parse");
 
-    // === The freeze, enforced HERE rather than described in a document. ===
+    // === The freeze, enforced here rather than described in a document. ===
     //
     // R16 deletes the TypeScript oracle that produced these goldens. After that
     // the only implementation able to regenerate them is the daemon this test
@@ -375,15 +352,7 @@ async fn rust_capture_matches_the_typescript_oracle_goldens() {
         "ecf8710b19870fab090abfc2c6b78e80a050d245d60c42c21cc6eb62962122d7";
     const GOLDENS_SHA256: &str = "246655d8e2f697d069d121c50faec04222f7f45eecc970f1af4e0b4ee64e5292";
 
-    let hash_of = |raw: &str| -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(raw.as_bytes());
-        hasher
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
-    };
+    let hash_of = |raw: &str| hex_sha256(raw.as_bytes());
     assert_eq!(
         hash_of(GOLDENS).as_str(),
         GOLDENS_SHA256,
@@ -400,7 +369,7 @@ async fn rust_capture_matches_the_typescript_oracle_goldens() {
          capture-goldens.provenance.md."
     );
 
-    // Scenario IDENTITIES, not counts. Equal lengths prove nothing: delete one
+    // Scenario identities, not counts. Equal lengths prove nothing: delete one
     // fixture scenario and duplicate another and both sides still read 10, while
     // the loop resolves the duplicate twice and the deleted scenario's golden is
     // never read.
@@ -425,8 +394,7 @@ async fn rust_capture_matches_the_typescript_oracle_goldens() {
             .unwrap_or_else(|| panic!("no golden for {}", scenario.name));
 
         let scratch = ScratchDir::new().expect("scratch");
-        write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
-        let db = scratch.engine_db_path().expect("db path");
+        let db = engine_db_path(&scratch).expect("db path");
         let transport = InProcessTransport::new(Arc::new(EngineService::new()));
         let mut id: u64 = 1;
         let mut handle = open_workspace(&transport, scratch.path(), id).await;

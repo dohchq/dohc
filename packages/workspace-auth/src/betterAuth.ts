@@ -3,24 +3,18 @@ import { betterAuth } from "better-auth";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import type { Pool } from "pg";
 
-// dohc Cloud auth: Better Auth mounted on the SAME Postgres the workspace
+// dohc Cloud auth: Better Auth mounted on the same Postgres the workspace
 // backend uses (self-host = one database, no auth vendor). Email/password for
 // accounts, the organization plugin for team workspaces, and the OAuth
 // device-authorization grant for desktop login (the desktop shows a code, the
 // browser approves, and the desktop polls).
 //
 // This package owns only the auth surface and has no application callbacks.
-export interface WorkspaceAuthOptions {
+interface WorkspaceAuthOptions {
   pool: Pool;
   baseURL: string;
   secret: string;
-  // The web client's origin (DOHC_WEB_ORIGIN) when browser cookie sessions
-  // are enabled; unset means same-origin/Bearer only (desktop flow).
-  // Session cookies keep Better Auth's SameSite=Lax default, so this origin
-  // must be SAME-SITE with the API (shared registrable domain, or a reverse
-  // proxy making them same-origin). A genuinely cross-site split — including
-  // localhost web vs 127.0.0.1 API in dev — silently drops the cookie on
-  // credentialed XHR and every authed call 401s.
+  // share-web forwards its validated viewer Origin when proxying browser auth.
   trustedOrigins?: string[];
   // Dev/self-host email delivery is console logging; production providers
   // plug in here later without touching callers.

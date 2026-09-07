@@ -61,7 +61,7 @@ function harness() {
         }
         if (activeWorkspaceId !== workspaceId) {
           throw new Error(
-            "The sites request does not target the active workspace.",
+            "The apps request does not target the active workspace.",
           );
         }
         return work(workspace);
@@ -142,7 +142,7 @@ describe("sites IPC handlers", () => {
       "authorize:7:workspace-1",
       "list:canonical",
     ]);
-    expect(test.subjects).toEqual(["sites request"]);
+    expect(test.subjects).toEqual(["apps request"]);
   });
 
   it("passes the authorized workspace and requested site to the owner catalog", async () => {

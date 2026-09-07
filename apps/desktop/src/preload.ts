@@ -1,13 +1,11 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   CreateLocalWorkspacePayload,
-  DesktopUserSettingsResult,
   DohcDesktopBridge,
   GetSitePreviewLogsPayload,
   InvokePluginCommandPayload,
   InvokePluginPanelSdkPayload,
   ListSitesPayload,
-  MenuCommand,
   PluginPanelOpenedEvent,
   PluginPanelInvalidatedEvent,
   PluginPanelSdkEvent,
@@ -28,23 +26,35 @@ import type {
   StopSitePreviewPayload,
   WorkspaceSettingsPayload,
   WorkspaceActivityEvent,
-  WorkspaceSummary,
   WriteClipboardTextPayload,
 } from "./ipc/bridgeContract";
 import {
+  DesktopUserSettingsResult,
+  EngineYDocLineageReplacementEvent,
+  EngineYDocRemoteUpdateEvent,
+  EngineYDocSaveStateEvent,
+  ExplorerMenuCommand,
   ListPluginsResult,
   ListOfferedPluginsResult,
   AddOfferedPluginResult,
   InvokePluginCommandResult,
+  MenuCommand,
   OpenPluginPanelResult,
   OpenPluginWebAppResult,
   PluginActionResult,
   PluginSettingsResult,
   PluginSizesResult,
   PluginUninstallPreflightResult,
+  SearchResultsEvent,
+  ShareHandoffStatus,
   StartPluginPanelResult,
   StartPluginWebAppResult,
+  UpdateActionResult,
+  UpdateCheckResult,
+  UpdateStateEvent,
+  WorkbenchMenuCommand,
   WorkspaceSearchStartResult,
+  WorkspaceSummary,
   parseInvokePluginPanelSdkPayloadForIpc,
   parsePluginPanelInvalidatedEventForIpc,
   parsePluginPanelSdkEventForIpc,
@@ -52,19 +62,32 @@ import {
   parsePluginWebAppFailedEventForIpc,
   parseWorkspaceActivityEventForIpc,
 } from "./ipc/bridgeContract";
-import {
-  CHANNELS,
-  isExplorerMenuCommand,
-  isMenuCommand,
-  isWorkbenchMenuCommand,
-  parseEngineYDocRemoteUpdateEvent,
-  parseEngineYDocLineageReplacementEvent,
-  parseEngineYDocSaveStateEvent,
-  parseSearchResultsEvent,
-  parseShareHandoffStatus,
-  parseUpdateStateEvent,
-  parseWorkspaceActivatedEvent,
-} from "./ipc/channels";
+import { CHANNELS } from "./ipc/channels";
+import type { z } from "zod";
+
+// Main→renderer events are validated here before renderer code sees them: a
+// value that fails its schema is dropped, and only the parsed (stripped) value
+// crosses. An invoke result that fails throws, since the caller is waiting.
+function onEvent<Schema extends z.ZodType>(
+  channel: string,
+  schema: Schema,
+  listener: (event: z.output<Schema>) => void,
+): () => void {
+  const handler = (_event: unknown, raw: unknown) => {
+    const parsed = schema.safeParse(raw);
+    if (parsed.success) listener(parsed.data);
+  };
+  ipcRenderer.on(channel, handler);
+  return () => ipcRenderer.removeListener(channel, handler);
+}
+
+async function invokeParsed<Schema extends z.ZodType>(
+  channel: string,
+  schema: Schema,
+  ...args: unknown[]
+): Promise<z.output<Schema>> {
+  return schema.parse(await ipcRenderer.invoke(channel, ...args));
+}
 
 // The entire bridge surface. Narrow on purpose: the renderer gets named,
 // typed operations — never raw ipcRenderer, never Node. Typed as
@@ -114,22 +137,20 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.exportWorkspaceZip, payload),
   exportDocumentFile: (payload) =>
     ipcRenderer.invoke(CHANNELS.exportDocumentFile, payload),
-  // The invoke RESULT is validated here like main→renderer events are: only
-  // an exact member of the closed EXPLORER_MENU_COMMANDS tuple reaches
-  // renderer code — anything else reads as null ("dismissed").
+  // The invoke RESULT is validated like main→renderer events are: only a
+  // member of the closed command set reaches renderer code — anything else
+  // reads as null ("dismissed").
   showExplorerMenu: async (payload) => {
-    const result: unknown = await ipcRenderer.invoke(
-      CHANNELS.showExplorerMenu,
-      payload,
+    const result = ExplorerMenuCommand.safeParse(
+      await ipcRenderer.invoke(CHANNELS.showExplorerMenu, payload),
     );
-    return isExplorerMenuCommand(result) ? result : null;
+    return result.success ? result.data : null;
   },
   showWorkbenchMenu: async (payload) => {
-    const result: unknown = await ipcRenderer.invoke(
-      CHANNELS.showWorkbenchMenu,
-      payload,
+    const result = WorkbenchMenuCommand.safeParse(
+      await ipcRenderer.invoke(CHANNELS.showWorkbenchMenu, payload),
     );
-    return isWorkbenchMenuCommand(result) ? result : null;
+    return result.success ? result.data : null;
   },
   // OS drag-in: sandboxed renderers lost File.path in Electron 32+;
   // webUtils.getPathForFile in the preload is the sanctioned resolver.
@@ -321,28 +342,15 @@ const bridge: DohcDesktopBridge = {
   cloudLoginPoll: () => ipcRenderer.invoke(CHANNELS.cloudLoginPoll),
   cloudStatus: (payload) => ipcRenderer.invoke(CHANNELS.cloudStatus, payload),
   cloudLogout: () => ipcRenderer.invoke(CHANNELS.cloudLogout),
-  getShareHandoffStatus: async () => {
-    const result: unknown = await ipcRenderer.invoke(
-      CHANNELS.getShareHandoffStatus,
-    );
-    const status = parseShareHandoffStatus(result);
-    if (!status) throw new Error("Invalid share handoff status from main");
-    return status;
-  },
+  getShareHandoffStatus: () =>
+    invokeParsed(CHANNELS.getShareHandoffStatus, ShareHandoffStatus),
   acceptShareHandoff: (payload) =>
     ipcRenderer.invoke(CHANNELS.acceptShareHandoff, payload),
   retryShareHandoff: () => ipcRenderer.invoke(CHANNELS.retryShareHandoff),
   dismissShareHandoff: (payload) =>
     ipcRenderer.invoke(CHANNELS.dismissShareHandoff, payload),
-  onShareHandoffStatus: (listener) => {
-    const handler = (_event: unknown, raw: unknown) => {
-      const status = parseShareHandoffStatus(raw);
-      if (status) listener(status);
-    };
-    ipcRenderer.on(CHANNELS.shareHandoffStatus, handler);
-    return () =>
-      ipcRenderer.removeListener(CHANNELS.shareHandoffStatus, handler);
-  },
+  onShareHandoffStatus: (listener) =>
+    onEvent(CHANNELS.shareHandoffStatus, ShareHandoffStatus, listener),
   cloudEnableSync: (payload) =>
     ipcRenderer.invoke(CHANNELS.cloudEnableSync, payload),
   cloudJoinWorkspace: (payload) =>
@@ -558,18 +566,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.writeClipboardText, payload),
   setTitlebarTheme: (payload) =>
     ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),
-  onUserSettingsChanged: (
-    listener: (result: DesktopUserSettingsResult) => void,
-  ) => {
-    const handler = (_event: unknown, raw: unknown) => {
-      if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
-        listener(raw as DesktopUserSettingsResult);
-      }
-    };
-    ipcRenderer.on(CHANNELS.userSettingsChanged, handler);
-    return () =>
-      ipcRenderer.removeListener(CHANNELS.userSettingsChanged, handler);
-  },
+  onUserSettingsChanged: (listener) =>
+    onEvent(CHANNELS.userSettingsChanged, DesktopUserSettingsResult, listener),
   stepWindowZoom: (payload) =>
     ipcRenderer.invoke(CHANNELS.stepWindowZoom, payload),
   getWorkspaceUiState: (payload) =>
@@ -616,74 +614,13 @@ const bridge: DohcDesktopBridge = {
     return () =>
       ipcRenderer.removeListener(CHANNELS.cloudSessionChanged, handler);
   },
-  // Event payloads from main are still validated at this boundary: only a
-  // command from the closed MENU_COMMANDS set ever reaches renderer code
-  // (isMenuCommand — unit-tested against String objects/toString tricks; the
-  // sandboxed preload stays dependency-free, bridgeContract's MenuCommand
-  // enum derives from the same tuple so the two can never drift).
-  onMenuCommand: (listener) => {
-    const handler = (_event: unknown, command: unknown) => {
-      if (isMenuCommand(command)) {
-        listener(command as MenuCommand);
-      }
-    };
-    ipcRenderer.on(CHANNELS.menuCommand, handler);
-    return () => ipcRenderer.removeListener(CHANNELS.menuCommand, handler);
-  },
-  onWorkspaceActivated: (listener) => {
-    const handler = (_event: unknown, raw: unknown) => {
-      const workspace = parseWorkspaceActivatedEvent(raw);
-      if (workspace) listener(workspace as WorkspaceSummary);
-    };
-    ipcRenderer.on(CHANNELS.workspaceActivated, handler);
-    return () => ipcRenderer.removeListener(CHANNELS.workspaceActivated, handler);
-  },
-  // Same boundary rule as onMenuCommand: only a value that passes the closed
-  // dependency-free check (parseUpdateStateEvent — exact tuple member status,
-  // bounded primitive string message) reaches renderer code, and only the two
-  // validated fields cross, never the raw event payload.
-  onUpdateState: (listener) => {
-    const handler = (_event: unknown, raw: unknown) => {
-      const state = parseUpdateStateEvent(raw);
-      if (state) listener(state);
-    };
-    ipcRenderer.on(CHANNELS.updateState, handler);
-    return () => ipcRenderer.removeListener(CHANNELS.updateState, handler);
-  },
-  getUpdateState: async () => {
-    const result: unknown = await ipcRenderer.invoke(CHANNELS.getUpdateState);
-    const state = parseUpdateStateEvent(result);
-    if (!state) throw new Error("Invalid update state from main process.");
-    return state;
-  },
-  checkForUpdates: async () => {
-    const result: unknown = await ipcRenderer.invoke(CHANNELS.checkForUpdates);
-    if (typeof result !== "object" || result === null || Array.isArray(result)) {
-      throw new Error("Invalid update check result from main process.");
-    }
-    const raw = result as Record<string, unknown>;
-    const state = parseUpdateStateEvent(raw.state);
-    if (typeof raw.checked !== "boolean" || !state) {
-      throw new Error("Invalid update check result from main process.");
-    }
-    return { checked: raw.checked, state };
-  },
-  installUpdate: async () => {
-    const result: unknown = await ipcRenderer.invoke(CHANNELS.installUpdate);
-    if (typeof result !== "object" || result === null || Array.isArray(result)) {
-      throw new Error("Invalid update install result from main process.");
-    }
-    const raw = result as Record<string, unknown>;
-    const state = parseUpdateStateEvent(raw.state);
-    if (
-      typeof raw.accepted !== "boolean" ||
-      typeof raw.completed !== "boolean" ||
-      !state
-    ) {
-      throw new Error("Invalid update install result from main process.");
-    }
-    return { accepted: raw.accepted, completed: raw.completed, state };
-  },
+  onMenuCommand: (listener) => onEvent(CHANNELS.menuCommand, MenuCommand, listener),
+  onWorkspaceActivated: (listener) =>
+    onEvent(CHANNELS.workspaceActivated, WorkspaceSummary, listener),
+  onUpdateState: (listener) => onEvent(CHANNELS.updateState, UpdateStateEvent, listener),
+  getUpdateState: () => invokeParsed(CHANNELS.getUpdateState, UpdateStateEvent),
+  checkForUpdates: () => invokeParsed(CHANNELS.checkForUpdates, UpdateCheckResult),
+  installUpdate: () => invokeParsed(CHANNELS.installUpdate, UpdateActionResult),
   onQuitRequested: (listener: () => void) => {
     const handler = () => listener();
     ipcRenderer.on(CHANNELS.quitRequested, handler);
@@ -713,7 +650,7 @@ const bridge: DohcDesktopBridge = {
   resumeQuit: async () => {
     await ipcRenderer.invoke(CHANNELS.resumeQuit);
   },
-  // Content search (Phase E5.0): results stream main→renderer as bounded
+  // Content search: results stream main→renderer as bounded
   // batches; the searchId round-trips so stale batches drop renderer-side.
   searchWorkspace: async (payload) =>
     WorkspaceSearchStartResult.parse(
@@ -721,18 +658,8 @@ const bridge: DohcDesktopBridge = {
     ),
   cancelWorkspaceSearch: (payload) =>
     ipcRenderer.invoke(CHANNELS.cancelWorkspaceSearch, payload),
-  // Same boundary rule as onUpdateState: every batch is validated by the
-  // closed dependency-free parseSearchResultsEvent check (bounded searchId,
-  // entries rebuilt field by field, every path lexically safe-relative) —
-  // anything else never reaches renderer code.
-  onSearchResults: (listener) => {
-    const handler = (_event: unknown, raw: unknown) => {
-      const batch = parseSearchResultsEvent(raw);
-      if (batch) listener(batch);
-    };
-    ipcRenderer.on(CHANNELS.searchResults, handler);
-    return () => ipcRenderer.removeListener(CHANNELS.searchResults, handler);
-  },
+  onSearchResults: (listener) =>
+    onEvent(CHANNELS.searchResults, SearchResultsEvent, listener),
   // Engine Y.Doc editor binding.
   // Updates cross as raw Uint8Array (structured clone); the sessionId
   // round-trips so the renderer applies forwarded deltas only for the bound
@@ -747,35 +674,16 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.engineYDocAcknowledgeLineageReplacement, payload),
   closeEngineYDocSession: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocClose, payload),
-  // Same boundary rule as onSearchResults: every event is validated by the
-  // closed dependency-free parseEngineYDocRemoteUpdateEvent check (bounded
-  // sessionId, real Uint8Array within the byte bound) before it reaches
-  // renderer code.
-  onEngineYDocRemoteUpdate: (listener) => {
-    const handler = (_event: unknown, raw: unknown) => {
-      const parsed = parseEngineYDocRemoteUpdateEvent(raw);
-      if (parsed) listener(parsed);
-    };
-    ipcRenderer.on(CHANNELS.engineYDocRemoteUpdate, handler);
-    return () => ipcRenderer.removeListener(CHANNELS.engineYDocRemoteUpdate, handler);
-  },
-  onEngineYDocLineageReplacement: (listener) => {
-    const handler = (_event: unknown, raw: unknown) => {
-      const parsed = parseEngineYDocLineageReplacementEvent(raw);
-      if (parsed) listener(parsed);
-    };
-    ipcRenderer.on(CHANNELS.engineYDocLineageReplacement, handler);
-    return () =>
-      ipcRenderer.removeListener(CHANNELS.engineYDocLineageReplacement, handler);
-  },
-  onEngineYDocSaveState: (listener) => {
-    const handler = (_event: unknown, raw: unknown) => {
-      const parsed = parseEngineYDocSaveStateEvent(raw);
-      if (parsed) listener(parsed);
-    };
-    ipcRenderer.on(CHANNELS.engineYDocSaveState, handler);
-    return () => ipcRenderer.removeListener(CHANNELS.engineYDocSaveState, handler);
-  },
+  onEngineYDocRemoteUpdate: (listener) =>
+    onEvent(CHANNELS.engineYDocRemoteUpdate, EngineYDocRemoteUpdateEvent, listener),
+  onEngineYDocLineageReplacement: (listener) =>
+    onEvent(
+      CHANNELS.engineYDocLineageReplacement,
+      EngineYDocLineageReplacementEvent,
+      listener,
+    ),
+  onEngineYDocSaveState: (listener) =>
+    onEvent(CHANNELS.engineYDocSaveState, EngineYDocSaveStateEvent, listener),
 };
 
 contextBridge.exposeInMainWorld("dohcDesktop", bridge);
@@ -786,7 +694,7 @@ contextBridge.exposeInMainWorld("dohcDesktopInternal", {
 });
 
 // Test-only bridge. The authoritative gate is the main-process handler, which
-// is double-gated (env AND !app.isPackaged); the preload cannot read
+// is double-gated (env and !app.isPackaged); the preload cannot read
 // isPackaged, so this env-only check is intentionally the weaker side — never
 // expose a data-returning test channel here without a matching double-gated
 // handler. Build-time stripping lands with Phase 14 packaging.

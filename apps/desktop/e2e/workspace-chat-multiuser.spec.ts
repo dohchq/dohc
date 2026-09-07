@@ -15,15 +15,14 @@ import {
   seedCloudCredentials,
   seedWorkspaceManifest,
   seedWorkspaceRegistry,
-  seedWorkspaceSettings,
 } from "./helpers/workspace";
 import { fetchSharedChannelInfo } from "../src/workspaces/sharedChannelInfo";
 
-// MU-C6 — the multi-user chat + co-presence PRODUCT proof, driven through the
-// REAL Electron app. One real desktop app is the channel OWNER (signed in as
-// the granter over a real relay child process); a SECOND relay client is the
+// MU-C6 — the multi-user chat + co-presence product proof, driven through the
+// real Electron app. One real desktop app is the channel OWNER (signed in as
+// the granter over a real relay child process); a second relay client is the
 // participant the channel is shared to. The participant is exercised through
-// the SAME public relay surface the desktop's own main process uses — the
+// the same public relay surface the desktop's own main process uses — the
 // share presence route (a participant's ephemeral awareness path) and the
 // daemon shared-channel push/pull APIs (a participant's durable chat path) —
 // because the serial single-display harness runs one Electron
@@ -45,7 +44,7 @@ const GRANTER_USER = "e2e-granter";
 const GRANTER_EMAIL = "e2e-granter@dohc.test";
 const RECIPIENT_TOKEN = "test:e2e-recipient";
 // The relay resolves the bearer `test:e2e-recipient` to this user id and
-// VERIFIES chat authorship (authorUserId / reaction authorId) against it, so
+// verifies chat authorship (authorUserId / reaction authorId) against it, so
 // the participant's local ops must be authored as this id, not the raw token.
 const RECIPIENT_USER = "e2e-recipient";
 const RECIPIENT_EMAIL = "e2e-recipient@dohc.test";
@@ -116,8 +115,8 @@ async function grantedShare(
         };
       }
     ).dohcDesktop;
-    // This probe reads the GRANTED relay lane only, so it names no channel:
-    // the joined lane is answered per channel a caller is showing (#640).
+    // This probe reads the granted relay lane only, so it names no channel:
+    // the joined lane is answered per channel a caller is showing.
     const shares = await api
       .listChatChannelShares({ workspaceId: id, channelWireIds: [] })
       .catch(() => null);
@@ -147,7 +146,6 @@ test("owner + participant chat and co-presence converge in the real app", async 
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, { experimental: { workspaceEngineAlpha: true } });
 
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
@@ -273,7 +271,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
       await typingPump;
     }
 
-    // --- (c) + (d) DURABLE convergence: the participant pulls the shared
+    // --- (c) + (d) durable convergence: the participant pulls the shared
     // channel, replies, and reacts to the owner's message; the owner's real app
     // shows both after re-opening the thread.
     const relayConn = recipientRelay(baseUrl);
@@ -319,7 +317,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
     expect(pushed.pushed).toBeGreaterThan(0);
 
     // The member's ops are in the OWNER's workspace bucket (share-namespaced
-    // origin); the owner ingests them through its NORMAL workspace pull, which
+    // origin); the owner ingests them through its normal workspace pull, which
     // applies chat ops via syncApply. An idle owner won't poll the relay on its
     // own (the relay is pull-based, no server push), so nudge the owner's sync
     // engine each iteration with a throwaway file write — the same wake pattern
@@ -346,7 +344,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
     // The participant's reaction on the owner's message rendered too.
     await expect(page.getByText("🚀").first()).toBeVisible({ timeout: 15_000 });
   } finally {
-    // Stop the relay child BEFORE removing the temp tree: its sqlite db lives
+    // Stop the relay child before removing the temp tree: its sqlite db lives
     // under temp.baseDir, and Windows refuses to unlink files a live process
     // still holds open (EBUSY). POSIX tolerates the old order; Windows does not.
     await member?.close();

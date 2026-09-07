@@ -39,7 +39,7 @@ import { isEngineTransportFailure } from "./shareViewEngineFailure";
 // of file: the projection of the store, which this module rewrites freely, and
 // whatever the recipient put there themselves, which is their own data and
 // which no moment describes. Reconciliation leaves those additions alone for
-// exactly that reason. Every operation here therefore asks BOTH sides
+// exactly that reason. Every operation here therefore asks both sides
 // before it writes either, and refuses when it would touch content the store
 // cannot state. Refusing is the whole fix: dohc does not carry those files
 // along, and does not invent a trash to put them in.
@@ -260,7 +260,7 @@ async function applyShareViewTextWrite(
 /**
  * A new file in a share view: a moment first, then the projection.
  *
- * A create never clobbers, and BOTH sides can be occupied: the store, and the
+ * A create never clobbers, and both sides can be occupied: the store, and the
  * projection, which may hold a file the recipient put there by hand. The disk
  * writer answers this with `wx` and a swallowed EEXIST; this answers it before
  * it journals a moment over either one.
@@ -395,7 +395,7 @@ async function applyShareViewPathMove(
     from: path,
     to: path === from ? to : `${to}/${path.slice(from.length + 1)}`,
   }));
-  // Every destination, before ANY of them is applied. A collision found half
+  // Every destination, before any of them is applied. A collision found half
   // way through would otherwise leave the files before it already moved.
   for (const move of moves) {
     if (held.has(move.to) || (await projectionOccupies(input.rootPath, move))) {
@@ -416,7 +416,7 @@ async function applyShareViewPathMove(
   // with every file under it gone, what is left is the empty directory the
   // projection made for them.
   //
-  // Unless the source and the destination are the SAME folder, which is what a
+  // Unless the source and the destination are the same folder, which is what a
   // case-only folder rename is. Removing it there removes the files this rename
   // just wrote into it.
   if (!held.has(from) && !renamesInPlace) {
@@ -513,7 +513,7 @@ async function putBackMoves(
         }),
       );
     } catch (cause) {
-      // EVERY reversal is attempted. Abandoning the list at the first failure
+      // Every reversal is attempted. Abandoning the list at the first failure
       // strands the files after it too, and those are files this same call
       // moved and could still have put back.
       stranded.push(move);
@@ -616,7 +616,7 @@ async function applyShareViewPathDelete(
  * Everything the ordinary import decides is decided the same way — the same
  * drag-in screen, the same destination rule, the same collision ladder, the
  * same skipped count. What differs is the destination: content the engine
- * cannot own is refused HERE, before anything lands, rather than copied to
+ * cannot own is refused here, before anything lands, rather than copied to
  * disk and left there as a file no moment states.
  */
 async function applyShareViewFileImport(
@@ -640,7 +640,7 @@ async function applyShareViewFileImport(
     input.rootPath,
     input.targetDir,
   );
-  // Names already occupied, on BOTH sides. The store is what a change is made
+  // Names already occupied, on both sides. The store is what a change is made
   // of; the projection can also hold a file the recipient put there by hand,
   // and the disk copy this replaces would never have overwritten it.
   //
@@ -683,7 +683,7 @@ async function applyShareViewFileImport(
         skipped += 1;
         continue;
       }
-      // Read the content BEFORE claiming a name: a source the engine cannot
+      // Read the content before claiming a name: a source the engine cannot
       // own must not consume a collision variant it never used.
       const content = await readDiskContent(source);
       if (content.kind !== "text" && content.kind !== "binary") {
@@ -830,14 +830,14 @@ async function refuseUntrackedUnder(
  * recursively, so a rename or delete that mutated the store over one of
  * these paths would delete a directory — and everything in it — that the
  * store never described. The refresh side already refuses this under the
- * same reason (#850); this asks the same question, of the same disk entry,
+ * same reason; this asks the same question, of the same disk entry,
  * before either operation is allowed to touch the store at all.
  *
- * TWO shapes, because a folder is checked differently from the files under
+ * Two shapes, because a folder is checked differently from the files under
  * it. A store leaf must be a FILE: the store never held a folder, so
- * anything else there replaced one. The operation's OWN path, when it is not
+ * anything else there replaced one. The operation's own path, when it is not
  * itself a leaf, must be a real DIRECTORY: a symlink standing in for it would
- * route every leaf lstat below through the link — those resolve the SAME
+ * route every leaf lstat below through the link — those resolve the same
  * ancestor chain materialization does — and land this whole refusal on the
  * files at wherever the link points, not the ones the store lost.
  */
@@ -849,7 +849,7 @@ async function refuseNonFileReplacement(
   leaves: readonly string[],
 ): Promise<void> {
   const messages: string[] = [];
-  // The operation's OWN path, checked separately from the leaves below: a
+  // The operation's own path, checked separately from the leaves below: a
   // share view has no tracked FOLDER for `unjournalablePathMessages`'s
   // file-flavored copy to name, so this states the folder in its own words
   // rather than telling the reader to "restore the file" a share view never
@@ -881,7 +881,7 @@ async function refuseNonFileReplacement(
 }
 
 /**
- * The disk entry at a tracked path, resolved the SAME way
+ * The disk entry at a tracked path, resolved the same way
  * `materializeSharedViewPaths` resolves it: `resolvedShareViewTarget` follows
  * every ancestor symlink and holds back only the leaf itself. Guard and
  * action then always agree on where a path leads, so an ancestor symlink

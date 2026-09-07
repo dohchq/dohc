@@ -1,4 +1,4 @@
-//! dohc engine runtime — CAL-1 calibration slice.
+//! dohc engine runtime: the workspace actor.
 //!
 //! The workspace actor model: each open workspace is a dedicated OS thread
 //! owning exactly one storage writer connection, addressed by clonable
@@ -19,8 +19,6 @@
 //!   closed`; dropping an actor or the supervisor joins the worker and releases
 //!   the connection — no detached task outlives its owner, and a panicking
 //!   worker still publishes `Closed`.
-//!
-//! The crate is dormant: nothing here is reachable from product code.
 
 #![forbid(unsafe_code)]
 
@@ -35,8 +33,8 @@ pub use actor::{
     MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, MergeExecutionResult,
     PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
     RollbackExecutionResult, SelfWriteRecorder, ShareViewIdentityRecord, SharingDeclined,
-    StoreSnapshot, UnitsOutcome, WorkspaceActor, WorkspaceRootGuard, YdocAppend,
-    YdocCloseSessionOutcome, YdocOpenState, YdocSettleOutcome, YdocSettlement,
+    WorkspaceActor, WorkspaceRootGuard, YdocAppend, YdocCloseSessionOutcome, YdocOpenState,
+    YdocSettleOutcome, YdocSettlement,
 };
 pub use error::RuntimeError;
 pub use identity::EngineDbIdentity;
@@ -49,8 +47,7 @@ pub use supervisor::{SupervisorOpen, WorkspaceSupervisor};
 // Re-export the storage surface callers need so a downstream host depends on
 // one crate for the common path.
 pub use dohc_engine_storage::{
-    CompoundWrite, Document, EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome,
-    WriteOutcome,
+    EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome,
     faults::{FaultAction, FaultPoint},
 };
 
@@ -68,4 +65,6 @@ pub use dohc_engine_domain::{
     ResolveTextConflict, ResolveTextConflictResult, RollbackTextFileMutation, TextConflict,
     TextSnapshot, VersionFileChange, VersionedTextComparison, WriteBinary, WriteResult, WriteText,
 };
-pub use dohc_engine_sync::{ApplyOutcome, ConflictApplyResult, ReplicationEnvelope};
+pub use dohc_engine_sync::{
+    ApplyDisposition, ApplyOutcome, ConflictApplyResult, ReplicationEnvelope,
+};

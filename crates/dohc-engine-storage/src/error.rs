@@ -1,10 +1,8 @@
 //! Storage error taxonomy. One enum, `thiserror`-derived, with a `code()`
 //! accessor returning a byte-identical kebab-case string — the compatibility
-//! contract that ported tests assert (`PORTING.md` §4). Messages are constant
+//! contract that ported tests assert. Messages are constant
 //! and redaction-safe: no paths with user content, no document bodies, no key
 //! material.
-
-use crate::limits::MAX_DOCUMENT_BODY_BYTES;
 
 /// A typed storage failure. `#[non_exhaustive]` because capability shards add
 /// variants without a breaking change; every variant maps to a stable
@@ -40,10 +38,6 @@ pub enum StorageError {
     #[error("invalid input: {reason}")]
     InvalidInput { reason: &'static str },
 
-    /// The document body exceeded [`MAX_DOCUMENT_BODY_BYTES`].
-    #[error("document body {actual} bytes exceeds the {MAX_DOCUMENT_BODY_BYTES}-byte limit")]
-    DocumentTooLarge { actual: usize },
-
     /// A write transaction failed to persist. The transaction rolled back;
     /// observable state is unchanged.
     #[error("write failed to persist")]
@@ -51,13 +45,6 @@ pub enum StorageError {
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
-
-    /// A retry reused an idempotency key with a *different* payload than the
-    /// originally recorded request. Replaying would either drop the new write
-    /// or return a stale result, so the store fails closed instead of guessing
-    /// (a same-payload retry stays exactly-once).
-    #[error("idempotency key was reused with a different payload")]
-    IdempotencyKeyReuseMismatch,
 
     /// An ordered migration failed to apply, or a previously-applied migration's
     /// recorded checksum does not match this build's definition (a tampered or
@@ -80,7 +67,7 @@ pub enum StorageError {
     },
 
     /// A destructive/space-consuming operation was refused because the target
-    /// volume lacks the preflighted free space. Fails closed BEFORE touching the
+    /// volume lacks the preflighted free space. Fails closed before touching the
     /// only valid source (`plan §Backups`: never delete the only valid source on
     /// disk-full).
     #[error("insufficient free space: need {needed} bytes, {available} available")]
@@ -98,8 +85,7 @@ pub enum StorageError {
     /// A file was transiently locked (Windows AV/indexer sharing violation, or a
     /// busy SQLite handle) and the bounded retry budget was exhausted. Distinct
     /// from corruption: the store is intact; the operation is retryable and any
-    /// pending job is left for startup replay (`LANGUAGE_SEMANTICS_MATRIX` 7.7,
-    /// `TEST_ORACLE` `env.sharing-violation-transient`).
+    /// pending job is left for startup replay.
     #[error("file is locked (retry budget exhausted)")]
     FileLocked,
 
@@ -123,9 +109,7 @@ impl StorageError {
             StorageError::ForeignDatabase => "foreign-database",
             StorageError::StateCorrupt { .. } => "state-corrupt",
             StorageError::InvalidInput { .. } => "invalid-input",
-            StorageError::DocumentTooLarge { .. } => "document-too-large",
             StorageError::PersistFailed { .. } => "persist-failed",
-            StorageError::IdempotencyKeyReuseMismatch => "idempotency-key-reuse-mismatch",
             StorageError::MigrationFailed { .. } => "migration-failed",
             StorageError::BackupFailed { .. } => "backup-failed",
             StorageError::DiskFull { .. } => "disk-full",
@@ -190,7 +174,7 @@ impl StorageError {
         }
     }
 
-    /// Whether SQLite refused this operation because the database was BUSY,
+    /// Whether SQLite refused this operation because the database was busy,
     /// rather than because anything is wrong with it.
     ///
     /// `SQLITE_BUSY` is another connection holding a lock this one needs;
@@ -199,12 +183,12 @@ impl StorageError {
     /// reaching here already means the store's own retry budget is spent —
     /// which is exactly what [`StorageError::FileLocked`] describes.
     ///
-    /// Recognized HERE because this is the last boundary that still holds the
+    /// Recognized here because this is the last boundary that still holds the
     /// typed `rusqlite::Error`. Above it the error is a boxed source and the
     /// result code is unreadable, which is why every busy database used to
     /// reach callers as `persist-failed` or `state-corrupt` — both terminal,
-    /// both wrong about a condition that clears by waiting (#658).
-    /// The same question for a caller holding a RAW `rusqlite::Error`.
+    /// both wrong about a condition that clears by waiting.
+    /// The same question for a caller holding a raw `rusqlite::Error`.
     ///
     /// `SearchError::Storage` keeps the rusqlite failure rather than wrapping
     /// it in this taxonomy, so it never reaches the constructors below and
@@ -274,7 +258,7 @@ mod tests {
     /// The classifier serves every SQLite-specific wrapper, not just the two
     /// on the read/write path.
     ///
-    /// A busy database met during a MIGRATION was boxed as
+    /// A busy database met during a migration was boxed as
     /// `migration-failed` — the code a store nobody should reopen answers —
     /// and during a backup as `backup-failed`, which the diagnostics read as
     /// evidence about the store's health. Both are the same transient
@@ -282,9 +266,6 @@ mod tests {
     /// transactional, so contention rolls the whole step back and leaves the
     /// store exactly as it was.
     ///
-    /// MUTATION: drop the `is_busy` check from `migration` or from `backup`
-    /// -> that wrapper reports its terminal code for a condition that clears
-    /// by waiting.
     #[test]
     fn every_sqlite_wrapper_tells_a_busy_database_apart() {
         let busy = || {

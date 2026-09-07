@@ -11,6 +11,7 @@ import type {
 import { PluginPanelPage } from "./PluginPanelPage";
 import { THEME_ATTRIBUTES } from "./pluginPanelTheme";
 import { palette } from "./tokens";
+import { deferred } from "../testing/deferred";
 
 let panelSdkEventListener: ((event: PluginPanelSdkEvent) => void) | null = null;
 let panelInvalidatedListener: (
@@ -49,14 +50,6 @@ const bridgeMock = {
     },
   ),
 };
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
-}
 
 function sdkMessage(
   source: Window,
@@ -454,10 +447,8 @@ describe("PluginPanelPage", () => {
       webAppId: "preview",
       instanceKey: "sites/marketing",
     });
-    // MUTATION (take the plugin id from the panel's own message): a panel
-    // could open another plugin's web app. It comes from the mounted panel.
     await vi.waitFor(() =>
-      expect(onOpenWebApp).toHaveBeenCalledWith(
+      expect(onOpenWebApp, "take the plugin id from the panel's own message: a panel could open another plugin's web app. It comes from the mounted panel.").toHaveBeenCalledWith(
         "hello-plugin",
         "preview",
         "sites/marketing",

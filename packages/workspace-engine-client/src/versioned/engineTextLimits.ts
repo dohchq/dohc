@@ -6,7 +6,7 @@
  * limits sit beside `node:crypto`, and a renderer that imported them from
  * there would pull a Node builtin into the browser bundle — which neither
  * typecheck nor vitest would catch, because both resolve TypeScript directly
- * (the #272 failure mode).
+ * (the failure mode).
  */
 
 /**
@@ -35,7 +35,7 @@ export const RESOLVE_REQUEST_FRAME_BYTES = 8 * 1024 * 1024;
  * over-cap side body (`text: null` beside `inbandLimitBytes` and
  * `blobSha256`), and the adapter hydrates through `versionedText.readBlob`.
  *
- * DERIVED from `RESOLVE_REQUEST_FRAME_BYTES` — both are the same negotiated
+ * Derived from `RESOLVE_REQUEST_FRAME_BYTES` — both are the same negotiated
  * frame — so this file keeps exactly one hand-copy of the daemon's frame size
  * under its drift guard, not two that can move apart.
  */
@@ -70,7 +70,7 @@ export function jsonStringEncodedLength(text: string): number {
     } else if (code < 0x800) {
       length += 2;
     } else if (code >= 0xd800 && code <= 0xdfff) {
-      // A LONE surrogate. `for...of` yields a matched pair as its combined
+      // A lone surrogate. `for...of` yields a matched pair as its combined
       // code point, so anything left in this range is unpaired, and
       // `JSON.stringify` emits it as a six-character escape rather than the
       // three UTF-8 bytes its value suggests. The Rust twin cannot reach this

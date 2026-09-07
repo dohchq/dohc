@@ -3,14 +3,15 @@ import react from "@vitejs/plugin-react";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import type { Plugin } from "vite";
 
-// Electron 42 ships Chromium 148 and Node 24.15. electron-vite 5.0.0
-// currently only maps Electron targets through major 39, so keep these
-// explicit until upstream support lands.
-const electronMainTarget = "node24.15";
-const electronRendererTarget = "chrome148";
+// Electron 43.3.0 ships Chromium 150 and Node 24.18. electron-vite 5.0.0
+// maps Electron targets only through major 39, so keep these explicit until
+// upstream support lands. Update both with the `electron` pin in package.json.
+const electronMainTarget = "node24.18";
+const electronRendererTarget = "chrome150";
 
 export const mainBundledWorkspaceDeps = [
   "@dohc/cli",
+  "@dohc/live-session-contract",
   "@dohc/sdk",
   "@dohc/security-contract",
   "@dohc/workspace-core",
@@ -23,9 +24,10 @@ export const mainBundledWorkspaceDeps = [
 
 export const preloadBundledRuntimeDeps = [
   // Sandboxed preloads cannot resolve app/workspace packages at runtime.
+  "@dohc/live-session-contract",
   "@dohc/workspace-contracts",
   "@dohc/workspace-core",
-  // The bridge contract reads the share access levels from the ONE place both
+  // The bridge contract reads the share access levels from the one place both
   // sides define them, and a value import from a sandboxed preload has to be
   // bundled like any other. Left external, the built preload carried a bare
   // `require("@dohc/security-contract/share-selector")`, Electron refused the

@@ -1,12 +1,12 @@
-// Pure content-search result model (Phase E5.0). Streamed batches fold into
+// Pure content-search result model. Streamed batches fold into
 // grouped-by-file results; everything here is unit-testable without React or
-// Electron. The renderer NEVER re-executes the pattern: highlighting comes
+// Electron. The renderer never re-executes the pattern: highlighting comes
 // only from each entry's matchStart/matchEnd offsets.
 
 import type {
   SearchResultsEvent,
   SearchResultsEventEntry,
-} from "../../ipc/channels";
+} from "../../ipc/bridgeContract";
 
 export interface SearchGroup {
   path: string;
@@ -15,7 +15,7 @@ export interface SearchGroup {
 
 export interface SearchModel {
   // The id of the search these results belong to; batches with any other id
-  // are STALE (a superseded search's stragglers) and must be dropped.
+  // are stale (a superseded search's stragglers) and must be dropped.
   searchId: string | null;
   status: "idle" | "searching" | "updating" | "complete";
   limitHit: boolean;
@@ -50,9 +50,9 @@ export function beginSearch(searchId: string): SearchModel {
 }
 
 // Folds one streamed batch into the model. Stale batches (searchId mismatch,
-// including batches arriving while idle) return the SAME model reference —
+// including batches arriving while idle) return the same model reference —
 // the caller can use identity to skip work. Entries append grouped by file in
-// arrival order; only TOUCHED groups are cloned so memoized group components
+// arrival order; only touched groups are cloned so memoized group components
 // skip re-rendering on every later batch.
 export function applyBatch(model: SearchModel, batch: SearchResultsEvent): SearchModel {
   if (model.searchId === null || batch.searchId !== model.searchId) return model;
@@ -90,7 +90,7 @@ export function applyBatch(model: SearchModel, batch: SearchResultsEvent): Searc
   };
 }
 
-export interface FlatSearchEntry {
+interface FlatSearchEntry {
   path: string;
   entry: SearchResultsEventEntry;
   groupIndex: number;
@@ -98,7 +98,7 @@ export interface FlatSearchEntry {
 }
 
 // Rendered-row bound per group (performance, not policy): a short query on
-// prose can put hundreds of matches in ONE file, and committing them all in
+// prose can put hundreds of matches in one file, and committing them all in
 // one render is a keystroke-budget long task. Groups over the bound render a
 // "show more" affordance; expanding is per group.
 export const GROUP_PREVIEW_ROWS = 20;
@@ -106,11 +106,11 @@ export const GROUP_PREVIEW_ROWS = 20;
 // Rendered-GROUP bound (same budget): a query matching once per file across
 // thousands of files would otherwise mount thousands of group headers while
 // batches stream in. The view renders the first window of groups and a
-// "show more files" tail extends it; the MODEL always holds everything (the
+// "show more files" tail extends it; the model always holds everything (the
 // summary and cap notice count the full result set).
 export const GROUP_WINDOW_STEP = 100;
 
-// The entries a group actually SHOWS: all of them when expanded (or small),
+// The entries a group actually shows: all of them when expanded (or small),
 // the first GROUP_PREVIEW_ROWS otherwise.
 export function groupVisibleEntries(
   group: SearchGroup,
@@ -121,7 +121,7 @@ export function groupVisibleEntries(
     : group.entries.slice(0, GROUP_PREVIEW_ROWS);
 }
 
-// The keyboard-navigation order: every VISIBLE entry in arrival order —
+// The keyboard-navigation order: every visible entry in arrival order —
 // collapsed groups contribute nothing, truncated groups contribute their
 // preview window. What you see is exactly what you step through.
 export function visibleFlatEntries(
@@ -145,7 +145,7 @@ export function visibleFlatEntries(
 //
 // Result rows render in a ~210px panel that fits roughly 28 monospace
 // characters before CSS end-truncation. A match starting deeper than that
-// would be ENTIRELY invisible in its own result row — the engine's preview
+// would be entirely invisible in its own result row — the engine's preview
 // windowing only kicks in past 250 chars and deliberately leaves ~83 chars
 // of lead-in. So the RENDERER windows again: when the match starts past the
 // threshold, trim the lead to a few context chars, prepend a literal
@@ -157,7 +157,7 @@ export const PREVIEW_LEAD_TRIM_THRESHOLD = 24;
 // Context characters kept immediately before the match after a trim.
 export const PREVIEW_LEAD_CONTEXT_CHARS = 8;
 
-export interface WindowedPreview {
+interface WindowedPreview {
   text: string;
   matchStart: number;
   matchEnd: number;

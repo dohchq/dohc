@@ -6,7 +6,7 @@ pub const MAX_WIRE_INTEGER: i64 = (1_i64 << 53) - 1;
 /// One PAGE of the continuous replication lane. Not the submit bound.
 pub const MAX_PUSH_OPS_PER_BATCH: usize = 500;
 pub const MAX_PULL_OPS: usize = 500;
-/// How many net-changed files ONE share submit carries.
+/// How many net-changed files one share submit carries.
 ///
 /// Measured, not guessed (`AGENTS.md`, "Measure limits that reject work"):
 /// healthy work reaches 1,434 changed files (one share of a repository-sized
@@ -94,7 +94,7 @@ impl ReplicationEnvelope {
 /// `bounded` is written in terms of this so the rule and the report of which
 /// part of it fired cannot drift apart. Reporting the length clause for an id
 /// that is short but carries a control byte tells the reader a bound the id
-/// SATISFIES, which reads as a contradiction and hides the real cause.
+/// satisfies, which reads as a contradiction and hides the real cause.
 pub(crate) fn unbounded_clause(value: &str) -> Option<String> {
     if value.is_empty() {
         return Some("it is empty".to_owned());

@@ -2,15 +2,13 @@
 //! writer connection, driven by a **tokio** command loop.
 //!
 //! This is the Rust replacement for the TS engine's process-global write chain
-//! and `workspaceActivity` map (`STATE_OWNERSHIP.tsv` rows `chain-store-writes`,
-//! `registry-workspace-activity`, `actor-registry`). State ownership is
-//! unambiguous: the connection lives on the worker thread and never crosses it;
-//! callers hold clonable [`ActorHandle`]s that only send messages
-//! (`PORTING.md` §5, §14).
+//! and `workspaceActivity` map. State ownership is unambiguous: the
+//! connection lives on the worker thread and never crosses it; callers hold
+//! clonable [`ActorHandle`]s that only send messages.
 //!
 //! ## The blocking writer under an async loop (CAL-2)
 //!
-//! The writer connection is synchronous, blocking rusqlite. It stays on ONE
+//! The writer connection is synchronous, blocking rusqlite. It stays on one
 //! dedicated OS thread (`std::thread`) — **never** on the async runtime (plan
 //! §Workspace actor model: "one writable `rusqlite` connection on a dedicated
 //! thread (never blocking the async runtime)"). Commands flow over a bounded
@@ -18,55 +16,57 @@
 //! [`blocking_recv`](tokio::sync::mpsc::Receiver::blocking_recv), so the
 //! blocking SQLite work never occupies a runtime worker. Replies come back on
 //! [`tokio::sync::oneshot`] channels. The tokio channels are runtime-agnostic
-//! for their blocking API, so the CAL-1 synchronous call sites keep working
+//! for their blocking API, so the the synchronous call sites keep working
 //! outside any runtime, while the async methods drive the loop from within one.
 //!
 //! Lifecycle is explicit — `open → ready → draining → closed` — and `Drop`
 //! releases the connection deterministically by joining the worker (no detached
 //! task outlives the actor). Cancellation ([`CancellationToken`]) is checked
-//! BETWEEN bounded units, never inside a transaction (`PORTING.md` §12).
+//! between bounded units, never inside a transaction.
 
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
 use crate::search::index::update_file_search_index_for_capture;
 use crate::search::{
-    GranularChatMessageSearchBatch, SearchPageBatch, SearchResult, SearchResultKey,
-    delete_file_search_index, ensure_search_index_for_version,
-    query_chat_messages_granular_bounded, search_workspace, search_workspace_page,
+    GranularChatMessageSearchBatch, SearchPageBatch, SearchResultKey, delete_file_search_index,
+    ensure_search_index_for_version, query_chat_messages_granular_bounded, search_workspace_page,
     upsert_file_search_index,
 };
 use crate::search::{SearchPolicySnapshot, read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
     AppendOutcome, CacheStats, CloseOutcome, CollabError, ContentKind, DocKey, LeaseRegistry,
-    LineageClaimStatus, Projection, Regime, SceneAsset, WriterDocCache, Ydoc,
+    LineageClaimStatus, OwnerDeliveryReceipt, OwnerOutboxAcknowledgeResult, OwnerOutboxAppendInput,
+    OwnerOutboxAppendResult, OwnerOutboxError, OwnerOutboxQuarantineInput, Projection, Regime,
+    SceneAsset, WriterDocCache, Ydoc, acknowledge_owner_outbox, append_owner_outbox,
     encode_scene_asset_record, encode_scene_asset_records, import_portable_scene,
+    quarantine_owner_outbox,
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
-    AgentRunRecord, AgentUnreadThreadRow, AutomationClaim, AutomationFailure, AutomationSettle,
-    BinaryHead, BinaryHeadMeta, BinaryWriteResult, CaptureIngest, CaptureIngestBatchContext,
-    CaptureIngestBinary, CaptureIngestBinaryResult, CaptureManifestSeedEntry, CaptureRetire,
-    CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ChangeAttribution,
-    ChannelThreadSummary, ChatAgentReadState, ChatAttachment, ChatBookmark, ChatBookmarkTransition,
-    ChatChannel, ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage,
-    ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
-    ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadProjection, ChatThreadReadState,
-    CollectionAdoptionCandidate, CollectionDetails, CollectionPendingAdoptionCursor,
-    CollectionPendingAdoptionPage, CollectionQuery, CollectionQueryResult, CollectionRecordDetails,
-    CollectionRelationCleanupCandidate, CollectionSummary, CompareTextFileVersions,
-    CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile, DispatchClaim,
-    DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText, LinkedChatStore,
-    ListMomentsQuery, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult, MomentPage,
-    MomentRecord, PendingBookmarkRow, ProjectedWriteText, RECORD_ID_FRONTMATTER_KEY, RenameResult,
-    RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
-    RollbackTextFileMutation, RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete,
-    SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretOp,
-    SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction,
-    SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict,
-    TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
-    VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
-    apply_secret_file_from_version_with, binary_delete_job_id, binary_rename_delete_job_id,
-    binary_rename_write_job_id, binary_rollback_job_identity,
+    AgentRunRecord, AgentUnreadThreadRow, AutomationClaim, AutomationClaimAttempt,
+    AutomationFailure, AutomationSettle, BinaryHead, BinaryWriteResult, CaptureIngest,
+    CaptureIngestBatchContext, CaptureIngestBinary, CaptureIngestBinaryResult,
+    CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult, CaptureSecret,
+    CaptureSecretRetire, ChangeAttribution, ChannelThreadSummary, ChatAgentReadState,
+    ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind,
+    ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow,
+    ChatMention, ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
+    ChatThreadProjection, ChatThreadReadState, CollectionAdoptionCandidate, CollectionDetails,
+    CollectionListPage, CollectionPendingAdoptionCursor, CollectionPendingAdoptionPage,
+    CollectionQuery, CollectionQueryResult, CollectionRecordDetails,
+    CollectionRelationCleanupCandidate, CompareTextFileVersions, CreateFileThread,
+    CreateNamedVersion, DeleteResult, DeleteTextFile, DispatchClaim, DispatchRecovery, DomainError,
+    InbandBinary, InbandSecret, InbandText, LinkedChatStore, ListMomentsQuery, MentionCursor,
+    MergeTextFileFromVersion, MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow,
+    ProjectedWriteText, RECORD_ID_FRONTMATTER_KEY, RenameResult, RenameTextFile, ResolveDecision,
+    ResolveTextConflict, ResolveTextConflictResult, RollbackTextFileMutation, RunRecordLink,
+    SaveBookmark, SecretComparePage, SecretDelete, SecretFileStat, SecretFileStore,
+    SecretMomentPage, SecretMomentRecord, SecretOp, SecretRestoreResult, SecretWrite,
+    SecretWriteResult, SendMessage, SetFollow, SetReaction, SnapshotContent, SnapshotMetadata,
+    StartChannelThread, TextConflict, TextSnapshot, ThreadDispatchPause, UnreadFileThread,
+    VersionFileChangePage, VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary,
+    WriteResult, WriteText, apply_secret_file_from_version_with, binary_delete_job_id,
+    binary_rename_delete_job_id, binary_rename_write_job_id, binary_rollback_job_identity,
     capture_ingest_binary_with_admission_in_tx, capture_ingest_in_batch_with_admission_in_tx,
     capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_retire_in_tx,
     capture_secret_retire_with, collection_record_id_mismatch_in_tx,
@@ -92,14 +92,14 @@ use dohc_engine_files::{
     materialize_secret_one, probe_projection_target,
 };
 use dohc_engine_storage::{
-    CompoundWrite, Document, EngineStore, FaultAction, FaultInjector, FaultPoint, JobStatus,
-    MaterializationJob, MaterializationJobSpec, MaterializationOperation, NoFaults, Preimage,
-    StorageError, TxnOutcome, WriteOutcome, hex_sha256, put_binary_blob, upsert_projection_job,
+    EngineStore, FaultAction, FaultInjector, FaultPoint, JobStatus, MaterializationJob,
+    MaterializationJobSpec, MaterializationOperation, NoFaults, Preimage, StorageError, TxnOutcome,
+    hex_sha256, put_binary_blob, upsert_projection_job,
 };
 use dohc_engine_sync::{
-    ApplyOutcome, BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse,
-    BlobHaveRequest, BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse,
-    ConflictApplyResult, EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest,
+    ApplyDisposition, ApplyOutcome, BlobDownloadBatchRequest, BlobDownloadBatchResponse,
+    BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse, BlobUploadRequest, ClaimRequest,
+    ClaimResponse, ConflictApplyResult, EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest,
     KeyEnvelopeDownloadResponse, KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest,
     LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest,
     PullResponse, PushRequest, PushResponse, RecoverResponse, RelayCursor, RelayError,
@@ -120,7 +120,6 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::sync_channel as std_sync_channel;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, OwnedPermit};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -188,7 +187,7 @@ pub struct ActiveVersionSwitch {
     pub now_ms: i64,
 }
 
-/// Physical channel capacity: the data bound plus ONE slot reserved at spawn
+/// Physical channel capacity: the data bound plus one slot reserved at spawn
 /// for the `Close` command (see [`WorkspaceActor::close`]). Reserving keeps the
 /// usable data capacity at exactly [`COMMAND_QUEUE_CAPACITY`] while guaranteeing
 /// `Close` always has a home, so shutdown never spins or starves.
@@ -229,27 +228,6 @@ impl LifecycleState {
     }
 }
 
-/// A cheap, comparable snapshot of the store's row counts — enough for
-/// durability/convergence assertions without exposing the connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StoreSnapshot {
-    pub documents: i64,
-    pub journal_entries: i64,
-    pub request_ledger: i64,
-    pub migration_ledger: i64,
-}
-
-/// The outcome of a cancellable multi-unit run ([`ActorHandle::run_units`]).
-/// `committed` is the number of units that reached a durable commit; `cancelled`
-/// reports whether the run stopped early at a between-unit cancellation point.
-/// The store always holds exactly the committed prefix — cancellation never
-/// tears a unit (`PORTING.md` §12).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnitsOutcome {
-    pub committed: usize,
-    pub cancelled: bool,
-}
-
 /// Actor-owned snapshot used to establish one daemon Y.Doc session without
 /// exposing the store connection to the protocol layer.
 #[derive(Debug)]
@@ -267,7 +245,7 @@ pub struct YdocOpenState {
     pub artifact_assets: Vec<ArtifactAssetDescriptor>,
     pub seed_materialization_jobs: Vec<String>,
     /// Record facts the open's deferred drain committed, in drain order. The
-    /// service emits them post-commit (#1002); they never claim automation
+    /// service emits them post-commit; they never claim automation
     /// triggers — drained updates are synced, and ADR 0008 gives the claim to
     /// the origin device alone.
     pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
@@ -303,7 +281,7 @@ pub struct YdocSettlement {
     pub sha256: String,
     /// Whether the file on disk actually received these bytes. `false` means
     /// the settle committed durably (marker, moment, snapshot) but
-    /// materialization was BLOCKED by containment, so the write is pending a
+    /// materialization was blocked by containment, so the write is pending a
     /// retry and the artifact on disk is still the old one. Callers must not
     /// report the document as saved on a `false`.
     pub materialized: bool,
@@ -317,7 +295,7 @@ pub struct YdocSettlement {
 /// deferred drain lands remote content cannot settle — the client's doc is
 /// behind — but the drained updates' record facts are already committed and
 /// their queue rows consumed, so they must cross the mailbox with the
-/// refusal or no path ever emits them (#1002).
+/// refusal or no path ever emits them.
 #[derive(Debug)]
 pub enum YdocSettleOutcome {
     Settled(Box<YdocSettlement>),
@@ -341,7 +319,7 @@ impl YdocSettleOutcome {
     /// adoption, relation cleanup). Those callers settle with
     /// `drain_deferred = false` — they have no event route for drained
     /// record facts — so the remote-updates-pending arm is defensive: it
-    /// restores the refusal rather than silently dropping facts (#1008).
+    /// restores the refusal rather than silently dropping facts.
     fn into_settlement_for_internal_caller(self) -> Result<YdocSettlement, RuntimeError> {
         match self {
             Self::Settled(settlement) => Ok(*settlement),
@@ -357,7 +335,7 @@ impl YdocSettleOutcome {
 
 /// A close's actor-side result: the collab close outcome (`None` when no
 /// lineage existed) plus the record facts the close's deferred drain
-/// committed, which the service emits post-commit (#1002).
+/// committed, which the service emits post-commit.
 #[derive(Debug)]
 pub struct YdocCloseSessionOutcome {
     pub outcome: Option<CloseOutcome>,
@@ -464,15 +442,15 @@ pub enum RelayOperation {
         stream_identity: String,
         created_at_ms: i64,
     },
-    /// Offer this replica's own edits of a RECEIVED file share back to the
-    /// granter, for the granter to accept or decline (#646 PR3). The grant
+    /// Offer this replica's own edits of a received file share back to the
+    /// granter, for the granter to accept or decline. The grant
     /// scopes the files and carries the level the client refuses below `edit`
     /// on.
     SubmitShareProposal {
         workspace_id: String,
         share_id: String,
         granted: dohc_engine_sync::ShareGrant,
-        /// The idempotency key for ONE submit. A repeat with the same id
+        /// The idempotency key for one submit. A repeat with the same id
         /// answers with the proposal the relay already holds and never opens a
         /// second one.
         submit_id: String,
@@ -802,7 +780,7 @@ mod deferred_relay_tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .completed
                 .is_empty(),
-            "MUTATION: omitting Push from the release set retains every consumed batch"
+            "omitting Push from the release set retains every consumed batch"
         );
     }
 
@@ -939,7 +917,7 @@ mod deferred_relay_tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .completed
                 .is_empty(),
-            "MUTATION: retaining a successful all-present inventory holds its request vector"
+            "retaining a successful all-present inventory holds its request vector"
         );
     }
 
@@ -964,7 +942,7 @@ mod deferred_relay_tests {
         );
         assert!(
             transport.take_pending().is_none(),
-            "MUTATION: rebasing the CAS conflict schedules a GET and re-enters cached I/O"
+            "rebasing the CAS conflict schedules a GET and re-enters cached I/O"
         );
     }
 
@@ -1254,7 +1232,7 @@ pub enum RelayOperationOutcome {
 /// What a share view's identity call settled on, including the answer the
 /// journal layer cannot give.
 ///
-/// `NotRequired` lives HERE rather than in `dohc-engine-sync` because it is
+/// `NotRequired` lives here rather than in `dohc-engine-sync` because it is
 /// the LEVEL's answer, and the level is read here: View and Comment never
 /// reach the store at all. Keeping it out of the journal layer means that
 /// function has no variant it can never return.
@@ -1274,6 +1252,13 @@ pub trait SelfWriteRecorder: Send + Sync {
     /// whose materialization conflicted (the file was never replaced, so the
     /// entry must not survive to suppress a genuine capture).
     fn retract(&self, workspace_id: &str, path: &str, sha256: &str);
+}
+
+/// The recorder for callers with no capture layer to suppress: every write is
+/// forgotten.
+impl SelfWriteRecorder for () {
+    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
+    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
 }
 
 /// Capture-owned proof that a filesystem pathname still names the workspace
@@ -1314,1079 +1299,10 @@ enum CaptureIndexing {
     UseSnapshot(Arc<SearchPolicySnapshot>),
 }
 
+type ActorWork = Box<dyn FnOnce(&mut EngineStore, &mut WriterDocCache) + Send>;
+
 enum Command {
-    Write {
-        write: CompoundWrite,
-        faults: Arc<dyn FaultInjector>,
-        reply: oneshot::Sender<Result<WriteOutcome, StorageError>>,
-    },
-    Read {
-        doc_id: String,
-        reply: oneshot::Sender<Result<Option<Document>, StorageError>>,
-    },
-    Snapshot {
-        reply: oneshot::Sender<Result<StoreSnapshot, StorageError>>,
-    },
-    BindShadowClone {
-        token: String,
-        reply: oneshot::Sender<Result<bool, StorageError>>,
-    },
-    /// A long operation: a sequence of bounded units (one compound write each,
-    /// one transaction each). The worker checks `token` BEFORE each unit and
-    /// stops cooperatively at that between-unit boundary.
-    RunUnits {
-        units: Vec<CompoundWrite>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<UnitsOutcome, StorageError>>,
-    },
-    VersionedTextWrite {
-        input: WriteText,
-        root_dir: Option<PathBuf>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<WriteResult, RuntimeError>>,
-    },
-    VersionedBinaryWrite {
-        input: WriteBinary,
-        root_dir: PathBuf,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<BinaryWriteExecutionResult, RuntimeError>>,
-    },
-    VersionedTextRename {
-        input: RenameTextFile,
-        root_dir: PathBuf,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<RenameResult, RuntimeError>>,
-    },
-    VersionedTextDelete {
-        input: DeleteTextFile,
-        root_dir: PathBuf,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<DeleteResult, RuntimeError>>,
-    },
-    VersionedTextRollback {
-        input: RollbackTextFileMutation,
-        root_dir: PathBuf,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<RollbackExecutionResult, RuntimeError>>,
-    },
-    VersionedTextCompare {
-        input: CompareTextFileVersions,
-        reply: oneshot::Sender<Result<VersionedTextComparison, RuntimeError>>,
-    },
-    VersionedTextMerge {
-        input: MergeTextFileFromVersion,
-        root_dir: PathBuf,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<MergeExecutionResult, RuntimeError>>,
-    },
-    CompareVersionFilesPage {
-        workspace_id: String,
-        source_version_id: String,
-        target_version_id: String,
-        after_path: Option<String>,
-        limit: usize,
-        reply: oneshot::Sender<Result<VersionFileChangePage, RuntimeError>>,
-    },
-    CaptureIngest {
-        input: CaptureIngest,
-        indexing: CaptureIndexing,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<WriteResult, RuntimeError>>,
-    },
-    CaptureIngestBatch {
-        inputs: Vec<CaptureIngest>,
-        search_policy: Arc<SearchPolicySnapshot>,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-        root_dir: PathBuf,
-        root_guard: Arc<dyn WorkspaceRootGuard>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError>>,
-    },
-    CaptureIngestBinary {
-        input: CaptureIngestBinary,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<CaptureIngestBinaryResult, RuntimeError>>,
-    },
-    CollectionRecordIdMismatch {
-        workspace_id: String,
-        version_id: String,
-        paths: Vec<String>,
-        reply: oneshot::Sender<Result<bool, RuntimeError>>,
-    },
-    ReconcileCollections {
-        workspace_id: String,
-        version_id: String,
-        root_dir: PathBuf,
-        root_guard: Option<Arc<dyn WorkspaceRootGuard>>,
-        leases: LeaseRegistry,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Vec<String>, RuntimeError>>,
-    },
-    CollectionsList {
-        workspace_id: String,
-        reply: oneshot::Sender<Result<Vec<CollectionSummary>, RuntimeError>>,
-    },
-    CollectionsListPendingAdoptions {
-        workspace_id: String,
-        limit: usize,
-        cursor: Option<CollectionPendingAdoptionCursor>,
-        reply: oneshot::Sender<Result<CollectionPendingAdoptionPage, RuntimeError>>,
-    },
-    CollectionsGet {
-        workspace_id: String,
-        collection_path: String,
-        reply: oneshot::Sender<Result<Option<CollectionDetails>, RuntimeError>>,
-    },
-    CollectionsQueryRecords {
-        workspace_id: String,
-        collection_path: String,
-        query: CollectionQuery,
-        reply: oneshot::Sender<Result<Option<CollectionQueryResult>, RuntimeError>>,
-    },
-    CollectionsGetRecord {
-        workspace_id: String,
-        collection_path: String,
-        record_id: String,
-        history_limit: usize,
-        before_history_id: Option<i64>,
-        reply: oneshot::Sender<Result<Option<CollectionRecordDetails>, RuntimeError>>,
-    },
-    CaptureSecret {
-        // Boxed: the plaintext + key payload should not size every command
-        // slot, and the key must never be duplicated by channel copies.
-        payload: Box<(CaptureSecret, SecretDataKey)>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<SecretWriteResult, RuntimeError>>,
-    },
-    CaptureSecretRetire {
-        input: CaptureSecretRetire,
-        workspace_root: Option<CommandWorkspaceRoot>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Option<SecretMomentRecord>, RuntimeError>>,
-    },
-    SecretStateExists {
-        workspace_id: String,
-        reply: oneshot::Sender<Result<bool, RuntimeError>>,
-    },
-    CaptureRetire {
-        input: CaptureRetire,
-        workspace_root: Option<CommandWorkspaceRoot>,
-        self_writes: Option<Arc<dyn SelfWriteRecorder>>,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<CaptureRetireResult, RuntimeError>>,
-    },
-    VersionedTextRead {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Option<TextSnapshot>, RuntimeError>>,
-    },
-    ResolvePathObject {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        reply: oneshot::Sender<Result<Option<String>, RuntimeError>>,
-    },
-    ListVersions {
-        workspace_id: String,
-        reply: oneshot::Sender<Result<Vec<VersionRecord>, RuntimeError>>,
-    },
-    ListSnapshots {
-        workspace_id: String,
-        version_id: String,
-        reply: oneshot::Sender<Result<Vec<SnapshotView>, RuntimeError>>,
-    },
-    ListSnapshotMetadata {
-        workspace_id: String,
-        version_id: String,
-        after_path: Option<String>,
-        limit: usize,
-        reply: oneshot::Sender<Result<Vec<SnapshotMetadata>, RuntimeError>>,
-    },
-    ListMoments {
-        query: Box<ListMomentsQuery>,
-        reply: oneshot::Sender<Result<MomentPage, RuntimeError>>,
-    },
-    HistoryPage {
-        workspace_id: String,
-        limit: i64,
-        before_moment_order: Option<i64>,
-        protected_probe_limit: usize,
-        reply: oneshot::Sender<Result<HistoryPageRead, RuntimeError>>,
-    },
-    GetMoment {
-        workspace_id: String,
-        moment_id: String,
-        reply: oneshot::Sender<Result<Option<MomentRecord>, RuntimeError>>,
-    },
-    ReadBinary {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        reply: oneshot::Sender<Result<Option<BinaryHead>, RuntimeError>>,
-    },
-    ReadBinaryMeta {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        reply: oneshot::Sender<Result<Option<BinaryHeadMeta>, RuntimeError>>,
-    },
-    ReadBinaryBlob {
-        workspace_id: String,
-        sha256: String,
-        reply: oneshot::Sender<Result<Option<dohc_engine_domain::BinaryBlobRead>, RuntimeError>>,
-    },
-    ReadBinaryBlobForEgress {
-        workspace_id: String,
-        sha256: String,
-        reply: oneshot::Sender<Result<Option<dohc_engine_domain::BinaryBlobRead>, RuntimeError>>,
-    },
-    ReadTextBlob {
-        workspace_id: String,
-        sha256: String,
-        reply: oneshot::Sender<Result<Option<dohc_engine_domain::TextBlobRead>, RuntimeError>>,
-    },
-    ReadTextBlobForEgress {
-        workspace_id: String,
-        sha256: String,
-        reply: oneshot::Sender<Result<Option<dohc_engine_domain::TextBlobRead>, RuntimeError>>,
-    },
-    ReadTextInband {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        cap: usize,
-        reply: oneshot::Sender<Result<Option<InbandText>, RuntimeError>>,
-    },
-    ReadBinaryInband {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        cap: usize,
-        reply: oneshot::Sender<Result<Option<InbandBinary>, RuntimeError>>,
-    },
-    MaterializeSecretInband {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        key: Box<SecretDataKey>,
-        cap: usize,
-        reply: oneshot::Sender<Result<Option<InbandSecret>, RuntimeError>>,
-    },
-    WriteSecretFile {
-        input: Box<SecretWrite>,
-        key: Box<SecretDataKey>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<SecretWriteResult, RuntimeError>>,
-    },
-    DeleteSecretFile {
-        input: SecretDelete,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Option<SecretMomentRecord>, RuntimeError>>,
-    },
-    ForkSecretVersion {
-        workspace_id: String,
-        from_version_id: String,
-        to_version_id: String,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
-    },
-    ListSecretMoments {
-        workspace_id: String,
-        version_id: Option<String>,
-        path: Option<String>,
-        before_moment_order: Option<i64>,
-        limit: usize,
-        reply: oneshot::Sender<Result<SecretMomentPage, RuntimeError>>,
-    },
-    GetSecretMoment {
-        workspace_id: String,
-        moment_id: String,
-        reply: oneshot::Sender<Result<Option<SecretMomentRecord>, RuntimeError>>,
-    },
-    CompareSecretFiles {
-        workspace_id: String,
-        source_version_id: String,
-        target_version_id: String,
-        after_path: Option<String>,
-        limit: usize,
-        key: Option<Box<SecretDataKey>>,
-        reply: oneshot::Sender<Result<SecretComparePage, RuntimeError>>,
-    },
-    ApplySecretFile {
-        workspace_id: String,
-        path: String,
-        from_version_id: String,
-        to_version_id: String,
-        moment_id: String,
-        metadata_origin: String,
-        metadata_summary: Option<String>,
-        metadata_correlation_id: Option<String>,
-        now_ms: i64,
-        key: Box<SecretDataKey>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<SecretWriteResult, RuntimeError>>,
-    },
-    RestoreSecretFile {
-        workspace_id: String,
-        path: String,
-        before_moment_id: String,
-        moment_id: String,
-        metadata_origin: String,
-        metadata_summary: Option<String>,
-        metadata_correlation_id: Option<String>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<SecretRestoreResult, RuntimeError>>,
-    },
-    ListSecretFiles {
-        workspace_id: String,
-        version_id: String,
-        reply: oneshot::Sender<Result<Vec<SecretFileStat>, RuntimeError>>,
-    },
-    SecretFileLen {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        reply: oneshot::Sender<Result<Option<i64>, RuntimeError>>,
-    },
-    ListSecretFilesPage {
-        workspace_id: String,
-        version_id: String,
-        after_path: Option<String>,
-        limit: usize,
-        reply: oneshot::Sender<Result<Vec<SecretFileStat>, RuntimeError>>,
-    },
-    MaterializeSecret {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        key: Box<SecretDataKey>,
-        reply: oneshot::Sender<Result<Option<String>, RuntimeError>>,
-    },
-    ActiveVersionId {
-        workspace_id: String,
-        reply: oneshot::Sender<Result<String, RuntimeError>>,
-    },
-    ActiveVersion {
-        workspace_id: String,
-        reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
-    },
-    EnsureMainVersion {
-        workspace_id: String,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
-    },
-    SetActiveVersion {
-        input: ActiveVersionSwitch,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
-    },
-    CreateNamedVersion {
-        input: CreateNamedVersion,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
-    },
-    PreflightCreateNamedVersion {
-        input: CreateNamedVersion,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Option<VersionRecord>, RuntimeError>>,
-    },
-    CaptureManifestSeed {
-        workspace_id: String,
-        version_id: String,
-        reply: oneshot::Sender<Result<Vec<CaptureManifestSeedEntry>, RuntimeError>>,
-    },
-    YdocOpenState {
-        workspace_id: String,
-        now_ms: i64,
-        drain_deferred: bool,
-        expected_key: Option<DocKey>,
-        version_id: String,
-        path: String,
-        content_kind: Option<ContentKind>,
-        seed_from_artifact: bool,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<YdocOpenState, RuntimeError>>,
-    },
-    YdocVersionUnsettledContentKind {
-        workspace_id: String,
-        version_id: String,
-        ignored_object_ids: Vec<String>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Option<ContentKind>, RuntimeError>>,
-    },
-    YdocMaterializeSceneSeedAssets {
-        root_dir: PathBuf,
-        workspace_id: String,
-        job_ids: Vec<String>,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        now_ms: i64,
-        reply: oneshot::Sender<Result<YdocSeedMaterialization, RuntimeError>>,
-    },
-    YdocRecordUpdate {
-        key: DocKey,
-        path: String,
-        content_kind: ContentKind,
-        regime: Regime,
-        update: Vec<u8>,
-        request_id: Option<String>,
-        actor_origin_id: Option<String>,
-        attribution: Option<ChangeAttribution>,
-        expected_lineage_claim_id: Option<String>,
-        require_empty_lineage: bool,
-        seed_source_sha256: Option<String>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<YdocAppend, RuntimeError>>,
-    },
-    YdocSettle {
-        root_dir: PathBuf,
-        key: DocKey,
-        path: String,
-        content_kind: ContentKind,
-        expected_lineage_claim_id: Option<String>,
-        expected_head_sha: Option<String>,
-        session_id: String,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<YdocSettleOutcome, RuntimeError>>,
-    },
-    YdocResync {
-        key: DocKey,
-        expected_lineage_claim_id: Option<String>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<YdocResyncState, RuntimeError>>,
-    },
-    /// Test evidence seam: observe the actor-local writer cache without
-    /// exposing it through the product protocol.
-    YdocCacheStatsForTest { reply: oneshot::Sender<CacheStats> },
-    /// Test evidence seam: force the next consumer down the cold path.
-    YdocCacheClearForTest { reply: oneshot::Sender<CacheStats> },
-    YdocCloseSession {
-        key: DocKey,
-        materialization: Option<YdocCloseMaterialization>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<YdocCloseSessionOutcome, RuntimeError>>,
-    },
-    RepairConflictedYdocRecoveries {
-        workspace_id: String,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<
-            Result<Vec<dohc_engine_sync::YdocRecoveryMaterialization>, RuntimeError>,
-        >,
-    },
-    MaterializeReplayPending {
-        root_dir: PathBuf,
-        workspace_id: String,
-        now_ms: i64,
-        reply: oneshot::Sender<Result<usize, RuntimeError>>,
-    },
-    MaterializeReplayPendingForFence {
-        root_dir: PathBuf,
-        workspace_id: String,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        now_ms: i64,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
-    },
-    MaterializeReplaySelectedForFence {
-        root_dir: PathBuf,
-        workspace_id: String,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        materialization_job_ids: Vec<String>,
-        now_ms: i64,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
-    },
-    ConflictList {
-        workspace_id: String,
-        status: Option<String>,
-        after_conflict_id: Option<String>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Vec<TextConflict>, RuntimeError>>,
-    },
-    ConflictOpen {
-        conflict: Box<TextConflict>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<bool, RuntimeError>>,
-    },
-    ConflictResolve {
-        input: ResolveTextConflict,
-        leases: LeaseRegistry,
-        root_dir: Option<PathBuf>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ResolveTextConflictResult, RuntimeError>>,
-    },
-    ConflictApplyReplicated {
-        envelope: ReplicationEnvelope,
-        faults: Arc<dyn FaultInjector>,
-        leases: LeaseRegistry,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ApplyOutcome<ConflictApplyResult>, RuntimeError>>,
-    },
-    Search {
-        root_dir: PathBuf,
-        workspace_id: String,
-        version_id: String,
-        query: String,
-        limit: Option<i64>,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Vec<SearchResult>, RuntimeError>>,
-    },
-    SearchPage {
-        root_dir: PathBuf,
-        workspace_id: String,
-        version_id: String,
-        query: String,
-        limit: Option<i64>,
-        now_ms: i64,
-        expected_generation: Option<u64>,
-        after: Option<SearchResultKey>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<SearchPageBatch, RuntimeError>>,
-    },
-    SearchQueryChatMessagesGranular {
-        workspace_id: String,
-        query: String,
-        limit: i64,
-        materialized_byte_budget: usize,
-        reply: oneshot::Sender<Result<GranularChatMessageSearchBatch, RuntimeError>>,
-    },
-    EnsureSearchIndex {
-        root_dir: PathBuf,
-        workspace_id: String,
-        version_id: String,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
-    },
-    ChatChannelCreate {
-        workspace_id: String,
-        channel_id: String,
-        name: String,
-        kind: ChatChannelKind,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatChannel, RuntimeError>>,
-    },
-    ChatChannelEnsureGeneral {
-        workspace_id: String,
-        channel_id: String,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatChannel, RuntimeError>>,
-    },
-    ChatChannelEnsureAgent {
-        workspace_id: String,
-        channel_id: String,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatChannel, RuntimeError>>,
-    },
-    ChatChannelsList {
-        workspace_id: String,
-        reply: oneshot::Sender<Result<Vec<ChatChannelSummary>, RuntimeError>>,
-    },
-    ChatChannelFindBySlug {
-        workspace_id: String,
-        slug: String,
-        reply: oneshot::Sender<Result<Option<ChatChannel>, RuntimeError>>,
-    },
-    ChatChannelGetWireId {
-        workspace_id: String,
-        channel_id: String,
-        reply: oneshot::Sender<Result<Option<String>, RuntimeError>>,
-    },
-    ChatThreadStart {
-        input: Box<StartChannelThread>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<(ChatThread, ChatMessage), RuntimeError>>,
-    },
-    ChatThreadCreate {
-        input: Box<CreateFileThread>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatThread, RuntimeError>>,
-    },
-    ChatThreadsList {
-        workspace_id: String,
-        reply: oneshot::Sender<Result<Vec<ChatThread>, RuntimeError>>,
-    },
-    ChatThreadsListForFile {
-        workspace_id: String,
-        object_id: String,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<ChatThread>, RuntimeError>>,
-    },
-    ChatThreadsListForChannel {
-        workspace_id: String,
-        channel_id: String,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<ChannelThreadSummary>, RuntimeError>>,
-    },
-    ChatThreadFindChannelId {
-        workspace_id: String,
-        thread_id: String,
-        reply: oneshot::Sender<Result<Option<String>, RuntimeError>>,
-    },
-    ChatThreadGetProjection {
-        workspace_id: String,
-        thread_id: String,
-        linked_file_access: ChatProjectionFileAccess,
-        reply: oneshot::Sender<Result<ChatThreadProjection, RuntimeError>>,
-    },
-    ChatAttachmentsListForThread {
-        workspace_id: String,
-        thread_id: String,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<ChatAttachment>, RuntimeError>>,
-    },
-    ChatAttachmentsListFileMentions {
-        workspace_id: String,
-        object_id: Option<String>,
-        path_hint: Option<String>,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<ChatFileMention>, RuntimeError>>,
-    },
-    ChatMentionsBackfill {
-        workspace_id: String,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<i64, RuntimeError>>,
-    },
-    ChatMentionsListForHandle {
-        workspace_id: String,
-        handle: String,
-        unread_only: bool,
-        after: Option<MentionCursor>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<ChatMention>, RuntimeError>>,
-    },
-    ChatDispatchRecordEligibleTriggers {
-        workspace_id: String,
-        verified_user_id: Option<String>,
-        at_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<i64, RuntimeError>>,
-    },
-    ChatMessageSend {
-        input: Box<SendMessage>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatMessage, RuntimeError>>,
-    },
-    ChatDecisionResolve {
-        input: Box<ResolveDecision>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatDecision, RuntimeError>>,
-    },
-    ChatDecisionsList {
-        workspace_id: String,
-        thread_id: String,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<ChatDecision>, RuntimeError>>,
-    },
-    ChatReactionSet {
-        input: Box<SetReaction>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatReaction, RuntimeError>>,
-    },
-    ChatReactionsList {
-        workspace_id: String,
-        thread_id: String,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<ChatReaction>, RuntimeError>>,
-    },
-    ChatMessagesList {
-        workspace_id: String,
-        thread_id: String,
-        limit: i64,
-        after_message_order: Option<i64>,
-        reply: oneshot::Sender<Result<ChatMessagePage, RuntimeError>>,
-    },
-    ChatThreadRevision {
-        workspace_id: String,
-        thread_id: String,
-        reply: oneshot::Sender<Result<i64, RuntimeError>>,
-    },
-    ChatReadStateMarkThreadRead {
-        workspace_id: String,
-        thread_id: String,
-        up_to_sequence: i64,
-        expected_revision: Option<i64>,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatThreadReadState, RuntimeError>>,
-    },
-    ChatReadStateGet {
-        workspace_id: String,
-        thread_id: String,
-        reply: oneshot::Sender<Result<ChatThreadReadState, RuntimeError>>,
-    },
-    ChatReadStateListUnreadFileThreads {
-        workspace_id: String,
-        after_thread_id: Option<String>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<UnreadFileThread>, RuntimeError>>,
-    },
-    ChatAgentUnreadThreads {
-        workspace_id: String,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<AgentUnreadThreadRow>, RuntimeError>>,
-    },
-    ChatAgentMarkThreadRead {
-        workspace_id: String,
-        thread_id: String,
-        up_to_created_at_ms: i64,
-        up_to_message_id: String,
-        expected_revision: Option<i64>,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatAgentReadState, RuntimeError>>,
-    },
-    ChatFollowSet {
-        input: Box<SetFollow>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatFollow, RuntimeError>>,
-    },
-    ChatFollowsList {
-        workspace_id: String,
-        owner_user_id: String,
-        state: Option<String>,
-        reply: oneshot::Sender<Result<Vec<ChatFollow>, RuntimeError>>,
-    },
-    ChatFollowsEnsureDefaults {
-        workspace_id: String,
-        owner_user_id: String,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
-    },
-    ChatBookmarkFind {
-        workspace_id: String,
-        owner_user_id: String,
-        bookmark_id: String,
-        reply: oneshot::Sender<Result<Option<ChatBookmark>, RuntimeError>>,
-    },
-    ChatBookmarksListPending {
-        workspace_id: String,
-        owner_user_id: String,
-        limit: i64,
-        after: Option<(i64, String)>,
-        reply: oneshot::Sender<Result<Vec<PendingBookmarkRow>, RuntimeError>>,
-    },
-    ChatFeedMarkSeen {
-        workspace_id: String,
-        owner_user_id: String,
-        replication_owner_user_id: Option<String>,
-        head_cursor: String,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatFeedReadState, RuntimeError>>,
-    },
-    ChatFeedListPersonal {
-        workspace_id: String,
-        owner_user_id: String,
-        limit: Option<i64>,
-        cursor: Option<String>,
-        reply: oneshot::Sender<Result<ChatFeedPage, RuntimeError>>,
-    },
-    ChatBookmarkSave {
-        input: Box<SaveBookmark>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatBookmark, RuntimeError>>,
-    },
-    ChatBookmarksList {
-        workspace_id: String,
-        owner_user_id: String,
-        state: Option<String>,
-        reply: oneshot::Sender<Result<Vec<ChatBookmark>, RuntimeError>>,
-    },
-    ChatBookmarkMarkReady {
-        workspace_id: String,
-        owner_user_id: String,
-        bookmark_id: String,
-        generation: i64,
-        projected_at_ms: i64,
-        projection_object_id: Option<String>,
-        projection_path: Option<String>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatBookmarkTransition, RuntimeError>>,
-    },
-    ChatBookmarkArchive {
-        workspace_id: String,
-        owner_user_id: String,
-        bookmark_id: String,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatBookmark, RuntimeError>>,
-    },
-    ChatBookmarkMarkPending {
-        workspace_id: String,
-        owner_user_id: String,
-        bookmark_id: String,
-        request_id: String,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatBookmark, RuntimeError>>,
-    },
-    ChatBookmarkMarkFailed {
-        workspace_id: String,
-        owner_user_id: String,
-        bookmark_id: String,
-        generation: i64,
-        failure_reason: String,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatBookmarkTransition, RuntimeError>>,
-    },
-    ChatBookmarkMarkStale {
-        workspace_id: String,
-        owner_user_id: String,
-        bookmark_id: String,
-        generation: i64,
-        failure_reason: Option<String>,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatBookmarkTransition, RuntimeError>>,
-    },
-    ChatDispatchEnqueue {
-        workspace_id: String,
-        trigger_message_id: String,
-        thread_id: String,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<bool, RuntimeError>>,
-    },
-    ChatDispatchClaimNextPending {
-        workspace_id: String,
-        run_id: String,
-        command: String,
-        log_path: Option<String>,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Option<DispatchClaim>, RuntimeError>>,
-    },
-    ChatDispatchListPending {
-        workspace_id: String,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<dohc_engine_domain::DispatchRecord>, RuntimeError>>,
-    },
-    ChatDispatchOpenRuns {
-        workspace_id: String,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<DispatchClaim>, RuntimeError>>,
-    },
-    ChatDispatchListRunMessages {
-        workspace_id: String,
-        run_id: String,
-        after_message_id: Option<String>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<String>, RuntimeError>>,
-    },
-    ChatDispatchRunIdForMessage {
-        workspace_id: String,
-        message_id: String,
-        reply: oneshot::Sender<Result<Option<String>, RuntimeError>>,
-    },
-    ChatDispatchRunRecordsForThread {
-        workspace_id: String,
-        thread_id: String,
-        run_limit: Option<i64>,
-        after: Option<(i64, String, String)>,
-        page_limit: i64,
-        reply: oneshot::Sender<Result<Vec<RunRecordLink>, RuntimeError>>,
-    },
-    ChatDispatchGetRunRecord {
-        workspace_id: String,
-        run_id: String,
-        reply: oneshot::Sender<Result<Option<AgentRunRecord>, RuntimeError>>,
-    },
-    ChatDispatchThreadPaused {
-        workspace_id: String,
-        thread_id: String,
-        reply: oneshot::Sender<Result<bool, RuntimeError>>,
-    },
-    ChatDispatchGetThreadPauseState {
-        workspace_id: String,
-        thread_id: String,
-        reply: oneshot::Sender<Result<Option<ThreadDispatchPause>, RuntimeError>>,
-    },
-    ChatDispatchRecentCount {
-        workspace_id: String,
-        thread_id: String,
-        since_ms: f64,
-        reply: oneshot::Sender<Result<i64, RuntimeError>>,
-    },
-    ChatDispatchFailPendingForThread {
-        workspace_id: String,
-        thread_id: String,
-        reason: String,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<i64, RuntimeError>>,
-    },
-    ChatDispatchRecordRunMessage {
-        workspace_id: String,
-        message_id: String,
-        run_id: String,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<bool, RuntimeError>>,
-    },
-    ChatDispatchSetThreadPaused {
-        workspace_id: String,
-        thread_id: String,
-        paused: bool,
-        reason: Option<String>,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ThreadDispatchPause, RuntimeError>>,
-    },
-    ChatDispatchMarkFailureNotePosted {
-        workspace_id: String,
-        run_id: String,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<AgentRunRecord, RuntimeError>>,
-    },
-    ChatDispatchRequeueFailedTrigger {
-        workspace_id: String,
-        trigger_message_id: String,
-        run_id: String,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<bool, RuntimeError>>,
-    },
-    ChatDispatchListAppQuitRecoveries {
-        workspace_id: String,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<DispatchRecovery>, RuntimeError>>,
-    },
-    ChatDispatchComplete {
-        workspace_id: String,
-        run_id: String,
-        exit_code: i64,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
-    },
-    ChatDispatchFail {
-        workspace_id: String,
-        run_id: String,
-        reason: String,
-        exit_code: Option<i64>,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
-    },
-    ChatDispatchReclaimRunning {
-        workspace_id: String,
-        max_attempts: i64,
-        now_ms: i64,
-        reply: oneshot::Sender<Result<Vec<String>, RuntimeError>>,
-    },
-    AutomationSubscribe {
-        workspace_id: String,
-        automation_id: String,
-        prefix: String,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<bool, RuntimeError>>,
-    },
-    AutomationUnsubscribe {
-        workspace_id: String,
-        automation_id: String,
-        prefix: String,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<bool, RuntimeError>>,
-    },
-    AutomationClaimNext {
-        workspace_id: String,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Option<AutomationClaim>, RuntimeError>>,
-    },
-    AutomationSettle {
-        workspace_id: String,
-        claim_id: String,
-        settle: AutomationSettle,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<AutomationClaim, RuntimeError>>,
-    },
-    AutomationReclaimRunning {
-        workspace_id: String,
-        max_attempts: i64,
-        stale_before_ms: i64,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Vec<AutomationClaim>, RuntimeError>>,
-    },
-    AutomationFailures {
-        workspace_id: String,
-        reply: oneshot::Sender<Result<Vec<AutomationFailure>, RuntimeError>>,
-    },
-    Relay {
-        transport: DeferredRelayTransport,
-        operation: RelayOperation,
-        leases: LeaseRegistry,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<RelayOperationOutcome, RuntimeError>>,
-    },
+    Run(ActorWork),
     /// Break the loop and release the connection. Carries no reply: the caller
     /// joins the worker, and the join is the completion signal (so `close`
     /// needs no `blocking_recv`, staying safe to call from a `Drop` that runs
@@ -2525,7 +1441,7 @@ impl WorkspaceActor {
     /// the worker drains and exits. From an async runtime that briefly parks the
     /// executor thread; a future `close_async` could yield instead (noted for a
     /// later shard). A worker wedged inside a fault gate must be released by the
-    /// caller before close (same contract as CAL-1).
+    /// caller before close (same contract as the storage writer).
     pub fn close(&mut self) -> Result<(), RuntimeError> {
         let Some(worker) = self.worker.take() else {
             return Ok(());
@@ -2567,6 +1483,42 @@ pub struct ActorHandle {
 }
 
 impl ActorHandle {
+    async fn run<R: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut EngineStore, &mut WriterDocCache) -> Result<R, RuntimeError>
+        + Send
+        + 'static,
+    ) -> Result<R, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::Run(Box::new(move |store, cache| {
+                let outcome = work(store, cache);
+                let _ = reply.send(outcome);
+            })))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    fn run_blocking<R: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut EngineStore, &mut WriterDocCache) -> Result<R, RuntimeError>
+        + Send
+        + 'static,
+    ) -> Result<R, RuntimeError> {
+        debug_assert_sync_context();
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::Run(Box::new(move |store, cache| {
+                let outcome = work(store, cache);
+                let _ = reply.send(outcome);
+            })))
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// The canonical identity of the actor this handle addresses.
     pub fn identity(&self) -> &EngineDbIdentity {
         &self.identity
@@ -2577,82 +1529,7 @@ impl ActorHandle {
         LifecycleState::from_u8(self.state.load(Ordering::Acquire))
     }
 
-    // --- Synchronous API (CAL-1 call sites; must be used OUTSIDE a runtime) ---
-
-    /// Issue a compound write through the actor's single writer, blocking the
-    /// calling thread for the result. For synchronous callers that are not on a
-    /// tokio runtime; the async loop is unaffected.
-    pub fn write(
-        &self,
-        write: CompoundWrite,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<WriteOutcome, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::Write {
-                write,
-                faults,
-                reply,
-            })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
-            .map_err(RuntimeError::Storage)
-    }
-
-    /// Enqueue a compound write WITHOUT waiting for its result, failing fast
-    /// with [`RuntimeError::Overloaded`] if the bounded queue is full. This is
-    /// the observable-backpressure path (the protocol's `OVERLOADED`). The
-    /// result is not delivered to the caller.
-    pub fn try_submit_write(
-        &self,
-        write: CompoundWrite,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<(), RuntimeError> {
-        // A single-slot reply channel is created and immediately dropped; the
-        // worker's later `reply.send` fails harmlessly.
-        let (reply, _reply_rx) = oneshot::channel();
-        match self.tx.try_send(Command::Write {
-            write,
-            faults,
-            reply,
-        }) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(RuntimeError::Overloaded),
-            Err(TrySendError::Closed(_)) => Err(RuntimeError::ActorUnavailable),
-        }
-    }
-
-    /// Read a document by id, blocking the calling thread.
-    pub fn read(&self, doc_id: &str) -> Result<Option<Document>, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::Read {
-                doc_id: doc_id.to_owned(),
-                reply,
-            })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
-            .map_err(RuntimeError::Storage)
-    }
-
-    /// Snapshot the store's row counts, blocking the calling thread.
-    pub fn snapshot(&self) -> Result<StoreSnapshot, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::Snapshot { reply })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
-            .map_err(RuntimeError::Storage)
-    }
+    // --- Synchronous API (must be used outside a runtime) ---
 
     /// Capture a text file on the actor's writer, blocking the calling thread.
     pub fn capture_ingest_blocking(
@@ -2692,23 +1569,20 @@ impl ActorHandle {
         root_dir: PathBuf,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::CaptureIngestBatch {
-                inputs,
-                search_policy,
-                leases,
-                faults,
-                root_dir,
-                root_guard,
-                token: CancellationToken::new(),
-                reply,
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_ingest_batch_on_store(
+                    store,
+                    &inputs,
+                    &search_policy,
+                    &leases,
+                    faults.as_ref(),
+                    &token,
+                    (&root_dir, root_guard.as_ref()),
+                )
             })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+        })
     }
 
     fn capture_ingest_blocking_with_indexing(
@@ -2718,21 +1592,12 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::CaptureIngest {
-                input,
-                indexing,
-                leases,
-                faults,
-                token: CancellationToken::new(),
-                reply,
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_ingest_on_store(store, &input, &indexing, &leases, faults.as_ref(), &token)
             })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+        })
     }
 
     /// Capture a binary file on the actor's writer, blocking the caller.
@@ -2742,20 +1607,12 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::CaptureIngestBinary {
-                input,
-                leases,
-                faults,
-                token: CancellationToken::new(),
-                reply,
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_ingest_binary_on_store(store, &input, &leases, faults.as_ref(), &token)
             })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+        })
     }
 
     /// Check changed collection records against their durable id bindings,
@@ -2766,42 +1623,13 @@ impl ActorHandle {
         version_id: String,
         paths: Vec<String>,
     ) -> Result<bool, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::CollectionRecordIdMismatch {
-                workspace_id,
-                version_id,
-                paths,
-                reply,
-            })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn reconcile_collections_blocking(
-        &self,
-        workspace_id: String,
-        version_id: String,
-        root_dir: PathBuf,
-        leases: LeaseRegistry,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<Vec<String>, RuntimeError> {
-        self.reconcile_collections_blocking_with_guard(
-            workspace_id,
-            version_id,
-            root_dir,
-            leases,
-            self_writes,
-            now_ms,
-            faults,
-            None,
-        )
+        self.run_blocking(move |store, _| {
+            store
+                .read_with(|conn| {
+                    collection_record_id_mismatch_in_tx(conn, &workspace_id, &version_id, &paths)
+                })
+                .map_err(RuntimeError::from)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2816,49 +1644,23 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Vec<String>, RuntimeError> {
-        self.reconcile_collections_blocking_with_guard(
-            workspace_id,
-            version_id,
-            root_dir,
-            leases,
-            self_writes,
-            now_ms,
-            faults,
-            Some(root_guard),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn reconcile_collections_blocking_with_guard(
-        &self,
-        workspace_id: String,
-        version_id: String,
-        root_dir: PathBuf,
-        leases: LeaseRegistry,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        root_guard: Option<Arc<dyn WorkspaceRootGuard>>,
-    ) -> Result<Vec<String>, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::ReconcileCollections {
-                workspace_id,
-                version_id,
-                root_dir,
-                root_guard,
-                leases,
-                self_writes,
+        let root_guard: Option<Arc<dyn WorkspaceRootGuard>> = Some(root_guard);
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, cache| {
+            reconcile_collections_on_store(
+                store,
+                cache,
+                &workspace_id,
+                &version_id,
+                &root_dir,
+                root_guard.as_deref(),
+                &leases,
+                self_writes.as_ref(),
                 now_ms,
-                faults,
-                token: CancellationToken::new(),
-                reply,
-            })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+                faults.as_ref(),
+                &token,
+            )
+        })
     }
 
     /// Capture a secret file on the actor's writer, blocking the caller. The
@@ -2870,31 +1672,14 @@ impl ActorHandle {
         key: SecretDataKey,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<SecretWriteResult, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::CaptureSecret {
-                payload: Box::new((input, key)),
-                faults,
-                token: CancellationToken::new(),
-                reply,
-            })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, _cache| {
+            capture_secret_on_store(store, &input, &key, faults.as_ref(), &token)
+        })
     }
 
     /// Retire a captured secret path on the actor's writer, blocking the
     /// caller. Keyless: a delete never decrypts.
-    pub fn capture_secret_retire_blocking(
-        &self,
-        input: CaptureSecretRetire,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        self.capture_secret_retire_blocking_with_guard(input, faults, None)
-    }
-
     pub fn capture_secret_retire_blocking_guarded(
         &self,
         input: CaptureSecretRetire,
@@ -2902,64 +1687,39 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        self.capture_secret_retire_blocking_with_guard(input, faults, Some((root_dir, root_guard)))
+        let workspace_root: Option<CommandWorkspaceRoot> = Some((root_dir, Some(root_guard)));
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, _cache| {
+            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
+            capture_secret_retire_on_store(
+                store,
+                &input,
+                root_dir,
+                root_guard,
+                faults.as_ref(),
+                &token,
+            )
+        })
     }
 
-    fn capture_secret_retire_blocking_with_guard(
-        &self,
-        input: CaptureSecretRetire,
-        faults: Arc<dyn FaultInjector>,
-        guarded_root: Option<(PathBuf, Arc<dyn WorkspaceRootGuard>)>,
-    ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        let workspace_root =
-            guarded_root.map(|(root_dir, root_guard)| (root_dir, Some(root_guard)));
-        self.tx
-            .blocking_send(Command::CaptureSecretRetire {
-                input,
-                workspace_root,
-                faults,
-                token: CancellationToken::new(),
-                reply,
-            })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
-    }
-
-    /// Whether the workspace holds ANY encrypted secret state — the async
+    /// Whether the workspace holds any encrypted secret state — the async
     /// variant for RPC handlers (a missing key file over live secret rows
     /// must fail closed, never read as "no secrets").
     pub async fn secret_state_exists(&self, workspace_id: String) -> Result<bool, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::SecretStateExists {
-                workspace_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            has_secret_state(store, &workspace_id).map_err(RuntimeError::from)
+        })
+        .await
     }
 
-    /// Whether the workspace holds ANY encrypted secret state. The capture
-    /// layer consults this before ever MINTING a data key: a missing key file
+    /// Whether the workspace holds any encrypted secret state. The capture
+    /// layer consults this before ever minting a data key: a missing key file
     /// over live secret rows must fail closed, never silently strand the
     /// history under a fresh key.
     pub fn secret_state_exists_blocking(&self, workspace_id: String) -> Result<bool, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::SecretStateExists {
-                workspace_id,
-                reply,
-            })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run_blocking(move |store, _cache| {
+            has_secret_state(store, &workspace_id).map_err(RuntimeError::from)
+        })
     }
 
     /// Retire a captured path on the actor's writer, blocking the caller.
@@ -2969,44 +1729,26 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<CaptureRetireResult, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::CaptureRetire {
-                input,
-                workspace_root: None,
-                self_writes: None,
-                leases,
-                faults,
-                token: CancellationToken::new(),
-                reply,
+        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_retire_on_store(
+                    store,
+                    &input,
+                    None,
+                    None,
+                    self_writes.as_deref(),
+                    &leases,
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+        })
     }
 
     /// Retire a captured path and immediately apply any durable disk cleanup
     /// that the mutation creates.
-    pub fn capture_retire_materialized_blocking(
-        &self,
-        input: CaptureRetire,
-        root_dir: PathBuf,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<CaptureRetireResult, RuntimeError> {
-        self.capture_retire_materialized_blocking_with_guard(
-            input,
-            root_dir,
-            self_writes,
-            leases,
-            faults,
-            None,
-        )
-    }
-
     pub fn capture_retire_materialized_blocking_guarded(
         &self,
         input: CaptureRetire,
@@ -3016,95 +1758,42 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<CaptureRetireResult, RuntimeError> {
-        self.capture_retire_materialized_blocking_with_guard(
-            input,
-            root_dir,
-            self_writes,
-            leases,
-            faults,
-            Some(root_guard),
-        )
-    }
-
-    fn capture_retire_materialized_blocking_with_guard(
-        &self,
-        input: CaptureRetire,
-        root_dir: PathBuf,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-        root_guard: Option<Arc<dyn WorkspaceRootGuard>>,
-    ) -> Result<CaptureRetireResult, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::CaptureRetire {
-                input,
-                workspace_root: Some((root_dir, root_guard)),
-                self_writes: Some(self_writes),
-                leases,
-                faults,
-                token: CancellationToken::new(),
-                reply,
+        let workspace_root: Option<CommandWorkspaceRoot> = Some((root_dir, Some(root_guard)));
+        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = Some(self_writes);
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, cache| {
+            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_retire_on_store(
+                    store,
+                    &input,
+                    root_dir,
+                    root_guard,
+                    self_writes.as_deref(),
+                    &leases,
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+        })
     }
 
     // --- Async API (drives the tokio loop from within a runtime) ---
 
-    /// Async compound write. Awaits queue space (bounded backpressure) and the
-    /// worker's reply.
-    pub async fn write_async(
+    /// Stamp a fresh database with its root's binding token, or verify an
+    /// existing binding, on the actor-owned connection before the workspace
+    /// can accept writes.
+    pub async fn bind_root(
         &self,
-        write: CompoundWrite,
+        token: String,
         faults: Arc<dyn FaultInjector>,
-    ) -> Result<WriteOutcome, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::Write {
-                write,
-                faults,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?
-            .map_err(RuntimeError::Storage)
-    }
-
-    /// Async read.
-    pub async fn read_async(&self, doc_id: &str) -> Result<Option<Document>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::Read {
-                doc_id: doc_id.to_owned(),
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?
-            .map_err(RuntimeError::Storage)
-    }
-
-    /// Stamp a fresh shadow database or verify an existing shadow binding on
-    /// the actor-owned connection before the workspace can accept writes.
-    pub async fn bind_shadow_clone(&self, token: String) -> Result<bool, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::BindShadowClone { token, reply })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?
-            .map_err(RuntimeError::Storage)
+    ) -> Result<bool, RuntimeError> {
+        self.run(move |store, _| {
+            store
+                .bind_root_token(&token, faults.as_ref())
+                .map_err(RuntimeError::Storage)
+        })
+        .await
     }
 
     /// Execute a versioned-text write on the actor's single writer thread.
@@ -3114,18 +1803,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedTextWrite {
-                input,
-                root_dir: None,
-                faults,
-                token,
-                reply,
+        let root_dir: Option<PathBuf> = None;
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_text_write_on_store(
+                    store,
+                    &input,
+                    root_dir.as_deref(),
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     /// Execute an RPC text write with its FTS row in the same transaction.
@@ -3136,18 +1826,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedTextWrite {
-                input,
-                root_dir: Some(root_dir),
-                faults,
-                token,
-                reply,
+        let root_dir: Option<PathBuf> = Some(root_dir);
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_text_write_on_store(
+                    store,
+                    &input,
+                    root_dir.as_deref(),
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     /// Execute, index, and materialize a caller-originated binary write on the
@@ -3160,19 +1851,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<BinaryWriteExecutionResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedBinaryWrite {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_binary_write_on_store(
+                    store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     pub async fn versioned_text_rename(
@@ -3183,19 +1874,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<RenameResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedTextRename {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_text_rename_on_store(
+                    store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     pub async fn versioned_text_delete(
@@ -3206,19 +1897,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<DeleteResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedTextDelete {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_text_delete_on_store(
+                    store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     pub async fn versioned_text_rollback(
@@ -3229,31 +1920,31 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<RollbackExecutionResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedTextRollback {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_text_rollback_on_store(
+                    store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     pub async fn versioned_text_compare(
         &self,
         input: CompareTextFileVersions,
     ) -> Result<VersionedTextComparison, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedTextCompare { input, reply })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .compare_text_file_versions(&input)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn versioned_text_merge(
@@ -3264,19 +1955,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<MergeExecutionResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedTextMerge {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_text_merge_on_store(
+                    store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     pub async fn compare_version_files_page(
@@ -3287,19 +1978,18 @@ impl ActorHandle {
         after_path: Option<String>,
         limit: usize,
     ) -> Result<VersionFileChangePage, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CompareVersionFilesPage {
-                workspace_id,
-                source_version_id,
-                target_version_id,
-                after_path,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .compare_version_files_page(
+                    &workspace_id,
+                    &source_version_id,
+                    &target_version_id,
+                    after_path.as_deref(),
+                    limit,
+                )
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     /// Capture a text file on the actor's single writer thread.
@@ -3337,19 +2027,12 @@ impl ActorHandle {
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
         let indexing = root_dir.map_or(CaptureIndexing::Skip, CaptureIndexing::ReadRoot);
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CaptureIngest {
-                input,
-                indexing,
-                leases,
-                faults,
-                token,
-                reply,
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_ingest_on_store(store, &input, &indexing, &leases, faults.as_ref(), &token)
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     /// Capture a binary file on the actor's single writer thread.
@@ -3360,18 +2043,12 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CaptureIngestBinary {
-                input,
-                leases,
-                faults,
-                token,
-                reply,
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_ingest_binary_on_store(store, &input, &leases, faults.as_ref(), &token)
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3386,38 +2063,37 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<Vec<String>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReconcileCollections {
-                workspace_id,
-                version_id,
-                root_dir,
-                root_guard: None,
-                leases,
-                self_writes,
+        let root_guard: Option<Arc<dyn WorkspaceRootGuard>> = None;
+        self.run(move |store, cache| {
+            reconcile_collections_on_store(
+                store,
+                cache,
+                &workspace_id,
+                &version_id,
+                &root_dir,
+                root_guard.as_deref(),
+                &leases,
+                self_writes.as_ref(),
                 now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+                faults.as_ref(),
+                &token,
+            )
+        })
+        .await
     }
 
     pub async fn collections_list(
         &self,
         workspace_id: String,
-    ) -> Result<Vec<CollectionSummary>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CollectionsList {
-                workspace_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        limit: usize,
+        cursor: Option<String>,
+    ) -> Result<CollectionListPage, RuntimeError> {
+        self.run(move |store, _cache| {
+            store
+                .read_with(|conn| list_collections(conn, &workspace_id, limit, cursor.as_deref()))
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn collections_list_pending_adoptions(
@@ -3426,17 +2102,14 @@ impl ActorHandle {
         limit: usize,
         cursor: Option<CollectionPendingAdoptionCursor>,
     ) -> Result<CollectionPendingAdoptionPage, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CollectionsListPendingAdoptions {
-                workspace_id,
-                limit,
-                cursor,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            store
+                .read_with(|conn| {
+                    list_pending_collection_adoptions(conn, &workspace_id, limit, cursor.as_ref())
+                })
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn collections_get(
@@ -3444,16 +2117,12 @@ impl ActorHandle {
         workspace_id: String,
         collection_path: String,
     ) -> Result<Option<CollectionDetails>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CollectionsGet {
-                workspace_id,
-                collection_path,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            store
+                .read_with(|conn| get_collection(conn, &workspace_id, &collection_path))
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn collections_query_records(
@@ -3462,17 +2131,14 @@ impl ActorHandle {
         collection_path: String,
         query: CollectionQuery,
     ) -> Result<Option<CollectionQueryResult>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CollectionsQueryRecords {
-                workspace_id,
-                collection_path,
-                query,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            store
+                .read_with(|conn| {
+                    query_collection_records(conn, &workspace_id, &collection_path, &query)
+                })
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn collections_get_record(
@@ -3483,19 +2149,21 @@ impl ActorHandle {
         history_limit: usize,
         before_history_id: Option<i64>,
     ) -> Result<Option<CollectionRecordDetails>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CollectionsGetRecord {
-                workspace_id,
-                collection_path,
-                record_id,
-                history_limit,
-                before_history_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            store
+                .read_with(|conn| {
+                    get_collection_record(
+                        conn,
+                        &workspace_id,
+                        &collection_path,
+                        &record_id,
+                        history_limit,
+                        before_history_id,
+                    )
+                })
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     /// Every version record in the workspace, oldest-first
@@ -3504,32 +2172,12 @@ impl ActorHandle {
         &self,
         workspace_id: String,
     ) -> Result<Vec<VersionRecord>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ListVersions {
-                workspace_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
-    }
-
-    pub async fn list_snapshots(
-        &self,
-        workspace_id: String,
-        version_id: String,
-    ) -> Result<Vec<SnapshotView>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ListSnapshots {
-                workspace_id,
-                version_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .list_versions(&workspace_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     /// One page of snapshot METADATA (no body hydration) — the listing read
@@ -3541,30 +2189,21 @@ impl ActorHandle {
         after_path: Option<String>,
         limit: usize,
     ) -> Result<Vec<SnapshotMetadata>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ListSnapshotMetadata {
-                workspace_id,
-                version_id,
-                after_path,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .list_snapshot_metadata(&workspace_id, &version_id, after_path.as_deref(), limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn list_moments(&self, query: ListMomentsQuery) -> Result<MomentPage, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ListMoments {
-                query: Box::new(query),
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .list_moments(&query)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn history_page(
@@ -3574,18 +2213,60 @@ impl ActorHandle {
         before_moment_order: Option<i64>,
         protected_probe_limit: usize,
     ) -> Result<HistoryPageRead, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::HistoryPage {
-                workspace_id,
-                limit,
-                before_moment_order,
-                protected_probe_limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            (|| {
+                let versioned = VersionedTextStore::new(store);
+                let active_version = versioned.get_active_version(&workspace_id)?;
+                let text_moment_page = versioned.list_moments(&ListMomentsQuery {
+                    workspace_id: workspace_id.clone(),
+                    version_id: Some(active_version.version_id.clone()),
+                    object_id: None,
+                    limit,
+                    before_moment_order,
+                })?;
+                let upper_recorded_at_ms = before_moment_order
+                    .map(|cursor| {
+                        let through_cursor =
+                            cursor.checked_add(1).ok_or(DomainError::InvalidInput {
+                                reason: "before_moment_order is too large",
+                            })?;
+                        versioned
+                            .list_moments(&ListMomentsQuery {
+                                workspace_id: workspace_id.clone(),
+                                version_id: Some(active_version.version_id.clone()),
+                                object_id: None,
+                                limit: 1,
+                                before_moment_order: Some(through_cursor),
+                            })
+                            .map(|page| page.moments.first().map(|moment| moment.recorded_at_ms))
+                    })
+                    .transpose()?
+                    .flatten();
+                let lower_recorded_at_ms =
+                    text_moment_page.next_before_moment_order.and_then(|_| {
+                        text_moment_page
+                            .moments
+                            .last()
+                            .map(|moment| moment.recorded_at_ms)
+                    });
+                let protected_moments = list_secret_moments_in_time_window_keyless(
+                    store,
+                    &workspace_id,
+                    &active_version.version_id,
+                    lower_recorded_at_ms,
+                    upper_recorded_at_ms,
+                    protected_probe_limit,
+                )?;
+                Ok::<HistoryPageRead, DomainError>(HistoryPageRead {
+                    active_version,
+                    text_moment_page,
+                    protected_moments,
+                    upper_recorded_at_ms,
+                })
+            })()
+            .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn get_moment(
@@ -3593,16 +2274,12 @@ impl ActorHandle {
         workspace_id: String,
         moment_id: String,
     ) -> Result<Option<MomentRecord>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::GetMoment {
-                workspace_id,
-                moment_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .get_moment(&workspace_id, &moment_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn read_binary(
@@ -3611,37 +2288,12 @@ impl ActorHandle {
         version_id: String,
         path: String,
     ) -> Result<Option<BinaryHead>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReadBinary {
-                workspace_id,
-                version_id,
-                path,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
-    }
-
-    /// The binary head's metadata (no bytes) — sized in SQL.
-    pub async fn read_binary_meta(
-        &self,
-        workspace_id: String,
-        version_id: String,
-        path: String,
-    ) -> Result<Option<BinaryHeadMeta>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReadBinaryMeta {
-                workspace_id,
-                version_id,
-                path,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .read_binary(&workspace_id, &version_id, &path)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn read_binary_blob(
@@ -3649,16 +2301,12 @@ impl ActorHandle {
         workspace_id: String,
         sha256: String,
     ) -> Result<Option<dohc_engine_domain::BinaryBlobRead>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReadBinaryBlob {
-                workspace_id,
-                sha256,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .read_binary_blob(&workspace_id, &sha256)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn read_binary_blob_for_egress(
@@ -3666,16 +2314,12 @@ impl ActorHandle {
         workspace_id: String,
         sha256: String,
     ) -> Result<Option<dohc_engine_domain::BinaryBlobRead>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReadBinaryBlobForEgress {
-                workspace_id,
-                sha256,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .read_binary_blob_for_egress(&workspace_id, &sha256)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn read_text_blob(
@@ -3683,16 +2327,12 @@ impl ActorHandle {
         workspace_id: String,
         sha256: String,
     ) -> Result<Option<dohc_engine_domain::TextBlobRead>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReadTextBlob {
-                workspace_id,
-                sha256,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .read_text_blob(&workspace_id, &sha256)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn read_text_blob_for_egress(
@@ -3700,16 +2340,12 @@ impl ActorHandle {
         workspace_id: String,
         sha256: String,
     ) -> Result<Option<dohc_engine_domain::TextBlobRead>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReadTextBlobForEgress {
-                workspace_id,
-                sha256,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .read_text_blob_for_egress(&workspace_id, &sha256)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     /// Text head with the body hydrated only under `cap` — one actor turn.
@@ -3720,18 +2356,12 @@ impl ActorHandle {
         path: String,
         cap: usize,
     ) -> Result<Option<InbandText>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReadTextInband {
-                workspace_id,
-                version_id,
-                path,
-                cap,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .read_text_inband(&workspace_id, &version_id, &path, cap)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     /// Binary head with the bytes hydrated only under `cap` — one actor turn.
@@ -3742,21 +2372,15 @@ impl ActorHandle {
         path: String,
         cap: usize,
     ) -> Result<Option<InbandBinary>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReadBinaryInband {
-                workspace_id,
-                version_id,
-                path,
-                cap,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .read_binary_inband(&workspace_id, &version_id, &path, cap)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
-    /// Secret materialize with the cap decided in the SAME turn — an
+    /// Secret materialize with the cap decided in the same turn — an
     /// over-cap tip is never decrypted.
     pub async fn materialize_secret_inband(
         &self,
@@ -3766,19 +2390,12 @@ impl ActorHandle {
         key: SecretDataKey,
         cap: usize,
     ) -> Result<Option<InbandSecret>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::MaterializeSecretInband {
-                workspace_id,
-                version_id,
-                path,
-                key: Box::new(key),
-                cap,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            SecretFileStore::new(store, &key)
+                .materialize_secret_file_inband(&workspace_id, &version_id, &path, cap)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn write_secret_file(
@@ -3788,18 +2405,18 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<SecretWriteResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::WriteSecretFile {
-                input: Box::new(input),
-                key: Box::new(key),
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                SecretFileStore::new(store, &key)
+                    .write_secret_file_with(&input, faults.as_ref(), |tx, result| {
+                        journal_secret_put_outbound_in_tx(tx, result)
+                    })
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn delete_secret_file(
@@ -3808,17 +2425,20 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::DeleteSecretFile {
-                input,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                delete_secret_file_keyless_with(
+                    store,
+                    &input,
+                    faults.as_ref(),
+                    journal_secret_delete_outbound_in_tx,
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn fork_secret_version(
@@ -3830,20 +2450,30 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<(), RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ForkSecretVersion {
-                workspace_id,
-                from_version_id,
-                to_version_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                fork_version_keyless_with(
+                    store,
+                    &workspace_id,
+                    &from_version_id,
+                    &to_version_id,
+                    faults.as_ref(),
+                    |tx| {
+                        journal_secret_fork_outbound_in_tx(
+                            tx,
+                            &workspace_id,
+                            &from_version_id,
+                            &to_version_id,
+                            now_ms,
+                        )
+                    },
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn list_secret_moments(
@@ -3854,19 +2484,18 @@ impl ActorHandle {
         before_moment_order: Option<i64>,
         limit: usize,
     ) -> Result<SecretMomentPage, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ListSecretMoments {
-                workspace_id,
-                version_id,
-                path,
+        self.run(move |store, _| {
+            list_secret_moments_page_keyless(
+                store,
+                &workspace_id,
+                version_id.as_deref(),
+                path.as_deref(),
                 before_moment_order,
                 limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+            )
+            .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn get_secret_moment(
@@ -3874,16 +2503,10 @@ impl ActorHandle {
         workspace_id: String,
         moment_id: String,
     ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::GetSecretMoment {
-                workspace_id,
-                moment_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            get_secret_moment_keyless(store, &workspace_id, &moment_id).map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn compare_secret_files(
@@ -3895,20 +2518,19 @@ impl ActorHandle {
         limit: usize,
         key: Option<SecretDataKey>,
     ) -> Result<SecretComparePage, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CompareSecretFiles {
-                workspace_id,
-                source_version_id,
-                target_version_id,
-                after_path,
+        self.run(move |store, _| {
+            compare_secret_files_page_keyless(
+                store,
+                key.as_ref(),
+                &workspace_id,
+                &source_version_id,
+                &target_version_id,
+                after_path.as_deref(),
                 limit,
-                key: key.map(Box::new),
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+            )
+            .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3927,26 +2549,31 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<SecretWriteResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ApplySecretFile {
-                workspace_id,
-                path,
-                from_version_id,
-                to_version_id,
-                moment_id,
-                metadata_origin,
-                metadata_summary,
-                metadata_correlation_id,
-                now_ms,
-                key: Box::new(key),
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                apply_secret_file_from_version_with(
+                    store,
+                    &key,
+                    &dohc_engine_domain::ApplySecretFileFromVersion {
+                        workspace_id,
+                        path,
+                        from_version_id,
+                        to_version_id,
+                        moment_id,
+                        metadata_origin,
+                        metadata_summary,
+                        metadata_correlation_id,
+                        now_ms,
+                    },
+                    faults.as_ref(),
+                    |tx, result| journal_secret_moment_outbound_in_tx(tx, result.moment.as_ref()),
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3963,41 +2590,27 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<SecretRestoreResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::RestoreSecretFile {
-                workspace_id,
-                path,
-                before_moment_id,
-                moment_id,
-                metadata_origin,
-                metadata_summary,
-                metadata_correlation_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
-    }
-
-    pub async fn list_secret_files(
-        &self,
-        workspace_id: String,
-        version_id: String,
-    ) -> Result<Vec<SecretFileStat>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ListSecretFiles {
-                workspace_id,
-                version_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                restore_secret_file_verbatim_with_metadata_and_after(
+                    store,
+                    &workspace_id,
+                    &path,
+                    &before_moment_id,
+                    &moment_id,
+                    &metadata_origin,
+                    metadata_summary,
+                    metadata_correlation_id,
+                    now_ms,
+                    faults.as_ref(),
+                    |tx, result| journal_secret_moment_outbound_in_tx(tx, result.moment.as_ref()),
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     /// One secret tip's recorded byte length — keyless, no decrypt.
@@ -4007,17 +2620,11 @@ impl ActorHandle {
         version_id: String,
         path: String,
     ) -> Result<Option<i64>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::SecretFileLen {
-                workspace_id,
-                version_id,
-                path,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            secret_file_len_keyless(store, &workspace_id, &version_id, &path)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     /// One page of secret-file tips (metadata only, keyset by path).
@@ -4028,72 +2635,42 @@ impl ActorHandle {
         after_path: Option<String>,
         limit: usize,
     ) -> Result<Vec<SecretFileStat>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ListSecretFilesPage {
-                workspace_id,
-                version_id,
-                after_path,
+        self.run(move |store, _| {
+            list_secret_files_keyless_page(
+                store,
+                &workspace_id,
+                &version_id,
+                after_path.as_deref(),
                 limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+            )
+            .map_err(RuntimeError::from)
+        })
+        .await
     }
 
-    /// Decrypt one secret tip to UTF-8 plaintext. The KEY comes from the
-    /// caller (the daemon loads it from the workspace root), matching the
-    /// capture-secret pattern — the actor never holds key custody itself.
-    pub async fn materialize_secret(
-        &self,
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        key: SecretDataKey,
-    ) -> Result<Option<String>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::MaterializeSecret {
-                workspace_id,
-                version_id,
-                path,
-                key: Box::new(key),
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
-    }
-
-    /// The workspace's ACTIVE version id (falling back to main), read on the
+    /// The workspace's active version id (falling back to main), read on the
     /// actor thread. The capture driver targets this so captures land in the
     /// version the user is actually on (TS oracle parity).
     pub async fn active_version_id(&self, workspace_id: String) -> Result<String, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ActiveVersionId {
-                workspace_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .get_active_version(&workspace_id)
+                .map(|version| version.version_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn active_version(
         &self,
         workspace_id: String,
     ) -> Result<VersionRecord, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ActiveVersion {
-                workspace_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .get_active_version(&workspace_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn ensure_main_version(
@@ -4103,18 +2680,16 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<VersionRecord, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::EnsureMainVersion {
-                workspace_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                VersionedTextStore::new(store)
+                    .ensure_main_version(&workspace_id, "main", now_ms, faults.as_ref())
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn set_active_version(
@@ -4123,17 +2698,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<VersionRecord, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::SetActiveVersion {
-                input,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            switch_active_version_on_store(
+                store,
+                &input.workspace_id,
+                &input.version_id,
+                &input.root_dir,
+                input.self_writes.as_ref(),
+                input.now_ms,
+                faults.as_ref(),
+                &token,
+            )
+        })
+        .await
     }
 
     pub async fn create_named_version(
@@ -4142,17 +2719,18 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<VersionRecord, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CreateNamedVersion {
-                input,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                VersionedTextStore::new(store)
+                    .create_named_version_with(&input, faults.as_ref(), |tx, record| {
+                        journal_version_create_outbound_in_tx(tx, record, &input.from_version_id)
+                    })
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn preflight_create_named_version(
@@ -4160,16 +2738,16 @@ impl ActorHandle {
         input: CreateNamedVersion,
         token: CancellationToken,
     ) -> Result<Option<VersionRecord>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::PreflightCreateNamedVersion {
-                input,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                VersionedTextStore::new(store)
+                    .preflight_create_named_version(&input)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     /// Every captured path with its content identity, for seeding a fresh
@@ -4180,16 +2758,64 @@ impl ActorHandle {
         workspace_id: String,
         version_id: String,
     ) -> Result<Vec<CaptureManifestSeedEntry>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CaptureManifestSeed {
-                workspace_id,
-                version_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            capture_manifest_seed(store, &workspace_id, &version_id).map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_outbox_append(
+        &self,
+        workspace_id: String,
+        input: OwnerOutboxAppendInput,
+        token: CancellationToken,
+    ) -> Result<Result<OwnerOutboxAppendResult, OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                Ok(append_owner_outbox(store, &workspace_id, input))
+            }
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_outbox_acknowledge(
+        &self,
+        workspace_id: String,
+        outbox_id: String,
+        receipts: Vec<OwnerDeliveryReceipt>,
+        token: CancellationToken,
+    ) -> Result<Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                Ok(acknowledge_owner_outbox(
+                    store,
+                    &workspace_id,
+                    &outbox_id,
+                    &receipts,
+                ))
+            }
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_outbox_quarantine(
+        &self,
+        workspace_id: String,
+        input: OwnerOutboxQuarantineInput,
+        token: CancellationToken,
+    ) -> Result<Result<(), OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                Ok(quarantine_owner_outbox(store, &workspace_id, input))
+            }
+        })
+        .await
     }
 
     /// Capture a secret file on the actor's single writer thread.
@@ -4200,17 +2826,10 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<SecretWriteResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CaptureSecret {
-                payload: Box::new((input, key)),
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            capture_secret_on_store(store, &input, &key, faults.as_ref(), &token)
+        })
+        .await
     }
 
     /// Retire a captured secret path on the actor's single writer thread.
@@ -4220,18 +2839,10 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CaptureSecretRetire {
-                input,
-                workspace_root: None,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            capture_secret_retire_on_store(store, &input, None, None, faults.as_ref(), &token)
+        })
+        .await
     }
 
     /// Retire a captured path on the actor's single writer thread.
@@ -4242,20 +2853,22 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<CaptureRetireResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CaptureRetire {
-                input,
-                workspace_root: None,
-                self_writes: None,
-                leases,
-                faults,
-                token,
-                reply,
+        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_retire_on_store(
+                    store,
+                    &input,
+                    None,
+                    None,
+                    self_writes.as_deref(),
+                    &leases,
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     /// Read one versioned text snapshot on the actor-owned connection.
@@ -4266,18 +2879,16 @@ impl ActorHandle {
         path: String,
         token: CancellationToken,
     ) -> Result<Option<TextSnapshot>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedTextRead {
-                workspace_id,
-                version_id,
-                path,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                VersionedTextStore::new(store)
+                    .read_text(&workspace_id, &version_id, &path)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn resolve_path_object(
@@ -4286,17 +2897,12 @@ impl ActorHandle {
         version_id: String,
         path: String,
     ) -> Result<Option<String>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ResolvePathObject {
-                workspace_id,
-                version_id,
-                path,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .object_id_for_path(&workspace_id, &version_id, &path)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4338,23 +2944,22 @@ impl ActorHandle {
         seed_from_artifact: bool,
         token: CancellationToken,
     ) -> Result<YdocOpenState, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocOpenState {
-                workspace_id,
+        self.run(move |store, cache| {
+            ydoc_open_state_on_store(
+                store,
+                cache,
+                &workspace_id,
                 now_ms,
                 drain_deferred,
-                expected_key,
-                version_id,
-                path,
+                expected_key.as_ref(),
+                &version_id,
+                &path,
                 content_kind,
                 seed_from_artifact,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+                &token,
+            )
+        })
+        .await
     }
 
     /// Report the content kind of durable Y.Doc state whose current CRDT
@@ -4366,18 +2971,16 @@ impl ActorHandle {
         ignored_object_ids: Vec<String>,
         token: CancellationToken,
     ) -> Result<Option<ContentKind>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocVersionUnsettledContentKind {
-                workspace_id,
-                version_id,
-                ignored_object_ids,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            ydoc_version_unsettled_content_kind_on_store(
+                store,
+                &workspace_id,
+                &version_id,
+                &ignored_object_ids,
+                &token,
+            )
+        })
+        .await
     }
 
     pub async fn ydoc_materialize_scene_seed_assets(
@@ -4388,19 +2991,39 @@ impl ActorHandle {
         self_writes: Arc<dyn SelfWriteRecorder>,
         now_ms: i64,
     ) -> Result<YdocSeedMaterialization, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocMaterializeSceneSeedAssets {
-                root_dir,
-                workspace_id,
-                job_ids,
-                self_writes,
-                now_ms,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            let selected: HashSet<String> = job_ids.into_iter().collect();
+            reconcile_scene_asset_materialization_conflicts(store, &root_dir, &selected, now_ms)
+                .and_then(|invalid_jobs| {
+                    replay_pending_materializations(
+                        store,
+                        &root_dir,
+                        MaterializationReplayScope {
+                            workspace_id: &workspace_id,
+                            self_writes: Some(self_writes.as_ref()),
+                        },
+                        now_ms,
+                        &NoFaults,
+                        Some(&selected),
+                        false,
+                    )?;
+                    let completed = selected.iter().try_fold(0_usize, |count, job_id| {
+                        store.load_materialization_job(job_id).map(|job| {
+                            count
+                                + usize::from(
+                                    job.is_some_and(|job| job.status == JobStatus::Complete),
+                                )
+                        })
+                    })?;
+                    let incomplete_jobs = selected.len().saturating_sub(completed);
+                    Ok(YdocSeedMaterialization {
+                        materialized: invalid_jobs == 0 && incomplete_jobs == 0,
+                        incomplete_jobs,
+                        invalid_jobs,
+                    })
+                })
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4421,28 +3044,28 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<YdocAppend, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocRecordUpdate {
-                key,
-                path,
+        self.run(move |store, cache| {
+            ydoc_record_update_on_store(
+                store,
+                cache,
+                &key,
+                &path,
                 content_kind,
                 regime,
-                update,
-                request_id,
+                &update,
                 actor_origin_id,
                 attribution,
                 expected_lineage_claim_id,
                 require_empty_lineage,
                 seed_source_sha256,
+                request_id,
+                true,
                 now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+                faults.as_ref(),
+                &token,
+            )
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4460,25 +3083,27 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<YdocSettleOutcome, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocSettle {
-                root_dir,
-                key,
-                path,
+        self.run(move |store, cache| {
+            ydoc_settle_on_store(
+                store,
+                cache,
+                &root_dir,
+                &key,
+                &path,
                 content_kind,
-                expected_lineage_claim_id,
+                true,
+                expected_lineage_claim_id.as_deref(),
                 expected_head_sha,
-                session_id,
-                self_writes,
+                None,
+                &session_id,
+                self_writes.as_ref(),
                 now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+                faults.as_ref(),
+                &token,
+                None,
+            )
+        })
+        .await
     }
 
     pub async fn ydoc_resync(
@@ -4487,37 +3112,33 @@ impl ActorHandle {
         expected_lineage_claim_id: Option<String>,
         token: CancellationToken,
     ) -> Result<YdocResyncState, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocResync {
-                key,
-                expected_lineage_claim_id,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, cache| {
+            ydoc_resync_on_store(
+                store,
+                cache,
+                &key,
+                expected_lineage_claim_id.as_deref(),
+                &token,
+            )
+        })
+        .await
     }
 
+    /// Test evidence seam: observe the actor-local writer cache without
+    /// exposing it through the product protocol.
     #[doc(hidden)]
     pub async fn ydoc_cache_stats_for_test(&self) -> Result<CacheStats, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocCacheStatsForTest { reply })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)
+        self.run(move |_store, cache| Ok(cache.stats())).await
     }
 
+    /// Test evidence seam: force the next consumer down the cold path.
     #[doc(hidden)]
     pub async fn ydoc_cache_clear_for_test(&self) -> Result<CacheStats, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocCacheClearForTest { reply })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)
+        self.run(move |_store, cache| {
+            cache.clear();
+            Ok(cache.stats())
+        })
+        .await
     }
 
     pub async fn ydoc_close_session(
@@ -4563,19 +3184,18 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<YdocCloseSessionOutcome, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocCloseSession {
-                key,
-                materialization,
+        self.run(move |store, cache| {
+            ydoc_close_session_on_store(
+                store,
+                cache,
+                &key,
+                materialization.as_ref(),
                 now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+                faults.as_ref(),
+                &token,
+            )
+        })
+        .await
     }
 
     /// Move disk-conflicted Y.Doc recovery artifacts to deterministic free
@@ -4586,17 +3206,26 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<Vec<dohc_engine_sync::YdocRecoveryMaterialization>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::RepairConflictedYdocRecoveries {
-                workspace_id,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, cache| {
+            let outcome = if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                dohc_engine_sync::repair_conflicted_ydoc_recoveries(
+                    store,
+                    &workspace_id,
+                    faults.as_ref(),
+                )
+                .map_err(RuntimeError::from)
+            };
+            // A proven-empty scan performed no lineage transaction, so it
+            // must not invalidate an unrelated active writer session. Any
+            // materialization or error can have changed lineage state.
+            if !matches!(&outcome, Ok(recoveries) if recoveries.is_empty()) {
+                cache.clear();
+            }
+            outcome
+        })
+        .await
     }
 
     /// Replay every pending materialization job (best-effort, per-job
@@ -4607,17 +3236,25 @@ impl ActorHandle {
         workspace_id: String,
         now_ms: i64,
     ) -> Result<usize, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::MaterializeReplayPending {
-                root_dir,
-                workspace_id,
+        self.run(move |store, _cache| {
+            // Open-time replay runs before the files layer starts. The
+            // switch path calls the same tolerant per-job executor with a
+            // selected durable job set and watcher suppression enabled.
+            replay_pending_materializations(
+                store,
+                &root_dir,
+                MaterializationReplayScope {
+                    workspace_id: &workspace_id,
+                    self_writes: None,
+                },
                 now_ms,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+                &NoFaults,
+                None,
+                false,
+            )
+            .map(|summary| summary.completed)
+        })
+        .await
     }
 
     /// Replay pending writes before a version fence scans the filesystem.
@@ -4631,18 +3268,30 @@ impl ActorHandle {
         self_writes: Arc<dyn SelfWriteRecorder>,
         now_ms: i64,
     ) -> Result<(), RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::MaterializeReplayPendingForFence {
-                root_dir,
-                workspace_id,
-                self_writes,
+        self.run(move |store, _cache| {
+            replay_pending_materializations(
+                store,
+                &root_dir,
+                MaterializationReplayScope {
+                    workspace_id: &workspace_id,
+                    self_writes: Some(self_writes.as_ref()),
+                },
                 now_ms,
-                reply,
+                &NoFaults,
+                None,
+                false,
+            )
+            .and_then(|summary| {
+                if summary.failed == 0 {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::ActiveVersionMaterializationIncomplete {
+                        failed_jobs: summary.failed,
+                    })
+                }
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     /// Strictly replay one caller-owned set of pending materialization jobs.
@@ -4655,19 +3304,31 @@ impl ActorHandle {
         materialization_job_ids: Vec<String>,
         now_ms: i64,
     ) -> Result<(), RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::MaterializeReplaySelectedForFence {
-                root_dir,
-                workspace_id,
-                self_writes,
-                materialization_job_ids,
+        self.run(move |store, _cache| {
+            let selected: HashSet<String> = materialization_job_ids.into_iter().collect();
+            replay_pending_materializations(
+                store,
+                &root_dir,
+                MaterializationReplayScope {
+                    workspace_id: &workspace_id,
+                    self_writes: Some(self_writes.as_ref()),
+                },
                 now_ms,
-                reply,
+                &NoFaults,
+                Some(&selected),
+                false,
+            )
+            .and_then(|summary| {
+                let failed_jobs =
+                    summary.failed + selected.len().saturating_sub(summary.selected_seen);
+                if failed_jobs == 0 {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs })
+                }
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     pub async fn conflict_list(
@@ -4677,18 +3338,20 @@ impl ActorHandle {
         after_conflict_id: Option<String>,
         token: CancellationToken,
     ) -> Result<Vec<TextConflict>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ConflictList {
-                workspace_id,
-                status,
-                after_conflict_id,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                VersionedTextStore::new(store)
+                    .list_text_conflicts_page(
+                        &workspace_id,
+                        status.as_deref(),
+                        after_conflict_id.as_deref(),
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn conflict_open(
@@ -4697,17 +3360,8 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<bool, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ConflictOpen {
-                conflict,
-                faults,
-                token,
-                reply,
-            })
+        self.run(move |store, _| conflict_open_on_store(store, &conflict, faults.as_ref(), &token))
             .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
     pub async fn conflict_resolve(
@@ -4743,19 +3397,22 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<ResolveTextConflictResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ConflictResolve {
-                input,
-                leases,
-                root_dir,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, cache| {
+            let outcome = conflict_resolve_on_store(
+                store,
+                &input,
+                root_dir.as_deref(),
+                &leases,
+                faults.as_ref(),
+                &token,
+            );
+            // Resolution can replace or archive a lineage; the tuple probe
+            // already misses on every such outcome (the claim id changes or
+            // the marker is deleted), but the reset hooks are unconditional.
+            cache.clear();
+            outcome
+        })
+        .await
     }
 
     pub async fn conflict_apply_replicated(
@@ -4765,46 +3422,40 @@ impl ActorHandle {
         leases: LeaseRegistry,
         token: CancellationToken,
     ) -> Result<ApplyOutcome<ConflictApplyResult>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ConflictApplyReplicated {
-                envelope,
-                faults,
-                leases,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn search(
-        &self,
-        root_dir: PathBuf,
-        workspace_id: String,
-        version_id: String,
-        query: String,
-        limit: Option<i64>,
-        now_ms: i64,
-        token: CancellationToken,
-    ) -> Result<Vec<SearchResult>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::Search {
-                root_dir,
-                workspace_id,
-                version_id,
-                query,
-                limit,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, cache| {
+            let outcome = if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                match apply_conflict_envelope(store, &envelope, faults.as_ref(), &leases) {
+                    Ok(
+                        outcome @ ApplyOutcome {
+                            primary: ApplyDisposition::Refused(_),
+                            ..
+                        },
+                    ) => retain_refusal_for_direct_retry(store, &envelope, faults.as_ref())
+                        .map(|()| outcome)
+                        .map_err(RuntimeError::from),
+                    Ok(
+                        mut outcome @ ApplyOutcome {
+                            primary: ApplyDisposition::Skipped,
+                            ..
+                        },
+                    ) => read_replayed_refusal(store, &envelope)
+                        .map(|refusal| {
+                            outcome.primary = refusal
+                                .map_or(ApplyDisposition::Skipped, ApplyDisposition::Refused);
+                            outcome
+                        })
+                        .map_err(RuntimeError::from),
+                    outcome => outcome.map_err(RuntimeError::from),
+                }
+            };
+            // A replicated conflict envelope can replace or archive a
+            // lineage (probe-covered; reset hooks stay unconditional).
+            cache.clear();
+            outcome
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4820,23 +3471,28 @@ impl ActorHandle {
         after: Option<SearchResultKey>,
         token: CancellationToken,
     ) -> Result<SearchPageBatch, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::SearchPage {
-                root_dir,
-                workspace_id,
-                version_id,
-                query,
-                limit,
-                now_ms,
-                expected_generation,
-                after,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                store
+                    .read_with(|conn| {
+                        search_workspace_page(
+                            conn,
+                            &root_dir,
+                            &workspace_id,
+                            &version_id,
+                            &query,
+                            limit,
+                            now_ms,
+                            expected_generation,
+                            after,
+                        )
+                    })
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn search_query_chat_messages_granular(
@@ -4846,18 +3502,20 @@ impl ActorHandle {
         limit: i64,
         materialized_byte_budget: usize,
     ) -> Result<GranularChatMessageSearchBatch, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::SearchQueryChatMessagesGranular {
-                workspace_id,
-                query,
-                limit,
-                materialized_byte_budget,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            store
+                .read_with(|conn| {
+                    query_chat_messages_granular_bounded(
+                        conn,
+                        &workspace_id,
+                        &query,
+                        limit,
+                        materialized_byte_budget,
+                    )
+                })
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn ensure_search_index(
@@ -4869,20 +3527,25 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<(), RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::EnsureSearchIndex {
-                root_dir,
-                workspace_id,
-                version_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                store
+                    .read_with(|conn| {
+                        ensure_search_index_for_version(
+                            conn,
+                            &root_dir,
+                            &workspace_id,
+                            &version_id,
+                            now_ms,
+                            faults.as_ref(),
+                        )
+                    })
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_channel_create(
@@ -4894,20 +3557,16 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatChannel, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatChannelCreate {
-                workspace_id,
-                channel_id,
-                name,
-                kind,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .create_channel(&workspace_id, &channel_id, &name, kind, now_ms, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_channel_ensure_general(
@@ -4917,18 +3576,16 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatChannel, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatChannelEnsureGeneral {
-                workspace_id,
-                channel_id,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .ensure_general_channel(&workspace_id, &channel_id, now_ms, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_channel_ensure_agent(
@@ -4938,33 +3595,28 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatChannel, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatChannelEnsureAgent {
-                workspace_id,
-                channel_id,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .ensure_agent_channel(&workspace_id, &channel_id, now_ms, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_channels_list(
         &self,
         workspace_id: String,
     ) -> Result<Vec<ChatChannelSummary>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatChannelsList {
-                workspace_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_channels(&workspace_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_channel_find_by_slug(
@@ -4972,16 +3624,12 @@ impl ActorHandle {
         workspace_id: String,
         slug: String,
     ) -> Result<Option<ChatChannel>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatChannelFindBySlug {
-                workspace_id,
-                slug,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .find_channel_by_slug(&workspace_id, &slug)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_channel_get_wire_id(
@@ -4989,16 +3637,12 @@ impl ActorHandle {
         workspace_id: String,
         channel_id: String,
     ) -> Result<Option<String>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatChannelGetWireId {
-                workspace_id,
-                channel_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .get_channel_wire_id(&workspace_id, &channel_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_thread_start(
@@ -5006,16 +3650,16 @@ impl ActorHandle {
         input: StartChannelThread,
         token: CancellationToken,
     ) -> Result<(ChatThread, ChatMessage), RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatThreadStart {
-                input: Box::new(input),
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .start_channel_thread(&input, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_thread_create(
@@ -5023,31 +3667,28 @@ impl ActorHandle {
         input: CreateFileThread,
         token: CancellationToken,
     ) -> Result<ChatThread, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatThreadCreate {
-                input: Box::new(input),
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .create_thread(&input, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_threads_list(
         &self,
         workspace_id: String,
     ) -> Result<Vec<ChatThread>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatThreadsList {
-                workspace_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_threads(&workspace_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_threads_list_for_file(
@@ -5057,18 +3698,12 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatThread>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatThreadsListForFile {
-                workspace_id,
-                object_id,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_threads_for_file(&workspace_id, &object_id, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_threads_list_for_channel(
@@ -5078,18 +3713,12 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChannelThreadSummary>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatThreadsListForChannel {
-                workspace_id,
-                channel_id,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_channel_threads(&workspace_id, &channel_id, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_thread_find_channel_id(
@@ -5097,16 +3726,12 @@ impl ActorHandle {
         workspace_id: String,
         thread_id: String,
     ) -> Result<Option<String>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatThreadFindChannelId {
-                workspace_id,
-                thread_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .find_thread_channel_id(&workspace_id, &thread_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_thread_get_projection(
@@ -5115,17 +3740,12 @@ impl ActorHandle {
         thread_id: String,
         linked_file_access: ChatProjectionFileAccess,
     ) -> Result<ChatThreadProjection, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatThreadGetProjection {
-                workspace_id,
-                thread_id,
-                linked_file_access,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .get_thread_projection(&workspace_id, &thread_id, linked_file_access)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_attachments_list_for_thread(
@@ -5135,18 +3755,12 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatAttachment>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatAttachmentsListForThread {
-                workspace_id,
-                thread_id,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_thread_attachments(&workspace_id, &thread_id, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_attachments_list_file_mentions(
@@ -5157,19 +3771,18 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatFileMention>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatAttachmentsListFileMentions {
-                workspace_id,
-                object_id,
-                path_hint,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_file_mentions(
+                    &workspace_id,
+                    object_id.as_deref(),
+                    path_hint.as_deref(),
+                    after,
+                    limit,
+                )
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_mentions_backfill(
@@ -5177,16 +3790,16 @@ impl ActorHandle {
         workspace_id: String,
         token: CancellationToken,
     ) -> Result<i64, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatMentionsBackfill {
-                workspace_id,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .backfill_mentions(&workspace_id, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_mentions_list_for_handle(
@@ -5197,19 +3810,12 @@ impl ActorHandle {
         after: Option<MentionCursor>,
         limit: i64,
     ) -> Result<Vec<ChatMention>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatMentionsListForHandle {
-                workspace_id,
-                handle,
-                unread_only,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_mentions_for_handle(&workspace_id, &handle, unread_only, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_record_eligible_triggers(
@@ -5219,18 +3825,21 @@ impl ActorHandle {
         at_ms: i64,
         token: CancellationToken,
     ) -> Result<i64, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchRecordEligibleTriggers {
-                workspace_id,
-                verified_user_id,
-                at_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .record_eligible_triggers(
+                        &workspace_id,
+                        verified_user_id.as_deref(),
+                        at_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_message_send(
@@ -5238,16 +3847,16 @@ impl ActorHandle {
         input: SendMessage,
         token: CancellationToken,
     ) -> Result<ChatMessage, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatMessageSend {
-                input: Box::new(input),
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .send_message(&input, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_decision_resolve(
@@ -5255,16 +3864,16 @@ impl ActorHandle {
         input: ResolveDecision,
         token: CancellationToken,
     ) -> Result<ChatDecision, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDecisionResolve {
-                input: Box::new(input),
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .resolve_decision(&input, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_decisions_list(
@@ -5274,18 +3883,12 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatDecision>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDecisionsList {
-                workspace_id,
-                thread_id,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_thread_decisions(&workspace_id, &thread_id, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_reaction_set(
@@ -5293,16 +3896,16 @@ impl ActorHandle {
         input: SetReaction,
         token: CancellationToken,
     ) -> Result<ChatReaction, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatReactionSet {
-                input: Box::new(input),
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .set_reaction(&input, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_reactions_list(
@@ -5312,18 +3915,12 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatReaction>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatReactionsList {
-                workspace_id,
-                thread_id,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_reactions(&workspace_id, &thread_id, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_messages_list(
@@ -5333,18 +3930,12 @@ impl ActorHandle {
         limit: i64,
         after_message_order: Option<i64>,
     ) -> Result<ChatMessagePage, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatMessagesList {
-                workspace_id,
-                thread_id,
-                limit,
-                after_message_order,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_messages(&workspace_id, &thread_id, limit, after_message_order)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_thread_revision(
@@ -5352,16 +3943,12 @@ impl ActorHandle {
         workspace_id: String,
         thread_id: String,
     ) -> Result<i64, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatThreadRevision {
-                workspace_id,
-                thread_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .conversation_revision(&workspace_id, &thread_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5374,20 +3961,23 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatThreadReadState, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatReadStateMarkThreadRead {
-                workspace_id,
-                thread_id,
-                up_to_sequence,
-                expected_revision,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .mark_thread_read(
+                        &workspace_id,
+                        &thread_id,
+                        up_to_sequence,
+                        expected_revision,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_read_state_get(
@@ -5395,16 +3985,12 @@ impl ActorHandle {
         workspace_id: String,
         thread_id: String,
     ) -> Result<ChatThreadReadState, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatReadStateGet {
-                workspace_id,
-                thread_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .read_state(&workspace_id, &thread_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_read_state_list_unread_file_threads(
@@ -5413,17 +3999,12 @@ impl ActorHandle {
         after_thread_id: Option<String>,
         limit: i64,
     ) -> Result<Vec<UnreadFileThread>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatReadStateListUnreadFileThreads {
-                workspace_id,
-                after_thread_id,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_unread_file_threads(&workspace_id, after_thread_id.as_deref(), limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_agent_unread_threads(
@@ -5432,17 +4013,12 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<AgentUnreadThreadRow>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatAgentUnreadThreads {
-                workspace_id,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_agent_unread_threads(&workspace_id, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5456,21 +4032,24 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatAgentReadState, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatAgentMarkThreadRead {
-                workspace_id,
-                thread_id,
-                up_to_created_at_ms,
-                up_to_message_id,
-                expected_revision,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .mark_thread_read_by_agent(
+                        &workspace_id,
+                        &thread_id,
+                        up_to_created_at_ms,
+                        &up_to_message_id,
+                        expected_revision,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_follow_set(
@@ -5478,16 +4057,16 @@ impl ActorHandle {
         input: SetFollow,
         token: CancellationToken,
     ) -> Result<ChatFollow, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatFollowSet {
-                input: Box::new(input),
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .set_follow(&input, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_follows_list(
@@ -5496,17 +4075,12 @@ impl ActorHandle {
         owner_user_id: String,
         state: Option<String>,
     ) -> Result<Vec<ChatFollow>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatFollowsList {
-                workspace_id,
-                owner_user_id,
-                state,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_follows(&workspace_id, &owner_user_id, state.as_deref())
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_follows_ensure_defaults(
@@ -5515,17 +4089,16 @@ impl ActorHandle {
         owner_user_id: String,
         token: CancellationToken,
     ) -> Result<(), RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatFollowsEnsureDefaults {
-                workspace_id,
-                owner_user_id,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .ensure_default_channel_follows(&workspace_id, &owner_user_id, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_bookmark_find(
@@ -5534,17 +4107,12 @@ impl ActorHandle {
         owner_user_id: String,
         bookmark_id: String,
     ) -> Result<Option<ChatBookmark>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarkFind {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .find_bookmark(&workspace_id, &owner_user_id, &bookmark_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_bookmarks_list_pending(
@@ -5554,18 +4122,12 @@ impl ActorHandle {
         limit: i64,
         after: Option<(i64, String)>,
     ) -> Result<Vec<PendingBookmarkRow>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarksListPending {
-                workspace_id,
-                owner_user_id,
-                limit,
-                after,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_pending_bookmarks_page(&workspace_id, &owner_user_id, limit, after)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_feed_mark_seen(
@@ -5577,20 +4139,23 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatFeedReadState, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatFeedMarkSeen {
-                workspace_id,
-                owner_user_id,
-                replication_owner_user_id,
-                head_cursor,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .mark_feed_seen(
+                        &workspace_id,
+                        &owner_user_id,
+                        replication_owner_user_id.as_deref(),
+                        &head_cursor,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_feed_list_personal(
@@ -5600,18 +4165,12 @@ impl ActorHandle {
         limit: Option<i64>,
         cursor: Option<String>,
     ) -> Result<ChatFeedPage, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatFeedListPersonal {
-                workspace_id,
-                owner_user_id,
-                limit,
-                cursor,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_personal_feed(&workspace_id, &owner_user_id, limit, cursor.as_deref())
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_bookmark_save(
@@ -5619,16 +4178,16 @@ impl ActorHandle {
         input: SaveBookmark,
         token: CancellationToken,
     ) -> Result<ChatBookmark, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarkSave {
-                input: Box::new(input),
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .save_bookmark(&input, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_bookmarks_list(
@@ -5637,17 +4196,12 @@ impl ActorHandle {
         owner_user_id: String,
         state: Option<String>,
     ) -> Result<Vec<ChatBookmark>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarksList {
-                workspace_id,
-                owner_user_id,
-                state,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_bookmarks(&workspace_id, &owner_user_id, state.as_deref())
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5662,22 +4216,25 @@ impl ActorHandle {
         projection_path: Option<String>,
         token: CancellationToken,
     ) -> Result<ChatBookmarkTransition, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarkMarkReady {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                generation,
-                projected_at_ms,
-                projection_object_id,
-                projection_path,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .mark_bookmark_ready(
+                        &workspace_id,
+                        &owner_user_id,
+                        &bookmark_id,
+                        generation,
+                        projected_at_ms,
+                        projection_object_id.as_deref(),
+                        projection_path.as_deref(),
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_bookmark_archive(
@@ -5688,19 +4245,22 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatBookmark, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarkArchive {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .archive_bookmark(
+                        &workspace_id,
+                        &owner_user_id,
+                        &bookmark_id,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5713,20 +4273,23 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatBookmark, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarkMarkPending {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                request_id,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .mark_bookmark_pending(
+                        &workspace_id,
+                        &owner_user_id,
+                        &bookmark_id,
+                        &request_id,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5740,21 +4303,24 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatBookmarkTransition, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarkMarkFailed {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                generation,
-                failure_reason,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .mark_bookmark_failed(
+                        &workspace_id,
+                        &owner_user_id,
+                        &bookmark_id,
+                        generation,
+                        &failure_reason,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5768,21 +4334,24 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatBookmarkTransition, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarkMarkStale {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                generation,
-                failure_reason,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .mark_bookmark_stale(
+                        &workspace_id,
+                        &owner_user_id,
+                        &bookmark_id,
+                        generation,
+                        failure_reason.as_deref(),
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_dispatch_enqueue(
@@ -5793,19 +4362,22 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<bool, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchEnqueue {
-                workspace_id,
-                trigger_message_id,
-                thread_id,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .enqueue_dispatch(
+                        &workspace_id,
+                        &trigger_message_id,
+                        &thread_id,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5818,20 +4390,23 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<Option<DispatchClaim>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchClaimNextPending {
-                workspace_id,
-                run_id,
-                command,
-                log_path,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .claim_next_pending(
+                        &workspace_id,
+                        &run_id,
+                        &command,
+                        log_path.as_deref(),
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_dispatch_list_pending(
@@ -5840,17 +4415,12 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<dohc_engine_domain::DispatchRecord>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchListPending {
-                workspace_id,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_pending_dispatches(&workspace_id, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_open_runs(
@@ -5859,17 +4429,12 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<DispatchClaim>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchOpenRuns {
-                workspace_id,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_open_dispatch_runs(&workspace_id, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_list_run_messages(
@@ -5879,18 +4444,12 @@ impl ActorHandle {
         after_message_id: Option<String>,
         limit: i64,
     ) -> Result<Vec<String>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchListRunMessages {
-                workspace_id,
-                run_id,
-                after_message_id,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_run_messages(&workspace_id, &run_id, after_message_id, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_run_id_for_message(
@@ -5898,16 +4457,12 @@ impl ActorHandle {
         workspace_id: String,
         message_id: String,
     ) -> Result<Option<String>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchRunIdForMessage {
-                workspace_id,
-                message_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .dispatch_run_id_for_message(&workspace_id, &message_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5919,19 +4474,12 @@ impl ActorHandle {
         after: Option<(i64, String, String)>,
         page_limit: i64,
     ) -> Result<Vec<RunRecordLink>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchRunRecordsForThread {
-                workspace_id,
-                thread_id,
-                run_limit,
-                after,
-                page_limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .run_records_for_thread(&workspace_id, &thread_id, run_limit, after, page_limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_get_run_record(
@@ -5939,16 +4487,12 @@ impl ActorHandle {
         workspace_id: String,
         run_id: String,
     ) -> Result<Option<AgentRunRecord>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchGetRunRecord {
-                workspace_id,
-                run_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .get_run_record(&workspace_id, &run_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_thread_paused(
@@ -5956,16 +4500,12 @@ impl ActorHandle {
         workspace_id: String,
         thread_id: String,
     ) -> Result<bool, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchThreadPaused {
-                workspace_id,
-                thread_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .thread_dispatch_paused(&workspace_id, &thread_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_get_thread_pause_state(
@@ -5973,16 +4513,12 @@ impl ActorHandle {
         workspace_id: String,
         thread_id: String,
     ) -> Result<Option<ThreadDispatchPause>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchGetThreadPauseState {
-                workspace_id,
-                thread_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .get_thread_dispatch_pause_state(&workspace_id, &thread_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_recent_count(
@@ -5991,17 +4527,12 @@ impl ActorHandle {
         thread_id: String,
         since_ms: f64,
     ) -> Result<i64, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchRecentCount {
-                workspace_id,
-                thread_id,
-                since_ms,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .recent_dispatch_count(&workspace_id, &thread_id, since_ms)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6013,19 +4544,16 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<i64, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchFailPendingForThread {
-                workspace_id,
-                thread_id,
-                reason,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .fail_pending_for_thread(&workspace_id, &thread_id, &reason, now_ms, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_dispatch_record_run_message(
@@ -6035,18 +4563,16 @@ impl ActorHandle {
         run_id: String,
         token: CancellationToken,
     ) -> Result<bool, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchRecordRunMessage {
-                workspace_id,
-                message_id,
-                run_id,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .record_run_message(&workspace_id, &message_id, &run_id, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6059,20 +4585,23 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ThreadDispatchPause, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchSetThreadPaused {
-                workspace_id,
-                thread_id,
-                paused,
-                reason,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .set_thread_dispatch_paused(
+                        &workspace_id,
+                        &thread_id,
+                        paused,
+                        reason.as_deref(),
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_dispatch_mark_failure_note_posted(
@@ -6081,17 +4610,16 @@ impl ActorHandle {
         run_id: String,
         token: CancellationToken,
     ) -> Result<AgentRunRecord, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchMarkFailureNotePosted {
-                workspace_id,
-                run_id,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .mark_failure_note_posted(&workspace_id, &run_id, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_dispatch_requeue_failed_trigger(
@@ -6102,19 +4630,22 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<bool, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchRequeueFailedTrigger {
-                workspace_id,
-                trigger_message_id,
-                run_id,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .requeue_failed_trigger(
+                        &workspace_id,
+                        &trigger_message_id,
+                        &run_id,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_dispatch_list_app_quit_recoveries(
@@ -6123,17 +4654,12 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<DispatchRecovery>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchListAppQuitRecoveries {
-                workspace_id,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_app_quit_recoveries(&workspace_id, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_complete(
@@ -6144,19 +4670,16 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<(), RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchComplete {
-                workspace_id,
-                run_id,
-                exit_code,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .complete_dispatch(&workspace_id, &run_id, exit_code, now_ms, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_dispatch_fail(
@@ -6168,20 +4691,23 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<(), RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchFail {
-                workspace_id,
-                run_id,
-                reason,
-                exit_code,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .fail_dispatch(
+                        &workspace_id,
+                        &run_id,
+                        &reason,
+                        exit_code,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_dispatch_reclaim_running(
@@ -6190,17 +4716,12 @@ impl ActorHandle {
         max_attempts: i64,
         now_ms: i64,
     ) -> Result<Vec<String>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchReclaimRunning {
-                workspace_id,
-                max_attempts,
-                now_ms,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .reclaim_running_dispatches(&workspace_id, max_attempts, now_ms, &NoFaults)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn automation_subscribe(
@@ -6212,20 +4733,22 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<bool, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::AutomationSubscribe {
-                workspace_id,
-                automation_id,
-                prefix,
-                now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                dohc_engine_domain::subscribe_automation(
+                    store,
+                    &workspace_id,
+                    &automation_id,
+                    &prefix,
+                    now_ms,
+                    faults.as_ref(),
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn automation_unsubscribe(
@@ -6236,19 +4759,21 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<bool, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::AutomationUnsubscribe {
-                workspace_id,
-                automation_id,
-                prefix,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                dohc_engine_domain::unsubscribe_automation(
+                    store,
+                    &workspace_id,
+                    &automation_id,
+                    &prefix,
+                    faults.as_ref(),
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn automation_claim_next(
@@ -6258,18 +4783,20 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<Option<AutomationClaim>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::AutomationClaimNext {
-                workspace_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                dohc_engine_domain::claim_next_pending_automation(
+                    store,
+                    &workspace_id,
+                    now_ms,
+                    faults.as_ref(),
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn automation_settle(
@@ -6281,60 +4808,74 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<AutomationClaim, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::AutomationSettle {
-                workspace_id,
-                claim_id,
-                settle,
-                now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                dohc_engine_domain::settle_automation_claim(
+                    store,
+                    &workspace_id,
+                    &claim_id,
+                    &settle,
+                    now_ms,
+                    faults.as_ref(),
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn automation_reclaim_running(
         &self,
         workspace_id: String,
+        attempts: Option<Vec<AutomationClaimAttempt>>,
         max_attempts: i64,
         stale_before_ms: i64,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<Vec<AutomationClaim>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::AutomationReclaimRunning {
-                workspace_id,
-                max_attempts,
-                stale_before_ms,
-                now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                dohc_engine_domain::reclaim_running_automations(
+                    store,
+                    &workspace_id,
+                    attempts.as_deref(),
+                    max_attempts,
+                    stale_before_ms,
+                    now_ms,
+                    faults.as_ref(),
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
+    }
+
+    pub async fn automation_running_attempts(
+        &self,
+        workspace_id: String,
+    ) -> Result<Vec<AutomationClaimAttempt>, RuntimeError> {
+        self.run(move |store, _cache| {
+            dohc_engine_domain::list_running_automation_attempts(store, &workspace_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn automation_failures(
         &self,
         workspace_id: String,
     ) -> Result<Vec<AutomationFailure>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::AutomationFailures {
-                workspace_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            dohc_engine_domain::list_automation_failures(store, &workspace_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn relay(
@@ -6353,18 +4894,29 @@ impl ActorHandle {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
-            let (reply, reply_rx) = oneshot::channel();
-            self.tx
-                .send(Command::Relay {
-                    transport: transport.clone(),
-                    operation: operation.clone(),
-                    leases: leases.clone(),
-                    token: token.clone(),
-                    reply,
+            let queued_transport = transport.clone();
+            let queued_operation = operation.clone();
+            let queued_leases = leases.clone();
+            let queued_token = token.clone();
+            let outcome = self
+                .run(move |store, cache| {
+                    let outcome = if queued_token.is_cancelled() {
+                        Err(RuntimeError::Cancelled)
+                    } else {
+                        execute_relay_operation(
+                            store,
+                            cache,
+                            queued_transport,
+                            queued_operation,
+                            &queued_leases,
+                        )
+                    };
+                    // A pull can claim, replace, or advance lineages behind the
+                    // local path (probe-covered; reset hooks stay unconditional).
+                    cache.clear();
+                    outcome
                 })
-                .await
-                .map_err(|_| RuntimeError::ActorUnavailable)?;
-            let outcome = reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?;
+                .await;
             match outcome {
                 Err(RuntimeError::Relay(RelayError::Local(reason)))
                     if reason == RELAY_IO_PENDING =>
@@ -6393,87 +4945,10 @@ impl ActorHandle {
             }
         }
     }
-
-    /// Run a long operation as a sequence of bounded units, cancellable at each
-    /// between-unit boundary via `token`. Returns how many units committed.
-    ///
-    /// The worker checks the token BEFORE each unit's transaction; once a
-    /// unit's `BEGIN IMMEDIATE` starts it always runs to COMMIT/ROLLBACK
-    /// (`PORTING.md` §12) — cancellation never tears a unit, so the store holds
-    /// exactly the committed prefix.
-    pub async fn run_units(
-        &self,
-        units: Vec<CompoundWrite>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-    ) -> Result<UnitsOutcome, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::RunUnits {
-                units,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?
-            .map_err(RuntimeError::Storage)
-    }
-
-    /// Run a long operation under a deadline. The units execute on the writer
-    /// thread; if `deadline` elapses first, the shared `token` is cancelled
-    /// (stopping the run at the next between-unit boundary) and
-    /// [`RuntimeError::DeadlineExceeded`] is returned. Work already committed
-    /// before the deadline stays durable — exactly-once ack semantics
-    /// (`PORTING.md` §12).
-    pub async fn run_units_with_deadline(
-        &self,
-        units: Vec<CompoundWrite>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        deadline: std::time::Duration,
-    ) -> Result<UnitsOutcome, RuntimeError> {
-        // The deadline bounds the WHOLE operation, including enqueue: under a
-        // full command queue `send().await` can block past the deadline, so the
-        // wait for queue space is inside the timed select too.
-        let deadline_at = tokio::time::Instant::now() + deadline;
-        let (reply, reply_rx) = oneshot::channel();
-
-        tokio::select! {
-            biased;
-            sent = self.tx.send(Command::RunUnits {
-                units,
-                faults,
-                token: token.clone(),
-                reply,
-            }) => sent.map_err(|_| RuntimeError::ActorUnavailable)?,
-            () = tokio::time::sleep_until(deadline_at) => {
-                // Never admitted; nothing was cancelled to observe.
-                token.cancel();
-                return Err(RuntimeError::DeadlineExceeded);
-            }
-        }
-
-        tokio::select! {
-            biased;
-            result = reply_rx => result
-                .map_err(|_| RuntimeError::ActorUnavailable)?
-                .map_err(RuntimeError::Storage),
-            () = tokio::time::sleep_until(deadline_at) => {
-                // Deadline first: ask the run to stop at its next between-unit
-                // boundary. The in-flight unit (if any) still finishes durably.
-                token.cancel();
-                Err(RuntimeError::DeadlineExceeded)
-            }
-        }
-    }
 }
 
-/// Debug-only guard: the synchronous `write`/`read`/`snapshot` API uses
-/// `blocking_send`/`blocking_recv`, which PANIC inside a tokio runtime (the
+/// Debug-only guard: the synchronous `*_blocking` API uses
+/// `blocking_send`/`blocking_recv`, which panic inside a tokio runtime (the
 /// product runs on tokio). Catch the misuse cheaply in debug builds with a
 /// clear message instead of an opaque tokio panic in production; use the async
 /// API from within a runtime.
@@ -6481,7 +4956,7 @@ impl ActorHandle {
 fn debug_assert_sync_context() {
     debug_assert!(
         tokio::runtime::Handle::try_current().is_err(),
-        "synchronous ActorHandle API called from within a tokio runtime; use the async API (write_async/read_async/run_units)"
+        "synchronous ActorHandle API called from within a tokio runtime; use the async API"
     );
 }
 
@@ -7022,8 +5497,10 @@ struct MaterializationReplayScope<'a> {
     self_writes: Option<&'a dyn SelfWriteRecorder>,
 }
 
-const ROLLBACK_RESTORE_PREFIX: &str = "rollback-restore_";
+const ROLLBACK_RESTORE_PREFIX: &str = "rollback-restore_\u{1f}";
 
+/// The rollback identity a materialization job belongs to, if it is one
+/// `binary_rollback_job_identity` minted (bare or wrapped in a rename pair).
 fn rollback_restore_identity(job_id: &str) -> Option<&str> {
     if job_id.starts_with(ROLLBACK_RESTORE_PREFIX) {
         return Some(job_id);
@@ -7032,24 +5509,6 @@ fn rollback_restore_identity(job_id: &str) -> Option<&str> {
         .strip_prefix("binary-rename-0-write-mat_")
         .or_else(|| job_id.strip_prefix("binary-rename-1-delete-mat_"))
         .filter(|id| id.starts_with(ROLLBACK_RESTORE_PREFIX))
-}
-
-fn legacy_rollback_restore_is_corroborated(
-    store: &EngineStore,
-    rollback_id: &str,
-) -> Result<bool, RuntimeError> {
-    store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT 1 FROM moments WHERE moment_id = ?1 LIMIT 1",
-                [rollback_id],
-                |_| Ok(()),
-            )
-            .optional()
-            .map(|ordinary_moment| ordinary_moment.is_none())
-            .map_err(StorageError::corrupt_public)
-        })
-        .map_err(RuntimeError::from)
 }
 
 fn rollback_write_matches_active_snapshot(
@@ -7140,21 +5599,14 @@ fn rollback_job_matches_active(
     let Some(rollback_id) = rollback_restore_identity(&job.job_id) else {
         return Ok(None);
     };
-    let version_id = match decode_binary_rollback_job_identity(rollback_id) {
-        Some((workspace_id, version_id, _)) => {
-            if workspace_id != replay_workspace_id {
-                return Ok(Some(false));
-            }
-            Some(version_id)
-        }
-        None if rollback_id.contains('\u{1f}') => return Ok(Some(false)),
-        None => {
-            if !legacy_rollback_restore_is_corroborated(store, rollback_id)? {
-                return Ok(None);
-            }
-            None
-        }
+    let Some((workspace_id, version_id, _)) = decode_binary_rollback_job_identity(rollback_id)
+    else {
+        return Ok(Some(false));
     };
+    if workspace_id != replay_workspace_id {
+        return Ok(Some(false));
+    }
+    let version_id = Some(version_id);
     if job.job_id.starts_with("binary-rename-1-delete-mat_") {
         let write_id = binary_rename_write_job_id(rollback_id);
         let Some(write_job) = store.load_materialization_job(&write_id)? else {
@@ -7347,10 +5799,10 @@ fn replay_pending_materializations(
                 .load_materialization_job(&write_job_id)?
                 .map(|write_job| write_job.status)
             {
-                // #739 follow-up: CANCELLED means the destination path was
+                // Follow-up: cancelled means the destination path was
                 // explicitly deleted after the rename committed — that
-                // delete already resolved the destination, so THIS paired
-                // delete (removing the rename's OLD path) must still run.
+                // delete already resolved the destination, so this paired
+                // delete (removing the rename's old path) must still run.
                 // Treating it like Conflict would strand the old path on
                 // disk forever, under a job nothing ever revisits.
                 Some(JobStatus::Complete) | Some(JobStatus::Cancelled) => {}
@@ -7842,14 +6294,7 @@ fn execute_relay_operation(
             workspace_id,
             now_ms,
         } => client
-            .pull_chat_workspace_with_cache(
-                store,
-                doc_cache,
-                &workspace_id,
-                &NoFaults,
-                leases,
-                now_ms,
-            )
+            .pull_chat_workspace(store, doc_cache, &workspace_id, &NoFaults, leases, now_ms)
             .map(RelayOperationOutcome::Sync)
             .map_err(RuntimeError::from),
         RelayOperation::CommitCursor {
@@ -8001,7 +6446,7 @@ fn execute_relay_operation(
             stream_identity,
             created_at_ms,
         } => {
-            // THE level gate, and the only place it is read. Only Edit sends
+            // The level gate, and the only place it is read. Only Edit sends
             // workspace replication ops, so View and Comment need no
             // identity and the store is not touched at all.
             if access != dohc_engine_sync::ShareAccess::Edit {
@@ -8069,7 +6514,7 @@ fn worker_main(
     state: Arc<AtomicU8>,
     startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
 ) {
-    // Publish Closed on ANY exit — normal return OR a panic unwind (e.g. a
+    // Publish Closed on any exit — normal return OR a panic unwind (e.g. a
     // panicking fault injector). Declared before `store` so `store` (and its
     // connection) drops first, then this guard publishes Closed: a reader that
     // observes Closed is guaranteed the writer handle is already gone.
@@ -8111,2630 +6556,12 @@ fn worker_main(
     // validity proof (`doc_cache.rs`, CACHE-VALID) assumes.
     let mut doc_cache = WriterDocCache::new();
 
-    // Blocking recv on the tokio channel keeps the SQLite work on THIS
+    // Blocking recv on the tokio channel keeps the SQLite work on this
     // dedicated thread, off the async runtime. `blocking_recv` returns `None`
     // once every sender is dropped.
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
-            Command::Write {
-                write,
-                faults,
-                reply,
-            } => {
-                let outcome = store.commit_compound(&write, faults.as_ref());
-                let _ = reply.send(outcome);
-            }
-            Command::Read { doc_id, reply } => {
-                let _ = reply.send(store.read_document(&doc_id));
-            }
-            Command::Snapshot { reply } => {
-                let _ = reply.send(snapshot(&store));
-            }
-            Command::BindShadowClone { token, reply } => {
-                let _ = reply.send(store.bind_shadow_clone_token(&token));
-            }
-            Command::RunUnits {
-                units,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = run_units(&mut store, units, faults.as_ref(), &token);
-                let _ = reply.send(outcome);
-            }
-            Command::VersionedTextWrite {
-                input,
-                root_dir,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    versioned_text_write_on_store(
-                        &mut store,
-                        &input,
-                        root_dir.as_deref(),
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::VersionedBinaryWrite {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    versioned_binary_write_on_store(
-                        &mut store,
-                        &input,
-                        &root_dir,
-                        self_writes.as_ref(),
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::VersionedTextRename {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    versioned_text_rename_on_store(
-                        &mut store,
-                        &input,
-                        &root_dir,
-                        self_writes.as_ref(),
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::VersionedTextDelete {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    versioned_text_delete_on_store(
-                        &mut store,
-                        &input,
-                        &root_dir,
-                        self_writes.as_ref(),
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::VersionedTextRollback {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    versioned_text_rollback_on_store(
-                        &mut store,
-                        &input,
-                        &root_dir,
-                        self_writes.as_ref(),
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::VersionedTextCompare { input, reply } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .compare_text_file_versions(&input)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::VersionedTextMerge {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    versioned_text_merge_on_store(
-                        &mut store,
-                        &input,
-                        &root_dir,
-                        self_writes.as_ref(),
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::CompareVersionFilesPage {
-                workspace_id,
-                source_version_id,
-                target_version_id,
-                after_path,
-                limit,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .compare_version_files_page(
-                        &workspace_id,
-                        &source_version_id,
-                        &target_version_id,
-                        after_path.as_deref(),
-                        limit,
-                    )
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::CaptureIngest {
-                input,
-                indexing,
-                leases,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    capture_ingest_on_store(
-                        &mut store,
-                        &input,
-                        &indexing,
-                        &leases,
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::CaptureIngestBatch {
-                inputs,
-                search_policy,
-                leases,
-                faults,
-                root_dir,
-                root_guard,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    capture_ingest_batch_on_store(
-                        &mut store,
-                        &inputs,
-                        &search_policy,
-                        &leases,
-                        faults.as_ref(),
-                        &token,
-                        (&root_dir, root_guard.as_ref()),
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::CaptureIngestBinary {
-                input,
-                leases,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    capture_ingest_binary_on_store(
-                        &mut store,
-                        &input,
-                        &leases,
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::CollectionRecordIdMismatch {
-                workspace_id,
-                version_id,
-                paths,
-                reply,
-            } => {
-                let outcome = store
-                    .read_with(|conn| {
-                        collection_record_id_mismatch_in_tx(
-                            conn,
-                            &workspace_id,
-                            &version_id,
-                            &paths,
-                        )
-                    })
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReconcileCollections {
-                workspace_id,
-                version_id,
-                root_dir,
-                root_guard,
-                leases,
-                self_writes,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = reconcile_collections_on_store(
-                    &mut store,
-                    &mut doc_cache,
-                    &workspace_id,
-                    &version_id,
-                    &root_dir,
-                    root_guard.as_deref(),
-                    &leases,
-                    self_writes.as_ref(),
-                    now_ms,
-                    faults.as_ref(),
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::CollectionsList {
-                workspace_id,
-                reply,
-            } => {
-                let outcome = store
-                    .read_with(|conn| list_collections(conn, &workspace_id))
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::CollectionsListPendingAdoptions {
-                workspace_id,
-                limit,
-                cursor,
-                reply,
-            } => {
-                let outcome = store
-                    .read_with(|conn| {
-                        list_pending_collection_adoptions(
-                            conn,
-                            &workspace_id,
-                            limit,
-                            cursor.as_ref(),
-                        )
-                    })
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::CollectionsGet {
-                workspace_id,
-                collection_path,
-                reply,
-            } => {
-                let outcome = store
-                    .read_with(|conn| get_collection(conn, &workspace_id, &collection_path))
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::CollectionsQueryRecords {
-                workspace_id,
-                collection_path,
-                query,
-                reply,
-            } => {
-                let outcome = store
-                    .read_with(|conn| {
-                        query_collection_records(conn, &workspace_id, &collection_path, &query)
-                    })
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::CollectionsGetRecord {
-                workspace_id,
-                collection_path,
-                record_id,
-                history_limit,
-                before_history_id,
-                reply,
-            } => {
-                let outcome = store
-                    .read_with(|conn| {
-                        get_collection_record(
-                            conn,
-                            &workspace_id,
-                            &collection_path,
-                            &record_id,
-                            history_limit,
-                            before_history_id,
-                        )
-                    })
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::CaptureSecret {
-                payload,
-                faults,
-                token,
-                reply,
-            } => {
-                let (input, key) = *payload;
-                let outcome =
-                    capture_secret_on_store(&mut store, &input, &key, faults.as_ref(), &token);
-                let _ = reply.send(outcome);
-            }
-            Command::CaptureSecretRetire {
-                input,
-                workspace_root,
-                faults,
-                token,
-                reply,
-            } => {
-                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
-                let outcome = capture_secret_retire_on_store(
-                    &mut store,
-                    &input,
-                    root_dir,
-                    root_guard,
-                    faults.as_ref(),
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::SecretStateExists {
-                workspace_id,
-                reply,
-            } => {
-                let outcome =
-                    has_secret_state(&mut store, &workspace_id).map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ListVersions {
-                workspace_id,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .list_versions(&workspace_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ListSnapshots {
-                workspace_id,
-                version_id,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .list_snapshots(&workspace_id, &version_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ListSnapshotMetadata {
-                workspace_id,
-                version_id,
-                after_path,
-                limit,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .list_snapshot_metadata(
-                        &workspace_id,
-                        &version_id,
-                        after_path.as_deref(),
-                        limit,
-                    )
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ListMoments { query, reply } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .list_moments(&query)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::HistoryPage {
-                workspace_id,
-                limit,
-                before_moment_order,
-                protected_probe_limit,
-                reply,
-            } => {
-                let outcome = (|| {
-                    let versioned = VersionedTextStore::new(&mut store);
-                    let active_version = versioned.get_active_version(&workspace_id)?;
-                    let text_moment_page = versioned.list_moments(&ListMomentsQuery {
-                        workspace_id: workspace_id.clone(),
-                        version_id: Some(active_version.version_id.clone()),
-                        object_id: None,
-                        limit,
-                        before_moment_order,
-                    })?;
-                    let upper_recorded_at_ms = before_moment_order
-                        .map(|cursor| {
-                            let through_cursor =
-                                cursor.checked_add(1).ok_or(DomainError::InvalidInput {
-                                    reason: "before_moment_order is too large",
-                                })?;
-                            versioned
-                                .list_moments(&ListMomentsQuery {
-                                    workspace_id: workspace_id.clone(),
-                                    version_id: Some(active_version.version_id.clone()),
-                                    object_id: None,
-                                    limit: 1,
-                                    before_moment_order: Some(through_cursor),
-                                })
-                                .map(|page| {
-                                    page.moments.first().map(|moment| moment.recorded_at_ms)
-                                })
-                        })
-                        .transpose()?
-                        .flatten();
-                    let lower_recorded_at_ms =
-                        text_moment_page.next_before_moment_order.and_then(|_| {
-                            text_moment_page
-                                .moments
-                                .last()
-                                .map(|moment| moment.recorded_at_ms)
-                        });
-                    let protected_moments = list_secret_moments_in_time_window_keyless(
-                        &store,
-                        &workspace_id,
-                        &active_version.version_id,
-                        lower_recorded_at_ms,
-                        upper_recorded_at_ms,
-                        protected_probe_limit,
-                    )?;
-                    Ok::<HistoryPageRead, DomainError>(HistoryPageRead {
-                        active_version,
-                        text_moment_page,
-                        protected_moments,
-                        upper_recorded_at_ms,
-                    })
-                })()
-                .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::GetMoment {
-                workspace_id,
-                moment_id,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .get_moment(&workspace_id, &moment_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReadBinary {
-                workspace_id,
-                version_id,
-                path,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .read_binary(&workspace_id, &version_id, &path)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReadBinaryMeta {
-                workspace_id,
-                version_id,
-                path,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .read_binary_meta(&workspace_id, &version_id, &path)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReadBinaryBlob {
-                workspace_id,
-                sha256,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .read_binary_blob(&workspace_id, &sha256)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReadBinaryBlobForEgress {
-                workspace_id,
-                sha256,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .read_binary_blob_for_egress(&workspace_id, &sha256)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReadTextBlob {
-                workspace_id,
-                sha256,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .read_text_blob(&workspace_id, &sha256)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReadTextBlobForEgress {
-                workspace_id,
-                sha256,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .read_text_blob_for_egress(&workspace_id, &sha256)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReadTextInband {
-                workspace_id,
-                version_id,
-                path,
-                cap,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .read_text_inband(&workspace_id, &version_id, &path, cap)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReadBinaryInband {
-                workspace_id,
-                version_id,
-                path,
-                cap,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .read_binary_inband(&workspace_id, &version_id, &path, cap)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::MaterializeSecretInband {
-                workspace_id,
-                version_id,
-                path,
-                key,
-                cap,
-                reply,
-            } => {
-                let outcome = SecretFileStore::new(&mut store, &key)
-                    .materialize_secret_file_inband(&workspace_id, &version_id, &path, cap)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::WriteSecretFile {
-                input,
-                key,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    SecretFileStore::new(&mut store, &key)
-                        .write_secret_file_with(&input, faults.as_ref(), |tx, result| {
-                            journal_secret_put_outbound_in_tx(tx, result)
-                        })
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::DeleteSecretFile {
-                input,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    delete_secret_file_keyless_with(
-                        &mut store,
-                        &input,
-                        faults.as_ref(),
-                        journal_secret_delete_outbound_in_tx,
-                    )
-                    .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ForkSecretVersion {
-                workspace_id,
-                from_version_id,
-                to_version_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    fork_version_keyless_with(
-                        &mut store,
-                        &workspace_id,
-                        &from_version_id,
-                        &to_version_id,
-                        now_ms,
-                        faults.as_ref(),
-                        |tx| {
-                            journal_secret_fork_outbound_in_tx(
-                                tx,
-                                &workspace_id,
-                                &from_version_id,
-                                &to_version_id,
-                                now_ms,
-                            )
-                        },
-                    )
-                    .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ListSecretMoments {
-                workspace_id,
-                version_id,
-                path,
-                before_moment_order,
-                limit,
-                reply,
-            } => {
-                let outcome = list_secret_moments_page_keyless(
-                    &store,
-                    &workspace_id,
-                    version_id.as_deref(),
-                    path.as_deref(),
-                    before_moment_order,
-                    limit,
-                )
-                .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::GetSecretMoment {
-                workspace_id,
-                moment_id,
-                reply,
-            } => {
-                let outcome = get_secret_moment_keyless(&store, &workspace_id, &moment_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::CompareSecretFiles {
-                workspace_id,
-                source_version_id,
-                target_version_id,
-                after_path,
-                limit,
-                key,
-                reply,
-            } => {
-                let outcome = compare_secret_files_page_keyless(
-                    &store,
-                    key.as_deref(),
-                    &workspace_id,
-                    &source_version_id,
-                    &target_version_id,
-                    after_path.as_deref(),
-                    limit,
-                )
-                .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ApplySecretFile {
-                workspace_id,
-                path,
-                from_version_id,
-                to_version_id,
-                moment_id,
-                metadata_origin,
-                metadata_summary,
-                metadata_correlation_id,
-                now_ms,
-                key,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    apply_secret_file_from_version_with(
-                        &mut store,
-                        &key,
-                        &dohc_engine_domain::ApplySecretFileFromVersion {
-                            workspace_id,
-                            path,
-                            from_version_id,
-                            to_version_id,
-                            moment_id,
-                            metadata_origin,
-                            metadata_summary,
-                            metadata_correlation_id,
-                            now_ms,
-                        },
-                        faults.as_ref(),
-                        |tx, result| {
-                            journal_secret_moment_outbound_in_tx(tx, result.moment.as_ref())
-                        },
-                    )
-                    .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::RestoreSecretFile {
-                workspace_id,
-                path,
-                before_moment_id,
-                moment_id,
-                metadata_origin,
-                metadata_summary,
-                metadata_correlation_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    restore_secret_file_verbatim_with_metadata_and_after(
-                        &mut store,
-                        &workspace_id,
-                        &path,
-                        &before_moment_id,
-                        &moment_id,
-                        &metadata_origin,
-                        metadata_summary,
-                        metadata_correlation_id,
-                        now_ms,
-                        faults.as_ref(),
-                        |tx, result| {
-                            journal_secret_moment_outbound_in_tx(tx, result.moment.as_ref())
-                        },
-                    )
-                    .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ListSecretFiles {
-                workspace_id,
-                version_id,
-                reply,
-            } => {
-                let outcome = list_secret_files_keyless(&store, &workspace_id, &version_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::SecretFileLen {
-                workspace_id,
-                version_id,
-                path,
-                reply,
-            } => {
-                let outcome = secret_file_len_keyless(&store, &workspace_id, &version_id, &path)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ListSecretFilesPage {
-                workspace_id,
-                version_id,
-                after_path,
-                limit,
-                reply,
-            } => {
-                let outcome = list_secret_files_keyless_page(
-                    &store,
-                    &workspace_id,
-                    &version_id,
-                    after_path.as_deref(),
-                    limit,
-                )
-                .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::MaterializeSecret {
-                workspace_id,
-                version_id,
-                path,
-                key,
-                reply,
-            } => {
-                let outcome = SecretFileStore::new(&mut store, &key)
-                    .materialize_secret_file(&workspace_id, &version_id, &path)
-                    .map_err(RuntimeError::from)
-                    .and_then(|plaintext| match plaintext {
-                        None => Ok(None),
-                        Some(plaintext) => plaintext.into_utf8().map(Some).map_err(|_| {
-                            RuntimeError::from(dohc_engine_domain::DomainError::StateCorrupt {
-                                reason: "secret plaintext is not utf-8",
-                            })
-                        }),
-                    });
-                let _ = reply.send(outcome);
-            }
-            Command::ActiveVersionId {
-                workspace_id,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .get_active_version(&workspace_id)
-                    .map(|version| version.version_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ActiveVersion {
-                workspace_id,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .get_active_version(&workspace_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::EnsureMainVersion {
-                workspace_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    VersionedTextStore::new(&mut store)
-                        .ensure_main_version(&workspace_id, "main", now_ms, faults.as_ref())
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::SetActiveVersion {
-                input,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = switch_active_version_on_store(
-                    &mut store,
-                    &input.workspace_id,
-                    &input.version_id,
-                    &input.root_dir,
-                    input.self_writes.as_ref(),
-                    input.now_ms,
-                    faults.as_ref(),
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::CreateNamedVersion {
-                input,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    VersionedTextStore::new(&mut store)
-                        .create_named_version_with(&input, faults.as_ref(), |tx, record| {
-                            journal_version_create_outbound_in_tx(
-                                tx,
-                                record,
-                                &input.from_version_id,
-                            )
-                        })
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::PreflightCreateNamedVersion {
-                input,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    VersionedTextStore::new(&mut store)
-                        .preflight_create_named_version(&input)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::CaptureManifestSeed {
-                workspace_id,
-                version_id,
-                reply,
-            } => {
-                let outcome = capture_manifest_seed(&store, &workspace_id, &version_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::CaptureRetire {
-                input,
-                workspace_root,
-                self_writes,
-                leases,
-                faults,
-                token,
-                reply,
-            } => {
-                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    capture_retire_on_store(
-                        &mut store,
-                        &input,
-                        root_dir,
-                        root_guard,
-                        self_writes.as_deref(),
-                        &leases,
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::VersionedTextRead {
-                workspace_id,
-                version_id,
-                path,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    VersionedTextStore::new(&mut store)
-                        .read_text(&workspace_id, &version_id, &path)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ResolvePathObject {
-                workspace_id,
-                version_id,
-                path,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .object_id_for_path(&workspace_id, &version_id, &path)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::YdocOpenState {
-                workspace_id,
-                now_ms,
-                drain_deferred,
-                expected_key,
-                version_id,
-                path,
-                content_kind,
-                seed_from_artifact,
-                token,
-                reply,
-            } => {
-                let outcome = ydoc_open_state_on_store(
-                    &mut store,
-                    &mut doc_cache,
-                    &workspace_id,
-                    now_ms,
-                    drain_deferred,
-                    expected_key.as_ref(),
-                    &version_id,
-                    &path,
-                    content_kind,
-                    seed_from_artifact,
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::YdocVersionUnsettledContentKind {
-                workspace_id,
-                version_id,
-                ignored_object_ids,
-                token,
-                reply,
-            } => {
-                let outcome = ydoc_version_unsettled_content_kind_on_store(
-                    &store,
-                    &workspace_id,
-                    &version_id,
-                    &ignored_object_ids,
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::YdocMaterializeSceneSeedAssets {
-                root_dir,
-                workspace_id,
-                job_ids,
-                self_writes,
-                now_ms,
-                reply,
-            } => {
-                let selected: HashSet<String> = job_ids.into_iter().collect();
-                let outcome = reconcile_scene_asset_materialization_conflicts(
-                    &store, &root_dir, &selected, now_ms,
-                )
-                .and_then(|invalid_jobs| {
-                    replay_pending_materializations(
-                        &mut store,
-                        &root_dir,
-                        MaterializationReplayScope {
-                            workspace_id: &workspace_id,
-                            self_writes: Some(self_writes.as_ref()),
-                        },
-                        now_ms,
-                        &NoFaults,
-                        Some(&selected),
-                        false,
-                    )?;
-                    let completed = selected.iter().try_fold(0_usize, |count, job_id| {
-                        store.load_materialization_job(job_id).map(|job| {
-                            count
-                                + usize::from(
-                                    job.is_some_and(|job| job.status == JobStatus::Complete),
-                                )
-                        })
-                    })?;
-                    let incomplete_jobs = selected.len().saturating_sub(completed);
-                    Ok(YdocSeedMaterialization {
-                        materialized: invalid_jobs == 0 && incomplete_jobs == 0,
-                        incomplete_jobs,
-                        invalid_jobs,
-                    })
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::YdocRecordUpdate {
-                key,
-                path,
-                content_kind,
-                regime,
-                update,
-                request_id,
-                actor_origin_id,
-                attribution,
-                expected_lineage_claim_id,
-                require_empty_lineage,
-                seed_source_sha256,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = ydoc_record_update_on_store(
-                    &mut store,
-                    &mut doc_cache,
-                    &key,
-                    &path,
-                    content_kind,
-                    regime,
-                    &update,
-                    actor_origin_id,
-                    attribution,
-                    expected_lineage_claim_id,
-                    require_empty_lineage,
-                    seed_source_sha256,
-                    request_id,
-                    true,
-                    now_ms,
-                    faults.as_ref(),
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::YdocSettle {
-                root_dir,
-                key,
-                path,
-                content_kind,
-                expected_lineage_claim_id,
-                expected_head_sha,
-                session_id,
-                self_writes,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = ydoc_settle_on_store(
-                    &mut store,
-                    &mut doc_cache,
-                    &root_dir,
-                    &key,
-                    &path,
-                    content_kind,
-                    true,
-                    expected_lineage_claim_id.as_deref(),
-                    expected_head_sha,
-                    None,
-                    &session_id,
-                    self_writes.as_ref(),
-                    now_ms,
-                    faults.as_ref(),
-                    &token,
-                    None,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::YdocResync {
-                key,
-                expected_lineage_claim_id,
-                token,
-                reply,
-            } => {
-                let outcome = ydoc_resync_on_store(
-                    &mut store,
-                    &mut doc_cache,
-                    &key,
-                    expected_lineage_claim_id.as_deref(),
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::YdocCacheStatsForTest { reply } => {
-                let _ = reply.send(doc_cache.stats());
-            }
-            Command::YdocCacheClearForTest { reply } => {
-                doc_cache.clear();
-                let _ = reply.send(doc_cache.stats());
-            }
-            Command::YdocCloseSession {
-                key,
-                materialization,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = ydoc_close_session_on_store(
-                    &mut store,
-                    &mut doc_cache,
-                    &key,
-                    materialization.as_ref(),
-                    now_ms,
-                    faults.as_ref(),
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::RepairConflictedYdocRecoveries {
-                workspace_id,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    dohc_engine_sync::repair_conflicted_ydoc_recoveries(
-                        &mut store,
-                        &workspace_id,
-                        faults.as_ref(),
-                    )
-                    .map_err(RuntimeError::from)
-                };
-                // A proven-empty scan performed no lineage transaction, so it
-                // must not invalidate an unrelated active writer session. Any
-                // materialization or error can have changed lineage state.
-                if !matches!(&outcome, Ok(recoveries) if recoveries.is_empty()) {
-                    doc_cache.clear();
-                }
-                let _ = reply.send(outcome);
-            }
-            Command::MaterializeReplayPending {
-                root_dir,
-                workspace_id,
-                now_ms,
-                reply,
-            } => {
-                // Open-time replay runs before the files layer starts. The
-                // switch path calls the same tolerant per-job executor with a
-                // selected durable job set and watcher suppression enabled.
-                let outcome = replay_pending_materializations(
-                    &mut store,
-                    &root_dir,
-                    MaterializationReplayScope {
-                        workspace_id: &workspace_id,
-                        self_writes: None,
-                    },
-                    now_ms,
-                    &NoFaults,
-                    None,
-                    false,
-                )
-                .map(|summary| summary.completed);
-                let _ = reply.send(outcome);
-            }
-            Command::MaterializeReplayPendingForFence {
-                root_dir,
-                workspace_id,
-                self_writes,
-                now_ms,
-                reply,
-            } => {
-                let outcome = replay_pending_materializations(
-                    &mut store,
-                    &root_dir,
-                    MaterializationReplayScope {
-                        workspace_id: &workspace_id,
-                        self_writes: Some(self_writes.as_ref()),
-                    },
-                    now_ms,
-                    &NoFaults,
-                    None,
-                    false,
-                )
-                .and_then(|summary| {
-                    if summary.failed == 0 {
-                        Ok(())
-                    } else {
-                        Err(RuntimeError::ActiveVersionMaterializationIncomplete {
-                            failed_jobs: summary.failed,
-                        })
-                    }
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::MaterializeReplaySelectedForFence {
-                root_dir,
-                workspace_id,
-                self_writes,
-                materialization_job_ids,
-                now_ms,
-                reply,
-            } => {
-                let selected: HashSet<String> = materialization_job_ids.into_iter().collect();
-                let outcome = replay_pending_materializations(
-                    &mut store,
-                    &root_dir,
-                    MaterializationReplayScope {
-                        workspace_id: &workspace_id,
-                        self_writes: Some(self_writes.as_ref()),
-                    },
-                    now_ms,
-                    &NoFaults,
-                    Some(&selected),
-                    false,
-                )
-                .and_then(|summary| {
-                    let failed_jobs =
-                        summary.failed + selected.len().saturating_sub(summary.selected_seen);
-                    if failed_jobs == 0 {
-                        Ok(())
-                    } else {
-                        Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs })
-                    }
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::ConflictList {
-                workspace_id,
-                status,
-                after_conflict_id,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    VersionedTextStore::new(&mut store)
-                        .list_text_conflicts_page(
-                            &workspace_id,
-                            status.as_deref(),
-                            after_conflict_id.as_deref(),
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ConflictOpen {
-                conflict,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome =
-                    conflict_open_on_store(&mut store, &conflict, faults.as_ref(), &token);
-                let _ = reply.send(outcome);
-            }
-            Command::ConflictResolve {
-                input,
-                leases,
-                root_dir,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = conflict_resolve_on_store(
-                    &mut store,
-                    &input,
-                    root_dir.as_deref(),
-                    &leases,
-                    faults.as_ref(),
-                    &token,
-                );
-                // Resolution can replace or archive a lineage; the tuple probe
-                // already misses on every such outcome (the claim id changes or
-                // the marker is deleted), but the reset hooks are unconditional.
-                doc_cache.clear();
-                let _ = reply.send(outcome);
-            }
-            Command::ConflictApplyReplicated {
-                envelope,
-                faults,
-                leases,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    match apply_conflict_envelope(&mut store, &envelope, faults.as_ref(), &leases) {
-                        Ok(outcome @ ApplyOutcome::Refused(_)) => {
-                            retain_refusal_for_direct_retry(&mut store, &envelope, faults.as_ref())
-                                .map(|()| outcome)
-                                .map_err(RuntimeError::from)
-                        }
-                        Ok(ApplyOutcome::Skipped) => read_replayed_refusal(&store, &envelope)
-                            .map(|refusal| {
-                                refusal.map_or(ApplyOutcome::Skipped, ApplyOutcome::Refused)
-                            })
-                            .map_err(RuntimeError::from),
-                        outcome => outcome.map_err(RuntimeError::from),
-                    }
-                };
-                // A replicated conflict envelope can replace or archive a
-                // lineage (probe-covered; reset hooks stay unconditional).
-                doc_cache.clear();
-                let _ = reply.send(outcome);
-            }
-            Command::ChatChannelCreate {
-                workspace_id,
-                channel_id,
-                name,
-                kind,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .create_channel(&workspace_id, &channel_id, &name, kind, now_ms, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatChannelEnsureGeneral {
-                workspace_id,
-                channel_id,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .ensure_general_channel(&workspace_id, &channel_id, now_ms, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatChannelEnsureAgent {
-                workspace_id,
-                channel_id,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .ensure_agent_channel(&workspace_id, &channel_id, now_ms, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatChannelsList {
-                workspace_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_channels(&workspace_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatChannelFindBySlug {
-                workspace_id,
-                slug,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .find_channel_by_slug(&workspace_id, &slug)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatChannelGetWireId {
-                workspace_id,
-                channel_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .get_channel_wire_id(&workspace_id, &channel_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatThreadStart {
-                input,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .start_channel_thread(&input, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatThreadCreate {
-                input,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .create_thread(&input, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatThreadsList {
-                workspace_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_threads(&workspace_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatThreadsListForFile {
-                workspace_id,
-                object_id,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_threads_for_file(&workspace_id, &object_id, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatThreadsListForChannel {
-                workspace_id,
-                channel_id,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_channel_threads(&workspace_id, &channel_id, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatThreadFindChannelId {
-                workspace_id,
-                thread_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .find_thread_channel_id(&workspace_id, &thread_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatThreadGetProjection {
-                workspace_id,
-                thread_id,
-                linked_file_access,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .get_thread_projection(&workspace_id, &thread_id, linked_file_access)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatAttachmentsListForThread {
-                workspace_id,
-                thread_id,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_thread_attachments(&workspace_id, &thread_id, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatAttachmentsListFileMentions {
-                workspace_id,
-                object_id,
-                path_hint,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_file_mentions(
-                        &workspace_id,
-                        object_id.as_deref(),
-                        path_hint.as_deref(),
-                        after,
-                        limit,
-                    )
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatMentionsBackfill {
-                workspace_id,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .backfill_mentions(&workspace_id, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatMentionsListForHandle {
-                workspace_id,
-                handle,
-                unread_only,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_mentions_for_handle(&workspace_id, &handle, unread_only, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchRecordEligibleTriggers {
-                workspace_id,
-                verified_user_id,
-                at_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .record_eligible_triggers(
-                            &workspace_id,
-                            verified_user_id.as_deref(),
-                            at_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatMessageSend {
-                input,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .send_message(&input, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDecisionResolve {
-                input,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .resolve_decision(&input, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDecisionsList {
-                workspace_id,
-                thread_id,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_thread_decisions(&workspace_id, &thread_id, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatReactionSet {
-                input,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .set_reaction(&input, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatReactionsList {
-                workspace_id,
-                thread_id,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_reactions(&workspace_id, &thread_id, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatMessagesList {
-                workspace_id,
-                thread_id,
-                limit,
-                after_message_order,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_messages(&workspace_id, &thread_id, limit, after_message_order)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatThreadRevision {
-                workspace_id,
-                thread_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .conversation_revision(&workspace_id, &thread_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatReadStateMarkThreadRead {
-                workspace_id,
-                thread_id,
-                up_to_sequence,
-                expected_revision,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .mark_thread_read(
-                            &workspace_id,
-                            &thread_id,
-                            up_to_sequence,
-                            expected_revision,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatReadStateGet {
-                workspace_id,
-                thread_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .read_state(&workspace_id, &thread_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatReadStateListUnreadFileThreads {
-                workspace_id,
-                after_thread_id,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_unread_file_threads(&workspace_id, after_thread_id.as_deref(), limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatAgentUnreadThreads {
-                workspace_id,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_agent_unread_threads(&workspace_id, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatAgentMarkThreadRead {
-                workspace_id,
-                thread_id,
-                up_to_created_at_ms,
-                up_to_message_id,
-                expected_revision,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .mark_thread_read_by_agent(
-                            &workspace_id,
-                            &thread_id,
-                            up_to_created_at_ms,
-                            &up_to_message_id,
-                            expected_revision,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatFollowSet {
-                input,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .set_follow(&input, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatFollowsList {
-                workspace_id,
-                owner_user_id,
-                state,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_follows(&workspace_id, &owner_user_id, state.as_deref())
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatFollowsEnsureDefaults {
-                workspace_id,
-                owner_user_id,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .ensure_default_channel_follows(&workspace_id, &owner_user_id, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarkFind {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .find_bookmark(&workspace_id, &owner_user_id, &bookmark_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarksListPending {
-                workspace_id,
-                owner_user_id,
-                limit,
-                after,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_pending_bookmarks_page(&workspace_id, &owner_user_id, limit, after)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatFeedMarkSeen {
-                workspace_id,
-                owner_user_id,
-                replication_owner_user_id,
-                head_cursor,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .mark_feed_seen(
-                            &workspace_id,
-                            &owner_user_id,
-                            replication_owner_user_id.as_deref(),
-                            &head_cursor,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatFeedListPersonal {
-                workspace_id,
-                owner_user_id,
-                limit,
-                cursor,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_personal_feed(&workspace_id, &owner_user_id, limit, cursor.as_deref())
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarkSave {
-                input,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .save_bookmark(&input, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarksList {
-                workspace_id,
-                owner_user_id,
-                state,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_bookmarks(&workspace_id, &owner_user_id, state.as_deref())
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarkMarkReady {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                generation,
-                projected_at_ms,
-                projection_object_id,
-                projection_path,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .mark_bookmark_ready(
-                            &workspace_id,
-                            &owner_user_id,
-                            &bookmark_id,
-                            generation,
-                            projected_at_ms,
-                            projection_object_id.as_deref(),
-                            projection_path.as_deref(),
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarkArchive {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .archive_bookmark(
-                            &workspace_id,
-                            &owner_user_id,
-                            &bookmark_id,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarkMarkPending {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                request_id,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .mark_bookmark_pending(
-                            &workspace_id,
-                            &owner_user_id,
-                            &bookmark_id,
-                            &request_id,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarkMarkFailed {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                generation,
-                failure_reason,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .mark_bookmark_failed(
-                            &workspace_id,
-                            &owner_user_id,
-                            &bookmark_id,
-                            generation,
-                            &failure_reason,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarkMarkStale {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                generation,
-                failure_reason,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .mark_bookmark_stale(
-                            &workspace_id,
-                            &owner_user_id,
-                            &bookmark_id,
-                            generation,
-                            failure_reason.as_deref(),
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchEnqueue {
-                workspace_id,
-                trigger_message_id,
-                thread_id,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .enqueue_dispatch(
-                            &workspace_id,
-                            &trigger_message_id,
-                            &thread_id,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchClaimNextPending {
-                workspace_id,
-                run_id,
-                command,
-                log_path,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .claim_next_pending(
-                            &workspace_id,
-                            &run_id,
-                            &command,
-                            log_path.as_deref(),
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchListPending {
-                workspace_id,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_pending_dispatches(&workspace_id, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchOpenRuns {
-                workspace_id,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_open_dispatch_runs(&workspace_id, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchListRunMessages {
-                workspace_id,
-                run_id,
-                after_message_id,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_run_messages(&workspace_id, &run_id, after_message_id, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchRunIdForMessage {
-                workspace_id,
-                message_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .dispatch_run_id_for_message(&workspace_id, &message_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchRunRecordsForThread {
-                workspace_id,
-                thread_id,
-                run_limit,
-                after,
-                page_limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .run_records_for_thread(&workspace_id, &thread_id, run_limit, after, page_limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchGetRunRecord {
-                workspace_id,
-                run_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .get_run_record(&workspace_id, &run_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchThreadPaused {
-                workspace_id,
-                thread_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .thread_dispatch_paused(&workspace_id, &thread_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchGetThreadPauseState {
-                workspace_id,
-                thread_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .get_thread_dispatch_pause_state(&workspace_id, &thread_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchRecentCount {
-                workspace_id,
-                thread_id,
-                since_ms,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .recent_dispatch_count(&workspace_id, &thread_id, since_ms)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchFailPendingForThread {
-                workspace_id,
-                thread_id,
-                reason,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .fail_pending_for_thread(
-                            &workspace_id,
-                            &thread_id,
-                            &reason,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchRecordRunMessage {
-                workspace_id,
-                message_id,
-                run_id,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .record_run_message(&workspace_id, &message_id, &run_id, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchSetThreadPaused {
-                workspace_id,
-                thread_id,
-                paused,
-                reason,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .set_thread_dispatch_paused(
-                            &workspace_id,
-                            &thread_id,
-                            paused,
-                            reason.as_deref(),
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchMarkFailureNotePosted {
-                workspace_id,
-                run_id,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .mark_failure_note_posted(&workspace_id, &run_id, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchRequeueFailedTrigger {
-                workspace_id,
-                trigger_message_id,
-                run_id,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .requeue_failed_trigger(
-                            &workspace_id,
-                            &trigger_message_id,
-                            &run_id,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchListAppQuitRecoveries {
-                workspace_id,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_app_quit_recoveries(&workspace_id, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchComplete {
-                workspace_id,
-                run_id,
-                exit_code,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .complete_dispatch(&workspace_id, &run_id, exit_code, now_ms, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchFail {
-                workspace_id,
-                run_id,
-                reason,
-                exit_code,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .fail_dispatch(
-                            &workspace_id,
-                            &run_id,
-                            &reason,
-                            exit_code,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchReclaimRunning {
-                workspace_id,
-                max_attempts,
-                now_ms,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .reclaim_running_dispatches(&workspace_id, max_attempts, now_ms, &NoFaults)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::AutomationSubscribe {
-                workspace_id,
-                automation_id,
-                prefix,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    dohc_engine_domain::subscribe_automation(
-                        &mut store,
-                        &workspace_id,
-                        &automation_id,
-                        &prefix,
-                        now_ms,
-                        faults.as_ref(),
-                    )
-                    .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::AutomationUnsubscribe {
-                workspace_id,
-                automation_id,
-                prefix,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    dohc_engine_domain::unsubscribe_automation(
-                        &mut store,
-                        &workspace_id,
-                        &automation_id,
-                        &prefix,
-                        faults.as_ref(),
-                    )
-                    .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::AutomationClaimNext {
-                workspace_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    dohc_engine_domain::claim_next_pending_automation(
-                        &mut store,
-                        &workspace_id,
-                        now_ms,
-                        faults.as_ref(),
-                    )
-                    .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::AutomationSettle {
-                workspace_id,
-                claim_id,
-                settle,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    dohc_engine_domain::settle_automation_claim(
-                        &mut store,
-                        &workspace_id,
-                        &claim_id,
-                        &settle,
-                        now_ms,
-                        faults.as_ref(),
-                    )
-                    .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::AutomationReclaimRunning {
-                workspace_id,
-                max_attempts,
-                stale_before_ms,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    dohc_engine_domain::reclaim_running_automations(
-                        &mut store,
-                        &workspace_id,
-                        max_attempts,
-                        stale_before_ms,
-                        now_ms,
-                        faults.as_ref(),
-                    )
-                    .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::AutomationFailures {
-                workspace_id,
-                reply,
-            } => {
-                let outcome = dohc_engine_domain::list_automation_failures(&store, &workspace_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::Search {
-                root_dir,
-                workspace_id,
-                version_id,
-                query,
-                limit,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    store
-                        .read_with(|conn| {
-                            search_workspace(
-                                conn,
-                                &root_dir,
-                                &workspace_id,
-                                &version_id,
-                                &query,
-                                limit,
-                                now_ms,
-                            )
-                        })
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::SearchPage {
-                root_dir,
-                workspace_id,
-                version_id,
-                query,
-                limit,
-                now_ms,
-                expected_generation,
-                after,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    store
-                        .read_with(|conn| {
-                            search_workspace_page(
-                                conn,
-                                &root_dir,
-                                &workspace_id,
-                                &version_id,
-                                &query,
-                                limit,
-                                now_ms,
-                                expected_generation,
-                                after,
-                            )
-                        })
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::SearchQueryChatMessagesGranular {
-                workspace_id,
-                query,
-                limit,
-                materialized_byte_budget,
-                reply,
-            } => {
-                let outcome = store
-                    .read_with(|conn| {
-                        query_chat_messages_granular_bounded(
-                            conn,
-                            &workspace_id,
-                            &query,
-                            limit,
-                            materialized_byte_budget,
-                        )
-                    })
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::EnsureSearchIndex {
-                root_dir,
-                workspace_id,
-                version_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    store
-                        .read_with(|conn| {
-                            ensure_search_index_for_version(
-                                conn,
-                                &root_dir,
-                                &workspace_id,
-                                &version_id,
-                                now_ms,
-                                faults.as_ref(),
-                            )
-                        })
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::Relay {
-                transport,
-                operation,
-                leases,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    execute_relay_operation(
-                        &mut store,
-                        &mut doc_cache,
-                        transport,
-                        operation,
-                        &leases,
-                    )
-                };
-                // A pull can claim, replace, or advance lineages behind the
-                // local path (probe-covered; reset hooks stay unconditional).
-                doc_cache.clear();
-                let _ = reply.send(outcome);
-            }
+            Command::Run(work) => work(&mut store, &mut doc_cache),
             Command::Close => {
                 // FIFO ordering means every command enqueued before Close has
                 // already been served; there is nothing left to drain.
@@ -10797,7 +6624,7 @@ fn reconcile_scene_asset_materialization_conflicts(
 /// the artifact).
 fn ydoc_marker_has_durable_state(marker: &dohc_engine_collab::Marker) -> bool {
     // The claim status covers the replicated base-only lineage: claim_base inserts
-    // the base snapshot at up_to_seq 0 WITHOUT advancing head_snapshot_seq, so
+    // the base snapshot at up_to_seq 0 without advancing head_snapshot_seq, so
     // the seq pair alone would misread a claimed base as absent (double-seed +
     // NoMarker settle refusals on a valid lineage).
     marker.head_update_seq > 0
@@ -10887,7 +6714,7 @@ fn ydoc_version_unsettled_content_kind_on_store(
                 "SELECT blob_sha256 FROM snapshots \
                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                 params![workspace_id, version_id, key.object_id],
-                // NULL for a BINARY head (schema v10). It matches no text
+                // NULL for a binary head (schema v10). It matches no text
                 // projection, and reading it as a plain String would raise
                 // InvalidColumnType instead — `.optional()` absorbs only
                 // QueryReturnedNoRows.
@@ -11159,22 +6986,25 @@ fn seed_scene_from_artifact_on_store(
     // guarded closure can run again after a crash retry, so it rebuilds the
     // list from scratch each attempt.
     let mut created_moment_ids: Vec<String> = Vec::new();
-    let outcome = dohc_engine_collab::record_local_update_creating_marker_guarded(
+    let outcome = dohc_engine_collab::record_local_update(
         store,
         doc_cache,
         key,
-        Some(path),
-        ContentKind::Scene,
-        Regime::LocalOnly,
         &seed_update,
-        None,
-        None,
-        true,
-        true,
-        Some(&request_id),
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some(path),
+                content_kind: ContentKind::Scene,
+                regime: Regime::LocalOnly,
+            }),
+            ensure_parent_row: true,
+            require_empty_lineage: true,
+            request_id: Some(&request_id),
+            ..Default::default()
+        },
         faults,
         now_ms,
-        |tx, _| {
+        |tx, _, _update_sha| {
             created_moment_ids.clear();
             let version_is_active: bool = tx
                 .query_row(
@@ -11270,7 +7100,7 @@ fn ydoc_open_state_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let canonical_path = validate_addressable_plaintext_path(path)?;
-    // Bootstrap: the first live doc in an EMPTY workspace must be creatable —
+    // Bootstrap: the first live doc in an empty workspace must be creatable —
     // without this, read_text errors VersionNotFound before the absent-path
     // flow can run (capture normally creates main, but nothing has captured).
     ensure_mutation_version_on_store(store, workspace_id, version_id, now_ms, &NoFaults)?;
@@ -11283,13 +7113,13 @@ fn ydoc_open_state_on_store(
             // NO HEAD: the entered version does not contain this path. The
             // daemon still binds an empty doc, because that is how a file the
             // user just created (written to disk, not yet captured) becomes
-            // editable. The open reports `head: "absent"` and the CONSUMER
+            // editable. The open reports `head: "absent"` and the consumer
             // decides whether that is a creation or a path the version does
             // not have — the contract it applies is stated on
             // `WorkspaceEngineCapture.openYDocSession`
             // (apps/desktop/src/workspaces/workspaceEngineCapture.ts).
             let derived = derive_capture_object_id(workspace_id, version_id, &canonical_path);
-            // A derived id still LIVE at another alias means this path's
+            // A derived id still live at another alias means this path's
             // former file was renamed away: capture's locked resolution mints
             // an order-disambiguated id for that case, which open-time cannot
             // reserve pre-commit. Reusing the derived id would graft the new
@@ -11308,16 +7138,16 @@ fn ydoc_open_state_on_store(
     };
     let key = DocKey::new(workspace_id, version_id, object_id)?;
     let expected_key_matches = expected_key.is_none_or(|expected| *expected == key);
-    // An open sync conflict on this object freezes the OPEN as well as the
+    // An open sync conflict on this object freezes the open as well as the
     // settle: the claimed lineage may be a peer's unreviewed base, and
     // serving it would put the editor on the very side the conflict
     // preserves the head against — the user types into unreviewed content
     // and resolution rewrites the lineage under the live client. Refuse
     // with the same reason the settle freeze uses; resolution lifts both.
-    // The check runs BEFORE the lineage clear and the deferred drain below:
+    // The check runs before the lineage clear and the deferred drain below:
     // both mutate durable state, and a drain whose open then refuses would
     // consume the parked rows — and the record facts persisted on them —
-    // with no caller left to emit their events (#1009).
+    // with no caller left to emit their events.
     if expected_key_matches
         && store
             .read_with(|conn| {
@@ -11335,7 +7165,7 @@ fn ydoc_open_state_on_store(
         }
         .into());
     }
-    // RETIRED artifact: the path has NO head (deleted on disk, capture
+    // Retired artifact: the path has NO head (deleted on disk, capture
     // retired the snapshot/alias) but a LOCAL-ONLY lineage that claims a
     // settled artifact survived (workspace teardown skips the prune).
     // Markdown-is-the-artifact: the user deleted the document, so reopening
@@ -11381,7 +7211,7 @@ fn ydoc_open_state_on_store(
             return Err(RuntimeError::OperationCrashed);
         }
     }
-    // Re-converge BEFORE loading state: an envelope acked-but-deferred while
+    // Re-converge before loading state: an envelope acked-but-deferred while
     // a previous session held the lease is only guaranteed to drain on that
     // session's ydoc.close — workspace.close, stale-handle eviction, and a
     // crash all skip it. The imported replication log is the durable pending
@@ -11417,14 +7247,14 @@ fn ydoc_open_state_on_store(
     // "Existing" means durable DOC STATE, not a bare marker: a local-only
     // close prunes every CRDT row and leaves head_update_seq == 0
     // (the workspace file is the artifact). Reporting it as existing would
-    // hand the client an EMPTY doc with no seedContent — its next settle
+    // hand the client an empty doc with no seedContent — its next settle
     // would clobber the settled file. A pruned marker is seed-eligible
     // (the recordUpdate guard checks head_update_seq > 0), so the artifact
     // re-seeds the cache exactly like a first open. "Durable doc state"
     // means updates OR snapshots: a replicated lineage holding only its
     // base snapshot (head_update_seq == 0, head_snapshot_seq > 0) is
-    // EXISTING — reporting it absent would hand the client the base state
-    // AND a content seed, duplicating the artifact on the first seed apply.
+    // existing — reporting it absent would hand the client the base state
+    // and a content seed, duplicating the artifact on the first seed apply.
     let mut lineage_existing = persisted
         .as_ref()
         .is_some_and(|persisted| ydoc_marker_has_durable_state(&persisted.marker));
@@ -11468,7 +7298,7 @@ fn ydoc_open_state_on_store(
         Some(persisted) => {
             let marker = &persisted.marker;
             let mut kind = marker.content_kind;
-            // A BARE local marker is a remembered default, not a lineage:
+            // A bare local marker is a remembered default, not a lineage:
             // honor an explicit caller kind and rewrite the row (re-proved
             // bare inside the write transaction). Without this, a stale
             // default — e.g. the plaintext markers the dead editor path
@@ -11593,7 +7423,7 @@ fn ydoc_record_update_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    // Validation happens ONCE, in the durable layer's `validate_update_bytes`,
+    // Validation happens once, in the durable layer's `validate_update_bytes`,
     // inside the append transaction. The rows the transaction writes before it
     // (the path stamp, the ensured file_objects parent) roll back with the
     // rejection, so a malformed first seed cannot strand a bare file_objects
@@ -11612,29 +7442,35 @@ fn ydoc_record_update_on_store(
     let journal_key = key.clone();
     let journal_path = path.to_owned();
     let journal_kind = content_kind;
-    match dohc_engine_collab::record_local_update_creating_marker_guarded_for_lineage(
+    match dohc_engine_collab::record_local_update(
         store,
         doc_cache,
         key,
-        Some(path),
-        content_kind,
-        regime,
         update,
-        actor_origin_id.as_deref(),
-        attribution.as_ref(),
-        expected_lineage_claim_id.as_deref(),
-        // Parent row, seed guard, marker, append, and outbound journal all
-        // commit in ONE transaction — no bare-parent crash window, and a
-        // timed-out-commit seed retry DEDUPES inside the guard instead of
-        // refusing seed-onto-existing-lineage.
-        true,
-        require_empty_lineage,
-        seed_source_sha256.as_deref(),
-        request_id.as_deref(),
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some(path),
+                content_kind,
+                regime,
+            }),
+            actor_origin_id: actor_origin_id.as_deref(),
+            attribution: attribution.as_ref(),
+            lineage_guard: dohc_engine_collab::LineageGuard::Expect(
+                expected_lineage_claim_id.as_deref(),
+            ),
+            // Parent row, seed guard, marker, append, and outbound journal all
+            // commit in one transaction — no bare-parent crash window, and a
+            // timed-out-commit seed retry dedupes inside the guard instead of
+            // refusing seed-onto-existing-lineage.
+            ensure_parent_row: true,
+            require_empty_lineage,
+            seed_source_sha256: seed_source_sha256.as_deref(),
+            request_id: request_id.as_deref(),
+        },
         faults,
         now_ms,
         |tx, outcome, update_sha| {
-            // Origination is asked FIRST and owns the base-once decision: it
+            // Origination is asked first and owns the base-once decision: it
             // originates only a lineage that has no base yet. The base is a
             // full state, so it already carries this append and every row the
             // lineage held before it — a delta beside it would be redundant.
@@ -11749,7 +7585,7 @@ fn ydoc_record_update_on_store(
 /// One recorded Y.Doc append, and what its origination attempt decided.
 ///
 /// The append itself is [`AppendOutcome`]. `sharing_declined` is `Some` only
-/// when this edit COULD have originated the lineage and did not — the edit
+/// when this edit could have originated the lineage and did not — the edit
 /// committed either way. The four ordinary reasons a lineage does not
 /// originate stay silent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11846,8 +7682,8 @@ fn ydoc_settle_on_store(
     // Refuse to settle a lineage that has no durable state: projecting a
     // fresh doc would be the empty string, and the projected write below
     // would clobber the existing file with it. Mirrors collab settle()'s
-    // NoMarker refusal — and a PRUNED bare marker (local-only close) is the
-    // same hazard: load_persisted returns Some with an EMPTY doc, so the
+    // NoMarker refusal — and a pruned bare marker (local-only close) is the
+    // same hazard: load_persisted returns Some with an empty doc, so the
     // durable-state predicate (updates OR snapshots) gates it, matching
     // ydoc.open's lineage-absent treatment.
     match dohc_engine_collab::read_marker(store, key)? {
@@ -11863,7 +7699,7 @@ fn ydoc_settle_on_store(
                 }
                 .into());
             }
-            // An open sync conflict on this object FREEZES the settle: the
+            // An open sync conflict on this object freezes the settle: the
             // lineage may hold a peer's base the user has not reviewed, and
             // settling would materialize it over the preserved head — the
             // clobbering settle #338 refuses. Resolution folds the choice
@@ -11885,7 +7721,7 @@ fn ydoc_settle_on_store(
                 }
                 .into());
             }
-            // Acked-but-deferred remote envelopes must land BEFORE the
+            // Acked-but-deferred remote envelopes must land before the
             // projection — but if any actually apply, the CLIENT's doc has
             // not seen them: settling would materialize content the user
             // never saw while they keep editing stale state. Refuse; the
@@ -11896,7 +7732,7 @@ fn ydoc_settle_on_store(
             // parked update they drained would fire no record events. The
             // rows stay queued for the next pull, open, settle, or close,
             // which all emit; the later drain applies and projects the
-            // remote content over whatever the pass settled (#1008).
+            // remote content over whatever the pass settled.
             if drain_deferred && marker.regime == Regime::Replicated {
                 let drained = drain_deferred_ydoc_for_live_session_rpc(
                     store,
@@ -11908,7 +7744,7 @@ fn ydoc_settle_on_store(
                 if drained.drained > 0 {
                     // The drained facts ride the refusal: the drain committed
                     // them and consumed their queue rows, so this is their
-                    // only crossing (#1002).
+                    // only crossing.
                     return Ok(YdocSettleOutcome::RemoteUpdatesPending {
                         record_facts: drained.record_facts,
                     });
@@ -11942,13 +7778,13 @@ fn ydoc_settle_on_store(
     // `content: None` and the caller reads the file. (Refusing here instead
     // left the user's content in the CRDT and the workspace file at zero bytes.)
     //
-    // The stale-head guard runs BEFORE the idempotent no-op: an external
+    // The stale-head guard runs before the idempotent no-op: an external
     // capture ingest (or any same-object writer) must surface as
     // ConflictStaleTarget even when the projection itself is unchanged —
     // otherwise settle reports success and a close can prune without the
     // client ever resyncing over the divergence.
     //
-    // The expectation derives from DURABLE state (the lineage's last settle
+    // The expectation derives from durable state (the lineage's last settle
     // sha) falling back to the caller-supplied OPEN-TIME head sha — never
     // from RPC-side session fields mutated after awaits, which a dropped
     // future (deadline firing after the actor committed a settle) leaves
@@ -11960,13 +7796,13 @@ fn ydoc_settle_on_store(
     let probe_sha = head_probe
         .as_ref()
         .map(|snapshot| snapshot.blob_sha256.clone());
-    // Adopt an EMPTY head when this lineage has no durable settle and the
+    // Adopt an empty head when this lineage has no durable settle and the
     // session saw no head at open. What the types cannot show: an empty
     // artifact holds no bytes, so adopting one can destroy nothing, while
     // refusing it wedges the session — a refused settle records no
     // expectation, so every later settle refuses the same way. Capture mints
     // such a head from the 0-byte artifact the desktop's New File leaves on
-    // disk. A head with CONTENT still refuses (#346).
+    // disk. A head with content still refuses.
     let expected_head_sha = match head_probe.as_ref() {
         Some(snapshot)
             if expected_head_sha.is_none()
@@ -11980,7 +7816,7 @@ fn ydoc_settle_on_store(
         return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
     }
     if let Some(current) = head_probe.as_ref() {
-        // Ownership must hold even when the CONTENT matches the expectation:
+        // Ownership must hold even when the content matches the expectation:
         // a path rebound to another object whose blob happens to equal this
         // session's expected sha would otherwise pass the stale guard and be
         // answered (or replayed) as if this session still owned it — and a
@@ -11989,15 +7825,15 @@ fn ydoc_settle_on_store(
         if current.object_id != key.object_id {
             return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
         }
-        // The marker may have committed while the PRIOR settle's
+        // The marker may have committed while the prior settle's
         // materialization failed transiently before the file replace: the
         // head and last_settled_sha are advanced, the job is still pending,
-        // and the DISK holds the old preimage. That job must replay BEFORE
+        // and the disk holds the old preimage. That job must replay before
         // any settle answer — the idempotent no-op (or close could prune
-        // over stale disk bytes) AND a changed-projection settle (whose new
+        // over stale disk bytes) and a changed-projection settle (whose new
         // job's preimage is the unmaterialized head; skipping the replay
         // would strand it in a permanent materialization conflict).
-        // The head's pending job can be a SETTLE job or a conflict-RESOLUTION
+        // The head's pending job can be a settle job or a conflict-RESOLUTION
         // job: a resolution write on this object enqueues `resolve-mat_<id>`
         // and the fold advances last_settled_sha in the same transaction, so
         // skipping it here would leave the disk pre-resolution while every
@@ -12013,13 +7849,13 @@ fn ydoc_settle_on_store(
                 break;
             }
         }
-        // PENDING only: a completed/conflicted job must not replay here — a
+        // Pending only: a completed/conflicted job must not replay here — a
         // completed one would re-read the target on every settle (and fail
         // the whole settle pre-commit on a transient read error), and a
         // conflicted one already ran its compensation.
         if let Some(job) = pending_job {
             validate_workspace_root(root_dir, root_guard)?;
-            // Suppression BEFORE the replace, exactly like the fresh path —
+            // Suppression before the replace, exactly like the fresh path —
             // the watcher can observe the replayed bytes the instant they
             // land; retract on a conflicted job.
             self_writes.record(&key.workspace_id, &current.path, &current.blob_sha256);
@@ -12112,7 +7948,7 @@ fn ydoc_settle_on_store(
             projection,
         })));
     }
-    // A session with no edits settles WITHOUT writing (#815). The lineage's
+    // A session with no edits settles without writing. The lineage's
     // durable history is exactly one client-declared seed importing the
     // captured head — and the head guard above proved the store still holds
     // that head, while the disk probe proved the file still holds its bytes.
@@ -12155,7 +7991,7 @@ fn ydoc_settle_on_store(
         }
         // The path may have changed owners since ydoc.open (another write
         // claimed it with a different object). Settling anyway would overwrite
-        // the OTHER object's head with this session's stale projection while
+        // the other object's head with this session's stale projection while
         // marking this lineage settled — refuse as a stale target instead.
         if let Some(snapshot) = current.snapshot.as_ref()
             && snapshot.object_id != key.object_id
@@ -12226,10 +8062,10 @@ fn ydoc_settle_on_store(
             .map_err(search_domain)?;
         }
         enqueue_write(tx, &result, preimage, "ydoc")?;
-        // The settle marker commits ATOMICALLY with the moment: a crash can
+        // The settle marker commits atomically with the moment: a crash can
         // never leave a minted settlement moment whose lineage still reads
         // as unsettled (which would force a non-idempotent re-settle — the
-        // moment fingerprint includes the per-open session_id). The PRIOR
+        // moment fingerprint includes the per-open session_id). The prior
         // marker values ride along so a materialization conflict below can
         // compensate — an errored settle must not leave a marker that lets
         // close(settle:false) prune the CRDT with no artifact on disk.
@@ -12282,7 +8118,7 @@ fn ydoc_settle_on_store(
         })
     })?;
     validate_workspace_root(root_dir, root_guard)?;
-    // The suppression identity registers BEFORE the file replace: the watcher
+    // The suppression identity registers before the file replace: the watcher
     // can observe the materialized bytes the instant they land, and a
     // record-after-replace left a window where capture queued an ingest that
     // would claim the settle as an external edit. Root validation comes first
@@ -12311,7 +8147,7 @@ fn ydoc_settle_on_store(
             // committed durably (marker, moment, snapshot) and the job stays
             // pending for startup replay, exactly as if the process had died
             // between the commit and the replace. Rolling the marker back to
-            // the PRIOR head would make every retry compare the advanced
+            // the prior head would make every retry compare the advanced
             // head against a stale expectation — permanent
             // ConflictStaleTarget — while the committed marker routes a
             // retry through the idempotent no-op branch, which replays the
@@ -12334,13 +8170,13 @@ fn ydoc_settle_on_store(
             // marker/job commit: the write is durably pending and will land
             // once containment is restored. Keep both the advanced marker and
             // the self-write registration, and report the committed settle —
-            // but say plainly that DISK did not move, so no caller reports the
+            // but say plainly that disk did not move, so no caller reports the
             // document as saved over an artifact that never changed.
             materialized = false;
         }
         JobOutcome::Conflict | JobOutcome::Superseded => {
             // The target changed on disk and the job left it untouched: this
-            // settle FAILED, so the marker committed above must not stand —
+            // settle failed, so the marker committed above must not stand —
             // it would let close(settle:false) pass the settled check and
             // prune the CRDT while the artifact was never materialized.
             // (A crash before this compensation is the pending-job case: the
@@ -12403,8 +8239,8 @@ fn ydoc_resync_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    // Resync is the staleness RECOVERY path: an envelope acked-but-deferred
-    // because THIS session held the lease may be the very edit that made the
+    // Resync is the staleness recovery path: an envelope acked-but-deferred
+    // because this session held the lease may be the very edit that made the
     // client stale — drain it first or the recovery response still misses it.
     let marker = dohc_engine_collab::read_marker(store, key)?;
     let observed_lineage_claim_id = marker
@@ -12490,7 +8326,7 @@ fn ydoc_close_session_on_store(
     }
     // Close is a lineage reset (the local-only branch prunes to the bare
     // marker — a head-rewind the cache's tuple probe cannot see if the same
-    // head coordinates are later re-appended). Remove BEFORE any branch so
+    // head coordinates are later re-appended). Remove before any branch so
     // every outcome, including a mid-close crash, leaves no entry behind.
     doc_cache.remove(key);
     doc_cache.unpin(key);
@@ -12501,7 +8337,7 @@ fn ydoc_close_session_on_store(
         });
     };
     // Richdoc settles like plaintext now, so the local-only close follows the
-    // same workspace-file artifact rule (close_session refuses a DIRTY local
+    // same workspace-file artifact rule (close_session refuses a dirty local
     // prune either way, and persists every replicated lineage internally).
     // Keeping the closed CRDT authoritative here would shadow external file
     // edits on reopen: existing lineage, no seedContent, stale document.
@@ -12529,27 +8365,24 @@ fn ydoc_close_session_on_store(
     };
     let mut record_facts = Vec::new();
     if marker.regime == Regime::Replicated {
-        // The drain PROJECTS internally now (idempotent-by-sha, dependency-
+        // The drain projects internally now (idempotent-by-sha, dependency-
         // gated): drained remote content reaches the visible head with no
-        // session left to settle it. The drain HOLDS its queue-row cleanup
+        // session left to settle it. The drain holds its queue-row cleanup
         // until materialization succeeded: a failed materialization would
         // otherwise error out of this close after the rows — and the record
         // facts persisted on them — were already deleted, and no retry could
-        // ever emit the events (#1009). With the rows kept, the retried
-        // close re-drains content-deduped and reads the facts back (#1004).
-        let (drained, cleanup) =
-            dohc_engine_sync::drain_deferred_ydoc_for_key_cached_holding_cleanup(
-                store, doc_cache, key, faults,
-            )?;
+        // ever emit the events. With the rows kept, the retried
+        // close re-drains content-deduped and reads the facts back.
+        let (drained, cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
+            store, doc_cache, key, faults,
+        )?;
         for declined in &drained.sharing_declined {
             eprintln!("engine: {declined}");
         }
         if let Some(materialization) = materialization {
             materialize_ydoc_drain(store, key, &drained, materialization, now_ms, faults)?;
         }
-        if let Some(cleanup) = cleanup {
-            dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, faults)?;
-        }
+        let _ = dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, faults)?;
         record_facts = drained.record_facts;
     }
     Ok(YdocCloseSessionOutcome {
@@ -12636,15 +8469,14 @@ fn materialize_ydoc_drain(
 /// decline visible at this boundary, matching the existing #632 diagnostic.
 /// The caller owns the drained record facts: the open, settle, and close
 /// RPC results carry them to the service, which emits them post-commit like
-/// the pull pass (#1002).
+/// the pull pass.
 fn drain_deferred_ydoc_for_local_rpc(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
     key: &DocKey,
     faults: &dyn FaultInjector,
 ) -> Result<dohc_engine_sync::YdocDrainResult, RuntimeError> {
-    let drained =
-        dohc_engine_sync::drain_deferred_ydoc_for_key_cached(store, doc_cache, key, faults)?;
+    let drained = dohc_engine_sync::drain_deferred_ydoc_for_key(store, doc_cache, key, faults)?;
     for declined in &drained.sharing_declined {
         eprintln!("engine: {declined}");
     }
@@ -12661,7 +8493,7 @@ fn drain_deferred_ydoc_for_live_session_rpc(
     expected_lineage_claim_id: Option<&str>,
     faults: &dyn FaultInjector,
 ) -> Result<dohc_engine_sync::YdocDrainResult, RuntimeError> {
-    let drained = dohc_engine_sync::drain_deferred_ydoc_for_live_session_cached(
+    let drained = dohc_engine_sync::drain_deferred_ydoc_for_live_session(
         store,
         doc_cache,
         key,
@@ -12801,7 +8633,7 @@ fn versioned_binary_write_on_store(
         });
     }
 
-    // Request-ledger reconstruction returns the ORIGINAL moment. A replay must
+    // Request-ledger reconstruction returns the original moment. A replay must
     // probe that moment's durable job, not the caller's newly supplied id: a
     // transient first materialization can leave the original job pending.
     let job = match store.load_materialization_job(&result.moment.moment_id) {
@@ -12928,7 +8760,7 @@ fn relay_enabled_in_tx(
         .map_err(outbound_domain)
 }
 
-/// File moments are the ONE kind a share view can carry, so this reads the
+/// File moments are the one kind a share view can carry, so this reads the
 /// wider `workspace_journals_file_moments_in_tx`. It is not the only site
 /// that does: `ydoc_recovery.rs` journals a recovered FILE moment and asks
 /// the same question, and the two must agree or a recovery would strand a
@@ -13667,34 +9499,6 @@ fn versioned_text_rollback_on_store(
             });
         }
     };
-    // Fall back only when the new namespace is absent, preserving legacy replay
-    // without mistaking an unrelated legacy collision for this rollback.
-    let (job, rename_write_job, rename_delete_job) =
-        if job.is_none() && rename_write_job.is_none() && rename_delete_job.is_none() {
-            let legacy_job_id = format!("{ROLLBACK_RESTORE_PREFIX}{}", input.mutation_moment_id);
-            let legacy_write_job_id = binary_rename_write_job_id(&legacy_job_id);
-            let legacy_delete_job_id = binary_rename_delete_job_id(&legacy_job_id);
-            match (
-                store.load_materialization_job(&legacy_job_id),
-                store.load_materialization_job(&legacy_write_job_id),
-                store.load_materialization_job(&legacy_delete_job_id),
-            ) {
-                (Ok(job), Ok(write_job), Ok(delete_job)) => (job, write_job, delete_job),
-                _ => {
-                    eprintln!(
-                        "engine: rollback committed but loading its legacy restore job(s) failed"
-                    );
-                    return Ok(RollbackExecutionResult {
-                        deduped,
-                        materialize_enqueued: true,
-                        materialized: false,
-                        materialize_outcome: PostCommitMaterializeOutcome::Error,
-                    });
-                }
-            }
-        } else {
-            (job, rename_write_job, rename_delete_job)
-        };
     let has_jobs = job.is_some() || rename_write_job.is_some() || rename_delete_job.is_some();
 
     let active_version =
@@ -13857,10 +9661,10 @@ fn versioned_text_rollback_on_store(
             write_job.created_at_ms,
             faults,
         ),
-        // #739 follow-up: same pairing rule as the startup replay's
-        // "binary-rename-1-delete-mat_" case — a CANCELLED write means its
+        // Follow-up: same pairing rule as the startup replay's
+        // "binary-rename-1-delete-mat_" case — a cancelled write means its
         // destination was explicitly deleted, already resolving it, so the
-        // paired delete below (the rename's OLD path) must still run rather
+        // paired delete below (the rename's old path) must still run rather
         // than being stranded.
         JobStatus::Cancelled => (true, PostCommitMaterializeOutcome::Skipped),
         JobStatus::Conflict => (false, PostCommitMaterializeOutcome::Conflict),
@@ -13949,7 +9753,7 @@ fn restore_deleted_scene_assets_in_tx(
         drawing_delete_moment_id,
         drawing_object_id,
     )?;
-    // Materialization jobs write into the ACTIVE workspace directory. A
+    // Materialization jobs write into the active workspace directory. A
     // rollback in a version the user has switched away from must restore the
     // heads without enqueueing jobs, or the general pending replay would
     // write the inactive version's asset files into the active tree and a
@@ -14257,7 +10061,7 @@ fn versioned_text_merge_on_store(
                         .map_err(map_fold_error)?;
                     }
                 }
-                // A fast-forwarded BINARY head needs no index work: the file
+                // A fast-forwarded binary head needs no index work: the file
                 // search reader drops any candidate whose live head is binary
                 // (`search::query::live_head_is_binary`), so the text this path
                 // used to hold is already unreachable.
@@ -14575,7 +10379,7 @@ fn adopt_collection_record_on_store(
     // first. The result still converges: at worst adoption writes a record
     // id the queued update also carries, which the CRDT merge and the
     // by-sha projection make idempotent, and the later drain projects the
-    // queued update over the adopted result (#1008).
+    // queued update over the adopted result.
     let state = ydoc_open_state_on_store(
         store,
         doc_cache,
@@ -14731,7 +10535,7 @@ fn cleanup_collection_relation_on_store(
     };
     // `drain_deferred = false` for the same reason as the adoption pass:
     // this caller has no event route for drained record facts, so the
-    // parked rows stay queued for a path that emits (#1008).
+    // parked rows stay queued for a path that emits.
     let state = ydoc_open_state_on_store(
         store,
         doc_cache,
@@ -15335,7 +11139,7 @@ mod capture_batch_fast_path_tests {
     #[test]
     fn clean_capture_batch_uses_one_batch_savepoint() {
         let scratch = ScratchDir::new().expect("scratch");
-        let db = scratch.engine_db_path().expect("engine database path");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
         let mut store = EngineStore::open(&db, 1).expect("open store");
         let begun_savepoints = Arc::new(Mutex::new(Vec::new()));
         let observed_savepoints = Arc::clone(&begun_savepoints);
@@ -15399,7 +11203,7 @@ mod capture_batch_fast_path_tests {
         const FAILED_PATH: &str = "note-1.md";
 
         let scratch = ScratchDir::new().expect("scratch");
-        let db = scratch.engine_db_path().expect("engine database path");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
         let mut store = EngineStore::open(&db, 1).expect("open store");
         let inputs = (0..3)
             .map(|index| CaptureIngest {
@@ -15762,16 +11566,6 @@ fn conflict_open_on_store(
     }
     let outcome = store.write_with(faults, |tx| {
         let inserted = insert_text_conflict_if_absent(tx, conflict)?;
-        if inserted {
-            tx.execute(
-                "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-                 VALUES (?1, 'conflict.open', ?2)",
-                params![conflict.conflict_id, conflict.created_at_ms],
-            )
-            .map_err(|error| {
-                dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
-            })?;
-        }
         Ok::<_, dohc_engine_domain::DomainError>(inserted)
     })?;
     match outcome {
@@ -15876,56 +11670,6 @@ fn map_fold_error(error: dohc_engine_sync::SyncError) -> dohc_engine_domain::Dom
     }
 }
 
-/// Execute a run of bounded units, checking `token` BETWEEN units. Each unit is
-/// one compound write (one transaction). Stops early and reports `cancelled` if
-/// the token trips at a boundary; a storage error aborts the run and surfaces.
-fn run_units(
-    store: &mut EngineStore,
-    units: Vec<CompoundWrite>,
-    faults: &dyn FaultInjector,
-    token: &CancellationToken,
-) -> Result<UnitsOutcome, StorageError> {
-    let mut committed = 0usize;
-    for unit in units {
-        // Cancellation point is BETWEEN units, before the next transaction.
-        if token.is_cancelled() {
-            return Ok(UnitsOutcome {
-                committed,
-                cancelled: true,
-            });
-        }
-        match store.commit_compound(&unit, faults)? {
-            WriteOutcome::Acked { .. } => committed += 1,
-            // A crash fault ends the run at a durable boundary. An
-            // after-commit-before-ack crash already durably committed THIS
-            // unit, so count it — otherwise `committed` undercounts what the
-            // database actually holds and breaks retry/progress accounting.
-            WriteOutcome::Crashed { committed: durable } => {
-                if durable {
-                    committed += 1;
-                }
-                return Ok(UnitsOutcome {
-                    committed,
-                    cancelled: token.is_cancelled(),
-                });
-            }
-        }
-    }
-    Ok(UnitsOutcome {
-        committed,
-        cancelled: false,
-    })
-}
-
-fn snapshot(store: &EngineStore) -> Result<StoreSnapshot, StorageError> {
-    Ok(StoreSnapshot {
-        documents: store.document_count()?,
-        journal_entries: store.journal_len()?,
-        request_ledger: store.request_ledger_len()?,
-        migration_ledger: store.migration_ledger_len()?,
-    })
-}
-
 #[cfg(test)]
 mod collection_relation_cleanup_tests {
     use super::*;
@@ -15937,14 +11681,6 @@ mod collection_relation_cleanup_tests {
     const TARGET_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
     const SOURCE_OBJECT_ID: &str = "relation-source-object";
     const SOURCE_PATH: &str = "tasks/source.md";
-
-    struct NoSelfWrites;
-
-    impl SelfWriteRecorder for NoSelfWrites {
-        fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-
-        fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    }
 
     fn write_text(
         store: &mut EngineStore,
@@ -15978,8 +11714,11 @@ mod collection_relation_cleanup_tests {
     #[test]
     fn absent_relation_target_cleanup_refreshes_only_the_index() {
         let scratch = ScratchDir::new().expect("scratch directory");
-        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
-            .expect("open engine store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("engine database"),
+            1,
+        )
+        .expect("open engine store");
         ensure_mutation_version_on_store(&mut store, WORKSPACE_ID, VERSION_ID, 1, &NoFaults)
             .expect("ensure main version");
         write_text(
@@ -16018,17 +11757,22 @@ mod collection_relation_cleanup_tests {
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
             .expect("seed rich document");
         let mut cache = WriterDocCache::new();
-        let appended = dohc_engine_collab::record_local_update_creating_marker(
+        let appended = dohc_engine_collab::record_local_update(
             &mut store,
             &mut cache,
             &key,
-            Some(SOURCE_PATH),
-            ContentKind::Richdoc,
-            Regime::LocalOnly,
             &doc.encode_full_state(),
-            None,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some(SOURCE_PATH),
+                    content_kind: ContentKind::Richdoc,
+                    regime: Regime::LocalOnly,
+                }),
+                ..Default::default()
+            },
             &NoFaults,
             4,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("seed source lineage");
         assert!(matches!(appended, TxnOutcome::Committed(_)));
@@ -16075,7 +11819,7 @@ mod collection_relation_cleanup_tests {
             VERSION_ID,
             scratch.path(),
             &LeaseRegistry::default(),
-            &NoSelfWrites,
+            &(),
             5,
             &NoFaults,
             &CancellationToken::new(),
@@ -16119,29 +11863,33 @@ mod doc_cache_reset_tests {
     #[test]
     fn local_file_retire_removes_a_poisoned_warm_entry_immediately() {
         let scratch = ScratchDir::new().expect("scratch directory");
-        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
-            .expect("open engine store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("engine database"),
+            1,
+        )
+        .expect("open engine store");
         ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
             .expect("ensure main version");
         let key = DocKey::new("workspace", "main", "document").expect("document key");
         let update = Ydoc::wire().plaintext_insert(0, "cached");
         let mut cache = WriterDocCache::new();
-        let appended = dohc_engine_collab::record_local_update_creating_marker_guarded(
+        let appended = dohc_engine_collab::record_local_update(
             &mut store,
             &mut cache,
             &key,
-            Some("document.md"),
-            ContentKind::Plaintext,
-            Regime::LocalOnly,
             &update,
-            None,
-            None,
-            true,
-            false,
-            None,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some("document.md"),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                ensure_parent_row: true,
+                ..Default::default()
+            },
             &NoFaults,
             2,
-            |_tx, _outcome| Ok(()),
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("append update");
         assert!(matches!(appended, TxnOutcome::Committed(_)));
@@ -16295,8 +12043,11 @@ mod scene_seed_transaction_tests {
     #[test]
     fn scene_seed_rolls_back_lineage_assets_and_outbound_work_as_one_unit() {
         let scratch = ScratchDir::new().expect("scratch directory");
-        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
-            .expect("open engine store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("engine database"),
+            1,
+        )
+        .expect("open engine store");
         ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
             .expect("ensure main version");
         let key = DocKey::new("workspace", "main", "drawing-object").expect("document key");
@@ -16387,12 +12138,15 @@ mod scene_seed_transaction_tests {
     #[test]
     fn duplicate_content_scene_assets_return_only_created_jobs() {
         let scratch = ScratchDir::new().expect("scratch directory");
-        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
-            .expect("open engine store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("engine database"),
+            1,
+        )
+        .expect("open engine store");
         ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
             .expect("ensure main version");
         let key = DocKey::new("workspace", "main", "drawing-object").expect("document key");
-        // Two file ids with IDENTICAL bytes and mime type resolve to one
+        // Two file ids with identical bytes and mime type resolve to one
         // content-addressed path. Counting the skipped duplicate as a
         // materialization job would reject the first open as
         // ydoc-artifact-assets-pending forever.
@@ -16449,8 +12203,11 @@ mod scene_seed_transaction_tests {
     #[test]
     fn scene_asset_materialization_conflict_stays_closed_until_disk_is_resolved() {
         let scratch = ScratchDir::new().expect("scratch directory");
-        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
-            .expect("open engine store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("engine database"),
+            1,
+        )
+        .expect("open engine store");
         ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
             .expect("ensure main version");
         let key = DocKey::new("workspace", "main", "drawing-object").expect("document key");
@@ -16551,7 +12308,7 @@ mod scene_seed_transaction_tests {
     }
 }
 
-/// #646 PR3-1 — the level gate on share-view enrolment, read at the one place
+/// The level gate on share-view enrolment, read at the one place
 /// that writes the row. `EnrollShareView` never touches the transport, so
 /// this drives `execute_relay_operation` directly.
 #[cfg(test)]
@@ -16601,7 +12358,7 @@ mod share_view_identity_tests {
     #[test]
     fn a_view_share_is_never_enrolled() {
         let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
+        let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
         let mut store = EngineStore::open(&path, 1_000).expect("open");
         assert_eq!(
             record(&mut store, ShareAccess::View),
@@ -16610,14 +12367,14 @@ mod share_view_identity_tests {
         assert_eq!(
             identity(&store),
             None,
-            "MUTATION: a view share must never gain a sync identity",
+            "a view share must never gain a sync identity",
         );
     }
 
     #[test]
     fn a_comment_share_is_never_enrolled() {
         let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
+        let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
         let mut store = EngineStore::open(&path, 1_000).expect("open");
         assert_eq!(
             record(&mut store, ShareAccess::Comment),
@@ -16626,7 +12383,7 @@ mod share_view_identity_tests {
         assert_eq!(
             identity(&store),
             None,
-            "MUTATION: comment discussion no longer uses the workspace sync identity",
+            "comment discussion no longer uses the workspace sync identity",
         );
     }
 
@@ -16642,14 +12399,14 @@ mod share_view_identity_tests {
             .expect("read file lane")
     }
 
-    /// THE level mapping, at the one place that makes it: only Edit can send
+    /// The level mapping, at the one place that makes it: only Edit can send
     /// workspace replication ops, so only Edit records an identity and takes
     /// the file lane.
     #[test]
     fn only_an_edit_share_takes_the_file_lane() {
         for access in [ShareAccess::View, ShareAccess::Comment] {
             let scratch = ScratchDir::new().expect("scratch");
-            let path = scratch.engine_db_path().expect("db path");
+            let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
             let mut store = EngineStore::open(&path, 1_000).expect("open");
             assert_eq!(
                 record(&mut store, access),
@@ -16658,30 +12415,27 @@ mod share_view_identity_tests {
             assert_eq!(
                 identity(&store),
                 None,
-                "MUTATION: {access:?} must not record an identity",
+                "{access:?} must not record an identity",
             );
-            assert!(
-                !file_lane(&store),
-                "MUTATION: {access:?} takes no file lane"
-            );
+            assert!(!file_lane(&store), "{access:?} takes no file lane");
         }
 
         let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
+        let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
         let mut store = EngineStore::open(&path, 1_000).expect("open");
         assert_eq!(
             record(&mut store, ShareAccess::Edit),
             ShareViewIdentityRecord::Recorded
         );
         assert_eq!(identity(&store).as_deref(), Some("origin_share-view"));
-        assert!(file_lane(&store), "MUTATION: Edit must take the file lane");
+        assert!(file_lane(&store), "Edit must take the file lane");
     }
 
     /// Edit records once; repeated refreshes cannot split the replica log.
     #[test]
     fn an_edit_share_enrols_once_per_workspace() {
         let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
+        let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
         let mut store = EngineStore::open(&path, 1_000).expect("open");
         assert_eq!(
             record(&mut store, ShareAccess::Edit),
@@ -16691,7 +12445,7 @@ mod share_view_identity_tests {
         assert_eq!(
             record(&mut store, ShareAccess::Edit),
             ShareViewIdentityRecord::AlreadyRecorded,
-            "MUTATION: every refresh calls this; a second row would split the log",
+            "every refresh calls this; a second row would split the log",
         );
     }
 }
@@ -16788,6 +12542,190 @@ mod capture_secret_root_guard_tests {
         }
     }
 
+    #[test]
+    fn queued_owner_outbox_mutations_observe_cancellation_before_storage() {
+        for method in ["append", "acknowledge", "quarantine"] {
+            for abandon_reply in [false, true] {
+                let store_scratch = ScratchDir::new().expect("store scratch");
+                let root_scratch = ScratchDir::new().expect("root scratch");
+                let root = root_scratch.path().to_path_buf();
+                let db =
+                    dohc_engine_testkit::engine_db_path(&store_scratch).expect("database path");
+                let mut store = EngineStore::open(&db, 1).expect("seed store");
+                VersionedTextStore::new(&mut store)
+                    .ensure_main_version(WORKSPACE_ID, VERSION_ID, 1, &NoFaults)
+                    .expect("main version");
+                let input = OwnerOutboxAppendInput {
+                    binding: dohc_engine_collab::LiveObjectBinding {
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        main_version_id: VERSION_ID.to_owned(),
+                        object_id: "object-1".to_owned(),
+                        lineage_claim_id: "lineage-1".to_owned(),
+                        current_path: "owner.md".to_owned(),
+                        selector_paths: vec!["owner.md".to_owned()],
+                        restore_fence_generation: 0,
+                    },
+                    base_update: b"base".to_vec(),
+                    update: b"seed".to_vec(),
+                    append_key: "seed".to_owned(),
+                    limits: dohc_engine_collab::OwnerOutboxLimits {
+                        max_pending_bytes: 1000,
+                        max_pending_age_ms: 1000,
+                    },
+                    created_at_ms: 1,
+                };
+                let appended = append_owner_outbox(&mut store, WORKSPACE_ID, input.clone())
+                    .expect("seed append");
+                let before = dohc_engine_collab::read_pending_owner_outbox(
+                    &store,
+                    WORKSPACE_ID,
+                    &appended.outbox_id,
+                )
+                .expect("seed pending");
+                drop(store);
+                let supervisor = WorkspaceSupervisor::new();
+                let actor = supervisor.open(&db, 1).expect("actor").actor;
+                let blocker = PausedRootGuard::bind(&root);
+                let blocker_guard: Arc<dyn WorkspaceRootGuard> = blocker.clone();
+                let blocker_input = CaptureRetire {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    path: "missing.md".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 2,
+                    request_id: None,
+                    only_if_text_head: false,
+                    only_if_capture_origin: true,
+                    allow_ydoc_origin: true,
+                };
+                let blocker_actor = actor.clone();
+                let blocker_thread = std::thread::spawn(move || {
+                    blocker_actor.capture_retire_materialized_blocking_guarded(
+                        blocker_input,
+                        root,
+                        Arc::new(()),
+                        LeaseRegistry::new(),
+                        Arc::new(NoFaults),
+                        blocker_guard,
+                    )
+                });
+                blocker.wait_until_reached();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                let token = CancellationToken::new();
+                let pending = async {
+                    match method {
+                        "append" => actor
+                            .owner_ydoc_outbox_append(
+                                WORKSPACE_ID.to_owned(),
+                                OwnerOutboxAppendInput {
+                                    append_key: "cancelled".to_owned(),
+                                    update: b"cancelled update".to_vec(),
+                                    ..input
+                                },
+                                token.clone(),
+                            )
+                            .await
+                            .map(|outcome| outcome.map(|_| ())),
+                        "acknowledge" => actor
+                            .owner_ydoc_outbox_acknowledge(
+                                WORKSPACE_ID.to_owned(),
+                                appended.outbox_id.clone(),
+                                vec![OwnerDeliveryReceipt {
+                                    delivery_id: before.entries[0].delivery_id.clone(),
+                                    update_digest: before.entries[0].update_digest.clone(),
+                                    journal_cursor: 1,
+                                    accepting_host_epoch: 1,
+                                }],
+                                token.clone(),
+                            )
+                            .await
+                            .map(|outcome| outcome.map(|_| ())),
+                        _ => {
+                            actor
+                                .owner_ydoc_outbox_quarantine(
+                                    WORKSPACE_ID.to_owned(),
+                                    OwnerOutboxQuarantineInput {
+                                        outbox_id: appended.outbox_id.clone(),
+                                        reason: "cancelled quarantine".to_owned(),
+                                        observed_binding: None,
+                                    },
+                                    token.clone(),
+                                )
+                                .await
+                        }
+                    }
+                };
+                let mut pending = Some(Box::pin(pending));
+                let was_pending = runtime.block_on(std::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(
+                        std::future::Future::poll(pending.as_mut().expect("future").as_mut(), cx)
+                            .is_pending(),
+                    )
+                }));
+                // The empty actor channel accepted the command on that poll;
+                // the earlier command still holds the writer. Service teardown
+                // cancels this same token when its reply future is dropped.
+                token.cancel();
+                if abandon_reply || !was_pending {
+                    drop(pending.take());
+                }
+                let (drained_reply, drained_rx) = oneshot::channel();
+                actor
+                    .tx
+                    .blocking_send(Command::Run(Box::new(move |store, _cache| {
+                        let outcome = capture_manifest_seed(store, WORKSPACE_ID, VERSION_ID)
+                            .map_err(RuntimeError::from);
+                        let _ = drained_reply.send(outcome);
+                    })))
+                    .expect("queue read barrier after cancelled mutation");
+                blocker.release();
+                let blocker_result = blocker_thread.join().expect("join blocker caller");
+                let result = pending.map(|pending| runtime.block_on(pending));
+                let drained_result = drained_rx.blocking_recv();
+                drop(actor);
+                supervisor
+                    .close(&db)
+                    .expect("close actor after queue drains");
+                let store = EngineStore::open_read_only(&db).expect("read store");
+                let after = dohc_engine_collab::read_pending_owner_outbox(
+                    &store,
+                    WORKSPACE_ID,
+                    &appended.outbox_id,
+                )
+                .expect("retained pending");
+                assert!(was_pending, "{method} must enter the held actor queue");
+                assert!(blocker_result.is_ok(), "blocker reply must complete");
+                assert!(
+                    drained_result.is_ok(),
+                    "read barrier must run before closing the actor"
+                );
+                if !abandon_reply {
+                    assert!(
+                        matches!(result, Some(Err(RuntimeError::Cancelled))),
+                        "{method}"
+                    );
+                }
+                assert_eq!(after, before, "{method}, abandoned reply={abandon_reply}");
+            }
+        }
+    }
+
+    fn wait_for_command_admission(actor: &ActorHandle, available_before: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while actor.tx.capacity() == available_before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "public call did not acquire an actor channel slot"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(actor.tx.capacity(), available_before - 1);
+    }
+
     struct RejectSecondValidation {
         calls: AtomicUsize,
     }
@@ -16812,7 +12750,7 @@ mod capture_secret_root_guard_tests {
         let store_scratch = ScratchDir::new().expect("store scratch");
         let root_scratch = ScratchDir::new().expect("workspace root scratch");
         let root = root_scratch.path();
-        let db = store_scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let mut store = EngineStore::open(&db, 1).expect("open store");
         let guard = RejectSecondValidation {
             calls: AtomicUsize::new(0),
@@ -16882,82 +12820,79 @@ mod capture_secret_root_guard_tests {
         let moved_scratch = ScratchDir::new().expect("moved root scratch");
         let root = root_scratch.path().to_path_buf();
         let moved_root = moved_scratch.path().join("original-root");
-        let db = store_scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         std::fs::create_dir_all(root.join("notes")).expect("create original notes");
         std::fs::write(root.join(PATH), b"original body").expect("write original file");
 
-        // Hold the writer on a command already ahead of the batch. Enqueuing
-        // both commands directly proves the root replacement happens after the
-        // batch entered the actor queue and before its transaction can start.
+        // Hold the writer until the public batch call acquires a channel slot.
+        // Replace the root before that call can start its transaction.
         let blocker = PausedRootGuard::bind(&root);
         let blocker_guard: Arc<dyn WorkspaceRootGuard> = blocker.clone();
-        let (blocker_reply, blocker_reply_rx) = oneshot::channel();
-        actor
-            .tx
-            .blocking_send(Command::CaptureRetire {
-                input: CaptureRetire {
-                    workspace_id: WORKSPACE_ID.to_owned(),
-                    version_id: VERSION_ID.to_owned(),
-                    path: "missing.md".to_owned(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    now_ms: 2,
-                    request_id: None,
-                    only_if_text_head: false,
-                    only_if_capture_origin: true,
-                    allow_ydoc_origin: true,
-                },
-                workspace_root: Some((root.clone(), Some(blocker_guard))),
-                self_writes: None,
-                leases: LeaseRegistry::new(),
-                faults: Arc::new(NoFaults),
-                token: CancellationToken::new(),
-                reply: blocker_reply,
-            })
-            .expect("queue actor blocker");
+        let input: CaptureRetire = CaptureRetire {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            version_id: VERSION_ID.to_owned(),
+            path: "missing.md".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 2,
+            request_id: None,
+            only_if_text_head: false,
+            only_if_capture_origin: true,
+            allow_ydoc_origin: true,
+        };
+        let blocker_actor = actor.clone();
+        let blocker_root = root.clone();
+        let blocker_thread = std::thread::spawn(move || {
+            blocker_actor.capture_retire_materialized_blocking_guarded(
+                input,
+                blocker_root,
+                Arc::new(()),
+                LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                blocker_guard,
+            )
+        });
         blocker.wait_until_reached();
 
         let captured_guard: Arc<dyn WorkspaceRootGuard> = Arc::new(BoundRootGuard::bind(&root));
-        let (batch_reply, batch_reply_rx) = oneshot::channel();
-        actor
-            .tx
-            .blocking_send(Command::CaptureIngestBatch {
-                inputs: vec![CaptureIngest {
-                    workspace_id: WORKSPACE_ID.to_owned(),
-                    version_id: VERSION_ID.to_owned(),
-                    path: PATH.to_owned(),
-                    text: "original body".to_owned(),
-                    metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
-                    metadata_summary: Some("Reconciled offline edits".to_owned()),
-                    metadata_correlation_id: Some("queued-root-swap".to_owned()),
-                    author_json: None,
-                    now_ms: 3,
-                    request_id: None,
-                    claim_foreign_head: false,
-                }],
-                search_policy: Arc::new(read_engine_search_policy(&root)),
-                leases: LeaseRegistry::new(),
-                faults: Arc::new(NoFaults),
-                root_dir: root.clone(),
-                root_guard: captured_guard,
-                token: CancellationToken::new(),
-                reply: batch_reply,
-            })
-            .expect("queue capture batch behind blocker");
+        let inputs: Vec<CaptureIngest> = vec![CaptureIngest {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            version_id: VERSION_ID.to_owned(),
+            path: PATH.to_owned(),
+            text: "original body".to_owned(),
+            metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+            metadata_summary: Some("Reconciled offline edits".to_owned()),
+            metadata_correlation_id: Some("queued-root-swap".to_owned()),
+            author_json: None,
+            now_ms: 3,
+            request_id: None,
+            claim_foreign_head: false,
+        }];
+        let search_policy: Arc<SearchPolicySnapshot> = Arc::new(read_engine_search_policy(&root));
+        let batch_actor = actor.clone();
+        let batch_root = root.clone();
+        let available_before = actor.tx.capacity();
+        let batch_thread = std::thread::spawn(move || {
+            batch_actor.capture_ingest_batch_blocking(
+                inputs,
+                search_policy,
+                LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                batch_root,
+                captured_guard,
+            )
+        });
+        wait_for_command_admission(&actor, available_before);
 
         std::fs::rename(&root, &moved_root).expect("move original workspace root");
         std::fs::create_dir_all(root.join("notes")).expect("create replacement notes");
         std::fs::write(root.join(PATH), b"replacement body").expect("write replacement file");
         let replacement_before = std::fs::read(root.join(PATH)).expect("read replacement file");
         blocker.release();
-        let blocker_result = blocker_reply_rx
-            .blocking_recv()
-            .expect("receive blocker result");
-        let batch_result = batch_reply_rx
-            .blocking_recv()
-            .expect("receive batch result");
+        let blocker_result = blocker_thread.join().expect("join blocker caller");
+        let batch_result = batch_thread.join().expect("join batch caller");
         let replacement_after = std::fs::read(root.join(PATH)).expect("reread replacement file");
 
         std::fs::remove_dir_all(&root).expect("remove replacement workspace root");
@@ -17016,7 +12951,7 @@ mod capture_secret_root_guard_tests {
         let moved_scratch = ScratchDir::new().expect("moved root scratch");
         let root = root_scratch.path().to_path_buf();
         let moved_root = moved_scratch.path().join("original-root");
-        let db = store_scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         std::fs::write(root.join(SECRET_PATH), b"TOKEN=original").expect("write original secret");
@@ -17038,57 +12973,58 @@ mod capture_secret_root_guard_tests {
             .expect("seed captured secret");
         std::fs::remove_file(root.join(SECRET_PATH)).expect("observe original secret removal");
 
-        // Hold the worker on a command already ahead of the secret retire.
-        // Sending the retire below therefore proves it entered the real actor
-        // queue before the pathname is rebound to a replacement directory.
+        // Hold the writer until the public secret retire call acquires a channel
+        // slot, then replace the root before the worker can validate it.
         let blocker = PausedRootGuard::bind(&root);
         let blocker_guard: Arc<dyn WorkspaceRootGuard> = blocker.clone();
-        let (blocker_reply, blocker_reply_rx) = oneshot::channel();
-        actor
-            .tx
-            .blocking_send(Command::CaptureRetire {
-                input: CaptureRetire {
-                    workspace_id: WORKSPACE_ID.to_owned(),
-                    version_id: VERSION_ID.to_owned(),
-                    path: "missing.md".to_owned(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    now_ms: 3,
-                    request_id: None,
-                    only_if_text_head: false,
-                    only_if_capture_origin: true,
-                    allow_ydoc_origin: true,
-                },
-                workspace_root: Some((root.clone(), Some(blocker_guard))),
-                self_writes: None,
-                leases: LeaseRegistry::new(),
-                faults: Arc::new(NoFaults),
-                token: CancellationToken::new(),
-                reply: blocker_reply,
-            })
-            .expect("queue actor blocker");
+        let input: CaptureRetire = CaptureRetire {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            version_id: VERSION_ID.to_owned(),
+            path: "missing.md".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 3,
+            request_id: None,
+            only_if_text_head: false,
+            only_if_capture_origin: true,
+            allow_ydoc_origin: true,
+        };
+        let blocker_actor = actor.clone();
+        let blocker_root = root.clone();
+        let blocker_thread = std::thread::spawn(move || {
+            blocker_actor.capture_retire_materialized_blocking_guarded(
+                input,
+                blocker_root,
+                Arc::new(()),
+                LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                blocker_guard,
+            )
+        });
         blocker.wait_until_reached();
 
         let captured_guard: Arc<dyn WorkspaceRootGuard> = Arc::new(BoundRootGuard::bind(&root));
-        let (retire_reply, retire_reply_rx) = oneshot::channel();
-        actor
-            .tx
-            .blocking_send(Command::CaptureSecretRetire {
-                input: CaptureSecretRetire {
-                    workspace_id: WORKSPACE_ID.to_owned(),
-                    version_id: VERSION_ID.to_owned(),
-                    path: SECRET_PATH.to_owned(),
-                    metadata_origin: "local-file".to_owned(),
-                    metadata_correlation_id: None,
-                    now_ms: 4,
-                    only_if_own_origin: true,
-                },
-                workspace_root: Some((root.clone(), Some(captured_guard))),
-                faults: Arc::new(NoFaults),
-                token: CancellationToken::new(),
-                reply: retire_reply,
-            })
-            .expect("queue secret retire behind blocker");
+        let input: CaptureSecretRetire = CaptureSecretRetire {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            version_id: VERSION_ID.to_owned(),
+            path: SECRET_PATH.to_owned(),
+            metadata_origin: "local-file".to_owned(),
+            metadata_correlation_id: None,
+            now_ms: 4,
+            only_if_own_origin: true,
+        };
+        let retire_actor = actor.clone();
+        let retire_root = root.clone();
+        let available_before = actor.tx.capacity();
+        let retire_thread = std::thread::spawn(move || {
+            retire_actor.capture_secret_retire_blocking_guarded(
+                input,
+                retire_root,
+                Arc::new(NoFaults),
+                captured_guard,
+            )
+        });
+        wait_for_command_admission(&actor, available_before);
 
         std::fs::rename(&root, &moved_root).expect("move original workspace root");
         std::fs::create_dir(&root).expect("create replacement workspace root");
@@ -17097,12 +13033,8 @@ mod capture_secret_root_guard_tests {
         let replacement_before =
             std::fs::read(root.join(SECRET_PATH)).expect("read replacement secret");
         blocker.release();
-        let blocker_result = blocker_reply_rx
-            .blocking_recv()
-            .expect("receive blocker result");
-        let retire_result = retire_reply_rx
-            .blocking_recv()
-            .expect("receive secret retire result");
+        let blocker_result = blocker_thread.join().expect("join blocker caller");
+        let retire_result = retire_thread.join().expect("join secret retire caller");
         let replacement_after =
             std::fs::read(root.join(SECRET_PATH)).expect("reread replacement secret");
 
@@ -17130,5 +13062,65 @@ mod capture_secret_root_guard_tests {
                 ..
             })
         ));
+    }
+}
+
+#[cfg(test)]
+mod rollback_identity_tests {
+    use super::*;
+    use dohc_engine_testkit::ScratchDir;
+
+    fn pending_write(job_id: &str, workspace_id: &str) -> MaterializationJob {
+        MaterializationJob {
+            job_id: job_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            target_path: "asset.bin".to_owned(),
+            content_sha256: hex_sha256(b"asset"),
+            operation: MaterializationOperation::Write,
+            preimage: Preimage::Absent,
+            target_generation: 1,
+            status: JobStatus::Pending,
+            created_at_ms: 1,
+        }
+    }
+
+    /// Only the encoded prefix marks a rollback job. One that carries the
+    /// prefix but does not decode, or decodes to another workspace, fails
+    /// closed as `Some(false)`: never `None` (the ordinary replay path) and
+    /// never `Some(true)`.
+    #[test]
+    fn undecodable_or_foreign_rollback_identities_fail_closed() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
+        let store = EngineStore::open(&db, 1).expect("open store");
+
+        let bare = pending_write("rollback-restore_target", "ws-a");
+        assert_eq!(
+            rollback_job_matches_active(&store, "ws-a", &bare).expect("bare prefix"),
+            None,
+            "a caller-chosen id that merely starts with the word is an ordinary job."
+        );
+
+        let truncated = pending_write("rollback-restore_\u{1f}4:ws-a", "ws-a");
+        assert_eq!(
+            rollback_job_matches_active(&store, "ws-a", &truncated).expect("truncated"),
+            Some(false),
+            "a rollback id that stops mid-encoding is refused."
+        );
+
+        let foreign_id = binary_rollback_job_identity("ws-b", "main", "moment-1");
+        let foreign = pending_write(&foreign_id, "ws-b");
+        assert_eq!(
+            rollback_job_matches_active(&store, "ws-a", &foreign).expect("foreign"),
+            Some(false),
+            "a rollback minted for another workspace never matches this one."
+        );
+
+        let ordinary = pending_write("write-mat_ordinary", "ws-a");
+        assert_eq!(
+            rollback_job_matches_active(&store, "ws-a", &ordinary).expect("ordinary"),
+            None,
+            "a non-rollback job takes the ordinary replay path."
+        );
     }
 }

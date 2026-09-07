@@ -1,5 +1,7 @@
+import { sha256Hex } from "@dohc/workspace-core/hash";
+import { isRecord } from "@dohc/workspace-core/records";
 // Pure MCP tool implementations. Each operates on a workspace ROOT dir and a
-// state HOME (the desktop registry/state location). EVERY workspace-relative
+// state HOME (the desktop registry/state location). Every workspace-relative
 // write path is validated through validateUserMaterializePath (reads through
 // validateUserReadPath) before it touches the filesystem — traversal (../,
 // percent-encoded, the reserved .dohc dir) is rejected here, the #1 security
@@ -7,44 +9,7 @@
 // materialized on this host. Writes are scoped to the root and never
 // auto-apply a boundary crossing.
 
-import {
-  addFileChanges,
-  createChangeSet,
-  databaseSyncStrategy,
-  DOHC_METADATA_GUARD,
-  DOHC_TRASH_GUARD,
-  frameworkConfigName,
-  hasIgnoredSegment,
-  hasWebDependency,
-  hasWebScript,
-  isDohcMetadataPath,
-  mediaTypeForPath,
-  notARealFolderRefusal,
-  outsideWorkspaceRefusal,
-  packageManagerFromFiles,
-  nameUnitFor,
-  sameFsEntry,
-  entryCharBudget,
-  trashEntryPlan,
-  WINDOWS_MAX_PATH_CHARS,
-  validateUserMaterializePath,
-  validateUserReadPath,
-  type ChangeAuthor,
-  type ChangeProvenance,
-  type ChangeSetKind,
-  type DohcPathGuard,
-  type DohcSiteConfig,
-  type FileChange,
-  type FsEntryIdentity,
-  type PackageJson,
-  type SiteConfidence,
-  type SiteDiagnostic,
-  type SiteKind,
-  type SiteScripts,
-  type WorkspaceSite,
-  isSharedWithMePath,
-  safeRelativeConfigPath,
-} from "@dohc/workspace-core";
+import { databaseSyncStrategy, DOHC_METADATA_GUARD, DOHC_TRASH_GUARD, frameworkConfigName, hasIgnoredSegment, hasWebDependency, hasWebScript, mediaTypeForPath, notARealFolderRefusal, outsideWorkspaceRefusal, packageManagerFromFiles, nameUnitFor, sameFsEntry, entryCharBudget, trashEntryPlan, WINDOWS_MAX_PATH_CHARS, validateUserMaterializePath, validateUserReadPath, type DohcPathGuard, type DohcSiteConfig, type FsEntryIdentity, type PackageJson, type SiteConfidence, type SiteDiagnostic, type SiteKind, type SiteScripts, type WorkspaceSite, isSharedWithMePath, safeRelativeConfigPath } from "@dohc/workspace-core";
 import { sendCliRequest } from "@dohc/cli/client";
 import { DohcCliError } from "@dohc/cli/errors";
 import {
@@ -61,11 +26,10 @@ import {
 import type { z } from "zod";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
-import { workspaceEngineSetting } from "@dohc/workspace-contracts/workspace-settings";
 import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
-// The resolved-path rule lives in ONE place for every surface that decides
-// authority from a path (#638, #667). This surface owns only its wording.
-import {
+// The resolved-path rule lives in one place for every surface that decides
+// authority from a path. This surface owns only its wording.
+import { errnoCode,
   realRelativeInRoot,
   resolvedAreaRefusal,
   type RealTarget,
@@ -86,9 +50,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import type { Stats } from "node:fs";
-import { basename, dirname, join, sep } from "node:path";
-import { hasLegacyAppImport } from "./sourceScanner";
+import { basename, dirname, join } from "node:path";
 
 export interface ToolContext {
   // Workspace root the server is scoped to (the --workspace arg). All file
@@ -96,7 +58,7 @@ export interface ToolContext {
   root: string;
   // Desktop state/home dir (the --home arg): holds dohc-workspaces.json.
   home: string;
-  // The share level this server was launched for (#646), from the
+  // The share level this server was launched for, from the
   // --share-access flag. Absent means a local workspace: every tool registers.
   // A level narrows the write surface — see createDohcMcpServer, which decides
   // which write tools exist for it.
@@ -106,12 +68,6 @@ export interface ToolContext {
   request?: (request: CliRequestWithoutToken) => Promise<unknown>;
 }
 
-const MCP_AUTHOR: ChangeAuthor = {
-  kind: "agent",
-  agentId: "dohc-mcp",
-  onBehalfOf: "local",
-};
-const historyRecordedAtMsByRoot = new Map<string, number>();
 const DEFAULT_READ_MAX_BYTES = 1024 * 1024;
 const HARD_READ_MAX_BYTES = 10 * 1024 * 1024;
 const DEFAULT_SEARCH_MAX_RESULTS = 100;
@@ -123,11 +79,11 @@ async function isWithinRealRoot(root: string, absolute: string): Promise<boolean
   return (await realRelativeInRoot(root, absolute)).ok;
 }
 
-// A tool's path arg, resolved to an absolute path INSIDE the root, or a reason
-// it was refused. Centralizes BOTH guards so no tool can forget them: lexical
+// A tool's path arg, resolved to an absolute path inside the root, or a reason
+// it was refused. Centralizes both guards so no tool can forget them: lexical
 // validation (traversal/encoding/reserved) then realpath containment (symlink
 // escape). Async because the symlink check touches the filesystem.
-// `normalized` is the path as SPELLED (what the agent asked for, what tool
+// `normalized` is the path as spelled (what the agent asked for, what tool
 // results and change records report). `realRelative` is where it actually
 // lands, root-relative, after symlinks — the only safe input to a guard that
 // decides authority from a path.
@@ -158,7 +114,7 @@ async function safeResolve(
   }
   const realRelative = target.relative;
   // The check above judged the path as SPELLED. An in-workspace symlink can
-  // spell a reserved area under any other name (#638), so the SAME reservation
+  // spell a reserved area under any other name, so the same reservation
   // is decided again on where the path really lands. Enumerating spellings is
   // the losing side of this; the resolved path ends the game.
   const refused = resolvedAreaRefusal(realRelative, access);
@@ -222,10 +178,6 @@ async function safeResolveForMutation(
   return resolved;
 }
 
-function sha256(bytes: Uint8Array | string): string {
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
 async function readFileWindowWithDigest(
   absolute: string,
   offsetBytes: number,
@@ -264,160 +216,12 @@ async function readFileWindowWithDigest(
   }
 }
 
-// PR 0N-1: is this workspace on the workspace engine? MCP reads the SAME
-// per-workspace settings file the desktop reads (.dohc/settings.local.json,
-// workspaceSettingsFile.ts) THROUGH THE SAME SCHEMA — the shared contract, not
-// a copy of it, because a hand-mirrored rule is how the two answers drift.
-// WS-H1 flag flip: the engine is the DEFAULT — an absent group or a missing
-// file resolves ON; only an explicit `workspaceEngineAlpha: false` opts the
-// workspace out. Cheap enough to read per mutating call — the flag can flip
-// between desktop opens.
-//
-// #641: a file that EXISTS but cannot be trusted resolves UNKNOWN, not OFF —
-// the three-state contract at the top of workspaceSettings.ts. Unknown never
-// names a recorder, so the read still fails closed.
-const MAX_WORKSPACE_SETTINGS_FILE_BYTES = 256 * 1024;
-const WORKSPACE_SETTINGS_PATH = ".dohc/settings.local.json";
-
-// Workspace-relative throughout: the agent named a workspace, not a host, and
-// an absolute host path is a fact it cannot act on.
-const CANNOT_READ_SETTINGS =
-  `dohc could not tell whether this workspace records history: it could not read ${WORKSPACE_SETTINGS_PATH}.`;
-
-type HistoryRecordingRead =
-  | { state: "on" }
-  | { state: "off" }
-  | { state: "unknown"; cause: string };
-
-function historyUnknown(detail: string): HistoryRecordingRead {
-  return { state: "unknown", cause: `${CANNOT_READ_SETTINGS} ${detail}` };
-}
-
-// The noun the reader can see at the path, so the instruction says what to
-// look for. "item" covers the rest (a socket, a device node).
-function settingsSquatterNoun(stats: Stats): string {
-  if (stats.isSymbolicLink()) return "link";
-  return stats.isDirectory() ? "folder" : "item";
-}
-
-// Why the resolver could not place the settings file. Only ONE of these is an
-// escape; the rest are checks that did not finish. Collapsing them to "that
-// path leads outside this workspace" would tell an agent to remove a file over
-// an escape dohc never established -- the same defect this fix exists to
-// remove, one layer down. Each cause names its own next step.
-function settingsPathDetail(target: Extract<RealTarget, { ok: false }>): string {
-  switch (target.reason) {
-    case "escapes-workspace":
-      return "That path leads outside this workspace, and it must stay inside. Remove or rename it. Then retry.";
-    case "unreadable-root":
-      return (
-        `dohc could not resolve the workspace folder (${target.code}). The workspace ` +
-        `folder failed, not this file. Check that the workspace folder is present and ` +
-        `readable. Then retry.`
-      );
-    case "dangling-symlink":
-      return (
-        "A link on that path has no target, so dohc cannot tell where the path leads. " +
-        "Create the target, or remove the link. Then retry."
-      );
-    case "unresolvable-symlink":
-      return (
-        `A link on that path cannot be resolved (${target.code}), so dohc cannot tell ` +
-        `where the path leads. Remove the link. Then retry.`
-      );
-    case "unreadable-path":
-      return (
-        `dohc could not check where that path leads (${target.code}). Fix that error on ` +
-        `the path, or remove it. Then retry.`
-      );
-  }
-}
-
-export async function readHistoryRecording(ctx: ToolContext): Promise<HistoryRecordingRead> {
-  const path = join(ctx.root, ".dohc", "settings.local.json");
-  let stats: Stats;
-  try {
-    stats = await lstat(path);
-  } catch (error) {
-    // Only an ABSENT file reads as the default: a new workspace must not be
-    // born opted out, and must not be born unknown either.
-    if (errnoCode(error) === "ENOENT") return { state: "on" };
-    return historyUnknown(
-      `The read failed (${errnoCode(error) ?? "no errno"}). Check that dohc can read that file. Then retry.`,
-    );
-  }
-  if (stats.isSymbolicLink() || !stats.isFile()) {
-    const noun = settingsSquatterNoun(stats);
-    return historyUnknown(
-      `A ${noun} is at that path, which must be a regular file. Remove or rename that ${noun}. Then retry.`,
-    );
-  }
-  if (stats.size > MAX_WORKSPACE_SETTINGS_FILE_BYTES) {
-    return historyUnknown(
-      `The file is ${stats.size} bytes and the limit is ${MAX_WORKSPACE_SETTINGS_FILE_BYTES} bytes. Shrink it below the limit. Then retry.`,
-    );
-  }
-  const target = await realRelativeInRoot(ctx.root, path);
-  if (!target.ok) return historyUnknown(settingsPathDetail(target));
-  let body: unknown;
-  try {
-    body = JSON.parse(await readFile(path, "utf8"));
-  } catch (error) {
-    const code = errnoCode(error);
-    return historyUnknown(
-      code === null
-        ? "The file is not valid JSON. Repair the file. Then retry."
-        : `The read failed (${code}). Check that dohc can read that file. Then retry.`,
-    );
-  }
-  const setting = workspaceEngineSetting(body);
-  return setting.state === "untrusted"
-    ? historyUnknown(
-        `The file does not match the settings schema (${setting.cause}). Repair the file. Then retry.`,
-      )
-    : { state: setting.state };
-}
-
-// Retirement Phase C (WS-H1): MCP writes NO legacy change sets. For an engine
-// workspace (the default) the desktop watcher captures MCP's physical writes
-// into engine moments (agent-attributed when a dohc-tracked run is active; an
-// external MCP client without a dohc-tracked run yields actor-neutral engine
-// capture — honest per the actor-neutral principle). Caveat a standalone MCP
-// client should know: that capture happens via the desktop watcher when the
-// app is open — a write made while the desktop is closed is picked up by the
-// next startup reconciliation. A workspace that explicitly opted OUT of the
-// engine has NO recorder at all; naming a recorder there would be a lie, so
-// mutating tools report `historyRecording: "off"` instead. Legacy
-// .dohc/history left by pre-flip versions is no longer read (the relic reader
-// retired with @dohc/workspace-history); the read tools below list engine
-// moments only.
-//
-// `historyRecording: "unknown"` is the third arm (#641): dohc could not read
-// the settings file, so it can name neither a recorder nor an opt-out. It
-// carries the cause, because "unknown" alone tells an agent nothing it can act
-// on.
-type RecordedChangeFields =
-  | { recordedBy: "workspace-engine" }
-  | { historyRecording: "off" }
-  | { historyRecording: "unknown"; historyRecordingUnavailable: string };
-
-async function recordedChangeFields(ctx: ToolContext): Promise<RecordedChangeFields> {
-  const history = await readHistoryRecording(ctx);
-  if (history.state === "on") return { recordedBy: "workspace-engine" };
-  if (history.state === "off") return { historyRecording: "off" };
-  return { historyRecording: "unknown", historyRecordingUnavailable: history.cause };
-}
-
-// Forward a write's history fields whole. Naming them one by one dropped the
-// unknown arm's cause, which is the only part of it an agent can act on.
-function forwardedRecordedChangeFields(written: RecordedChangeFields): RecordedChangeFields {
-  if ("recordedBy" in written) return { recordedBy: written.recordedBy };
-  if (written.historyRecording === "off") return { historyRecording: "off" };
-  return {
-    historyRecording: "unknown",
-    historyRecordingUnavailable: written.historyRecordingUnavailable,
-  };
-}
+// MCP writes no history of its own. The desktop watcher captures MCP's
+// physical writes into engine moments (agent-attributed when a dohc-tracked
+// run is active; an external MCP client without one yields actor-neutral
+// capture). That capture happens while the app is open; a write made while
+// the desktop is closed is picked up on the next open.
+const RECORDED_BY_ENGINE = { recordedBy: "workspace-engine" } as const;
 
 function failureReason(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
@@ -428,7 +232,7 @@ function failureReason(error: unknown, fallback: string): string {
 // It cannot say "unchanged". Three rounds of review walked that claim from
 // presence to identity to identity-plus-reuse, and the answer is that no
 // comparison of two lstat results supports it: an entry can be deleted and
-// recreated with the SAME inode on the same device, and content can be
+// recreated with the same inode on the same device, and content can be
 // rewritten in place without touching identity at all. This is a probe on a
 // filesystem dohc holds no lock on, so every "same" reading is evidence, never
 // proof. Holding a handle across the operation does not rescue it either -- on
@@ -439,7 +243,7 @@ function failureReason(error: unknown, fallback: string): string {
 //
 // What IS provable comes from rename, not from a probe: rename is atomic, so a
 // rename that failed moved nothing. That sentence is in every refusal below.
-// The probe is demoted to raising a WARNING when it has positive evidence of
+// The probe is demoted to raising a warning when it has positive evidence of
 // change. A missed warning leaves a true message; there is no reading of the
 // probe that makes a false one.
 type Aftermath = "replaced" | "gone" | "unchecked" | "undetermined";
@@ -451,7 +255,7 @@ function replacedSince(before: FsEntryIdentity, after: FsEntryIdentity): boolean
   return sameFsEntry(before, after) === "replaced";
 }
 
-// Is the source still the entry the ladder started on? Asked BEFORE every
+// Is the source still the entry the ladder started on? Asked before every
 // attempt after the first, because a rename that failed for length leaves a
 // window in which another MCP call, the desktop, or any local process can
 // replace the path -- and the next rung would then move the replacement into
@@ -486,7 +290,7 @@ function deleteAftermath(path: string, aftermath: Aftermath): string {
     case "gone":
       return ` ${path} is no longer in this workspace: something else moved or deleted it.`;
     case "unchecked":
-      // The look itself failed. That dohc could not check is ITSELF provable,
+      // The look itself failed. That dohc could not check is itself provable,
       // and it is a different state from "the entry looks the same" -- the two
       // used to render byte-identical, which told an agent the second when the
       // truth was the first.
@@ -499,24 +303,8 @@ function deleteAftermath(path: string, aftermath: Aftermath): string {
   }
 }
 
-// The errno code alone, for refusals that translate a filesystem failure. An
-// agent can act on "EACCES"; it cannot act on a sentence that hides which
-// failure happened.
-//
-// null means "this is not an errno at all", which is a different fact and has
-// to stay one: it is how a guard refusal this code wrote is told apart from a
-// failure the platform reported, and rendering it as "(unknown)" would put a
-// non-code in a slot that is documented to hold one.
-function errnoCode(error: unknown): string | null {
-  if (typeof error === "object" && error !== null && "code" in error) {
-    const { code } = error as { code?: unknown };
-    if (typeof code === "string") return code;
-  }
-  return null;
-}
-
 async function ensureRecordable(ctx: ToolContext) {
-  // Retirement Phase C: no legacy durable-writer platform gate — the engine
+  // No legacy durable-writer platform gate — the engine
   // captures the physical write. The metadata-dir safety check still fails
   // closed before visible disk changes (symlinked/escaping .dohc).
   try {
@@ -527,7 +315,7 @@ async function ensureRecordable(ctx: ToolContext) {
   }
 }
 
-// #642: the errno used to pass through whole, so an agent read
+// The errno used to pass through whole, so an agent read
 // `EPERM: operation not permitted, lstat 'C:\Users\…\ws\.dohc'` — an absolute
 // host path it never supplied and cannot act on.
 //
@@ -560,7 +348,7 @@ function metadataDirRefusal(error: unknown): string {
 // mkdir{recursive} throws a raw errno (EEXIST, or a Windows variant) when
 // something that is not a directory squats the path, and every reason here
 // reaches the calling agent verbatim. Fall through on PRESENCE, never on an
-// errno allowlist: a DANGLING symlink squat raises ENOENT, which an allowlist
+// errno allowlist: a dangling symlink squat raises ENOENT, which an allowlist
 // misses. When something is at the path, the check below names it and the way
 // out. When nothing is there, the mkdir itself failed (permissions, I/O) --
 // rethrow that.
@@ -570,7 +358,7 @@ async function ensureGuardedDir(dir: string, guard: DohcPathGuard, root: string)
   } catch (error) {
     if (!(await lstat(dir).catch(() => null))) throw error;
   }
-  // Validate AFTER mkdir: mkdir{recursive} silently no-ops on an existing
+  // Validate after mkdir: mkdir{recursive} silently no-ops on an existing
   // symlink-to-dir, so only the post-mkdir state proves where a write or a
   // rename would land.
   const link = await lstat(dir);
@@ -653,7 +441,7 @@ async function writeFileAtomicallyForTool(
       });
     }
     const currentBytes = existing ? await readFile(finalPath) : Buffer.alloc(0);
-    const currentSha256 = sha256(currentBytes);
+    const currentSha256 = sha256Hex(currentBytes);
     if (currentSha256 !== options.expectedSha256) {
       throw expectedSha256Mismatch(currentSha256);
     }
@@ -802,7 +590,7 @@ export async function listWorkspaceFiles(
   return { ok: true as const, root: root.normalized, entries };
 }
 
-// Secret-backed files (PR 08, plan agent-access default = DENY): dohc-
+// Secret-backed files (PR 08, plan agent-access default = deny): dohc-
 // controlled agent surfaces never share secret file contents. The floor is
 // the same classifyEngineFilePath rule the engine enforces everywhere —
 // policy files can never unmark it.
@@ -816,7 +604,7 @@ function isSecretWorkspacePath(normalizedPath: string): boolean {
   return classifyEngineFilePathForRead(normalizedPath).kind === "secret";
 }
 
-// The secret floor decided on BOTH spellings of a resolved path. The name the
+// The secret floor decided on both spellings of a resolved path. The name the
 // agent asked for is not the name the bytes come from: `notes.md -> .env`
 // passes a check on the request and reads the secret anyway, and every tool
 // that opens a file follows the link. Neither spelling may classify as secret.
@@ -1002,7 +790,7 @@ export async function searchWorkspaceFiles(
   }
 
   async function searchFile(absolute: string, relativePath: string): Promise<boolean> {
-    // Secret floor (PR 08): never search protected files — neither their
+    // Secret floor: never search protected files — neither their
     // contents nor a path hit that would carry a preview. The skip is
     // reported honestly instead of silently vanishing.
     if (isSecretWorkspacePath(relativePath)) {
@@ -1152,8 +940,8 @@ export async function writeWorkspaceFile(
     ok: true as const,
     path: resolved.normalized,
     bytes: bytes.byteLength,
-    sha256: sha256(bytes),
-    ...(await recordedChangeFields(ctx)),
+    sha256: sha256Hex(bytes),
+    ...RECORDED_BY_ENGINE,
   };
 }
 
@@ -1192,7 +980,7 @@ export async function createWorkspaceDirectory(
   return {
     ok: true as const,
     path: resolved.normalized,
-    ...(await recordedChangeFields(ctx)),
+    ...RECORDED_BY_ENGINE,
   };
 }
 
@@ -1225,7 +1013,7 @@ export async function moveWorkspacePath(
       ok: true as const,
       fromPath: from.normalized,
       toPath: to.normalized,
-      ...(await recordedChangeFields(ctx)),
+      ...RECORDED_BY_ENGINE,
     };
   } catch (error) {
     return {
@@ -1246,7 +1034,7 @@ export async function deleteWorkspacePath(
   if (recordable) return recordable;
   // "Nothing is there" answered on its own, before anything can fail: it is a
   // different fact from "the move failed", and an lstat errno naming an
-  // absolute host path told the agent neither (#613).
+  // absolute host path told the agent neither.
   //
   // ONLY ENOENT is absence. A parent directory without search permission
   // answers EACCES for a file that is right there, and an agent told that file
@@ -1265,7 +1053,7 @@ export async function deleteWorkspacePath(
           : `dohc could not delete ${resolved.normalized}. The check on that path failed (${source.code}). dohc did not move it.`,
     };
   }
-  // The guard refusals name their own constraint (#585) and pass through as
+  // The guard refusals name their own constraint and pass through as
   // they are. Everything else here is an errno from mkdir or lstat, and it
   // used to reach the agent raw, absolute host path and all -- the very defect
   // this tool's other arms were fixed for. A guard refusal is an Error this
@@ -1303,7 +1091,7 @@ export async function deleteWorkspacePath(
   let moveError: unknown = null;
   let trashed = false;
   // Set when the ladder stopped because the path stopped being the entry the
-  // agent named. The identity comes from the preflight, captured ONCE before
+  // agent named. The identity comes from the preflight, captured once before
   // the first rename -- re-reading it per rung would compare the source with
   // itself and reopen the window it exists to close.
   let aborted: Aftermath | null = null;
@@ -1350,7 +1138,7 @@ export async function deleteWorkspacePath(
     // atomic, so a failed one moved nothing. That holds whatever else touched
     // the path, and it is what an agent needs to decide whether to retry.
     //
-    // The probe only ADDS a warning, and only on positive evidence that the
+    // The probe only adds a warning, and only on positive evidence that the
     // path changed under the tool. Nothing serializes these mutations, so the
     // desktop, another MCP call, or any local process can empty or replace the
     // path between the check above and this rename.
@@ -1371,7 +1159,7 @@ export async function deleteWorkspacePath(
     ok: true as const,
     path: resolved.normalized,
     trashed: true,
-    ...(await recordedChangeFields(ctx)),
+    ...RECORDED_BY_ENGINE,
   };
 }
 
@@ -1590,8 +1378,8 @@ export async function workspaceStatus(ctx: ToolContext) {
 
 // --- dohc_list_changes / dohc_read_change ----------------------------------
 
-// The workspace engine is the sole recorder of history, but desktop main is
-// the sole owner of its database. These tools read moments through the CLI
+// The workspace engine records history, and desktop main is the sole owner
+// of its database. These tools read moments through the CLI
 // transport. The pre-flip legacy `.dohc/history` change-set relic was retired;
 // a moment carries path/operation/versionId (the legacy kind,
 // boundaryCrossings, and provenance fields no longer exist and are never
@@ -1627,7 +1415,6 @@ type SiteCheck = {
   path?: string;
 };
 
-const LEGACY_APPS_SEGMENT = `.${"apps"}`;
 const SITE_SCAN_IGNORED_NAMES = new Set([
   ".cache",
   ".dohc",
@@ -1643,45 +1430,14 @@ const SITE_SCAN_IGNORED_NAMES = new Set([
   "node_modules",
 ]);
 const SITE_BUILD_OUTPUT_NAMES = ["dist", "build", "out"];
-const SITE_SOURCE_EXTENSIONS = new Set([
-  ".html",
-  ".js",
-  ".jsx",
-  ".mjs",
-  ".cjs",
-  ".mts",
-  ".cts",
-  ".ts",
-  ".tsx",
-  ".css",
-]);
-const MAX_SITE_TEST_BYTES = 2 * 1024 * 1024;
-const MAX_SITE_SCAN_DEPTH = 100;
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function relativeJoin(prefix: string, name: string): string {
   return prefix && prefix !== "." ? `${prefix}/${name}` : name;
 }
 
-function hasLegacyAppsSegment(path: string): boolean {
-  return path
-    .split(/[\\/]+/)
-    .filter(Boolean)
-    .some((segment) => segment.toLowerCase() === LEGACY_APPS_SEGMENT);
-}
-
-function sitePathAllowed(path: string): { ok: true } | { ok: false; reason: string } {
-  if (hasLegacyAppsSegment(path)) {
-    return { ok: false, reason: `site tools do not operate on legacy ${LEGACY_APPS_SEGMENT} paths` };
-  }
-  return { ok: true };
-}
-
 function isIgnoredSitePath(path: string): boolean {
   if (!path) return false;
-  if (hasIgnoredSegment(path) || hasLegacyAppsSegment(path)) return true;
+  if (hasIgnoredSegment(path)) return true;
   return path
     .split("/")
     .filter(Boolean)
@@ -1876,8 +1632,8 @@ async function detectSiteAt(
   // Same code and message as workspace-core's parseDohcSiteConfig (packages/
   // workspace-core/src/sites.ts) for the identical malformed input — a
   // dohc.json preview.mode that isn't one of the three valid values must
-  // surface the SAME diagnostic here as it does for the desktop detector,
-  // or test_site can silently pass a config the desktop Sites view flags.
+  // surface the same diagnostic here as it does for the desktop detector,
+  // or test_site can silently pass a config the desktop Apps view flags.
   if (configPreviewMode !== undefined && configuredPreviewMode === undefined) {
     diagnostics.push({
       severity: "warning",
@@ -1909,7 +1665,7 @@ async function detectSiteAt(
 
   const frameworkConfig = frameworkConfigName(files);
   const hasIndex = files.has("index.html");
-  // Whether ANY script exists is a materially looser test than whether
+  // Whether any script exists is a materially looser test than whether
   // one actually names a web dependency or a recognizable web-tool token —
   // the shared hasWebScript predicate is the same one desktop's own
   // discoverSites already applies, so both sites views agree on the same
@@ -1917,15 +1673,15 @@ async function detectSiteAt(
   const hasPackageSignal =
     files.has("package.json") &&
     (hasWebScript(pkg ?? undefined) || Boolean(frameworkConfig) || hasWebDependency(pkg));
-  // A directory ACTUALLY found on disk vs. the configured build.output PATH
+  // A directory actually found on disk vs. the configured build.output PATH
   // (a claim, whether or not anything was ever built there) are different
   // signals — workspace-core's hasIndependentWebsiteSignal only accepts the
   // former as the independent signal that overrides an explicit non-site
   // type declaration; its own doc comment explains why (an explicitly
   // non-site config's own build.output claim can't override its own type).
-  // Both detectors have to agree on that rule for the SAME input. A bare
-  // directory presence isn't enough EITHER: workspace-core only counts a
-  // build output as DETECTED when it holds a real <output>/index.html
+  // Both detectors have to agree on that rule for the same input. A bare
+  // directory presence isn't enough either: workspace-core only counts a
+  // build output as detected when it holds a real <output>/index.html
   // artifact, the same check builtEntry (below) needs — one pass computes
   // both instead of two separate stat sweeps.
   const detectedBuildOutputs: string[] = [];
@@ -1944,7 +1700,7 @@ async function detectSiteAt(
   }
   // Same safe-relative-path validation as workspace-core's parseBuild — an
   // absolute path, a traversal, or a Windows-alias traversal in
-  // build.output gets the SAME invalid-build-output diagnostic and is
+  // build.output gets the same invalid-build-output diagnostic and is
   // dropped, not returned as an unsafe planned output for build_site/
   // test_site to act on.
   const rawConfiguredBuildOutput = configString(config?.build, "output");
@@ -1960,16 +1716,16 @@ async function detectSiteAt(
     });
   }
   // The conventional-names loop above only ever checks "dist"/"build"/
-  // "out" — a CONFIGURED output can be nested or custom-named
+  // "out" — a configured output can be nested or custom-named
   // ("public/dist"), so it needs its own verification, independent of
-  // whether a conventional one was ALSO found. workspace-core's
+  // whether a conventional one was also found. workspace-core's
   // preferredBuildOutput/presentBuildOutput (packages/workspace-core/src/
   // sites.ts) give a real configured artifact priority over a real
   // conventional one whenever both exist — this has to agree, or an agent
   // building through the configured output sees MCP still reporting (and
   // test_site/build_site acting on) a stale conventional artifact left
   // over from an earlier build. So this check is unconditional, and its
-  // result OVERRIDES whatever the conventional loop already set.
+  // result overrides whatever the conventional loop already set.
   // Every entry `detectedBuildOutputs` already required a passing isFile()
   // check above; a configured output only joins them once its own check
   // here passes too — so realBuildOutputs never needs a second stat of a
@@ -2030,17 +1786,17 @@ async function detectSiteAt(
   // core/src/sites.ts) branch-for-branch: a dohc.json config OR a
   // framework config file (vite.config.ts, ...) is "configured", and
   // either one is a high-confidence signal on its own, same as an actual
-  // index.html file — the desktop Sites view and MCP's detect_sites must
+  // index.html file — the desktop Apps view and MCP's detect_sites must
   // describe the same project the same way.
   const kind: SiteKind = configPath || frameworkConfig ? "configured" : hasPackageSignal ? "package" : "static";
   // Mirrors workspace-core's own siteConfidence exactly: a dohc.json only
-  // counts toward HIGH confidence when it explicitly DECLARES type: "site"
+  // counts toward high confidence when it explicitly declares type: "site"
   // — a valid-but-empty config ({}) or one for another dohc feature isn't
   // itself a high-confidence website signal, even though it parsed
-  // cleanly. The two detectors have to agree on the SAME dohc.json.
+  // cleanly. The two detectors have to agree on the same dohc.json.
   // Mirrors workspace-core's own siteConfidence exactly, including its
   // medium branch: hasWebPackageSignal || hasBuildOutputSignal. A folder
-  // detected ONLY because a real build output exists (dist/index.html,
+  // detected only because a real build output exists (dist/index.html,
   // say, with no package.json signal at all) still needs medium, not low
   // — omitting uniqueBuildOutputs here left the two detectors disagreeing
   // on exactly that input despite this branch's own parity comment.
@@ -2088,10 +1844,6 @@ export async function detectSites(
       ? await safeResolve(ctx, args.path, "read")
       : { ok: true as const, absolute: ctx.root, normalized: "", realRelative: "" };
   if (!start.ok) return { ok: false as const, reason: start.reason };
-  // Where the scan really lands decides the rule (#638): `sites -> .apps`
-  // spells an ordinary folder and reads the legacy tree site tools disown.
-  const allowed = sitePathAllowed(start.realRelative);
-  if (!allowed.ok) return allowed;
 
   const info = await lstat(start.absolute).catch(() => null);
   if (!info) return { ok: false as const, reason: `path not found: ${args.path ?? "."}` };
@@ -2099,14 +1851,14 @@ export async function detectSites(
 
   const maxDepth = Math.min(12, Math.max(0, Math.floor(args.maxDepth ?? 5)));
   const sites: WorkspaceSite[] = [];
-  // A directory an already-visited ancestor reported as ITS OWN REAL build
+  // A directory an already-visited ancestor reported as its own real build
   // artifact (conventional dist/build/out, or an explicitly configured
   // build.output path, single- or multi-segment — either way, backed by an
   // actual <output>/index.html file on disk) is that site's own output,
   // not an independent site — matches workspace-core's discoverSites,
   // which never promotes a build output's own index.html into a separate
-  // site root. A MERELY configured build.output with no real artifact
-  // there yet must NOT suppress the path: an independent site (its own
+  // site root. A merely configured build.output with no real artifact
+  // there yet must not suppress the path: an independent site (its own
   // package.json-based project, say) can genuinely live at a path a
   // sibling's dohc.json only claims as a future build output, and
   // workspace-core's own configuredOutputArtifacts crediting is likewise
@@ -2157,8 +1909,6 @@ export async function createSite(
   const root = await safeResolve(ctx, args.path);
   if (!root.ok) return { ok: false as const, reason: root.reason };
   if (!root.normalized) return { ok: false as const, reason: "site path must name a folder" };
-  const allowed = sitePathAllowed(root.realRelative);
-  if (!allowed.ok) return allowed;
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
 
@@ -2308,8 +2058,6 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
   for (const file of files) {
     const resolved = await safeResolve(ctx, file.path);
     if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-    const fileAllowed = sitePathAllowed(resolved.realRelative);
-    if (!fileAllowed.ok) return fileAllowed;
     if (
       resolved.normalized !== root.normalized &&
       !resolved.normalized.startsWith(`${root.normalized}/`)
@@ -2345,7 +2093,7 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
     ok: true as const,
     siteRoot: root.normalized,
     files: resolvedFiles.map((file) => file.normalized),
-    ...(await recordedChangeFields(ctx)),
+    ...RECORDED_BY_ENGINE,
   };
 }
 
@@ -2365,10 +2113,10 @@ async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
   // or mutate the site (test/build/preview/publish) — running
   // someone else's shared code with workspace access is refused. Copying
   // the site into the user's own files makes it runnable. The check is the
-  // shared case-insensitive/alias-normalizing predicate, NOT a literal
+  // shared case-insensitive/alias-normalizing predicate, not a literal
   // compare: normalized paths preserve casing, and "Shared-With-Me/…" names
-  // the same directory on case-insensitive filesystems (CodeRabbit). Both
-  // gates read the RESOLVED path (#638): reads may enter shared-with-me, so
+  // the same directory on case-insensitive filesystems. Both
+  // gates read the resolved path: reads may enter shared-with-me, so
   // safeResolve lets an alias of it through, and judging the spelling would
   // let `mine -> shared-with-me/alex` run someone else's shared code.
   if (isSharedWithMePath(root.realRelative)) {
@@ -2377,8 +2125,6 @@ async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
       reason: `site root is a mounted share (read-only): ${siteRoot} — copy it into your own files to run it`,
     };
   }
-  const allowed = sitePathAllowed(root.realRelative);
-  if (!allowed.ok) return allowed;
   const info = await lstat(root.absolute).catch(() => null);
   if (!info) return { ok: false as const, reason: `site root not found: ${siteRoot}` };
   if (!info.isDirectory()) return { ok: false as const, reason: `site root is not a directory: ${siteRoot}` };
@@ -2426,74 +2172,8 @@ export async function testSite(ctx: ToolContext, args: { siteRoot: string }) {
     });
   }
 
-  const legacyImport = await findLegacyAppImport(root.absolute, root.normalized);
-  checks.push(
-    legacyImport
-      ? {
-          name: "no-legacy-sdk-import",
-          ok: false,
-          path: legacyImport.path,
-          message:
-            legacyImport.reason === "too-large"
-              ? "Site source is too large for MCP static validation."
-              : "Sites must use normal web files or @dohc/sdk, not the legacy app SDK.",
-        }
-      : {
-          name: "no-legacy-sdk-import",
-          ok: true,
-          message: "No legacy app SDK import found in scanned site source.",
-        },
-  );
-
   const ok = checks.every((check) => check.ok);
   return { ok, site, checks };
-}
-
-async function findLegacyAppImport(
-  absolute: string,
-  root: string,
-): Promise<{ path: string; reason: "legacy-import" | "too-large" } | null> {
-  let totalBytes = 0;
-  async function walk(
-    currentAbsolute: string,
-    currentRoot: string,
-    depth: number,
-  ): Promise<{ path: string; reason: "legacy-import" | "too-large" } | null> {
-    if (depth > MAX_SITE_SCAN_DEPTH) return null;
-    if (isIgnoredSitePath(currentRoot)) return null;
-    let dirents;
-    try {
-      dirents = await readdir(currentAbsolute, { withFileTypes: true });
-    } catch {
-      return null;
-    }
-    for (const dirent of dirents) {
-      const rel = relativeJoin(currentRoot, dirent.name);
-      if (dirent.isSymbolicLink() || isIgnoredSitePath(rel)) continue;
-      const child = join(currentAbsolute, dirent.name);
-      if (dirent.isDirectory()) {
-        const found = await walk(child, rel, depth + 1);
-        if (found) return found;
-        continue;
-      }
-      if (!dirent.isFile() || !SITE_SOURCE_EXTENSIONS.has(fileExtension(dirent.name))) continue;
-      const info = await stat(child);
-      if (totalBytes + info.size > MAX_SITE_TEST_BYTES) {
-        return { path: rel, reason: "too-large" };
-      }
-      totalBytes += info.size;
-      if (hasLegacyAppImport(await readFile(child, "utf8"))) {
-        return { path: rel, reason: "legacy-import" };
-      }
-    }
-    return null;
-  }
-  return walk(absolute, root, 0);
-}
-
-function fileExtension(path: string): string {
-  const index = path.lastIndexOf(".");
-  return index >= 0 ? path.slice(index).toLowerCase() : "";
 }
 
 export async function buildSite(ctx: ToolContext, args: { siteRoot: string }) {
@@ -2550,7 +2230,7 @@ export async function previewSite(ctx: ToolContext, args: { siteRoot: string }) 
     modes,
     message:
       modes.length > 0
-        ? "Open this site in Sites to run the preview."
+        ? "Open this app in Apps to run the preview."
         : "No preview mode is available yet.",
     checks: tested.checks,
   };
@@ -2577,7 +2257,7 @@ export async function publishSite(ctx: ToolContext, args: { siteRoot: string }) 
 
 // --- dohc_import_data -------------------------------------------------------
 
-// A VISIBLE user database under BOTH spellings. The strategy is read off the
+// A visible user database under both spellings. The strategy is read off the
 // name, so an alias carries its own: `records.sqlite -> notes/data.sqlite-wal`
 // spells a database while the bytes are a sidecar. Both names must qualify.
 function isVisibleDatabase(resolved: { normalized: string; realRelative: string }): boolean {
@@ -2587,7 +2267,7 @@ function isVisibleDatabase(resolved: { normalized: string; realRelative: string 
   );
 }
 
-// Imports a delimited/structured source into a NEW visible .sqlite, written
+// Imports a delimited/structured source into a new visible.sqlite, written
 // safely under the root. Refuses a hidden-internal (.dohc) or sidecar target —
 // only a visible user database is a valid import destination.
 export async function importData(
@@ -2642,7 +2322,7 @@ export async function importData(
     path: dbRel.normalized,
     tableName: result.tableName,
     rowCount: result.rowCount,
-    ...(await recordedChangeFields(ctx)),
+    ...RECORDED_BY_ENGINE,
   };
 }
 
@@ -2665,7 +2345,7 @@ export async function queryDatabase(
   if (isSecretResolvedPath(dbRel)) {
     return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
   }
-  // Only a VISIBLE user database (parity with import_data): never a sidecar,
+  // Only a visible user database (parity with import_data): never a sidecar,
   // hidden internal, or a non-db file that merely contains SQLite bytes.
   if (!isVisibleDatabase(dbRel)) {
     return { ok: false as const, reason: `not a visible database: ${args.databasePath}` };
@@ -2703,7 +2383,7 @@ function isReadOnlySelect(sql: string): boolean {
 
 // --- dohc_share -------------------------------------------------------------
 
-// Sharing crosses a boundary, so this NEVER auto-applies. It routes through
+// Sharing crosses a boundary, so this never auto-applies. It routes through
 // the liberal collaboration policy and returns needs-confirmation with the
 // human-readable reason; only the desktop, with the user's explicit OK, applies
 // the share.

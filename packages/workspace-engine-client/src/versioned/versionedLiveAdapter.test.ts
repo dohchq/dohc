@@ -1,8 +1,8 @@
+import { ProtocolShapeError } from "../wireSchema";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { EngineRequestError } from "../daemon/engineClient";
-import type { Request } from "../ydoc/generated/Request";
-import type { Response } from "../ydoc/generated/Response";
+import type { Request, Response } from "../protocol";
 import {
   DaemonProtocolError,
   DaemonRefusalError,
@@ -10,7 +10,6 @@ import {
 } from "../live/daemonLiveAdapter";
 import {
   WORKSPACE_METHOD,
-  WorkspaceProtocolShapeError,
   decodeWorkspaceResult,
   type ConflictRecord,
   type WorkspaceMethod,
@@ -18,7 +17,6 @@ import {
 } from "../workspace/workspaceWireContract";
 import {
   VERSIONED_METHOD,
-  VersionedProtocolShapeError,
   decodeVersionedResult,
   type VersionedMethod,
   type VersionedMethodParamsMap,
@@ -27,7 +25,7 @@ import {
   VersionedAdapterCapabilityError,
   VersionedLiveAdapter,
 } from "./versionedLiveAdapter";
-import { VersionedLoopbackEngine } from "./versionedLoopbackEngine";
+import { VersionedLoopbackEngine } from "../testing/versionedLoopbackEngine";
 
 const WORKSPACE = "workspace";
 const SENTINEL = new Error("captured");
@@ -188,10 +186,6 @@ const WORKSPACE_REQUEST_CASES: WorkspaceRequestCase[] = [
   { method: WORKSPACE_METHOD.conflictsList, params: {} },
   { method: WORKSPACE_METHOD.conflictsOpen, params: { conflict: {} } },
   { method: WORKSPACE_METHOD.conflictsResolve, params: { local: {} } },
-  {
-    method: WORKSPACE_METHOD.searchQuery,
-    params: { versionId: "main", query: "hello" },
-  },
   { method: WORKSPACE_METHOD.watcherStatus, params: {} },
   { method: WORKSPACE_METHOD.captureFlush, params: {} },
   { method: WORKSPACE_METHOD.captureSetAuthor, params: { author: null } },
@@ -285,7 +279,7 @@ const WORKSPACE_DECODER_CASES: Array<{
   },
   {
     method: WORKSPACE_METHOD.collectionsList,
-    valid: { collections: [collectionSummary] },
+    valid: { collections: [collectionSummary], nextCursor: null },
   },
   {
     method: WORKSPACE_METHOD.collectionsListPendingAdoptions,
@@ -358,9 +352,9 @@ const WORKSPACE_DECODER_CASES: Array<{
           recordedAtMs: 1,
         },
       ],
+      nextBeforeHistoryId: null,
     },
   },
-  { method: WORKSPACE_METHOD.searchQuery, valid: [] },
   {
     method: WORKSPACE_METHOD.watcherStatus,
     valid: { running: true, degraded: false, terminal: false, phase: "ready" },
@@ -449,8 +443,8 @@ describe("VersionedLiveAdapter", () => {
     });
   });
 
-  it("passes ONE conflicts.list page through with the daemon's continuation", async () => {
-    // #562: the drain that undid the daemon's paging lived here. One call is
+  it("passes one conflicts.list page through with the daemon's continuation", async () => {
+    // The drain that undid the daemon's paging lived here. One call is
     // one page — a second request from a single call is the drain coming back.
     const requests: Request[] = [];
     const second = { ...conflict, id: "conflict-2", createdAtMs: 2 };
@@ -556,8 +550,6 @@ describe("VersionedLiveAdapter", () => {
   it("hydrates a withheld conflict side through the text blob route", async () => {
     // The daemon degrades a conflicts.list row past its frame cap: the side
     // body arrives as `text: null` beside `inbandLimitBytes` and `blobSha256`.
-    // MUTATION: drop the hydration branch in `listTextConflicts` and this
-    // side reaches the caller with no body at all.
     const body = "an over-cap side body";
     const bodySha = createHash("sha256").update(body, "utf8").digest("hex");
     const withheld: ConflictRecord = {
@@ -617,8 +609,6 @@ describe("VersionedLiveAdapter", () => {
 
   it("reads no bodies for a metadata-only conflict listing", async () => {
     // A metadata-only conflict listing must not fetch bodies it will not use.
-    // MUTATION: drop the `bodies: "withheld"` early return and this listing
-    // issues a blob read.
     const withheld: ConflictRecord = {
       ...conflict,
       current: {
@@ -663,8 +653,6 @@ describe("VersionedLiveAdapter", () => {
     // rebuilt. The page is cut by the `byteLength` each withheld side already
     // carries, so the bodies past the budget are never transferred.
     //
-    // MUTATION: drop the budget cut in `listTextConflicts` and both conflicts
-    // hydrate, issuing a second blob read.
     const body = "rebuilt";
     const bodySha = createHash("sha256").update(body, "utf8").digest("hex");
     const huge = (id: string): ConflictRecord => ({
@@ -1616,6 +1604,7 @@ describe("VersionedLiveAdapter", () => {
         collection: { path: "projects", status: "valid", reasons: [] },
         record,
         history: [],
+        nextBeforeHistoryId: null,
       },
     } as const;
     const blobHandlers = new Set<
@@ -1682,14 +1671,14 @@ describe("VersionedLiveAdapter", () => {
       expect(() => decodeWorkspaceResult(method as never, valid)).not.toThrow();
       expect(() =>
         decodeWorkspaceResult(method as never, { unexpected: true }),
-      ).toThrow(WorkspaceProtocolShapeError);
+      ).toThrow(ProtocolShapeError);
     },
   );
 
   it("decodes a withheld conflict body from either surface as a hydration hint", () => {
     // `conflicts.resolve` withholds over-cap sides to keep its answer inside
     // one control frame (`settled_conflict_json`, lib.rs), and `conflicts.list`
-    // withholds the sides of a row past the conflict row frame cap (#537).
+    // withholds the sides of a row past the conflict row frame cap.
     // The null is a hint, not content: `blobSha256` names the body, and
     // `listTextConflicts` hydrates it — or throws — before any reader sees
     // the record.
@@ -1727,7 +1716,7 @@ describe("VersionedLiveAdapter", () => {
         ],
         nextAfterConflictId: null,
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it("keeps the daemon's provenance fields on decoded conflict snapshots", () => {
@@ -1789,15 +1778,15 @@ describe("VersionedLiveAdapter", () => {
         nextAfterPath: null,
         unknown: true,
       }),
-    ).toThrow(VersionedProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
     expect(() =>
       decodeVersionedResult(VERSIONED_METHOD.versionsCompare, {
         status: "same",
       }),
-    ).toThrow(VersionedProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
     expect(() =>
       decodeVersionedResult(VERSIONED_METHOD.secretsFork, { accepted: true }),
-    ).toThrow(VersionedProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it("maps daemon refusals through the shared retryability contract", async () => {

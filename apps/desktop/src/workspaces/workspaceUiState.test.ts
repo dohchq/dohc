@@ -1,4 +1,4 @@
-import { readdir, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { readdir, readFile, rename, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,8 +9,8 @@ import {
   writeUiStateFile,
 } from "./workspaceUiState";
 import { startWorkspaceWatch } from "./workspaceWatcher";
-import { createTestScratch } from "./testTemp";
 
+import { createTestScratch } from "./testTemp";
 vi.mock("node:fs/promises", async () => {
   const actual = await vi.importActual<typeof import("node:fs/promises")>(
     "node:fs/promises",
@@ -18,16 +18,8 @@ vi.mock("node:fs/promises", async () => {
   return { ...actual, rename: vi.fn(actual.rename) };
 });
 
-const roots: string[] = [];
 const tempBase = tmpdir().startsWith("/mnt/") ? "/tmp" : tmpdir();
-async function tempRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-ui-state-");
-  roots.push(root);
-  return root;
-}
-
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   vi.restoreAllMocks();
 });
 
@@ -44,7 +36,7 @@ const STATE = {
 
 describe("ui-state file store", () => {
   it("round-trips state through .dohc/ui-state.json", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-ui-state-");
     await writeUiStateFile(root, STATE);
     expect(await readUiStateFile(root)).toEqual(STATE);
     // Pretty-printed JSON with a trailing newline, like every .dohc file.
@@ -53,7 +45,7 @@ describe("ui-state file store", () => {
   });
 
   it("serializes a burst of writes and leaves the latest complete state", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-ui-state-");
     await Promise.all(
       Array.from({ length: 40 }, (_, sequence) =>
         writeUiStateFile(root, { ...STATE, sidebarWidth: 300 + sequence }),
@@ -69,11 +61,11 @@ describe("ui-state file store", () => {
     ).toEqual([]);
     // 15s: 40 real atomic writes (write + fsync + rename each) is an I/O budget, not
     // a logic budget — same profile as collectZipEntries, and it timed out at 5000ms
-    // under contention (#372). Scoped to this test; the rest of the file is fast.
+    // under contention. Scoped to this test; the rest of the file is fast.
   }, 15_000);
 
   it("retries a transient Windows rename failure and completes the write", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-ui-state-");
     const transient = Object.assign(new Error("file is temporarily busy"), {
       code: "EBUSY",
     });
@@ -88,15 +80,15 @@ describe("ui-state file store", () => {
   });
 
   it("a missing or corrupt file reads as null, never an error", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-ui-state-");
     expect(await readUiStateFile(root)).toBeNull();
     await writeUiStateFile(root, STATE);
     await writeFile(join(root, ".dohc", "ui-state.json"), "{not json");
     expect(await readUiStateFile(root)).toBeNull();
   });
 
-  it("an oversized on-disk file reads as null — stat-capped BEFORE read+parse", async () => {
-    const root = await tempRoot();
+  it("an oversized on-disk file reads as null — stat-capped before read+parse", async () => {
+    const root = await createTestScratch("dohc-ui-state-");
     await writeUiStateFile(root, STATE);
     // Valid JSON, hostile size: a workspace can carry any bytes it likes —
     // the cap must refuse it before JSON.parse ever sees the payload.
@@ -113,8 +105,8 @@ describe("ui-state file store", () => {
   // main-process metadata writes outside the boundary — both the write and
   // the read must refuse, and nothing may appear in the symlink's target.
   it("refuses to write through a symlinked .dohc and never lands files outside", async () => {
-    const root = await tempRoot();
-    const outside = await tempRoot();
+    const root = await createTestScratch("dohc-ui-state-");
+    const outside = await createTestScratch("dohc-ui-state-");
     await symlink(outside, join(root, ".dohc"), "dir");
 
     await expect(writeUiStateFile(root, STATE)).rejects.toThrow(
@@ -126,8 +118,8 @@ describe("ui-state file store", () => {
   });
 
   it("refuses to read a symlinked ui-state file", async () => {
-    const root = await tempRoot();
-    const outside = await tempRoot();
+    const root = await createTestScratch("dohc-ui-state-");
+    const outside = await createTestScratch("dohc-ui-state-");
     await writeUiStateFile(root, STATE);
     const outsideState = join(outside, "ui-state.json");
     await writeFile(outsideState, JSON.stringify({ ...STATE, sidebarWidth: 999 }));
@@ -138,14 +130,14 @@ describe("ui-state file store", () => {
   });
 });
 
-// THE invariant this file exists for: ui-state writes land under .dohc, which
+// The invariant this file exists for: ui-state writes land under.dohc, which
 // the watcher ignores at any depth — persisting workbench chrome state must
-// NEVER produce a history record (feedback loop, timeline noise, sync upload).
-// Retirement Phase C: the engine capture is the only recorder, so the
+// never produce a history record (feedback loop, timeline noise, sync upload).
+// The engine capture is the only recorder, so the
 // assertion is against what the watcher enqueues into it.
 describe("ui-state writes never reach history", () => {
   it("the watcher enqueues the user file but nothing for ui-state.json", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-ui-state-");
     const workspace = {
       workspaceId: "ws-ui-state-test",
       rootPath: root,

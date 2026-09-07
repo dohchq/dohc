@@ -1,23 +1,23 @@
-// Cross-engine parity fixture generator (R08).
+// Cross-engine parity fixture generator.
 //
-// Produces byte-exact fixtures using the SAME Node crypto primitives used by
+// Produces byte-exact fixtures using the same Node crypto primitives used by
 // the frozen TypeScript oracle. The Rust `dohc-engine-crypto` crate decrypts
 // these and — because AES-256-GCM is deterministic given key+IV+AAD+plaintext —
-// re-encrypts with the SAME recorded IV and asserts the ciphertext+tag bytes
+// re-encrypts with the same recorded IV and asserts the ciphertext+tag bytes
 // match, proving cross-engine AEAD parity against a REAL TS-produced artifact
 // (not the Rust engine's own output).
 //
 // Regenerate: `node crates/dohc-engine-crypto/tests/fixtures/generate.mjs`.
 // The committed JSON is the checked-in oracle; this script documents its origin.
 
-import { createCipheriv, scryptSync } from "node:crypto";
+import { createCipheriv } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-// --- secret AEAD parity (secretFileStore.ts encryptSecretText) -------------
+// --- secret AEAD parity (encryptSecretText) --------------------------------
 const SECRET_AAD_PREFIX = "dohc-secret-v1";
 function secretAad(workspaceId, path) {
   return Buffer.from(`${SECRET_AAD_PREFIX}\0${workspaceId}\0${path}`, "utf8");
@@ -55,7 +55,7 @@ const entryA = {
   plaintext,
   ...encryptSecret(dataKeyHex, workspaceId, pathA, ivHex, plaintext),
 };
-// Same key + IV + plaintext but a DIFFERENT path — proves the AAD binds the
+// Same key + IV + plaintext but a different path — proves the AAD binds the
 // path: the tag differs, and decrypting entryA's ciphertext under pathB's AAD
 // must fail closed on the Rust side.
 const entryB = {
@@ -84,68 +84,4 @@ writeFileSync(
   `${JSON.stringify({ entries: [entryA, entryB, entryEmpty] }, null, 2)}\n`,
 );
 
-// --- key-envelope parity (secretKeyEnvelope.ts wrapWorkspaceDataKey) --------
-const ENVELOPE_FORMAT = "dohc-key-envelope-v1";
-const SCRYPT_N = 2 ** 17;
-const SCRYPT_R = 8;
-const SCRYPT_P = 1;
-const SCRYPT_MAXMEM = 256 * 1024 * 1024;
-function envAad(workspaceId) {
-  return Buffer.from(`${ENVELOPE_FORMAT}\0${workspaceId}`, "utf8");
-}
-function wrapDataKey(dataKeyHex, passphrase, workspaceId, saltHex, ivHex) {
-  const dataKey = Buffer.from(dataKeyHex, "hex");
-  const salt = Buffer.from(saltHex, "hex");
-  const iv = Buffer.from(ivHex, "hex");
-  const kek = scryptSync(passphrase, salt, 32, {
-    N: SCRYPT_N,
-    r: SCRYPT_R,
-    p: SCRYPT_P,
-    maxmem: SCRYPT_MAXMEM,
-  });
-  const cipher = createCipheriv("aes-256-gcm", kek, iv);
-  cipher.setAAD(envAad(workspaceId));
-  const ciphertext = Buffer.concat([cipher.update(dataKey), cipher.final()]);
-  const envelope = {
-    format: ENVELOPE_FORMAT,
-    saltBase64: salt.toString("base64"),
-    scryptN: SCRYPT_N,
-    scryptR: SCRYPT_R,
-    scryptP: SCRYPT_P,
-    ivBase64: iv.toString("base64"),
-    authTagBase64: cipher.getAuthTag().toString("base64"),
-    ciphertextBase64: ciphertext.toString("base64"),
-  };
-  return JSON.stringify(envelope);
-}
-
-const passphrase = "correct horse battery staple";
-const envWorkspaceId = "ws_envelope_01";
-const envSaltHex = "0f0e0d0c0b0a09080706050403020100";
-const envIvHex = "fedcba9876543210fedcba98";
-const envelopeJson = wrapDataKey(
-  dataKeyHex,
-  passphrase,
-  envWorkspaceId,
-  envSaltHex,
-  envIvHex,
-);
-
-writeFileSync(
-  join(here, "ts_key_envelope.json"),
-  `${JSON.stringify(
-    {
-      passphrase,
-      workspaceId: envWorkspaceId,
-      dataKeyHex,
-      scryptN: SCRYPT_N,
-      scryptR: SCRYPT_R,
-      scryptP: SCRYPT_P,
-      envelopeJson,
-    },
-    null,
-    2,
-  )}\n`,
-);
-
-console.log("wrote ts_secret_ciphertext.json + ts_key_envelope.json");
+console.log("wrote ts_secret_ciphertext.json");

@@ -1,3 +1,4 @@
+import { isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
 import { Fragment, useEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
 import { serializeRichdocBody } from "@dohc/ydoc-projection";
@@ -28,22 +29,6 @@ type TopLevelDocLike = {
 };
 
 const blockControlsKey = new PluginKey("dohc-block-controls");
-
-function isEditableEditor(editor: Editor | null | undefined): boolean {
-  if (!editor) return false;
-  if ((editor as { isEditable?: boolean }).isEditable === false) return false;
-  if ((editor.view as { editable?: boolean }).editable === false) return false;
-  return true;
-}
-
-function isEditableView(view: EditorView): boolean {
-  return (view as { editable?: boolean }).editable !== false;
-}
-
-function stopEditorMouseEvent(event: Event) {
-  event.preventDefault();
-  event.stopPropagation();
-}
 
 // ── drag payload ──────────────────────────────────────────────────────────
 
@@ -171,7 +156,7 @@ function buildBlockControlDecorations(
           handle.addEventListener("dragstart", (event) => {
             const dragEvent = event as DragEvent;
             dragEvent.stopPropagation();
-            if (!isEditableView(view) || !dragEvent.dataTransfer) {
+            if (view.editable === false || !dragEvent.dataTransfer) {
               dragEvent.preventDefault();
               return;
             }
@@ -366,7 +351,7 @@ export function selectBlock(editor: Editor | null, pos: number): void {
 
 // ── block context menu ─────────────────────────────────────────────────────
 
-export type BlockMenuTurnIntoId =
+type BlockMenuTurnIntoId =
   | "paragraph"
   | "heading-1"
   | "heading-2"
@@ -376,7 +361,7 @@ export type BlockMenuTurnIntoId =
   | "task-list"
   | "quote";
 
-export type BlockMenuActionId = "duplicate" | "copy-markdown" | "delete";
+type BlockMenuActionId = "duplicate" | "copy-markdown" | "delete";
 
 export type BlockMenuEntry =
   | { kind: "turn-into"; id: BlockMenuTurnIntoId; label: string; glyph: string }
@@ -415,7 +400,7 @@ const ACTION_ENTRIES: BlockMenuEntry[] = [
   { kind: "action", id: "delete", label: "Delete", glyph: "✕" },
 ];
 
-export const BLOCK_MENU_ENTRIES: BlockMenuEntry[] = [
+const BLOCK_MENU_ENTRIES: BlockMenuEntry[] = [
   ...TURN_INTO_ENTRIES,
   ...ACTION_ENTRIES,
 ];
@@ -679,16 +664,16 @@ export function BlockMenu({
 // floating-menu math's horizontal clamp, the dropdown itself stays anchored.
 const TURN_INTO_MENU_WIDTH = 190;
 
-export type TurnIntoDropdownPosition = {
+type TurnIntoDropdownPosition = {
   placement: FloatingMenuPlacement;
   maxHeight: number;
 };
 
 /**
  * Flip side + viewport-fitted max height for the bubble menu's turn-into
- * dropdown. Unlike the other editor popovers this one stays ANCHORED to its
- * trigger with position: absolute — the bubble menu is appended inside
- * .dohc-editor-surface, whose container-type makes it the containing block
+ * dropdown. Unlike the other editor popovers this one stays anchored to its
+ * trigger with position: absolute — the bubble menu is appended inside.
+ * Dohc-editor-surface, whose container-type makes it the containing block
  * for fixed descendants, so position: fixed viewport coordinates would be
  * re-based onto the pane (see the .dohc-editor-surface comment in
  * styles.css). Only placement/maxHeight from the shared floating-menu math
@@ -756,7 +741,7 @@ export function TurnIntoMenu({ editor }: { editor: Editor }) {
         (current + delta + TURN_INTO_ENTRIES.length) % TURN_INTO_ENTRIES.length,
     );
 
-  // Measure ONCE, at open — the dropdown is anchored to the trigger, so it
+  // Measure once, at open — the dropdown is anchored to the trigger, so it
   // never repositions while open; only the flip side and max height are
   // resolved here (offscreen/jsdom rects fall back to below/full height).
   const openMenu = () => {

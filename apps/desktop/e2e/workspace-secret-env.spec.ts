@@ -8,14 +8,13 @@ import {
   createTempWorkspace,
   openHistoryView,
   openWorkspaceFromFirstRun,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// PR 08 — SECRET-BACKED FILES, THE MARQUEE CLAIM AS A TEST: dohc can version
-// `.env` safely, which git cannot. A flagged workspace with a .env gets a
-// PROTECTED history moment (lock, "Contents are protected", no diff), the
+// SECRET-BACKED FILES, THE MARQUEE CLAIM AS A TEST: dohc can version
+// `.env` safely, which git cannot. A workspace with a .env gets a
+// protected history moment (lock, "Contents are protected", no diff), the
 // secret follows a version switch on disk, search finds nothing, and the
 // persisted engine.db never contains the plaintext.
 
@@ -123,9 +122,6 @@ test("a .env is versioned protected: locked history, versions carry it, search f
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await writeWorkspaceFiles(temp, [
       { path: "notes.md", contents: "ordinary findable prose\n" },
     ]);
@@ -136,7 +132,7 @@ test("a .env is versioned protected: locked history, versions carry it, search f
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes.md");
     await expectActiveVersion(page, "Main");
 
-    // 1. A live .env edit is captured ENCRYPTED with a protected
+    // 1. A live.env edit is captured encrypted with a protected
     //    metadata-only moment.
     await writeWorkspaceFiles(temp, [{ path: ".env", contents: ENV_MAIN }]);
     await expect
@@ -208,7 +204,7 @@ test("a .env is versioned protected: locked history, versions carry it, search f
       page.locator('[data-testid="search-result-group"][data-path="notes.md"]'),
     ).toBeVisible({ timeout: 20_000 });
 
-    // 6. ADVERSARIAL: the persisted engine.db (+wal/shm) never contains the
+    // 6. Adversarial: the persisted engine.db (+wal/shm) never contains the
     //    plaintext secret.
     const bytes = await engineDbBytes(temp.rootPath);
     expect(bytes.length).toBeGreaterThan(0);

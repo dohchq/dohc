@@ -5,9 +5,7 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
   VERSIONED_METHOD,
-  VersionedLoopbackEngine,
   YDOC_METHOD,
-  YdocLoopbackEngine,
   openEngineYdocProviderSession,
   type EngineTransport,
   type Event,
@@ -15,6 +13,10 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import {
+  VersionedLoopbackEngine,
+  YdocLoopbackEngine,
+} from "@dohc/workspace-engine-client/testing";
 import {
   createEngineYDocSaveSeqState,
   noteLocalEdit,
@@ -32,6 +34,11 @@ import {
   YDocUncapturedArtifactError,
 } from "./workspaceEngineCapture";
 import { createTestScratch } from "./testTemp";
+import {
+  createFakeDaemonCapture,
+  type FakeDaemonCapture,
+} from "../testing/fakeDaemonCapture";
+import { daemonCaptureLifecycleAnswer } from "../testing/liveEngineSessions";
 
 const WORKSPACE_ID = "engine-ydoc-session-test";
 const ATTACHMENT_ID = Symbol("test-workspace-attachment");
@@ -39,9 +46,9 @@ const PATH = "notes/solo.md";
 const INITIAL_MARKDOWN = "# Solo\n\nStart here.\n";
 
 let root = "";
-// Milliseconds the loopback daemon takes to answer ONE journal RPC. A busy
+// Milliseconds the loopback daemon takes to answer one journal RPC. A busy
 // machine is what makes the session's update queue back up behind the settle
-// debounce (#514); this is that machine, made deterministic.
+// debounce; this is that machine, made deterministic.
 let recordUpdateDelayMs = 0;
 let requests: Request[] = [];
 // Armed by a test to make the next ydoc.settle requests refuse. The loopback
@@ -52,12 +59,15 @@ let requests: Request[] = [];
 let settleRefusal: unknown = null;
 // The same, for the RELEASE. The daemon refuses a local-only prune-close with
 // `unsettled-close` when the CRDT projection no longer matches
-// `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs) and REINSERTS
+// `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs) and reinserts
 // the session entry, so the doc stays reserved.
 let closeRefusal: unknown = null;
 let captureErrors: string[] = [];
 let versioned: VersionedLoopbackEngine;
 let ydoc: YdocLoopbackEngine;
+// The daemon's disk side: ingests the folder on `capture.flush`, rewrites it
+// on a version switch, and skips a path while a `ydoc.open` lease holds it.
+let daemon: FakeDaemonCapture;
 let sessions: EngineWorkspaceSessions;
 let capture: ReturnType<typeof createWorkspaceEngineCapture>;
 
@@ -85,38 +95,24 @@ function daemonSessions(): EngineWorkspaceSessions {
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
-      if (request.method === "capture.flush") {
-        return {
-          id: request.id,
-          result: { settled: true, running: true, degraded: false },
-        };
-      }
-      if (request.method === "capture.setAuthor") {
-        return { id: request.id, result: { updated: true } };
-      }
-      if (request.method === "watcher.status") {
-        return {
-          id: request.id,
-          result: { running: true, degraded: false, terminal: false },
-        };
-      }
       if (request.method === "ydoc.settle" && settleRefusal !== null) {
         throw settleRefusal;
       }
       if (request.method === "ydoc.close" && closeRefusal !== null) {
         throw closeRefusal;
       }
-      if (request.method.startsWith("ydoc.")) {
-        if (
-          recordUpdateDelayMs > 0 &&
-          request.method === YDOC_METHOD.recordUpdate
-        ) {
-          await new Promise((resolve) =>
-            setTimeout(resolve, recordUpdateDelayMs),
-          );
-        }
-        return await ydoc.sendRequest(request);
+      if (
+        recordUpdateDelayMs > 0 &&
+        request.method === YDOC_METHOD.recordUpdate
+      ) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, recordUpdateDelayMs),
+        );
       }
+      const answered = await daemon.sendRequest(request);
+      if (answered) return answered;
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await versioned.sendRequest(request);
     },
   };
@@ -160,6 +156,14 @@ function methodCount(method: string): number {
   return requests.filter((request) => request.method === method).length;
 }
 
+// Writes the daemon's own capture made into its store. They never cross the
+// desktop transport, so `requests` cannot see them.
+function daemonWriteCount(): number {
+  return versioned.requests.filter(
+    (request) => request.method === VERSIONED_METHOD.textWrite,
+  ).length;
+}
+
 
 // The envelope EngineClient rejects a refused request with. DaemonLiveAdapter
 // re-throws it as DaemonRefusalError, which is the shape the close path's
@@ -191,13 +195,19 @@ beforeEach(async () => {
   });
   // The daemon materializes a settle to the workspace file itself, and the
   // desktop no longer mirrors settled bytes over a file that holds something
-  // else (#338). A loopback that reports `materialized: true` while writing
+  // else. A loopback that reports `materialized: true` while writing
   // nothing would leave every file below unchanged, so it materializes too.
   ydoc = new YdocLoopbackEngine({
     materialize: ({ path, content }) =>
       writeFileSync(join(root, path), content, "utf8"),
   });
   seedYdoc("main");
+  daemon = createFakeDaemonCapture({
+    rootPath: root,
+    workspaceId: WORKSPACE_ID,
+    loopback: versioned,
+    ydoc,
+  });
   sessions = daemonSessions();
   capture = createWorkspaceEngineCapture({
     workspaceId: WORKSPACE_ID,
@@ -231,12 +241,12 @@ it("journals a live editor update through the Rust Y.Doc provider and suppresses
   expect(await readFile(join(root, PATH), "utf8")).toContain(
     "Typed with no collaboration server.",
   );
-  const writesBeforeWatcher = methodCount(VERSIONED_METHOD.textWrite);
+  const writesBeforeWatcher = daemonWriteCount();
 
   capture.captureBatch([{ path: PATH, operation: "update" }]);
   await capture.flush();
 
-  expect(methodCount(VERSIONED_METHOD.textWrite)).toBe(writesBeforeWatcher);
+  expect(daemonWriteCount()).toBe(writesBeforeWatcher);
   await session.close({ settle: false });
 });
 
@@ -319,49 +329,6 @@ it("keeps a completed delete absent after a live-session race and closes its rem
   await reopened.close({ settle: false });
 });
 
-it("captures a different disk edit while the Rust Y.Doc session is live", async () => {
-  const session = await capture.openYDocSession({
-    path: PATH,
-    onRemoteUpdate: () => undefined,
-  });
-  const editor = mirrorEditor(session);
-  typeIntoBody(editor, "Owner edit.");
-  await session.settleNow();
-  const writesBeforeExternalEdit = methodCount(VERSIONED_METHOD.textWrite);
-  const beforeExternalEdit = await capture.listMoments({ limit: 100 });
-  const priorMomentIds = new Set(
-    beforeExternalEdit.moments.map((moment) => moment.id),
-  );
-  const externalMarkdown =
-    "# Solo\n\nAn external agent changed this file.\n";
-
-  await writeFile(join(root, PATH), externalMarkdown, "utf8");
-  capture.captureBatch([{ path: PATH, operation: "update" }]);
-  await capture.flush();
-
-  expect(methodCount(VERSIONED_METHOD.textWrite)).toBeGreaterThan(
-    writesBeforeExternalEdit,
-  );
-  const afterExternalEdit = await capture.listMoments({ limit: 100 });
-  const externalMoment = afterExternalEdit.moments.find(
-    (moment) => moment.path === PATH && !priorMomentIds.has(moment.id),
-  );
-  if (!externalMoment) {
-    throw new Error("Expected the external disk edit to record a new moment.");
-  }
-  expect(await capture.readMoment(externalMoment.id)).toMatchObject({
-    protected: false,
-    moment: {
-      payload: {
-        after: {
-          text: externalMarkdown,
-        },
-      },
-    },
-  });
-  await session.close({ settle: false });
-});
-
 it("settles and closes the Rust Y.Doc session before a version switch", async () => {
   const draft = await capture.createVersion("Draft");
   seedYdoc(draft.activeVersionId);
@@ -392,7 +359,7 @@ it("settles and closes the Rust Y.Doc session before a version switch", async ()
   await session.close();
 });
 
-// #496. The daemon's own capture ingests an edit made outside dohc, which
+// The daemon's own capture ingests an edit made outside dohc, which
 // moves the path's head; the close-settle that follows meets that moved head
 // and the engine refuses ConflictStaleTarget. The RELEASE then succeeds, which
 // is what makes the refusal benign: the outside author's file is intact, and a
@@ -426,20 +393,18 @@ it("closes clean and reports changed-on-disk when the close settle meets a moved
   // The daemon session was released exactly as a clean close releases it.
   expect(methodCount("ydoc.close")).toBe(1);
 
-  // And the path's guard lifted with it: a watcher event on this path is
-  // captured, not deferred behind a retained failing-close entry.
+  // And the path's lease lifted with it: the daemon captures the next disk
+  // edit instead of deferring it behind a session it still holds.
   settleRefusal = null;
-  const writesBeforeWatcher = methodCount(VERSIONED_METHOD.textWrite);
+  const writesBeforeWatcher = daemonWriteCount();
   await writeFile(join(root, PATH), "# Solo\n\nWritten outside dohc.\n", "utf8");
   capture.captureBatch([{ path: PATH, operation: "update" }]);
   await capture.flush();
-  expect(methodCount(VERSIONED_METHOD.textWrite)).toBeGreaterThan(
-    writesBeforeWatcher,
-  );
+  expect(daemonWriteCount()).toBeGreaterThan(writesBeforeWatcher);
 });
 
 // The narrowness guard for the downgrade above. Any other refusal means the
-// user's edits did NOT reach the engine, which is what the thrown settle
+// user's edits did not reach the engine, which is what the thrown settle
 // failure and the retryable `error` state exist to say.
 it("still throws when an ordinary settle failure fails the close", async () => {
   const states: string[] = [];
@@ -463,7 +428,7 @@ it("still throws when an ordinary settle failure fails the close", async () => {
   expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
 });
 
-// The other half of the narrowness: the SAME refusal outside a close keeps
+// The other half of the narrowness: the same refusal outside a close keeps
 // reporting `error`. That document stays open, so its retry advice is real.
 it("still reports an error for a stale-target settle while the document stays open", async () => {
   const states: string[] = [];
@@ -487,7 +452,7 @@ it("still reports an error for a stale-target settle while the document stays op
   await session.close({ settle: false });
 });
 
-// The transient lock gets its OWN state (#554): the engine keeps the write
+// The transient lock gets its own state: the engine keeps the write
 // durably pending and the provider retries by itself, so "error"'s advice
 // (try another edit) would be noise and "saved" a lie about the disk. The
 // surface needs to know which one it is showing.
@@ -515,7 +480,7 @@ it("reports file-locked, not error, for a lock refusal", async () => {
   await session.close({ settle: false });
 });
 
-// #658. The OTHER busy thing needs the other answer. A busy engine database
+// The other busy thing needs the other answer. A busy engine database
 // is dohc's own writers meeting inside SQLite: nothing of the user's is held,
 // nobody can act, and the provider retries by itself. So the surface stays
 // quiet and keeps saying what is true — dohc is still saving. `file-locked`
@@ -550,7 +515,7 @@ it("stays on settling for a busy engine store, because the retry is coming", asy
 // session and leave nothing to retry, so a busy pre-close settle really did
 // end the save. Now a teardown that meets a transient blocker either keeps
 // the session — when the engine is still missing text, so the close ladder
-// retries it — or releases only once the engine HAS the text and hands the
+// retries it — or releases only once the engine has the text and hands the
 // artifact to the detached debt. Here the journal landed and only the settle
 // was refused, so it takes the second path: the session goes, the debt owns
 // the write, and `settling` is what is true of the document.
@@ -610,9 +575,9 @@ it("keeps the close loud when the file still holds this document's bytes", async
 
 // A RELEASE is not proof of settlement, and this is the lineage that shows it.
 // `close_session` checks `last_settled_sha` only before a local-only prune; a
-// REPLICATED lineage — any doc in a synced workspace, promoted by `claim_base`
+// replicated lineage — any doc in a synced workspace, promoted by `claim_base`
 // on the first pulled `ydoc.update` — compacts instead and never prunes, so its
-// release SUCCEEDS with the typed text still unsettled
+// release succeeds with the typed text still unsettled
 // (crates/dohc-engine-collab/src/durable.rs). Staged here by letting the
 // release succeed while the close-settle refuses, which is exactly what that
 // lineage does. Reporting `changed-on-disk` over it would send the user to a
@@ -630,14 +595,14 @@ it("keeps the close loud when a released lineage never settled the edits", async
   states.length = 0;
   captureErrors = [];
 
-  // Typed AFTER the last settle: this text is in no moment.
+  // Typed after the last settle: this text is in no moment.
   typeIntoBody(editor, "Typed again, never settled.");
   // And the outside writer, so the drift proof PASSES. Without it that proof
   // alone makes this close loud and the settled-coverage check below is never
   // the reason — the test would hold with the counter deleted.
   await writeFile(join(root, PATH), "# Solo\n\nEdited in another app.\n", "utf8");
   settleRefusal = wireRefusal("conflict-stale-target");
-  // The release is left to SUCCEED — the replicated close.
+  // The release is left to succeed — the replicated close.
   await expect(session.close()).rejects.toThrow(
     /released, but its pre-close settle failed/,
   );
@@ -646,7 +611,7 @@ it("keeps the close loud when a released lineage never settled the edits", async
   expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
 });
 
-// The P1 the first version of #496 shipped: the refusal is NOT the outcome.
+// The P1 the first version of #496 shipped: the refusal is not the outcome.
 // With unsettled edits, the release that follows the refused close-settle
 // refuses too — the projection no longer matches `last_settled_sha`, so the
 // daemon refuses the prune and reinserts the session entry. The doc is still
@@ -670,23 +635,23 @@ it("keeps a stale-target close loud when the release fails too", async () => {
   closeRefusal = wireRefusal("unsettled-close");
   await expect(session.close()).rejects.toThrow(/unsettled-close/);
 
-  // Loud, and it STAYS loud: no correction may follow a release that failed.
+  // Loud, and it stays loud: no correction may follow a release that failed.
   expect(states).toEqual(["settling", "error"]);
   expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
-  // And the path keeps its guard, because the reservation was never released:
-  // a watcher event stays deferred behind the failing-close entry.
+  // And the path keeps its lease, because the reservation was never
+  // released: the daemon defers the next disk edit behind the session.
   settleRefusal = null;
   closeRefusal = null;
-  const writesBeforeWatcher = methodCount(VERSIONED_METHOD.textWrite);
+  const writesBeforeWatcher = daemonWriteCount();
   await writeFile(join(root, PATH), "# Solo\n\nWritten outside dohc.\n", "utf8");
   capture.captureBatch([{ path: PATH, operation: "update" }]);
   await capture.flush();
-  expect(methodCount(VERSIONED_METHOD.textWrite)).toBe(writesBeforeWatcher);
+  expect(daemonWriteCount()).toBe(writesBeforeWatcher);
 });
 
-// AUDIT-SILENTSAVE, #514. The save indicator's whole job is to not lie, and
+// AUDIT-SILENTSAVE. The save indicator's whole job is to not lie, and
 // the seq is how it keeps that promise: a settle may only vouch for edits it
-// actually carried. This drives the SAME wiring main.ts's IPC handlers use —
+// actually carried. This drives the same wiring main.ts's IPC handlers use —
 // noteLocalEdit on the way in, noteSettleStart/noteSettleOutcome on the way
 // out — against a daemon slow enough for the update queue to back up behind
 // the settle debounce, which is what a loaded machine produces.
@@ -762,18 +727,18 @@ it("never reports a save seq the settled file does not back", async () => {
   );
   await honest.stop().catch(() => undefined);
 });
-// #534 — the absent-head contract stated on WorkspaceEngineCapture.openYDocSession.
+// The absent-head contract stated on WorkspaceEngineCapture.openYDocSession.
 //
-// The daemon does NOT refuse an open for a path the entered version has no
-// snapshot for: it derives an object id and binds an EMPTY doc, which is the
+// The daemon does not refuse an open for a path the entered version has no
+// snapshot for: it derives an object id and binds an empty doc, which is the
 // only reason a just-created file is editable before capture ingests it. Both
 // halves of the contract are pinned here, because the guard is only correct if
 // it separates them: refusing everything would break creation, and refusing
 // nothing is the phantom file.
 it("refuses a live session for a path the entered version does not have", async () => {
-  // The #534 interleaving, at the point it actually decides: the user clicked
+  // The interleaving, at the point it actually decides: the user clicked
   // draftOnly.md while switchVersion("main") was on the capture chain, so the
-  // open runs AFTER the switch — against a version with no snapshot for the
+  // open runs after the switch — against a version with no snapshot for the
   // path, over a folder the switch already removed it from.
   const DRAFT_ONLY = "notes/draftOnly.md";
 
@@ -804,8 +769,8 @@ it("refuses a live session for a path the entered version does not have", async 
 
 it("still opens a file the user just created that capture has not ingested", async () => {
   // Creation, verbatim: workspaceFiles.createFile writes the artifact to disk
-  // with `wx` as an EMPTY file and the editor opens it immediately. The version
-  // has no snapshot yet (capture is asynchronous), so this open takes the SAME
+  // with `wx` as an empty file and the editor opens it immediately. The version
+  // has no snapshot yet (capture is asynchronous), so this open takes the same
   // absent-head branch the test above refuses. Only the artifact on disk
   // separates them.
   const CREATED = "notes/created.md";
@@ -826,12 +791,12 @@ it("still opens a file the user just created that capture has not ingested", asy
   await session.close({ settle: false });
 });
 
-it("refuses an uncaptured artifact that HAS content, without calling it missing", async () => {
+it("refuses an uncaptured artifact that has content, without calling it missing", async () => {
   // Head absent but the file is really on disk with bytes in it. The daemon
   // seeds an absent-head bind from the HEAD, so the doc comes up empty and the
   // first settle would erase the file. Refuse the session — but this is an
   // ordinary refusal: the file exists, so the caller keeps the plain editor and
-  // must NOT tell the user the version does not have it.
+  // must not tell the user the version does not have it.
   const UNCAPTURED = "notes/uncaptured.md";
   await writeFile(join(root, UNCAPTURED), "# Real content", "utf8");
 
@@ -856,7 +821,7 @@ it("refuses an uncaptured artifact that HAS content, without calling it missing"
 
 it("opens a crash-orphaned draft the daemon resurrects, head absent and all", async () => {
   // actor.rs keeps a never-settled local lineage alive: its CRDT rows are the
-  // ONLY copy of what the user typed before the crash, and the version has no
+  // only copy of what the user typed before the crash, and the version has no
   // snapshot for the path. Refusing on `head` alone would strand those edits —
   // and the settle:false close of a dirty lineage is itself refused, wedging
   // the lease so the path could never be opened again.

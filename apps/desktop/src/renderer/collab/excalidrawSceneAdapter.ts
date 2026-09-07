@@ -14,12 +14,12 @@ import {
 } from "@dohc/excalidraw-scene";
 import * as Y from "yjs";
 
-export const LOCAL_EXCALIDRAW_ORIGIN: unique symbol = Symbol(
+const LOCAL_EXCALIDRAW_ORIGIN: unique symbol = Symbol(
   "dohc.localExcalidrawChange",
 );
 
 type SceneRemoteEchoes = {
-  // Revision tuples of the elements the LAST remote render handed the canvas.
+  // Revision tuples of the elements the last remote render handed the canvas.
   elements: Set<string>;
   // Durable app-state values remote renders handed the canvas, per key.
   // Unlike elements these carry no revision identity, so a delayed
@@ -40,7 +40,7 @@ type CanvasSceneChange = {
   appState: Record<string, unknown>;
   files: Record<string, unknown>;
   hydratedFileIds?: ReadonlySet<string>;
-  // The transaction origin of THIS canvas. Two panes of one document share
+  // The transaction origin of this canvas. Two panes of one document share
   // one Y.Doc; each pane must recognize only its own transactions as local,
   // so the other pane's edits still render into it.
   origin?: unknown;

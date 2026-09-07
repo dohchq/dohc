@@ -66,7 +66,7 @@ describe("workspace headings", () => {
     ]);
   });
 
-  it("prefers a genuine suffixed-base occurrence over the legacy fallback", () => {
+  it("prefers a genuine suffixed-base occurrence over the allocated-suffix match", () => {
     const headings = extractWorkspaceHeadings([
       "# Foo",
       "# Foo-1",

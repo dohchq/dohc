@@ -74,7 +74,7 @@ export function BacklinksPanel(props: {
   path: string;
   // Bumps on workspace activity (saves, agent edits) so mentions recompute.
   refreshKey?: number;
-  // Chat mentions are a CHATS call (#615): `listChatFileMentions` goes through
+  // Chat mentions are a CHATS call: `listChatFileMentions` goes through
   // requireEngineCapture, so a workspace with no capture — a shared view, most
   // visibly — can only refuse it. Opt-in, and named the way GraphView names
   // the same fact, so both chat affordances read one word.

@@ -30,7 +30,7 @@ const NPM_RUN_BOOLEAN_OPTIONS: ReadonlySet<string> = new Set([
 // `npm run [options] <script> [options] [-- <forwardedArgs...>]` — options
 // can land either between `run` and the script name or after it. They're
 // collected (not discarded) — `--ignore-scripts` changes what actually
-// RUNS, so dropping it from the rewritten command would run hooks the user
+// runs, so dropping it from the rewritten command would run hooks the user
 // explicitly suppressed.
 function npmRunScriptResult(
   args: string[],
@@ -83,13 +83,13 @@ function validatedPackageManagerRun(
   if (!run) return null;
   if (!site.packagePath) {
     throw new Error(
-      `Site has no package.json to run ${run.script} via ${run.manager}: ${site.root}`,
+      `App has no package.json to run ${run.script} via ${run.manager}: ${site.root}`,
     );
   }
   const scriptBody = site.scripts[run.script];
   if (!scriptBody) {
     throw new Error(
-      `Site has no ${run.script} script to run via ${run.manager}: ${site.root}`,
+      `App has no ${run.script} script to run via ${run.manager}: ${site.root}`,
     );
   }
   const validated = packageManagerValidatedScriptCommand(
@@ -101,8 +101,8 @@ function validatedPackageManagerRun(
       post: site.scripts[`post${run.script}`],
     },
   );
-  // Forwarded args need the `--` separator PRESERVED, not just appended —
-  // without it npm treats them as its OWN options (`npm run dev --port
+  // Forwarded args need the `--` separator preserved, not just appended —
+  // without it npm treats them as its own options (`npm run dev --port
   // 3000` lets npm's CLI consume --port instead of forwarding it to the
   // script), so the args the user meant for the script silently vanish.
   const extraArgs = [
@@ -115,7 +115,7 @@ function validatedPackageManagerRun(
   // pre/post hooks the user explicitly suppressed, and a forwarded
   // `--host 0.0.0.0` is exactly as real a bind-everywhere risk as one
   // written directly into the configured script. The loopback-only
-  // constraint has to see this FINAL argv.
+  // constraint has to see this final argv.
   const withExtraArgs = { command: validated.command, args: [...validated.args, ...extraArgs] };
   assertLoopbackOnlyDevServerCommand(withExtraArgs.command, withExtraArgs.args);
   return withExtraArgs;
@@ -143,20 +143,20 @@ export function commandForSiteScript(
     const parsed = splitCommandLine(configuredCommand);
     const validated = validatedPackageManagerRun(site, parsed);
     if (validated) return validated;
-    // A known package manager MUST resolve to a validated script run — the
+    // A known package manager must resolve to a validated script run — the
     // uninspected literal-command fallback below is only for commands that
     // aren't a package manager at all (e.g. a bare `vite --host ...`).
     // Falling through here would let an unrecognized wrapper shape (like
     // `npm run dev --if-present` before this fix) execute unvalidated.
     if (KNOWN_PACKAGE_MANAGER_COMMANDS.has(parsed.command)) {
       throw new Error(
-        `This site's configured ${script} command invokes ${parsed.command} in a shape dohc does not recognize as a script-run wrapper: ${configuredCommand}`,
+        `This app's configured ${script} command invokes ${parsed.command} in a shape dohc does not recognize as a script-run wrapper: ${configuredCommand}`,
       );
     }
     return validatedLiteralCommand(parsed);
   }
   const configured = site.scripts[script];
-  if (!configured) throw new Error(`Site has no ${script} script: ${site.root}`);
+  if (!configured) throw new Error(`App has no ${script} script: ${site.root}`);
   if (site.packagePath) {
     // dev/start/build all validate the same way — a package.json build
     // script (or its pre/post hooks) is exactly as capable of binding

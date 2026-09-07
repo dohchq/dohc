@@ -1,18 +1,11 @@
 use dohc_engine_domain::{CreateNamedVersion, RollbackTextFileMutation, WriteBinary};
 use dohc_engine_runtime::{
     ActiveVersionSwitch, CancellationToken, NoFaults, PostCommitMaterializeOutcome,
-    SelfWriteRecorder, WorkspaceSupervisor,
+    WorkspaceSupervisor,
 };
 use dohc_engine_storage::FaultPoint;
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::sync::Arc;
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 fn binary_input(request_id: &str) -> WriteBinary {
     WriteBinary {
@@ -33,10 +26,8 @@ fn binary_input(request_id: &str) -> WriteBinary {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deduped_binary_write_retries_its_original_pending_materialization() {
-    // MUTATION: keep the deduped skipped short-circuit -> the retry reports
-    // skipped and asset.bin remains absent.
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     let input = binary_input("binary-materialize-request");
@@ -46,7 +37,7 @@ async fn deduped_binary_write_retries_its_original_pending_materialization() {
         .versioned_binary_write(
             input.clone(),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
         )
@@ -64,7 +55,7 @@ async fn deduped_binary_write_retries_its_original_pending_materialization() {
         .versioned_binary_write(
             input,
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -86,17 +77,15 @@ async fn deduped_binary_write_retries_its_original_pending_materialization() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deduped_binary_rollback_retries_its_pending_compensation() {
-    // MUTATION: keep rollback's deduped skipped short-circuit -> asset.bin
-    // survives the retry and the pending compensation never reaches disk.
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor
         .versioned_binary_write(
             binary_input("binary-seed-request"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -110,7 +99,6 @@ async fn deduped_binary_rollback_retries_its_pending_compensation() {
         path: "asset.bin".to_owned(),
         mutation_moment_id: "binary-original-moment".to_owned(),
         request_id: Some("binary-rollback-request".to_owned()),
-        legacy_before_text: None,
         metadata_origin: "restore".to_owned(),
         author_json: None,
     };
@@ -119,7 +107,7 @@ async fn deduped_binary_rollback_retries_its_pending_compensation() {
         .versioned_text_rollback(
             rollback.clone(),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
         )
@@ -137,7 +125,7 @@ async fn deduped_binary_rollback_retries_its_pending_compensation() {
         .versioned_text_rollback(
             rollback,
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -155,10 +143,8 @@ async fn deduped_binary_rollback_retries_its_pending_compensation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inactive_binary_rollback_cancels_the_original_pending_job_before_reopen() {
-    // MUTATION: keep original-job cancellation behind the active-version guard
-    // -> reopen replays main's stale bytes into branch's working tree.
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor
@@ -191,7 +177,7 @@ async fn inactive_binary_rollback_cancels_the_original_pending_job_before_reopen
         .versioned_binary_write(
             binary_input("inactive-rollback-binary-write"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
         )
@@ -210,7 +196,7 @@ async fn inactive_binary_rollback_cancels_the_original_pending_job_before_reopen
                 workspace_id: "ws-binary-materialize-retry".to_owned(),
                 version_id: "branch".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 10,
             },
             Arc::new(NoFaults),
@@ -226,12 +212,11 @@ async fn inactive_binary_rollback_cancels_the_original_pending_job_before_reopen
                 path: "asset.bin".to_owned(),
                 mutation_moment_id: "binary-original-moment".to_owned(),
                 request_id: Some("inactive-binary-rollback".to_owned()),
-                legacy_before_text: None,
                 metadata_origin: "restore".to_owned(),
                 author_json: None,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )

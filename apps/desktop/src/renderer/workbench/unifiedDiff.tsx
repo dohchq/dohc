@@ -5,10 +5,10 @@
 // Both callers — the history diff page in DesktopWorkspaceShell and the
 // versions compare page in WorkspaceVersions — run on the UI thread, so the
 // bounds below are what keeps a hydrated 10 MiB body from freezing them.
-// computeTextDiff does the work ONCE per pair of bodies (both callers memoize
+// computeTextDiff does the work once per pair of bodies (both callers memoize
 // it); buildUnifiedDiffLines and the counts only read the result.
 
-export type DiffLine = {
+type DiffLine = {
   kind: "context" | "added" | "removed";
   text: string;
 };
@@ -22,7 +22,7 @@ export type UnifiedDiffLine = {
 
 /// One pair of bodies, diffed. Everything expensive happened when this was
 /// built.
-export type TextDiff = {
+type TextDiff = {
   /// When set, the whole body is this one note and `lines` is empty.
   note: string | null;
   /// The diff lines that were built — never more than the display can show.
@@ -49,34 +49,19 @@ export type TextDiff = {
 };
 
 // The LCS table holds one Uint32Array cell per (before line, after line) pair,
-// so the cell count bounds MEMORY: 250,000 cells is 1 MB.
+// so the cell count bounds memory: 250,000 cells is 1 MB.
 const HISTORY_LCS_DIFF_CELL_LIMIT = 250_000;
 
-// Each of those cells compares two WHOLE LINES, so the TIME is the cell count
-// times the line length — linear in body bytes, which the cell limit does not
-// bound. This bounds it. Measured by unifiedDiff.measure.test.ts (Windows 11,
-// Node 22, the same V8 the renderer runs on).
-//
-// What holds is the measured TIME AT THE BOUND, not a throughput figure. The
-// largest body this limit admits — 499 lines of 3,990 characters at the cell
-// ceiling, 4 MB across both sides — costs 50 ms here for a full pass: the diff
-// plus the lines the page draws. Throughput is NOT constant across scales. The
-// harness ladder reports 1.5 million units per millisecond for short lines and
-// 19 million near the bound, because a fixed per-cell cost dominates when the
-// lines are short; that only makes the estimate more conservative below the
-// bound. An independent review measured 74-120 ms at twice this limit on other
-// hardware.
-//
-// ENCODING: `.length` counts UTF-16 code units, not bytes and not glyphs. A
-// comparison of CJK text costs about twice a comparison of the same number of
-// ASCII units (186 ms against 99 ms, measured in review at twice this limit).
-// This limit is halved to pay for that, so the bound holds for either script.
-//
-// Headroom: the largest healthy body measured — 499 lines of 2,000-character
-// paragraphs, 2 MB across both sides — is 500 million units, so this is twice
-// the healthy maximum. A 10 MiB body sits at 5.2 billion and degrades to the
-// contiguous diff, instead of costing the 1.9 seconds it used to cost, twice
-// per render.
+// Each of those cells compares two whole lines, so the time is the cell count
+// times the line length, which the cell limit does not bound. This bounds it.
+// Measured by unifiedDiff.measure.test.ts (Windows 11, Node 22, the renderer's
+// V8): the largest body this limit admits (499 lines of 3,990 characters, 4 MB
+// across both sides) costs 50 ms for a full pass. `.length` counts UTF-16
+// code units, and a CJK comparison costs about twice an ASCII one of the same
+// unit count, so the limit is halved to hold for either script. The largest
+// healthy body measured (499 lines of 2,000-character paragraphs) is 500
+// million units, so this is twice the healthy maximum; a 10 MiB body degrades
+// to the contiguous diff.
 export const HISTORY_DIFF_WORK_LIMIT = 1_000_000_000;
 
 /// An upper bound on the characters the LCS inner loop must compare: one whole
@@ -268,7 +253,7 @@ function buildLineDiff(before: string[], after: string[], maxLines: number): Lin
     lines.push({ kind: "added", text: after[afterIndex] });
     afterIndex += 1;
   }
-  // This list is NOT bounded by the display: the LCS threads changes through
+  // This list is not bounded by the display: the LCS threads changes through
   // the whole body, so compaction still has context lines to drop between
   // them. Cutting the list here would change what the reader sees, not only
   // what we throw away. The cell limit already holds it under 250,000 lines.
@@ -310,10 +295,10 @@ export function computeTextDiff(
   const before = splitDiffLines(beforeText ?? "");
   const after = splitDiffLines(afterText ?? "");
 
-  // Texts that differ ONLY invisibly (final-newline presence or CRLF/LF line
+  // Texts that differ only invisibly (final-newline presence or CRLF/LF line
   // endings) split into identical line arrays, which would render as
   // "No text changes" — a lie for an exact-text change. Name the change
-  // honestly instead. Only when BOTH sides exist: undefined-vs-empty is a
+  // honestly instead. Only when both sides exist: undefined-vs-empty is a
   // create/delete of an empty file, not a line-ending change.
   if (beforeText !== undefined && afterText !== undefined && linesEqual(before, after)) {
     return noteDiff("Only line endings or the final newline changed", displayLimit);

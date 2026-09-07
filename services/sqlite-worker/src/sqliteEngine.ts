@@ -1,8 +1,8 @@
 import { createRequire } from 'node:module'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createHash } from 'node:crypto'
+import { sha256Hex } from '@dohc/workspace-core/hash'
 
 export type DatabaseColumn = {
   name: string
@@ -18,19 +18,6 @@ export type DatabaseTable = {
 
 export type DatabaseSnapshot = Record<string, DatabaseTable>
 
-export type CollectionIndex = {
-  indexId: string
-  columns: string[]
-  rows: Array<Record<string, unknown>>
-  rowCount: number
-}
-
-export type CollectionQuery = {
-  where?: Record<string, unknown>
-  orderBy?: Array<{ field: string; direction?: 'asc' | 'desc' }>
-  limit?: number
-}
-
 export type ImportDataInput = {
   name: string
   mediaType: string
@@ -43,7 +30,6 @@ export type ImportDataInput = {
 type SQLiteDatabase = {
   exec(sql: string): void
   prepare(sql: string): {
-    all(...params: unknown[]): Array<Record<string, unknown>>
     run(...params: unknown[]): unknown
   }
   close(): void
@@ -53,10 +39,7 @@ type SQLiteModule = {
   DatabaseSync: new (location: string) => SQLiteDatabase
 }
 
-type RowOperation = 'insert' | 'update' | 'upsert' | 'delete'
-
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
-const MAX_SQL_BYTES = 64 * 1024
 
 // Named requireModule (not `require`): bundlers that emit an ESM chunk with a
 // CommonJS shim inject their own top-level `const require`, and a second
@@ -69,8 +52,8 @@ function sqliteModule() {
   return sqliteModulePromise
 }
 
-function error(code: string, message: string, extra: Record<string, unknown> = {}) {
-  return { ok: false as const, code, message, ...extra }
+function error(code: string, message: string) {
+  return { ok: false as const, code, message }
 }
 
 function quoteIdent(name: string): string {
@@ -92,10 +75,6 @@ function bindValue(value: unknown): unknown {
   if (value === null || typeof value === 'string' || typeof value === 'number') return value
   if (typeof value === 'boolean') return value ? 1 : 0
   return JSON.stringify(value ?? null)
-}
-
-function primaryKeyFor(table: DatabaseTable): string {
-  return table.columns.find((column) => column.primaryKey)?.name ?? 'id'
 }
 
 function assertSnapshot(snapshot: DatabaseSnapshot) {
@@ -145,47 +124,6 @@ function createTables(db: SQLiteDatabase, snapshot: DatabaseSnapshot) {
   }
 }
 
-function loadDatabase(DatabaseSync: SQLiteModule['DatabaseSync'], snapshot: DatabaseSnapshot) {
-  const db = new DatabaseSync(':memory:')
-  createTables(db, snapshot)
-  return db
-}
-
-function plainRows(rows: Array<Record<string, unknown>>) {
-  return rows.map((row) => Object.fromEntries(Object.entries(row)))
-}
-
-function snapshotFromDatabase(db: SQLiteDatabase): DatabaseSnapshot {
-  const tableRows = db
-    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
-    .all()
-  const snapshot: DatabaseSnapshot = {}
-  for (const tableRow of tableRows) {
-    const tableName = String(tableRow.name)
-    const pragma = db.prepare(`PRAGMA table_info(${quoteIdent(tableName)})`).all()
-    const columns = pragma.map((row) => ({
-      name: String(row.name),
-      type: sqliteType(String(row.type || 'TEXT')),
-      ...(Number(row.pk ?? 0) > 0 ? { primaryKey: true } : {}),
-      ...(Number(row.notnull ?? 0) === 0 ? { nullable: true } : {}),
-    }))
-    snapshot[tableName] = {
-      columns,
-      rows: plainRows(db.prepare(`SELECT * FROM ${quoteIdent(tableName)}`).all()),
-    }
-  }
-  return snapshot
-}
-
-function bytesFromBase64(bytesBase64: string): Buffer | null {
-  try {
-    const bytes = Buffer.from(bytesBase64, 'base64')
-    return bytes.length > 0 ? bytes : null
-  } catch {
-    return null
-  }
-}
-
 async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), prefix))
   try {
@@ -193,42 +131,6 @@ async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): 
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
-}
-
-function sha256Hex(bytes: Buffer): string {
-  return createHash('sha256').update(bytes).digest('hex')
-}
-
-function sha256Text(text: string): string {
-  return createHash('sha256').update(text).digest('hex')
-}
-
-async function ingestSnapshotFromBytes(
-  DatabaseSync: SQLiteModule['DatabaseSync'],
-  bytes: Buffer,
-) {
-  return await withTempDir('dohc-sqlite-ingest-', async (dir) => {
-    const file = join(dir, 'database.sqlite')
-    await writeFile(file, bytes)
-    const db = new DatabaseSync(file)
-    try {
-      const integrity = db.prepare('PRAGMA integrity_check').all()
-      const ok = integrity.length === 1 && String(integrity[0]?.integrity_check ?? '') === 'ok'
-      if (!ok) {
-        return error('invalid-sqlite-file', 'SQLite integrity check failed.')
-      }
-      return {
-        ok: true as const,
-        snapshot: snapshotFromDatabase(db),
-        size: bytes.byteLength,
-        sha256: sha256Hex(bytes),
-      }
-    } catch (cause) {
-      return error('invalid-sqlite-file', cause instanceof Error ? cause.message : 'Invalid SQLite database.')
-    } finally {
-      db.close()
-    }
-  })
 }
 
 async function materializeSnapshotToBytes(
@@ -255,14 +157,6 @@ async function materializeSnapshotToBytes(
       return error('sqlite-materialize-failed', cause instanceof Error ? cause.message : 'Could not materialize SQLite database.')
     }
   })
-}
-
-function isReadOnlySelect(sql: string): boolean {
-  const trimmed = sql.trim()
-  if (!trimmed || new TextEncoder().encode(trimmed).length > MAX_SQL_BYTES) return false
-  if (!/^select\b/i.test(trimmed)) return false
-  const withoutFinalSemicolon = trimmed.endsWith(';') ? trimmed.slice(0, -1) : trimmed
-  return !withoutFinalSemicolon.includes(';')
 }
 
 function columnNamesForRows(rows: Array<Record<string, unknown>>): string[] {
@@ -507,67 +401,10 @@ function snapshotForImport(input: ImportDataInput, rows: Array<Record<string, un
   }
 }
 
-function snapshotForIndex(rows: Array<Record<string, unknown>>): DatabaseSnapshot {
-  const columns = columnNamesForRows(rows)
-  return {
-    rows: {
-      columns: columns.map((name) => ({
-        name,
-        type: inferColumnType(rows, name),
-        ...(name === 'id' ? { primaryKey: true } : {}),
-      })),
-      rows,
-    },
-  }
-}
-
-function queryToSql(query?: CollectionQuery) {
-  const whereEntries = Object.entries(query?.where ?? {})
-  for (const [field] of whereEntries) quoteIdent(field)
-  const orderBy = query?.orderBy ?? []
-  for (const item of orderBy) quoteIdent(item.field)
-  const clauses = ['SELECT * FROM "rows"']
-  const params: unknown[] = []
-  if (whereEntries.length > 0) {
-    clauses.push(`WHERE ${whereEntries.map(([field]) => `${quoteIdent(field)} = ?`).join(' AND ')}`)
-    params.push(...whereEntries.map(([, value]) => bindValue(value)))
-  }
-  if (orderBy.length > 0) {
-    clauses.push(
-      `ORDER BY ${orderBy
-        .map((item) => `${quoteIdent(item.field)} ${item.direction === 'desc' ? 'DESC' : 'ASC'}`)
-        .join(', ')}`,
-    )
-  }
-  if (Number.isInteger(query?.limit) && Number(query?.limit) >= 0) {
-    clauses.push(`LIMIT ${Number(query?.limit)}`)
-  }
-  return { sql: clauses.join(' '), params }
-}
-
 export async function createSqliteEngine() {
   const { DatabaseSync } = await sqliteModule()
 
   return {
-    preflight() {
-      return { ok: true as const, service: 'dohc-sqlite-worker', sqlite: true as const }
-    },
-
-    async ingest({ bytesBase64 }: { bytesBase64: string }) {
-      const bytes = bytesFromBase64(bytesBase64)
-      if (!bytes) return error('invalid-sqlite-file', 'SQLite bytes are missing or invalid.')
-      return await ingestSnapshotFromBytes(DatabaseSync, bytes)
-    },
-
-    async materialize({ snapshot }: { snapshot: DatabaseSnapshot }) {
-      try {
-        assertSnapshot(snapshot)
-      } catch (cause) {
-        return error('invalid-database-snapshot', cause instanceof Error ? cause.message : 'Invalid database snapshot.')
-      }
-      return await materializeSnapshotToBytes(DatabaseSync, snapshot)
-    },
-
     async importData(input: ImportDataInput) {
       const tableName = safeIdentifier(input.tableName, 'rows')
       try {
@@ -591,7 +428,7 @@ export async function createSqliteEngine() {
       }
       const materialized = await materializeSnapshotToBytes(DatabaseSync, snapshot)
       if (!materialized.ok) return materialized
-      const sourceHash = sha256Text(input.body)
+      const sourceHash = sha256Hex(input.body)
       const table = snapshot[tableName]
       return {
         ok: true as const,
@@ -610,145 +447,6 @@ export async function createSqliteEngine() {
         bytesBase64: materialized.bytesBase64,
         size: materialized.size,
         sha256: materialized.sha256,
-      }
-    },
-
-    async query({
-      snapshot,
-      sql,
-      params = [],
-    }: {
-      snapshot: DatabaseSnapshot
-      sql: string
-      params?: unknown[]
-    }) {
-      if (!isReadOnlySelect(sql)) {
-        return error('unsupported-sql', 'Only read-only SELECT statements are supported.')
-      }
-      const db = loadDatabase(DatabaseSync, snapshot)
-      try {
-        return { ok: true as const, rows: plainRows(db.prepare(sql).all(...params.map(bindValue))) }
-      } catch (cause) {
-        return error('sqlite-query-failed', cause instanceof Error ? cause.message : 'Query failed.')
-      } finally {
-        db.close()
-      }
-    },
-
-    async apply({
-      snapshot,
-      version,
-      expectedVersion,
-      operationId,
-      op,
-      table,
-      rowId,
-      payload,
-    }: {
-      snapshot: DatabaseSnapshot
-      version: number
-      expectedVersion?: number
-      operationId: string
-      op: RowOperation
-      table: string
-      rowId?: string
-      payload: Record<string, unknown>
-    }) {
-      if (expectedVersion !== undefined && expectedVersion !== version) {
-        return error('database-version-conflict', 'Database version changed.', {
-          currentVersion: version,
-        })
-      }
-      const sourceTable = snapshot[table]
-      if (!sourceTable) return error('table-not-found', 'Table not found.', { version })
-      const key = primaryKeyFor(sourceTable)
-      const resolvedRowId = rowId ?? String(payload[key] ?? '')
-      if (!resolvedRowId) return error('invalid-row-id', 'Row id is required.', { version })
-      const db = loadDatabase(DatabaseSync, snapshot)
-      try {
-        db.exec('BEGIN')
-        const existing = db
-          .prepare(`SELECT ${quoteIdent(key)} FROM ${quoteIdent(table)} WHERE ${quoteIdent(key)} = ?`)
-          .all(resolvedRowId)
-        if (op === 'insert' && existing.length > 0) {
-          db.exec('ROLLBACK')
-          return error('database-row-conflict', 'Row already exists.', { version })
-        }
-        if ((op === 'update' || op === 'delete') && existing.length === 0) {
-          db.exec('ROLLBACK')
-          return error('database-row-not-found', 'Row not found.', { version })
-        }
-        if (op === 'delete') {
-          db.prepare(`DELETE FROM ${quoteIdent(table)} WHERE ${quoteIdent(key)} = ?`).run(resolvedRowId)
-        } else if (op === 'insert' || (op === 'upsert' && existing.length === 0)) {
-          const row = { ...payload, [key]: resolvedRowId }
-          const columns = sourceTable.columns.map((column) => column.name)
-          db.prepare(
-            `INSERT INTO ${quoteIdent(table)} (${columns.map(quoteIdent).join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`,
-          ).run(...columns.map((column) => bindValue(row[column])))
-        } else {
-          const patchColumns = Object.keys(payload).filter((column) => column !== key)
-          if (patchColumns.length > 0) {
-            db.prepare(
-              `UPDATE ${quoteIdent(table)} SET ${patchColumns.map((column) => `${quoteIdent(column)} = ?`).join(', ')} WHERE ${quoteIdent(key)} = ?`,
-            ).run(...patchColumns.map((column) => bindValue(payload[column])), resolvedRowId)
-          }
-        }
-        db.exec('COMMIT')
-        const nextVersion = version + 1
-        return {
-          ok: true as const,
-          version: nextVersion,
-          snapshot: snapshotFromDatabase(db),
-          operation: { operationId, op, table, rowId: resolvedRowId, version: nextVersion },
-        }
-      } catch (cause) {
-        try {
-          db.exec('ROLLBACK')
-        } catch {}
-        return error('sqlite-transaction-failed', cause instanceof Error ? cause.message : 'Transaction failed.', { version })
-      } finally {
-        db.close()
-      }
-    },
-
-    async rebuildIndex({
-      indexId,
-      rows,
-    }: {
-      indexId: string
-      rows: Array<Record<string, unknown>>
-    }) {
-      const snapshot = snapshotForIndex(rows)
-      const db = loadDatabase(DatabaseSync, snapshot)
-      try {
-        const indexedRows = plainRows(db.prepare('SELECT * FROM "rows"').all())
-        return {
-          ok: true as const,
-          index: {
-            indexId,
-            columns: snapshot.rows!.columns.map((column) => column.name),
-            rows: indexedRows,
-            rowCount: indexedRows.length,
-          } satisfies CollectionIndex,
-        }
-      } finally {
-        db.close()
-      }
-    },
-
-    async queryIndex(index: CollectionIndex, query?: CollectionQuery) {
-      const db = loadDatabase(DatabaseSync, snapshotForIndex(index.rows))
-      try {
-        const planned = queryToSql(query)
-        return {
-          ok: true as const,
-          rows: plainRows(db.prepare(planned.sql).all(...planned.params)),
-        }
-      } catch (cause) {
-        return error('sqlite-index-query-failed', cause instanceof Error ? cause.message : 'Index query failed.')
-      } finally {
-        db.close()
       }
     },
   }

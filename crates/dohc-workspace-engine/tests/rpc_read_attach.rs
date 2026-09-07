@@ -1,27 +1,18 @@
+mod common;
+
+use common::*;
 use std::sync::Arc;
 
 use dohc_engine_protocol::{
     error::ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_workspace_engine::EngineService;
 use serde_json::{Value, json};
 
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const WORKSPACE_ID: &str = "cli-read-attach";
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
 
 async fn open(
     transport: &InProcessTransport<EngineService>,
@@ -68,7 +59,6 @@ async fn call(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cli_read_attaches_to_full_relay_binding_and_close_preserves_owner() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
 
     let desktop = open(
@@ -104,9 +94,12 @@ async fn cli_read_attaches_to_full_relay_binding_and_close_preserves_owner() {
     assert_eq!(unread, json!([]));
 
     let attached_close = call(&transport, &cli, 4, "workspace.close").await;
-    // MUTATION: routing attached close through owner teardown makes this fail.
     let flushed = call(&transport, &desktop, 5, "capture.flush").await;
-    assert_eq!(flushed["settled"], json!(true));
+    assert_eq!(
+        flushed["settled"],
+        json!(true),
+        "routing attached close through owner teardown makes this fail."
+    );
     assert_eq!(
         attached_close,
         json!({ "closed": false, "attachmentClosed": true })
@@ -117,10 +110,7 @@ async fn cli_read_attaches_to_full_relay_binding_and_close_preserves_owner() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn read_attach_respects_the_open_handle_cap() {
-    // MUTATION: insert the attachment without the MAX_OPEN_HANDLES check and
-    // this loop mints handles far past the cap instead of refusing.
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let workspace_id = "ws-attach-cap";
     open(&transport, &scratch, 1, workspace_id, json!({}))
@@ -150,11 +140,7 @@ async fn read_attach_respects_the_open_handle_cap() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn read_attachment_over_a_full_owner_cannot_reach_mutating_methods() {
-    // MUTATION: keep the owner's mode on the attached clone (drop the
-    // `attached.mode = WorkspaceOpenMode::ReadOnly` line) and this write
-    // reaches the desktop's Full binding through a "read" handle.
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let workspace_id = "ws-attach-write-isolation";
     let desktop = open(&transport, &scratch, 1, workspace_id, json!({}))
@@ -221,7 +207,6 @@ async fn read_attachment_over_a_full_owner_cannot_reach_mutating_methods() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn read_attach_preserves_workspace_id_binding() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let desktop = open(&transport, &scratch, 1, WORKSPACE_ID, json!({}))
         .await
@@ -248,7 +233,6 @@ async fn read_attach_preserves_workspace_id_binding() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn full_write_intent_still_rejects_a_live_read_only_owner() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let seed = open(&transport, &scratch, 1, WORKSPACE_ID, json!({}))
         .await

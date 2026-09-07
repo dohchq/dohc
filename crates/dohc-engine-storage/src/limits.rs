@@ -1,23 +1,15 @@
-//! Storage-layer bounds. Every value the compound-write API accepts is
-//! bounded; violations are typed errors, never silent truncation (plan
-//! §"Rust policy": bounded everything).
-
-/// Maximum document body size accepted by [`crate::EngineStore::commit_compound`],
-/// in UTF-8 bytes. Compared against `str::len()` — already the UTF-8 byte
-/// length, so no re-encoding is needed (`PORTING.md` §6: this is a place Rust
-/// is simpler than the TS `Buffer.byteLength` detour).
-pub const MAX_DOCUMENT_BODY_BYTES: usize = 256 * 1024;
+//! Storage-layer bounds. Every value the storage API accepts is bounded;
+//! violations are typed errors, never silent truncation.
 
 /// Maximum length of an identifier a caller mints on a write, in UTF-8 bytes:
 /// workspace, version, object and moment ids on every layer's write path.
 ///
-/// NOT the bound on a conflict row's identifiers. Those are bounded by
+/// Not the bound on a conflict row's identifiers. Those are bounded by
 /// `CONFLICT_METADATA_BUDGET_BYTES`, a rule derived from what one
 /// `conflicts.list` page can serve rather than from what a caller mints, and it
 /// deliberately admits a much longer id.
 ///
-/// MEASURED against the identifiers the product actually mints, not chosen.
-/// `dohc-engine-domain/tests/identifier_bounds.rs` measures them:
+/// Measured against the identifiers the product actually mints, not chosen:
 /// a bare UUID is 36 bytes, the prefixed forms the desktop mints
 /// (`object-<uuid>`, `moment-<uuid>`) are 43, and the widest the engine
 /// generates for itself — `derive_capture_object_id`, a `object-` prefix over
@@ -26,7 +18,7 @@ pub const MAX_DOCUMENT_BODY_BYTES: usize = 256 * 1024;
 ///
 /// It exists because identifiers are ECHOED. A `versionedText.write` answer
 /// serves the caller's object id three times and its moment id twice, and
-/// reserves no response bytes for either (#654), so an unbounded id turned a
+/// reserves no response bytes for either, so an unbounded id turned a
 /// request that fits its 8 MiB control frame into a response that cannot —
 /// after the write had committed. `dohc-engine-collab` (`DocKey::new`) and
 /// `dohc-engine-sync` (`model::unbounded_clause`) have enforced this number

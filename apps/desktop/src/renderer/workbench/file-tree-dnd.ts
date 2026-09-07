@@ -1,3 +1,4 @@
+import { basenameOf, dirnameOf } from "../path";
 // file-org-v1 D4.7 — drag-and-drop planning. Extracted as a pure
 // function for the same reason as `navigateTree` (the harness is
 // node-only, no DOM). The component sets up HTML5 DnD events; this
@@ -5,10 +6,10 @@
 //
 // Drop semantics (VSCode + Finder convention):
 //   • Source = file, target = folder ⇒ move file INTO folder.
-//   • Source = file, target = file ⇒ move source NEXT TO target
+//   • Source = file, target = file ⇒ move source next TO target
 //     (i.e., into target's parent folder).
 //   • Source = folder, target = folder ⇒ move source INTO target.
-//   • Source = folder, target = file ⇒ move source NEXT TO target
+//   • Source = folder, target = file ⇒ move source next TO target
 //     (i.e., into target's parent folder).
 //   • Target = root (no row, just the tree container) ⇒ move to
 //     workspace root.
@@ -34,34 +35,24 @@ export type DragSource = {
 }
 
 /** The target as resolved by the drop handler. `parentDir` is the
- *  folder that will CONTAIN the moved item — '' means workspace
+ *  folder that will contain the moved item — '' means workspace
  *  root. Computed by the caller based on what the user dropped on
  *  (a folder row, a file row's parent, or the root container). */
-export type DropTarget = {
+type DropTarget = {
   parentDir: string
 }
 
-export type DropAction =
+type DropAction =
   | { kind: 'move-file'; fromPath: string; toPath: string }
   | { kind: 'move-folder'; fromPath: string; toPath: string }
   | { kind: 'noop'; reason: string }
-
-function leafOf(path: string): string {
-  const idx = path.lastIndexOf('/')
-  return idx < 0 ? path : path.slice(idx + 1)
-}
-
-function parentOf(path: string): string {
-  const idx = path.lastIndexOf('/')
-  return idx < 0 ? '' : path.slice(0, idx)
-}
 
 export function planDrop(
   source: DragSource,
   target: DropTarget,
 ): DropAction {
-  const sourceParent = parentOf(source.path)
-  const leaf = leafOf(source.path)
+  const sourceParent = dirnameOf(source.path)
+  const leaf = basenameOf(source.path)
 
   // Same parent ⇒ no-op (nothing to do; the item is already where
   // the user is asking).

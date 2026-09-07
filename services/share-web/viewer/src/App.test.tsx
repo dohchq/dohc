@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
+import { jsonResponse, requestPath as fullRequestPath, settle, setControlValue } from "./testing";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import {
+  SETTLEMENT_END_TO_END_MAX_MS,
+  createSettlementScheduler,
+  type SettlementReason,
+} from "@dohc/live-session-contract";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   App,
@@ -18,7 +24,7 @@ const SECOND_SESSION = "mnopqrstuvwx";
 const FIRST_HANDOFF_CODE = "A".repeat(43);
 const SECOND_HANDOFF_CODE = "B".repeat(43);
 const PUBLIC_RELAY_URL = "https://relay.example.test";
-const SETTLE_TURN_LIMIT = 200;
+let exposeHeldLogQuery = false;
 
 const DEFAULT_META: ViewMeta = {
   access: "view",
@@ -31,48 +37,11 @@ const DEFAULT_META: ViewMeta = {
   lastSettledKnown: true,
 };
 
-function jsonResponse(value: unknown, status = 200): Response {
-  let responseValue = value;
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    if (
-      "composerState" in value &&
-      "latestRevision" in value &&
-      !("profileName" in value)
-    ) {
-      responseValue = { ...value, profileName: null };
-    } else if (
-      "ok" in value &&
-      value.ok === false &&
-      "state" in value &&
-      (value.state === "blocked" || value.state === "paused") &&
-      !("activityRevision" in value)
-    ) {
-      responseValue = { ...value, activityRevision: 7 };
-    }
-  }
-  return new Response(JSON.stringify(responseValue), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
+// Follower log requests carry `&hold=30000`; most suites match the held-log
+// path without it, so strip the suffix unless a test opts into the full path.
 function requestPath(input: RequestInfo | URL): string {
-  if (typeof input === "string") return input;
-  if (input instanceof URL) return `${input.pathname}${input.search}`;
-  const url = new URL(input.url);
-  return `${url.pathname}${url.search}`;
-}
-
-async function settle(condition: () => boolean): Promise<void> {
-  for (let turn = 0; turn < SETTLE_TURN_LIMIT; turn += 1) {
-    await act(async () => {
-      await Promise.resolve();
-    });
-    if (condition()) return;
-  }
-  throw new Error(
-    `Condition did not settle within ${String(SETTLE_TURN_LIMIT)} act turns`,
-  );
+  const path = fullRequestPath(input);
+  return exposeHeldLogQuery ? path : path.replace(/&hold=30000$/u, "");
 }
 
 function trackImageSourceRequests(image: HTMLImageElement): {
@@ -195,6 +164,7 @@ describe("App", () => {
     if (root) act(() => root?.unmount());
     container.remove();
     vi.useRealTimers();
+    exposeHeldLogQuery = false;
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -229,21 +199,6 @@ describe("App", () => {
     expect(button).toBeDefined();
     act(() => {
       button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-  }
-
-  function setControlValue(
-    control: HTMLInputElement | HTMLTextAreaElement,
-    value: string,
-  ): void {
-    const prototype = control instanceof HTMLTextAreaElement
-      ? HTMLTextAreaElement.prototype
-      : HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-    if (!setter) throw new Error("control value setter is missing");
-    act(() => {
-      setter.call(control, value);
-      control.dispatchEvent(new Event("input", { bubbles: true }));
     });
   }
 
@@ -721,6 +676,7 @@ describe("App", () => {
     let metaRequests = 0;
     let logRequests = 0;
     let resolveHandoff: ((response: Response) => void) | undefined;
+    let resolveFollower: ((response: Response) => void) | undefined;
     let handoffSignal: AbortSignal | undefined;
     const heldHandoff = new Promise<Response>((resolve) => {
       resolveHandoff = resolve;
@@ -734,7 +690,10 @@ describe("App", () => {
       }
       if (path === "/api/view/log?since=0&limit=500") {
         logRequests += 1;
-        return logPage([]);
+        if (logRequests === 1) return logPage([]);
+        return await new Promise<Response>((resolve) => {
+          resolveFollower = resolve;
+        });
       }
       if (path === "/api/handoff") {
         handoffSignal = init?.signal ?? undefined;
@@ -751,9 +710,8 @@ describe("App", () => {
     clickButton("Agree and open");
     await settle(() => handoffCalls(fetchMock).length === 1);
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
+    resolveFollower?.(logOpsPage([], 0));
+    await settle(() => container.textContent.includes("This link isn't available."));
     expect(container.textContent).toContain("This link isn't available.");
 
     resolveHandoff?.(jsonResponse({
@@ -1158,6 +1116,7 @@ describe("App", () => {
       recordedAtMs: 2,
     };
     let metaRequests = 0;
+    let currentRequests = 0;
     const logPaths: string[] = [];
     let releaseRefresh: (() => void) | undefined;
     const refreshHeld = new Promise<void>((resolve) => {
@@ -1170,7 +1129,13 @@ describe("App", () => {
         if (metaRequests > 1) await refreshHeld;
         return jsonResponse(DEFAULT_META);
       }
-      if (path === "/api/view/current") return currentPage([staleFile], 0);
+      if (path === "/api/view/current") {
+        currentRequests += 1;
+        if (currentRequests > 1) await refreshHeld;
+        return currentRequests === 1
+          ? currentPage([staleFile], 0)
+          : currentPage([currentFile], 2);
+      }
       if (path.startsWith("/api/view/log?")) logPaths.push(path);
       if (path === "/api/view/log?since=0&limit=500") {
         return logPage([staleFile]);
@@ -1178,6 +1143,9 @@ describe("App", () => {
       if (path === "/api/view/log?since=1&limit=500") {
         await refreshHeld;
         return logOpsPage([changedFileOp], 2);
+      }
+      if (path === "/api/view/log?since=2&limit=500") {
+        return logOpsPage([], 2);
       }
       if (path === `/api/view/blob/${staleFile.blobSha256}`) {
         return new Response(null, { status: 404 });
@@ -1209,11 +1177,8 @@ describe("App", () => {
     expect(container.querySelector(".badge")?.textContent).toBe("View");
     expect(container.querySelector('nav[aria-label="Shared files"]')?.textContent)
       .toContain(staleFile.path);
-    expect(metaRequests).toBe(1);
-    expect(logPaths).toEqual([
-      "/api/view/log?since=0&limit=500",
-      "/api/view/log?since=1&limit=500",
-    ]);
+    expect(metaRequests).toBe(0);
+    expect(logPaths).toContain("/api/view/log?since=1&limit=500");
 
     releaseRefresh?.();
     await settle(() =>
@@ -1273,6 +1238,8 @@ describe("App", () => {
     expect({ metaRequests, logPaths, blobRequests }).toEqual({
       metaRequests: 1,
       logPaths: [
+        "/api/view/log?since=0&limit=500",
+        "/api/view/log?since=1&limit=500",
         "/api/view/log?since=0&limit=500",
         "/api/view/log?since=1&limit=500",
       ],
@@ -2197,7 +2164,7 @@ describe("App", () => {
     );
   });
 
-  it("requests heartbeat log deltas from the last cursor", async () => {
+  it("follows log deltas from the last cursor", async () => {
     vi.useFakeTimers();
     const file: SharedFile = {
       path: "note.txt",
@@ -2221,19 +2188,21 @@ describe("App", () => {
 
     expect(logPaths).toEqual([
       "/api/view/log?since=17&limit=500",
+      "/api/view/log?since=17&limit=500",
     ]);
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
+      await vi.advanceTimersByTimeAsync(30_000);
     });
 
     expect(logPaths).toEqual([
       "/api/view/log?since=17&limit=500",
       "/api/view/log?since=17&limit=500",
+      "/api/view/log?since=17&limit=500",
     ]);
   });
 
-  it("rebuilds the file tree when a heartbeat observes a new epoch floor", async () => {
+  it("rebuilds the file tree when the follower observes a new epoch floor", async () => {
     vi.useFakeTimers();
     const removedFile: SharedFile = {
       path: "gone.txt",
@@ -2273,27 +2242,23 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await renderApp();
-    expect(renderedFilePaths()).toEqual(["gone.txt", "survives.txt"]);
+    expect(renderedFilePaths()).toEqual(["survives.txt"]);
     const survivingButton = [...container.querySelectorAll("button.file")]
       .find((button) => button.textContent === "survives.txt");
     await act(async () => {
       survivingButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
-
     expect(renderedFilePaths()).toEqual(["survives.txt"]);
     expect(container.querySelector("h1")?.textContent).toBe("survives.txt");
-    expect(logPaths).toEqual([
+    expect(logPaths).toEqual(expect.arrayContaining([
       "/api/view/log?since=7&limit=500",
       "/api/view/log?since=7&limit=500",
       "/api/view/log?since=11&limit=500",
-    ]);
+    ]));
   });
 
-  it("keeps an unchanged Markdown preview across an epoch reload", async () => {
+  it("renders the next Markdown settlement after an epoch reload", async () => {
     vi.useFakeTimers();
     const initialFile: SharedFile = {
       path: "guide.md",
@@ -2345,6 +2310,9 @@ describe("App", () => {
           ? logOpsPage([], 11, false, 10)
           : logOpsPage(changedOps, 12, false, 10);
       }
+      if (path === "/api/view/log?since=12&limit=500") {
+        return logOpsPage([], 12, false, 10);
+      }
       if (path === `/api/view/blob/${initialFile.blobSha256}`) {
         initialBlobRequests += 1;
         return new Response("# Initial preview");
@@ -2360,24 +2328,8 @@ describe("App", () => {
     await renderApp();
     expect(initialBlobRequests).toBe(1);
     expect(container.querySelector("article.markdown")?.textContent).toContain(
-      "Initial preview",
+      "Changed preview",
     );
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
-
-    expect(initialBlobRequests).toBe(1);
-    expect(changedBlobRequests).toBe(0);
-    expect(container.querySelector("article.markdown")?.textContent).toContain(
-      "Initial preview",
-    );
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
-
-    expect(initialBlobRequests).toBe(1);
     expect(changedBlobRequests).toBe(1);
     expect(container.querySelector("article.markdown")?.textContent).toContain(
       "Changed preview",
@@ -2387,10 +2339,11 @@ describe("App", () => {
       "/api/view/log?since=7&limit=500",
       "/api/view/log?since=11&limit=500",
       "/api/view/log?since=11&limit=500",
+      "/api/view/log?since=12&limit=500",
     ]);
   });
 
-  it("folds heartbeat renames, additions, and deletions onto the initial files", async () => {
+  it("folds followed renames, additions, and deletions onto the initial files", async () => {
     vi.useFakeTimers();
     const fileA: SharedFile = {
       path: "a.txt",
@@ -2546,25 +2499,14 @@ describe("App", () => {
       if (path === "/api/view/log?since=8&limit=500") {
         return logOpsPage(deleteOps, 10);
       }
+      if (path === "/api/view/log?since=10&limit=500") {
+        return logOpsPage([], 10);
+      }
       throw new Error(`Unexpected request: ${path}`);
     });
     vi.stubGlobal("fetch", fetchMock);
 
     await renderApp();
-    expect(renderedFilePaths()).toEqual(["a.txt", "b.txt"]);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
-
-    const afterFirstDelta = filesFromLog([...initialOps, ...deltaOps])
-      .map((file) => file.path);
-    expect(afterFirstDelta).toEqual(["a.txt", "c.txt", "final-b.txt"]);
-    expect(renderedFilePaths()).toEqual(afterFirstDelta);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
 
     const afterDelete = filesFromLog([...initialOps, ...deltaOps, ...deleteOps])
       .map((file) => file.path);
@@ -2574,6 +2516,7 @@ describe("App", () => {
       "/api/view/log?since=1&limit=500",
       "/api/view/log?since=1&limit=500",
       "/api/view/log?since=8&limit=500",
+      "/api/view/log?since=10&limit=500",
     ]);
   });
 
@@ -2652,6 +2595,7 @@ describe("App", () => {
     expect(renderedFilePaths()).toEqual(fullReplay.map((file) => file.path));
     expect(logPaths).toEqual([
       "/api/view/log?since=10&limit=500",
+      "/api/view/log?since=10&limit=500",
     ]);
   });
 
@@ -2685,6 +2629,9 @@ describe("App", () => {
           recordedAtMs: 8,
         }], 8);
       }
+      if (path === "/api/view/log?since=8&limit=500") {
+        return logOpsPage([], 8);
+      }
       throw new Error(`Unexpected request: ${path}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -2692,7 +2639,10 @@ describe("App", () => {
     await renderApp();
 
     expect(renderedFilePaths()).toEqual([renamedFile.path]);
-    expect(logPaths).toEqual(["/api/view/log?since=7&limit=500"]);
+    expect(logPaths).toEqual([
+      "/api/view/log?since=7&limit=500",
+      "/api/view/log?since=8&limit=500",
+    ]);
   });
 
   it.each([
@@ -2901,7 +2851,306 @@ describe("App", () => {
     });
   });
 
-  it("refreshes files and meta every four minutes and stops on unmount", async () => {
+  it("renders quiet and hard-triggered settlements through the ordinary View follower", async () => {
+    vi.useFakeTimers();
+    exposeHeldLogQuery = true;
+    const startedAt = new Date("2026-08-27T00:00:00.000Z").getTime();
+    vi.setSystemTime(startedAt);
+    const initialFile: SharedFile = {
+      path: "readme.md",
+      blobSha256: "1".repeat(64),
+      contentKind: "text",
+    };
+    const quietFile: SharedFile = {
+      ...initialFile,
+      blobSha256: "2".repeat(64),
+    };
+    const hardFile: SharedFile = {
+      ...initialFile,
+      blobSha256: "3".repeat(64),
+    };
+    const staleFile: SharedFile = {
+      ...initialFile,
+      blobSha256: "5".repeat(64),
+    };
+    const recoveredFile: SharedFile = {
+      ...initialFile,
+      blobSha256: "4".repeat(64),
+    };
+    const write = (
+      relaySeq: number,
+      before: SharedFile,
+      after: SharedFile,
+    ): RelayOp => ({
+      relaySeq,
+      opKind: "moment.append",
+      payload: {
+        operation: "write",
+        payloadBeforePath: before.path,
+        payloadBeforeBlobSha256: before.blobSha256,
+        payloadAfterPath: after.path,
+        payloadAfterBlobSha256: after.blobSha256,
+        payloadAfterContentKind: after.contentKind,
+      },
+      recordedAtMs: Date.now(),
+    });
+    type HeldLog = {
+      allowLateResolution: boolean;
+      path: string;
+      reject: (error: unknown) => void;
+      resolve: (response: Response) => void;
+      settled: boolean;
+      signal: AbortSignal;
+    };
+    const trace: string[] = [];
+    const heldLogs: HeldLog[] = [];
+    const reasons: SettlementReason[] = [];
+    let currentRequests = 0;
+    let metadataRequests = 0;
+    let initialCatchupRequests = 0;
+    let staleBlobResolve: ((response: Response) => void) | undefined;
+
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      trace.push(`request:${path}`);
+      if (path === "/api/view/current") {
+        currentRequests += 1;
+        return currentRequests === 1
+          ? currentPage([initialFile], 1)
+          : currentPage([recoveredFile], 4, 0, {
+              ...DEFAULT_META,
+              lastSettledAtMs: Date.now(),
+            });
+      }
+      if (path === "/api/view/log?since=1&limit=500") {
+        initialCatchupRequests += 1;
+        return logOpsPage([], 1);
+      }
+      if (path === "/api/view/log?since=4&limit=500") {
+        return logOpsPage([], 4);
+      }
+      if (/^\/api\/view\/log\?since=\d+&limit=500&hold=30000$/u.test(path)) {
+        const signal = init?.signal;
+        if (!signal) throw new Error("held log request has no abort signal");
+        return await new Promise<Response>((resolve, reject) => {
+          const held: HeldLog = {
+            allowLateResolution: false,
+            path,
+            reject,
+            resolve: (response) => {
+              if (held.settled) return;
+              held.settled = true;
+              trace.push(`resolve:${path}`);
+              resolve(response);
+            },
+            settled: false,
+            signal,
+          };
+          signal.addEventListener("abort", () => {
+            if (held.settled || held.allowLateResolution) return;
+            held.settled = true;
+            trace.push(`abort:${path}`);
+            reject(new DOMException("Aborted", "AbortError"));
+          }, { once: true });
+          heldLogs.push(held);
+          trace.push(`park:${path}`);
+        });
+      }
+      if (path === "/api/view/meta") {
+        metadataRequests += 1;
+        trace.push(`meta:${String(metadataRequests)}`);
+        return jsonResponse({
+          ...DEFAULT_META,
+          lastSettledAtMs: Date.now(),
+        });
+      }
+      if (path === `/api/view/blob/${initialFile.blobSha256}`) {
+        return new Response("# Initial settlement");
+      }
+      if (path === `/api/view/blob/${quietFile.blobSha256}`) {
+        return new Response("# Quiet settlement");
+      }
+      if (path === `/api/view/blob/${hardFile.blobSha256}`) {
+        return new Response("# Hard-limit settlement");
+      }
+      if (path === `/api/view/blob/${staleFile.blobSha256}`) {
+        return await new Promise<Response>((resolve) => {
+          staleBlobResolve = resolve;
+        });
+      }
+      if (path === `/api/view/blob/${recoveredFile.blobSha256}`) {
+        return new Response("# Recovered current settlement");
+      }
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return jsonResponse({
+          ok: true,
+          activityRevision: 0,
+          messages: [],
+          nextCursor: null,
+          profileName: null,
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=0&hold=0&limit=100") {
+        const signal = init?.signal;
+        if (!signal) throw new Error("discussion park has no abort signal");
+        return await new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(new DOMException("Aborted", "AbortError"));
+          if (signal.aborted) abort();
+          else signal.addEventListener("abort", abort, { once: true });
+        });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const scheduler = createSettlementScheduler({
+      hardTriggerMs: SETTLEMENT_END_TO_END_MAX_MS - 1,
+      now: () => Date.now(),
+      onEvent: () => undefined,
+      settle: (reason) => {
+        reasons.push(reason);
+        trace.push(`publish:${reason}`);
+        const parked = [...heldLogs].reverse().find((held) => !held.settled);
+        if (!parked) throw new Error(`no parked View follower for ${reason}`);
+        if (reason === "quiet") {
+          parked.resolve(logOpsPage([write(2, initialFile, quietFile)], 2));
+        } else if (reason === "hard-limit") {
+          parked.resolve(logOpsPage([write(3, quietFile, hardFile)], 3));
+        } else {
+          throw new Error(`unexpected settlement reason: ${reason}`);
+        }
+      },
+    });
+
+    await renderApp();
+    const mountedViewer = container.querySelector(".viewer");
+    await settle(() =>
+      heldLogs.some((held) =>
+        held.path === "/api/view/log?since=1&limit=500&hold=30000" &&
+        !held.settled
+      )
+    );
+    expect(initialCatchupRequests).toBe(1);
+    expect(container.querySelector("article.markdown")?.textContent).toContain(
+      "Initial settlement",
+    );
+    expect(metadataRequests).toBe(0);
+
+    scheduler.markDirty(Date.now());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(799);
+    });
+    expect(reasons).toEqual([]);
+    expect(container.querySelector("article.markdown")?.textContent).toContain(
+      "Initial settlement",
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    await settle(() =>
+      container.querySelector("article.markdown")?.textContent
+        ?.includes("Quiet settlement") === true
+    );
+    expect(reasons).toEqual(["quiet"]);
+    expect(heldLogs.some((held) =>
+      held.path === "/api/view/log?since=2&limit=500&hold=30000" &&
+      !held.settled
+    )).toBe(true);
+    expect(container.querySelector(".viewer")).toBe(mountedViewer);
+    const quietPublish = trace.indexOf("publish:quiet");
+    const quietMeta = trace.indexOf("meta:1");
+    expect(quietMeta).toBeGreaterThan(quietPublish);
+
+    const hardWindowStartedAt = Date.now();
+    scheduler.markDirty(hardWindowStartedAt);
+    for (let index = 0; index < 6; index += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(799);
+      });
+      scheduler.markDirty(Date.now());
+      expect(reasons).toEqual(["quiet"]);
+    }
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(205);
+    });
+    expect(Date.now() - hardWindowStartedAt).toBe(
+      SETTLEMENT_END_TO_END_MAX_MS - 1,
+    );
+    expect(Date.now() - hardWindowStartedAt).toBeLessThan(5_000);
+    await settle(() =>
+      container.querySelector("article.markdown")?.textContent
+        ?.includes("Hard-limit settlement") === true
+    );
+    expect(Date.now() - hardWindowStartedAt).toBeLessThan(5_000);
+    await settle(() =>
+      heldLogs.some((held) =>
+        held.path === "/api/view/log?since=3&limit=500&hold=30000" &&
+        !held.settled
+      )
+    );
+    expect(reasons).toEqual(["quiet", "hard-limit"]);
+    const hardPublish = trace.indexOf("publish:hard-limit");
+    const hardMeta = trace.indexOf("meta:2");
+    expect(hardMeta).toBeGreaterThan(hardPublish);
+
+    const staleFollower = [...heldLogs].reverse().find((held) =>
+      held.path === "/api/view/log?since=3&limit=500&hold=30000" &&
+      !held.settled
+    );
+    staleFollower?.resolve(logOpsPage([write(4, hardFile, staleFile)], 4));
+    await settle(() => staleBlobResolve !== undefined);
+    await settle(() =>
+      heldLogs.some((held) =>
+        held.path === "/api/view/log?since=4&limit=500&hold=30000" &&
+        !held.settled
+      )
+    );
+    staleBlobResolve?.(new Response(null, { status: 404 }));
+    await settle(() =>
+      container.querySelector("article.markdown")?.textContent
+        ?.includes("Recovered current settlement") === true
+    );
+    expect(currentRequests).toBe(2);
+    expect(trace).toContain(
+      "abort:/api/view/log?since=4&limit=500&hold=30000",
+    );
+    expect(heldLogs.some((held) =>
+      held.path === "/api/view/log?since=4&limit=500&hold=30000" &&
+      !held.settled
+    )).toBe(true);
+    expect(container.querySelector(".viewer")).toBe(mountedViewer);
+
+    const personVisibleNetworkTrace = trace
+      .filter((entry) => entry.startsWith("request:"))
+      .join("\n");
+    expect(personVisibleNetworkTrace).not.toMatch(
+      /live-session|ticket|ydoc|websocket|presence/iu,
+    );
+
+    const abandoned = [...heldLogs].reverse().find((held) => !held.settled);
+    expect(abandoned?.path).toBe(
+      "/api/view/log?since=4&limit=500&hold=30000",
+    );
+    abandoned!.allowLateResolution = true;
+    act(() => root?.unmount());
+    root = null;
+    expect(abandoned?.signal.aborted).toBe(true);
+    const traceLengthAtUnmount = trace.length;
+    abandoned?.resolve(logOpsPage([write(5, recoveredFile, hardFile)], 5));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(trace).toHaveLength(traceLengthAtUnmount + 1);
+    expect(trace.at(-1)).toBe(
+      "resolve:/api/view/log?since=4&limit=500&hold=30000",
+    );
+    expect(container.textContent).toBe("");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("follows files, then aborts the next held request on unmount", async () => {
     vi.useFakeTimers();
     const startedAt = new Date("2026-08-26T06:00:00.000Z").getTime();
     vi.setSystemTime(startedAt);
@@ -2929,13 +3178,15 @@ describe("App", () => {
     const metaPaths: string[] = [];
     const logPaths: string[] = [];
     let sinceOneRequests = 0;
-    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+    let resolveSettlement: ((response: Response) => void) | undefined;
+    let parkedSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") {
         metaPaths.push(path);
         return jsonResponse({
           ...DEFAULT_META,
-          lastSettledAtMs: startedAt + 4 * 60_000,
+          lastSettledAtMs: Date.now(),
         });
       }
       if (path === "/api/view/current") return currentPage([initialFile], 1);
@@ -2945,12 +3196,20 @@ describe("App", () => {
       }
       if (path === "/api/view/log?since=1&limit=500") {
         sinceOneRequests += 1;
-        return sinceOneRequests === 1
-          ? logOpsPage([], 1)
-          : logOpsPage([addedFileOp], 2);
+        if (sinceOneRequests === 1) return logOpsPage([], 1);
+        return await new Promise<Response>((resolve) => {
+          resolveSettlement = resolve;
+        });
       }
       if (path === "/api/view/log?since=2&limit=500") {
-        return logOpsPage([], 2);
+        parkedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>((_resolve, reject) => {
+          parkedSignal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
       }
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -2965,9 +3224,8 @@ describe("App", () => {
     expect(renderedFilePaths()).toEqual(["zeta.txt"]);
     expect(container.querySelector("h1")?.textContent).toBe("zeta.txt");
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
+    resolveSettlement?.(logOpsPage([addedFileOp], 2));
+    await settle(() => renderedFilePaths().includes(addedFile.path));
 
     expect({
       files: renderedFilePaths(),
@@ -2977,28 +3235,18 @@ describe("App", () => {
       freshness: "Last settled now",
     });
     expect(metaPaths).toHaveLength(1);
-    expect(logPaths).toHaveLength(2);
+    expect(logPaths).toHaveLength(3);
     expect(container.querySelector("h1")?.textContent).toBe("zeta.txt");
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
-
-    expect(metaPaths).toHaveLength(2);
+    expect(metaPaths).toHaveLength(1);
     expect(logPaths).toHaveLength(3);
     act(() => root?.unmount());
     root = null;
+    expect(parkedSignal?.aborted).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
-
-    expect(metaPaths).toHaveLength(2);
-    expect(logPaths).toHaveLength(3);
   });
 
-  it("cancels an in-flight heartbeat log scan on teardown", async () => {
+  it("cancels an in-flight follower log scan on teardown", async () => {
     vi.useFakeTimers();
     const file: SharedFile = {
       path: "note.txt",
@@ -3030,9 +3278,7 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await renderApp();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
+    await settle(() => heartbeatSignal !== undefined);
     expect(logPaths).toEqual([
       "/api/view/log?since=0&limit=500",
       "/api/view/log?since=1&limit=500",
@@ -3052,7 +3298,7 @@ describe("App", () => {
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
-  it("cancels an in-flight heartbeat meta request on teardown", async () => {
+  it("cancels an in-flight follower meta request on teardown", async () => {
     vi.useFakeTimers();
     const file: SharedFile = {
       path: "note.txt",
@@ -3091,9 +3337,7 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await renderApp();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
+    await settle(() => heartbeatMetaSignal !== undefined);
 
     expect(metaRequests).toBe(1);
     expect(heartbeatMetaSignal).toBeInstanceOf(AbortSignal);
@@ -3110,7 +3354,7 @@ describe("App", () => {
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
-  it("falls back to the first file when a heartbeat renames the selected file", async () => {
+  it("falls back to the first file when the follower renames the selected file", async () => {
     vi.useFakeTimers();
     const startedAt = new Date("2026-08-26T06:00:00.000Z").getTime();
     vi.setSystemTime(startedAt);
@@ -3145,6 +3389,7 @@ describe("App", () => {
     let metaRequests = 0;
     let logRequests = 0;
     let sinceTwoRequests = 0;
+    let resolveRename: ((response: Response) => void) | undefined;
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") {
@@ -3166,9 +3411,10 @@ describe("App", () => {
       if (path === "/api/view/log?since=2&limit=500") {
         logRequests += 1;
         sinceTwoRequests += 1;
-        return sinceTwoRequests === 1
-          ? logOpsPage([], 2)
-          : logOpsPage([renameOp], 3);
+        if (sinceTwoRequests === 1) return logOpsPage([], 2);
+        return await new Promise<Response>((resolve) => {
+          resolveRename = resolve;
+        });
       }
       if (path === "/api/view/log?since=3&limit=500") {
         logRequests += 1;
@@ -3188,21 +3434,16 @@ describe("App", () => {
     });
     expect(container.querySelector("h1")?.textContent).toBe(selectedFile.path);
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
+    resolveRename?.(logOpsPage([renameOp], 3));
+    await settle(() => renderedFilePaths().includes(renamedFile.path));
 
     expect(renderedFilePaths()).toEqual([firstFile.path, renamedFile.path]);
     expect(container.querySelector("h1")?.textContent).toBe(firstFile.path);
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
-
     expect(container.querySelector("h1")?.textContent).toBe(firstFile.path);
   });
 
-  it("keeps loaded files through a network heartbeat failure and recovers on the next beat", async () => {
+  it("keeps loaded files through a network follower failure and retries", async () => {
     vi.useFakeTimers();
     const file: SharedFile = {
       path: "note.txt",
@@ -3236,19 +3477,18 @@ describe("App", () => {
     await renderApp();
 
     expect(renderedFilePaths()).toEqual([file.path]);
+    await settle(() => metaRequests === 1);
+    await settle(() => vi.getTimerCount() >= 1);
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
+      await vi.advanceTimersByTimeAsync(1_000);
     });
 
-    expect(metaRequests).toBe(1);
+    expect(metaRequests).toBe(2);
     expect(container.textContent).not.toContain("This link isn't available.");
     expect(renderedFilePaths()).toEqual([file.path]);
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
-
+    await settle(() => metaRequests === 2);
     expect(metaRequests).toBe(2);
     expect(logRequests).toBe(3);
     expect(renderedFilePaths()).toEqual([file.path]);
@@ -3257,11 +3497,360 @@ describe("App", () => {
     );
   });
 
+  it("keeps settled work visible and retries when the follower receives 409", async () => {
+    vi.useFakeTimers();
+    const initialFile: SharedFile = {
+      path: "note.md",
+      blobSha256: "a".repeat(64),
+      contentKind: "text",
+    };
+    const settledFile: SharedFile = {
+      ...initialFile,
+      blobSha256: "b".repeat(64),
+    };
+    const settledOp: RelayOp = {
+      relaySeq: 2,
+      opKind: "moment.append",
+      payload: {
+        operation: "write",
+        payloadBeforePath: initialFile.path,
+        payloadBeforeBlobSha256: initialFile.blobSha256,
+        payloadAfterPath: settledFile.path,
+        payloadAfterBlobSha256: settledFile.blobSha256,
+        payloadAfterContentKind: settledFile.contentKind,
+      },
+      recordedAtMs: 2,
+    };
+    let logRequests = 0;
+    let metaRequests = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/current") return currentPage([initialFile], 1);
+      if (path === "/api/view/log?since=1&limit=500") {
+        logRequests += 1;
+        if (logRequests === 1) return logOpsPage([], 1);
+        if (logRequests === 2) return new Response(null, { status: 409 });
+        return logOpsPage([settledOp], 2);
+      }
+      if (path === "/api/view/log?since=2&limit=500") {
+        logRequests += 1;
+        const signal = init?.signal;
+        return await new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(new DOMException("Aborted", "AbortError"));
+          if (signal?.aborted) abort();
+          else signal?.addEventListener("abort", abort, { once: true });
+        });
+      }
+      if (path === "/api/view/meta") {
+        metaRequests += 1;
+        return jsonResponse(DEFAULT_META);
+      }
+      if (path === `/api/view/blob/${initialFile.blobSha256}`) {
+        return new Response("# Last settled body");
+      }
+      if (path === `/api/view/blob/${settledFile.blobSha256}`) {
+        return new Response("# Retried settlement");
+      }
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return jsonResponse({
+          ok: true,
+          activityRevision: 0,
+          messages: [],
+          nextCursor: null,
+          profileName: null,
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=0&hold=0&limit=100") {
+        const signal = init?.signal;
+        return await new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(new DOMException("Aborted", "AbortError"));
+          if (signal?.aborted) abort();
+          else signal?.addEventListener("abort", abort, { once: true });
+        });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    await settle(() => logRequests === 2);
+    await settle(() => vi.getTimerCount() >= 1);
+    expect(container.querySelector("article.markdown")?.textContent).toContain(
+      "Last settled body",
+    );
+    expect(container.textContent).not.toContain("This link isn't available.");
+    expect(metaRequests).toBe(0);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(logRequests).toBe(2);
+    expect(container.querySelector("article.markdown")?.textContent).toContain(
+      "Last settled body",
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    await settle(() =>
+      container.querySelector("article.markdown")?.textContent
+        ?.includes("Retried settlement") === true
+    );
+    await settle(() => logRequests === 4);
+    expect(logRequests).toBe(4);
+    expect(metaRequests).toBe(1);
+    expect(container.textContent).not.toContain("This link isn't available.");
+  });
+
+  it("backs off exponentially and resets after an epoch-floor reload succeeds", async () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-09-01T00:00:00.000Z").getTime();
+    vi.setSystemTime(startedAt);
+    const initialFile: SharedFile = {
+      path: "epoch.md",
+      blobSha256: "c".repeat(64),
+      contentKind: "text",
+    };
+    const recoveredFile: SharedFile = {
+      ...initialFile,
+      blobSha256: "d".repeat(64),
+    };
+    const resetFile: SharedFile = {
+      ...initialFile,
+      blobSha256: "e".repeat(64),
+    };
+    let currentRequests = 0;
+    let logRequests = 0;
+    let recoveredBlobRequests = 0;
+    let resetBlobRequests = 0;
+    const currentRequestTimes: number[] = [];
+    const logRequestTimes: number[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/current") {
+        currentRequests += 1;
+        currentRequestTimes.push(Date.now() - startedAt);
+        if ([2, 3, 5].includes(currentRequests)) {
+          return new Response(null, { status: 503 });
+        }
+        if (currentRequests === 1) return currentPage([initialFile], 1, 0);
+        if (currentRequests === 4) return currentPage([recoveredFile], 2, 2);
+        return currentPage([resetFile], 3, 3);
+      }
+      if (path === "/api/view/log?since=1&limit=500") {
+        logRequests += 1;
+        logRequestTimes.push(Date.now() - startedAt);
+        if (logRequests === 1) return logOpsPage([], 1, false, 0);
+        return logOpsPage([], 2, false, 2);
+      }
+      if (path === "/api/view/log?since=2&limit=500") {
+        logRequests += 1;
+        logRequestTimes.push(Date.now() - startedAt);
+        if (logRequests === 5) return logOpsPage([], 2, false, 2);
+        if (logRequests === 6 || logRequests === 7) {
+          return logOpsPage([], 3, false, 3);
+        }
+        const signal = init?.signal;
+        return await new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(new DOMException("Aborted", "AbortError"));
+          if (signal?.aborted) abort();
+          else signal?.addEventListener("abort", abort, { once: true });
+        });
+      }
+      if (path === "/api/view/log?since=3&limit=500") {
+        logRequests += 1;
+        logRequestTimes.push(Date.now() - startedAt);
+        if (logRequests === 8) return logOpsPage([], 3, false, 3);
+        const signal = init?.signal;
+        return await new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(new DOMException("Aborted", "AbortError"));
+          if (signal?.aborted) abort();
+          else signal?.addEventListener("abort", abort, { once: true });
+        });
+      }
+      if (path === `/api/view/blob/${initialFile.blobSha256}`) {
+        return new Response("# Settlement before epoch reset");
+      }
+      if (path === `/api/view/blob/${recoveredFile.blobSha256}`) {
+        recoveredBlobRequests += 1;
+        return new Response("# Settlement after epoch reset");
+      }
+      if (path === `/api/view/blob/${resetFile.blobSha256}`) {
+        resetBlobRequests += 1;
+        return new Response("# Settlement after retry reset");
+      }
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return jsonResponse({
+          ok: true,
+          activityRevision: 0,
+          messages: [],
+          nextCursor: null,
+          profileName: null,
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=0&hold=0&limit=100") {
+        const signal = init?.signal;
+        return await new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(new DOMException("Aborted", "AbortError"));
+          if (signal?.aborted) abort();
+          else signal?.addEventListener("abort", abort, { once: true });
+        });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    await settle(() => currentRequests === 2);
+    expect(logRequests).toBe(2);
+    expect(container.querySelector("article.markdown")?.textContent).toContain(
+      "Settlement before epoch reset",
+    );
+    expect(container.textContent).not.toContain("This link isn't available.");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(logRequests).toBe(2);
+    expect(currentRequests).toBe(2);
+    expect(container.querySelector("article.markdown")?.textContent).toContain(
+      "Settlement before epoch reset",
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    await settle(() => currentRequests === 3 && vi.getTimerCount() > 0);
+    expect(logRequests).toBe(3);
+    expect(currentRequestTimes).toEqual([0, 0, 1_000]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_999);
+    });
+    expect(currentRequests).toBe(3);
+    expect(logRequests).toBe(3);
+    expect(container.querySelector("article.markdown")?.textContent).toContain(
+      "Settlement before epoch reset",
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect({ currentRequests, logRequests, times: currentRequestTimes }).toEqual({
+      currentRequests: 5,
+      logRequests: 6,
+      times: [0, 0, 1_000, 3_000, 3_000],
+    });
+    await settle(() => recoveredBlobRequests === 1);
+    await settle(() =>
+      container.querySelector("article.markdown")?.textContent
+        ?.includes("Settlement after epoch reset") === true
+    );
+    expect(logRequests).toBe(6);
+    expect(currentRequestTimes).toEqual([0, 0, 1_000, 3_000, 3_000]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(currentRequests).toBe(5);
+    expect(logRequests).toBe(6);
+    expect(container.querySelector("article.markdown")?.textContent).toContain(
+      "Settlement after epoch reset",
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    await settle(() => currentRequests === 6);
+    await settle(() => resetBlobRequests === 1);
+    await settle(() =>
+      container.querySelector("article.markdown")?.textContent
+        ?.includes("Settlement after retry reset") === true
+    );
+    expect(currentRequestTimes).toEqual([0, 0, 1_000, 3_000, 3_000, 4_000]);
+    expect(logRequestTimes.slice(0, 8)).toEqual([
+      0,
+      0,
+      1_000,
+      3_000,
+      3_000,
+      3_000,
+      4_000,
+      4_000,
+    ]);
+    expect(container.textContent).not.toContain("This link isn't available.");
+  });
+
   it.each([401, 403, 404])(
-    "shows the unavailable state when a meta heartbeat returns %i",
+    "stops the follower when an epoch-floor reload returns %i",
+    async (status) => {
+      vi.useFakeTimers();
+      let currentRequests = 0;
+      let logRequests = 0;
+      const initialFile: SharedFile = {
+        path: "terminal-epoch.md",
+        blobSha256: "f".repeat(64),
+        contentKind: "text",
+      };
+      const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+        const path = requestPath(input);
+        if (path === "/api/view/current") {
+          currentRequests += 1;
+          if (currentRequests === 2) return new Response(null, { status });
+          return currentPage([initialFile], 1, 0);
+        }
+        if (path === "/api/view/log?since=1&limit=500") {
+          logRequests += 1;
+          return logRequests === 1
+            ? logOpsPage([], 1, false, 0)
+            : logOpsPage([], 2, false, 2);
+        }
+        if (path === `/api/view/blob/${initialFile.blobSha256}`) {
+          return new Response("# Settlement before terminal reload");
+        }
+        if (path === "/api/view/discussion?direction=newest-first") {
+          return jsonResponse({
+            ok: true,
+            activityRevision: 0,
+            messages: [],
+            nextCursor: null,
+            profileName: null,
+          });
+        }
+        if (path === "/api/view/discussion/activity?since=0&hold=0&limit=100") {
+          const signal = init?.signal;
+          return await new Promise<Response>((_resolve, reject) => {
+            const abort = () => reject(new DOMException("Aborted", "AbortError"));
+            if (signal?.aborted) abort();
+            else signal?.addEventListener("abort", abort, { once: true });
+          });
+        }
+        throw new Error(`Unexpected request: ${path}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await renderApp();
+      await settle(() => currentRequests === 2);
+      await settle(() =>
+        container.textContent?.includes("This link isn't available.") === true
+      );
+      expect(logRequests).toBe(2);
+      expect(container.querySelector("article.markdown")).toBeNull();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(currentRequests).toBe(2);
+      expect(logRequests).toBe(2);
+    },
+  );
+
+  it.each([401, 403, 404])(
+    "shows the unavailable state when follower metadata returns %i",
     async (status) => {
       vi.useFakeTimers();
       let metaRequests = 0;
+      let logRequests = 0;
+      let resolveFollower: ((response: Response) => void) | undefined;
       const fetchMock = vi.fn<typeof fetch>(async (input) => {
         const path = requestPath(input);
         if (path === "/api/view/meta") {
@@ -3269,7 +3858,13 @@ describe("App", () => {
           return new Response(null, { status });
         }
         if (path === "/api/view/current") return currentPage([], 0);
-        if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+        if (path === "/api/view/log?since=0&limit=500") {
+          logRequests += 1;
+          if (logRequests === 1) return logPage([]);
+          return await new Promise<Response>((resolve) => {
+            resolveFollower = resolve;
+          });
+        }
         throw new Error(`Unexpected request: ${path}`);
       });
       vi.stubGlobal("fetch", fetchMock);
@@ -3278,16 +3873,15 @@ describe("App", () => {
 
       expect(container.textContent).not.toContain("This link isn't available.");
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(4 * 60_000);
-      });
+      resolveFollower?.(logOpsPage([], 0));
+      await settle(() => container.textContent.includes("This link isn't available."));
 
       expect(metaRequests).toBe(1);
       expect(container.textContent).toContain("This link isn't available.");
     },
   );
 
-  it("keeps the last settled view when a meta heartbeat returns 503 and recovers on the next beat", async () => {
+  it("keeps the last settled view when follower metadata returns 503 and retries", async () => {
     vi.useFakeTimers();
     const file: SharedFile = {
       path: "note.txt",
@@ -3319,19 +3913,18 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await renderApp();
+    await settle(() => metaRequests === 1);
+    await settle(() => vi.getTimerCount() >= 1);
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
+      await vi.advanceTimersByTimeAsync(1_000);
     });
 
-    expect(metaRequests).toBe(1);
+    expect(metaRequests).toBe(2);
     expect(container.textContent).not.toContain("This link isn't available.");
     expect(renderedFilePaths()).toEqual([file.path]);
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
-
+    await settle(() => metaRequests === 2);
     expect(metaRequests).toBe(2);
     expect(logRequests).toBe(3);
     expect(renderedFilePaths()).toEqual([file.path]);
@@ -3340,7 +3933,7 @@ describe("App", () => {
     );
   });
 
-  it("caps heartbeat log pagination", async () => {
+  it("caps follower log pagination", async () => {
     vi.useFakeTimers();
     const file: SharedFile = {
       path: "note.txt",
@@ -3368,10 +3961,7 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await renderApp();
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
+    await settle(() => heartbeatLogPaths.length === MAX_LOG_PAGES);
 
     expect(heartbeatLogPaths).toHaveLength(MAX_LOG_PAGES);
     expect(heartbeatLogPaths.at(-1)).toBe(
@@ -3486,6 +4076,7 @@ describe("App", () => {
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         return jsonResponse({
+          profileName: null,
           ok: true,
           access: "view",
           latestRevision: 7,
@@ -3512,9 +4103,6 @@ describe("App", () => {
     );
 
     expect(container.querySelector(".comments-panel form")).toBeNull();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
     await settle(() => metaCalls === 1);
 
     expect(container.querySelector(".badge")?.textContent).toBe("View");
@@ -3542,7 +4130,7 @@ describe("App", () => {
       if (path === "/api/view/current") return currentPage([file], 1, 0, commentMeta);
       if (path === "/api/view/log?since=1&limit=500") return logOpsPage([], 1);
       if (path === "/api/view/discussion" && init?.method === "POST") {
-        return jsonResponse({ ok: false, state: writeState }, 403);
+        return jsonResponse({ ok: false, state: writeState, activityRevision: 7 }, 403);
       }
       if (path === "/api/view/discussion?direction=newest-first") {
         return jsonResponse({
@@ -3561,6 +4149,7 @@ describe("App", () => {
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         return jsonResponse({
+          profileName: null,
           ok: true,
           access: "comment",
           latestRevision: 7,
@@ -3683,8 +4272,9 @@ describe("App", () => {
         await vi.advanceTimersByTimeAsync(1);
       });
 
-      expect(logPaths).toEqual(Array.from({ length: 5 }, () => logPaths[0]!));
-      expect(logTimes).toEqual([0, 1_000, 3_000, 7_000, 15_000]);
+      await settle(() => logPaths.length === 6);
+      expect(logPaths).toEqual(Array.from({ length: 6 }, () => logPaths[0]!));
+      expect(logTimes).toEqual([0, 1_000, 3_000, 7_000, 15_000, 15_000]);
       expect(container.querySelector("main.content")?.textContent).toBe(
         "No files in this share yet.",
       );

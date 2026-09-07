@@ -6,7 +6,7 @@ import {
   WorkspaceDaemonRequester,
   type MinimalDaemonClient,
 } from "../live/daemonLiveAdapter";
-import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
+import type { JsonValue, WorkspaceHandle } from "../protocol";
 import {
   WORKSPACE_METHOD,
   collectionResultExpectsBlob,
@@ -26,6 +26,7 @@ import {
   type CollectionGetRecordParams,
   type CollectionGetRecordResult,
   type CollectionGetResult,
+  type CollectionListPage,
   type CollectionListResult,
   type CollectionPendingAdoptionsPage,
   type CollectionPendingAdoptionsParams,
@@ -38,15 +39,12 @@ import {
   type ConflictRecord,
   type ConflictResolveParams,
   type ConflictResolveResult,
-  type SearchQueryParams,
-  type SearchResult,
   type WatcherStatusResult,
   type WorkspaceMethod,
   type WorkspaceMethodParamsMap,
   type WorkspaceMethodResultMap,
   type WorkspaceOpenParams,
 } from "../workspace/workspaceWireContract";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 import {
   VERSIONED_METHOD,
   decodeVersionedResult,
@@ -90,7 +88,7 @@ const CONFLICT_HYDRATION_CONCURRENCY = 8;
  * The most reconstructed body text one hydrated `conflicts.list` page may
  * retain.
  *
- * DERIVED from the transport, not chosen: the daemon answers one
+ * Derived from the transport, not chosen: the daemon answers one
  * `conflicts.list` inside a single control frame, so any page it served with
  * bodies IN BAND is already at most `CONFLICT_ROW_HARD_CAP_BYTES`. Hydration
  * puts back only what the daemon withheld, so holding the reconstructed page
@@ -103,7 +101,7 @@ const CONFLICT_HYDRATION_CONCURRENCY = 8;
  * kilobytes of withheld metadata on the wire and 480 MiB once rebuilt, which
  * then crosses Electron IPC.
  *
- * A page is cut to this budget BEFORE any body is fetched, using the
+ * A page is cut to this budget before any body is fetched, using the
  * `byteLength` every withheld side already carries, so the bytes are never
  * transferred rather than transferred and dropped. One conflict always
  * survives the cut, or a caller could not make progress; a single conflict
@@ -673,7 +671,7 @@ export class VersionedLiveAdapter {
 
   // One page of the daemon's whole-version comparison: differing paths with
   // status only, in path order, under the daemon's own page budget. Callers
-  // hydrate the sides they need per path (#562).
+  // hydrate the sides they need per path.
   async compareVersionFilesPage(input: {
     workspaceId: string;
     sourceVersionId: string;
@@ -722,9 +720,9 @@ export class VersionedLiveAdapter {
     );
   }
 
-  // ONE `conflicts.list` page, passed through with the daemon's own
+  // One `conflicts.list` page, passed through with the daemon's own
   // continuation. This adapter used to drain every page into one array, which
-  // undid the daemon's paging for every caller at once (#562).
+  // undid the daemon's paging for every caller at once.
   async listTextConflicts(input: {
     workspaceId: string;
     status?: "open" | "resolved";
@@ -756,7 +754,7 @@ export class VersionedLiveAdapter {
         nextAfterConflictId: page.nextAfterConflictId,
       };
     }
-    // Cut the page to its byte budget BEFORE fetching anything, using the
+    // Cut the page to its byte budget before fetching anything, using the
     // `byteLength` each withheld side already carries. Sizing first means the
     // bodies past the budget are never transferred, rather than transferred
     // and then dropped. One conflict always survives, or the cursor could not
@@ -776,8 +774,8 @@ export class VersionedLiveAdapter {
     }
     // A row past the daemon's conflict row frame cap arrives with its side
     // bodies withheld. Hydrate them here — the branch `readTextFile` already
-    // has — so every caller still receives full sides. Bounded over ONE page,
-    // because this adapter passes the daemon's continuation through (#562)
+    // has — so every caller still receives full sides. Bounded over one page,
+    // because this adapter passes the daemon's continuation through
     // instead of draining every page.
     const conflicts = await mapWithConcurrency(
       affordable,
@@ -937,7 +935,6 @@ export class VersionedLiveAdapter {
     versionId: string;
     path: string;
     mutationMomentId: string;
-    legacyBeforeText?: string;
   }): Promise<void> {
     this.assertWorkspace(input.workspaceId);
     const requestId = randomUUID();
@@ -1003,12 +1000,22 @@ export class VersionedLiveAdapter {
     await this.request(VERSIONED_METHOD.searchEnsureIndex, input);
   }
 
-  async querySearch(input: SearchQueryParams): Promise<SearchResult[]> {
-    return this.workspaceRequest(WORKSPACE_METHOD.searchQuery, input);
-  }
-
+  /**
+   * Drains every `collections.list` page through the exclusive cursor, so
+   * callers keep the full listing while each response stays frame-bounded.
+   */
   async listCollections(): Promise<CollectionListResult> {
-    return this.workspaceRequest(WORKSPACE_METHOD.collectionsList, {});
+    const collections: CollectionListResult["collections"] = [];
+    let cursor: string | null = null;
+    do {
+      const page: CollectionListPage = await this.workspaceRequest(
+        WORKSPACE_METHOD.collectionsList,
+        cursor === null ? {} : { cursor },
+      );
+      collections.push(...page.collections);
+      cursor = page.nextCursor;
+    } while (cursor !== null);
+    return { collections };
   }
 
   async listPendingCollectionAdoptions(
@@ -1188,8 +1195,8 @@ export class VersionedLiveAdapter {
     await this.request(VERSIONED_METHOD.secretsFork, input);
   }
 
-  // ONE `secrets.compare` page, passed through with the daemon's own
-  // continuation (#562) — the drain that put every remaining protected row on
+  // One `secrets.compare` page, passed through with the daemon's own
+  // continuation — the drain that put every remaining protected row on
   // one compare page lived here.
   async compareSecretFileVersions(input: {
     workspaceId: string;

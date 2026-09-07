@@ -1,9 +1,9 @@
 import {
   VERSIONED_METHOD,
-  VersionedLoopbackEngine,
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import type { SecretFileMoment } from "@dohc/workspace-contracts/engine";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
@@ -19,13 +19,13 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mockLiveSessions } from "../testing/liveEngineSessions";
-import { createTestScratch } from "./testTemp";
+import { mockDaemonSessions, mockLiveSessions } from "../testing/liveEngineSessions";
 import {
   createWorkspaceEngineCapture,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 
+import { createTestScratch } from "./testTemp";
 // Secret-backed files through the desktop daemon pipeline: protected moments
 // stay metadata-only while switch, merge, and restore materialize disk state.
 
@@ -33,17 +33,8 @@ const MARKER = "DESKTOP_SECRET_MARKER_31337";
 const ENV_A = `API_KEY=${MARKER}\n`;
 const ENV_B = `API_KEY=${MARKER}\nEXTRA=b\n`;
 
-const roots: string[] = [];
-
-async function tempRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-engine-secret-");
-  roots.push(root);
-  return root;
-}
-
 afterEach(async () => {
   vi.restoreAllMocks();
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 async function write(root: string, path: string, contents: string) {
@@ -67,11 +58,12 @@ function daemonCapture(
   loopback: VersionedLoopbackEngine,
   requests?: Request[],
 ): WorkspaceEngineCapture {
+  const workspaceId = "engine-secret-test";
   return createWorkspaceEngineCapture({
-    workspaceId: "engine-secret-test",
+    workspaceId,
     rootPath: root,
     attachmentId: Symbol("test-workspace-attachment"),
-    rustEngineSessions: mockLiveSessions(loopback, requests),
+    rustEngineSessions: mockDaemonSessions({ rootPath: root, workspaceId, loopback, requests }),
   });
 }
 
@@ -114,7 +106,7 @@ async function writeLoopbackSecret(
 
 describe("secret capture through the desktop pipeline (daemon path)", () => {
   it("captures metadata-only .env batches, coalesces no-op rewrites, and retires deletions", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-secret-");
     await write(root, ".env", ENV_A);
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
@@ -122,11 +114,14 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     engine.start();
     await engine.flush();
 
-    // The legacy in-process engine never opens a daemon workspace or writes
-    // the secret over the wire.
+    // The chain opens the daemon workspace; the daemon writes the secret
+    // into its own store, never the chain.
     const methods = requests.map((request) => request.method);
     expect(methods).toContain("workspace.open");
-    expect(methods).toContain(VERSIONED_METHOD.secretsWrite);
+    expect(methods).not.toContain(VERSIONED_METHOD.secretsWrite);
+    expect(loopback.requests.map((request) => request.method)).toContain(
+      VERSIONED_METHOD.secretsWrite,
+    );
 
     // Same content again: no second moment (content-equality no-op).
     engine.captureBatch([{ path: ".env", operation: "update" }]);
@@ -161,14 +156,14 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     expect(protectedMoments).toHaveLength(3);
     expect(protectedMoments[0].operation).toBe("delete");
     expect(protectedMoments[0].metadata.summary).toBe("Deleted .env");
-    expect(requests.map((request) => request.method)).toContain(
+    expect(loopback.requests.map((request) => request.method)).toContain(
       VERSIONED_METHOD.secretsDelete,
     );
     await engine.stop();
   });
 
   it("a version that never had .env removes it from disk on switch and restores it on the way back", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-secret-");
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
     const engine = daemonCapture(root, loopback, requests);
@@ -201,7 +196,7 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
   });
 
   it("compareVersions reports protected changes without contents", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-secret-");
     await write(root, ".env", ENV_A);
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
@@ -232,55 +227,22 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
   });
 });
 
-describe("#681 round 5: the stand-down marker cleanup must never touch secret paths", () => {
-  it("an engine-owned removal of a secret path does not record a spurious protected delete", async () => {
-    // #681 round 5, CodeRabbit Major (real). The round-4 hoist consumed the
-    // expected-delete token for EVERY event, before the secret floor gate —
-    // stealing it from `captureSecretPath`'s own `consumeExpectedEvent`
-    // check (workspaceEngineCapture.ts). An engine-owned removal — a
-    // version switch whose target omits the file, a relay fast-forward
-    // delete — registers this SAME token via `registerExpectedEngineEvents`
-    // before the disk delete, exactly like `materialize()` does for a
-    // text-file delete operation. With the token stolen, the removal read
-    // as EXTERNAL and recorded a spurious "Deleted .env" protected moment
-    // on every version switch that drops a secret file.
-    const root = await tempRoot();
-    await write(root, ".env", ENV_A);
-    const loopback = new VersionedLoopbackEngine();
-    const engine = daemonCapture(root, loopback);
-    engine.start();
-    await engine.flush();
-
-    let page = await engine.listMoments();
-    expect(page.moments.filter((moment) => moment.protected)).toHaveLength(1);
-
-    engine.registerExpectedEngineEvents([{ path: ".env", operation: "delete" }]);
-    await rm(join(root, ".env"));
-    engine.captureBatch([{ path: ".env", operation: "delete" }]);
-    await engine.flush();
-
-    // RED before the fix: the hoist consumed the token first, so this
-    // recorded a spurious second "Deleted .env" protected moment.
-    page = await engine.listMoments();
-    const protectedMoments = page.moments.filter((moment) => moment.protected);
-    expect(protectedMoments).toHaveLength(1);
-    await engine.stop();
-  });
-
+describe("the stand-down marker cleanup must never touch secret paths", () => {
   it("a secret path's watcher event never reaches the plaintext reader", async () => {
-    // #681 round 5, CodeRabbit security trivial (real, security-significant
-    // despite the tag). The round-4 hoist called the plaintext reader
-    // (readDiskTextState) unconditionally, before the secret floor —
-    // reading secret bytes through the reader with no secret-store
-    // awareness, and charging a redundant disk read to every secret event.
-    // Both readers ultimately call node:fs/promises readFile on the same
-    // absolute path, so a stray plaintext-reader call shows up as a SECOND
-    // readFile call for .env — readDiskSecretState's own read, inside
-    // captureSecretPath, is the only legitimate one.
-    const root = await tempRoot();
+    // The stand-down cleanup once called the plaintext reader
+    // (readDiskTextState) for every event, before the secret floor, reading
+    // secret bytes through a reader with no secret-store awareness. The
+    // daemon reads the file for capture; the chain has no reason to. The
+    // sessions here carry no daemon disk side, so every readFile of .env
+    // after the flush is the chain's own.
+    const root = await createTestScratch("dohc-engine-secret-");
     await write(root, ".env", ENV_A);
-    const loopback = new VersionedLoopbackEngine();
-    const engine = daemonCapture(root, loopback);
+    const engine = createWorkspaceEngineCapture({
+      workspaceId: "engine-secret-test",
+      rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment"),
+      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
+    });
     engine.start();
     await engine.flush();
 
@@ -294,16 +256,14 @@ describe("#681 round 5: the stand-down marker cleanup must never touch secret pa
     const envReads = trackedReadFile.mock.calls.filter(
       (call) => call[0] === envAbsolute,
     );
-    // RED before the fix: readDiskTextState's own extra read of .env's
-    // bytes, ahead of the secret floor, doubled this count.
-    expect(envReads).toHaveLength(1);
+    expect(envReads).toHaveLength(0);
     await engine.stop();
   });
 });
 
 describe("secret version operations through the desktop daemon path", () => {
   it("merges a version's secret into Main and materializes it", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-secret-");
     await write(root, ".env", ENV_A);
     const loopback = new SecretMergeLoopbackEngine();
     const requests: Request[] = [];
@@ -315,7 +275,7 @@ describe("secret version operations through the desktop daemon path", () => {
     engine.captureBatch([{ path: ".env", operation: "update" }]);
     await engine.flush();
 
-    // Merge while Main is ACTIVE so the merged secret must land on disk.
+    // Merge while Main is active so the merged secret must land on disk.
     await engine.switchVersion("main");
     expect(await readText(root, ".env")).toBe(ENV_A);
     const result = await engine.mergeVersionIntoMain(created.activeVersionId);
@@ -331,7 +291,7 @@ describe("secret version operations through the desktop daemon path", () => {
   });
 
   it("restores a protected file to before a moment and materializes it", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-secret-");
     await write(root, ".env", ENV_A);
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
@@ -368,7 +328,7 @@ describe("secret version operations through the desktop daemon path", () => {
 
 describe("listMoments protected pagination", () => {
   it("assigns tied protected moments to one half-open production page window", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-secret-");
     const loopback = new VersionedLoopbackEngine();
     await loopback.sendRequest({
       id: 1,
@@ -476,7 +436,7 @@ describe("listMoments protected pagination", () => {
   // then lower id. Ids here are chosen so that dropping any one rule reorders
   // the result.
   it("orders same-millisecond text before protected rows by the stated rule", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-secret-");
     const loopback = new VersionedLoopbackEngine();
     await loopback.sendRequest({
       id: 1,
@@ -489,7 +449,7 @@ describe("listMoments protected pagination", () => {
       "aa-secret",
       "tie",
     );
-    // "aaa-text" is written first, so it holds the LOWER momentOrder even
+    // "aaa-text" is written first, so it holds the lower momentOrder even
     // though its id sorts first.
     const textWrites: ReadonlyArray<[string, number]> = [
       ["older-text", tiedSecret.recordedAtMs - 1],
@@ -528,10 +488,10 @@ describe("listMoments protected pagination", () => {
 
   // The rule has to hold across the whole timeline the user reads, not only
   // inside one page. DesktopWorkspaceShell loads 200 moments at a time and
-  // APPENDS each later page, so a tie group longer than one page would put
+  // appends each later page, so a tie group longer than one page would put
   // the protected moment in front of the tied text moments still to come.
   it("keeps tied text before a protected moment across a page boundary", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-secret-");
     const loopback = new VersionedLoopbackEngine();
     await loopback.sendRequest({
       id: 1,

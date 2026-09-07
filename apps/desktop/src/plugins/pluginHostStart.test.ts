@@ -9,14 +9,7 @@ import {
   PluginHostBusyError,
 } from "./pluginCommandInvocation";
 import type { PluginHostRecordToken } from "./PluginHost";
-
-function deferredVoid(): { promise: Promise<void>; resolve: () => void } {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
+import { deferred } from "../testing/deferred";
 
 function ownedHost() {
   return {
@@ -31,7 +24,7 @@ function ownedHost() {
 
 describe("plugin host start", () => {
   it("returns the exact host only after activation finishes", async () => {
-    const activation = deferredVoid();
+    const activation = deferred();
     const host = {
       activationOf: vi.fn(() => activation.promise),
       marker: "exact-host",

@@ -1,18 +1,25 @@
 # Renderer profiling harness
 
-This harness measures renderer hypotheses A1 and A3 from `DISCOVERY-R2.md`.
-It also validates workspace-switch wins through the bounded switch timeline.
+This harness profiles the desktop renderer on seeded workspaces. Its six
+scenarios measure:
 
-The reader is the next agent preparing an orchestrator-scheduled profiling run.
+- `switch-profile`: ten workspace switches after both workspaces are ready,
+  as a phase timeline with median and p95 offsets.
+- `explorer-profile`: expanding a 5,000-file Explorer folder, to first child
+  and to the complete tree.
+- `quickopen-graph`: eight Quick Open keystrokes and Graph construction.
+- `excalidraw-profile`: pointer-frame dragging in the 1,500-element scene.
+- `bigdoc-profile`: opening, typing in, and saving the 250 KiB document.
+- `bigdoc-read-profile`: a settled read of the 3 MiB Markdown document.
+
+The reader is the next agent preparing a scheduled profiling run.
 
 ## Run the full profiles
 
 Use Node 24.14 or newer and pnpm 11.20.0.
 
-1. Build the desktop app with `pnpm build:desktop`.
-2. Ensure the worktree-root `target/debug` contains the current debug engine.
-3. Schedule exclusive access to the engine daemon build slot and desktop display.
-4. Run `node tools/perf-profiling/run-profiles.mjs --output test-results/perf-profiling`.
+1. Schedule an otherwise idle machine and exclusive access to the desktop display.
+2. Run `node tools/perf-profiling/run-profiles.mjs --output test-results/perf-profiling`.
 
 Do not run full profiles concurrently. CPU profiles need an otherwise idle machine.
 
@@ -21,8 +28,8 @@ Electron launches a real window in either mode.
 
 The runner performs these actions:
 
-1. Seeds deterministic workspaces under `<output>/fixtures`.
-2. Stages the worktree-root engine through the existing E2E preflight.
+1. Prepares and verifies the engine and desktop for this checkout, then stages the engine for E2E.
+2. Seeds deterministic workspaces under `<output>/fixtures`.
 3. Runs each profiling spec in a separate Electron profile.
 4. Runs the six scenarios serially.
 5. Writes an attributable `run.json` before launching the scenarios.
@@ -34,7 +41,10 @@ keeps one broken path from hiding the rest of the launch evidence. Each
 scenario also has its own Playwright output directory, so a later pass cannot
 erase an earlier failure screenshot or trace.
 
-The runner does not build the app or the Rust engine.
+Preparation installs frozen dependencies and rebuilds the engine or desktop when its inputs or artifacts differ from the receipt.
+An engine rebuild acquires a shared build slot and uses the workstation's build budget.
+To prepare before the profiling window, run `pnpm qa:prepare` in the same checkout.
+The profiling runner still verifies that preparation before it seeds workspaces or collects profiles.
 
 ## Run the plumbing smoke
 

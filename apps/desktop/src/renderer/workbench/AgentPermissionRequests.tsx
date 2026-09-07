@@ -1,3 +1,4 @@
+import { SectionLabel } from "../ui/controls";
 import { Check, ShieldAlert, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentPermissionDecision } from "../../ipc/bridgeContract";
@@ -5,7 +6,7 @@ import { bridge } from "../bridge";
 import { useGuestBlockingUiWhile } from "../guestBlockingUi";
 import type { AgentPermissionRequest } from "./useAgentNotifications";
 
-// Floating permission cards (update-toast position, bottom-right): THE place
+// Floating permission cards (update-toast position, bottom-right): the place
 // a blocked agent run asks the user for consent. Requests arrive through the
 // shell's session poll (useAgentNotifications) from any run source — "Try it
 // in a version", chat dispatch, an MCP-connected agent — and answering
@@ -28,7 +29,7 @@ function permissionDecision(kind: string): AgentPermissionDecision {
 export function AgentPermissionRequests(props: {
   workspaceId: string;
   // The run the requests belong to (session runId). Optimistic-hide keys are
-  // scoped by it: a LATER run reusing a provider request id must ask again,
+  // scoped by it: a later run reusing a provider request id must ask again,
   // never inherit an old answer.
   runId: string | null;
   requests: readonly AgentPermissionRequest[];
@@ -106,9 +107,9 @@ export function AgentPermissionRequests(props: {
         >
           <div className="mb-1 flex items-center gap-2">
             <ShieldAlert size={13} aria-hidden className="shrink-0 text-warning" />
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-subtle">
+            <SectionLabel >
               Your agent asked
-            </span>
+            </SectionLabel>
           </div>
           <h3 className="m-0 mb-1 text-[13px] font-medium leading-snug text-ink">
             {request.title}

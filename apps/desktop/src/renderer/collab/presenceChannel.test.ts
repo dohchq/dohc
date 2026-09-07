@@ -162,9 +162,9 @@ describe("createPresenceChannel", () => {
     await flush();
     peers.mockClear();
     // pollController.abort() happens synchronously inside stop(), before it
-    // awaits any in-flight publish (#742 P2, round 5) — but leave() no
+    // awaits any in-flight publish — but leave() no
     // longer dispatches synchronously, so it is checked after a flush, not
-    // synchronously. stop()'s own returned promise is NOT awaited here: it
+    // synchronously. stop()'s own returned promise is not awaited here: it
     // additionally waits on loopDone, which (in this fake) only settles once
     // resolvePoll runs below — awaiting it here would deadlock the test.
     void channel.stop();
@@ -177,7 +177,7 @@ describe("createPresenceChannel", () => {
         incarnationId: f.publishes[0]?.incarnationId,
       },
     ]);
-    // A poll that resolves AFTER stop must not repaint.
+    // A poll that resolves after stop must not repaint.
     await f.resolvePoll({ version: 99, peers: [{ userId: "x", clientId: "cx", state: {}, updatedAtMs: 0 }] });
     await flush();
     expect(peers).not.toHaveBeenCalled();
@@ -243,7 +243,7 @@ describe("createPresenceChannel", () => {
     await flush(); // the failed poll has parked the loop in its retry sleep
     expect(polls).toBe(1);
     // stop() must resolve the sleeping promise so the loop observes `stopped`
-    // and RETURNS — before the fix it dangled until the 60s timer was GC'd.
+    // and returns — before the fix it dangled until the 60s timer was GC'd.
     const outcome = await Promise.race([
       channel.stop().then(() => "terminated"),
       new Promise<string>((resolve) => setTimeout(() => resolve("leaked"), 250)),
@@ -279,9 +279,9 @@ describe("createPresenceChannel", () => {
     await flush(); // any unhandled rejection would fail the test run here
   });
 
-  // #742 P2, round 5: awaiting transport.leave alone does not order it after
+  // Awaiting transport.leave alone does not order it after
   // a publish already in flight when stop() is called — a late-arriving
-  // publish (a heartbeat, or setState) can reach the transport AFTER leave
+  // publish (a heartbeat, or setState) can reach the transport after leave
   // does, reviving presence the instant after it left (ghost until the
   // relay's TTL). This transport hangs its SECOND publish (the kickoff's
   // first publish settles immediately, matching real startup) until the test
@@ -372,7 +372,7 @@ describe("createPresenceChannel", () => {
       onPeers: vi.fn(),
     });
     // The initial publish is still in flight. Rapid updates must not start
-    // concurrent requests — they coalesce into ONE queued publish that reads
+    // concurrent requests — they coalesce into one queued publish that reads
     // the newest state when it runs.
     channel.setState({ n: 1 });
     channel.setState({ n: 2 });

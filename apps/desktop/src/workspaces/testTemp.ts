@@ -15,10 +15,9 @@ const SCRATCH_PARENT = "dohc-test-scratch";
 // How long a run root must be untouched before this sweep may remove it.
 //
 // This sweep walks the parent every runtime shares, so it can reach a live Rust
-// soak's workspace, not just an abandoned vitest run. It is a limit that
-// destroys work, so it is set past the longest run this repo asks for:
-// `tools/rust-engine-program/soak-config.json` declares
-// `postCutoverContinuous.durationsHours: [6, 24]`. Double the longest.
+// test's workspace, not just an abandoned vitest run. It is a limit that
+// destroys work, so it sits at twice the longest run anything here is expected
+// to hold a workspace open: a day.
 const MAX_RUN_AGE_MS = 48 * 60 * 60 * 1_000;
 // Windows refuses to unlink a file whose handle is still open, and a just-closed
 // SQLite handle can hold one for a beat. This is the budget the e2e helper this
@@ -80,7 +79,7 @@ export function testScratchRunRoot(): string {
 }
 
 export async function createTestScratch(prefix: string): Promise<string> {
-  await ensureScratchRun();
+  await prepareTestScratch();
   const path = await mkdtemp(join(testScratchRunRoot(), safePrefix(prefix)));
   testScratch.add(path);
   return path;
@@ -134,7 +133,7 @@ export async function removeTestScratch(path: string): Promise<void> {
   unresolvedScratch.delete(path);
 }
 
-export async function sweepOldTestScratch(): Promise<void> {
+async function sweepOldTestScratch(): Promise<void> {
   const currentRun = testScratchRunRoot();
   await sweepScratchParent(join(nativeTmpdir(), SCRATCH_PARENT), currentRun, Date.now());
 }
@@ -215,7 +214,7 @@ function scratchRunId(): string {
 /// not own — an external target with recent files would pin an abandoned run
 /// forever, and a cycle answers `ELOOP`, which reads as "still busy" and pins it
 /// the same way.
-export async function isIdleSince(path: string, nowMs: number): Promise<boolean> {
+async function isIdleSince(path: string, nowMs: number): Promise<boolean> {
   let metadata;
   try {
     metadata = await lstat(path);
@@ -253,7 +252,7 @@ function safePrefix(prefix: string): string {
   return safe.length > 0 && !isDirection ? safe : "scratch-";
 }
 
-async function ensureScratchRun(): Promise<void> {
+export async function prepareTestScratch(): Promise<void> {
   startup ??= (async () => {
     await sweepOldTestScratch();
     await mkdir(testScratchRunRoot(), { recursive: true });
@@ -261,7 +260,7 @@ async function ensureScratchRun(): Promise<void> {
   await startup;
 }
 
-// Only the run root, never a sweep. `testSetup.ts` awaits `sweepOldTestScratch`
+// Only the run root, never a sweep. `testSetup.ts` awaits `prepareTestScratch`
 // at module scope, and vitest evaluates a setup file before the test module
 // that needs this — so by the time any synchronous creator runs, the sweep has
 // already happened. Playwright never reaches here: its helpers are async.
@@ -319,4 +318,3 @@ function errorCode(error: unknown): string {
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
-

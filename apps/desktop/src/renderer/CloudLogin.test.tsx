@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudLogin } from "./CloudLogin";
 
+import { deferred } from "../testing/deferred";
 const bridgeMock = {
   cloudStatus: vi.fn(),
   cloudEnableSync: vi.fn(),
@@ -16,16 +17,6 @@ const bridgeMock = {
 vi.mock("./bridge", () => ({
   bridge: () => bridgeMock,
 }));
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((nextResolve, nextReject) => {
-    resolve = nextResolve;
-    reject = nextReject;
-  });
-  return { promise, resolve, reject };
-}
 
 beforeEach(() => {
   vi.useRealTimers();
@@ -410,7 +401,7 @@ describe("CloudLogin", () => {
     expect(screen.getByTestId("cloud-sync-passphrase")).toBeTruthy();
   });
 
-  it("shows the copyable sync code for a synced workspace (0P-C join handle)", async () => {
+  it("shows the copyable sync code for a synced workspace", async () => {
     bridgeMock.cloudStatus.mockResolvedValue({
       connected: true,
       email: "ice@dohc.dev",

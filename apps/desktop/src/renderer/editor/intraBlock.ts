@@ -1,7 +1,7 @@
-// #688: lineBlocks.ts lands a search result on the top-level BLOCK holding the
+// lineBlocks.ts lands a search result on the top-level BLOCK holding the
 // line, which is the whole passage when the block is a paragraph and almost
 // none of it when the block is a hundred-item list or a three-hundred-line
-// fence. This refines that landing to a range INSIDE the block — but only
+// fence. This refines that landing to a range inside the block — but only
 // where the source and the parsed node agree well enough to prove the answer.
 //
 // The mapping in lineBlocks.ts is block-granular BY DESIGN and stays that way.
@@ -16,14 +16,14 @@
 //
 // UNSURE, every case, all of which fall back to the block start:
 //
-//  - The matched line is the block's FIRST line (offset 0), or sits outside
+//  - The matched line is the block's first line (offset 0), or sits outside
 //    the block's own lines. Both already land where the block starts.
 //  - The block is neither a fenced code block nor a list. A quote, a table
 //    and a paragraph have children too, but no rule here maps a source line
 //    onto them, and a guessed one would land the wrong child.
 //  - A code block whose text does not equal its source lines from line 1 on.
 //    That is what proves the offset is exactly one opening fence — an
-//    INDENTED code block (four columns the parse strips) fails it, and so
+//    indented code block (four columns the parse strips) fails it, and so
 //    does a Y.Doc that has drifted from the artifact search numbered.
 //  - A code block whose matched line is empty: an empty inline range renders
 //    no element to scroll to.
@@ -31,7 +31,7 @@
 //    whose counted child's rendered text does not contain the matched line's
 //    rendered text. The count rejects drift and unmodeled shapes; because it
 //    can agree by coincidence, the text check rejects the wrong child.
-//  - A top-level list whose matched line belongs to its FIRST item, nested
+//  - A top-level list whose matched line belongs to its first item, nested
 //    lines included — that item starts where the block does.
 
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
@@ -46,13 +46,13 @@ export type IntraBlockMatch = {
 
 /** A range inside the document, in the same coordinates the block index is
  *  resolved in: `containerPos` is where the block starts. */
-export type DocRange = { from: number; to: number };
+type DocRange = { from: number; to: number };
 
-export type InlineTextRenderer = (source: string) => string;
+type InlineTextRenderer = (source: string) => string;
 
 // A list item's marker. Narrower than the list rules in lineBlocks.ts on
 // purpose: this only has to recognize a line that starts an item of a list
-// the parser has ALREADY built, and the count check below rejects it when it
+// the parser has already built, and the count check below rejects it when it
 // recognizes the wrong ones.
 const LIST_ITEM_RE = /^[ \t]{0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/;
 const LIST_TYPES = new Set(["bulletList", "orderedList", "taskList"]);
@@ -88,12 +88,12 @@ function dedentLine(line: string, columns: number): string {
   return line.slice(index);
 }
 
-/** PURE: which top-level block of `body` holds 1-based `line`, and the block's
+/** Pure: which top-level block of `body` holds 1-based `line`, and the block's
  *  own source around it. The seam a search jump rides: the index reveals the
  *  block, the match refines the landing inside it.
  *
  *  No match when the line is not one of the block's own lines — a gap line
- *  resolves to the block ABOVE it, and a body with no block at all has
+ *  resolves to the block above it, and a body with no block at all has
  *  nothing to slice. */
 export function blockTargetForLine(
   body: string,
@@ -112,7 +112,7 @@ export function blockTargetForLine(
   };
 }
 
-/** PURE: the range inside `container` holding the matched source line, or
+/** Pure: the range inside `container` holding the matched source line, or
  *  null when that cannot be proven — see the unsure list above. */
 export function intraBlockRange(
   container: ProseMirrorNode,
@@ -173,7 +173,7 @@ function codeLineRange(
 /** The item holding the matched line, found by counting item starts above it
  *  only when the count equals childCount and the child's rendered text contains
  *  the matched line's rendered text. The text check rejects a wrong child when
- *  the counts agree by coincidence. The item's CONTENT is the range, so the
+ *  the counts agree by coincidence. The item's content is the range, so the
  *  reveal has text to render. */
 function listItemRange(
   container: ProseMirrorNode,
@@ -199,7 +199,7 @@ function listItemRange(
     itemCount += 1;
   }
   if (itemCount !== container.childCount) return null;
-  // The first item starts where the block does only at the TOP level — a
+  // The first item starts where the block does only at the top level — a
   // proven descent's own synthetic document always starts below the outer
   // item's first line, so its first item is ground the outer level never
   // reached.

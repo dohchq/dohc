@@ -30,7 +30,6 @@ import type {
   CollectionRecord,
 } from "@dohc/workspace-contracts/collection";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
-import { LINKED_CHAT_STORE_RELATIVE_PATH } from "@dohc/workspace-contracts/engine";
 import type {
   ChannelThreadSummary,
   ChatChannelSummary,
@@ -51,7 +50,6 @@ import {
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { createRequire } from "node:module";
 import { createServer, type Server, type Socket } from "node:net";
 import {
   chmod,
@@ -80,7 +78,7 @@ import { z } from "zod";
 import { isInside } from "../security/pathContainment";
 
 export const CLI_SOCKET_FILE = "dohc-cli.sock";
-export const CLI_TOKEN_FILE = "dohc-cli-token";
+const CLI_TOKEN_FILE = "dohc-cli-token";
 export const CLI_ENDPOINT_FILE = "dohc-cli-endpoint";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -122,25 +120,6 @@ try {
 }
 `;
 
-interface EngineSqliteStatement {
-  all(...params: unknown[]): Array<Record<string, unknown>>;
-  get(...params: unknown[]): Record<string, unknown> | undefined;
-  run(...params: unknown[]): { changes: number };
-}
-
-interface EngineSqliteDb {
-  exec(sql: string): void;
-  prepare(sql: string): EngineSqliteStatement;
-  close(): void;
-}
-
-interface SqliteModule {
-  DatabaseSync: new (
-    path: string,
-    options?: { readOnly?: boolean },
-  ) => EngineSqliteDb;
-}
-
 type CliGranularChatMessageSearchResult = Pick<
   GranularChatMessageSearchResult,
   "threadId" | "messageId" | "text"
@@ -166,7 +145,7 @@ export interface CliRegistryWorkspace {
 // `setCollectionRecordFields` / `createCollectionRecord` in
 // `apps/desktop/src/workspaces/collectionRecordEdits.ts` exactly, so main's
 // wiring is a closure over that module's workspace-scoped edit context. The
-// author is derived HERE, main-side, from the workspace identity plus the
+// author is derived here, main-side, from the workspace identity plus the
 // behavior-bearing actor kind; the request never supplies one. Field values
 // are plain JSON: they land in the record's frontmatter Y.Doc map. Both
 // functions throw on refusal (invalid path, engine off, "id" field, a held
@@ -186,13 +165,11 @@ export interface CliCollectionWriteSeam {
 }
 
 // Engine-backed collection access for the CLI verbs. Reads go to the engine
-// adapter; the two writes go through the write seam. `writes` is the seam's
-// injection point: main wires it when the seam exists, and the write verbs
-// answer with a failure naming the missing capability until it does.
+// adapter; the two writes go through the write seam.
 export interface CliCollectionsPort {
   query(params: CollectionQueryParams): Promise<CollectionQueryResult>;
   getRecord(params: CollectionGetRecordParams): Promise<CollectionGetRecordResult>;
-  writes?: CliCollectionWriteSeam;
+  writes: CliCollectionWriteSeam;
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
@@ -208,7 +185,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
     target: { channelId: string } | { threadId: string },
     authorUserId: string | undefined,
   ): Promise<void>;
-  daemonReads?: {
+  daemonReads: {
     queryChatMessagesGranular(input: {
       query: string;
       limit: number;
@@ -222,7 +199,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   collections?: CliCollectionsPort;
 }
 
-export interface CliMainIdentity {
+interface CliMainIdentity {
   displayName: string;
   authorUserId?: string;
   reactionAuthorId: string;
@@ -249,7 +226,7 @@ export interface CliServerOptions {
     target?: { channelId: string } | { threadId: string },
   ): void | Promise<void>;
   // A chat read has no renderer poll behind it — with no window open, nothing
-  // else ever runs a sync pass for it (#731). AWAITED (up to a bound — see
+  // else ever runs a sync pass for it. Awaited (up to a bound — see
   // CHAT_READ_SYNC_BUDGET_MS) before the verb reads the store, the same
   // bounded rotating pass the renderer's reads trigger. `target` names the
   // read's own channel or thread, when the verb's args carry one, so that
@@ -279,7 +256,6 @@ export interface CliServerOptions {
 export interface CliServerHandle {
   socketPath: string;
   tokenPath: string;
-  ready: Promise<void>;
   close(): Promise<void>;
 }
 
@@ -300,12 +276,6 @@ class CliCommandError extends Error {
     super(message.startsWith("dohc:") ? message : `dohc: ${message}`);
     this.name = "CliCommandError";
   }
-}
-
-const requireModule = createRequire(import.meta.url);
-
-function nodeSqlite(): SqliteModule {
-  return requireModule("node:sqlite") as SqliteModule;
 }
 
 export async function resolveCliWorkspace(
@@ -353,7 +323,7 @@ function shortenedEngineId(id: string, enginePrefix: string, cliPrefix: string):
     : id;
 }
 
-export function cliChannelId(id: string): string {
+function cliChannelId(id: string): string {
   return shortenedEngineId(id, "channel_", "ch_");
 }
 
@@ -468,13 +438,6 @@ function collectionsUnavailable() {
   return {
     ok: false as const,
     reason: "collections are not available in this workspace",
-  };
-}
-
-function collectionWritesUnavailable() {
-  return {
-    ok: false as const,
-    reason: "collection writes are not available in this dohc build",
   };
 }
 
@@ -980,29 +943,10 @@ async function queryFtsCandidates(
   onDebug?: (message: string) => void,
 ): Promise<{ threadIds: Set<string>; messageIds: Set<string> } | null> {
   if ([...query.trim()].length < 3) return null;
-  if (
-    context.daemonReads &&
-    [...query.trim()].length > MAX_GRANULAR_CHAT_QUERY_CHARS
-  ) {
-    return null;
-  }
+  if ([...query.trim()].length > MAX_GRANULAR_CHAT_QUERY_CHARS) return null;
   let response: CliGranularChatMessageSearchResponse;
   try {
-    // The daemon is the only reader. It is unconditionally present -- main.ts
-    // quits the app if startRustEngineDaemon fails, before the CLI server is
-    // even registered -- so the legacy branch here, which opened a SECOND
-    // sqlite connection to the daemon-owned engine.db, was unreachable.
-    //
-    // Thrown rather than silently degraded: a missing daemon reader is an
-    // invariant violation, and the old fallback quietly became a second
-    // writer-adjacent connection to a database the daemon owns.
-    const daemonReads = context.daemonReads;
-    if (!daemonReads) {
-      throw new Error(
-        "CLI workspace context has no daemon reader; the engine daemon is required.",
-      );
-    }
-    response = await daemonReads.queryChatMessagesGranular({
+    response = await context.daemonReads.queryChatMessagesGranular({
       query,
       limit: MAX_FTS_CANDIDATES,
     });
@@ -1030,65 +974,20 @@ async function queryFtsCandidates(
 async function humanUnreadFileThreadIds(
   context: CliWorkspaceContext,
 ): Promise<Set<string>> {
-  if (context.daemonReads) {
-    const threadIds = new Set<string>();
-    let afterThreadId: string | undefined;
-    for (;;) {
-      const rows = await context.daemonReads.listUnreadFileThreads({
-        pageLimit: 500,
-        ...(afterThreadId ? { afterThreadId } : {}),
-      });
-      for (const row of rows) threadIds.add(row.threadId);
-      if (rows.length < 500) return threadIds;
-      const next = rows.at(-1)?.threadId;
-      if (!next || next === afterThreadId) {
-        throw new Error("Daemon unread-file pagination did not advance.");
-      }
-      afterThreadId = next;
+  const threadIds = new Set<string>();
+  let afterThreadId: string | undefined;
+  for (;;) {
+    const rows = await context.daemonReads.listUnreadFileThreads({
+      pageLimit: 500,
+      ...(afterThreadId ? { afterThreadId } : {}),
+    });
+    for (const row of rows) threadIds.add(row.threadId);
+    if (rows.length < 500) return threadIds;
+    const next = rows.at(-1)?.threadId;
+    if (!next || next === afterThreadId) {
+      throw new Error("Daemon unread-file pagination did not advance.");
     }
-  }
-  const { DatabaseSync } = nodeSqlite();
-  let db: EngineSqliteDb | null = null;
-  try {
-    db = new DatabaseSync(
-      join(context.rootPath, LINKED_CHAT_STORE_RELATIVE_PATH),
-      { readOnly: true },
-    );
-    const rows = db.prepare(
-      `SELECT t.thread_id,
-              (SELECT COUNT(*) FROM chat_messages m
-               WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id)
-                AS message_count,
-              COALESCE((SELECT rs.last_read_sequence FROM chat_thread_read_state rs
-                        WHERE rs.workspace_id = t.workspace_id AND rs.thread_id = t.thread_id), 0)
-                AS last_read_sequence
-       FROM chat_threads t
-       WHERE t.workspace_id = ?
-         AND t.channel_id IS NULL
-         AND t.linked_object_id IS NOT NULL`,
-    ).all(context.workspaceId);
-    const ids = new Set<string>();
-    for (const row of rows) {
-      const messageCount = row.message_count;
-      const lastReadSequence = row.last_read_sequence;
-      if (
-        typeof row.thread_id !== "string" || row.thread_id.length === 0 ||
-        typeof messageCount !== "number" ||
-        !Number.isSafeInteger(messageCount) ||
-        messageCount < 0 ||
-        typeof lastReadSequence !== "number" ||
-        !Number.isSafeInteger(lastReadSequence) ||
-        lastReadSequence < 0
-      ) {
-        throw new CliCommandError("chat store contains invalid read state");
-      }
-      if (messageCount > Math.min(lastReadSequence, messageCount)) {
-        ids.add(row.thread_id);
-      }
-    }
-    return ids;
-  } finally {
-    db?.close();
+    afterThreadId = next;
   }
 }
 
@@ -1120,7 +1019,7 @@ const CHAT_READ_SYNC_BUDGET_MS = 10_000;
 
 // A pass past the budget keeps running detached (see notifyRead below). A
 // slow relay behind a stream of reads would otherwise start one detached pass
-// PER READ — main.ts's own serializer only stops them running concurrently,
+// per read — main.ts's own serializer only stops them running concurrently,
 // not from queueing up unboundedly. One in-flight pass per (options,
 // workspace) is tracked here so a read that finds one already running joins
 // its race instead of starting another.
@@ -1142,7 +1041,7 @@ async function notifyRead(
   const inFlight = chatReadSyncInFlightFor(options);
   let pending = inFlight.get(context.workspaceId);
   if (!pending) {
-    // `target` names the pass THIS call starts. A read that instead joins an
+    // `target` names the pass this call starts. A read that instead joins an
     // already-running pass gets whatever priority that pass already
     // committed to — the same tradeoff a rotation-only pass always had.
     pending = Promise.resolve()
@@ -1166,7 +1065,7 @@ async function notifyRead(
   });
   // Past the budget, the read proceeds on whatever the store already has —
   // `pending` keeps running (tracked above, so a concurrent read joins it
-  // instead of starting a second one) and the NEXT read benefits from what it
+  // instead of starting a second one) and the next read benefits from what it
   // finishes.
   await Promise.race([pending, budget]);
   clearTimeout(timer);
@@ -1190,7 +1089,7 @@ function isChatReadVerb(verb: CliRequest["verb"]): boolean {
 
 // The chat/show/threads verbs name their target directly in their args — no
 // resolution against the (not-yet-synced) local channel/thread list needed,
-// the way #725's write side already resolves it. A wrong or unresolvable
+// the way the write side already resolves it. A wrong or unresolvable
 // guess is harmless: syncSharedChannelsForChatTarget falls back to a plain
 // pass, so this can only add coverage, never remove it.
 function chatReadTarget(
@@ -1214,7 +1113,7 @@ type RunMessageLinkInput = {
   messageId: string;
 };
 
-// A daemon refusal carries the engine's domain code as its message (#418).
+// A daemon refusal carries the engine's domain code as its message.
 // Two of those codes can never succeed on a retry: a malformed message or run
 // id ("invalid-input"), and a run that is not in this workspace
 // ("run-not-found"). Retryability does not select them — a persist failure is
@@ -2001,7 +1900,6 @@ async function dispatch(
     case "collectionSetFields": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
-      if (!collections.writes) return collectionWritesUnavailable();
       // A write-mode check: the seam opens the record's live session, so
       // the path must clear the same floor every other CLI write clears.
       const validated = validateUserWritePath(request.args.recordPath);
@@ -2026,7 +1924,6 @@ async function dispatch(
     case "collectionCreateRecord": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
-      if (!collections.writes) return collectionWritesUnavailable();
       const collectionValidated = validateUserReadPath(
         request.args.collectionPath,
       );
@@ -2862,23 +2759,17 @@ export async function startCliServer(
   }
   server.unref();
   server.on("error", (error) => options.onError?.(error));
-  const ready = Promise.resolve();
 
   let closed = false;
   return {
     socketPath,
     tokenPath,
-    ready,
     async close() {
       if (closed) return;
       closed = true;
       const serverClosed = closeServer(server);
       for (const socket of sockets) socket.destroy();
-      await Promise.all([
-        serverClosed,
-        ready,
-        Promise.allSettled([...inFlight]),
-      ]);
+      await Promise.all([serverClosed, Promise.allSettled([...inFlight])]);
       await Promise.all([
         rm(endpointArtifactPath, { force: true }),
         rm(tokenPath, { force: true }),

@@ -1,9 +1,9 @@
 import { forwardRef } from "react";
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from "react";
 import { DohcMark } from "@dohc/brand";
 
 // The dohc control primitives — the canonical implementations of the recipes
-// in the dohc-interface skill. Surfaces compose THESE instead of re-typing
+// in the dohc-interface skill. Surfaces compose these instead of re-typing
 // class strings so the language cannot drift file by file. Styling changes
 // happen here (or in the spec) — never inline at a call site.
 
@@ -13,34 +13,36 @@ function cx(...parts: Array<string | false | undefined>): string {
   return parts.filter(Boolean).join(" ");
 }
 
-// Class constants exist for call sites that must BRANCH between recipes on a
-// single element (e.g. a Start/Stop toggle, where swapping components would
-// remount the button and drop keyboard focus). Everything else composes the
-// components below.
-export const primaryButtonClass =
+const primaryButtonClass =
   "rounded-lg bg-accent px-3 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50";
-export const secondaryButtonClass =
+const secondaryButtonClass =
   "rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:opacity-50";
-export const iconButtonClass =
+const iconButtonClass =
   "grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:pointer-events-none disabled:opacity-40";
 
+type ActionButtonProps = NativeButtonProps & { size?: "default" | "compact" };
+const compactPrimaryButtonClass =
+  "h-7 cursor-pointer rounded-md bg-accent px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 dohc-focus-visible focus-visible:outline-offset-1 disabled:cursor-wait disabled:opacity-50";
+const compactSecondaryButtonClass =
+  "h-7 cursor-pointer rounded-md border border-line px-2.5 text-[11px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-50";
+
 /** Filled brand-accent CTA — at most one per surface. */
-export function PrimaryButton({ className, type, ...rest }: NativeButtonProps) {
+export function PrimaryButton({ className, type, size, ...rest }: ActionButtonProps) {
   return (
     <button
       type={type ?? "button"}
-      className={cx(primaryButtonClass, className)}
+      className={cx(size === "compact" ? compactPrimaryButtonClass : primaryButtonClass, className)}
       {...rest}
     />
   );
 }
 
 /** Quiet bordered action — the default button. */
-export function SecondaryButton({ className, type, ...rest }: NativeButtonProps) {
+export function SecondaryButton({ className, type, size, ...rest }: ActionButtonProps) {
   return (
     <button
       type={type ?? "button"}
-      className={cx(secondaryButtonClass, className)}
+      className={cx(size === "compact" ? compactSecondaryButtonClass : secondaryButtonClass, className)}
       {...rest}
     />
   );
@@ -83,32 +85,26 @@ export function Pill({
   );
 }
 
-/** Keyboard hint chip — always the mono voice. */
-export function Kbd({ children }: { children: ReactNode }) {
-  return (
-    <kbd className="rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle">
-      {children}
-    </kbd>
-  );
-}
-
 /** Uppercase section label for panel groups. */
 export function SectionLabel({
+  as: Element = "span",
   className,
   children,
+  ...rest
 }: {
-  className?: string;
+  as?: "span" | "p" | "div" | "header" | "h3";
   children: ReactNode;
-}) {
+} & HTMLAttributes<HTMLElement>) {
   return (
-    <span
+    <Element
+      {...rest}
       className={cx(
-        "text-[10px] font-semibold uppercase tracking-wide text-subtle",
+        "dohc-section-label",
         className,
       )}
     >
       {children}
-    </span>
+    </Element>
   );
 }
 

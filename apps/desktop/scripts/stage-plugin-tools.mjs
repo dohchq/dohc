@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { cp, mkdir, readFile, readdir, realpath, rename, rm, stat } from "node:fs/promises";
+import { accessSync, constants } from "node:fs";
+import { chmod, cp, mkdir, readFile, readdir, realpath, rename, rm, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -54,6 +55,18 @@ export function esbuildPlatformPackageName(platform = process.platform, arch = p
     );
   }
   return packageName;
+}
+
+export function stagedEsbuildExecutable(destinationRoot, platformPackage = esbuildPlatformPackageName()) {
+  if (process.platform === "win32" || platformPackage.startsWith("@esbuild/win32-")) return true;
+  const platformKey = platformPackage.slice("@esbuild/".length);
+  try {
+    accessSync(join(destinationRoot, "esbuild", platformKey, "node_modules", platformPackage, "bin/esbuild"), constants.X_OK);
+    return true;
+  } catch (error) {
+    if (["ENOENT", "EACCES", "EPERM"].includes(error.code)) return false;
+    throw error;
+  }
 }
 
 function errorMessage(error) {
@@ -262,6 +275,11 @@ export async function stagePluginTools(options = {}) {
       dereference: true,
     }),
   ]);
+  if (!stagedEsbuildExecutable(stagingRoot, platformPackage)) {
+    const binary = join(stagingNodeModules, platformPackage, "bin/esbuild");
+    await chmod(binary, (await stat(binary)).mode | 0o100);
+    if (!stagedEsbuildExecutable(stagingRoot, platformPackage)) throw new Error(`Staged esbuild is not executable: ${binary}`);
+  }
 
   // A tree that already matches is left untouched. A dev app that runs from
   // this worktree holds files in the live tree open, so the rebuild that
@@ -270,7 +288,7 @@ export async function stagePluginTools(options = {}) {
     aggregateTreeSha512(stagingRoot),
     aggregateTreeSha512(destinationRoot).catch(() => null),
   ]);
-  const swapped = candidateSha512 !== liveSha512;
+  const swapped = candidateSha512 !== liveSha512 || !stagedEsbuildExecutable(destinationRoot, platformPackage);
   if (swapped) {
     const replaced = await swapStagedTree({ destinationRoot, stagingRoot, replacedRoot });
     if (replaced) retained.push(replaced);

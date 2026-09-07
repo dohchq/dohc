@@ -382,7 +382,7 @@ fn corrupt_bundle(bundle_order: i64, constraint: &str) -> SyncError {
 mod tests {
     use dohc_engine_domain::VersionedTextStore;
     use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome, hex_sha256};
-    use dohc_engine_testkit::ScratchDir;
+    use dohc_engine_testkit::{ScratchDir, open_store};
     use rusqlite::params;
 
     use super::*;
@@ -393,9 +393,7 @@ mod tests {
     };
 
     fn store() -> (ScratchDir, EngineStore) {
-        let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
-        let mut store = EngineStore::open(&path, 1_000).expect("open store");
+        let (scratch, _, mut store) = open_store();
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1, &NoFaults)
             .expect("main version");

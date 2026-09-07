@@ -36,6 +36,8 @@ ADR 0004's "one typed create-only collection" and this program's collection are 
 
 ## Phase 1: engine collections
 
+**Status: DONE.**
+
 The data layer, no UI. A schema'd folder that validates, indexes, and syncs is the shippable result.
 
 - Define the collection schema contract in `packages/workspace-contracts` with a Rust twin held equal by shared vectors: field types, relation targets, select options, view definitions. `collection.yaml` is the one reserved filename.
@@ -50,6 +52,8 @@ Settled (2026-08-27): a record id is engine-minted and opaque, `rec_` plus 128 b
 Gate: the rust-gate skill passes, read from its summary block. Tests prove: adoption mints and writes back ids exactly once; two devices editing different fields of one record converge with both writes; two devices editing the same field converge on the later write with the earlier one in history; invalid values index flagged and survive round-trips; a broken schema degrades and recovers without data loss; deleting a referenced record drops relation edges through attributed ops.
 
 ## Phase 2: views
+
+**Status: DONE.**
 
 Everything a Notion user touches. All three views ship in this phase.
 
@@ -67,8 +71,10 @@ Gate: `pnpm typecheck` and `pnpm test:desktop` pass, plus an e2e walkthrough in 
 
 ## Phase 3: events and the SDK
 
+**Status: DONE.**
+
 - Add record.created, record.updated, and record.field.changed to the workspace event vocabulary. Payload: collection path, record id, field, previous value, next value, author, timestamp. The engine emits on apply; the desktop forwards over the same SDK channel as `files.watch`, with the same per-owner subscription cap.
-- Serve the dormant `collections.read` SDK capability from the real index, path-scoped like file capabilities; it covers list, get, query, and record reads. Add `collections.edit` for writes through the frontmatter map, attributed as agent-authored writes with `onBehalfOf`.
+- Serve the `collections.read` SDK capability from the real index, path-scoped like file capabilities; it covers list, get, query, and record reads. Add `collections.edit` for writes through the frontmatter map, attributed as agent-authored writes with `onBehalfOf`.
 - Add collection tools to `packages/mcp` beside the existing database and chat tools: query a collection, read a record, set fields, create a record. External agents get the same reach as plugins, path-scoped the same way.
 - Hand the share-links program its contract: a collection with a create-only grant policy is the ADR 0004 lane. No implementation here; the contract and a written pointer are the deliverable.
 
@@ -79,6 +85,8 @@ Gate: a plugin subscribed on device B receives the field-change event for an edi
 The gate also requires one cross-program conformance test with the share-links program: share a collection, converge a named-user edit across devices, prove a link holder sees the converged state, revoke the share, and prove collection operations over the share stop. The two programs are compatible by construction — collections ride `ydoc.update`, shares select paths, and ADR 0004's lane is a collection under a create-only grant — but this test is the first thing that proves it.
 
 ## Phase 4: automations
+
+**Status: DONE.**
 
 Settled (2026-09-03): An automation is one entry in a plugin manifest's `automations` list, subscribed to record events on a collection path; the origin device's desktop runs it (ADR 0008). The trigger key is the change's replication coordinate (origin id and origin seq), which the engine threads into the apply facts; a change on a never-synced lineage keys on the device's history row id, since no other device can see it. The origin device claims the key in a durable claim table shaped like the chat dispatch ledger before it starts the handler, and a claim that exists is never taken again; the executor starts the plugin if it is not running. History rows, facts, and events carry the actor kind, the `onBehalfOf` principal, and a chain depth beside the author origin; the wire and the history table change together in the phase's first commit. The handler's writes take the collection write seam with the claim row id as their idempotency key, so a retried handler does not write twice. An automation's own writes carry depth one greater than their trigger and never re-trigger the same automation; a chain stops at depth 4 and the stop is reported. A throwing handler records a terminal failure in the claim row and surfaces it like a share refusal: durable, in the notice center, until the owner acknowledges it; external effects are never retried. The two-device race proves that the origin device's claim table has exactly one row for the change and the other device's has none, and that record history on both devices shows one automation write attributed to the automation on behalf of its owner.
 

@@ -1,18 +1,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use dohc_engine_domain::collections::markdown_frontmatter_json_with_provenance;
 use dohc_engine_domain::{
     CollectionFilter, CollectionFilterOperator, CollectionIndexedValueValidation,
     CollectionPendingAdoptionCursor, CollectionQuery, CollectionSchemaReasonCode,
     CollectionSchemaStatus, CollectionSort, DeleteTextFile, DomainError, FieldDefinition,
-    MAX_COLLECTION_HISTORY_LIMIT, MAX_COLLECTION_QUERY_SORTS, NoFaults, RenameTextFile, TxnOutcome,
-    VersionedTextStore, ViewSortDirection, WriteText, collection_record_markdown_with_id,
-    get_collection, get_collection_record, index_collection_frontmatter_apply_in_tx,
-    list_collections, list_pending_collection_adoptions, parse_collection_schema,
-    query_collection_records, reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
-    synchronize_collection_frontmatter_index_in_tx,
+    MAX_COLLECTION_HISTORY_LIMIT, MAX_COLLECTION_QUERY_LIMIT, MAX_COLLECTION_QUERY_SORTS, NoFaults,
+    RenameTextFile, TxnOutcome, VersionedTextStore, ViewSortDirection, WriteText,
+    collection_record_markdown_with_id, get_collection, get_collection_record,
+    index_collection_frontmatter_apply_in_tx, list_collections, list_pending_collection_adoptions,
+    parse_collection_schema, query_collection_records, reconcile_collections_in_tx,
+    set_collection_adoption_state_in_tx, synchronize_collection_frontmatter_index_in_tx,
 };
-use dohc_engine_storage::{EngineStore, StorageError};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_storage::{EngineStore, StorageError, hex};
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::params;
 use serde::Deserialize;
 use serde_json::json;
@@ -102,7 +103,7 @@ fn write_text_for_object(
 
 fn fresh_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, VERSION_ID, 1, &NoFaults)
@@ -298,12 +299,7 @@ fn shared_collection_field_pipeline_vectors_index_and_query_exactly() {
             .insert(vector.class.clone());
         assert_eq!(vector.field.name(), vector.field_name, "{}", vector.name);
         assert_eq!(
-            vector
-                .value_yaml
-                .as_bytes()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>(),
+            hex(vector.value_yaml.as_bytes()),
             vector.value_yaml_utf8_hex,
             "{} source bytes",
             vector.name
@@ -681,6 +677,7 @@ fn numeric_equality_uses_one_rule_across_every_collection_surface() {
                 &integer_frontmatter,
                 &float_frontmatter,
                 &integer_frontmatter,
+                None,
                 Some("editor"),
                 None,
                 None,
@@ -708,6 +705,7 @@ fn numeric_equality_uses_one_rule_across_every_collection_surface() {
                 &changed_frontmatter,
                 &integer_frontmatter,
                 &changed_frontmatter,
+                None,
                 Some("editor"),
                 None,
                 None,
@@ -760,6 +758,7 @@ fn body_only_collection_apply_does_not_rewrite_index_or_history() {
                 &frontmatter,
                 &frontmatter,
                 &frontmatter,
+                None,
                 Some("editor"),
                 None,
                 None,
@@ -847,6 +846,7 @@ fn multi_field_history_order_matches_across_independent_stores() {
                     &after,
                     &before,
                     &after,
+                    None,
                     Some("editor"),
                     None,
                     None,
@@ -1335,6 +1335,7 @@ fn changing_an_adopted_record_id_keeps_authored_history_under_the_engine_id() {
                 &review,
                 &draft,
                 &review,
+                None,
                 Some("human-editor"),
                 None,
                 None,
@@ -1349,6 +1350,7 @@ fn changing_an_adopted_record_id_keeps_authored_history_under_the_engine_id() {
                 &done,
                 &review,
                 &done,
+                None,
                 Some("agent-editor"),
                 None,
                 None,
@@ -1548,6 +1550,7 @@ fn deleted_record_id_stays_reserved_and_keeps_its_history() {
                 &after,
                 &before,
                 &after,
+                None,
                 Some("alpha-editor"),
                 None,
                 None,
@@ -1823,6 +1826,7 @@ fn rename_and_same_id_copy_keep_identity_and_history_with_the_original_object() 
                 &after,
                 &before,
                 &after,
+                None,
                 Some("editor"),
                 None,
                 None,
@@ -1993,6 +1997,263 @@ fn reconcile_indexes_non_finite_yaml_numbers_without_dropping_them() {
             "status": "flagged",
             "reason": { "code": "expected-number", "path": "" }
         })
+    );
+}
+
+// Both `.nan` spellings coerce to the string ".nan", so the synced
+// moment.append lane could not tell a non-finite number from a string that
+// merely spells one and flagged both expected-number. The parse provenance
+// now rides the apply; the stored value stays the coerced string.
+#[test]
+fn moment_lane_indexing_distinguishes_non_finite_numbers_from_nan_strings() {
+    let (_scratch, mut store) = fresh_store();
+    write_text(
+        &mut store,
+        "measurements/collection.yaml",
+        "fields:
+  estimate:
+    type: number
+",
+        2,
+    )
+    .expect("measurement schema");
+    write_text(
+        &mut store,
+        "measurements/unquoted.md",
+        &format!(
+            "---
+id: {FIRST_TASK_ID}
+estimate: 0
+---
+"
+        ),
+        3,
+    )
+    .expect("unquoted seed");
+    write_text(
+        &mut store,
+        "measurements/quoted.md",
+        &format!(
+            "---
+id: {SECOND_TASK_ID}
+estimate: 0
+---
+"
+        ),
+        4,
+    )
+    .expect("quoted seed");
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile measurements");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+
+    for (object_id, text, now) in [
+        (
+            "object-3",
+            format!(
+                "---
+id: {FIRST_TASK_ID}
+estimate: .nan
+---
+"
+            ),
+            5,
+        ),
+        (
+            "object-4",
+            format!(
+                "---
+id: {SECOND_TASK_ID}
+estimate: \".nan\"
+---
+"
+            ),
+            6,
+        ),
+    ] {
+        let before = json!({ "estimate": 0 });
+        let (after, provenance) =
+            markdown_frontmatter_json_with_provenance(&text).expect("incoming frontmatter parses");
+        let applied = store
+            .write_with(&NoFaults, |tx| {
+                index_collection_frontmatter_apply_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    VERSION_ID,
+                    object_id,
+                    &before,
+                    &after,
+                    &before,
+                    &after,
+                    Some(&provenance),
+                    Some("peer"),
+                    None,
+                    Some(("peer", now)),
+                    now,
+                )
+            })
+            .expect("apply synced frontmatter");
+        assert!(matches!(applied, TxnOutcome::Committed(Some(_))));
+    }
+
+    let query = store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "measurements",
+                &CollectionQuery::default(),
+            )
+        })
+        .expect("query measurements")
+        .expect("measurement collection");
+    let validation = |record_id: &str| {
+        let record = query
+            .records
+            .iter()
+            .find(|record| record.id == record_id)
+            .unwrap_or_else(|| panic!("missing record {record_id}"));
+        let value = record
+            .values
+            .iter()
+            .find(|value| value.field == "estimate")
+            .expect("estimate value");
+        assert_eq!(value.value, json!(".nan"), "the coerced value is preserved");
+        serde_json::to_value(&value.validation).expect("serialize validation")
+    };
+    assert_eq!(
+        validation(FIRST_TASK_ID),
+        json!({
+            "status": "flagged",
+            "reason": { "code": "number-not-finite", "path": "" }
+        }),
+        "an unquoted .nan is a non-finite number"
+    );
+    assert_eq!(
+        validation(SECOND_TASK_ID),
+        json!({
+            "status": "flagged",
+            "reason": { "code": "expected-number", "path": "" }
+        }),
+        "a quoted \".nan\" is a string in a number field"
+    );
+}
+
+#[test]
+fn a_same_value_provenance_change_refreshes_the_flag_reason() {
+    let (_scratch, mut store) = fresh_store();
+    write_text(
+        &mut store,
+        "measurements/collection.yaml",
+        "fields:
+  estimate:
+    type: number
+",
+        2,
+    )
+    .expect("measurement schema");
+    write_text(
+        &mut store,
+        "measurements/one.md",
+        &format!(
+            "---
+id: {FIRST_TASK_ID}
+estimate: 0
+---
+"
+        ),
+        3,
+    )
+    .expect("seed");
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile measurements");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+
+    // Unquoted .nan, then the quoted string: the coerced JSON value is the
+    // same ".nan" both times, so nothing but the provenance changes.
+    let mut before = json!({ "estimate": 0 });
+    for (text, now) in [
+        (
+            format!(
+                "---
+id: {FIRST_TASK_ID}
+estimate: .nan
+---
+"
+            ),
+            5,
+        ),
+        (
+            format!(
+                "---
+id: {FIRST_TASK_ID}
+estimate: \".nan\"
+---
+"
+            ),
+            6,
+        ),
+    ] {
+        let (after, provenance) =
+            markdown_frontmatter_json_with_provenance(&text).expect("incoming frontmatter parses");
+        let applied = store
+            .write_with(&NoFaults, |tx| {
+                index_collection_frontmatter_apply_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    VERSION_ID,
+                    "object-3",
+                    &before,
+                    &after,
+                    &before,
+                    &after,
+                    Some(&provenance),
+                    Some("peer"),
+                    None,
+                    Some(("peer", now)),
+                    now,
+                )
+            })
+            .expect("apply synced frontmatter");
+        assert!(matches!(applied, TxnOutcome::Committed(_)));
+        before = after;
+    }
+
+    let query = store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "measurements",
+                &CollectionQuery::default(),
+            )
+        })
+        .expect("query measurements")
+        .expect("measurement collection");
+    let record = query
+        .records
+        .iter()
+        .find(|record| record.id == FIRST_TASK_ID)
+        .expect("record");
+    let value = record
+        .values
+        .iter()
+        .find(|value| value.field == "estimate")
+        .expect("estimate value");
+    assert_eq!(value.value, json!(".nan"));
+    assert_eq!(
+        serde_json::to_value(&value.validation).expect("serialize validation"),
+        json!({
+            "status": "flagged",
+            "reason": { "code": "expected-number", "path": "" }
+        }),
+        "the quoted rewrite replaces the non-finite reason even though the value is unchanged"
     );
 }
 
@@ -3936,9 +4197,10 @@ fn root_schema_is_visible_as_degraded_but_does_not_collect_root_markdown() {
     };
     assert!(reconciled.adoptions.is_empty());
     let listed = store
-        .read_with(|conn| list_collections(conn, WORKSPACE_ID))
+        .read_with(|conn| list_collections(conn, WORKSPACE_ID, MAX_COLLECTION_QUERY_LIMIT, None))
         .expect("list collections");
     let root_status = listed
+        .collections
         .iter()
         .find(|collection| collection.path == ".")
         .expect("root schema status is visible");
@@ -3987,9 +4249,10 @@ fn root_schema_is_visible_as_degraded_but_does_not_collect_root_markdown() {
 fn every_read_answers_for_a_degraded_collection() {
     let (_scratch, store) = seeded_store();
     let listed = store
-        .read_with(|conn| list_collections(conn, WORKSPACE_ID))
+        .read_with(|conn| list_collections(conn, WORKSPACE_ID, MAX_COLLECTION_QUERY_LIMIT, None))
         .expect("list collections");
     let summary = listed
+        .collections
         .iter()
         .find(|collection| collection.path == "broken")
         .expect("degraded collection listed");

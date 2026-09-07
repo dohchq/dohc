@@ -9,7 +9,7 @@ import {
 import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { formatChatFileReferenceToken } from "./chatFileMentions";
 
-export interface FileMentionCandidate {
+interface FileMentionCandidate {
   path: string;
   label: string;
 }
@@ -55,7 +55,7 @@ export function MentionComposer(props: {
   const fileRequest = useRef(0);
   const currentFileLoader = useRef(props.loadFileHeadings);
   currentFileLoader.current = props.loadFileHeadings;
-  // When we complete a mention we must reposition the caret AFTER React commits
+  // When we complete a mention we must reposition the caret after React commits
   // the new value; this holds the pending caret target for the layout effect.
   const pendingCaret = useRef<number | null>(null);
 
@@ -124,7 +124,7 @@ export function MentionComposer(props: {
       setMenuOpen(false);
       props.onChange(result.value);
     },
-    [caret, props],
+    [caret, props.onChange, props.value],
   );
 
   const completeFile = useCallback(
@@ -139,7 +139,7 @@ export function MentionComposer(props: {
       setMenuOpen(false);
       props.onChange(next);
     },
-    [caret, props],
+    [caret, props.onChange, props.value],
   );
 
   const chooseFile = useCallback(
@@ -172,7 +172,7 @@ export function MentionComposer(props: {
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      // IME guard FIRST: Enter during composition confirms the composed
+      // IME guard first: Enter during composition confirms the composed
       // characters — it must never accept a mention candidate or send, even
       // when the mention menu is open. Let the browser handle the keystroke.
       if (event.nativeEvent.isComposing) return;
@@ -230,7 +230,7 @@ export function MentionComposer(props: {
         props.onEscape();
       }
     },
-    [chooseFile, complete, completeFile, fileMatches, fileStage, highlight, matches, menuLength, props, showMenu],
+    [chooseFile, complete, completeFile, fileMatches, fileStage, highlight, matches, menuLength, props.onEscape, props.onSend, showMenu],
   );
 
   const listboxId = `${props.composerId}-mentions`;
@@ -414,7 +414,7 @@ export function MentionComposer(props: {
           setMenuOpen(false);
           setFileStage(null);
         }}
-        className="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+        className="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
       />
       <button
         type="button"

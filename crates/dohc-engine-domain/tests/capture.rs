@@ -4,7 +4,7 @@ use dohc_engine_domain::{
     derive_capture_moment_id, derive_capture_object_id, write_text_in_tx,
 };
 use dohc_engine_storage::EngineStore;
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 const WS: &str = "ws-capture";
 const VERSION: &str = "main";
@@ -43,7 +43,7 @@ fn retire(path: &str, now_ms: i64) -> CaptureRetire {
 
 fn open_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WS, VERSION, 1, &NO_FAULTS)
@@ -155,7 +155,7 @@ fn length_prefixed_capture_ids_distinguish_embedded_nul_tuples() {
     assert_ne!(first_id, second_id);
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(FIRST_WS, FIRST_VERSION, 1, &NO_FAULTS)
@@ -489,7 +489,7 @@ fn request_ids_replay_ingest_and_retire_exactly_once() {
         .capture_retire(&delete_replay, &NO_FAULTS)
         .expect("retire replay");
     assert!(replay_delete.deduped);
-    // The replayed inner result reports ITS OWN dedupe honestly; every
+    // The replayed inner result reports its own dedupe honestly; every
     // other field must match the original byte-for-byte.
     let mut expected = first_delete.retired.clone();
     if let Some(expected) = expected.as_mut() {
@@ -621,9 +621,9 @@ fn binary_capture_persists_a_jobless_binary_head_and_dedupes() {
     assert!(!first.deduped);
     assert_eq!(first.binary_sha256, hex_sha256(&bytes));
 
-    // Capture-from-disk must never enqueue a RUNNABLE job (the bytes came
+    // Capture-from-disk must never enqueue a runnable job (the bytes came
     // FROM disk — TS oracle parity: capture never writes disk), but it records
-    // a COMPLETED marker so the materializer's staleness gate supersedes any
+    // a completed marker so the materializer's staleness gate supersedes any
     // older still-pending job for the path.
     assert_eq!(job_count_by_status(&store, "pending"), 0);
     assert_eq!(job_count_by_status(&store, "complete"), 1);
@@ -662,7 +662,7 @@ fn binary_capture_replaces_a_text_head_and_text_recaptures_over_binary() {
         .expect_err("binary head is not text");
     assert!(matches!(err, DomainError::BinaryHeadNotText));
 
-    // And text capture flips it back on the SAME object.
+    // And text capture flips it back on the same object.
     let back = VersionedTextStore::new(&mut store)
         .capture_ingest(&ingest("flip.md", "text again", 30), &NO_FAULTS)
         .expect("flip back to text");
@@ -739,7 +739,6 @@ fn rollback_of_a_capture_binary_moment_still_restores_disk() {
                 path: "flip.md".to_owned(),
                 mutation_moment_id: flipped.moment_id.clone(),
                 request_id: None,
-                legacy_before_text: None,
                 metadata_origin: "restore".to_owned(),
                 author_json: None,
             },
@@ -784,8 +783,8 @@ fn capture_supersedes_an_older_pending_materialization_job() {
     let stale_bytes = b"stale resolve content";
     std::fs::write(scratch.path().join("doc.bin"), disk_bytes).expect("seed disk");
 
-    // An older mirrored-resolve write enqueues a PENDING job whose preimage
-    // matches the CURRENT disk bytes (the exact codex-review scenario).
+    // An older mirrored-resolve write enqueues a pending job whose preimage
+    // matches the current disk bytes (the exact codex-review scenario).
     let stale_sha = hex_sha256(stale_bytes);
     store
         .write_with(&NO_FAULTS, |tx| {
@@ -810,12 +809,12 @@ fn capture_supersedes_an_older_pending_materialization_job() {
         })
         .expect("older resolve write with pending job");
 
-    // The user's on-disk bytes are captured at a NEWER generation.
+    // The user's on-disk bytes are captured at a newer generation.
     VersionedTextStore::new(&mut store)
         .capture_ingest_binary(&ingest_binary("doc.bin", disk_bytes, 20), &NO_FAULTS)
         .expect("capture the live disk bytes");
 
-    // Draining the materializer must SUPERSEDE the stale job — never regress
+    // Draining the materializer must supersede the stale job — never regress
     // disk behind the captured head.
     let results = run_pending_jobs(
         &store,
@@ -860,7 +859,6 @@ fn recapture_after_rollback_advances_past_the_durable_restore() {
                 path: "doc.bin".to_owned(),
                 mutation_moment_id: first.moment_id.clone(),
                 request_id: None,
-                legacy_before_text: None,
                 metadata_origin: "restore".to_owned(),
                 author_json: None,
             },
@@ -914,7 +912,7 @@ fn deduped_capture_marks_the_confirmed_head_as_materialized() {
     let stale_bytes = b"older stale content";
     std::fs::write(scratch.path().join("doc.bin"), live_bytes).expect("seed disk");
 
-    // Two sequential resolve writes to the SAME path leave an OLDER pending
+    // Two sequential resolve writes to the same path leave an older pending
     // job (stale bytes, preimage matching the current disk) beneath the head
     // whose own newer job is also still pending.
     store
@@ -996,7 +994,7 @@ fn deduped_capture_marks_the_confirmed_head_as_materialized() {
 fn the_capture_origin_is_reserved_on_the_public_write_path() {
     use dohc_engine_domain::{WriteText, validate_write_input};
 
-    // A caller must not be able to FORGE capture ownership: a write claiming
+    // A caller must not be able to forge capture ownership: a write claiming
     // the reserved origin would be seeded as capture-owned on the next open
     // and retired for having no disk counterpart.
     let forged = WriteText {
@@ -1016,7 +1014,7 @@ fn the_capture_origin_is_reserved_on_the_public_write_path() {
     let err = validate_write_input(&forged).expect_err("reserved origin must be refused");
     assert!(matches!(err, DomainError::InvalidInput { .. }));
 
-    // And — the case that matters — the REAL write path must refuse it too.
+    // And — the case that matters — the real write path must refuse it too.
     // A guard living only in the validator would never see the RPC surface,
     // which reaches write_text_in_tx through the normalizer instead.
     let (_scratch, mut store) = open_store();
@@ -1067,7 +1065,7 @@ fn a_claimed_dedupe_transfers_ownership_to_capture() {
         })
         .expect("seed imported metadata");
 
-    // Capture OBSERVES the same bytes on disk (a claimed capture that
+    // Capture observes the same bytes on disk (a claimed capture that
     // dedupes). Ownership must transfer, or later disk-driven retires stay
     // blocked forever against a head capture legitimately claimed.
     let mut claimed = ingest("shared.md", "same bytes", 20);
@@ -1086,8 +1084,6 @@ fn a_claimed_dedupe_transfers_ownership_to_capture() {
             )
         })
         .expect("head metadata");
-    // MUTATION: retaining either imported optional column in the ownership
-    // transfer makes this tuple disagree with capture's local provenance.
     assert_eq!(
         metadata,
         ("capture-test".to_owned(), None, None),
@@ -1122,7 +1118,7 @@ fn disk_driven_retire_owns_materialized_ydoc_heads() {
         })
         .expect("ydoc head");
     // The manifest seeds 'ydoc' rows into the baseline scanner, so its file
-    // deleted while the daemon was down MUST retire the head — a stale
+    // deleted while the daemon was down must retire the head — a stale
     // snapshot must not stay readable forever. Mutation check: drop the
     // YDOC_ORIGIN arm from `capture_retire_in_tx`'s origin gate — this
     // retire settles as a no-op and the assertion fails.
@@ -1225,7 +1221,7 @@ fn snapshot_metadata_reports_which_paths_the_ydoc_editor_owns() {
     // AUDIT-SILENTSAVE round 4 (D3). `has_ydoc_marker` is what stops the
     // desktop capture layer from retiring a settled Y.Doc for exceeding a cap
     // a Y.Doc is not bound by. The whole daemon half of that fix rests on this
-    // EXISTS subquery, so it is asserted BOTH ways here rather than only
+    // exists subquery, so it is asserted both ways here rather than only
     // through the e2e.
     let (_scratch, mut store) = open_store();
 
@@ -1366,9 +1362,6 @@ fn a_non_ownable_retire_must_not_destroy_a_materialized_ydoc_head() {
 
 #[test]
 fn capture_ingest_persists_the_supplied_summary_and_correlation() {
-    // MUTATION: reverting either plumb-through in capture_ingest_in_tx /
-    // capture_ingest_binary_in_tx (back to hardcoded None) fails this test —
-    // the daemon reconcile pass depends on both reaching the moment row.
     let (_scratch, mut store) = open_store();
     let mut text_input = ingest("notes/a.md", "A", 10);
     text_input.metadata_summary = Some("Reconciled offline edits".to_owned());
@@ -1378,7 +1371,8 @@ fn capture_ingest_persists_the_supplied_summary_and_correlation() {
         .expect("text capture");
     assert_eq!(
         text_result.moment.metadata_summary.as_deref(),
-        Some("Reconciled offline edits")
+        Some("Reconciled offline edits"),
+        "reverting either plumb-through in capture_ingest_in_tx / capture_ingest_binary_in_tx (back to hardcoded None) fails this test — the daemon reconcile pass depends on both reaching the moment row.",
     );
     assert_eq!(
         text_result.moment.metadata_correlation_id.as_deref(),
@@ -1414,7 +1408,7 @@ fn capture_ingest_persists_the_supplied_summary_and_correlation() {
         Some("reconcile-1")
     );
 
-    // The RETIRE path too: a delete recorded mid-pass must carry the pass
+    // The retire path too: a delete recorded mid-pass must carry the pass
     // provenance or it splits the history group.
     let mut retire_input = retire("notes/a.md", 30);
     retire_input.metadata_summary = Some("Reconciled offline edits".to_owned());
@@ -1437,7 +1431,7 @@ fn capture_ingest_persists_the_supplied_summary_and_correlation() {
 #[test]
 fn live_capture_labels_default_at_the_primitive() {
     // TS `writeIfChanged` parity, enforced at the capture primitive: a plain
-    // live TEXT capture carries NO summary, a live BINARY capture carries
+    // live TEXT capture carries NO summary, a live binary capture carries
     // "Updated <basename>", and content-kind flips get the honest
     // transition labels.
     let (_scratch, mut store) = open_store();

@@ -19,7 +19,6 @@ import { isLoopbackHostname } from "../security/loopback";
 import {
   resolveDesktopIconDirectory,
   resolveSystemThemeIconPath,
-  shouldUseDarkSystemIcon,
 } from "../systemThemeIcon";
 import { stateDir } from "../workspaces/WorkspaceRegistry";
 import { installRendererCrashRecovery } from "./rendererCrashRecovery";
@@ -41,7 +40,7 @@ import {
 let chromeTheme: ChromeTheme = "light";
 let persistCurrentWindow: (() => void) | null = null;
 
-// Called by the desktop:set-titlebar-theme IPC handler so the NEXT launch
+// Called by the desktop:set-titlebar-theme IPC handler so the next launch
 // paints the correct chrome before any renderer JS runs.
 export function rememberChromeTheme(theme: ChromeTheme): void {
   if (chromeTheme === theme) return;
@@ -169,7 +168,7 @@ export function createMainWindow(options?: {
 }): BrowserWindow {
   const preloadPath = join(import.meta.dirname, "../preload/preload.cjs");
   const placement = loadPlacement();
-  // Native chrome paints the LAUNCH theme (persisted user choice, else the OS
+  // Native chrome paints the launch theme (persisted user choice, else the OS
   // preference) before any renderer JS — no light flash on dark launches.
   chromeTheme = placement.theme;
   // The executable and Wayland launcher keep the static packaging icon. Live
@@ -181,7 +180,7 @@ export function createMainWindow(options?: {
   });
   const iconPath = resolveSystemThemeIconPath(
     iconDirectory,
-    shouldUseDarkSystemIcon(nativeTheme),
+    nativeTheme.shouldUseDarkColors,
   );
 
   const window = new BrowserWindow({

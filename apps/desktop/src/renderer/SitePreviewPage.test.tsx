@@ -11,6 +11,7 @@ import type {
 } from "../ipc/bridgeContract";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { shareTargetForSite, SitePreviewPage } from "./SitePreviewPage";
+import { deferred } from "../testing/deferred";
 
 function readyShare(
   entryPath: string,
@@ -65,16 +66,6 @@ const bridgeMock = {
   stopSitePreview: vi.fn(async () => undefined),
   openExternalUrl: vi.fn(async () => undefined),
 };
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((nextResolve, nextReject) => {
-    resolve = nextResolve;
-    reject = nextReject;
-  });
-  return { promise, resolve, reject };
-}
 
 describe("SitePreviewPage", () => {
   beforeEach(() => {
@@ -229,7 +220,7 @@ describe("SitePreviewPage", () => {
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
     await screen.findByText(
-      "This site has no previewable entry, dev script, or build output yet.",
+      "This app has no previewable entry, dev script, or build output yet.",
     );
     expect(screen.queryByTestId("site-preview-options")).toBeNull();
     expect(bridgeMock.startSitePreview).not.toHaveBeenCalled();
@@ -431,7 +422,7 @@ describe("SitePreviewPage", () => {
   });
 
   it("refuses an ancestor site instead of showing it as this tab's own", async () => {
-    // getSitePackage returns the deepest CONTAINING site for a path, so a
+    // getSitePackage returns the deepest containing site for a path, so a
     // stale tab whose own root stopped being a detected site can still get
     // back a detected ancestor above it — here the tab names "report/legacy"
     // but the workspace only has a site rooted at "report" above it.
@@ -443,7 +434,7 @@ describe("SitePreviewPage", () => {
     bridgeMock.getSitePackage.mockResolvedValueOnce(ancestorSite);
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report/legacy" />);
 
-    await screen.findByText("This site is no longer part of the workspace.");
+    await screen.findByText("This app is no longer part of the workspace.");
     expect(screen.queryByText(site.title)).toBeNull();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
     expect(screen.queryByTestId("site-preview-share")).toBeNull();
@@ -470,12 +461,12 @@ describe("SitePreviewPage", () => {
 
     expect(onShareSite).not.toHaveBeenCalled();
     expect((await screen.findByTestId("site-preview-error")).textContent).toContain(
-      "This site is no longer part of the workspace.",
+      "This app is no longer part of the workspace.",
     );
   });
 
   it("aborts a share when the pre-share refresh returns a different site's root than the tab's own", async () => {
-    // getSitePackage returns the deepest CONTAINING site for a path, so a
+    // getSitePackage returns the deepest containing site for a path, so a
     // stale tab whose own root stopped being a detected site can still get
     // back a detected ancestor above it — sharing that ancestor would offer
     // a different site than the one this tab names.
@@ -498,7 +489,7 @@ describe("SitePreviewPage", () => {
 
     expect(onShareSite).not.toHaveBeenCalled();
     expect((await screen.findByTestId("site-preview-error")).textContent).toContain(
-      "This site is no longer part of the workspace.",
+      "This app is no longer part of the workspace.",
     );
   });
 
@@ -530,7 +521,7 @@ describe("SitePreviewPage", () => {
 
     expect(onShareSite).not.toHaveBeenCalled();
     expect((await screen.findByTestId("site-preview-error")).textContent).toContain(
-      "This site is no longer part of the workspace.",
+      "This app is no longer part of the workspace.",
     );
   });
 
@@ -854,7 +845,7 @@ describe("SitePreviewPage", () => {
 
     expect(
       await screen.findByText(
-        "dohc scanned 5 MiB for sharing. The configured limit is 4 MiB. Reduce the site's referenced files and try again.",
+        "dohc scanned 5 MiB for sharing. The configured limit is 4 MiB. Reduce the app's referenced files and try again.",
       ),
     ).toBeTruthy();
   });
@@ -906,7 +897,7 @@ describe("SitePreviewPage", () => {
     ],
     [
       noRunnableArtifact,
-      "This site does not have a runnable static artifact to share.",
+      "This app has no static entry file or build output to share.",
     ],
   ])("renders the share refusal reason %#", async (shareManifest, message) => {
     const refusedSite: SitePackageInfo = {
@@ -1255,14 +1246,14 @@ describe("SitePreviewPage", () => {
 
     await screen.findByText("Report");
 
-    expect(await screen.findByText("This site tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
+    expect(await screen.findByText("This app tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
     expect(screen.queryByTestId("site-preview-reload")).toBeNull();
     expect(screen.queryByTestId("site-preview-open-external")).toBeNull();
     expect(screen.getByTestId("site-preview-stop")).toBeTruthy();
   });
 
-  it("refuses to render HTTPS loopback preview URLs", async () => {
+  it("refuses to render https loopback preview URLs", async () => {
     bridgeMock.startSitePreview.mockResolvedValueOnce({
       siteRoot: "report",
       mode: "static",
@@ -1274,7 +1265,7 @@ describe("SitePreviewPage", () => {
 
     await screen.findByText("Report");
 
-    expect(await screen.findByText("This site tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
+    expect(await screen.findByText("This app tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
   });
 
@@ -1290,7 +1281,7 @@ describe("SitePreviewPage", () => {
 
     await screen.findByText("Report");
 
-    expect(await screen.findByText("This site tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
+    expect(await screen.findByText("This app tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
   });
 

@@ -1,6 +1,7 @@
-import type { SearchResultsEvent, SearchResultsEventEntry } from "../../desktop/src/ipc/channels";
 import type {
   DohcDesktopBridge,
+  SearchResultsEvent,
+  SearchResultsEventEntry,
   WorkspaceActivityEvent,
 } from "../../desktop/src/ipc/bridgeContract";
 import {
@@ -415,7 +416,7 @@ function message(threadId: string, id: string, body: string, agent = false) {
 // The joined lane, answered the way main answers it: one entry per wire id the
 // caller NAMED. The demo workspace is solo, so every answer is "no grant" — but
 // the shape matters more than the value. A wire id the lane leaves out is
-// UNKNOWN to the renderer, and unknown locks the channel, so a bridge that
+// unknown to the renderer, and unknown locks the channel, so a bridge that
 // ignored the caller's scope would model less than production and lock every
 // demo channel the moment demo channels carry wire ids.
 export function answerDemoJoinedLane(
@@ -583,7 +584,6 @@ const demoBridge = {
         agents: { mcpAutoStart: false, defaultDriverId: null, defaultModel: null },
         sites: { defaultPreviewMode: "auto" as const },
         privacy: { confirmExternalLinks: true },
-        experimental: { workspaceEngineAlpha: true },
         files: { attachmentLocation: "per-document" as const, attachmentFolderName: "assets" },
       },
       source: "default" as const,

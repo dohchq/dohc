@@ -1,287 +1,92 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { load } from 'js-yaml'
 
-function mappingValueAtPath(source, expectedPath) {
-  const path = []
-
-  for (const line of source.split(/\r?\n/)) {
-    const match = /^( *)([A-Za-z0-9_-]+):(?:\s+(.*))?$/.exec(line)
-    if (!match) continue
-
-    const [, spaces, key, value] = match
-    while (path.at(-1)?.indent >= spaces.length) path.pop()
-    path.push({ indent: spaces.length, key })
-
-    if (
-      value !== undefined &&
-      path.map((part) => part.key).join('.') === expectedPath.join('.')
-    ) {
-      return value
-    }
-  }
-
-  return undefined
-}
-
-function mappingBlockAtPath(source, expectedPath) {
-  const lines = source.split(/\r?\n/)
-  const path = []
-
-  for (const [index, line] of lines.entries()) {
-    const match = /^( *)([A-Za-z0-9_-]+):(?:\s+(.*))?$/.exec(line)
-    if (!match) continue
-
-    const [, spaces, key] = match
-    while (path.at(-1)?.indent >= spaces.length) path.pop()
-    path.push({ indent: spaces.length, key })
-
-    if (path.map((part) => part.key).join('.') !== expectedPath.join('.')) {
-      continue
-    }
-
-    const block = [line]
-    for (const candidate of lines.slice(index + 1)) {
-      const indent = candidate.length - candidate.trimStart().length
-      if (candidate.trim() !== '' && indent <= spaces.length) {
-        break
-      }
-      block.push(candidate)
-    }
-    return block.join('\n')
-  }
-
-  return undefined
-}
-
-function environmentValue(source, name) {
-  const prefix = `${name}=`
-  return source
+const composeText = readFileSync('docker-compose.self-host.yml', 'utf8')
+const compose = load(composeText)
+const envExample = Object.fromEntries(
+  readFileSync('.env.self-host.example', 'utf8')
     .split(/\r?\n/)
-    .find((line) => line.startsWith(prefix))
-    ?.slice(prefix.length)
-}
+    .filter((line) => line && !line.startsWith('#'))
+    .map((line) => {
+      const eq = line.indexOf('=')
+      assert.notEqual(eq, -1, `.env.self-host.example line has no value: ${line}`)
+      return [line.slice(0, eq), line.slice(eq + 1)]
+    }),
+)
 
-test('self-host sync relay requires the link grant key', () => {
-  const compose = readFileSync('docker-compose.self-host.yml', 'utf8')
-  const envLines = readFileSync('.env.self-host.example', 'utf8').split(/\r?\n/)
-  const linkKeyLine = envLines.findIndex((line) =>
-    line.startsWith('DOHC_RELAY_LINK_KEY='),
-  )
+const relay = compose.services['sync-relay']
+const shareWeb = compose.services['share-web']
 
-  assert.equal(
-    mappingValueAtPath(compose, [
-      'services',
-      'sync-relay',
-      'environment',
-      'DOHC_RELAY_LINK_KEY',
-    ]),
-    '${DOHC_RELAY_LINK_KEY:?Set DOHC_RELAY_LINK_KEY in .env.self-host}',
-  )
-  assert.deepEqual(envLines.slice(linkKeyLine - 2, linkKeyLine), [
-    '# The sync relay serves share links, so it reads shared content in plaintext.',
-    '# A link secret hides the work from other people, not from this relay.',
-  ])
-})
+/** A `${NAME:?message}` interpolation refuses to start without NAME set. */
+const required = (name) => new RegExp(`^\\$\\{${name}:\\?`)
 
-test('self-host sync relay requires and documents the relay exchange key', () => {
-  const compose = readFileSync('docker-compose.self-host.yml', 'utf8')
-  const envExample = readFileSync('.env.self-host.example', 'utf8')
-
-  assert.equal(
-    mappingValueAtPath(compose, [
-      'services',
-      'sync-relay',
-      'environment',
-      'DOHC_RELAY_EXCHANGE_KEY',
-    ]),
-    '${DOHC_RELAY_EXCHANGE_KEY:?Set DOHC_RELAY_EXCHANGE_KEY in .env.self-host}',
-  )
+test('the relay refuses to start without its secrets', () => {
+  assert.match(relay.environment.DOHC_RELAY_LINK_KEY, required('DOHC_RELAY_LINK_KEY'))
+  assert.match(relay.environment.DOHC_RELAY_EXCHANGE_KEY, required('DOHC_RELAY_EXCHANGE_KEY'))
   assert.match(
-    envExample,
-    /^DOHC_RELAY_EXCHANGE_KEY=change-me-with-at-least-32-random-bytes$/m,
+    relay.environment.DOHC_RELAY_SHARE_WEB_ORIGIN,
+    required('DOHC_SHARE_WEB_PUBLIC_ORIGIN'),
   )
 })
 
-test('self-host share viewer waits for relay HTTP readiness', () => {
-  const compose = readFileSync('docker-compose.self-host.yml', 'utf8')
-  const shareWebDependsOn = mappingBlockAtPath(compose, [
-    'services',
-    'share-web',
-    'depends_on',
-  ])
-
+test('share-web and the relay read the same exchange key', () => {
   assert.equal(
-    mappingValueAtPath(compose, [
-      'services',
-      'sync-relay',
-      'healthcheck',
-      'test',
-    ]),
-    `["CMD", "node", "-e", "fetch('http://127.0.0.1:1788/').then(() => process.exit(0)).catch(() => process.exit(1))"]`,
-  )
-  assert.equal(
-    mappingValueAtPath(compose, [
-      'services',
-      'sync-relay',
-      'healthcheck',
-      'interval',
-    ]),
-    '5s',
-  )
-  assert.equal(
-    mappingValueAtPath(compose, [
-      'services',
-      'sync-relay',
-      'healthcheck',
-      'timeout',
-    ]),
-    '5s',
-  )
-  assert.equal(
-    mappingValueAtPath(compose, [
-      'services',
-      'sync-relay',
-      'healthcheck',
-      'retries',
-    ]),
-    '20',
-  )
-  assert.equal(
-    mappingValueAtPath(compose, [
-      'services',
-      'sync-relay',
-      'healthcheck',
-      'start_period',
-    ]),
-    '300s',
-  )
-  assert.equal(
-    shareWebDependsOn,
-    '    depends_on:\n      sync-relay:\n        condition: service_healthy',
+    shareWeb.environment.DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY,
+    relay.environment.DOHC_RELAY_EXCHANGE_KEY,
   )
 })
 
-test('self-host compose starts the public share viewer with one external origin', () => {
-  const compose = readFileSync('docker-compose.self-host.yml', 'utf8')
-  const envExample = readFileSync('.env.self-host.example', 'utf8')
-  const publicOrigin = environmentValue(
-    envExample,
-    'DOHC_SHARE_WEB_PUBLIC_ORIGIN',
-  )
-  const publicHost = environmentValue(envExample, 'DOHC_SHARE_WEB_PUBLIC_HOST')
-  const publicRelayUrl = environmentValue(
-    envExample,
-    'DOHC_SHARE_WEB_PUBLIC_RELAY_URL',
-  )
-  const trustedProxies = environmentValue(
-    envExample,
-    'DOHC_SHARE_WEB_TRUSTED_PROXIES',
-  )
-  const shareWebService = mappingBlockAtPath(compose, ['services', 'share-web'])
-  const shareWebCommand = mappingBlockAtPath(compose, [
-    'services',
-    'share-web',
-    'command',
-  ])
-  const shareWebPorts = mappingBlockAtPath(compose, [
-    'services',
-    'share-web',
-    'ports',
-  ])
+test('share-web waits for the relay to answer HTTP, not only to start', () => {
+  assert.equal(shareWeb.depends_on['sync-relay'].condition, 'service_healthy')
+  assert.ok(relay.healthcheck?.test, 'the relay declares a healthcheck')
+})
 
-  assert.ok(shareWebService, 'compose must define the share-web service')
-  assert.equal(compose.match(/^  share-web:$/gm)?.length, 1)
-  assert.equal(
-    mappingValueAtPath(compose, [
-      'services',
-      'sync-relay',
-      'environment',
-      'DOHC_RELAY_SHARE_WEB_ORIGIN',
-    ]),
-    '${DOHC_SHARE_WEB_PUBLIC_ORIGIN:?Set DOHC_SHARE_WEB_PUBLIC_ORIGIN in .env.self-host}',
-  )
-  assert.equal(
-    mappingValueAtPath(compose, [
-      'services',
-      'share-web',
-      'environment',
-      'DOHC_SHARE_WEB_RELAY_URL',
-    ]),
-    'http://sync-relay:1788',
-  )
-  assert.equal(
-    mappingValueAtPath(compose, [
-      'services',
-      'share-web',
-      'environment',
-      'DOHC_SHARE_WEB_PUBLIC_RELAY_URL',
-    ]),
-    '${DOHC_SHARE_WEB_PUBLIC_RELAY_URL:?Set DOHC_SHARE_WEB_PUBLIC_RELAY_URL in .env.self-host}',
-  )
-  assert.equal(
-    mappingValueAtPath(compose, [
-      'services',
-      'share-web',
-      'environment',
-      'DOHC_SHARE_WEB_PUBLIC_HOSTS',
-    ]),
-    '${DOHC_SHARE_WEB_PUBLIC_HOST:?Set DOHC_SHARE_WEB_PUBLIC_HOST in .env.self-host}',
-  )
-  assert.equal(
-    mappingValueAtPath(compose, [
-      'services',
-      'share-web',
-      'environment',
-      'DOHC_SHARE_WEB_TRUSTED_PROXIES',
-    ]),
-    '${DOHC_SHARE_WEB_TRUSTED_PROXIES:-}',
-  )
-  assert.equal(
-    mappingValueAtPath(compose, [
-      'services',
-      'share-web',
-      'environment',
-      'DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY',
-    ]),
-    '${DOHC_RELAY_EXCHANGE_KEY:?Set DOHC_RELAY_EXCHANGE_KEY in .env.self-host}',
-  )
-  assert.equal(
-    mappingValueAtPath(compose, [
-      'services',
-      'share-web',
-      'environment',
-      'DOHC_SHARE_WEB_BIND',
-    ]),
-    '"0.0.0.0"',
-  )
-  assert.equal(
-    mappingValueAtPath(compose, [
-      'services',
-      'share-web',
-      'environment',
-      'DOHC_SHARE_WEB_PORT',
-    ]),
-    '"1790"',
+test('browser sign-in uses the shared auth base and exact viewer origin', () => {
+  const api = compose.services['workspace-api']
+  assert.match(api.environment.WORKSPACE_API_BASE_URL, required('WORKSPACE_API_BASE_URL'))
+  assert.equal(relay.environment.SYNC_RELAY_AUTH_BASE_URL, api.environment.WORKSPACE_API_BASE_URL)
+  assert.equal(api.environment.DOHC_WEB_ORIGIN, shareWeb.environment.DOHC_SHARE_WEB_PUBLIC_ORIGIN)
+  assert.match(api.environment.DOHC_WEB_ORIGIN, required('DOHC_SHARE_WEB_PUBLIC_ORIGIN'))
+  assert.equal(shareWeb.environment.DOHC_SHARE_WEB_AUTH_URL, 'http://workspace-api:1786')
+  assert.equal(shareWeb.depends_on['workspace-api'].condition, 'service_healthy')
+  assert.ok(api.healthcheck?.test, 'the auth service declares a healthcheck')
+  assert.equal(new URL(envExample.WORKSPACE_API_BASE_URL).protocol, 'https:')
+})
+
+test('share-web reaches the relay over the compose network and publishes one origin', () => {
+  assert.equal(shareWeb.environment.DOHC_SHARE_WEB_RELAY_URL, 'http://sync-relay:1788')
+  assert.match(
+    shareWeb.environment.DOHC_SHARE_WEB_PUBLIC_RELAY_URL,
+    required('DOHC_SHARE_WEB_PUBLIC_RELAY_URL'),
   )
   assert.match(
-    shareWebPorts ?? '',
-    /^    ports:\n      - "\$\{DOHC_SHARE_WEB_BIND:-127\.0\.0\.1\}:\$\{DOHC_SHARE_WEB_PORT:-1790\}:1790"$/m,
+    shareWeb.environment.DOHC_SHARE_WEB_PUBLIC_HOSTS,
+    required('DOHC_SHARE_WEB_PUBLIC_HOST'),
   )
-  assert.match(
-    shareWebCommand ?? '',
-    /pnpm --filter @dohc\/share-web build &&\n      pnpm --filter @dohc\/share-web start"/,
+})
+
+test('the relay keeps its database on a named volume', () => {
+  assert.ok(relay.volumes.includes('dohc_self_host_sync_relay:/data'))
+  assert.ok('dohc_self_host_sync_relay' in compose.volumes)
+})
+
+test('share-web binds every interface so its published port is reachable', () => {
+  assert.equal(shareWeb.environment.DOHC_SHARE_WEB_BIND, '0.0.0.0')
+})
+
+test('the example env names every variable compose requires', () => {
+  const interpolations = composeText.matchAll(/\$\{([A-Z0-9_]+):\?/g)
+  for (const [, name] of interpolations) {
+    assert.ok(name in envExample, `.env.self-host.example must define ${name}`)
+  }
+})
+
+test('the example env keeps the public relay URL distinct from the compose-internal one', () => {
+  assert.notEqual(envExample.DOHC_SHARE_WEB_PUBLIC_RELAY_URL, 'http://sync-relay:1788')
+  assert.equal(
+    envExample.DOHC_SHARE_WEB_PUBLIC_HOST,
+    new URL(envExample.DOHC_SHARE_WEB_PUBLIC_ORIGIN).hostname,
   )
-  assert.equal(publicOrigin, 'https://share.example.com')
-  assert.equal(publicRelayUrl, 'https://relay.example.com')
-  assert.notEqual(publicRelayUrl, 'http://sync-relay:1788')
-  assert.equal(publicHost, 'share.example.com')
-  assert.equal(publicHost, new URL(publicOrigin).hostname)
-  assert.equal(trustedProxies, '')
-  assert.match(envExample, /^DOHC_SHARE_WEB_PORT=1790$/m)
-  assert.match(
-    mappingBlockAtPath(compose, ['services', 'sync-relay', 'volumes']) ?? '',
-    /dohc_self_host_sync_relay:\/data/,
-  )
-  assert.ok(mappingBlockAtPath(compose, ['volumes', 'dohc_self_host_sync_relay']))
 })

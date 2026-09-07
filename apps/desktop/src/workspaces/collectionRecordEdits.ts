@@ -10,9 +10,8 @@ import * as Y from "yjs";
 import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createFile } from "./workspaceFiles";
-import { workspaceRelativePathsEqual } from "./workspaceRelativePathIdentity";
 
-// The ONE main-side collection write seam. Every agent surface (plugin SDK,
+// The one main-side collection write seam. Every agent surface (plugin SDK,
 // MCP/CLI) sets record fields and creates records through these two
 // functions, so attribution, session ownership, and settle behavior cannot
 // drift between surfaces. The record's live-document frontmatter map is the
@@ -77,7 +76,7 @@ export interface CreateCollectionRecordInput {
  * The actor origin a Y.Doc update is recorded under. Mirrors the engine's
  * capture rule (capture_agent_origin_id in dohc-engine-runtime): an agent
  * author is recorded as its agentId, an automation as its automationId —
- * EXACTLY the id its engine subscription is registered under, or the
+ * exactly the id its engine subscription is registered under, or the
  * engine's self-skip guard never binds; every other author stays device-
  * attributed, exactly like a human edit from this desktop. One attribution
  * path, no second authority.
@@ -157,7 +156,7 @@ function writableFieldEntries(
 
 /**
  * Sets frontmatter fields on one record through the record's live engine
- * Y.Doc session: open, transact every field in ONE transaction with the
+ * Y.Doc session: open, transact every field in one transaction with the
  * author-derived actorOriginId, settle so the write is durable and the .md
  * is on disk, release. Throws on refusal (invalid path, engine off, the
  * record's doc session held live elsewhere).
@@ -191,7 +190,7 @@ export async function setCollectionRecordFields(
   try {
     // The update is computed on a scratch replica, exactly like the renderer
     // editor: the session journals a local edit from its doc's update event,
-    // so transacting on the session's own doc would change state WITHOUT
+    // so transacting on the session's own doc would change state without
     // journaling, and re-applying the same update afterwards would journal
     // nothing (Yjs re-apply is a no-op).
     const scratch = new Y.Doc();
@@ -327,7 +326,7 @@ async function findAdoptedRecordId(
         ...(cursor ? { cursor } : {}),
       });
       const record = page.records.find((candidate) =>
-        workspaceRelativePathsEqual(candidate.path, recordPath),
+        candidate.path === recordPath,
       );
       if (record) return record.id;
       if (page.nextCursor === null) return null;

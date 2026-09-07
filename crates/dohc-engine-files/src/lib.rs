@@ -1,4 +1,4 @@
-//! dohc engine files — CAL-3 calibration slice.
+//! dohc engine files: workspace filesystem capture.
 //!
 //! Workspace filesystem **scan → hash → diff → reconcile-plan**, with the path
 //! floor, the watcher dirty-generation state machine, and full resource bounds,
@@ -7,8 +7,7 @@
 //! reference accelerator (NDJSON thread-per-request) — studied for its
 //! documented behavior, not depended on.
 //!
-//! The calibration point is **cancellation + bounds** (`plan §Workspace actor
-//! model`, `PORTING.md` §12/§14):
+//! The calibration point is **cancellation + bounds**:
 //!
 //! - **Cooperative cancellation between bounded units.** Every scan checks the
 //!   [`CancellationToken`] between directory entries and between hash batches,
@@ -24,9 +23,6 @@
 //! - **Dirty-generation reconcile.** A watcher overflow sets a dirty generation
 //!   forcing a full bounded rescan; coalescing may reduce work but never drops
 //!   the only evidence of a change.
-//!
-//! The crate is dormant: nothing here is reachable from product code, and it
-//! changes no TypeScript/product behavior.
 
 #![forbid(unsafe_code)]
 

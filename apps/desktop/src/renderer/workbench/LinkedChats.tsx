@@ -1,3 +1,6 @@
+import { formatChatTime } from "../time";
+import { basenameOf } from "../path";
+import { ipcErrorMessage } from "../ipcError";
 import { ArrowLeft, MessageSquare } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
@@ -11,26 +14,18 @@ import {
   ChatComposer,
   ChatMessageList,
   chatAuthorLabel,
-  formatChatTime,
-  ipcErrorMessage,
   runReactionToggle,
 } from "./chatMessages";
 
-// Linked Chats surface (PR 0M-5, workspace-engine alpha) — the Chats
-// panel's "This file" tab. Per-file Chats
-// stored in the engine and linked to the file's STABLE object id, so a chat
+// Linked Chats surface (PR 0M-5) — the Chats panel's "This file" tab. Per-file Chats
+// stored in the engine and linked to the file's stable object id, so a chat
 // follows its file through renames. Product vocabulary: these are Chats.
-// Message rendering + composer are the SHARED chatMessages pieces (PR 13)
+// Message rendering + composer are the shared chatMessages pieces
 // so this surface and the workspace Chats view can never drift.
 
 // Re-exported: EngineHistory (and its tests) import the authorship rule from
 // here since PR 0N-1.
 export { chatAuthorLabel };
-
-function basename(path: string): string {
-  const index = path.lastIndexOf("/");
-  return index >= 0 ? path.slice(index + 1) : path;
-}
 
 // The composer's replacement for every received file share.
 // Same words main throws (SharedFileReadOnlyError) and the same shape the
@@ -94,7 +89,7 @@ export function LinkedChatsPanel(props: {
   onInitialThreadConsumed?: () => void;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   // Reports a landed read so the Chats navigator can refetch its badges. The
-  // file-linked threads it lists are read HERE, not in the Chats view.
+  // file-linked threads it lists are read here, not in the Chats view.
   onThreadRead?: () => void;
   onError: (message: string) => void;
 }) {
@@ -195,7 +190,7 @@ export function LinkedChatsPanel(props: {
         setReactions(reactionResult.reactions);
         setViewerAuthorId(reactionResult.viewerAuthorId);
         // Everything on screen is read. Reporting waits for the write to
-        // LAND: the navigator refetches on that signal, and refetching earlier
+        // land: the navigator refetches on that signal, and refetching earlier
         // would read the same count back.
         void bridge()
           .markChatThreadRead({
@@ -235,15 +230,11 @@ export function LinkedChatsPanel(props: {
         if (token === liveToken.current) setMessagesLoading(false);
       }
     },
-    [props, workspaceId],
+    [props.onError, props.onThreadRead, workspaceId],
   );
 
-  // A search-result chat open is consumed ONCE by object identity: the Shell
-  // mints a fresh record per click, so clicking the same result again still
-  // re-opens, while re-renders (openThread's identity changes every render
-  // because it closes over props) and back-navigation inside the panel never
-  // re-trigger it — without the guard this effect would loop setMessages([])
-  // on every render and trap the user inside the thread.
+  // Consume each search-result click once. The shell creates a fresh record
+  // per click, including when the user reopens the same thread.
   const consumedInitialThread = useRef<ChatThreadRecord | null>(null);
   useEffect(() => {
     if (!props.initialThread) return;
@@ -283,7 +274,7 @@ export function LinkedChatsPanel(props: {
         props.onError(ipcErrorMessage(error, "Could not start a chat for this file."));
       }
     },
-    [filePath, openThread, props, workspaceId],
+    [filePath, openThread, props.onError, workspaceId],
   );
 
   const sendMessage = useCallback(async () => {
@@ -309,11 +300,11 @@ export function LinkedChatsPanel(props: {
       // Reset unconditionally: switching threads/files bumps liveToken
       // without resetting `sending`, so a token-gated reset could leave this
       // panel instance's composer disabled forever. The token guard on the
-      // `sending` READ (line above the IPC call) already prevents concurrent
+      // `sending` Read (line above the IPC call) already prevents concurrent
       // sends, so an unconditional reset is race-free.
       setSending(false);
     }
-  }, [activeThread, composer, props, sending, workspaceId]);
+  }, [activeThread, composer, props.onError, sending, workspaceId]);
 
   // Reactions (WS-MU-C2): optimistic toggle of the viewer's own reaction with
   // rollback-on-failure and per-cell ordering, then reconcile to the canonical
@@ -336,12 +327,12 @@ export function LinkedChatsPanel(props: {
         input,
       );
     },
-    [activeThread, props, viewerAuthorId, workspaceId],
+    [activeThread, props.onError, viewerAuthorId, workspaceId],
   );
 
   // Stable for ChatMessageList's memo — an inline literal would defeat it on
-  // every composer keystroke. A reaction is a WRITE, so a share that refuses
-  // writes offers no PICKER — but the reactions already on a message are part
+  // every composer keystroke. A reaction is a write, so a share that refuses
+  // writes offers no picker — but the reactions already on a message are part
   // of the conversation and stay readable. `readOnly` is the affordance built
   // for exactly this; omitting the whole prop would have hidden other
   // people's reactions too.
@@ -383,7 +374,7 @@ export function LinkedChatsPanel(props: {
           testIdPrefix="linked-chat"
           messages={messages}
           loading={messagesLoading}
-          emptyLabel={`No messages yet${filePath ? ` about ${basename(filePath)}` : ""}.`}
+          emptyLabel={`No messages yet${filePath ? ` about ${basenameOf(filePath)}` : ""}.`}
           endRef={messagesEndRef}
           onOpenPath={props.onOpenPath}
           reactionControls={reactionControls}
@@ -497,7 +488,7 @@ export function LinkedChatsPanel(props: {
             <button
               type="button"
               data-testid="linked-chat-new"
-              onClick={() => setCreating(basename(filePath))}
+              onClick={() => setCreating(basenameOf(filePath))}
               className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
             >
               <MessageSquare size={12} aria-hidden />
@@ -528,7 +519,7 @@ export function LinkedChatsPanel(props: {
                     setCreating(null);
                   }
                 }}
-                className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+                className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
               />
               <p className="mb-0 mt-1 px-1 text-[10px] leading-4 text-subtle">
                 Press Enter to start the chat.

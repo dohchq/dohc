@@ -1,11 +1,11 @@
-//! [`LinkedChatStore`]: the chats domain over the R04 storage core (R09).
+//! [`LinkedChatStore`]: the chats domain over the R04 storage core.
 //!
 //! The chat surface — channels, threads, messages, per-thread read state,
 //! receiver-private follows / personal feed / bookmarks, and the durable agent
 //! dispatch ledger — composed ON the storage seam exactly like the versioning
 //! domain: reads via [`EngineStore::read_with`], every compound mutation via
-//! [`EngineStore::write_with`] so the domain write and its replication-journal
-//! entry commit in ONE `BEGIN IMMEDIATE` transaction (PORTING.md §9). Storage
+//! [`EngineStore::write_with`] so each compound write commits in one
+//! `BEGIN IMMEDIATE` transaction. Storage
 //! owns the connection, open ritual, transaction boundary, and the crash
 //! fault seam; this crate owns what a channel / thread / message / read-cursor /
 //! follow / bookmark / dispatch claim *means* (the TS `linkedChatStore.ts` +
@@ -38,9 +38,10 @@
 //! outbox, and the single-writer dispatch ledger.
 
 use crate::error::DomainError;
+use crate::store::hash_fields;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
+use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome, hex};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -51,7 +52,7 @@ use unicode_normalization::UnicodeNormalization as _;
 /// The auto-created default channel's display name.
 pub const GENERAL_CHANNEL_NAME: &str = "general";
 /// Deterministic cross-machine wire id for the auto-created `general` channel,
-/// so independently minted rows converge as ONE channel under sync.
+/// so independently minted rows converge as one channel under sync.
 pub const GENERAL_CHANNEL_WIRE_ID: &str = "channel_wire_general_v1";
 /// The reserved agent channel's display name.
 pub const AGENT_CHANNEL_NAME: &str = "My agent";
@@ -1006,13 +1007,13 @@ pub fn encode_feed_cursor(value: &FeedCursorValue) -> String {
 }
 
 /// Decode a personal-feed cursor, failing closed as `invalid-follow-target` on
-/// ANY decode/shape violation (`decodeFeedCursor`, matrix 4.8). Accepts exactly
+/// any decode/shape violation (`decodeFeedCursor`, matrix 4.8). Accepts exactly
 /// the strings the TS engine emits (unpadded url-safe base64 of the JSON body).
 ///
-/// DELIBERATE DIVERGENCE (Rust is stricter, fail-closed, on NON-engine-minted
-/// cursors — recorded in BEHAVIOR_DELTA §10): (1) `createdAtMs` must be an
+/// Deliberate divergence (Rust is stricter, fail-closed, on NON-engine-minted
+/// cursors): (1) `createdAtMs` must be an
 /// integral i64 here, whereas TS accepts any finite JS number (our feed only
-/// ever EMITS integral coordinates, so a fractional/out-of-range value is never
+/// ever emits integral coordinates, so a fractional/out-of-range value is never
 /// a cursor this engine minted); (2) the message-id length cap counts Unicode
 /// scalar values (`chars().count()`) rather than JS UTF-16 units, so an astral
 /// string near the 256 boundary can be rejected on one engine and accepted on
@@ -1382,7 +1383,7 @@ fn normalize_reaction_emoji(value: &str) -> Result<String, DomainError> {
     Ok(normalized)
 }
 
-/// Claim metadata follows `normalizeCommand`: an omitted command is the EMPTY
+/// Claim metadata follows `normalizeCommand`: an omitted command is the empty
 /// string (the oracle's default) and empty/whitespace commands are preserved
 /// verbatim — only NUL (and the daemon's metadata length cap) refuse.
 fn normalize_dispatch_command(command: &str) -> Result<String, DomainError> {
@@ -1496,7 +1497,7 @@ fn normalize_bookmark_reason(
 
 /// Stored title (`""` = untitled) + first message body -> display title. This
 /// is shared with the runtime rebuild so write-time and repair header rows stay
-/// byte-identical (`chatThreadTitle.ts`).
+/// byte-identical.
 pub fn chat_thread_display_title(stored_title: &str, first_body: Option<&str>) -> String {
     if !stored_title.is_empty() {
         return stored_title.to_owned();
@@ -1565,7 +1566,7 @@ pub fn chat_message_search_text(display_name: &str, is_agent: bool, body: &str) 
     parts.join("\n")
 }
 
-/// The ONE delete-then-insert SQL implementation for a chat FTS row. Domain
+/// The one delete-then-insert SQL implementation for a chat FTS row. Domain
 /// writes call it inside their transaction; runtime rebuild/upsert wrappers call
 /// the same helper so the two maintenance paths cannot drift.
 pub fn upsert_chat_search_index_row(
@@ -1807,13 +1808,7 @@ pub fn attachment_id_for(
             hasher.update(occurrence.to_string().as_bytes());
         }
     }
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    hex(&hasher.finalize())
 }
 
 fn attachment_fingerprint_bytes(attachments: &[LocalAttachmentInput]) -> Vec<u8> {
@@ -1910,7 +1905,7 @@ pub fn normalize_reaction_author_id(author_id: &str) -> Result<String, DomainErr
 /// LineTerminator), so a normalized body is byte-identical to the TS
 /// `normalizeBody`. It differs from Rust's `char::is_whitespace` (Unicode
 /// `White_Space`) at exactly two code points: JS trims U+FEFF (ZWNBSP) which is
-/// NOT `White_Space`, and JS does NOT trim U+0085 (NEL) which IS `White_Space`.
+/// not `White_Space`, and JS does not trim U+0085 (NEL) which IS `White_Space`.
 pub fn is_js_trim_ws(c: char) -> bool {
     c == '\u{FEFF}' || (c.is_whitespace() && c != '\u{0085}')
 }
@@ -2223,7 +2218,7 @@ impl<'a> LinkedChatStore<'a> {
                     "A channel with that name already exists.",
                 ));
             }
-            // Persist the validated kind (`channel` or `dm`) — NOT hardcoded:
+            // Persist the validated kind (`channel` or `dm`) — not hardcoded:
             // DM privacy depends on the stored kind (`list_personal_feed`
             // suppresses `c.kind = 'dm'`), so a requested DM must stay a DM.
             insert_channel(tx, &ws, &cid, &name_c, &slug_c, kind, now_ms)?;
@@ -2243,7 +2238,6 @@ impl<'a> LinkedChatStore<'a> {
                 }),
                 now_ms,
             )?;
-            journal(tx, &cid, "chat.channel.create", now_ms)?;
             Ok::<_, DomainError>(ChatChannel {
                 workspace_id: ws.clone(),
                 channel_id: cid.clone(),
@@ -2364,7 +2358,6 @@ impl<'a> LinkedChatStore<'a> {
                 }),
                 now_ms,
             )?;
-            journal(tx, &cid, "chat.channel.create", now_ms)?;
             Ok::<_, DomainError>(ChatChannel {
                 workspace_id: ws.clone(),
                 channel_id: cid.clone(),
@@ -2589,7 +2582,6 @@ impl<'a> LinkedChatStore<'a> {
                 &payload,
                 input.now_ms,
             )?;
-            journal(tx, &thread_id_c, "chat.thread.create", input.now_ms)?;
             record_request(tx, Some(&input.request_id), &payload_hash, input.now_ms)?;
             Ok::<_, DomainError>(ChatThread {
                 workspace_id: input.workspace_id.clone(),
@@ -2606,7 +2598,7 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
-    /// Atomically create a channel thread AND its first message in ONE
+    /// Atomically create a channel thread and its first message in one
     /// transaction (`startChannelThread`). A failed send never strands an empty
     /// thread: the thread row, the message row (order 0), the read-cursor
     /// advance (for a human author), and both local journal entries commit
@@ -2810,8 +2802,6 @@ impl<'a> LinkedChatStore<'a> {
                 now,
                 replicate,
             )?;
-            journal(tx, &input.thread_id, "chat.thread.create", now)?;
-            journal(tx, &input.message_id, "chat.message.append", now)?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
             bump_chat_conversation_revision(tx, &input.workspace_id, &input.thread_id)?;
             let thread = ChatThread {
@@ -3063,7 +3053,6 @@ impl<'a> LinkedChatStore<'a> {
                 now,
                 replicate,
             )?;
-            journal(tx, &input.message_id, "chat.message.append", now)?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
             bump_chat_conversation_revision(tx, &input.workspace_id, &input.thread_id)?;
             Ok::<_, DomainError>(ChatMessage {
@@ -4207,7 +4196,7 @@ impl<'a> LinkedChatStore<'a> {
 
     // ------------------------------------------------------------- read state
 
-    /// Mark a thread read up to `up_to_sequence` (`markThreadRead`). The ONE
+    /// Mark a thread read up to `up_to_sequence` (`markThreadRead`). The one
     /// cursor writer: optional CAS against `expected_revision`, monotonic (never
     /// moves backwards), clamped to the thread's real message count, and it
     /// repairs a tampered OVER-COUNT cursor in place (revision unchanged on a
@@ -4394,7 +4383,6 @@ impl<'a> LinkedChatStore<'a> {
                     &payload,
                     at_ms,
                 )?;
-                journal(tx, &input.target_id, "chat.follow.set", at_ms)?;
             }
             require_follow(
                 tx,
@@ -4421,7 +4409,7 @@ impl<'a> LinkedChatStore<'a> {
         })
     }
 
-    /// List a follow owner's ACTIVE (following) registers, ordered by
+    /// List a follow owner's active (following) registers, ordered by
     /// `(target_kind, target_id)` (`listFollows`).
     pub fn list_follows(
         &self,
@@ -4429,11 +4417,11 @@ impl<'a> LinkedChatStore<'a> {
         owner_user_id: &str,
         state: Option<&str>,
     ) -> Result<Vec<ChatFollow>, DomainError> {
-        // The write path stores TRIMMED owners: a padded lookup must resolve
+        // The write path stores trimmed owners: a padded lookup must resolve
         // the same identity or the caller sees a silently empty list.
         let owner_user_id = normalize_feed_identity(owner_user_id, "follow owner")?;
         let owner_user_id = owner_user_id.as_str();
-        // Oracle `listFollows`: an omitted state returns ALL rows — unfollow
+        // Oracle `listFollows`: an omitted state returns all rows — unfollow
         // tombstones included, which reseeding flows inspect — and a present
         // state must be one of the two follow states.
         if let Some(state) = state {
@@ -4557,7 +4545,7 @@ impl<'a> LinkedChatStore<'a> {
             // clamped target is at or below the current cursor — a fresh cursor
             // is the (0, "") floor, so a negative-timestamp latest leaves the
             // thread unread-but-unmarkable exactly like the oracle (the daemon
-            // does NOT advance onto a negative coordinate the oracle refuses).
+            // does not advance onto a negative coordinate the oracle refuses).
             if target <= current_coordinate {
                 return Ok(current);
             }
@@ -4626,7 +4614,7 @@ impl<'a> LinkedChatStore<'a> {
         let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             // Receiver-private read state must not be advanced past a coordinate
             // the owner cannot actually see: prove the (created_at_ms, message_id)
-            // names a currently-visible feed item under the SAME predicate before
+            // names a currently-visible feed item under the same predicate before
             // persisting (`markPersonalFeedSeen`), else a caller could mark
             // arbitrary future/DM/unfollowed messages as seen.
             if !feed_coordinate_visible(tx, &ws, &owner, last_seen_created_at_ms, &msg)? {
@@ -4685,7 +4673,6 @@ impl<'a> LinkedChatStore<'a> {
                     }),
                     at_ms,
                 )?;
-                journal(tx, &owner, "chat.feed.read.set", at_ms)?;
             }
             require_feed_read_state(tx, &ws, &owner)
         })?;
@@ -4937,7 +4924,7 @@ impl<'a> LinkedChatStore<'a> {
         // `result.normalized`. A weaker floor here would let a disguised path
         // like `%2e%2e/outside.md` ride into `chat_bookmarks`/outbox that the
         // TS projection writer then refuses, wedging the bookmark.
-        // TRACKED only: a secret-classified destination (`.env`,
+        // Tracked only: a secret-classified destination (`.env`,
         // `secrets%252eenv`, ...) is structurally valid but the plaintext
         // projection flow refuses secret paths — persisting it would queue a
         // bookmark whose projection can only fail, and a plaintext bookmark
@@ -5371,7 +5358,7 @@ impl<'a> LinkedChatStore<'a> {
     }
 
     /// Mark a bookmark projection ready, fenced by a generation CAS
-    /// (`markBookmarkReady`): the outbox row flips to `ready` ONLY when the
+    /// (`markBookmarkReady`): the outbox row flips to `ready` Only when the
     /// finished `generation` is still the current pending one. A stale worker
     /// (generation N after N+1 was queued) matches no row → `applied = false`,
     /// no lost update.
@@ -5395,7 +5382,7 @@ impl<'a> LinkedChatStore<'a> {
         )?;
         // Same bound as the failed/stale transitions: a generation above
         // JS Number.MAX_SAFE_INTEGER is a malformed coordinate (worker or
-        // serialization bug) and must REFUSE, not read as merely stale.
+        // serialization bug) and must refuse, not read as merely stale.
         if !(1..=9_007_199_254_740_991).contains(&generation) {
             return Err(DomainError::chat(
                 "invalid-bookmark-target",
@@ -5610,7 +5597,7 @@ impl<'a> LinkedChatStore<'a> {
     /// Claim the oldest pending, non-paused dispatch trigger (`claimNextPending`):
     /// flips it to `running`, marks every other pending trigger in the same
     /// thread `done` under the same run, mints an `agent_run_records` row, and
-    /// returns the claim. Idempotent: retrying the same RUNNING `run_id`
+    /// returns the claim. Idempotent: retrying the same running `run_id`
     /// returns its existing claim; a different open run returns `None`
     /// (single-writer; no double-claim). `None` also when nothing is pending.
     pub fn claim_next_pending(
@@ -5634,9 +5621,9 @@ impl<'a> LinkedChatStore<'a> {
             }
             // Run ids are globally unique by schema
             // (idx_agent_run_records_run_id); the oracle never collides
-            // because it MINTS ids (freshRunId), while this wire contract
+            // because it mints ids (freshRunId), while this wire contract
             // accepts caller ids for retry rehydration. Any remaining match
-            // (another workspace, or an ENDED run in this one) must refuse
+            // (another workspace, or an ended run in this one) must refuse
             // cleanly here rather than hit the UNIQUE violation mid-claim
             // and surface an internal error for a valid pending dispatch.
             let run_id_taken: Option<i64> = tx
@@ -5653,7 +5640,7 @@ impl<'a> LinkedChatStore<'a> {
                     "Agent run id is already in use.",
                 ));
             }
-            // Single-writer guard: a run already RUNNING means no new claim.
+            // Single-writer guard: a run already running means no new claim.
             let open_running: i64 = tx
                 .query_row(
                     "SELECT COUNT(*) FROM chat_dispatch_ledger \
@@ -6656,7 +6643,7 @@ fn collect<T>(
     Ok(out)
 }
 
-/// Requeue every ACTIVE `live` bookmark on a thread for reprojection after a new
+/// Requeue every active `live` bookmark on a thread for reprojection after a new
 /// message (`markLiveBookmarksPending`), so a live projection never goes
 /// permanently stale. Bumps the generation-CAS token + resets `pending`.
 fn mark_live_bookmarks_pending(
@@ -8248,7 +8235,7 @@ fn persist_read_state(
     Ok(())
 }
 
-/// The ONE cursor writer (`advanceReadCursor`): optional CAS, monotonic, clamped
+/// The one cursor writer (`advanceReadCursor`): optional CAS, monotonic, clamped
 /// to the real message count, over-count repaired in place (revision unchanged).
 fn advance_read_cursor(
     tx: &Transaction<'_>,
@@ -8976,7 +8963,7 @@ fn active_follow_exists(
     .map_err(DomainError::sql_corrupt)
 }
 
-/// Rehydrate a lost-response retry from the one RUNNING ledger row and its
+/// Rehydrate a lost-response retry from the one running ledger row and its
 /// still-open run record. The join also makes a half-persisted pair fail closed
 /// as no retry claim; the workspace guard will then surface the wedged row.
 fn running_dispatch_claim(
@@ -9088,20 +9075,6 @@ fn dispatch_run_context(
     .map_err(DomainError::sql_corrupt)
 }
 
-fn journal(
-    tx: &Transaction<'_>,
-    doc_id: &str,
-    op_kind: &str,
-    now_ms: i64,
-) -> Result<(), DomainError> {
-    tx.execute(
-        "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) VALUES (?1, ?2, ?3)",
-        params![doc_id, op_kind, now_ms],
-    )
-    .map_err(DomainError::sql_persist)?;
-    Ok(())
-}
-
 /// Look up a prior request's payload hash in the exactly-once ledger
 /// (`engine_requests`), mirroring the versioning domain's idempotency seam.
 fn lookup_request(conn: &Connection, request_id: &str) -> Result<Option<String>, DomainError> {
@@ -9144,7 +9117,7 @@ fn record_request_result(
     Ok(())
 }
 
-/// Record the idempotency-ledger row in the SAME transaction as the mutation, so
+/// Record the idempotency-ledger row in the same transaction as the mutation, so
 /// a committed retry replays to the recorded result exactly-once. `result_seq`
 /// is unused by chat replays (the result is rebuilt from the durable rows by
 /// their caller-supplied ids), stored as 0.
@@ -9169,23 +9142,6 @@ fn record_request(
         .map_err(DomainError::sql_persist)?;
     }
     Ok(())
-}
-
-/// Deterministic fingerprint over NUL-separated fields (idempotency payloads),
-/// matching the versioning domain's `hash_fields`.
-fn hash_fields(fields: &[&[u8]]) -> String {
-    let mut hasher = Sha256::new();
-    for field in fields {
-        hasher.update(field);
-        hasher.update([0u8]);
-    }
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }
 
 fn mention_backfill_marker_id(workspace_id: &str) -> String {

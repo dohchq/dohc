@@ -1,10 +1,10 @@
 import { createCipheriv, createDecipheriv, randomBytes, scrypt } from "node:crypto";
 import type { WorkspaceId } from "@dohc/workspace-contracts/engine";
 
-export const SECRET_KEY_ENVELOPE_FORMAT = "dohc-key-envelope-v1";
-export const SECRET_KEY_ENVELOPE_SCRYPT_N = 2 ** 17;
-export const SECRET_KEY_ENVELOPE_SCRYPT_R = 8;
-export const SECRET_KEY_ENVELOPE_SCRYPT_P = 1;
+const SECRET_KEY_ENVELOPE_FORMAT = "dohc-key-envelope-v1";
+const SECRET_KEY_ENVELOPE_SCRYPT_N = 2 ** 17;
+const SECRET_KEY_ENVELOPE_SCRYPT_R = 8;
+const SECRET_KEY_ENVELOPE_SCRYPT_P = 1;
 
 const KEY_BYTES = 32;
 const SALT_BYTES = 16;
@@ -18,10 +18,10 @@ export class SecretKeyEnvelopeError extends Error {
     super("Workspace secret key envelope could not be unwrapped.");
     this.name = "SecretKeyEnvelopeError";
     // The raw cause (JSON.parse SyntaxError text, OpenSSL error codes, scrypt
-    // failures) stays debug-internal: it is deliberately NOT the standard
-    // `cause` property and NOT enumerable, so structured clone across the IPC
+    // failures) stays debug-internal: it is deliberately not the standard
+    // `cause` property and not enumerable, so structured clone across the IPC
     // boundary, JSON serialization, and object spread all produce a shape that
-    // is identical for every failure mode. Nothing distinguishable about WHY
+    // is identical for every failure mode. Nothing distinguishable about why
     // an unwrap failed may reach the renderer or a server.
     if (cause !== undefined) {
       Object.defineProperty(this, "debugCause", {
@@ -34,7 +34,7 @@ export class SecretKeyEnvelopeError extends Error {
   }
 }
 
-export interface SecretKeyEnvelopeJson {
+interface SecretKeyEnvelopeJson {
   format: typeof SECRET_KEY_ENVELOPE_FORMAT;
   saltBase64: string;
   scryptN: number;

@@ -3,6 +3,9 @@
 //! reaper's requeue-or-exhaust transitions, all observed through the real
 //! in-process daemon request path over durable claims seeded in engine.db.
 
+mod common;
+
+use common::*;
 use dohc_engine_domain::{
     AUTOMATION_RECLAIM_EXHAUSTED, ChangeActorKind, ChangeAttribution, CollectionFieldChangeFact,
     CollectionRecordApplyFacts, NoFaults, claim_automation_triggers_in_tx,
@@ -11,28 +14,16 @@ use dohc_engine_domain::{
 use dohc_engine_protocol::{
     error::ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
-use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
+use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const WORKSPACE_ID: &str = "ws-rpc-automations";
 const AUTOMATION: &str = "plugin:triage";
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
 
 async fn call(
     transport: &InProcessTransport<EngineService>,
@@ -92,12 +83,12 @@ fn facts(origin_seq: i64) -> CollectionRecordApplyFacts {
 }
 
 /// Seed engine.db before the workspace opens: one subscription, two pending
-/// claims from real apply facts, and two stale RUNNING claims for the
+/// claims from real apply facts, and two stale running claims for the
 /// open-time reaper — one with attempts left, one exhausted.
 fn seed_claims(scratch: &ScratchDir) {
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     store
         .write_with(&NoFaults, |tx| {
             subscribe_automation_in_tx(tx, WORKSPACE_ID, AUTOMATION, "tasks", 10)?;
@@ -137,7 +128,7 @@ fn seed_claims(scratch: &ScratchDir) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_claims(&scratch);
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport

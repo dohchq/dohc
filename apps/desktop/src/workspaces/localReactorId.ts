@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 
 // The opaque per-install reactor id used when signed out (no cloud user id): a
-// stable uuid persisted to `file` — NEVER the email — so a signed-out reaction
+// stable uuid persisted to `file` — never the email — so a signed-out reaction
 // cell is stable across restarts without leaking PII into the CRDT.
 //
-// Reads the existing id, or mints and persists a new one. The write is ATOMIC
+// Reads the existing id, or mints and persists a new one. The write is atomic
 // (write a temp file, then rename over the target), matching
 // cloudCredentialStore's save(): a crash between the two steps can never leave a
 // half-written id file — a reader sees either the old file or the complete new

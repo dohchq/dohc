@@ -1,10 +1,10 @@
-//! dohc engine crypto — R08 secrets capability shard.
+//! dohc engine crypto: secret-file crypto for the workspace engine.
 //!
 //! The security-critical core for secret-backed files: AES-256-GCM AEAD with
-//! byte-exact parity with the frozen TypeScript oracle recorded before the
-//! legacy engine package was deleted, the scrypt-wrapped workspace data-key envelope, and
-//! the redaction-safe [`SecretPlaintext`] / [`SecretDataKey`] types that make
-//! cleartext impossible to log or serialize by accident.
+//! byte-exact parity with the TypeScript oracle, and the redaction-safe
+//! [`SecretPlaintext`] / [`SecretDataKey`] types that make cleartext impossible
+//! to log or serialize by accident. The passphrase-wrapped data-key envelope is
+//! TypeScript-only (`secretKeyEnvelope.ts`); the engine transports it opaquely.
 //!
 //! Invariants this crate upholds (`plan §Product invariants`):
 //! - **Plaintext never leaks.** The only cleartext carrier is
@@ -21,20 +21,19 @@
 //!
 //! This crate is pure crypto: it depends on no storage, filesystem, or SQLite.
 //! The secret domain ops (tables, write/read, fork, materialization) live in
-//! `dohc-engine-domain`. The crate is dormant — not wired into the product.
+//! `dohc-engine-domain`.
 
 #![forbid(unsafe_code)]
 
 pub mod aead;
 pub mod base64;
-pub mod envelope;
 pub mod error;
 pub mod key;
 pub mod secret;
 
-// The public sealing entry is [`aead::seal`] ONLY — it draws a fresh CSPRNG IV
+// The public sealing entry is [`aead::seal`] only — it draws a fresh CSPRNG IV
 // on every call. The deterministic caller-supplied-IV variant (`seal_with_iv`)
-// is gated behind the `test-util` feature and intentionally NOT re-exported
+// is gated behind the `test-util` feature and intentionally not re-exported
 // here: reusing a nonce under one key breaks AES-GCM catastrophically.
 pub use aead::{
     MAX_SECRET_FILE_BYTES, SECRET_AAD_PREFIX, SECRET_IV_BYTES, SECRET_TAG_BYTES, SealedSecret,

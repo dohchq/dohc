@@ -29,7 +29,7 @@ export type FlatRow = {
   parentPath: string | null
 }
 
-export type NavAction =
+type NavAction =
   | { kind: 'focus'; path: string }
   | { kind: 'expand'; path: string }
   | { kind: 'collapse'; path: string }
@@ -40,7 +40,7 @@ export type NavAction =
 /** Pure: given the current visible-rows order, focused path, and the
  *  pressed key, return the navigation action to perform.
  *
- *  `rows` MUST be in render order (the visible row sequence the user
+ *  `rows` Must be in render order (the visible row sequence the user
  *  sees top-to-bottom). The function tolerates a missing currentPath
  *  by returning a `focus` action onto the first row — initial-focus
  *  bootstrap. */

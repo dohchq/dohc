@@ -1,6 +1,6 @@
 import type { ShareAccess } from "../../ipc/bridgeContract";
 
-// The level a file share grants (#646), on every share row. Both lists show
+// The level a file share grants, on every share row. Both lists show
 // it always: a level shown only sometimes teaches the reader nothing when it
 // is absent, so there is no "default" the reader has to infer.
 //

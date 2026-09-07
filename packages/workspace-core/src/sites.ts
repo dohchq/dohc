@@ -1,3 +1,4 @@
+import { isRecord } from "./records";
 export type SiteKind = "static" | "package" | "configured";
 export type SiteConfidence = "high" | "medium" | "low";
 export type SitePackageManager = "pnpm" | "npm" | "yarn" | "bun";
@@ -12,7 +13,7 @@ export interface SiteScripts {
   build?: string;
 }
 
-export interface SitePackageDerivedFactsInput {
+interface SitePackageDerivedFactsInput {
   root: string;
   configuredBuildOutput?: string | null;
   buildOutputs: readonly string[];
@@ -80,7 +81,7 @@ export interface WorkspaceSite {
 export interface WorkspaceSiteSource {
   path: string;
   body?: string | null;
-  // Diagnostics the CALLER already knows about this source before discovery
+  // Diagnostics the caller already knows about this source before discovery
   // runs (e.g. desktop's own metadata-file size bound refusing to read the
   // body at all) — merged into whichever site candidate this path's
   // directory becomes, the same way a config parse diagnostic is.
@@ -101,7 +102,7 @@ export interface DohcSiteConfig {
   };
 }
 
-export interface ParsedDohcSiteConfig {
+interface ParsedDohcSiteConfig {
   config?: DohcSiteConfig;
   diagnostics: SiteDiagnostic[];
   // The raw `type` string as written, kept even when it isn't "site" (and so
@@ -160,7 +161,7 @@ const SITE_TITLE_MAX_LENGTH = 200;
 // Framework/package signals are intentionally limited to mainstream web stacks
 // with recognizable package dependencies or official CLI/build tooling. Refresh
 // this list periodically as npm usage and framework conventions move.
-export const WEB_DEPENDENCY_NAMES = [
+const WEB_DEPENDENCY_NAMES = [
   "@angular/cli",
   "@angular/core",
   "@astrojs/react",
@@ -191,7 +192,7 @@ export const WEB_DEPENDENCY_NAMES = [
   "webpack",
 ] as const;
 
-export const WEB_DEPENDENCIES: ReadonlySet<string> = new Set(WEB_DEPENDENCY_NAMES);
+const WEB_DEPENDENCIES: ReadonlySet<string> = new Set(WEB_DEPENDENCY_NAMES);
 
 const WEB_SCRIPT_TOKENS = [
   "astro",
@@ -229,10 +230,6 @@ const IGNORED_SITE_SEGMENTS = new Set([
   ".yarn",
   "node_modules",
 ]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function diagnostic(
   path: string,
@@ -315,7 +312,7 @@ function getCandidate(candidates: Map<string, Candidate>, root: string): Candida
   return candidate;
 }
 
-// Exported so MCP's own site detector can apply the SAME safe-relative-path
+// Exported so MCP's own site detector can apply the same safe-relative-path
 // rule to a configured build.output — the two detectors reporting different
 // values for the identical dohc.json is a contract violation, not just an
 // inconsistency (round-15 finding 12).
@@ -619,9 +616,9 @@ function includesWebScriptToken(haystack: string, token: string): boolean {
   return false;
 }
 
-// Exported so MCP's own site detector can apply the SAME "does this
+// Exported so MCP's own site detector can apply the same "does this
 // package.json look like a web project" rule desktop's discoverSites
-// already does — testing only whether ANY script exists (rather than
+// already does — testing only whether any script exists (rather than
 // whether one actually names a web dependency or tool) is a materially
 // looser test that disagrees with desktop's Sites view on the same input
 // (round-16 finding 9).
@@ -723,7 +720,7 @@ function hasIndependentWebsiteSignal(candidate: Candidate): boolean {
     candidate.hasWebPackageSignal ||
     candidate.hasFrameworkConfig ||
     // Not hasBuildOutputSignal: that flag also turns on from the dohc.json's
-    // OWN configured build.output path, whether or not anything was ever
+    // own configured build.output path, whether or not anything was ever
     // built there. An explicitly non-site config's own claim can't be the
     // independent signal that overrides its own type declaration — only a
     // build output actually found on disk (candidate.buildOutputs) counts.
@@ -762,7 +759,7 @@ function finalizeSite(candidate: Candidate): WorkspaceSite {
   // config?.title is already bounded at config parse time (its own
   // title-too-long diagnostic there), but a package.json name or a folder
   // name can still be arbitrarily long and neither goes through that parse
-  // path — bound the title this site ACTUALLY carries, whichever source won.
+  // path — bound the title this site actually carries, whichever source won.
   const diagnostics = [...candidate.diagnostics];
   const rawTitle = config?.title ?? packageTitle(candidate.packageJson) ?? titleFromRoot(candidate.root);
   const title =
@@ -880,10 +877,10 @@ export function discoverSites(sources: readonly (string | WorkspaceSiteSource)[]
     }
   }
 
-  // A configured site's OWN declared build.output can itself sit several
+  // A configured site's own declared build.output can itself sit several
   // directories deep and contain a conventional output-directory name —
   // "public/dist" for a site at "portal", say. Without checking that
-  // FIRST, the generic "first conventional directory name in the path"
+  // first, the generic "first conventional directory name in the path"
   // scan below finds "dist" and promotes "portal/public" (an ordinary
   // subdirectory, not a site of its own) into a spurious second candidate,
   // instead of crediting the match to "portal" (its declared output) the

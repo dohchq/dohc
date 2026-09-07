@@ -139,10 +139,9 @@ describe("EditorTabs strip scrolling", () => {
       />,
     );
 
-    // MUTATION (ignore the label again): the tab falls back to "hello-plugin".
     const tab = screen.getByRole("tab", { name: "Hello Plugin" });
     // The tooltip stays the id: it is what tells a plugin's two tabs apart.
-    expect(tab.title).toBe("Plugin details: hello-plugin");
+    expect(tab.title, "ignore the label again: the tab falls back to 'hello-plugin'.").toBe("Plugin details: hello-plugin");
   });
 
   it("falls back to the plugin id until the shell knows a display name", () => {
@@ -172,7 +171,7 @@ describe("EditorTabs strip scrolling", () => {
     const strip = screen.getByRole("tablist");
     expect(strip.className).toContain("overflow-x-auto");
     expect(strip.className).toContain("overflow-y-hidden");
-    // Scrollbar-hiding hook — styles.test.ts asserts the rule itself.
+    // The class is the hook the scrollbar-hiding rule in styles.css targets.
     expect(strip.className).toContain("dohc-tab-strip");
   });
 

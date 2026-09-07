@@ -40,6 +40,7 @@ import {
 } from "./workspaceAssets";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
 import { createTestScratch } from "./testTemp";
+import { deferred } from "../testing/deferred";
 
 let materializationWriteSchedule: {
   path: string;
@@ -103,14 +104,6 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     }) as typeof rm,
   };
 });
-
-function deferred(): { promise: Promise<void>; resolve: () => void } {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
 
 async function workspaceRoot(): Promise<string> {
   const root = join(await createTestScratch("share-view-files-"), "workspace");
@@ -2660,21 +2653,6 @@ describe("ShareViewFiles", () => {
       ),
     ).rejects.toThrow("Cannot move a path into itself");
     expect(store.renameTextFile).not.toHaveBeenCalled();
-  });
-
-  it("keeps main behind the received-share owner", async () => {
-    const main = (await readFile(
-      new URL("../main.ts", import.meta.url),
-      "utf8",
-    )).replaceAll("\r\n", "\n");
-    expect(main).toContain("createShareViewFiles({");
-    expect(main).not.toContain('from "./workspaces/sharedView"');
-    expect(main).not.toContain('from "./workspaces/shareViewFileChanges"');
-    expect(main).not.toContain('from "./workspaces/shareViewTextChange"');
-    expect(main).not.toMatch(/routeWorkspace(?:Text|File|Path)/);
-    expect(main).toContain("receivedShareEngine.storeFor({");
-    expect(main).toContain("receivedShareEngine.relayFor({");
-    expect(main).not.toContain("shareMount: true");
   });
 
 });

@@ -27,14 +27,14 @@ export interface CloudSyncEngineOptions {
   operations: RelaySyncOperations;
   capture: WorkspaceEngineCapture;
   onChange: () => void;
-  // The number of conflicts currently OPEN in the engine store. When
+  // The number of conflicts currently open in the engine store. When
   // provided, each successful pass re-reads it so the snapshot reflects
   // reality after resolutions (local or replicated from another machine) —
   // never a monotone accumulator that keeps saying "conflict" after the
   // user resolved everything. Absent (tests/legacy), conflictsOpened
   // accumulates as before.
   countOpenConflicts?: () => Promise<number>;
-  // Join bootstrap (0P-C gate fix): this engine belongs to a freshly JOINED
+  // Join bootstrap (0P-C gate fix): this engine belongs to a freshly joined
   // workspace, so it must never append ops to the relay before its first
   // successful pull — pushing first could seed local boilerplate into the
   // remote workspace or mint conflicts against it. The first pass (and
@@ -53,10 +53,6 @@ export interface CloudSyncEngineOptions {
   // work such as live chat bookmarks must be prompt, but is ancillary: a
   // failure is logged and contained so it cannot put relay sync into backoff.
   afterSuccessfulPull?: () => Promise<void>;
-  // Dormant R13b shadow hook. No shipping caller supplies it; when the later
-  // adapter wiring does, it runs only after the pull is fully durable and can
-  // never put relay sync into backoff.
-  onRustEngineAdapterPull?: () => Promise<void>;
   debounceMs?: number;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
@@ -186,7 +182,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         }
       },
     );
-    // Only a FULLY successful pull (materialized + cursor committed inside
+    // Only a fully successful pull (materialized + cursor committed inside
     // runRelaySync) completes the bootstrap; a throw above leaves the next
     // retry pull-only.
     bootstrapPullPending = false;
@@ -197,18 +193,8 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         console.error(`[desktop] post-pull work failed for ${options.rootDir}:`, error);
       }
     }
-    if (options.onRustEngineAdapterPull) {
-      try {
-        await options.onRustEngineAdapterPull();
-      } catch (error) {
-        console.error(
-          `[desktop] Rust engine adapter post-pull failed for ${options.rootDir}:`,
-          error,
-        );
-      }
-    }
     // Shared channels ride the same cadence but never gate the pass: chat
-    // replay touches no workspace files, so it runs OUTSIDE runRelaySync's
+    // replay touches no workspace files, so it runs outside runRelaySync's
     // capture gate, and its failures are contained here.
     if (options.syncSharedChannels) {
       try {
@@ -234,7 +220,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     consecutiveFailures = 0;
     nextBackoffMs = initialBackoffMs;
     setSyncFailing(false);
-    // The bootstrap pull done, immediately queue the first NORMAL pass so
+    // The bootstrap pull done, immediately queue the first normal pass so
     // local identity/journal ops reconcile without waiting for an edit.
     if (bootstrapPass && !stopped && !authExpired && debounceTimer === undefined) {
       debounceTimer = setTimeout(() => {

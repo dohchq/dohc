@@ -183,14 +183,13 @@ describe("applyDatabaseEdit", () => {
 
 describe("containment of '..'-prefixed names", () => {
   it("materializes a database under a directory whose NAME starts with '..'", async () => {
-    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     const result = await importToDatabase(
       root,
       WALLET_SOURCE,
       "..cache/wallet.sqlite",
       "transactions",
     );
-    expect(result.rowCount).toBe(2);
+    expect(result.rowCount, "..-segment: a bare '..-prefix' isInside refuses this real contained name.").toBe(2);
 
     const snapshot = await readDatabaseSnapshot(root, "..cache/wallet.sqlite");
     expect(snapshot.tables.find((t) => t.name === "transactions")?.rows).toHaveLength(2);

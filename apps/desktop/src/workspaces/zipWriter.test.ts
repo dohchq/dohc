@@ -3,7 +3,7 @@ import { buildStoreZip, crc32 } from "./zipWriter";
 
 // Pure reader for the test: walks the central directory the way unzip does
 // (EOCD → central headers → local headers) so the writer is verified against
-// the FORMAT, not against itself.
+// the format, not against itself.
 function readZip(zip: Buffer): Array<{ path: string; data: Buffer; crc: number }> {
   const eocdOffset = zip.length - 22;
   expect(zip.readUInt32LE(eocdOffset)).toBe(0x06054b50);
@@ -74,7 +74,7 @@ describe("buildStoreZip", () => {
 
   it("refuses zip-slip entry names at the container boundary", () => {
     const data = Buffer.from("x");
-    // Each of these can write OUTSIDE the extraction dir in some extractor.
+    // Each of these can write outside the extraction dir in some extractor.
     for (const path of [
       "../evil.md", // parent traversal
       "a/../../evil.md", // traversal mid-path
@@ -89,7 +89,7 @@ describe("buildStoreZip", () => {
         /absolute|drive letter|backslash|unsafe segment|empty/,
       );
     }
-    // A clean relative POSIX name (including dots WITHIN a segment) is fine.
+    // A clean relative POSIX name (including dots within a segment) is fine.
     expect(() => buildStoreZip([{ path: "notes/my.notes.md", data }])).not.toThrow();
   });
 });

@@ -29,9 +29,9 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
-import { encodeFixtureBigInts } from "../../../../packages/workspace-engine-client/src/workspace/collectionFieldPipeline.testSupport";
+import { encodeFixtureBigInts } from "@dohc/workspace-engine-client/testing";
 import { decodeCollectionValue } from "../../../../packages/workspace-engine-client/src/workspace/workspaceWireContract";
-import type { JsonValue } from "../../../../packages/workspace-engine-client/src/ydoc/generated/serde_json/JsonValue";
+import type { JsonValue } from "@dohc/workspace-engine-client";
 
 function createWorkspaceEngineCapture(
   options: Omit<WorkspaceEngineCaptureOptions, "attachmentId">,
@@ -60,9 +60,9 @@ function decodePipelineFixtureValue(value: unknown): unknown {
   return value;
 }
 
-// This suite looked only under the repo root, so it SKIPPED everywhere from the
+// This suite looked only under the repo root, so it skipped everywhere from the
 // day it was written and its coverage came and went with whoever last ran
-// `cargo build` (#390). The shared gate also checks apps/desktop/target/debug,
+// `cargo build`. The shared gate also checks apps/desktop/target/debug,
 // which is where the app under test and the staged-binary harnesses put it.
 const engine = requireEngineBinaryOrSkip();
 
@@ -133,7 +133,6 @@ it.skipIf(engine.missing)(
     const capture = createAttachedWorkspaceEngineCapture({
       ...workspace,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
     try {
       // `capture.flush()` drains changes the OS watcher has already observed;
@@ -211,7 +210,6 @@ it.skipIf(engine.missing)(
     const capture = createAttachedWorkspaceEngineCapture({
       ...workspace,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
     const queryRecords = async () =>
       await sessions.run(
@@ -320,13 +318,6 @@ it.skipIf(engine.missing)(
   "drives watcher-batch capture, readback, and version-switch materialization through the real daemon",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-e2e-");
-    const markerDirectory = join(root, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(
-      join(markerDirectory, "SHADOW_CLONE"),
-      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "utf8",
-    );
     const lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
@@ -337,7 +328,6 @@ it.skipIf(engine.missing)(
       workspaceId: "capture-rust-e2e",
       rootPath: root,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
     try {
       const mainText = `main\n${"m".repeat(64 * 1024)}`;
@@ -402,7 +392,7 @@ it.skipIf(engine.missing)(
   60_000,
 );
 
-// #338: another app (Notepad, an agent, `>>`) writes the .md WHILE the
+// Another app (Notepad, an agent, `>>`) writes the.md while the
 // document is open in dohc. The session's close runs a pre-close settle; the
 // engine answers it from the lineage's last settled content and never touches
 // the drifted file, and the desktop then mirrored those bytes over it — the
@@ -412,13 +402,6 @@ it.skipIf(engine.missing)(
   "keeps an edit made outside dohc when the open document closes",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-drift-");
-    const markerDirectory = join(root, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(
-      join(markerDirectory, "SHADOW_CLONE"),
-      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "utf8",
-    );
     const lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
@@ -429,7 +412,6 @@ it.skipIf(engine.missing)(
       workspaceId: "capture-rust-drift",
       rootPath: root,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
     const outside = "written outside dohc\n";
     try {
@@ -508,7 +490,6 @@ it.skipIf(engine.missing)(
           workspaceId: openedWorkspace.workspaceId,
           rootPath: openedWorkspace.rootPath,
           rustEngineSessions: firstSessions,
-          daemonOwnsCapture: true,
         });
         openedState.capture = capture;
         return { capture, shareView: false };
@@ -552,7 +533,6 @@ it.skipIf(engine.missing)(
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
         rustEngineSessions: secondSessions,
-        daemonOwnsCapture: true,
       });
       try {
         const moments = await waitForPathMoments(reopened, "final.md", 1);
@@ -577,8 +557,8 @@ it.skipIf(engine.missing)(
   60_000,
 );
 
-// The domain-code translation (#418) is asserted on the loopback in
-// workspaceVersionOperations.test.ts. It is asserted HERE against the real
+// The domain-code translation is asserted on the loopback in
+// workspaceVersionOperations.test.ts. It is asserted here against the real
 // daemon because the loopback is where those codes could quietly stop matching
 // the engine's: the translation reads the refusal message, and a fixture is free
 // to write any message it likes.
@@ -596,7 +576,6 @@ it.skipIf(engine.missing)(
       workspaceId: "capture-rust-codes",
       rootPath: root,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
     try {
       await capture.createVersion("Draft");
@@ -623,13 +602,6 @@ it.skipIf(engine.missing)(
   "closes clean, then captures an outside edit deferred by its live lease",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-race-");
-    const markerDirectory = join(root, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(
-      join(markerDirectory, "SHADOW_CLONE"),
-      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "utf8",
-    );
     const lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
@@ -645,7 +617,6 @@ it.skipIf(engine.missing)(
     const capture = createAttachedWorkspaceEngineCapture({
       ...workspace,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
       onError: (context) => errors.push(context),
     });
     const outside = "written outside dohc\n";
@@ -691,7 +662,7 @@ it.skipIf(engine.missing)(
       // prunes, which is what proves the refusal benign — the file belongs to
       // the outside author and this document's text is a settled moment in
       // History. The refusal is still reported as it happens and withdrawn
-      // after the release; the editor's LAST word is what it acts on.
+      // after the release; the editor's last word is what it acts on.
       await expect(session.close()).resolves.toBeUndefined();
       expect(states).toEqual(["settling", "error", "changed-on-disk"]);
       expect(errors).toEqual(["ydoc settle of note.md"]);
@@ -708,7 +679,7 @@ it.skipIf(engine.missing)(
         settledMoments.length + 1,
       );
       expect(capturedMoments).toHaveLength(3);
-      expect(capturedMoments[0]?.id).not.toBe(settledMoments[0]?.id);
+      expect(capturedMoments[0]?.id).not.toBe(settledMoments[0]?.momentId);
     } finally {
       await capture.stop().catch(() => undefined);
       await sessions.closeAll().catch(() => undefined);
@@ -719,7 +690,7 @@ it.skipIf(engine.missing)(
 );
 
 // dohc-ai/dohc#337 item 5, driven by its own mechanism: another app holds the
-// `.md` open WITHOUT FILE_SHARE_DELETE, so every attempt to replace it fails
+// `.md` open without FILE_SHARE_DELETE, so every attempt to replace it fails
 // with a sharing violation. An ACL cannot model this — the workspace folder
 // grants FILE_DELETE_CHILD, which lets the replace through a deny-write ACE on
 // the file itself.
@@ -759,13 +730,6 @@ it.skipIf(engine.missing || process.platform !== "win32")(
   "surfaces a locked save and lands it by itself once the lock releases",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-lock-");
-    const markerDirectory = join(root, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(
-      join(markerDirectory, "SHADOW_CLONE"),
-      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "utf8",
-    );
     const lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
@@ -777,7 +741,6 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       workspaceId: "capture-rust-lock",
       rootPath: root,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
       onError: (context) => errors.push(context),
     });
     const absolute = join(root, "note.md");
@@ -819,7 +782,7 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       await release();
       release = null;
 
-      // The item's second claim, closed (#554): the provider retries the
+      // The item's second claim, closed: the provider retries the
       // settle on a doubling delay, so releasing the lock is followed by the
       // write landing BY ITSELF — no further edit. The retry replays the
       // durably pending materialization job through the idempotent settle.
@@ -836,7 +799,7 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       expect(await readFile(absolute, "utf8")).toBe("locked edit\nbase\n");
       expect(states).toContain("saved");
 
-      // And an ordinary settle keeps working after the recovery: BOTH edits
+      // And an ordinary settle keeps working after the recovery: both edits
       // stay in the file, so nothing the lock blocked was dropped.
       states.length = 0;
       await type("second edit\n");
@@ -858,11 +821,11 @@ it.skipIf(engine.missing || process.platform !== "win32")(
 );
 
 // The half a refusal cannot answer, driven against the real daemon. Same
-// deferred outside edit as above, but the user has UNSETTLED edits when the
+// deferred outside edit as above, but the user has unsettled edits when the
 // close runs: the close-settle refuses ConflictStaleTarget, and then the
 // release refuses too — a local-only prune needs the CRDT projection to equal
 // `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs) and the
-// daemon REINSERTS the session entry on that refusal
+// daemon reinserts the session entry on that refusal
 // (crates/dohc-workspace-engine/src/lib.rs, ydoc_close_inner). The doc stays
 // reserved, live, and unsaved, so the failure must stay loud. Deciding this
 // at the refusal instead of after the release reported "changed on disk" over
@@ -871,13 +834,6 @@ it.skipIf(engine.missing)(
   "keeps the close loud when unsettled edits meet a deferred outside edit",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-loud-");
-    const markerDirectory = join(root, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(
-      join(markerDirectory, "SHADOW_CLONE"),
-      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "utf8",
-    );
     const lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
@@ -893,7 +849,6 @@ it.skipIf(engine.missing)(
     const capture = createAttachedWorkspaceEngineCapture({
       ...workspace,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
       onError: (context) => errors.push(context),
     });
     const outside = "written outside dohc\n";
@@ -941,8 +896,8 @@ it.skipIf(engine.missing)(
         (error: unknown) => error,
       );
       // The sharpest statement of the fix. The error the release throws here
-      // CARRIES the stale-target message — the escalated settling release
-      // refuses the same way the settle did — while NOT being the
+      // carries the stale-target message — the escalated settling release
+      // refuses the same way the settle did — while not being the
       // released-with-settle-failure signal, because nothing was released.
       // A downgrade keyed on the refusal's message would fire on exactly
       // this; keyed on the type, it cannot.
@@ -982,7 +937,7 @@ it.skipIf(engine.missing)(
   60_000,
 );
 
-// #534 against the REAL daemon, which is the only place `head` actually
+// #534 against the real daemon, which is the only place `head` actually
 // crosses the wire. The loopback tests state what the daemon does; this proves
 // the daemon does it — that an absent head really comes back absent, and that
 // the three outcomes the contract distinguishes are the three that happen.
@@ -1000,7 +955,6 @@ it.skipIf(engine.missing)(
       workspaceId: "capture-rust-absent-head",
       rootPath: root,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
     try {
       // Nothing in the version, nothing on disk: the path is not here.
@@ -1016,7 +970,7 @@ it.skipIf(engine.missing)(
         code: "ENOENT",
       });
 
-      // On disk with content but not captured yet: refused, but NOT as missing.
+      // On disk with content but not captured yet: refused, but not as missing.
       await writeFile(join(root, "uncaptured.md"), "real bytes", "utf8");
       const uncaptured = await capture
         .openYDocSession({
@@ -1032,9 +986,9 @@ it.skipIf(engine.missing)(
         "real bytes",
       );
 
-      // Creation, the case the daemon's absent-head bind exists for: an EMPTY
+      // Creation, the case the daemon's absent-head bind exists for: an empty
       // artifact on disk, exactly what workspaceFiles.createFile leaves. The
-      // open must be ADMITTED — the guard above refused two paths in a row, and
+      // open must be admitted — the guard above refused two paths in a row, and
       // a guard that refused this one too would look just as green.
       //
       // Deliberately stops at the open. Whether the daemon's own capture reaches
@@ -1058,7 +1012,7 @@ it.skipIf(engine.missing)(
   60_000,
 );
 
-// #815: the engine's Markdown settlement rewrote unedited files on close —
+// The engine's Markdown settlement rewrote unedited files on close —
 // mangling CRLF and trailing newlines, churning mtimes, and feeding the
 // watcher a settled write for content nobody changed. For a plugin README
 // that settled write is exactly what `PluginPipeline.handleWatcherEvents`
@@ -1069,18 +1023,11 @@ it.skipIf(engine.missing)(
 // real capture, real fs watcher — and pins both halves: no edit means no
 // event for the pipeline to hold on; a real edit still produces one.
 // PluginPipeline.test.ts owns the other link (a README watcher event ->
-// disabled-pending-approval), so the two suites together pin the #815 chain.
+// disabled-pending-approval), so the two suites together pin the chain.
 it.skipIf(engine.missing)(
   "a no-edit open and close of a plugin README feeds the watcher nothing; a real edit still does",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-815-");
-    const markerDirectory = join(root, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(
-      join(markerDirectory, "SHADOW_CLONE"),
-      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "utf8",
-    );
     const lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
@@ -1091,7 +1038,6 @@ it.skipIf(engine.missing)(
       workspaceId: "capture-rust-815",
       rootPath: root,
       rustEngineSessions: sessions,
-      daemonOwnsCapture: true,
     });
     const workspace: CreatedWorkspace = {
       workspaceId: "capture-rust-815",
@@ -1132,7 +1078,7 @@ it.skipIf(engine.missing)(
         const after = await stat(join(root, readmePath));
         expect(after.mtimeMs).toBe(before.mtimeMs);
 
-        // The control half: a REAL edit must reach the feed exactly as
+        // The control half: a real edit must reach the feed exactly as
         // before the skip existed.
         const edited = await capture.openYDocSession({
           path: readmePath,

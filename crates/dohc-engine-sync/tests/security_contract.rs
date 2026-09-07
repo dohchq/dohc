@@ -65,7 +65,7 @@ fn fixture() -> Fixture {
 }
 
 /// The write floor is the deliberate Rust twin of the TypeScript
-/// `classifyEngineFilePath`, so it must agree on EVERY vector. `rustClaimed`
+/// `classifyEngineFilePath`, so it must agree on every vector. `rustClaimed`
 /// narrows the share classifier asserted below, not this one: the write floor
 /// normalizes backslashes and percent-encoding itself, platform-independently.
 ///
@@ -103,7 +103,7 @@ fn generated_ts_write_floor_matches_the_rust_write_floor() {
 ///
 /// This test guards the one thing construction cannot: a future edit that
 /// restates the rules at the boundary instead of calling the shared one, which
-/// is the #484 shape returning. A widened pre-check is deliberately not
+/// is the shape returning. A widened pre-check is deliberately not
 /// guarded — the grammar and ignored-segment checks run first, so widening one
 /// turns a secret verdict into `Unsafe` or `Ignored`, which is still refused.
 ///
@@ -200,7 +200,7 @@ fn generated_ts_share_version_id_rule_matches_the_rust_twin() {
     }
 }
 
-/// The file-share access level (#646, S7): both sides must accept EXACTLY
+/// The file-share access level: both sides must accept exactly
 /// `view`, `comment`, `edit` and refuse everything else, including the case
 /// variants and padded values a lax parser would let through. This holds the
 /// Rust twin (`ShareAccess::parse`) to the TypeScript oracle

@@ -10,17 +10,10 @@ use dohc_engine_runtime::{
     WorkspaceSupervisor,
 };
 use dohc_engine_storage::EngineStore;
-use dohc_engine_sync::{LeaseProbe, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
-use dohc_engine_testkit::{ScratchDir, try_make_dir_alias};
+use dohc_engine_sync::{AlwaysLive, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
+use dohc_engine_testkit::{ScratchDir, engine_db_path, try_make_dir_alias};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 #[derive(Default)]
 struct CountingRecorder {
@@ -47,21 +40,13 @@ fn remove_dir_alias(path: &std::path::Path) {
     let _ = path;
 }
 
-struct AlwaysLive;
-
-impl LeaseProbe for AlwaysLive {
-    fn is_live(&self, _key: &DocKey) -> bool {
-        true
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applied() {
     const WS: &str = "ws-settle-identity-refusal";
     const PATH: &str = "notes/client.md";
     const WRONG_PATH: &str = "notes/stale-remote-name.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     let (key, expected_head_sha, lineage_claim_id) = {
         let mut store = EngineStore::open(&db, 1).expect("open store");
@@ -116,8 +101,14 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
             }),
             recorded_at_ms: 3,
         };
-        apply_ydoc_envelope(&mut store, &base_envelope, &NoFaults, &NoLiveLeases)
-            .expect("apply verified base");
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base_envelope,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("apply verified base");
         let remote = doc.plaintext_insert(6, " remote");
         let remote_sha = store.put_binary_blob(&remote).expect("remote update blob");
         let envelope = ReplicationEnvelope {
@@ -137,8 +128,14 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
             }),
             recorded_at_ms: 4,
         };
-        apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLive)
-            .expect("park stale-path remote update");
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &AlwaysLive,
+        )
+        .expect("park stale-path remote update");
         (key, head.blob_sha256, lineage_claim_id)
     };
     std::fs::create_dir_all(scratch.path().join("notes")).expect("notes dir");
@@ -155,7 +152,7 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
             Some(lineage_claim_id),
             Some(expected_head_sha),
             "identity-refusal-session".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             6,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -167,7 +164,7 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
             refused,
             dohc_engine_runtime::YdocSettleOutcome::RemoteUpdatesPending { .. }
         ),
-        "MUTATION: excluding identity-refused applied rows from drained lets settle succeed: {refused:?}"
+        "excluding identity-refused applied rows from drained lets settle succeed: {refused:?}"
     );
     supervisor.close(&db).expect("close actor");
 
@@ -204,7 +201,7 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
     const WS: &str = "ws-settle-rebind";
     const PATH: &str = "notes/own.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     // The session creates and settles PATH ("same text").
     let supervisor = WorkspaceSupervisor::new();
@@ -252,7 +249,7 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
             state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-rebind".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -262,9 +259,9 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
     supervisor.close(&db).expect("close actor");
 
     // Rebind: rename the settled file away, then capture identical bytes at
-    // the old path — capture's locked resolution mints a DISAMBIGUATED object
+    // the old path — capture's locked resolution mints a disambiguated object
     // (the derived id is live at the new alias), so PATH's head is now
-    // another object with the SAME blob sha.
+    // another object with the same blob sha.
     {
         let mut store = EngineStore::open(&db, 100).expect("open store");
         VersionedTextStore::new(&mut store)
@@ -331,7 +328,7 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
             state.lineage_claim_id.clone(),
             None,
             "session-rebind".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             130,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -353,7 +350,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
     const WS: &str = "ws-prune-reseed";
     const PATH: &str = "notes/prune.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
@@ -400,7 +397,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
             state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-prune".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -418,7 +415,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
         .await
         .expect("prune close");
 
-    // The head advances WITHOUT a session: an external disk edit ingested by
+    // The head advances without a session: an external disk edit ingested by
     // capture (disk + DB stay consistent).
     std::fs::write(scratch.path().join(PATH), "external edit").expect("disk edit");
     handle
@@ -443,7 +440,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
         .await
         .expect("external capture");
 
-    // Reopen: the pruned lineage reseeds from the NEW head, and its first
+    // Reopen: the pruned lineage reseeds from the new head, and its first
     // settle must succeed. Mutation check: drop `last_settled_sha = NULL`
     // from the prune UPDATE in `close_session` — the settle expectation then
     // trails at the v1 sha and this settle refuses ConflictStaleTarget.
@@ -490,7 +487,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
             reopened.lineage_claim_id.clone(),
             reopened.head_blob_sha256.clone(),
             "session-prune-2".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             80,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -512,7 +509,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
     const WS: &str = "ws-retired-reopen";
     const PATH: &str = "notes/retired.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
@@ -559,14 +556,14 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
             state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-retire".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
         .await
         .expect("settle");
-    // Workspace teardown WITHOUT ydoc.close: the lineage (rows +
+    // Workspace teardown without ydoc.close: the lineage (rows +
     // last_settled_sha) survives. The user then deletes the file and the
     // disk-driven retire destroys the head.
     std::fs::remove_file(scratch.path().join(PATH)).expect("delete artifact");
@@ -591,10 +588,10 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
         .await
         .expect("retire");
 
-    // Reopen: the deleted document must NOT resurrect, and the fresh
+    // Reopen: the deleted document must not resurrect, and the fresh
     // create-flow must settle cleanly. Mutation check: drop the
     // retired-lineage clearing in ydoc_open_state_on_store — the open
-    // reports lineage EXISTING and the settle below wedges
+    // reports lineage existing and the settle below wedges
     // ConflictStaleTarget on the retained last_settled_sha.
     let reopened = handle
         .ydoc_open_state(
@@ -642,7 +639,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
             reopened.lineage_claim_id.clone(),
             reopened.head_blob_sha256.clone(),
             "session-retire-2".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             70,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -658,7 +655,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn settle_replay_recovers_cross_platform_via_fault_injection() {
     // Portable twin of the windows-only exclusive-lock tests: the crash
-    // fault at materialize.after-job-commit leaves the SAME durable state a
+    // fault at materialize.after-job-commit leaves the same durable state a
     // transient replace failure does (committed marker + pending ydoc-mat_
     // job + stale disk), so the replay path gets non-Windows coverage.
     // Mutation check: drop the pending-job probe from `close_session`'s
@@ -667,7 +664,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
     const WS: &str = "ws-portable-replay";
     const PATH: &str = "notes/portable.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
@@ -715,7 +712,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-portable".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -759,7 +756,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-portable".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             50,
             faults.clone(),
             CancellationToken::new(),
@@ -805,7 +802,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-portable".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             70,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -828,7 +825,7 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
     const PATH: &str = "notes/linked/blocked.md";
     let scratch = ScratchDir::new().expect("scratch");
     let outside = ScratchDir::new().expect("outside scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     std::fs::create_dir(scratch.path().join("notes")).expect("notes parent");
     let alias = scratch.path().join("notes/linked");
     if !try_make_dir_alias(outside.path(), &alias).expect("create directory alias") {

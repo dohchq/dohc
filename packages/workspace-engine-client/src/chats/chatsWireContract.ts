@@ -1,8 +1,8 @@
+import { ProtocolShapeError, mutableStruct } from "../wireSchema";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
-import * as Struct from "effect/Struct";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
+import type { JsonValue } from "../protocol";
 
 export const CHATS_METHOD = {
   channelCreate: "chats.channels.create",
@@ -71,41 +71,15 @@ export const CHATS_METHOD = {
 
 export type ChatsMethod = (typeof CHATS_METHOD)[keyof typeof CHATS_METHOD];
 export type ChatsJsonObject = { [key: string]: JsonValue | undefined };
-export type ChatPageParams = ChatsJsonObject & {
+type ChatPageParams = ChatsJsonObject & {
   pageLimit?: number;
   cursor?: string;
 };
 
-export type ChatActor = ChatsJsonObject & {
-  kind: "human" | "agent";
-  displayName: string;
-};
-export type ChatLinkedFile = ChatsJsonObject & {
-  objectId: string;
-  pathHint?: string;
-  linkedAtMs: number;
-};
-export type ChatThread = ChatsJsonObject & {
-  id: string;
-  workspaceId: string;
-  title: string;
-  createdAtMs: number;
-  updatedAtMs: number;
-  linkedFile?: ChatLinkedFile;
-  channelId?: string;
-};
-export type ChatAttachment = ChatsJsonObject & {
-  attachmentId: string;
-  threadId: string;
-  messageId: string;
-  targetKind: "file";
-  objectId?: string;
-  pathHint?: string;
-  headingText?: string;
-  headingAnchor?: string;
-  headingOccurrence?: number;
-  createdAtMs: number;
-};
+export type ChatActor = typeof ChatActorSchema.Type;
+
+export type ChatThread = typeof ChatThreadSchema.Type;
+export type ChatAttachment = typeof ChatAttachmentSchema.Type;
 export type ChatLocalAttachmentParams = ChatsJsonObject & {
   objectId: string;
   pathHint?: string;
@@ -113,217 +87,50 @@ export type ChatLocalAttachmentParams = ChatsJsonObject & {
   headingAnchor?: string;
   headingOccurrence?: number;
 };
-export type ChatMessage = ChatsJsonObject & {
-  id: string;
-  workspaceId: string;
-  threadId: string;
-  author: ChatActor;
-  authorUserId?: string;
-  parentMessageId?: string;
-  origin?: "cli";
-  body: string;
-  createdAtMs: number;
-  attachments: ChatAttachment[];
-};
-export type ChatDecision = ChatsJsonObject & {
-  threadId: string;
-  messageId: string;
-  state: "open" | "resolved";
-  resolvedByMessageId?: string;
-  atMs: number;
-};
-export type ChatReactionAuthor = ChatsJsonObject & {
-  authorId: string;
-  kind: "human" | "agent";
-  displayName: string;
-};
-export type ChatReaction = ChatsJsonObject & {
-  reactionId: string;
-  threadId: string;
-  messageId: string;
-  emoji: string;
-  author: ChatReactionAuthor;
-  state: "added" | "removed";
-  atMs: number;
-};
-export type ChatBookmark = ChatsJsonObject & {
-  bookmarkId: string;
-  workspaceId: string;
-  ownerUserId: string;
-  targetKind: "message" | "thread";
-  targetId: string;
-  threadId: string;
-  messageId?: string;
-  mode: "live" | "snapshot";
-  destinationPath: string;
-  state: "active" | "archived";
-  generation: number;
-  projectedGeneration: number;
-  projectionState: "pending" | "ready" | "failed" | "stale";
-  projectionObjectId?: string;
-  createdAtMs: number;
-  updatedAtMs: number;
-  lastProjectedAtMs?: number;
-  failureReason?: string;
-};
-export type ChatBookmarkTransition = ChatsJsonObject & {
-  bookmark: ChatBookmark;
-  applied: boolean;
-};
-export type ChatDispatch = ChatsJsonObject & {
-  workspaceId: string;
-  triggerMessageId: string;
-  threadId: string;
-  state: "pending" | "running" | "done" | "failed";
-  runId?: string;
-  failureReason?: string;
-  attemptCount: number;
-  createdAtMs: number;
-  updatedAtMs: number;
-};
-export type ChatRun = ChatsJsonObject & {
-  workspaceId: string;
-  runId: string;
-  threadId: string;
-  triggerMessageId: string;
-  command: string;
-  startedAtMs: number;
-  endedAtMs?: number;
-  exitCode?: number;
-  failureReason?: string;
-  logPath?: string;
-  failureNotePosted: boolean;
-};
-export type ChatDispatchClaim = ChatsJsonObject & {
-  dispatch: ChatDispatch;
-  run: ChatRun;
-};
-export type ChatThreadPause = ChatsJsonObject & {
-  workspaceId: string;
-  threadId: string;
-  paused: boolean;
-  reason?: string;
-  updatedAtMs: number;
-};
-export type ChatAgentReadState = ChatsJsonObject & {
-  workspaceId: string;
-  threadId: string;
-  lastReadCreatedAtMs: number;
-  lastReadMessageId: string;
-  revision: number;
-  updatedAtMs: number;
-};
-export type ChatMention = ChatsJsonObject & {
-  threadId: string;
-  messageId: string;
-  handle: string;
-  authorKind: "human" | "agent";
-  createdAtMs: number;
-};
-export type ChatChannel = ChatsJsonObject & {
-  workspaceId: string;
-  channelId: string;
-  name: string;
-  slug: string;
-  kind: "channel" | "dm" | "agent";
-  createdAtMs: number;
-  updatedAtMs: number;
-};
-export type ChatChannelSummary = ChatChannel & {
-  threadCount: number;
-  unreadCount: number;
-};
-export type ChatThreadWireRecord = ChatsJsonObject & {
-  workspaceId: string;
-  threadId: string;
-  title: string;
-  createdAtMs: number;
-  updatedAtMs: number;
-  channelId: string | null;
-  linkedObjectId: string | null;
-};
-export type ChatThreadReadState = ChatsJsonObject & {
-  workspaceId: string;
-  threadId: string;
-  lastReadSequence: number;
-  revision: number;
-  updatedAtMs: number;
-};
-export type ChatUnreadFileThread = ChatsJsonObject & {
-  threadId: string;
-  messageCount: number;
-  lastReadSequence: number;
-};
-export type ChatFollow = ChatsJsonObject & {
-  workspaceId: string;
-  ownerUserId: string;
-  targetKind: "person" | "agent" | "channel" | "thread";
-  targetId: string;
-  state: "following" | "unfollowed";
-  updatedAtMs: number;
-};
-export type ChatFileMention = ChatsJsonObject & {
-  attachment: ChatAttachment;
-  message: ChatMessage;
-  thread: ChatThread;
-  channel?: ChatChannel;
-};
-export type ChatChannelOpeningMessage = ChatsJsonObject & {
-  id: string;
-  author: ChatActor;
-  createdAtMs: number;
-  bodySnippet: string;
-  reactions: ChatReaction[];
-};
-export type ChatChannelThreadSummary = ChatsJsonObject & {
-  thread: ChatThread;
-  messageCount: number;
-  lastReadSequence: number;
-  unreadCount: number;
-  openDecisionCount: number;
-  openingMessage?: ChatChannelOpeningMessage;
-};
-export type ChatProjection = ChatsJsonObject & {
-  path: string;
-  readOnly: true;
-  threadId: string;
-  text: string;
-};
+export type ChatMessage = typeof ChatMessageSchema.Type;
+export type ChatDecision = typeof ChatDecisionSchema.Type;
+export type ChatReactionAuthor = typeof ChatReactionAuthorSchema.Type;
+export type ChatReaction = typeof ChatReactionSchema.Type;
+export type ChatBookmark = typeof ChatBookmarkSchema.Type;
+export type ChatBookmarkTransition = typeof BookmarkTransitionSchema.Type;
+export type ChatDispatch = typeof ChatDispatchSchema.Type;
+export type ChatRun = typeof ChatRunSchema.Type;
+export type ChatDispatchClaim = typeof ChatDispatchClaimSchema.Type;
+export type ChatThreadPause = typeof ChatThreadPauseSchema.Type;
+export type ChatAgentReadState = typeof ChatAgentReadStateSchema.Type;
+export type ChatMention = typeof ChatMentionSchema.Type;
+export type ChatChannel = typeof ChatChannelSchema.Type;
+export type ChatChannelSummary = typeof ChatChannelSummarySchema.Type;
+export type ChatThreadWireRecord = typeof ChatThreadWireRecordSchema.Type;
+export type ChatThreadReadState = typeof ChatThreadReadStateSchema.Type;
+export type ChatUnreadFileThread = typeof ChatUnreadFileThreadSchema.Type;
+export type ChatFollow = typeof ChatFollowSchema.Type;
+export type ChatFileMention = typeof ChatFileMentionSchema.Type;
+
+export type ChatChannelThreadSummary =
+  typeof ChatChannelThreadSummarySchema.Type;
+export type ChatProjection = typeof ChatProjectionSchema.Type;
 export type ChatProjectionFileAccess =
   | (ChatsJsonObject & { kind: "allowed"; path: string })
   | (ChatsJsonObject & { kind: "denied" | "unknown" });
-export type ChatFeedReadState = ChatsJsonObject & {
-  workspaceId: string;
-  ownerUserId: string;
-  lastSeenCreatedAtMs: number;
-  lastSeenMessageId: string;
-  updatedAtMs: number;
-};
-export type ChatFeedChannel = Omit<ChatChannel, "channelId"> & { id: string };
-export type ChatFeedItem = ChatsJsonObject & {
-  message: ChatMessage;
-  thread: ChatThread;
-  reactions: ChatReaction[];
-  matchedBy: Array<"person" | "agent" | "channel" | "thread">;
-  channel?: ChatFeedChannel;
-  parentMessage?: ChatMessage;
-  openingMessage?: ChatMessage;
-};
+export type ChatFeedReadState = typeof ChatFeedReadStateSchema.Type;
 
-export type ChatChannelGetWireIdParams = ChatsJsonObject & { channelId: string };
-export type ChatChannelCreateParams = ChatsJsonObject & {
+export type ChatFeedItem = typeof ChatFeedItemSchema.Type;
+
+type ChatChannelGetWireIdParams = ChatsJsonObject & { channelId: string };
+type ChatChannelCreateParams = ChatsJsonObject & {
   channelId: string;
   name: string;
   kind: "channel" | "dm" | "agent";
   nowMs?: number;
 };
-export type ChatChannelEnsureParams = ChatsJsonObject & {
+type ChatChannelEnsureParams = ChatsJsonObject & {
   channelId: string;
   nowMs?: number;
 };
-export type ChatChannelFindBySlugParams = ChatsJsonObject & { slug: string };
-export type ChatEmptyParams = ChatsJsonObject;
-export type ChatThreadStartParams = ChatsJsonObject & {
+type ChatChannelFindBySlugParams = ChatsJsonObject & { slug: string };
+
+type ChatThreadStartParams = ChatsJsonObject & {
   channelId: string;
   threadId: string;
   messageId: string;
@@ -337,19 +144,19 @@ export type ChatThreadStartParams = ChatsJsonObject & {
   attachments?: ChatLocalAttachmentParams[];
   nowMs?: number;
 };
-export type ChatThreadCreateParams = ChatsJsonObject & {
+type ChatThreadCreateParams = ChatsJsonObject & {
   threadId: string;
   title: string;
   linkedFile: ChatsJsonObject & { objectId: string; pathHint?: string };
   nowMs?: number;
 };
-export type ChatThreadsListForFileParams = ChatPageParams & { objectId: string };
-export type ChatThreadsListForChannelParams = ChatPageParams & { channelId: string };
-export type ChatThreadParams = ChatsJsonObject & { threadId: string };
-export type ChatThreadProjectionParams = ChatThreadParams & {
+type ChatThreadsListForFileParams = ChatPageParams & { objectId: string };
+type ChatThreadsListForChannelParams = ChatPageParams & { channelId: string };
+type ChatThreadParams = ChatsJsonObject & { threadId: string };
+type ChatThreadProjectionParams = ChatThreadParams & {
   linkedFileAccess?: ChatProjectionFileAccess;
 };
-export type ChatMessageSendParams = ChatsJsonObject & {
+type ChatMessageSendParams = ChatsJsonObject & {
   threadId: string;
   messageId: string;
   authorKind: "human" | "agent";
@@ -362,28 +169,28 @@ export type ChatMessageSendParams = ChatsJsonObject & {
   attachments?: ChatLocalAttachmentParams[];
   nowMs?: number;
 };
-export type ChatMessagesListParams = ChatsJsonObject & {
+type ChatMessagesListParams = ChatsJsonObject & {
   threadId: string;
   limit?: number;
   afterMessageOrder?: number;
 };
-export type ChatReadStateMarkParams = ChatsJsonObject & {
+type ChatReadStateMarkParams = ChatsJsonObject & {
   threadId: string;
   upToSequence: number;
   expectedRevision?: number;
   nowMs?: number;
 };
-export type ChatUnreadFileThreadsParams = ChatsJsonObject & {
+type ChatUnreadFileThreadsParams = ChatsJsonObject & {
   pageLimit?: number;
   afterThreadId?: string;
 };
-export type ChatDecisionResolveParams = ChatsJsonObject & {
+type ChatDecisionResolveParams = ChatsJsonObject & {
   threadId: string;
   messageId: string;
   resolvedByMessageId: string;
   nowMs?: number;
 };
-export type ChatReactionSetParams = ChatsJsonObject & {
+type ChatReactionSetParams = ChatsJsonObject & {
   threadId: string;
   messageId: string;
   emoji: string;
@@ -392,22 +199,22 @@ export type ChatReactionSetParams = ChatsJsonObject & {
   state: "added" | "removed";
   nowMs?: number;
 };
-export type ChatThreadPageParams = ChatPageParams & { threadId: string };
-export type ChatFileMentionsParams = ChatPageParams & {
+type ChatThreadPageParams = ChatPageParams & { threadId: string };
+type ChatFileMentionsParams = ChatPageParams & {
   objectId?: string;
   pathHint?: string;
 };
-export type ChatMentionsParams = ChatPageParams & {
+type ChatMentionsParams = ChatPageParams & {
   handle: string;
   unreadByAgentOnly?: boolean;
 };
-export type ChatAgentReadMarkParams = ChatsJsonObject & {
+type ChatAgentReadMarkParams = ChatsJsonObject & {
   threadId: string;
   upTo: ChatsJsonObject & { createdAtMs: number; messageId: string };
   expectedRevision?: number;
 };
-export type ChatOwnerParams = ChatsJsonObject & { ownerUserId: string };
-export type ChatFollowSetParams = ChatsJsonObject & {
+type ChatOwnerParams = ChatsJsonObject & { ownerUserId: string };
+type ChatFollowSetParams = ChatsJsonObject & {
   ownerUserId: string;
   replicationOwnerUserId?: string;
   targetKind: "person" | "agent" | "channel" | "thread";
@@ -415,188 +222,114 @@ export type ChatFollowSetParams = ChatsJsonObject & {
   state: "following" | "unfollowed";
   nowMs?: number;
 };
-export type ChatFollowListParams = ChatOwnerParams & ChatPageParams & {
-  state?: "following" | "unfollowed";
-};
-export type ChatFeedMarkSeenParams = ChatOwnerParams & {
+type ChatFollowListParams = ChatOwnerParams &
+  ChatPageParams & {
+    state?: "following" | "unfollowed";
+  };
+type ChatFeedMarkSeenParams = ChatOwnerParams & {
   replicationOwnerUserId?: string;
   headCursor: string;
   nowMs?: number;
 };
-export type ChatFeedListParams = ChatsJsonObject & {
+type ChatFeedListParams = ChatsJsonObject & {
   ownerUserId: string;
   limit?: number;
   cursor?: string;
 };
-export type ChatBookmarkFindParams = ChatsJsonObject & {
+type ChatBookmarkFindParams = ChatsJsonObject & {
   ownerUserId: string;
   bookmarkId: string;
 };
-export type ChatBookmarkSaveParams = ChatOwnerParams & {
+type ChatBookmarkSaveParams = ChatOwnerParams & {
   targetKind: "message" | "thread";
   targetId: string;
   mode: "live" | "snapshot";
   destinationPath: string;
   nowMs?: number;
 };
-export type ChatBookmarksListParams = ChatOwnerParams & ChatPageParams & {
-  state?: "active" | "archived";
-};
-export type ChatBookmarkListPendingParams = ChatPageParams & {
+type ChatBookmarksListParams = ChatOwnerParams &
+  ChatPageParams & {
+    state?: "active" | "archived";
+  };
+type ChatBookmarkListPendingParams = ChatPageParams & {
   ownerUserId: string;
   limit?: number;
 };
-export type ChatBookmarkGenerationParams = ChatBookmarkFindParams & { generation: number };
-export type ChatBookmarkMarkReadyParams = ChatBookmarkGenerationParams & {
+type ChatBookmarkGenerationParams = ChatBookmarkFindParams & {
+  generation: number;
+};
+type ChatBookmarkMarkReadyParams = ChatBookmarkGenerationParams & {
   projectedAtMs?: number;
   projectionObjectId?: string;
   projectionPath?: string;
 };
-export type ChatBookmarkMarkFailedParams = ChatBookmarkGenerationParams & {
+type ChatBookmarkMarkFailedParams = ChatBookmarkGenerationParams & {
   failureReason: string;
 };
-export type ChatBookmarkMarkStaleParams = ChatBookmarkGenerationParams & {
+type ChatBookmarkMarkStaleParams = ChatBookmarkGenerationParams & {
   failureReason?: string;
 };
-export type ChatDispatchRecordEligibleParams = ChatsJsonObject & { verifiedUserId?: string };
-export type ChatDispatchEnqueueParams = ChatsJsonObject & {
+type ChatDispatchRecordEligibleParams = ChatsJsonObject & {
+  verifiedUserId?: string;
+};
+type ChatDispatchEnqueueParams = ChatsJsonObject & {
   triggerMessageId: string;
   threadId: string;
   nowMs?: number;
 };
-export type ChatDispatchClaimParams = ChatsJsonObject & {
+type ChatDispatchClaimParams = ChatsJsonObject & {
   runId: string;
   command?: string;
   logPath?: string;
   nowMs?: number;
 };
-export type ChatDispatchRunPageParams = ChatPageParams & { runId: string };
-export type ChatDispatchMessageParams = ChatsJsonObject & { messageId: string };
-export type ChatDispatchThreadRunsParams = ChatPageParams & {
+type ChatDispatchRunPageParams = ChatPageParams & { runId: string };
+type ChatDispatchMessageParams = ChatsJsonObject & { messageId: string };
+type ChatDispatchThreadRunsParams = ChatPageParams & {
   threadId: string;
   limit?: number;
 };
-export type ChatDispatchRunParams = ChatsJsonObject & { runId: string };
-export type ChatDispatchRecentCountParams = ChatsJsonObject & {
+type ChatDispatchRunParams = ChatsJsonObject & { runId: string };
+type ChatDispatchRecentCountParams = ChatsJsonObject & {
   threadId: string;
   sinceMs: number;
 };
-export type ChatDispatchFailPendingParams = ChatsJsonObject & {
+type ChatDispatchFailPendingParams = ChatsJsonObject & {
   threadId: string;
   reason: string;
 };
-export type ChatDispatchRecordRunMessageParams = ChatsJsonObject & {
+type ChatDispatchRecordRunMessageParams = ChatsJsonObject & {
   messageId: string;
   runId: string;
 };
-export type ChatDispatchSetPausedParams = ChatsJsonObject & {
+type ChatDispatchSetPausedParams = ChatsJsonObject & {
   threadId: string;
   paused: boolean;
   reason?: string;
 };
-export type ChatDispatchRequeueParams = ChatsJsonObject & {
+type ChatDispatchRequeueParams = ChatsJsonObject & {
   triggerMessageId: string;
   runId: string;
 };
-export type ChatDispatchCompleteParams = ChatsJsonObject & {
+type ChatDispatchCompleteParams = ChatsJsonObject & {
   runId: string;
   exitCode: number;
   nowMs?: number;
 };
-export type ChatDispatchFailParams = ChatsJsonObject & {
+type ChatDispatchFailParams = ChatsJsonObject & {
   runId: string;
   reason: string;
   exitCode?: number;
   nowMs?: number;
 };
 
-export type ChatThreadStartResult = ChatsJsonObject & {
-  thread: ChatThread;
-  message: ChatMessage;
-};
-export type ChatThreadRevisionResult = ChatsJsonObject & { revision: number };
-export type ChatWireIdResult = ChatsJsonObject & { wireId: string | null };
-export type ChatChannelsListResult = ChatsJsonObject & {
-  channels: ChatChannelSummary[];
-  nextCursor: string | null;
-};
-export type ChatThreadsListResult = ChatsJsonObject & {
-  threads: ChatThreadWireRecord[];
-  nextCursor: string | null;
-};
-export type ChatMessagesListResult = ChatsJsonObject & {
-  messages: ChatMessage[];
-  nextAfterMessageOrder: number | null;
-};
-export type ChatFollowsListResult = ChatsJsonObject & {
-  follows: ChatFollow[];
-  nextCursor: string | null;
-};
-export type ChatBookmarksListResult = ChatsJsonObject & {
-  bookmarks: ChatBookmark[];
-  nextCursor: string | null;
-};
-export type ChatEnqueueResult = ChatsJsonObject & { enqueued: boolean };
-export type ChatCompleteResult = ChatsJsonObject & { completed: true };
-export type ChatFailResult = ChatsJsonObject & { failed: true };
-export type ChatThreadsPage = ChatsJsonObject & {
-  threads: ChatThread[];
-  nextCursor: string | null;
-};
-export type ChatChannelThreadsPage = ChatsJsonObject & {
-  threads: ChatChannelThreadSummary[];
-  nextCursor: string | null;
-};
-export type ChatDecisionsPage = ChatsJsonObject & {
-  decisions: ChatDecision[];
-  nextCursor: string | null;
-};
-export type ChatReactionsPage = ChatsJsonObject & {
-  reactions: ChatReaction[];
-  nextCursor: string | null;
-};
-export type ChatAttachmentsPage = ChatsJsonObject & {
-  attachments: ChatAttachment[];
-  nextCursor: string | null;
-};
-export type ChatFileMentionsPage = ChatsJsonObject & {
-  mentions: ChatFileMention[];
-  nextCursor: string | null;
-};
-export type ChatMentionsPage = ChatsJsonObject & {
-  mentions: ChatMention[];
-  nextCursor: string | null;
-};
-export type ChatBookmarksPage = ChatsJsonObject & {
-  bookmarks: ChatBookmark[];
-  nextCursor: string | null;
-};
-export type ChatDispatchesPage = ChatsJsonObject & {
-  dispatches: ChatDispatch[];
-  nextCursor: string | null;
-};
-export type ChatClaimsPage = ChatsJsonObject & {
-  claims: ChatDispatchClaim[];
-  nextCursor: string | null;
-};
-export type ChatRunMessagesPage = ChatsJsonObject & {
-  messageIds: string[];
-  nextCursor: string | null;
-};
-export type ChatThreadRunsPage = ChatsJsonObject & {
-  runs: Record<string, ChatRun>;
-  nextCursor: string | null;
-};
-export type ChatRecoveriesPage = ChatsJsonObject & {
-  recoveries: Array<ChatsJsonObject & { run: ChatRun; attemptCount: number }>;
-  nextCursor: string | null;
-};
-export type ChatFeedPage = ChatsJsonObject & {
-  items: ChatFeedItem[];
-  nextCursor: string | null;
-  headCursor: string | null;
-  readState: ChatFeedReadState | null;
-};
+export type ChatRunMessagesPage =
+  ChatsMethodResultMap[typeof CHATS_METHOD.dispatchListRunMessages];
+type ChatThreadRunsPage = typeof RunRecordsPageSchema.Type;
+export type ChatRecoveriesPage =
+  ChatsMethodResultMap[typeof CHATS_METHOD.dispatchListAppQuitRecoveries];
+export type ChatFeedPage =
+  ChatsMethodResultMap[typeof CHATS_METHOD.feedListPersonal];
 
 export type ChatsMethodParamsMap = {
   [CHATS_METHOD.channelCreate]: ChatChannelCreateParams;
@@ -664,80 +397,8 @@ export type ChatsMethodParamsMap = {
 };
 
 export type ChatsMethodResultMap = {
-  [CHATS_METHOD.channelCreate]: ChatChannel;
-  [CHATS_METHOD.channelEnsureAgent]: ChatChannel;
-  [CHATS_METHOD.channelEnsureGeneral]: ChatChannel;
-  [CHATS_METHOD.channelFindBySlug]: ChatChannel | null;
-  [CHATS_METHOD.channelsList]: ChatChannelsListResult;
-  [CHATS_METHOD.channelGetWireId]: ChatWireIdResult;
-  [CHATS_METHOD.threadStart]: ChatThreadStartResult;
-  [CHATS_METHOD.threadCreate]: ChatThread;
-  [CHATS_METHOD.threadsList]: ChatThreadsListResult;
-  [CHATS_METHOD.threadsListForFile]: ChatThreadsPage;
-  [CHATS_METHOD.threadsListForChannel]: ChatChannelThreadsPage;
-  [CHATS_METHOD.threadFindChannelId]: string | null;
-  [CHATS_METHOD.threadGetProjection]: ChatProjection;
-  [CHATS_METHOD.threadRevision]: ChatThreadRevisionResult;
-  [CHATS_METHOD.messageSend]: ChatMessage;
-  [CHATS_METHOD.messagesList]: ChatMessagesListResult;
-  [CHATS_METHOD.readStateGet]: ChatThreadReadState;
-  [CHATS_METHOD.readStateMarkThreadRead]: ChatThreadReadState;
-  [CHATS_METHOD.readStateListUnreadFileThreads]: ChatUnreadFileThread[];
-  [CHATS_METHOD.decisionResolve]: ChatDecision;
-  [CHATS_METHOD.decisionsListForThread]: ChatDecisionsPage;
-  [CHATS_METHOD.reactionSet]: ChatReaction;
-  [CHATS_METHOD.reactionsList]: ChatReactionsPage;
-  [CHATS_METHOD.attachmentsListForThread]: ChatAttachmentsPage;
-  [CHATS_METHOD.attachmentsListFileMentions]: ChatFileMentionsPage;
-  [CHATS_METHOD.mentionsListForHandle]: ChatMentionsPage;
-  [CHATS_METHOD.agentReadListUnreadThreads]: ChatThreadsPage;
-  [CHATS_METHOD.agentReadMarkThreadRead]: ChatAgentReadState;
-  [CHATS_METHOD.followsSet]: ChatFollow;
-  [CHATS_METHOD.followsList]: ChatFollowsListResult;
-  [CHATS_METHOD.followsEnsureDefaults]: null;
-  [CHATS_METHOD.feedMarkSeen]: ChatFeedReadState;
-  [CHATS_METHOD.feedListPersonal]: ChatFeedPage;
-  [CHATS_METHOD.bookmarkSave]: ChatBookmark;
-  [CHATS_METHOD.bookmarksList]: ChatBookmarksListResult;
-  [CHATS_METHOD.bookmarkFind]: ChatBookmark | null;
-  [CHATS_METHOD.bookmarkListPending]: ChatBookmarksPage;
-  [CHATS_METHOD.bookmarkMarkReady]: ChatBookmarkTransition;
-  [CHATS_METHOD.bookmarkArchive]: ChatBookmark;
-  [CHATS_METHOD.bookmarkMarkPending]: ChatBookmark;
-  [CHATS_METHOD.bookmarkMarkFailed]: ChatBookmarkTransition;
-  [CHATS_METHOD.bookmarkMarkStale]: ChatBookmarkTransition;
-  [CHATS_METHOD.dispatchEnqueue]: ChatEnqueueResult;
-  [CHATS_METHOD.dispatchRecordEligibleTriggers]: number;
-  [CHATS_METHOD.dispatchClaimNextPending]: ChatDispatchClaim | null;
-  [CHATS_METHOD.dispatchListPending]: ChatDispatchesPage;
-  [CHATS_METHOD.dispatchOpenRuns]: ChatClaimsPage;
-  [CHATS_METHOD.dispatchListRunMessages]: ChatRunMessagesPage;
-  [CHATS_METHOD.dispatchRunIdForMessage]: string | null;
-  [CHATS_METHOD.dispatchRunRecordsForThread]: ChatThreadRunsPage;
-  [CHATS_METHOD.dispatchGetRunRecord]: ChatRun | null;
-  [CHATS_METHOD.dispatchIsThreadPaused]: boolean;
-  [CHATS_METHOD.dispatchGetThreadPauseState]: ChatThreadPause | null;
-  [CHATS_METHOD.dispatchRecentCount]: number;
-  [CHATS_METHOD.dispatchFailPendingForThread]: number;
-  [CHATS_METHOD.dispatchRecordRunMessage]: boolean;
-  [CHATS_METHOD.dispatchSetThreadPaused]: ChatThreadPause;
-  [CHATS_METHOD.dispatchMarkFailureNotePosted]: ChatRun;
-  [CHATS_METHOD.dispatchRequeueFailedTrigger]: boolean;
-  [CHATS_METHOD.dispatchListAppQuitRecoveries]: ChatRecoveriesPage;
-  [CHATS_METHOD.dispatchComplete]: ChatCompleteResult;
-  [CHATS_METHOD.dispatchFail]: ChatFailResult;
+  [M in ChatsMethod]: (typeof ChatsResultSchemas)[M]["Type"];
 };
-
-export class ChatsProtocolShapeError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ChatsProtocolShapeError";
-  }
-}
-
-function mutableStruct<const Fields extends Schema.Struct.Fields>(fields: Fields) {
-  return Schema.Struct(fields).mapFields(Struct.map(Schema.mutableKey));
-}
 
 function decodeChatsSchema<S extends Schema.ConstraintDecoder<unknown>>(
   schema: S,
@@ -751,10 +412,13 @@ function decodeChatsSchema<S extends Schema.ConstraintDecoder<unknown>>(
     const issue = SchemaIssue.makeFormatterStandardSchemaV1()(
       decoded.failure.issue,
     ).issues[0];
-    const path = issue?.path?.map((part) =>
-      typeof part === "number" ? `[${part}]` : `.${String(part)}`,
-    ).join("") ?? "";
-    throw new ChatsProtocolShapeError(
+    const path =
+      issue?.path
+        ?.map((part) =>
+          typeof part === "number" ? `[${part}]` : `.${String(part)}`,
+        )
+        .join("") ?? "";
+    throw new ProtocolShapeError(
       `${label}${path}: ${issue?.message ?? decoded.failure.message}`,
     );
   }
@@ -1014,149 +678,178 @@ const BookmarkTransitionSchema = mutableStruct({
   applied: Schema.Boolean,
 });
 
-function pageSchema(key: string, item: Schema.Constraint) {
+function pageSchema<const Fields extends Schema.Struct.Fields>(fields: Fields) {
   return mutableStruct({
-    [key]: Schema.mutable(Schema.Array(item)),
+    ...fields,
     ...NextCursorFields,
   });
 }
 
+const RunRecordsPageSchema = pageSchema({
+  runs: Schema.Record(Schema.String, Schema.mutableKey(ChatRunSchema)),
+});
+
+const ThreadsPageSchema = pageSchema({
+  threads: Schema.mutable(Schema.Array(ChatThreadSchema)),
+});
+
 const ChatsResultSchemas = {
-  channel: ChatChannelSchema,
-  channelMaybe: Schema.NullOr(ChatChannelSchema),
-  channelsList: mutableStruct({
+  [CHATS_METHOD.channelCreate]: ChatChannelSchema,
+  [CHATS_METHOD.channelEnsureAgent]: ChatChannelSchema,
+  [CHATS_METHOD.channelEnsureGeneral]: ChatChannelSchema,
+  [CHATS_METHOD.channelFindBySlug]: Schema.NullOr(ChatChannelSchema),
+  [CHATS_METHOD.channelsList]: pageSchema({
     channels: Schema.mutable(Schema.Array(ChatChannelSummarySchema)),
-    ...NextCursorFields,
   }),
-  wireId: mutableStruct({ wireId: NullableString }),
-  threadStart: mutableStruct({
+  [CHATS_METHOD.channelGetWireId]: mutableStruct({ wireId: NullableString }),
+  [CHATS_METHOD.threadStart]: mutableStruct({
     thread: ChatThreadSchema,
     message: ChatMessageSchema,
   }),
-  thread: ChatThreadSchema,
-  threadsList: mutableStruct({
+  [CHATS_METHOD.threadCreate]: ChatThreadSchema,
+  [CHATS_METHOD.threadsList]: pageSchema({
     threads: Schema.mutable(Schema.Array(ChatThreadWireRecordSchema)),
-    ...NextCursorFields,
   }),
-  threadsPage: pageSchema("threads", ChatThreadSchema),
-  channelThreadsPage: pageSchema("threads", ChatChannelThreadSummarySchema),
-  maybeString: Schema.NullOr(Schema.String),
-  projection: ChatProjectionSchema,
-  revision: mutableStruct({ revision: NonnegativeInt }),
-  message: ChatMessageSchema,
-  messagesList: mutableStruct({
+  [CHATS_METHOD.threadsListForFile]: ThreadsPageSchema,
+  [CHATS_METHOD.threadsListForChannel]: pageSchema({
+    threads: Schema.mutable(Schema.Array(ChatChannelThreadSummarySchema)),
+  }),
+  [CHATS_METHOD.threadFindChannelId]: Schema.NullOr(Schema.String),
+  [CHATS_METHOD.threadGetProjection]: ChatProjectionSchema,
+  [CHATS_METHOD.threadRevision]: mutableStruct({ revision: NonnegativeInt }),
+  [CHATS_METHOD.messageSend]: ChatMessageSchema,
+  [CHATS_METHOD.messagesList]: mutableStruct({
     messages: Schema.mutable(Schema.Array(ChatMessageSchema)),
     nextAfterMessageOrder: NullableNonnegativeInt,
   }),
-  readState: ChatThreadReadStateSchema,
-  unreadThreads: Schema.mutable(Schema.Array(ChatUnreadFileThreadSchema)),
-  decision: ChatDecisionSchema,
-  decisionsPage: pageSchema("decisions", ChatDecisionSchema),
-  reaction: ChatReactionSchema,
-  reactionsPage: pageSchema("reactions", ChatReactionSchema),
-  attachmentsPage: pageSchema("attachments", ChatAttachmentSchema),
-  fileMentionsPage: pageSchema("mentions", ChatFileMentionSchema),
-  mentionsPage: pageSchema("mentions", ChatMentionSchema),
-  agentRead: ChatAgentReadStateSchema,
-  follow: ChatFollowSchema,
-  followsList: mutableStruct({
-    follows: Schema.mutable(Schema.Array(ChatFollowSchema)),
-    ...NextCursorFields,
+  [CHATS_METHOD.readStateGet]: ChatThreadReadStateSchema,
+  [CHATS_METHOD.readStateMarkThreadRead]: ChatThreadReadStateSchema,
+  [CHATS_METHOD.readStateListUnreadFileThreads]: Schema.mutable(
+    Schema.Array(ChatUnreadFileThreadSchema),
+  ),
+  [CHATS_METHOD.decisionResolve]: ChatDecisionSchema,
+  [CHATS_METHOD.decisionsListForThread]: pageSchema({
+    decisions: Schema.mutable(Schema.Array(ChatDecisionSchema)),
   }),
-  nullResult: Schema.Null,
-  feedReadState: ChatFeedReadStateSchema,
-  feedPage: mutableStruct({
+  [CHATS_METHOD.reactionSet]: ChatReactionSchema,
+  [CHATS_METHOD.reactionsList]: pageSchema({
+    reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
+  }),
+  [CHATS_METHOD.attachmentsListForThread]: pageSchema({
+    attachments: Schema.mutable(Schema.Array(ChatAttachmentSchema)),
+  }),
+  [CHATS_METHOD.attachmentsListFileMentions]: pageSchema({
+    mentions: Schema.mutable(Schema.Array(ChatFileMentionSchema)),
+  }),
+  [CHATS_METHOD.mentionsListForHandle]: pageSchema({
+    mentions: Schema.mutable(Schema.Array(ChatMentionSchema)),
+  }),
+  [CHATS_METHOD.agentReadListUnreadThreads]: ThreadsPageSchema,
+  [CHATS_METHOD.agentReadMarkThreadRead]: ChatAgentReadStateSchema,
+  [CHATS_METHOD.followsSet]: ChatFollowSchema,
+  [CHATS_METHOD.followsList]: pageSchema({
+    follows: Schema.mutable(Schema.Array(ChatFollowSchema)),
+  }),
+  [CHATS_METHOD.followsEnsureDefaults]: Schema.Null,
+  [CHATS_METHOD.feedMarkSeen]: ChatFeedReadStateSchema,
+  [CHATS_METHOD.feedListPersonal]: mutableStruct({
     items: Schema.mutable(Schema.Array(ChatFeedItemSchema)),
     ...NextCursorFields,
     headCursor: NullableString,
     readState: Schema.NullOr(ChatFeedReadStateSchema),
   }),
-  bookmark: ChatBookmarkSchema,
-  bookmarkMaybe: Schema.NullOr(ChatBookmarkSchema),
-  bookmarksList: mutableStruct({
+  [CHATS_METHOD.bookmarkSave]: ChatBookmarkSchema,
+  [CHATS_METHOD.bookmarksList]: pageSchema({
     bookmarks: Schema.mutable(Schema.Array(ChatBookmarkSchema)),
-    ...NextCursorFields,
   }),
-  bookmarksPage: pageSchema("bookmarks", ChatBookmarkSchema),
-  bookmarkTransition: BookmarkTransitionSchema,
-  enqueue: mutableStruct({ enqueued: Schema.Boolean }),
-  count: NonnegativeInt,
-  claimMaybe: Schema.NullOr(ChatDispatchClaimSchema),
-  dispatchesPage: pageSchema("dispatches", ChatDispatchSchema),
-  claimsPage: pageSchema("claims", ChatDispatchClaimSchema),
-  runMessagesPage: mutableStruct({
-    messageIds: Schema.mutable(Schema.Array(Schema.String)),
-    ...NextCursorFields,
+  [CHATS_METHOD.bookmarkFind]: Schema.NullOr(ChatBookmarkSchema),
+  [CHATS_METHOD.bookmarkListPending]: pageSchema({
+    bookmarks: Schema.mutable(Schema.Array(ChatBookmarkSchema)),
   }),
-  runMaybe: Schema.NullOr(ChatRunSchema),
-  boolean: Schema.Boolean,
-  pauseMaybe: Schema.NullOr(ChatThreadPauseSchema),
-  pause: ChatThreadPauseSchema,
-  run: ChatRunSchema,
-  recoveriesPage: pageSchema(
-    "recoveries",
-    mutableStruct({ run: ChatRunSchema, attemptCount: NonnegativeInt }),
+  [CHATS_METHOD.bookmarkMarkReady]: BookmarkTransitionSchema,
+  [CHATS_METHOD.bookmarkArchive]: ChatBookmarkSchema,
+  [CHATS_METHOD.bookmarkMarkPending]: ChatBookmarkSchema,
+  [CHATS_METHOD.bookmarkMarkFailed]: BookmarkTransitionSchema,
+  [CHATS_METHOD.bookmarkMarkStale]: BookmarkTransitionSchema,
+  [CHATS_METHOD.dispatchEnqueue]: mutableStruct({ enqueued: Schema.Boolean }),
+  [CHATS_METHOD.dispatchRecordEligibleTriggers]: NonnegativeInt,
+  [CHATS_METHOD.dispatchClaimNextPending]: Schema.NullOr(
+    ChatDispatchClaimSchema,
   ),
-  complete: mutableStruct({ completed: Schema.Literal(true) }),
-  fail: mutableStruct({ failed: Schema.Literal(true) }),
+  [CHATS_METHOD.dispatchListPending]: pageSchema({
+    dispatches: Schema.mutable(Schema.Array(ChatDispatchSchema)),
+  }),
+  [CHATS_METHOD.dispatchOpenRuns]: pageSchema({
+    claims: Schema.mutable(Schema.Array(ChatDispatchClaimSchema)),
+  }),
+  [CHATS_METHOD.dispatchListRunMessages]: pageSchema({
+    messageIds: Schema.mutable(Schema.Array(Schema.String)),
+  }),
+  [CHATS_METHOD.dispatchRunIdForMessage]: Schema.NullOr(Schema.String),
+  [CHATS_METHOD.dispatchRunRecordsForThread]: RunRecordsPageSchema,
+  [CHATS_METHOD.dispatchGetRunRecord]: Schema.NullOr(ChatRunSchema),
+  [CHATS_METHOD.dispatchIsThreadPaused]: Schema.Boolean,
+  [CHATS_METHOD.dispatchGetThreadPauseState]: Schema.NullOr(
+    ChatThreadPauseSchema,
+  ),
+  [CHATS_METHOD.dispatchRecentCount]: NonnegativeInt,
+  [CHATS_METHOD.dispatchFailPendingForThread]: NonnegativeInt,
+  [CHATS_METHOD.dispatchRecordRunMessage]: Schema.Boolean,
+  [CHATS_METHOD.dispatchSetThreadPaused]: ChatThreadPauseSchema,
+  [CHATS_METHOD.dispatchMarkFailureNotePosted]: ChatRunSchema,
+  [CHATS_METHOD.dispatchRequeueFailedTrigger]: Schema.Boolean,
+  [CHATS_METHOD.dispatchListAppQuitRecoveries]: pageSchema({
+    recoveries: Schema.mutable(
+      Schema.Array(
+        mutableStruct({ run: ChatRunSchema, attemptCount: NonnegativeInt }),
+      ),
+    ),
+  }),
+  [CHATS_METHOD.dispatchComplete]: mutableStruct({
+    completed: Schema.Literal(true),
+  }),
+  [CHATS_METHOD.dispatchFail]: mutableStruct({ failed: Schema.Literal(true) }),
 } as const;
 
-const RunRecordsPageSchema = mutableStruct({
-  runs: Schema.Record(Schema.String, ChatRunSchema),
-  ...NextCursorFields,
-});
-
-export function decodeChatActor(value: JsonValue, label = "chat actor"): ChatActor {
-  return decodeChatsSchema(ChatActorSchema, value, label) as ChatActor;
-}
-
-export function decodeChatThread(value: JsonValue, label = "chat thread"): ChatThread {
-  return decodeChatsSchema(ChatThreadSchema, value, label) as ChatThread;
+export function decodeChatThread(
+  value: JsonValue,
+  label = "chat thread",
+): ChatThread {
+  return decodeChatsSchema(ChatThreadSchema, value, label);
 }
 
 export function decodeChatAttachment(
   value: JsonValue,
   label = "chat attachment",
 ): ChatAttachment {
-  return decodeChatsSchema(ChatAttachmentSchema, value, label) as ChatAttachment;
+  return decodeChatsSchema(ChatAttachmentSchema, value, label);
 }
 
-export function decodeChatMessage(value: JsonValue, label = "chat message"): ChatMessage {
-  return decodeChatsSchema(ChatMessageSchema, value, label) as ChatMessage;
-}
-
-export function decodeChatDecision(value: JsonValue, label = "chat decision"): ChatDecision {
-  return decodeChatsSchema(ChatDecisionSchema, value, label) as ChatDecision;
-}
-
-export function decodeChatReaction(value: JsonValue, label = "chat reaction"): ChatReaction {
-  return decodeChatsSchema(ChatReactionSchema, value, label) as ChatReaction;
-}
-
-export function decodeChatBookmark(value: JsonValue, label = "chat bookmark"): ChatBookmark {
-  return decodeChatsSchema(ChatBookmarkSchema, value, label) as ChatBookmark;
-}
-
-export function decodeChatDispatch(value: JsonValue, label = "chat dispatch"): ChatDispatch {
-  return decodeChatsSchema(ChatDispatchSchema, value, label) as ChatDispatch;
-}
-
-export function decodeChatRun(value: JsonValue, label = "chat run"): ChatRun {
-  return decodeChatsSchema(ChatRunSchema, value, label) as ChatRun;
-}
-
-export function decodeUnreadFileThreads(
+export function decodeChatMessage(
   value: JsonValue,
-  label = `${CHATS_METHOD.readStateListUnreadFileThreads} result`,
-): ChatUnreadFileThread[] {
-  return decodeChatsSchema(
-    Schema.mutable(Schema.Array(ChatUnreadFileThreadSchema)),
-    value,
-    label,
-  ) as ChatUnreadFileThread[];
+  label = "chat message",
+): ChatMessage {
+  return decodeChatsSchema(ChatMessageSchema, value, label);
 }
 
-function decodeRunRecordsForThread(value: JsonValue, label: string): ChatThreadRunsPage {
+export function decodeChatDecision(
+  value: JsonValue,
+  label = "chat decision",
+): ChatDecision {
+  return decodeChatsSchema(ChatDecisionSchema, value, label);
+}
+
+export function decodeChatReaction(
+  value: JsonValue,
+  label = "chat reaction",
+): ChatReaction {
+  return decodeChatsSchema(ChatReactionSchema, value, label);
+}
+
+function decodeRunRecordsForThread(
+  value: JsonValue,
+  label: string,
+): ChatThreadRunsPage {
   const decoded = decodeChatsSchema(RunRecordsPageSchema, value, label);
   const runs: Record<string, ChatRun> = Object.create(null);
   Object.assign(runs, decoded.runs);
@@ -1167,125 +860,13 @@ export function decodeChatsResult<M extends ChatsMethod>(
   method: M,
   value: JsonValue,
 ): ChatsMethodResultMap[M] {
-  const label = `${method} result`;
-  let result: unknown;
-  switch (method) {
-    case CHATS_METHOD.channelCreate:
-    case CHATS_METHOD.channelEnsureAgent:
-    case CHATS_METHOD.channelEnsureGeneral:
-      result = decodeChatsSchema(ChatsResultSchemas.channel, value, label); break;
-    case CHATS_METHOD.channelFindBySlug:
-      result = decodeChatsSchema(ChatsResultSchemas.channelMaybe, value, label); break;
-    case CHATS_METHOD.channelsList:
-      result = decodeChatsSchema(ChatsResultSchemas.channelsList, value, label); break;
-    case CHATS_METHOD.channelGetWireId:
-      result = decodeChatsSchema(ChatsResultSchemas.wireId, value, label); break;
-    case CHATS_METHOD.threadStart:
-      result = decodeChatsSchema(ChatsResultSchemas.threadStart, value, label); break;
-    case CHATS_METHOD.threadCreate:
-      result = decodeChatsSchema(ChatsResultSchemas.thread, value, label); break;
-    case CHATS_METHOD.threadsList:
-      result = decodeChatsSchema(ChatsResultSchemas.threadsList, value, label); break;
-    case CHATS_METHOD.threadsListForFile:
-    case CHATS_METHOD.agentReadListUnreadThreads:
-      result = decodeChatsSchema(ChatsResultSchemas.threadsPage, value, label); break;
-    case CHATS_METHOD.threadsListForChannel:
-      result = decodeChatsSchema(ChatsResultSchemas.channelThreadsPage, value, label); break;
-    case CHATS_METHOD.threadFindChannelId:
-    case CHATS_METHOD.dispatchRunIdForMessage:
-      result = decodeChatsSchema(ChatsResultSchemas.maybeString, value, label); break;
-    case CHATS_METHOD.threadGetProjection:
-      result = decodeChatsSchema(ChatsResultSchemas.projection, value, label); break;
-    case CHATS_METHOD.threadRevision:
-      result = decodeChatsSchema(ChatsResultSchemas.revision, value, label); break;
-    case CHATS_METHOD.messageSend:
-      result = decodeChatsSchema(ChatsResultSchemas.message, value, label); break;
-    case CHATS_METHOD.messagesList:
-      result = decodeChatsSchema(ChatsResultSchemas.messagesList, value, label); break;
-    case CHATS_METHOD.readStateGet:
-    case CHATS_METHOD.readStateMarkThreadRead:
-      result = decodeChatsSchema(ChatsResultSchemas.readState, value, label); break;
-    case CHATS_METHOD.readStateListUnreadFileThreads:
-      result = decodeChatsSchema(ChatsResultSchemas.unreadThreads, value, label); break;
-    case CHATS_METHOD.decisionResolve:
-      result = decodeChatsSchema(ChatsResultSchemas.decision, value, label); break;
-    case CHATS_METHOD.decisionsListForThread:
-      result = decodeChatsSchema(ChatsResultSchemas.decisionsPage, value, label); break;
-    case CHATS_METHOD.reactionSet:
-      result = decodeChatsSchema(ChatsResultSchemas.reaction, value, label); break;
-    case CHATS_METHOD.reactionsList:
-      result = decodeChatsSchema(ChatsResultSchemas.reactionsPage, value, label); break;
-    case CHATS_METHOD.attachmentsListForThread:
-      result = decodeChatsSchema(ChatsResultSchemas.attachmentsPage, value, label); break;
-    case CHATS_METHOD.attachmentsListFileMentions:
-      result = decodeChatsSchema(ChatsResultSchemas.fileMentionsPage, value, label); break;
-    case CHATS_METHOD.mentionsListForHandle:
-      result = decodeChatsSchema(ChatsResultSchemas.mentionsPage, value, label); break;
-    case CHATS_METHOD.agentReadMarkThreadRead:
-      result = decodeChatsSchema(ChatsResultSchemas.agentRead, value, label); break;
-    case CHATS_METHOD.followsSet:
-      result = decodeChatsSchema(ChatsResultSchemas.follow, value, label); break;
-    case CHATS_METHOD.followsList:
-      result = decodeChatsSchema(ChatsResultSchemas.followsList, value, label); break;
-    case CHATS_METHOD.followsEnsureDefaults:
-      result = decodeChatsSchema(ChatsResultSchemas.nullResult, value, label); break;
-    case CHATS_METHOD.feedMarkSeen:
-      result = decodeChatsSchema(ChatsResultSchemas.feedReadState, value, label); break;
-    case CHATS_METHOD.feedListPersonal:
-      result = decodeChatsSchema(ChatsResultSchemas.feedPage, value, label); break;
-    case CHATS_METHOD.bookmarkSave:
-      result = decodeChatsSchema(ChatsResultSchemas.bookmark, value, label); break;
-    case CHATS_METHOD.bookmarksList:
-      result = decodeChatsSchema(ChatsResultSchemas.bookmarksList, value, label); break;
-    case CHATS_METHOD.bookmarkFind:
-      result = decodeChatsSchema(ChatsResultSchemas.bookmarkMaybe, value, label); break;
-    case CHATS_METHOD.bookmarkListPending:
-      result = decodeChatsSchema(ChatsResultSchemas.bookmarksPage, value, label); break;
-    case CHATS_METHOD.bookmarkArchive:
-    case CHATS_METHOD.bookmarkMarkPending:
-      result = decodeChatsSchema(ChatsResultSchemas.bookmark, value, label); break;
-    case CHATS_METHOD.bookmarkMarkFailed:
-    case CHATS_METHOD.bookmarkMarkStale:
-    case CHATS_METHOD.bookmarkMarkReady:
-      result = decodeChatsSchema(ChatsResultSchemas.bookmarkTransition, value, label); break;
-    case CHATS_METHOD.dispatchEnqueue:
-      result = decodeChatsSchema(ChatsResultSchemas.enqueue, value, label); break;
-    case CHATS_METHOD.dispatchRecordEligibleTriggers:
-    case CHATS_METHOD.dispatchRecentCount:
-    case CHATS_METHOD.dispatchFailPendingForThread:
-      result = decodeChatsSchema(ChatsResultSchemas.count, value, label); break;
-    case CHATS_METHOD.dispatchClaimNextPending:
-      result = decodeChatsSchema(ChatsResultSchemas.claimMaybe, value, label); break;
-    case CHATS_METHOD.dispatchListPending:
-      result = decodeChatsSchema(ChatsResultSchemas.dispatchesPage, value, label); break;
-    case CHATS_METHOD.dispatchOpenRuns:
-      result = decodeChatsSchema(ChatsResultSchemas.claimsPage, value, label); break;
-    case CHATS_METHOD.dispatchListRunMessages:
-      result = decodeChatsSchema(ChatsResultSchemas.runMessagesPage, value, label); break;
-    case CHATS_METHOD.dispatchRunRecordsForThread:
-      result = decodeRunRecordsForThread(value, label); break;
-    case CHATS_METHOD.dispatchGetRunRecord:
-      result = decodeChatsSchema(ChatsResultSchemas.runMaybe, value, label); break;
-    case CHATS_METHOD.dispatchIsThreadPaused:
-    case CHATS_METHOD.dispatchRecordRunMessage:
-    case CHATS_METHOD.dispatchRequeueFailedTrigger:
-      result = decodeChatsSchema(ChatsResultSchemas.boolean, value, label); break;
-    case CHATS_METHOD.dispatchGetThreadPauseState:
-      result = decodeChatsSchema(ChatsResultSchemas.pauseMaybe, value, label); break;
-    case CHATS_METHOD.dispatchSetThreadPaused:
-      result = decodeChatsSchema(ChatsResultSchemas.pause, value, label); break;
-    case CHATS_METHOD.dispatchMarkFailureNotePosted:
-      result = decodeChatsSchema(ChatsResultSchemas.run, value, label); break;
-    case CHATS_METHOD.dispatchListAppQuitRecoveries:
-      result = decodeChatsSchema(ChatsResultSchemas.recoveriesPage, value, label); break;
-    case CHATS_METHOD.dispatchComplete:
-      result = decodeChatsSchema(ChatsResultSchemas.complete, value, label); break;
-    case CHATS_METHOD.dispatchFail:
-      result = decodeChatsSchema(ChatsResultSchemas.fail, value, label); break;
-    default: {
-      const exhaustive: never = method;
-      throw new ChatsProtocolShapeError(`Unsupported chats method: ${exhaustive}`);
-    }
+  if (!Object.hasOwn(ChatsResultSchemas, method)) {
+    throw new ProtocolShapeError(`Unsupported chats method: ${method}`);
   }
-  return result as ChatsMethodResultMap[M];
+  const schema = ChatsResultSchemas[method];
+  const label = `${method} result`;
+  if (method === CHATS_METHOD.dispatchRunRecordsForThread) {
+    return decodeRunRecordsForThread(value, label) as ChatsMethodResultMap[M];
+  }
+  return decodeChatsSchema(schema, value, label) as ChatsMethodResultMap[M];
 }

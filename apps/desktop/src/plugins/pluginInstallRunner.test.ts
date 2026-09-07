@@ -32,6 +32,7 @@ import {
   PINNED_PLUGIN_PNPM_VERSION,
   PLUGIN_INSTALL_TIMEOUT_MS,
 } from "./pluginSourceSnapshot";
+import { deferred } from "../testing/deferred";
 
 interface InstallFixture {
   root: string;
@@ -39,11 +40,6 @@ interface InstallFixture {
   snapshotRoot: string;
   resourcesBasePath: string;
   input: InstallPluginDependenciesInput;
-}
-
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve(value: T): void;
 }
 
 const roots: string[] = [];
@@ -82,20 +78,6 @@ class FakeInstallProcess implements PluginInstallProcessHandle {
   error(message: string): void {
     for (const listener of this.errorListeners) listener(message);
   }
-}
-
-function deferred<T>(): Deferred<T> {
-  let resolvePromise: ((value: T) => void) | undefined;
-  const promise = new Promise<T>((resolveValue) => {
-    resolvePromise = resolveValue;
-  });
-  return {
-    promise,
-    resolve: (value) => {
-      if (!resolvePromise) throw new Error("Deferred promise was not initialized.");
-      resolvePromise(value);
-    },
-  };
 }
 
 async function createInstallFixture(
@@ -221,7 +203,7 @@ describe("installPluginDependencies", () => {
       [resolvePluginPnpmEntry(fixture.resourcesBasePath), ...PLUGIN_INSTALL_ARGS],
       {
         cwd: fixture.snapshotRoot,
-        // R18 (CodeRabbit #779): an explicit allowlist, never a full
+        // R18: an explicit allowlist, never a full
         // process.env spread — see the canary/user-.npmrc pins below for
         // why.
         env: {
@@ -250,7 +232,7 @@ describe("installPluginDependencies", () => {
     );
   });
 
-  it("never forwards the parent process's ambient env, only the pinned allowlist (CodeRabbit #779 R18 PoC)", async () => {
+  it("never forwards the parent process's ambient env, only the pinned allowlist", async () => {
     const fixture = await createInstallFixture();
     const child = new FakeInstallProcess();
     const forkProcess = vi.fn<PluginInstallFork>(() => {
@@ -277,14 +259,14 @@ describe("installPluginDependencies", () => {
       join(fixture.input.pnpmPaths.homeDir, ".npmrc-disabled"),
     );
     // The pinned pnpm reads only its own PNPM_CONFIG_ prefix; an npm_config_
-    // name here would be config this install never applies (#779 round 8 D1).
+    // name here would be config this install never applies.
     expect(observedEnv?.PNPM_CONFIG_REGISTRY).toBe("https://registry.npmjs.org/");
     expect(
       Object.keys(observedEnv ?? {}).filter((key) => key.startsWith("npm_config_")),
     ).toEqual([]);
   });
 
-  it("fails closed when the installed tree resolves outside the snapshot (#779 round 8 D1)", async () => {
+  it("fails closed when the installed tree resolves outside the snapshot", async () => {
     const fixture = await createInstallFixture();
     // Whatever put it there — a redirecting pnpm setting this runner did not
     // pin, or a node_modules link the plugin shipped in its own source — the
@@ -315,31 +297,35 @@ describe("installPluginDependencies", () => {
     expect(escaped.error.message).toContain("node_modules");
   });
 
-  it("rejects an install that reported success and wrote no dependency tree", async () => {
-    const fixture = await createInstallFixture({ pluginId: "truncated-plugin" });
-    // Exactly what the pnpm-runner wrapper used to do: exit 0 with the
-    // snapshot untouched. pnpm writes node_modules/.modules.yaml when an
-    // install completes, so its absence beside a declared dependency is what
-    // makes a truncated install unreportable as success.
-    await writeFile(
-      join(fixture.snapshotRoot, "package.json"),
-      `${JSON.stringify({ name: "truncated", dependencies: { zod: "4.4.3" } })}\n`,
-    );
-    const child = new FakeInstallProcess();
-    const forkProcess = vi.fn<PluginInstallFork>(() => {
-      queueMicrotask(() => child.exit(0));
-      return child;
-    });
+  it.each(["dependencies", "peerDependencies"] as const)(
+    "rejects an install that reported success and wrote no tree for a %s entry",
+    async (field) => {
+      const fixture = await createInstallFixture({ pluginId: "truncated-plugin" });
+      // Exactly what the pnpm-runner wrapper used to do: exit 0 with the
+      // snapshot untouched. pnpm writes node_modules/.modules.yaml when an
+      // install completes, so its absence beside a declared dependency is what
+      // makes a truncated install unreportable as success.
+      await writeFile(
+        join(fixture.snapshotRoot, "package.json"),
+        `${JSON.stringify({ name: "truncated", [field]: { zod: "4.4.3" } })}
+`,
+      );
+      const child = new FakeInstallProcess();
+      const forkProcess = vi.fn<PluginInstallFork>(() => {
+        queueMicrotask(() => child.exit(0));
+        return child;
+      });
 
-    const failed = requireFailure(await installPluginDependencies({
-      ...fixture.input,
-      forkProcess,
-    }));
+      const failed = requireFailure(await installPluginDependencies({
+        ...fixture.input,
+        forkProcess,
+      }));
 
-    expect(failed.error.code).toBe("install-not-materialized");
-    expect(failed.error.message).toContain(".modules.yaml");
-    expect(failed.error.message).toContain("declared dependencies: 1");
-  });
+      expect(failed.error.code).toBe("install-not-materialized");
+      expect(failed.error.message).toContain(".modules.yaml");
+      expect(failed.error.message).toContain("declared dependencies: 1");
+    },
+  );
 
   it("accepts a completed install of a snapshot that declares no dependencies", async () => {
     const fixture = await createInstallFixture({ pluginId: "no-deps-plugin" });
@@ -359,7 +345,7 @@ describe("installPluginDependencies", () => {
       .resolves.toMatchObject({ ok: true, exitCode: 0 });
   });
 
-  it("classifies a lockfile mismatch even when its marker token is split across stream chunks (CodeRabbit #779 R17)", async () => {
+  it("classifies a lockfile mismatch even when its marker token is split across stream chunks", async () => {
     const fixture = await createInstallFixture();
     const child = new FakeInstallProcess();
     const started = deferred<void>();
@@ -386,7 +372,7 @@ describe("installPluginDependencies", () => {
     expect(failure.error.code).toBe("lockfile-mismatch");
   });
 
-  it("names the real forked module (the runner entry, not pnpmEntry) on the default production fork path (CodeRabbit #779 R19)", async () => {
+  it("names the real forked module (the runner entry, not pnpmEntry) on the default production fork path", async () => {
     const fixture = await createInstallFixture();
     const pnpmRunnerEntry = join(fixture.root, "pnpm-runner.js");
     // No forkProcess override, so this takes the default fork. The real
@@ -455,7 +441,7 @@ describe("installPluginDependencies", () => {
     expect(failure.error.logs.at(-1)?.text).toBe("Install cancelled by the caller.");
   });
 
-  it("signals the install child's descendants, not just the child (#779 round 7 B3)", async () => {
+  it("signals the install child's descendants, not just the child", async () => {
     vi.useFakeTimers();
     const fixture = await createInstallFixture();
     const child = new FakeInstallProcess(4_242);
@@ -523,7 +509,7 @@ describe("installPluginDependencies", () => {
 
     // pnpm itself is gone, but the git and tar processes it left are not, so
     // this job must not report teardown complete yet — the pipeline discards
-    // the staging tree the moment it does (#779 round 10 B2).
+    // the staging tree the moment it does.
     child.exit(143);
     await flushMicrotasks();
     expect(settled).toBe(false);
@@ -538,7 +524,7 @@ describe("installPluginDependencies", () => {
     expect(requireFailure(await install).error.code).toBe("aborted");
   });
 
-  it("settles at the teardown cap when the force round never returns (CERT779J B3.2)", async () => {
+  it("settles at the teardown cap when the force round never returns", async () => {
     vi.useFakeTimers();
     const fixture = await createInstallFixture();
     const child = new FakeInstallProcess();
@@ -580,7 +566,7 @@ describe("installPluginDependencies", () => {
     });
   });
 
-  it("resolves within a bounded grace period when terminate() reports it never sent the request (CodeRabbit #779 R20)", async () => {
+  it("resolves within a bounded grace period when terminate() reports it never sent the request", async () => {
     vi.useFakeTimers();
     const fixture = await createInstallFixture();
     const child = new FakeInstallProcess();
@@ -709,7 +695,7 @@ describe("installPluginDependencies", () => {
 // above, and they used to gate on two paths that exist in no fresh checkout:
 // apps/desktop/resources/plugin-tools (a build output) and a gitignored
 // reference fixture. Both were absent, so all three skipped green — the
-// pins looked proven and nothing had run them (#779 round 9 A2).
+// pins looked proven and nothing had run them.
 //
 // Now the only precondition is the pinned pnpm this repo already installs as
 // a devDependency, which the setup below stages the same way
@@ -843,7 +829,7 @@ it.skipIf(!realInstallAvailable)(
   async () => {
     const fixture = await createInstallFixture({ pluginId: "npmrc-plugin" });
     await writeFixtureProject(fixture.snapshotRoot);
-    // The snapshot now rejects this file outright (#779 round 9 A1), so it
+    // The snapshot now rejects this file outright, so it
     // can only reach pnpm's cwd if that rejection is ever removed. This is
     // the depth behind it: even then, the pinned registry wins.
     await writeFile(

@@ -9,13 +9,12 @@ import {
   openWorkspaceFromFirstRun,
   revealExplorerPath,
   seedWorkspaceManifest,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
 // PR 0M-5 linked Chats rail E2E: create a chat about a file, send a message,
-// survive a relaunch AND a rename (stable engine object id), and render
+// survive a relaunch and a rename (stable engine object id), and render
 // agent-authored messages as "<User Name>'s agent".
 
 async function waitForFileObjectId(
@@ -45,9 +44,6 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
     let page = desktop.page;
@@ -103,7 +99,7 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
     );
 
     // Rename through the product move IPC: the chat follows the file's
-    // STABLE engine object id to its new path.
+    // stable engine object id to its new path.
     await page.evaluate(
       async ({ id }) => {
         const api = (window as unknown as {
@@ -158,9 +154,6 @@ test("agent-authored messages render as \"<User Name>'s agent\"", async () => {
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     // Seed BEFORE launch, through the engine daemon (post-cutover the
     // retired TS in-process store is refused): the file exists in the engine
     // (and identically on disk so startup reconciliation is a no-op), with a

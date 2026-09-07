@@ -110,7 +110,7 @@ export function makeMathNodeView(
     let field: HTMLTextAreaElement | HTMLInputElement | null = null;
     // The field's value at the moment editing began (or the last remote value
     // adopted while the field was still untouched). The commit gate compares
-    // against THIS, not currentTex, so an opened-but-unedited field never
+    // against this, not currentTex, so an opened-but-unedited field never
     // clobbers a concurrent remote edit — see exitEditing / update.
     let baseline = "";
 
@@ -123,12 +123,12 @@ export function makeMathNodeView(
       view.dispatch(view.state.tr.setNodeMarkup(pos, undefined, { tex: value }));
     };
 
-    // `nextValue === null` cancels (keep currentTex); otherwise commit ONLY if
+    // `nextValue === null` cancels (keep currentTex); otherwise commit only if
     // the user actually changed the field (`value !== baseline`). Opening the
     // source editor and clicking away with no local edit must not dispatch —
     // otherwise a concurrent remote tex change (which advanced currentTex but
     // not the untouched field) would be silently overwritten. When the user
-    // DID edit locally and a remote edit also landed, their text wins on
+    // did edit locally and a remote edit also landed, their text wins on
     // commit: last-writer-wins.
     const exitEditing = (nextValue: string | null): void => {
       if (!editing) return;

@@ -10,7 +10,7 @@ import {
 import { startTransition, StrictMode, Suspense } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
+import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
 import { resetOrphanedDrafts } from "../orphanedDrafts";
 import {
   disposeEngineDocLeasesForTests,
@@ -498,7 +498,7 @@ it("reopens one shared lease when only one mounted consumer retries", async () =
     expect(renderedDocs.get("first")).not.toBe(initialDoc);
     expect(renderedDocs.get("second")).toBe(renderedDocs.get("first"));
   });
-  // The pane that did NOT retry has to come back with the shared session, not
+  // The pane that did not retry has to come back with the shared session, not
   // sit in the opening state waiting for a request key it never asked for.
   // Without this, two nulls satisfy the identity check above.
   await waitForPair();

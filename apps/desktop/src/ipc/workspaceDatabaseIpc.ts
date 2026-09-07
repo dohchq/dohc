@@ -14,7 +14,7 @@ type WorkspaceDatabaseIpcHandler<Event> = (
   payload: unknown,
 ) => Promise<unknown>;
 
-export interface WorkspaceDatabaseOperation<Workspace> {
+interface WorkspaceDatabaseOperation<Workspace> {
   readonly workspace: Workspace;
   readonly signal: AbortSignal;
 }

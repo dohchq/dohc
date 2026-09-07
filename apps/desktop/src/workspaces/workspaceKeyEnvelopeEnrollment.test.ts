@@ -311,11 +311,11 @@ function expectNoSentinel(
   for (const encoding of sentinelEncodings(sentinel)) {
     expect(
       serialized.includes(encoding),
-      `MUTATION: raw workspace key sentinel leaked into ${label} as ${encoding}`,
+      `raw workspace key sentinel leaked into ${label} as ${encoding}`,
     ).toBe(false);
     expect(
       bytes.includes(Buffer.from(encoding, "utf8")),
-      `MUTATION: raw workspace key sentinel bytes leaked into ${label}`,
+      `raw workspace key sentinel bytes leaked into ${label}`,
     ).toBe(false);
   }
 }

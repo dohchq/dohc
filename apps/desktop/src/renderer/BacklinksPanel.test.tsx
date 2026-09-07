@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GetBacklinksResult } from "../ipc/bridgeContract";
 import { BacklinksPanel } from "./BacklinksPanel";
 
+import { deferred } from "../testing/deferred";
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -23,16 +24,6 @@ function stubBacklinksWithChatFailure(result: GetBacklinksResult) {
   });
   vi.stubGlobal("dohcDesktop", { getBacklinks, listChatFileMentions });
   return { getBacklinks, listChatFileMentions };
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
 }
 
 function backlinksSource(title: string): GetBacklinksResult {

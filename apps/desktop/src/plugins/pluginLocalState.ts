@@ -24,7 +24,7 @@ import { errorMessage } from "./pluginShared";
  * plugin ids pass the count and still exceed the byte limit, which then made
  * the file unreadable and took every plugin's state with it. Bounding the
  * bytes directly bounds the thing that actually matters and rejects nothing
- * that fits (#779 round 9 B4).
+ * that fits.
  */
 export const MAX_PLUGIN_LOCAL_STATE_FILE_BYTES = 256 * 1024;
 
@@ -38,7 +38,7 @@ export const PluginRecord = z.object({
   approvedHash: PluginSourceHash.optional(),
   installedBaselineHash: PluginSourceHash.optional(),
   // SHA-256 of bundle.mjs at the moment it was last (re)built from approved
-  // source — the EXECUTING artifact's own hash, re-checked before every
+  // source — the executing artifact's own hash, re-checked before every
   // start alongside approvedHash (CERT779: approvedHash alone verified a
   // source tree that never runs; a tampered bundle.mjs with an unchanged
   // source tree previously loaded without detection).
@@ -48,7 +48,7 @@ export const PluginRecord = z.object({
   // its directory name and no longer matches the key this record is stored
   // under — "foo" against a record keyed "@scope/bar". That lost the
   // installation, and with it the Uninstall action. The directory is the one
-  // identity a broken manifest cannot take away (#779 round 9 B3).
+  // identity a broken manifest cannot take away.
   directoryName: z.string().min(1).max(255).optional(),
 }).strict();
 export type PluginRecordShape = z.infer<typeof PluginRecord>;
@@ -68,7 +68,7 @@ export const DEFAULT_PLUGIN_LOCAL_STATE: PluginLocalState = {
   plugins: {},
 };
 
-export type PluginLocalStateResult =
+type PluginLocalStateResult =
   | { ok: true; state: PluginLocalState }
   | { ok: false; warning: string };
 

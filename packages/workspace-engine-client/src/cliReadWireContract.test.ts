@@ -1,15 +1,16 @@
+import { ProtocolShapeError } from "./wireSchema";
 import { describe, expect, it } from "vitest";
 import {
-  ChatsProtocolShapeError,
-  WorkspaceProtocolShapeError,
-  decodeGranularChatMessageSearchResponse,
-  decodeUnreadFileThreads,
+  CHATS_METHOD,
+  WORKSPACE_METHOD,
+  decodeWorkspaceResult,
+  decodeChatsResult,
 } from "./index";
 
 describe("CLI daemon read decoders", () => {
   it("decodes granular chat candidates including the null thread-header id", () => {
     expect(
-      decodeGranularChatMessageSearchResponse({
+      decodeWorkspaceResult(WORKSPACE_METHOD.searchQueryChatMessagesGranular, {
         results: [
           {
             threadId: "thread-1",
@@ -39,7 +40,7 @@ describe("CLI daemon read decoders", () => {
 
   it("fails granular candidates closed on unknown or malformed fields", () => {
     expect(() =>
-      decodeGranularChatMessageSearchResponse({
+      decodeWorkspaceResult(WORKSPACE_METHOD.searchQueryChatMessagesGranular, {
         results: [
           {
             threadId: "thread-1",
@@ -49,9 +50,9 @@ describe("CLI daemon read decoders", () => {
         ],
         saturated: false,
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
     expect(() =>
-      decodeGranularChatMessageSearchResponse({
+      decodeWorkspaceResult(WORKSPACE_METHOD.searchQueryChatMessagesGranular, {
         results: [
           {
             threadId: "",
@@ -61,9 +62,9 @@ describe("CLI daemon read decoders", () => {
         ],
         saturated: false,
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
     expect(() =>
-      decodeGranularChatMessageSearchResponse({
+      decodeWorkspaceResult(WORKSPACE_METHOD.searchQueryChatMessagesGranular, {
         results: [
           {
             threadId: "thread-1",
@@ -74,18 +75,18 @@ describe("CLI daemon read decoders", () => {
         ],
         saturated: false,
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
     expect(() =>
-      decodeGranularChatMessageSearchResponse({
+      decodeWorkspaceResult(WORKSPACE_METHOD.searchQueryChatMessagesGranular, {
         results: [],
         saturated: "yes",
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it("decodes unread file-thread aggregates", () => {
     expect(
-      decodeUnreadFileThreads([
+      decodeChatsResult(CHATS_METHOD.readStateListUnreadFileThreads, [
         {
           threadId: "thread-1",
           messageCount: 2,
@@ -125,9 +126,9 @@ describe("CLI daemon read decoders", () => {
         extra: true,
       },
     ]) {
-      expect(() => decodeUnreadFileThreads([row])).toThrow(
-        ChatsProtocolShapeError,
-      );
+      expect(() =>
+        decodeChatsResult(CHATS_METHOD.readStateListUnreadFileThreads, [row]),
+      ).toThrow(ProtocolShapeError);
     }
   });
 });

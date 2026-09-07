@@ -38,7 +38,6 @@ import {
   testSite,
   writeWorkspaceFile,
   workspaceStatus,
-  readHistoryRecording,
   type ToolContext,
 } from "./tools";
 import {
@@ -78,7 +77,7 @@ const lstatOverride = vi.hoisted(() => ({
 // inside the rename call, which is the race itself. `replaceWith` names an
 // entry to move ON TOP of the path.
 // Without it the path is simply removed. `failWith` names an errno code the
-// mock throws INSTEAD of calling the real rename -- for a failure a real
+// mock throws instead of calling the real rename -- for a failure a real
 // filesystem will not reproduce on demand, such as a length rejection whose
 // exact errno depends on what the host decides to say. The ladder then sees a
 // rename that moved nothing, exactly as the real failure it stands in for
@@ -158,12 +157,6 @@ function refusalReason(result: { ok: true } | { ok: false; reason: string }): st
   return result.reason;
 }
 
-// Keep these split so siteNoLegacyAppModel.test.ts does not flag this
-// compatibility regression fixture as active legacy guidance.
-const LEGACY_APPS_SEGMENT = `.${"apps"}`;
-const LEGACY_SDK_PACKAGE = `@dohc/${"app"}`;
-const importLegacySdk = `import "${LEGACY_SDK_PACKAGE}";\n`;
-
 const emptyDesktopHistoryRequest: NonNullable<ToolContext["request"]> = async (request) => {
   if (request.verb === "moments") {
     return {
@@ -217,7 +210,7 @@ async function withProcessPlatform<T>(platform: NodeJS.Platform, fn: () => Promi
 // relative fs (the same platform gate the retired durable history used).
 const itDurableHistory = process.platform === "linux" ? it : it.skip;
 
-// The traversal vectors EVERY path-taking tool must refuse: parent escape,
+// The traversal vectors every path-taking tool must refuse: parent escape,
 // percent-encoded escape (single and double), an absolute path, and the
 // reserved .dohc control dir.
 const TRAVERSALS = [
@@ -289,7 +282,7 @@ describe("mcp tool path containment", () => {
 
   it("refuses a path that escapes via an in-tree symlink (realpath containment)", async () => {
     await withWorkspace(async (ctx) => {
-      // A symlink that already exists INSIDE the workspace but points outside
+      // A symlink that already exists inside the workspace but points outside
       // it: lexical validation passes, realpath containment must still refuse.
       const outside = await mkdtemp(join(tmpdir(), "dohc-mcp-outside-"));
       await writeFile(join(outside, "secret.txt"), "top secret");
@@ -303,7 +296,7 @@ describe("mcp tool path containment", () => {
     });
   });
 
-  it("refuses a reserved .dohc segment at ANY depth", async () => {
+  it("refuses a reserved .dohc segment at any depth", async () => {
     await withWorkspace(async (ctx) => {
       for (const p of [".dohc/x", "notes/.dohc/x", "a/b/.DOHC/x"]) {
         expect((await safeResolve(ctx, p)).ok).toBe(false);
@@ -311,14 +304,10 @@ describe("mcp tool path containment", () => {
     });
   });
 
-  it("create_site refuses traversal, .dohc, and legacy app folders", async () => {
+  it("create_site refuses traversal and .dohc", async () => {
     await withWorkspace(async (ctx) => {
       await expect(createSite(ctx, { path: "../x" })).resolves.toMatchObject({ ok: false });
       await expect(createSite(ctx, { path: ".dohc/x" })).resolves.toMatchObject({ ok: false });
-      await expect(createSite(ctx, { path: `finance/${LEGACY_APPS_SEGMENT}/x` })).resolves.toMatchObject({
-        ok: false,
-        reason: expect.stringContaining(`legacy ${LEGACY_APPS_SEGMENT}`),
-      });
     });
   });
 
@@ -386,7 +375,7 @@ describe("mcp tool path containment", () => {
       });
       expect(found).toMatchObject({ ok: true });
 
-      // The secret floor holds INSIDE mounts: a mounted .env is denied to
+      // The secret floor holds inside mounts: a mounted.env is denied to
       // reads and searches even though the mount itself is readable.
       await writeFile(join(ctx.root, "shared-with-me", "alex", ".env"), "API_KEY=x");
       await expect(
@@ -506,7 +495,7 @@ describe("mcp tool path containment", () => {
     });
   });
 
-  // #613: the trash name joined a ~51-byte timestamp+uuid prefix onto an
+  // The trash name joined a ~51-byte timestamp+uuid prefix onto an
   // untruncated basename. A 230-character name is legal on NTFS, ext4 and
   // APFS, so the file exists and the DELETE is what fails -- with "ENOENT: no
   // such file or directory, rename ...", which an agent would reasonably read
@@ -536,7 +525,7 @@ describe("mcp tool path containment", () => {
   });
 
   // The other half of #613, and the mirror of its first fix. A name the
-  // filesystem WILL take must not be shortened for a limit that did not
+  // filesystem will take must not be shortened for a limit that did not
   // apply: the trash keeps no record of the original name, so a character
   // dropped here cannot be restored. The tool asks the filesystem rather than
   // predicting, so this holds wherever the suite runs -- the same delete is a
@@ -546,7 +535,7 @@ describe("mcp tool path containment", () => {
   // refused the delete outright on that arithmetic, which took deletion away
   // from deep workspaces that had been working.
   //
-  // The right answer depends on the host, so the test ASKS it rather than
+  // The right answer depends on the host, so the test asks it rather than
   // assuming, exactly as the tool now does: where a past-MAX_PATH path can be
   // written, the delete must still happen; where it cannot, the refusal must
   // name the limit and leave the file alone.
@@ -593,7 +582,7 @@ describe("mcp tool path containment", () => {
 
   // The needless-truncation case, and the one that pins the ladder itself: a
   // basename that fits the per-component limit whole, inside a workspace deep
-  // enough that the COMPOSED path passes the legacy MAX_PATH limit. Where the
+  // enough that the composed path passes the legacy MAX_PATH limit. Where the
   // host allows the long path, the name must be stored whole -- truncating it
   // would drop characters for a limit that did not apply, and the trash keeps
   // no record of the original to restore them from.
@@ -643,7 +632,7 @@ describe("mcp tool path containment", () => {
   // report success for a file the agent never named.
   //
   // The identity check that guarded the failure path now guards each retry
-  // too, against the identity captured before the FIRST attempt. A wrong
+  // too, against the identity captured before the first attempt. A wrong
   // refusal costs a retry; a wrong success trashes the wrong file and says it
   // is done.
   it("refuses rather than trashing a file that replaced the source mid-ladder", async () => {
@@ -674,7 +663,7 @@ describe("mcp tool path containment", () => {
         expect(renameRace.path).toBeNull();
         expect(result).toMatchObject({ ok: false });
         expect(refusalReason(result)).toContain("something replaced it while dohc worked");
-        // The point: the replacement is still where it was, NOT in the trash.
+        // The point: the replacement is still where it was, not in the trash.
         expect(await readFile(join(ctx.root, name), "utf8")).toBe(
           "a different entry entirely",
         );
@@ -725,10 +714,10 @@ describe("mcp tool path containment", () => {
     });
   });
 
-  // A failing rename must say what happened AND what did not. rename is
+  // A failing rename must say what happened and what did not. rename is
   // atomic, so a failed one moved nothing -- and an agent that cannot tell a
   // refused delete from a silent one cannot decide what to do next. Note what
-  // this does NOT say: that the file is unchanged. Two lstat readings cannot
+  // this does not say: that the file is unchanged. Two lstat readings cannot
   // establish that, so the sentence stays inside the rename contract.
   it("names the failure and says dohc moved nothing when the move fails", async () => {
     await withWorkspace(async (ctx) => {
@@ -769,7 +758,7 @@ describe("mcp tool path containment", () => {
   // same lie, pointing the other way.
   // The trash folder is prepared with mkdir + lstat, and every errno from
   // those reached the agent raw -- absolute host path and all -- while the
-  // arms either side of it were being translated. A guard refusal (#585) is an
+  // arms either side of it were being translated. A guard refusal is an
   // Error this code wrote and still passes through whole; an errno does not.
   it("translates an errno from preparing the trash folder", async () => {
     await withWorkspace(async (ctx) => {
@@ -896,7 +885,7 @@ describe("mcp tool path containment", () => {
 
         const result = await deleteWorkspacePath(ctx, { path: "note.md" });
         // "dohc could not check it" rather than silence: that dohc could not
-        // look is itself provable, and it is a DIFFERENT state from "the entry
+        // look is itself provable, and it is a different state from "the entry
         // looks the same", which renders with no trailing sentence at all.
         expect(refusalReason(result)).toMatch(
           /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\. dohc did not move it\. dohc could not check note\.md afterwards\.$/,
@@ -925,9 +914,9 @@ describe("mcp tool path containment", () => {
         const trashDir = join(ctx.root, ".dohc", "trash");
         await mkdir(trashDir, { recursive: true });
         await mkdir(join(trashDir, `${now}-${uuid}-note.md`));
-        // BOTH looks, one at a time, because the guard has two sides and an
+        // Both looks, one at a time, because the guard has two sides and an
         // earlier version of this test only armed the first -- which left
-        // `before.ino === 0` alone as a surviving mutant. The SECOND look is
+        // `before.ino === 0` alone as a surviving mutant. The second look is
         // the likelier zero in practice: a failed rename is often a sharing
         // violation, which is what makes libuv fall back to a directory stat
         // and report a FileId of 0.
@@ -948,12 +937,12 @@ describe("mcp tool path containment", () => {
     });
   });
 
-  // dohc_delete_path is the tool that MOVES a user's file into .dohc/trash, so
+  // dohc_delete_path is the tool that moves a user's file into.dohc/trash, so
   // a squatter there is reachable from an ordinary agent request. Every squat
-  // used to reach the agent as a raw errno from mkdir (#544, #585): "EEXIST:
+  // used to reach the agent as a raw errno from mkdir: "EEXIST:
   // file already exists, mkdir …" names no constraint and no next step. The
   // three squat shapes below are one test because they must all answer the
-  // same way -- and because a dangling link raises a DIFFERENT errno than the
+  // same way -- and because a dangling link raises a different errno than the
   // other two, which is exactly what an errno allowlist would get wrong.
   describe("a squatted .dohc/trash", () => {
     async function deleteThrough(squat: (trash: string) => Promise<void>) {
@@ -978,7 +967,7 @@ describe("mcp tool path containment", () => {
       });
     });
 
-    it("names a DANGLING link squatter, which an errno allowlist would miss", async () => {
+    it("names a dangling link squatter, which an errno allowlist would miss", async () => {
       await expect(
         deleteThrough((trash) => symlink(join(trash, "..", "nowhere"), trash, "dir")),
       ).resolves.toMatchObject({
@@ -988,7 +977,7 @@ describe("mcp tool path containment", () => {
       });
     });
 
-    it("names a link to a real OUTSIDE folder and lands nothing there", async () => {
+    it("names a link to a real outside folder and lands nothing there", async () => {
       const outside = await mkdtemp(join(tmpdir(), "dohc-mcp-trash-outside-"));
       try {
         await expect(
@@ -998,7 +987,7 @@ describe("mcp tool path containment", () => {
           reason:
             "dohc could not move this to the workspace trash. A link is at .dohc/trash, which must be a real folder. Remove or rename that link. Then retry.",
         });
-        // Why the guard runs AFTER mkdir: mkdir{recursive} no-ops on an
+        // Why the guard runs after mkdir: mkdir{recursive} no-ops on an
         // existing symlink-to-dir, so a pre-check would see nothing. Drop
         // both this lstat and the containment check and keep.txt lands here.
         expect(await readdir(outside)).toEqual([]);
@@ -1099,7 +1088,7 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("writes, reads, and lists arbitrary visible files (no legacy change sets after Phase C)", async () => {
+  it("writes, reads, and lists arbitrary visible files", async () => {
     await withWorkspace(async (ctx) => {
       const written = await writeWorkspaceFile(ctx, {
         path: "docs/report.html",
@@ -1138,13 +1127,13 @@ describe("mcp tools operate on allowed paths", () => {
         ]);
       }
 
-      // Retirement Phase C: the write carried no legacy change set (the engine
+      // The write carried no legacy change set (the engine
       // is the recorder).
       expect(written).toMatchObject({ recordedBy: "workspace-engine" });
     });
   });
 
-  it("mutating tools work on platforms without durable legacy history (Phase C: engine capture needs none)", async () => {
+  it("mutating tools work on platforms without durable legacy history", async () => {
     await withWorkspace(async (ctx) => {
       await withProcessPlatform("darwin", async () => {
         // The retired legacy recorder used to fail closed here; the engine
@@ -1248,7 +1237,7 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("denies reading secret-backed file contents with a clear reason (PR 08 default deny)", async () => {
+  it("denies reading secret-backed file contents with a clear reason", async () => {
     await withWorkspace(async (ctx) => {
       const marker = "MCP_SECRET_MARKER_42";
       await writeFile(join(ctx.root, ".env"), `API_KEY=${marker}\n`);
@@ -1272,12 +1261,12 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("denies reading secrets through an in-workspace symlink alias (CodeRabbit major)", async () => {
+  it("denies reading secrets through an in-workspace symlink alias", async () => {
     await withWorkspace(async (ctx) => {
       const marker = "MCP_ALIAS_SECRET_7";
       await writeFile(join(ctx.root, ".env"), `API_KEY=${marker}\n`);
       await writeFile(join(ctx.root, ".env.local"), `LOCAL=${marker}\n`);
-      // A symlink INSIDE the workspace passes lexical validation and realpath
+      // A symlink inside the workspace passes lexical validation and realpath
       // containment, but the read follows it to the secret: the resolved
       // real target must be classified too.
       await symlink(join(ctx.root, ".env"), join(ctx.root, "notes.md"));
@@ -1328,7 +1317,7 @@ describe("mcp tools operate on allowed paths", () => {
         JSON.stringify({ id: "relic-1", summary: "Pre-flip edit" }),
       );
 
-      // A new MCP write records NOTHING legacy (Phase C).
+      // A new MCP write records nothing legacy (Phase C).
       await expect(
         writeWorkspaceFile(ctx, { path: "notes/plan.txt", content: "draft\n" }),
       ).resolves.toMatchObject({ ok: true, recordedBy: "workspace-engine" });
@@ -1439,7 +1428,7 @@ describe("mcp tools operate on allowed paths", () => {
       const trash = await readdir(join(ctx.root, ".dohc", "trash"));
       expect(trash.some((name) => name.endsWith("-todo.txt"))).toBe(true);
 
-      // Phase C: none of the mutations wrote a legacy change set.
+      // None of the mutations wrote a legacy change set.
       expect(moved).toMatchObject({ recordedBy: "workspace-engine" });
       expect(deleted).toMatchObject({ recordedBy: "workspace-engine" });
     });
@@ -1479,7 +1468,6 @@ describe("mcp tools operate on allowed paths", () => {
       const packageJson = JSON.parse(await readFile(join(ctx.root, "finance/ledger/package.json"), "utf8"));
       const config = JSON.parse(await readFile(join(ctx.root, "finance/ledger/dohc.json"), "utf8"));
       expect(html).toContain("<title>Ledger</title>");
-      expect(html).not.toContain(LEGACY_SDK_PACKAGE);
       expect(packageJson).toMatchObject({
         private: true,
         type: "module",
@@ -1496,7 +1484,7 @@ describe("mcp tools operate on allowed paths", () => {
         },
       });
       expect(config).toMatchObject({ type: "site", title: "Ledger", build: { output: "dist" } });
-      // Phase C: the scaffold reports the engine as recorder; no change set.
+      // The scaffold reports the engine as recorder; no change set.
       await expect(listChanges(ctx, { includeFiles: true })).resolves.toMatchObject({
         count: 0,
       });
@@ -1586,7 +1574,7 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("detect_sites prefers a real configured build output over a real conventional one", async () => {
     await withWorkspace(async (ctx) => {
-      // Both a conventional "dist" AND a configured, nested "public/dist"
+      // Both a conventional "dist" And a configured, nested "public/dist"
       // hold a real index.html — the conventional loop runs first and would
       // claim builtEntry before the configured check ever gets a chance to
       // run, unless that check is unconditional (not gated on builtEntry
@@ -1639,7 +1627,7 @@ describe("mcp tools operate on allowed paths", () => {
   it("detect_sites gives medium confidence to a folder detected only from a real build output", async () => {
     await withWorkspace(async (ctx) => {
       // No dohc.json, no package.json, no root-level index.html — the
-      // ONLY website signal at all is the real, conventional build
+      // only website signal at all is the real, conventional build
       // output. workspace-core's own siteConfidence returns "medium" for
       // exactly this (hasBuildOutputSignal), not "low" — the two
       // detectors have to agree on the same input.
@@ -1661,7 +1649,7 @@ describe("mcp tools operate on allowed paths", () => {
       // returns "high" for a config reason when it explicitly declares
       // type: "site"; a valid-but-empty config isn't itself a
       // high-confidence website signal. Both detectors have to agree on
-      // the SAME dohc.json.
+      // the same dohc.json.
       await mkdir(join(ctx.root, "empty-config"), { recursive: true });
       await writeFile(join(ctx.root, "empty-config/dohc.json"), JSON.stringify({}));
 
@@ -1775,7 +1763,7 @@ describe("mcp tools operate on allowed paths", () => {
         join(ctx.root, "workflow-claims-build/dohc.json"),
         JSON.stringify({ type: "workflow", build: { output: "dist" } }),
       );
-      // A sibling with the SAME non-site type but a REAL build artifact on
+      // A sibling with the same non-site type but a real build artifact on
       // disk (an actual dist/index.html, not just an empty dist/) still
       // counts, proving the detected-vs-configured distinction (not a
       // blanket refusal of every build.output claim).
@@ -1792,7 +1780,7 @@ describe("mcp tools operate on allowed paths", () => {
       const roots = result.sites.map((site) => site.root);
       expect(roots).toContain("workflow-real-build");
       expect(roots).not.toContain("workflow-claims-build");
-      // "workflow-real-build/dist" is workflow-real-build's OWN build
+      // "workflow-real-build/dist" is workflow-real-build's own build
       // output, not an independent site — matches workspace-core's
       // discoverSites, which never promotes a build output's own
       // index.html into a separate site root.
@@ -1802,7 +1790,7 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("detect_sites still finds an independent site at a path a sibling only CLAIMS as a build.output", async () => {
+  it("detect_sites still finds an independent site at a path a sibling only claims as a build.output", async () => {
     await withWorkspace(async (ctx) => {
       // "portal" declares build.output: "dist", but nothing was ever built
       // there yet — no dist/index.html on disk.
@@ -1815,7 +1803,7 @@ describe("mcp tools operate on allowed paths", () => {
       // A genuinely separate, independently detectable web project happens
       // to live at that exact claimed (but unbuilt) path — the claim alone
       // must not hide it, the same way workspace-core's discoverSites only
-      // credits a build.output claim to its declaring site once a REAL
+      // credits a build.output claim to its declaring site once a real
       // index.html exists at the claimed path, never on the claim alone.
       await mkdir(join(ctx.root, "portal/dist"), { recursive: true });
       await writeFile(
@@ -2005,50 +1993,6 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("test_site validates entries and refuses legacy app SDK imports", async () => {
-    await withWorkspace(async (ctx) => {
-      await createSite(ctx, { path: "todo" });
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
-
-      await writeFile(join(ctx.root, "todo/script.js"), `// ${importLegacySdk}`);
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
-
-      await writeFile(join(ctx.root, "todo/script.js"), `const marker = "/* ${LEGACY_SDK_PACKAGE} */";\n`);
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
-
-      await writeFile(
-        join(ctx.root, "todo/script.js"),
-        `const slashOrStar = /[/*]/;\n${importLegacySdk}`,
-      );
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
-        ok: false,
-        checks: expect.arrayContaining([
-          expect.objectContaining({ name: "no-legacy-sdk-import", ok: false }),
-        ]),
-      });
-
-      await writeFile(join(ctx.root, "todo/script.js"), importLegacySdk);
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
-        ok: false,
-        checks: expect.arrayContaining([
-          expect.objectContaining({ name: "no-legacy-sdk-import", ok: false }),
-        ]),
-      });
-
-      await writeFile(join(ctx.root, "todo/script.js"), "x".repeat(2 * 1024 * 1024 + 1));
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
-        ok: false,
-        checks: expect.arrayContaining([
-          expect.objectContaining({
-            name: "no-legacy-sdk-import",
-            ok: false,
-            message: "Site source is too large for MCP static validation.",
-          }),
-        ]),
-      });
-    });
-  });
-
   it("build_site returns the detected build plan without executing it", async () => {
     await withWorkspace(async (ctx) => {
       await createSite(ctx, { path: "todo", title: "Todo" });
@@ -2188,7 +2132,7 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("query_database refuses a non-visible-database target and bounds large results", async () => {
     await withWorkspace(async (ctx) => {
-      // A real SQLite file that is NOT a visible-db path (wrong extension): the
+      // A real SQLite file that is not a visible-db path (wrong extension): the
       // visible-database guard refuses it even though the bytes are a database.
       await writeFile(join(ctx.root, "people.csv"), "id,name\n1,Ada\n");
       await importData(ctx, { sourcePath: "people.csv", databasePath: "p.sqlite", tableName: "p" });
@@ -2222,191 +2166,7 @@ function expectWorkspaceRelative(text: string, ctx: ToolContext): void {
   expect(text, "a POSIX absolute path reached the agent").not.toMatch(/(^|\s)\/\w/);
 }
 
-// AUDIT-OPTOUT: MCP resolves the settings file through the SAME schema the
-// desktop uses (@dohc/workspace-contracts/workspace-settings).
-//
-// #641: a file that exists but cannot be trusted resolves UNKNOWN, not OFF.
-// Both fail closed, so neither names a recorder — but OFF says the user chose
-// this, and a read that failed established no such thing. The desktop split
-// these in #483 and #505; this suite holds MCP to the same split.
-describe("workspace engine flag", () => {
-  const settingsPath = (root: string) => join(root, ".dohc", "settings.local.json");
-  const validSettings = (workspaceEngineAlpha: boolean) =>
-    JSON.stringify({
-      ...DEFAULT_WORKSPACE_SETTINGS,
-      experimental: { workspaceEngineAlpha },
-    });
-
-  it("reads an absent file as on and an explicit opt-out as off", async () => {
-    await withWorkspace(async (ctx) => {
-      await expect(readHistoryRecording(ctx)).resolves.toEqual({ state: "on" });
-
-      await mkdir(join(ctx.root, ".dohc"), { recursive: true });
-      await writeFile(settingsPath(ctx.root), validSettings(true));
-      await expect(readHistoryRecording(ctx)).resolves.toEqual({ state: "on" });
-
-      await writeFile(settingsPath(ctx.root), validSettings(false));
-      await expect(readHistoryRecording(ctx)).resolves.toEqual({ state: "off" });
-      await expect(
-        writeWorkspaceFile(ctx, { path: "notes.md", content: "draft\n" }),
-      ).resolves.toMatchObject({ ok: true, historyRecording: "off" });
-    });
-  });
-
-  // A hand-mirrored rule once answered ON for the schema-invalid bodies, which
-  // is why both readers share one schema. The schema's verdict is three-valued
-  // now: a body it rejects may hold an opt-out dohc cannot read, and saying so
-  // is not the same as saying the opt-out is there.
-  it("reads every unparseable and schema-invalid body as could-not-determine", async () => {
-    const bodies = [
-      "{not json",
-      JSON.stringify({ version: 2 }),
-      JSON.stringify({ experimental: { workspaceEngineAlpha: "false" } }),
-      JSON.stringify({}),
-      JSON.stringify([]),
-      JSON.stringify(null),
-    ];
-    for (const body of bodies) {
-      await withWorkspace(async (ctx) => {
-        await mkdir(join(ctx.root, ".dohc"), { recursive: true });
-        await writeFile(settingsPath(ctx.root), body);
-        const read = await readHistoryRecording(ctx);
-        expect(read.state, body).toBe("unknown");
-        if (read.state !== "unknown") throw new Error("unreachable");
-        expect(read.cause, body).toContain(".dohc/settings.local.json");
-        expectWorkspaceRelative(read.cause, ctx);
-      });
-    }
-  });
-
-  it("reads a non-regular, symlinked, or oversized settings file as could-not-determine", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(settingsPath(ctx.root), { recursive: true });
-      await expect(readHistoryRecording(ctx)).resolves.toMatchObject({
-        state: "unknown",
-        cause: expect.stringContaining("A folder is at that path"),
-      });
-      await rm(settingsPath(ctx.root), { recursive: true });
-
-      const outside = join(ctx.home, "settings.local.json");
-      await writeFile(outside, validSettings(true));
-      await symlink(outside, settingsPath(ctx.root));
-      await expect(readHistoryRecording(ctx)).resolves.toMatchObject({
-        state: "unknown",
-        cause: expect.stringContaining("A link is at that path"),
-      });
-      await rm(settingsPath(ctx.root));
-
-      await writeFile(
-        settingsPath(ctx.root),
-        JSON.stringify({
-          ...JSON.parse(validSettings(true)),
-          padding: "x".repeat(256 * 1024),
-        }),
-      );
-      // The limit that rejected the read, with its unit and the observed size.
-      await expect(readHistoryRecording(ctx)).resolves.toMatchObject({
-        state: "unknown",
-        cause: expect.stringContaining("the limit is 262144 bytes"),
-      });
-    });
-  });
-
-  it("reads a settings file that escapes the workspace as could-not-determine", async () => {
-    await withWorkspace(async (ctx) => {
-      const outside = join(ctx.home, "dohc-meta");
-      await mkdir(outside, { recursive: true });
-      await writeFile(join(outside, "settings.local.json"), validSettings(true));
-      await symlink(outside, join(ctx.root, ".dohc"), "dir");
-
-      await expect(readHistoryRecording(ctx)).resolves.toMatchObject({
-        state: "unknown",
-        cause: expect.stringContaining("leads outside this workspace"),
-      });
-    });
-  });
-
-  // Only ONE resolver failure is an escape. The others are checks that did not
-  // finish, and calling them an escape tells an agent to remove a settings file
-  // over a fact dohc never established -- this PR's own defect, one layer down.
-  // Consume the resolver's boolean instead of its reason and both cases here
-  // report the escape wording, so both fail.
-  describe("a resolver failure that is not an escape", () => {
-    const armRealpathErrno = (path: string, code: string) => {
-      realpathOverride.path = path;
-      realpathOverride.error = errnoError(code);
-    };
-    const disarm = () => {
-      realpathOverride.path = null;
-      realpathOverride.error = null;
-    };
-
-    it("reports an unreadable path as a check that failed, not as an escape", async () => {
-      await withWorkspace(async (ctx) => {
-        await mkdir(join(ctx.root, ".dohc"), { recursive: true });
-        await writeFile(settingsPath(ctx.root), validSettings(true));
-        armRealpathErrno(settingsPath(ctx.root), "EACCES");
-        try {
-          const read = await readHistoryRecording(ctx);
-          expect(read.state).toBe("unknown");
-          if (read.state !== "unknown") throw new Error("unreachable");
-          expect(read.cause).toContain("could not check where that path leads (EACCES)");
-          // The claim never established.
-          expect(read.cause).not.toContain("leads outside this workspace");
-          expectWorkspaceRelative(read.cause, ctx);
-        } finally {
-          disarm();
-        }
-      });
-    });
-
-    it("reports an unreadable workspace folder as the folder's failure, not this file's", async () => {
-      await withWorkspace(async (ctx) => {
-        await mkdir(join(ctx.root, ".dohc"), { recursive: true });
-        await writeFile(settingsPath(ctx.root), validSettings(true));
-        armRealpathErrno(ctx.root, "EACCES");
-        try {
-          const read = await readHistoryRecording(ctx);
-          expect(read.state).toBe("unknown");
-          if (read.state !== "unknown") throw new Error("unreachable");
-          expect(read.cause).toContain("could not resolve the workspace folder (EACCES)");
-          expect(read.cause).not.toContain("leads outside this workspace");
-          expectWorkspaceRelative(read.cause, ctx);
-        } finally {
-          disarm();
-        }
-      });
-    });
-  });
-
-  // #641, the whole point: what the AGENT reads. A settings file dohc cannot
-  // trust used to report `historyRecording: "off"` -- the opt-out's copy, on
-  // no evidence. Revert the fix and this fails: the report becomes "off".
-  it("reports an unreadable settings file as unknown, never as the opt-out", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(settingsPath(ctx.root), { recursive: true });
-
-      const written = await writeWorkspaceFile(ctx, { path: "notes.md", content: "draft\n" });
-      expect(written).toMatchObject({ ok: true, historyRecording: "unknown" });
-      if (!written.ok || !("historyRecordingUnavailable" in written)) {
-        throw new Error("expected the unknown arm to carry its cause");
-      }
-      // The state, the file, and the way out -- not a claim about a choice.
-      expect(written.historyRecordingUnavailable).toContain(
-        "dohc could not tell whether this workspace records history",
-      );
-      expect(written.historyRecordingUnavailable).toContain(".dohc/settings.local.json");
-      expect(written.historyRecordingUnavailable).toContain("Then retry.");
-      expectWorkspaceRelative(written.historyRecordingUnavailable, ctx);
-
-      // The write itself still happened, and the opt-out's word is nowhere.
-      expect(await readFile(join(ctx.root, "notes.md"), "utf8")).toBe("draft\n");
-      expect(JSON.stringify(written)).not.toContain('"off"');
-    });
-  });
-});
-
-// #642: safeMetadataDir prepares .dohc with mkdir + lstat, and every errno
+// safeMetadataDir prepares .dohc with mkdir + lstat, and every errno
 // from those used to reach the agent whole -- `EPERM: operation not
 // permitted, lstat 'C:\Users\...\ws\.dohc'`. Seven mutating tools refuse
 // through this one catch, so all seven said it.
@@ -2491,7 +2251,7 @@ describe("a metadata-folder failure reaches the agent translated", () => {
   });
 });
 
-// Every mutating tool checks .dohc is a real folder BEFORE it touches a
+// Every mutating tool checks.dohc is a real folder before it touches a
 // visible file, and refuses without changing anything when it is not. One
 // pre-existing test covered that, through a symlinked .dohc, for two of the
 // eight tools; these cover all eight.
@@ -2510,7 +2270,7 @@ describe("a refused recordability boundary leaves the filesystem alone", () => {
     });
   }
 
-  // Every case below asserts THIS reason, so a tool refusing for some other
+  // Every case below asserts this reason, so a tool refusing for some other
   // reason cannot pass as evidence that the boundary held.
   const BLOCKED =
     "dohc could not open this workspace's .dohc folder. A file is at .dohc, which must be a real folder. Remove or rename that file. Then retry.";
@@ -2591,30 +2351,28 @@ describe("a refused recordability boundary leaves the filesystem alone", () => {
 
 });
 
-// #638. The reserved rule used to read the path as SPELLED, and containment
-// was proved only INTO the root -- never OUT of .dohc. So an in-workspace
+// The reserved rule used to read the path as spelled, and containment
+// was proved only INTO the root -- never out of.dohc. So an in-workspace
 // symlink named anything but `.dohc` carried every mutating tool straight into
-// the workspace's control plane: the probe on the issue wrote
-// `experimental.workspaceEngineAlpha: false` through one, and a delete through
-// the same alias moved the settings file to trash, silently dropping the
-// workspace's engine opt-out.
+// the workspace's control plane: the probe on the issue rewrote the settings
+// file through one, and a delete through the same alias moved it to trash.
 //
-// Every case below is decided on the RESOLVED path, which is what makes the
+// Every case below is decided on the resolved path, which is what makes the
 // spelling irrelevant. Revert safeResolve to the lexical check alone and each
 // one fails.
 describe("a symlink cannot alias a reserved area", () => {
   const settingsPath = (root: string) => join(root, ".dohc", "settings.local.json");
-  const OPTED_OUT = JSON.stringify({
+  const SETTINGS = JSON.stringify({
     ...DEFAULT_WORKSPACE_SETTINGS,
-    experimental: { workspaceEngineAlpha: false },
+    privacy: { confirmExternalLinks: false },
   });
 
-  // A workspace holding a real `.dohc` with an engine opt-out in it, plus
+  // A workspace holding a real `.dohc` with a settings file in it, plus
   // `meta -> .dohc`: an ordinary-looking folder whose real path is reserved.
   async function withDohcAlias<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
     return withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, ".dohc"), { recursive: true });
-      await writeFile(settingsPath(ctx.root), OPTED_OUT);
+      await writeFile(settingsPath(ctx.root), SETTINGS);
       await symlink(join(ctx.root, ".dohc"), join(ctx.root, "meta"), "dir");
       return fn(ctx);
     });
@@ -2639,20 +2397,16 @@ describe("a symlink cannot alias a reserved area", () => {
     });
   });
 
-  it("refuses the write, and the engine opt-out still reads off", async () => {
+  it("refuses the write, and the settings file is untouched", async () => {
     await withDohcAlias(async (ctx) => {
       const written = await writeWorkspaceFile(ctx, {
         path: "meta/settings.local.json",
-        content: JSON.stringify({
-          ...DEFAULT_WORKSPACE_SETTINGS,
-          experimental: { workspaceEngineAlpha: true },
-        }),
+        content: JSON.stringify(DEFAULT_WORKSPACE_SETTINGS),
       });
       expect(written.ok).toBe(false);
       expectsReservedRefusal(refusalReason(written));
 
-      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
-      await expect(readHistoryRecording(ctx)).resolves.toEqual({ state: "off" });
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(SETTINGS);
     });
   });
 
@@ -2662,8 +2416,7 @@ describe("a symlink cannot alias a reserved area", () => {
       expect(deleted.ok).toBe(false);
       expectsReservedRefusal(refusalReason(deleted));
 
-      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
-      await expect(readHistoryRecording(ctx)).resolves.toEqual({ state: "off" });
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(SETTINGS);
     });
   });
 
@@ -2685,7 +2438,7 @@ describe("a symlink cannot alias a reserved area", () => {
       expect(into.ok).toBe(false);
       expectsReservedRefusal(refusalReason(into));
 
-      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(SETTINGS);
       expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("visible");
       await expect(stat(join(ctx.root, "stolen.json"))).rejects.toThrow();
     });
@@ -2708,7 +2461,7 @@ describe("a symlink cannot alias a reserved area", () => {
     });
   });
 
-  // Reading or writing THROUGH the alias is the attack; removing the alias is
+  // Reading or writing through the alias is the attack; removing the alias is
   // the cleanup, and refusing that left an agent unable to undo the very thing
   // the guard is warning about. A rename moves the link and never opens it.
   it("deletes the alias itself, and .dohc keeps every byte", async () => {
@@ -2718,8 +2471,7 @@ describe("a symlink cannot alias a reserved area", () => {
         trashed: true,
       });
       await expect(lstat(join(ctx.root, "meta"))).rejects.toThrow();
-      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
-      await expect(readHistoryRecording(ctx)).resolves.toEqual({ state: "off" });
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(SETTINGS);
     });
   });
 
@@ -2734,7 +2486,7 @@ describe("a symlink cannot alias a reserved area", () => {
       expectsReservedRefusal(
         refusalReason(await readWorkspaceFile(ctx, { path: "old-meta/settings.local.json" })),
       );
-      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(SETTINGS);
     });
   });
 
@@ -2767,7 +2519,7 @@ describe("a symlink cannot alias a reserved area", () => {
     });
   });
 
-  // shared-with-me is a WRITE reservation: mount refresh owns it, agents read
+  // shared-with-me is a write reservation: mount refresh owns it, agents read
   // it. An alias must inherit exactly that split, not more and not less.
   it("refuses a write through an alias of shared-with-me but still reads it", async () => {
     await withWorkspace(async (ctx) => {
@@ -2791,7 +2543,7 @@ describe("a symlink cannot alias a reserved area", () => {
     });
   });
 
-  // Site tools EXECUTE the site. shared-with-me is readable, so safeResolve
+  // Site tools execute the site. shared-with-me is readable, so safeResolve
   // lets an alias of it through on purpose — which means the "do not run
   // someone else's shared code" gate is the one that has to read the resolved
   // path. Judged on the spelling, `mine -> shared-with-me/alex` runs it.
@@ -2818,17 +2570,17 @@ describe("a symlink cannot alias a reserved area", () => {
     });
   });
 
-  // A DANGLING alias is the ordering trap. With no `.dohc` on disk yet,
+  // A dangling alias is the ordering trap. With no `.dohc` on disk yet,
   // realpath fails for the alias itself, so a walk that treats every
   // unresolvable component as "not there yet" reports an ordinary path. Then
-  // the mutator calls ensureRecordable, which CREATES `.dohc` -- the alias
+  // the mutator calls ensureRecordable, which creates `.dohc` -- the alias
   // goes live between the check and the operation, and the operation follows
   // it in. A component that exists cannot be absent, so lstat decides this,
   // not realpath.
   describe("through an alias that is still dangling", () => {
     async function withDanglingAlias<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
       return withWorkspace(async (ctx) => {
-        // Deliberately NOT created: the alias points at a `.dohc` that does
+        // Deliberately not created: the alias points at a `.dohc` that does
         // not exist until a mutator makes it.
         await symlink(join(ctx.root, ".dohc"), join(ctx.root, "meta"), "dir");
         await expect(stat(join(ctx.root, ".dohc"))).rejects.toThrow();
@@ -2862,7 +2614,7 @@ describe("a symlink cannot alias a reserved area", () => {
       await withDanglingAlias(async (ctx) => {
         const written = await writeWorkspaceFile(ctx, {
           path: "meta/settings.local.json",
-          content: OPTED_OUT,
+          content: SETTINGS,
         });
         expect(refusalReason(written)).toMatch(/no target|reserved/i);
         await expect(stat(join(ctx.root, ".dohc", "settings.local.json"))).rejects.toThrow();
@@ -2870,7 +2622,7 @@ describe("a symlink cannot alias a reserved area", () => {
     });
 
     // Refusing every path with a broken link on it takes away the one
-    // operation that FIXES a broken link. Delete and a move's source rename
+    // operation that fixes a broken link. Delete and a move's source rename
     // the entry, so the alias is the object here, not a route into `.dohc`.
     it("deletes the broken link itself, and .dohc survives it", async () => {
       await withDanglingAlias(async (ctx) => {
@@ -2897,9 +2649,9 @@ describe("a symlink cannot alias a reserved area", () => {
       });
     });
 
-    // The relaxation is the LAST component only. A broken link partway along a
+    // The relaxation is the last component only. A broken link partway along a
     // path is still a route, and where it leads is still unknown.
-    it("still refuses a delete THROUGH the broken link", async () => {
+    it("still refuses a delete through the broken link", async () => {
       await withDanglingAlias(async (ctx) => {
         const deleted = await deleteWorkspacePath(ctx, { path: "meta/settings.local.json" });
         expect(refusalReason(deleted)).toMatch(/no target/i);
@@ -2907,7 +2659,7 @@ describe("a symlink cannot alias a reserved area", () => {
     });
 
     // Climbing past the link does not skip the reserved re-decision: the
-    // parent's REAL path plus this name is what the rule reads.
+    // parent's real path plus this name is what the rule reads.
     it("still refuses deleting a broken link that really sits inside .dohc", async () => {
       await withWorkspace(async (ctx) => {
         await mkdir(join(ctx.root, ".dohc"), { recursive: true });
@@ -2921,7 +2673,7 @@ describe("a symlink cannot alias a reserved area", () => {
     });
   });
 
-  // The refusal must name the rule that ACTUALLY rejected the path. An alias
+  // The refusal must name the rule that actually rejected the path. An alias
   // into .git is refused by the ignored-area rule, and a message claiming
   // dohc reserves ".dohc and shared-with-me" would send an agent looking for
   // a reservation that had nothing to do with it.
@@ -2961,7 +2713,7 @@ describe("a symlink cannot alias a reserved area", () => {
   });
 });
 
-// #638 on the surfaces next door. safeResolve hands every tool BOTH spellings
+// #638 on the surfaces next door. safeResolve hands every tool both spellings
 // of a path; a guard that decides authority has to read the resolved one. Each
 // case here passes its guard on the name the agent asked for, and the guard is
 // the last thing standing between the alias and the bytes behind it.
@@ -3044,37 +2796,8 @@ describe("a guard that decides authority reads the resolved path", () => {
     10_000,
   );
 
-  it("refuses a site scan whose folder really is the legacy one", async () => {
-    await withWorkspace(async (ctx) => {
-      const legacy = join(ctx.root, LEGACY_APPS_SEGMENT, "portal");
-      await mkdir(legacy, { recursive: true });
-      await writeFile(join(legacy, "index.html"), "<h1>legacy</h1>");
-      await symlink(join(ctx.root, LEGACY_APPS_SEGMENT), join(ctx.root, "shortcut"), "dir");
-
-      const scanned = await detectSites(ctx, { path: "shortcut/portal" });
-      expect(scanned).toMatchObject({
-        ok: false,
-        reason: expect.stringContaining(LEGACY_APPS_SEGMENT),
-      });
-    });
-  });
-
-  it("refuses to create a site whose folder really is the legacy one", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, LEGACY_APPS_SEGMENT), { recursive: true });
-      await symlink(join(ctx.root, LEGACY_APPS_SEGMENT), join(ctx.root, "shortcut"), "dir");
-
-      const created = await createSite(ctx, { path: "shortcut/fresh" });
-      expect(created).toMatchObject({
-        ok: false,
-        reason: expect.stringContaining(LEGACY_APPS_SEGMENT),
-      });
-      await expect(stat(join(ctx.root, LEGACY_APPS_SEGMENT, "fresh"))).rejects.toThrow();
-    });
-  });
-
   // Climbing past a component realpath cannot resolve is safe only when
-  // NOTHING is there. A permission error answers neither question, and reading
+  // nothing is there. A permission error answers neither question, and reading
   // it as absence appends the component as spelling -- which is the exact
   // input the reserved rule must never decide on.
   it("refuses a path whose presence the filesystem would not report", async () => {
@@ -3110,7 +2833,7 @@ describe("a guard that decides authority reads the resolved path", () => {
     });
   });
 
-  // A filesystem root is the one path realpath returns WITH its separator, so
+  // A filesystem root is the one path realpath returns with its separator, so
   // a workspace opened at one would compare against `C:\\` or `//` and refuse
   // every path inside itself as an escape.
   it("resolves inside a workspace whose root is the filesystem root", async () => {
@@ -3179,9 +2902,9 @@ describe("a guard that decides authority reads the resolved path", () => {
       });
     });
 
-    // Only the FINAL name is held back. The cycle is a parent here, so it is
+    // Only the final name is held back. The cycle is a parent here, so it is
     // still a route to somewhere unknown and still has to be resolved.
-    it("still refuses a delete THROUGH the looping link", async () => {
+    it("still refuses a delete through the looping link", async () => {
       await withCycle(async (ctx) => {
         const deleted = await deleteWorkspacePath(ctx, { path: "ping/note.md" });
         const reason = refusalReason(deleted);

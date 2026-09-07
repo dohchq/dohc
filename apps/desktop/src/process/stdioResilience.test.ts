@@ -6,7 +6,7 @@ import { makeStreamWriteNonFatal } from "./stdioResilience";
 // AUDIT-KILLREC. The dogfood journey's first hard daemon kill produced
 // "A JavaScript error occurred in the main process / Error: EPIPE: broken
 // pipe, write ... at Socket._write ... at console.error", and the editor was
-// dead afterwards. Node writes a pipe stdio stream SYNCHRONOUSLY, so a reader
+// dead afterwards. Node writes a pipe stdio stream synchronously, so a reader
 // that has gone away makes `console.error` itself throw — inside whichever
 // catch handler happened to be reporting the daemon's death. This models that
 // exact shape: a Writable whose _write throws synchronously.
@@ -46,7 +46,7 @@ it("restoring a guarded stream puts its own write back", () => {
 });
 
 // ignoreErrors:false is the console shape the journey actually hit — its stack
-// showed the EPIPE propagating THROUGH console.error's write into the caller,
+// showed the EPIPE propagating through console.error's write into the caller,
 // so a console that swallows write errors itself would prove nothing here.
 function brokenPipeConsole(stream: BrokenPipeStream): Console {
   return new Console({ stdout: stream, stderr: stream, ignoreErrors: false });

@@ -8,8 +8,6 @@ import {
   effectiveThemeMode,
 } from "../settings/userSettings";
 
-const LEGACY_STORAGE_KEY = "dohc-theme";
-
 type AppearanceSettings = DesktopUserSettings["appearance"];
 
 let media: MediaQueryList | null = null;
@@ -45,32 +43,12 @@ export function initTheme(): void {
   media = window.matchMedia("(prefers-color-scheme: dark)");
   media.addEventListener("change", () => applyAppearance(currentAppearance));
 
-  const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
-  const legacyThemeMode =
-    legacy === "light" || legacy === "dark" ? legacy : "system";
-  applyAppearance({ ...currentAppearance, themeMode: legacyThemeMode });
+  applyAppearance(currentAppearance);
 
-  const settingsResult = window.dohcDesktop?.getUserSettings?.();
-  if (!settingsResult) return;
-
-  void settingsResult
-    .then(async (result: DesktopUserSettingsResult) => {
-      let next = result.settings.appearance;
-      if (result.source === "default" && (legacy === "light" || legacy === "dark")) {
-        next = { ...next, themeMode: legacy };
-        try {
-          await window.dohcDesktop?.setUserSettings?.({
-            settings: {
-              ...result.settings,
-              appearance: next,
-            },
-          });
-        } catch (error) {
-          console.warn("Failed to migrate legacy theme setting", error);
-        }
-      }
-      localStorage.removeItem(LEGACY_STORAGE_KEY);
-      applyAppearance(next);
+  void window.dohcDesktop
+    ?.getUserSettings?.()
+    .then((result: DesktopUserSettingsResult) => {
+      applyAppearance(result.settings.appearance);
     })
     .catch(() => undefined);
 }
@@ -79,7 +57,7 @@ export function applyAppearanceSettings(appearance: AppearanceSettings): void {
   applyAppearance(appearance);
 }
 
-export async function setThemeMode(themeMode: ThemeMode): Promise<void> {
+async function setThemeMode(themeMode: ThemeMode): Promise<void> {
   const result = await window.dohcDesktop?.getUserSettings?.();
   if (!result) {
     applyAppearance({ ...currentAppearance, themeMode });

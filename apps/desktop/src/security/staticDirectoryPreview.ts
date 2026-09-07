@@ -12,7 +12,7 @@ import { isInside } from "./pathContainment";
  * served by this, and nothing here knows what a panel is.
  */
 
-export interface StaticDirectoryPreview {
+interface StaticDirectoryPreview {
   url: string;
   root: string;
   stop(): Promise<void>;
@@ -204,12 +204,12 @@ export async function startStaticDirectoryPreview(
         response.end("Forbidden");
         return;
       }
-      // ONE open, and everything after it comes from that handle. The fd is
+      // One open, and everything after it comes from that handle. The fd is
       // bound to the object open() found, so the file that is checked is the
       // file that is read — a stat followed by a separate read let the name be
       // swapped in between and served bytes nothing had checked.
       //
-      // RESIDUAL, stated rather than papered over: this narrows the window to
+      // Residual, stated rather than papered over: this narrows the window to
       // the single open() call, it does not close it.
       //
       // The LEAF: on POSIX O_NOFOLLOW makes the open refuse a leaf swapped for
@@ -217,7 +217,7 @@ export async function startStaticDirectoryPreview(
       // affordance, so a leaf swapped between the guard and this open is still
       // followed.
       //
-      // The ANCESTORS: O_NOFOLLOW never covered those on any platform. Binding
+      // The ancestors: O_NOFOLLOW never covered those on any platform. Binding
       // each traversed component needs openat-style dirfd traversal, and Node's
       // fs does not expose it -- no openat, no relative open on FileHandle, Dir
       // hands out no fd, and O_DIRECTORY/O_PATH are undefined here. So a

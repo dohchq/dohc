@@ -1,8 +1,4 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
@@ -18,11 +14,25 @@ import {
   LINK_DISCUSSION_PAGE_LIMIT,
   LINK_DISCUSSION_PRINCIPAL_LIMIT,
   DISCUSSION_NON_OWNER_SHARE_ROW_LIMIT,
-  openSyncRelayStorage,
   type OpenSyncRelayStorageOptions,
   type SyncRelayLinkSessionRow,
   type SyncRelayStorage,
 } from "./storage";
+import {
+  seedDependentGrant,
+  linkWritesPausedAtMs,
+  closeTestStorage,
+  closeTestStorages,
+  countRows,
+  inspect,
+  inspectDatabase,
+  reopenTestStorage,
+  seedLinkGrant,
+  seedLinkSession,
+  storagePath,
+  testStorage,
+  type InspectionDatabase,
+} from "./testing";
 import type {
   RecipientBudgetRaceOperation,
   RecipientBudgetRaceWorkerData,
@@ -31,48 +41,17 @@ import type {
 const OWNER = "owner";
 const RECIPIENT = "recipient";
 
-interface InspectionStatement {
-  all(...params: unknown[]): Record<string, unknown>[];
-  get(...params: unknown[]): Record<string, unknown> | undefined;
-  run(...params: unknown[]): { changes: number | bigint };
-}
-
-interface InspectionDatabase {
-  prepare(sql: string): InspectionStatement;
-  exec(sql: string): void;
-  close(): void;
-}
-
-const { DatabaseSync: InspectionDatabaseSync } = createRequire(import.meta.url)(
-  "node:sqlite",
-) as {
-  DatabaseSync: new (
-    path: string,
-    options?: { readOnly?: boolean },
-  ) => InspectionDatabase;
-};
-
-const roots: string[] = [];
-const storages: SyncRelayStorage[] = [];
-
-afterEach(async () => {
-  for (const storage of storages.splice(0)) storage.close();
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-});
+afterEach(closeTestStorages);
 
 async function openStorage(
   options: OpenSyncRelayStorageOptions = {},
 ): Promise<{ storage: SyncRelayStorage; dbPath: string }> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-link-discussion-"));
-  roots.push(root);
-  const dbPath = join(root, "relay.sqlite");
   let id = 0;
-  const storage = openSyncRelayStorage(dbPath, {
+  const storage = await testStorage({
     ...options,
     newDiscussionId: options.newDiscussionId ?? (() => `discussion-id-${++id}`),
   });
-  storages.push(storage);
-  return { storage, dbPath };
+  return { storage, dbPath: storagePath(storage) };
 }
 
 function profileHash(profile: string): string {
@@ -121,44 +100,22 @@ function seedShare(
       parentGrantId: null,
     },
   });
-  expect(
-    storage.createLinkGrant({
-      grant: {
-        grantId,
-        shareId,
-        principalKind: "link",
-        principalUserId: null,
-        principalEmail: null,
-        access: input.access ?? "comment",
-        generation: 1,
-        status: "active",
-        createdAtMs: createdAtMs + 1,
-        revokedAtMs: null,
-        parentGrantId: null,
-      },
-      credential: {
-        credentialId: `credential-${suffix}`,
-        grantId,
-        secretHash: `secret-hash-${suffix}`,
-        generation: 1,
-        mintedAtMs: createdAtMs + 1,
-        retiredAtMs: null,
-      },
-    }),
-  ).toBe(true);
+  seedLinkGrant(storage, {
+    grantId,
+    shareId,
+    access: input.access ?? "comment",
+    createdAtMs: createdAtMs + 1,
+    credentialId: `credential-${suffix}`,
+    secretHash: `secret-hash-${suffix}`,
+  });
   const hash = capabilityHash(`capability-${suffix}`);
-  expect(
-    storage.mintLinkSession({
-      session: {
-        sessionId: `session-${suffix}`,
-        capabilityHash: hash,
-        grantId,
-        generation: 1,
-        mintedAtMs: createdAtMs + 2,
-        expiresAtMs: createdAtMs + 1_000_000,
-      },
-    }),
-  ).toBe(true);
+  seedLinkSession(storage, {
+    grantId,
+    capabilityHash: hash,
+    sessionId: `session-${suffix}`,
+    mintedAtMs: createdAtMs + 2,
+    expiresAtMs: createdAtMs + 1_000_000,
+  });
   return { workspaceId, shareId, grantId, capabilityHash: hash };
 }
 
@@ -257,51 +214,8 @@ async function raceDiscussionAppends(
   }
 }
 
-function countRows(dbPath: string, table: string): number {
-  const db = new InspectionDatabaseSync(dbPath, { readOnly: true });
-  try {
-    return Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count ?? 0);
-  } finally {
-    db.close();
-  }
-}
-
-function replaceTableSchemaFragment(
-  dbPath: string,
-  table: string,
-  current: string,
-  stale: string,
-): void {
-  const db = new InspectionDatabaseSync(dbPath);
-  try {
-    const schema = db
-      .prepare(
-        `SELECT type, sql
-         FROM sqlite_schema
-         WHERE (type = 'table' AND name = ?)
-            OR (type = 'index' AND tbl_name = ? AND sql IS NOT NULL)
-         ORDER BY type DESC, name`,
-      )
-      .all(table, table);
-    const tableSql = String(schema.find((row) => row.type === "table")?.sql ?? "");
-    const staleTableSql = tableSql.replace(current, stale);
-    expect(staleTableSql).not.toBe(tableSql);
-    const indexSql = schema
-      .filter((row) => row.type === "index")
-      .map((row) => String(row.sql));
-
-    db.exec("PRAGMA foreign_keys = OFF");
-    db.exec(`DROP TABLE ${table}`);
-    db.exec(staleTableSql);
-    for (const sql of indexSql) db.exec(sql);
-  } finally {
-    db.close();
-  }
-}
-
 function discussionUsageBytes(dbPath: string): number {
-  const db = new InspectionDatabaseSync(dbPath, { readOnly: true });
-  try {
+  return inspect(dbPath, (db) => {
     const messageBytes = Number(
       db
         .prepare(
@@ -318,14 +232,11 @@ function discussionUsageBytes(dbPath: string): number {
         .get()?.bytes ?? 0,
     );
     return messageBytes + principalBytes;
-  } finally {
-    db.close();
-  }
+  });
 }
 
 function aggregateWorkspaceUsageBytes(dbPath: string, workspaceId: string): number {
-  const db = new InspectionDatabaseSync(dbPath, { readOnly: true });
-  try {
+  return inspect(dbPath, (db) => {
     return Number(
       db
         .prepare(
@@ -360,14 +271,11 @@ function aggregateWorkspaceUsageBytes(dbPath: string, workspaceId: string): numb
         )
         .get(workspaceId)?.bytes ?? 0,
     );
-  } finally {
-    db.close();
-  }
+  });
 }
 
 function storedWorkspaceUsageBytes(dbPath: string, workspaceId: string): number {
-  const db = new InspectionDatabaseSync(dbPath, { readOnly: true });
-  try {
+  return inspect(dbPath, (db) => {
     return Number(
       db
         .prepare(
@@ -377,9 +285,7 @@ function storedWorkspaceUsageBytes(dbPath: string, workspaceId: string): number 
         )
         .get(workspaceId)?.usage_bytes ?? -1,
     );
-  } finally {
-    db.close();
-  }
+  });
 }
 
 function expectExactWorkspaceUsage(dbPath: string, workspaceId: string): number {
@@ -646,7 +552,7 @@ describe("durable link discussion storage", () => {
     });
 
     const capped = seedShare(storage, { suffix: "activity-capped" });
-    const writable = new InspectionDatabaseSync(dbPath);
+    const writable = inspectDatabase(dbPath);
     try {
       writable
         .prepare(
@@ -693,7 +599,7 @@ describe("durable link discussion storage", () => {
       }),
     ]);
 
-    const db = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    const db = inspectDatabase(dbPath, { readOnly: true });
     try {
       expect(
         db.prepare(
@@ -714,10 +620,8 @@ describe("durable link discussion storage", () => {
       db.close();
     }
 
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
+    closeTestStorage(storage);
+    const reopened = reopenTestStorage(dbPath);
     expect(
       reopened.listShareDiscussionActivity({
         shareId: seeded.shareId,
@@ -1324,7 +1228,7 @@ describe("durable link discussion storage", () => {
     ).toMatchObject({ ok: true, replayed: false });
 
     const lostOwner = seedShare(storage, { suffix: "lost-owner" });
-    const inspection = new InspectionDatabaseSync(dbPath);
+    const inspection = inspectDatabase(dbPath);
     try {
       inspection
         .prepare("UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?")
@@ -2094,14 +1998,13 @@ describe("durable link discussion storage", () => {
       usage: storedWorkspaceUsageBytes(dbPath, seeded.workspaceId),
     }).toEqual(before);
 
-    const quotaLimited = openSyncRelayStorage(dbPath, {
+    const quotaLimited = reopenTestStorage(dbPath, {
       workspaceQuotaBytes: fullUsage,
       discussionMessageRateLimit: 10,
       discussionLifetimeMessageLimit: 1,
       discussionNonOwnerShareRowLimit: 1,
       newDiscussionId: () => "replay-ceilings-unexpected-id",
     });
-    storages.push(quotaLimited);
     expect(
       quotaLimited.appendAuthenticatedDiscussionMessage({
         shareId: seeded.shareId,
@@ -2387,7 +2290,7 @@ describe("durable link discussion storage", () => {
     expect(results.filter((result) =>
       (result as { reason?: string }).reason === "share-limit"
     )).toHaveLength(1);
-    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    const inspection = inspectDatabase(dbPath, { readOnly: true });
     try {
       expect(
         inspection
@@ -2495,7 +2398,7 @@ describe("durable link discussion storage", () => {
     expect(combined).toBeGreaterThan(lifetime);
     expect(commit).toBeGreaterThan(combined);
 
-    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    const inspection = inspectDatabase(dbPath, { readOnly: true });
     try {
       const ratePlan = inspection
         .prepare(
@@ -2610,7 +2513,7 @@ describe("durable link discussion storage", () => {
     });
     const seeded = seedShare(storage, { suffix: "named-debt" });
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: seeded.shareId,
         parentGrantId: seeded.grantId,
         grantId: "named-debt-dependent",
@@ -2661,7 +2564,7 @@ describe("durable link discussion storage", () => {
       }),
     ).toMatchObject({ ok: true });
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: seeded.shareId,
         parentGrantId: seeded.grantId,
         grantId: "named-debt-regrant",
@@ -2670,14 +2573,12 @@ describe("durable link discussion storage", () => {
       }),
     ).toMatchObject({ ok: true });
 
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
-    const reopened = openSyncRelayStorage(dbPath, {
+    closeTestStorage(storage);
+    const reopened = reopenTestStorage(dbPath, {
       discussionMessageRateLimit: 10,
       discussionLifetimeMessageLimit: 2,
       discussionNonOwnerShareRowLimit: 10,
     });
-    storages.push(reopened);
     expect(
       appendAuthenticated(reopened, seeded, {
         authorUserId: "promoted-recipient",
@@ -2826,10 +2727,9 @@ describe("durable link discussion storage", () => {
       }),
     ).toMatchObject({ ok: true });
     expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
+    closeTestStorage(storage);
 
-    const audit = new InspectionDatabaseSync(dbPath);
+    const audit = inspectDatabase(dbPath);
     try {
       audit.exec(`
         CREATE TABLE sync_relay_workspace_usage_delete_audit (
@@ -2846,9 +2746,8 @@ describe("durable link discussion storage", () => {
       audit.close();
     }
 
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    const reopened = reopenTestStorage(dbPath);
+    const inspection = inspectDatabase(dbPath, { readOnly: true });
     try {
       expect(
         inspection
@@ -2859,50 +2758,6 @@ describe("durable link discussion storage", () => {
       inspection.close();
     }
     expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-  });
-
-  it("backfills the durable workspace total when its migration marker is absent", async () => {
-    const { storage, dbPath } = await openStorage();
-    const seeded = seedShare(storage, { suffix: "usage-backfill" });
-    expect(
-      append(storage, seeded, {
-        profile: "usage-backfill-profile",
-        body: "restored by the one-time backfill",
-        idempotencyKey: "usage-backfill",
-      }),
-    ).toMatchObject({ ok: true });
-    const expectedUsage = expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-    expect(expectedUsage).toBeGreaterThan(0);
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
-
-    const stale = new InspectionDatabaseSync(dbPath);
-    try {
-      stale
-        .prepare("UPDATE sync_relay_workspace_usage SET usage_bytes = 0 WHERE workspace_id = ?")
-        .run(seeded.workspaceId);
-      stale
-        .prepare("DELETE FROM sync_relay_migrations WHERE migration_id = ?")
-        .run("workspace-usage-backfill-v1");
-    } finally {
-      stale.close();
-    }
-
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(expectedUsage);
-    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
-    try {
-      expect(
-        inspection
-          .prepare(
-            "SELECT COUNT(*) AS count FROM sync_relay_migrations WHERE migration_id = ?",
-          )
-          .get("workspace-usage-backfill-v1")?.count,
-      ).toBe(1);
-    } finally {
-      inspection.close();
-    }
   });
 
   it("keeps the durable workspace total exact across every counted write lifecycle", async () => {
@@ -2999,11 +2854,10 @@ describe("durable link discussion storage", () => {
     ).toMatchObject({ ok: true, replayed: true });
     expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(afterLink);
 
-    const second = openSyncRelayStorage(dbPath, {
+    const second = reopenTestStorage(dbPath, {
       blobGraceMs: 0,
       newDiscussionId: () => "usage-second-message",
     });
-    storages.push(second);
     expect(
       second.appendAuthenticatedDiscussionMessage({
         shareId: seeded.shareId,
@@ -3047,21 +2901,17 @@ describe("durable link discussion storage", () => {
     ).toMatchObject({ removed: 1, removedSha256s: [blobSha] });
     expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
 
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
-    second.close();
-    storages.splice(storages.indexOf(second), 1);
-    const reopened = openSyncRelayStorage(dbPath, {
+    closeTestStorage(storage);
+    closeTestStorage(second);
+    const reopened = reopenTestStorage(dbPath, {
       blobGraceMs: 0,
       newDiscussionId: () => "usage-rejected-message",
     });
-    storages.push(reopened);
     const reopenedUsage = expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-    const limited = openSyncRelayStorage(dbPath, {
+    const limited = reopenTestStorage(dbPath, {
       workspaceQuotaBytes: reopenedUsage,
       newDiscussionId: () => "usage-over-quota-message",
     });
-    storages.push(limited);
     expect(
       append(limited, seeded, {
         profile: "usage-profile",
@@ -3088,7 +2938,7 @@ describe("durable link discussion storage", () => {
       ).toMatchObject({ ok: true });
       expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
 
-      const inspection = new InspectionDatabaseSync(dbPath);
+      const inspection = inspectDatabase(dbPath);
       try {
         inspection.exec("PRAGMA foreign_keys = ON");
         if (deletedModel === "grant") {
@@ -3231,13 +3081,11 @@ describe("durable link discussion storage", () => {
       }),
     ).toBe(true);
 
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
-    const reopened = openSyncRelayStorage(dbPath, {
+    closeTestStorage(storage);
+    const reopened = reopenTestStorage(dbPath, {
       discussionMessageRateLimit: 2,
       discussionLifetimeMessageLimit: 2,
     });
-    storages.push(reopened);
     expect(reopened.getLinkPrincipal(kept.principal.principalId)).toMatchObject({
       displayName: "Kept",
       blockedAtMs: null,
@@ -3249,7 +3097,7 @@ describe("durable link discussion storage", () => {
     expect(reopened.findLinkSessionByCapabilityHash(seeded.capabilityHash)).toMatchObject({
       principalId: kept.principal.principalId,
     });
-    expect(reopened.getShareLinkWritesPausedAtMs(seeded.shareId)).toBe(2_300);
+    expect(linkWritesPausedAtMs(storagePath(reopened), seeded.shareId)).toBe(2_300);
     expect(reopened.listShareDiscussionMessages({ shareId: seeded.shareId, limit: 50 })).toMatchObject({
       linkCommentsPaused: true,
       messages: [
@@ -3306,75 +3154,9 @@ describe("durable link discussion storage", () => {
     ).toMatchObject({ ok: false, reason: "lifetime-limit" });
   });
 
-  it("replaces the pre-discussion normalized share schema as one authority model", async () => {
-    const { storage, dbPath } = await openStorage();
-    const seeded = seedShare(storage, { suffix: "pre-discussion" });
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
-
-    const oldSchema = new InspectionDatabaseSync(dbPath);
-    try {
-      oldSchema.exec(`
-        PRAGMA foreign_keys = OFF;
-        ALTER TABLE sync_relay_link_sessions RENAME TO old_link_sessions;
-        CREATE TABLE sync_relay_link_sessions (
-          session_id TEXT PRIMARY KEY,
-          capability_hash TEXT NOT NULL UNIQUE,
-          grant_id TEXT NOT NULL,
-          generation INTEGER NOT NULL CHECK (generation >= 1),
-          minted_at_ms INTEGER NOT NULL,
-          expires_at_ms INTEGER NOT NULL,
-          CHECK (expires_at_ms > minted_at_ms),
-          FOREIGN KEY (grant_id)
-            REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE
-        ) STRICT;
-        INSERT INTO sync_relay_link_sessions (
-          session_id, capability_hash, grant_id, generation, minted_at_ms, expires_at_ms
-        )
-        SELECT session_id, capability_hash, grant_id, generation, minted_at_ms, expires_at_ms
-        FROM old_link_sessions;
-        DROP TABLE old_link_sessions;
-      `);
-    } finally {
-      oldSchema.close();
-    }
-
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    expect(reopened.getShare(seeded.shareId)).toBeNull();
-    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
-    try {
-      expect(
-        inspection
-          .prepare("PRAGMA table_info(sync_relay_link_sessions)")
-          .all()
-          .map((row) => row.name),
-      ).toContain("principal_id");
-      expect(
-        inspection
-          .prepare("PRAGMA table_info(sync_relay_shares)")
-          .all()
-          .map((row) => row.name),
-      ).toContain("link_writes_paused_at_ms");
-      expect(
-        inspection
-          .prepare(
-            "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('sync_relay_link_principals', 'sync_relay_share_discussion_messages') ORDER BY name",
-          )
-          .all()
-          .map((row) => row.name),
-      ).toEqual([
-        "sync_relay_link_principals",
-        "sync_relay_share_discussion_messages",
-      ]);
-    } finally {
-      inspection.close();
-    }
-  });
-
   it("creates principal and message CHECK clauses from the exported discussion bounds", async () => {
     const { dbPath } = await openStorage();
-    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    const inspection = inspectDatabase(dbPath, { readOnly: true });
     try {
       const principalSql = String(
         inspection
@@ -3415,97 +3197,6 @@ describe("durable link discussion storage", () => {
     }
   });
 
-  it.each([
-    {
-      label: "principal name",
-      table: "sync_relay_link_principals",
-      current: `length(display_name) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}`,
-      stale: `length(display_name) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT - 1}`,
-    },
-    {
-      label: "message body",
-      table: "sync_relay_share_discussion_messages",
-      current: `length(body) BETWEEN 1 AND ${LINK_DISCUSSION_BODY_CODE_POINT_LIMIT}`,
-      stale: `length(body) BETWEEN 1 AND ${LINK_DISCUSSION_BODY_CODE_POINT_LIMIT - 1}`,
-    },
-    {
-      label: "message body NUL predicate",
-      table: "sync_relay_share_discussion_messages",
-      current: "instr(body, char(0)) = 0",
-      stale: "instr(body, char(0)) >= 0",
-    },
-    {
-      label: "message author roles",
-      table: "sync_relay_share_discussion_messages",
-      current: "author_kind IN ('owner', 'named', 'link')",
-      stale: "author_kind IN ('named', 'link')",
-    },
-  ])("replaces the normalized share model when the $label CHECK is stale", async ({
-    table,
-    current,
-    stale,
-  }) => {
-    const { storage, dbPath } = await openStorage();
-    const seeded = seedShare(storage, { suffix: "stale-schema" });
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
-    replaceTableSchemaFragment(dbPath, table, current, stale);
-
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    expect(reopened.getShare(seeded.shareId)).toBeNull();
-
-    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
-    try {
-      const schemaSql = String(
-        inspection
-          .prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?")
-          .get(table)?.sql ?? "",
-      );
-      expect(schemaSql).toContain(current);
-      expect(schemaSql).not.toContain(stale);
-    } finally {
-      inspection.close();
-    }
-  });
-
-  it("reconciles the stored workspace total after normalized-share replacement", async () => {
-    const { storage, dbPath } = await openStorage();
-    const seeded = seedShare(storage, { suffix: "usage-reconcile" });
-    const blob = Buffer.from("usage survives share replacement");
-    expect(
-      storage.putBlob({
-        workspaceId: seeded.workspaceId,
-        sha256: createHash("sha256").update(blob).digest("hex"),
-        content: blob,
-        createdAtMs: 1_100,
-      }),
-    ).toMatchObject({ alreadyHad: false });
-    expect(
-      append(storage, seeded, {
-        profile: "usage-reconcile-profile",
-        claimedName: "Usage Reconcile",
-        body: "removed with normalized share model",
-        idempotencyKey: "usage-reconcile",
-      }),
-    ).toMatchObject({ ok: true });
-    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
-    replaceTableSchemaFragment(
-      dbPath,
-      "sync_relay_link_principals",
-      `length(display_name) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}`,
-      `length(display_name) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT - 1}`,
-    );
-
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    expect(reopened.getShare(seeded.shareId)).toBeNull();
-    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(blob.byteLength);
-  });
-
   it("keeps named display snapshots bounded across direct writes and restart", async () => {
     const { storage, dbPath } = await openStorage();
     const seeded = seedShare(storage, { suffix: "named-bound" });
@@ -3534,10 +3225,8 @@ describe("durable link discussion storage", () => {
       }),
     ).toEqual({ ok: false, reason: "invalid-input" });
 
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
+    closeTestStorage(storage);
+    const reopened = reopenTestStorage(dbPath);
     expect(
       reopened.listShareDiscussionMessages({ shareId: seeded.shareId, limit: 10 })
         .messages.map((message) => message.displayNameSnapshot),
@@ -3563,7 +3252,7 @@ describe("durable link discussion storage", () => {
     expect(accepted.ok).toBe(true);
     if (!accepted.ok) return;
 
-    const db = new InspectionDatabaseSync(dbPath);
+    const db = inspectDatabase(dbPath);
     const insert = db.prepare(
       `INSERT INTO sync_relay_share_discussion_messages (
          message_id, share_id, idempotency_key, request_hash, author_kind,

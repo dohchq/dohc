@@ -9,7 +9,7 @@ use dohc_engine_storage::StorageError;
 #[derive(Debug, thiserror::Error)]
 pub enum CollabError {
     /// An update failed to decode/apply (truncated or malformed). The doc is
-    /// state-unchanged and the bytes are NEVER journaled (binding constraint 5).
+    /// state-unchanged and the bytes are never journaled (binding constraint 5).
     #[error("malformed Y.Doc update: {reason}")]
     MalformedUpdate { reason: String },
 
@@ -67,7 +67,7 @@ pub enum CollabError {
     #[error("replicated lineage already has a base (base-once)")]
     BaseAlreadyClaimed,
 
-    /// An incoming base-state envelope carries DIFFERENT bytes than the
+    /// An incoming base-state envelope carries different bytes than the
     /// already-claimed base: acking it would silently drop a divergent
     /// lineage while the relay cursor advances past it.
     #[error("incoming base state diverges from the claimed base")]
@@ -109,14 +109,6 @@ pub enum CollabError {
         "Y.Doc lineage epoch changed: expected {expected}, observed {observed}; start a successor lineage instead"
     )]
     LineageEpochChanged { expected: String, observed: String },
-
-    /// Successor installation requires an exact predecessor claim. A compacted
-    /// legacy lineage has no recoverable claim until semantic repair inspects
-    /// its Yrs state.
-    #[error(
-        "Y.Doc lineage claim status is {status}; successor replacement requires lineage_claim_status=exact"
-    )]
-    LineageClaimUnresolved { status: String },
 
     /// The active claim changed after the successor artifact was prepared.
     #[error(
@@ -216,7 +208,6 @@ impl CollabError {
             CollabError::SuccessorProjectionMismatch { .. } => "successor-projection-mismatch",
             CollabError::SuccessorResultMismatch { .. } => "successor-result-mismatch",
             CollabError::LineageEpochChanged { .. } => "lineage-epoch-changed",
-            CollabError::LineageClaimUnresolved { .. } => "lineage-claim-unresolved",
             CollabError::LineagePredecessorMismatch { .. } => "lineage-predecessor-mismatch",
             CollabError::LineageStateVectorMismatch { .. } => "lineage-state-vector-mismatch",
             CollabError::InvalidSuccessorBase { .. } => "invalid-successor-base",

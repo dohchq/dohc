@@ -1,12 +1,12 @@
-//! dohc engine collab — R11a durable Y.Doc layer.
+//! dohc engine collab: the durable Y.Doc layer.
 //!
-//! The Rust-owned durable Y.Doc update cache, snapshots, convergence-neutral
-//! compaction, per-document leases, the base-once replicated lineage, idempotent
-//! and echo-suppressed `ydoc.update` replication apply, and the settle pipeline
-//! (Y.Doc → artifact content with provenance, materialized through R04's job
-//! pipeline). It is the follow-through on the yrs abort criterion the week-one
-//! spike cleared (`SPIKE_REPORT.md`, `DECISIONS.md`), and it enforces all five
-//! binding yrs constraints — see [`ydoc`] for the per-constraint enforcement.
+//! Owns the durable Y.Doc update cache, its snapshots, and their compaction.
+//! Holds per-document leases and the base-once replicated lineage. Applies
+//! `ydoc.update` replication idempotently with echo suppression. Settles a
+//! Y.Doc into artifact content with provenance through the job pipeline.
+//!
+//! It enforces the yrs spike's four caveats (`crates/yrs-spike/SPIKE_REPORT.md`)
+//! plus the shared root schema; see [`ydoc`] for the per-constraint enforcement.
 //!
 //! # Two regimes (do not conflate)
 //!
@@ -17,8 +17,6 @@
 //!   canonical. `ydoc.update` ops are journaled, the base is emitted exactly
 //!   once (base-once), and the rows are NEVER pruned on close — peers bootstrap
 //!   from that lineage.
-//!
-//! The crate is dormant: nothing here is reachable from product code.
 
 #![forbid(unsafe_code)]
 
@@ -28,6 +26,8 @@ pub mod durable;
 pub mod error;
 pub mod lease;
 pub mod limits;
+pub mod live_object_binding;
+pub mod owner_outbox;
 pub mod replay_parity;
 pub mod replication;
 pub mod scene;
@@ -41,25 +41,29 @@ pub use durable::{
     load_doc_from_connection, load_doc_in_tx, load_persisted, mark_base_coordinate_absent_in_tx,
     maybe_compact, read_last_settled_sha, read_marker, read_marker_from_connection,
     read_marker_in_tx, read_pristine_seed_lineage_source, read_seed_only_lineage_source,
-    record_base_coordinate, record_base_coordinate_in_tx, record_local_update,
-    record_local_update_creating_marker, record_local_update_creating_marker_guarded,
-    record_local_update_creating_marker_guarded_for_lineage, record_local_update_with_origin,
-    record_update_for_lineage_in_tx, record_update_in_tx, replace_lineage_with_successor,
-    replace_lineage_with_successor_in_tx, rewrite_bare_marker_content_kind, settle,
-    validate_remote_update_for, validate_remote_update_with_pending,
-    validate_remote_update_with_pending_cached, AppendOutcome, BaseCoordinateRecord,
-    BaseRelayCoordinate, ClaimOutcome, CloseOutcome, CompactOutcome, LineageClaimStatus, Marker,
-    OriginationBase, PersistedDoc, Regime, SettleOutcome, SuccessorInstallOutcome,
-    SuccessorReplacement,
+    record_base_coordinate, record_base_coordinate_in_tx, record_local_update, record_update_in_tx,
+    replace_lineage_with_successor, replace_lineage_with_successor_in_tx,
+    rewrite_bare_marker_content_kind, settle, validate_remote_update, AppendOutcome,
+    BaseCoordinateRecord, BaseRelayCoordinate, ClaimOutcome, CloseOutcome, CompactOutcome,
+    LineageClaimStatus, LineageGuard, LocalAppend, Marker, MarkerCreation, OriginationBase,
+    PersistedDoc, Regime, SettleOutcome, SuccessorInstallOutcome, SuccessorReplacement,
 };
 pub use error::CollabError;
 pub use lease::{Lease, LeaseRegistry};
+pub use live_object_binding::LiveObjectBinding;
+pub use owner_outbox::{
+    acknowledge as acknowledge_owner_outbox, append as append_owner_outbox,
+    quarantine as quarantine_owner_outbox, read_pending as read_pending_owner_outbox,
+    read_pending_page as read_pending_owner_outbox_page, OwnerDeliveryReceipt,
+    OwnerOutboxAcknowledgeResult, OwnerOutboxAppendInput, OwnerOutboxAppendResult,
+    OwnerOutboxEntry, OwnerOutboxError, OwnerOutboxLimits, OwnerOutboxPageResult,
+    OwnerOutboxPending, OwnerOutboxQuarantineInput, OwnerOutboxReadCursor, OwnerOutboxReadPage,
+    OwnerOutboxReadPart, OwnerOutboxState,
+};
 pub use replay_parity::{validate_replay_parity, validate_replay_parity_with_scratch};
 pub use replication::{
-    apply_remote_update, apply_remote_update_for_deferred_drain,
-    apply_remote_update_in_transaction, apply_remote_update_in_transaction_cached_with_projection,
-    apply_remote_update_in_transaction_with_projection, RemoteApplyProjection, RemoteUpdate,
-    ReplicationApplyOutcome, UpdateOrigin,
+    apply_remote_update, apply_remote_update_in_transaction_with_projection, RemoteApplyProjection,
+    RemoteUpdate, ReplicationApplyOutcome, UpdateOrigin,
 };
 pub use scene::{
     encode_scene_asset_record, encode_scene_asset_records, fold_scene, import_portable_scene,

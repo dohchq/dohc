@@ -19,7 +19,7 @@ import {
 } from "../ipc/bridgeContract";
 
 // These drive userEvent through async UI settles — 67 findBy* awaits across 47
-// tests — so the wall-clock profile is the file, not one test (#372).
+// tests — so the wall-clock profile is the file, not one test.
 //
 // asyncUtilTimeout is the constraint that actually bit: findBy* rejects on RTL's
 // own 1000ms default, so these failed at ~1-3s with "Unable to find
@@ -76,17 +76,15 @@ import type {
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
   UpdateStateEvent,
+  EngineYDocSaveStateEvent,
+  MenuCommand,
+  SearchResultsEvent,
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
   WorkspaceActivityEvent,
   WorkspaceSearchPayload,
   WorkspaceUiState,
 } from "../ipc/bridgeContract";
-import type {
-  EngineYDocSaveStateEvent,
-  MenuCommandId,
-  SearchResultsEvent,
-} from "../ipc/channels";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
@@ -94,20 +92,8 @@ import {
 } from "../workspaces/workspaceSettings";
 import { rendererMarks } from "../performance/rendererMarks";
 import {
-  chatMentionOpenTarget,
-  chatsOffCopy,
-  chatsNavigationChangesDestination,
-  chatsNavigationLeavesConversation,
-  chatsNavigationRequiresRemount,
   DesktopWorkspaceShell,
-  graphChatOpenTarget,
   pendingHeadingTargetForOpen,
-  resolveCanonicalDm,
-  goneMountProjections,
-  runCanonicalDmNavigation,
-  shareRefreshSummary,
-  shareUnmountProjection,
-  versionCompareOffCopy,
   WORKBENCH_PERSIST_DELAY_MS,
   type Workspace,
 } from "./DesktopWorkspaceShell";
@@ -115,7 +101,6 @@ import {
   WORKSPACE_ACTIVITY_REFRESH_DELAY_MS,
   WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS,
 } from "./workspaceActivityCoalescer";
-import type { ChatsNav } from "./workbench/ChatsView";
 import {
   CHATS_TAB_PATH,
   OPEN_EDITORS_DEFAULT_HEIGHT,
@@ -133,17 +118,28 @@ import {
   useAllOrphanedDrafts,
 } from "./orphanedDrafts";
 import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
+import {
+  CollectionFieldWriteHost,
+  abandonPendingCollectionFieldWrites,
+  collectionWriteFailures,
+  collectionWritesPaused,
+  discardCollectionFieldWrite,
+  enqueueCollectionFieldWrite,
+  hasPendingCollectionFieldWrites,
+  resetCollectionFieldWritesForTests,
+} from "./collections/recordFieldWrites";
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 import { RecoveryList } from "./RecoveryList";
 import { documentVersionKey } from "./documentVersionKey";
-import { leafOf } from "./workbench/path-tree";
+import { basenameOf } from "./path";
+import { deferred } from "../testing/deferred";
 
 // Real implementations, spied (the chatFileMentions precedent): FileInspector
 // derives its document key on every render, and every explorer surface names
-// its rows through leafOf — so these call counts show whether the inspector
+// its rows through basenameOf — so these call counts show whether the inspector
 // and the tree actually re-rendered across a shell render.
 vi.mock("./documentVersionKey", { spy: true });
-vi.mock("./workbench/path-tree", { spy: true });
+vi.mock("./path", { spy: true });
 
 // The close dialog's list, standing on its own: the guard subscribes and hands
 // the rows down, so a test of the LIST needs the same one-line subscriber.
@@ -168,7 +164,7 @@ const SYNC_STATUS: SyncStatusResult = {
   state: "synced",
   pendingChangeCount: 0,
   lastSyncedAtMs: null,
-  // Required on the contract (#505, #540, #874): every status states whether
+  // Required on the contract: every status states whether
   // the recorder failed to build, whether the workspace is a shared view,
   // and whether the engine refused the workspace's data store.
   historyRecordingUnavailable: false,
@@ -318,17 +314,15 @@ for (const method of ["getClientRects", "getBoundingClientRect"] as const) {
   });
 }
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((r, fail) => {
-    resolve = r;
-    reject = fail;
-  });
-  return { promise, resolve, reject };
+// A record file's live document as the engine serves it: the frontmatter map
+// carries the record's id, which the write queue verifies before applying.
+function recordDocUpdate(recordId: string): Uint8Array {
+  const doc = new Y.Doc();
+  doc.getMap("frontmatter").set("id", recordId);
+  return Y.encodeStateAsUpdate(doc);
 }
 
-function makeBridge(
+function makeBaseBridge(
   uiStatePromise: Promise<WorkspaceUiState | null>,
   platform: NodeJS.Platform = "linux",
 ) {
@@ -337,7 +331,7 @@ function makeBridge(
     (event: { workspaceId: string }) => void
   >();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
-  let menuCallback: ((command: MenuCommandId) => void) | null = null;
+  let menuCallback: ((command: MenuCommand) => void) | null = null;
   let pluginPanelOpenedCallback:
     | ((event: PluginPanelOpenedEvent) => void)
     | null = null;
@@ -377,7 +371,7 @@ function makeBridge(
     ),
     openWorkspace: vi.fn(async () => SYNC_STATUS),
     getSyncStatus: vi.fn(async () => SYNC_STATUS),
-    // #874: the refused-store rebuild. Typed to the contract, not to this
+    // The refused-store rebuild. Typed to the contract, not to this
     // default: the recovery tests swap in the no-clobber refusal.
     rebuildEngineStore: vi.fn(
       async (): Promise<RebuildEngineStoreResult> => ({
@@ -423,18 +417,8 @@ function makeBridge(
       settings: DEFAULT_USER_SETTINGS,
       source: "stored" as const,
     })),
-    // WS-H1: this suite renders the shell as an EXPLICITLY OPTED-OUT
-    // workspace (engine off). Post retirement Phase C that means NO history
-    // source at all — the rail shows the history-off placeholder. The engine
-    // history surface has its own tests (workbench/EngineHistory.test.ts).
     getWorkspaceSettings: vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
-      settings: {
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        experimental: {
-          ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-          workspaceEngineAlpha: false,
-        },
-      },
+      settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored" as const,
     })),
     setWorkspaceSettings: vi.fn(
@@ -478,7 +462,7 @@ function makeBridge(
       contentHash: "a".repeat(64),
     })),
     // The linked-mentions panel bails without this, and its chat-mention read
-    // is an ENGINE CAPTURE call (#615) — so a fake that omits it makes every
+    // is an ENGINE CAPTURE call — so a fake that omits it makes every
     // no-call pin on that read pass for the wrong reason.
     getBacklinks: vi.fn(async () => ({ sources: [] as never[] })),
     listChatFileMentions: vi.fn(async () => ({ mentions: [] as never[] })),
@@ -527,7 +511,6 @@ function makeBridge(
     })),
     installUpdate: vi.fn(async () => ({
       accepted: true,
-      completed: false,
       state: READY_UPDATE_STATE,
     })),
     getDroppedFilePaths: vi.fn(() => []),
@@ -546,7 +529,7 @@ function makeBridge(
     retryShareHandoff: vi.fn(async () => undefined),
     dismissShareHandoff: vi.fn(async () => undefined),
     revokeRelayShare: vi.fn(async () => undefined),
-    // Share changes (#646 PR3a). Typed to the contract, not to these empty
+    // Share changes. Typed to the contract, not to these empty
     // defaults: the review and submit tests drive real rows through them.
     listShareProposals: vi.fn(
       async (): Promise<ListShareProposalsResult> => ({ proposals: [] }),
@@ -623,7 +606,7 @@ function makeBridge(
       },
     ),
     onCloudSessionChanged: vi.fn((_callback: () => void) => () => {}),
-    onMenuCommand: vi.fn((callback: (command: MenuCommandId) => void) => {
+    onMenuCommand: vi.fn((callback: (command: MenuCommand) => void) => {
       menuCallback = callback;
       return () => {
         menuCallback = null;
@@ -684,7 +667,7 @@ function makeBridge(
     ),
     stopPluginWebApp: vi.fn(async () => undefined),
     onPluginWebAppFailed: vi.fn(() => () => undefined),
-    emitMenuCommand: (command: MenuCommandId) => menuCallback?.(command),
+    emitMenuCommand: (command: MenuCommand) => menuCallback?.(command),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.
     onSearchResults: vi.fn((callback: (batch: SearchResultsEvent) => void) => {
@@ -710,23 +693,16 @@ function makeBridge(
   };
 }
 
-// Engine-flagged variant: the same bridge with the workspace-engine alpha on
-// plus the minimal engine/chats IPC surface the flagged shell touches on
-// mount (empty history, no try-session, Main only, no chats yet).
-function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
-  const bridge = makeBridge(uiStatePromise);
-  bridge.getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
-    settings: {
-      ...DEFAULT_WORKSPACE_SETTINGS,
-      experimental: {
-        ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-        workspaceEngineAlpha: true,
-      },
-    },
-    source: "stored" as const,
-  }));
+// Every workspace has the engine, so every bridge answers the engine
+// surfaces: collections, history, versions, chats. Typed to the contracts so
+// a test that drives real rows can swap an implementation in.
+function makeBridge(
+  uiStatePromise: Promise<WorkspaceUiState | null>,
+  platform: NodeJS.Platform = "linux",
+) {
+  const bridge = makeBaseBridge(uiStatePromise, platform);
   return Object.assign(bridge, {
-    // Collections (Phase 2 views): the flagged shell lists collections on
+    // Collections: the flagged shell lists collections on
     // ready and on activity. Typed to the contract; the collection tests
     // swap in real rows.
     listCollections: vi.fn(
@@ -829,13 +805,19 @@ function renderShell(
   workspaces: Workspace[] = [workspace],
 ) {
   vi.stubGlobal("dohcDesktop", bridge);
+  // The host rides outside the shell, exactly as main.tsx mounts it: the
+  // collection write queue must keep landing accepted edits while the keyed
+  // shell remounts.
   return render(
-    <DesktopWorkspaceShell
-      workspace={workspace}
-      workspaces={workspaces}
-      {...shellBootstrapProps(bridge)}
-      onSwitchWorkspace={() => {}}
-    />,
+    <>
+      <CollectionFieldWriteHost />
+      <DesktopWorkspaceShell
+        workspace={workspace}
+        workspaces={workspaces}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
+    </>,
   );
 }
 
@@ -877,6 +859,15 @@ async function enterMarkdownSource(
     expect(content?.getAttribute("contenteditable")).toBe("true");
     return content!;
   });
+}
+
+// A history page that never lands. The editor-boundary suites measure draft
+// flushes and editor identity across renames, deletes, and close-all; the
+// first history commit bumps the inspector's refresh key, which is a
+// different behavior with its own tests.
+function holdHistory(bridge: ReturnType<typeof makeBridge>) {
+  bridge.listEngineMoments = vi.fn(() => new Promise<never>(() => {}));
+  return bridge;
 }
 
 function sourceEditorText(editor: HTMLElement): string {
@@ -976,7 +967,7 @@ describe("workspace switch performance timeline", () => {
 describe("direct message workspace picker", () => {
   it("does not offer shared-view workspaces for acceptance", async () => {
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     bridge.syncDms = vi.fn(async () => ({
       available: true,
       dms: [],
@@ -1006,7 +997,6 @@ describe("direct message workspace picker", () => {
 // the workspace identity that rides the capture decision.
 const SHARE_STATUS = {
   ...SYNC_STATUS,
-  historyRecordingOff: true,
   historyShareView: true,
 };
 const SHARE_VIEW: Workspace = {
@@ -1019,19 +1009,18 @@ const SHARE_VIEW: Workspace = {
 };
 
 // A bridge that answers the way MAIN answers for a shared view: the capture
-// gate short-circuits before the settings read, so requireEngineCapture has
-// no capture and every capture-backed call is refused with engineOffRefusal
-// copy. A fake that resolved these would model more than main can do, and
+// gate short-circuits, so requireEngineCapture has no capture and every
+// capture-backed call is refused. A fake that resolved these would model more than main can do, and
 // every no-call pin below would pass even after the fix was reverted.
 //
-// `listFileChats` is the one that ANSWERS (#646 PR2): main resolves a chat
+// `listFileChats` is the one that answers: main resolves a chat
 // scope from the share instead of a capture, so the per-file chat surface is
 // served at every level. A fake that still refused it would model less than
 // main can do, and every pin written against it would certify fiction.
 function makeShareBridge(
   uiState: Promise<WorkspaceUiState | null> = Promise.resolve(null),
 ) {
-  const bridge = makeEngineBridge(uiState);
+  const bridge = makeBridge(uiState);
   bridge.openWorkspace = vi.fn(async () => SHARE_STATUS);
   bridge.getSyncStatus = vi.fn(async () => SHARE_STATUS);
   bridge.listWorkspaceVersions = vi.fn(async (): Promise<never> => {
@@ -1063,19 +1052,10 @@ function makeShareBridge(
   return bridge;
 }
 
-// The non-vacuity probe for a shared view (#615). The capture-backed surfaces
-// are hidden there — the version selector, the history timeline, the graph's
-// chat mentions — so no rendered control proves the renderer's capability read
-// resolved engine-ON, and a no-call pin asserted before that read lands would
-// pass for the wrong reason. The read itself carries the proof: wait until the
-// shell asked, confirm the answer is engine-ON, then flush the state update
-// that answer commits. (The Chats panel and its titlebar button render for a
-// shared view since #646 PR2, but they render off `isShareView`, not off this
-// read, so they still prove nothing about it.)
-async function settleEngineOnRead(bridge: ReturnType<typeof makeEngineBridge>) {
-  await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalled());
-  const read = await bridge.getWorkspaceSettings();
-  expect(read.settings.experimental.workspaceEngineAlpha).toBe(true);
+// Flushes the shell's mount effects for a shared view, whose capture-backed
+// surfaces are hidden, so a no-call pin below is asserted after the shell
+// had its chance to call.
+async function settleShareView() {
   await act(async () => {});
 }
 
@@ -1096,9 +1076,12 @@ afterEach(async () => {
   resetSharedLocalDocumentsForTests();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
-  // The set-aside drafts (#567) live in a module store on purpose; tests
+  // The set-aside drafts live in a module store on purpose; tests
   // that seed it must not leak into each other.
   resetOrphanedDrafts();
+  // The collection write queue is module state on purpose too — a pending
+  // head left by one test must not open sessions inside the next.
+  resetCollectionFieldWritesForTests();
 });
 
 describe("plugin panel tabs", () => {
@@ -1268,11 +1251,9 @@ describe("plugin web app tabs", () => {
       });
     });
 
-    // MUTATION (open the tab without reading the refusal): the user clicks
-    // Open in plugin settings, the dialog closes, and nothing appears — with
-    // nothing on screen naming the limit that refused it.
     expect(
       (await screen.findByTestId("workspace-shell-error")).textContent,
+      "open the tab without reading the refusal: the user clicks Open in plugin settings, the dialog closes, and nothing appears — with nothing on screen naming the limit that refused it.",
     ).toContain(
       "This workspace has 100 open tabs; the limit is 100. Close a tab to open another tab.",
     );
@@ -1286,11 +1267,7 @@ describe("plugin web app tabs", () => {
     renderShell(bridge);
 
     const tab = await screen.findByTestId(`tab-${path}`);
-    // MUTATION (label from the tab path): the tab reads "app", the id, and
-    // the name the user installed never appears. The title arrives with the
-    // app's own start — no second trip to main, which racing the plugin's
-    // on-demand host start proved to break it (e2e, 4 of 6 runs).
-    await waitFor(() => expect(tab.textContent).toContain("T3 Code"));
+    await waitFor(() => expect(tab.textContent, "label from the tab path: the tab reads 'app', the id, and the name the user installed never appears. The title arrives with the app's own start — no second trip to main, which racing the plugin's on-demand host start proved to break it (e2e, 4 of 6 runs).").toContain("T3 Code"));
     await waitFor(() => expect(tab.title).toBe("t3-code — T3 Code"));
   });
 
@@ -1321,10 +1298,8 @@ describe("plugin web app tabs", () => {
       />,
     );
 
-    // MUTATION (drop the workspace scope): the tab keeps showing the first
-    // workspace's title for an app that has not started here.
     await waitFor(() =>
-      expect(screen.getByTestId(`tab-${path}`).textContent).not.toContain(
+      expect(screen.getByTestId(`tab-${path}`).textContent, "drop the workspace scope: the tab keeps showing the first workspace's title for an app that has not started here.").not.toContain(
         "T3 Code",
       ),
     );
@@ -1369,9 +1344,7 @@ describe("plugin web app tabs", () => {
     );
     await screen.findByTestId("command-palette");
 
-    // MUTATION (drop the overlay signal): the guest keeps painting over the
-    // palette and keeps its clicks.
-    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(false));
+    await waitFor(() => expect(lastReportedVisibility(bridge), "drop the overlay signal: the guest keeps painting over the palette and keeps its clicks.").toBe(false));
   });
 
   it("hides the guest while the settings dialog is open, and restores it after", async () => {
@@ -1707,7 +1680,7 @@ describe("plugin details tabs", () => {
   });
 
   // A discovered row's id is only ever a broken manifest's directory-
-  // derived fallback, which can coincide with some OTHER, unrelated
+  // derived fallback, which can coincide with some other, unrelated
   // plugin's real id — two rows sharing one id string is a real, reachable
   // state, not a hypothetical. Before carrying directoryName through
   // open-details and the tab path, clicking the second-sorting row always
@@ -1743,8 +1716,8 @@ describe("plugin details tabs", () => {
     bridge.listPlugins = vi.fn(async () => ({
       ok: true as const,
       plugins: [
-        { ...rowFields, id: "codex", directoryName: "codex-a", displayName: "Codex A" },
-        { ...rowFields, id: "codex", directoryName: "codex-b", displayName: "Codex B" },
+        { ...rowFields, id: "agent-chat", directoryName: "chat-a", displayName: "Chat A" },
+        { ...rowFields, id: "agent-chat", directoryName: "chat-b", displayName: "Chat B" },
       ] as PluginStatusRecord[],
     }));
     renderShell(bridge);
@@ -1752,13 +1725,13 @@ describe("plugin details tabs", () => {
     await userEvent.click(await screen.findByTestId("activity-plugins"));
     const rows = await screen.findAllByTestId("plugin-row");
     expect(rows).toHaveLength(2);
-    const rowB = rows.find((row) => within(row).queryByText("Codex B"));
-    if (!rowB) throw new Error("Codex B row not found among the rendered rows.");
+    const rowB = rows.find((row) => within(row).queryByText("Chat B"));
+    if (!rowB) throw new Error("Chat B row not found among the rendered rows.");
     await userEvent.click(within(rowB).getByTestId("plugin-open-details"));
 
     const page = await screen.findByTestId("plugin-details-page");
-    expect(page.getAttribute("data-directory-name")).toBe("codex-b");
-    expect(within(page).getByText("Codex B")).toBeTruthy();
+    expect(page.getAttribute("data-directory-name")).toBe("chat-b");
+    expect(within(page).getByText("Chat B")).toBeTruthy();
   });
 
   it("restores a plugin's details tab and mounts its page", async () => {
@@ -1783,9 +1756,7 @@ describe("plugin details tabs", () => {
     renderShell(bridge);
 
     const tab = await screen.findByTestId(`tab-${detailsPath}`);
-    // MUTATION (drop the label from the details branch): the tab keeps
-    // reading "t3-code" while the page header reads "T3 Code".
-    await waitFor(() => expect(tab.textContent).toContain("T3 Code"));
+    await waitFor(() => expect(tab.textContent, "drop the label from the details branch: the tab keeps reading 't3-code' while the page header reads 'T3 Code'.").toContain("T3 Code"));
     expect(
       within(await screen.findByTestId("plugin-details-page")).getByRole(
         "heading",
@@ -1797,7 +1768,7 @@ describe("plugin details tabs", () => {
   });
 
   // A tab that follows a rename only tracked that in memory. A tab switch
-  // remounts the page, whose tracking reseeds from the tab's OWN virtual
+  // remounts the page, whose tracking reseeds from the tab's own virtual
   // path — still the original, now-vacated directory, if nothing ever
   // retargets that path. This pins the fix end to end: the tab's own path
   // itself must move, so a remount reads the directory the plugin actually
@@ -1829,7 +1800,7 @@ describe("plugin details tabs", () => {
 
     // The rename: same id, new directoryName, nothing left at the old one.
     // Reported both live (the event a mounted page hears) and as the
-    // catalog's own new ground truth (what a FRESH fetch — the remount
+    // catalog's own new ground truth (what a fresh fetch — the remount
     // below triggers one — reads back): a real rescan would settle to
     // exactly this, not just notify of it.
     const renamedRow = {
@@ -2096,10 +2067,17 @@ describe("global letter shortcut ownership", () => {
 });
 
 describe("collection folders", () => {
+  // The table virtualizer reads offsetWidth/offsetHeight, which jsdom reports
+  // as 0 — no row would render (CollectionPage.test.tsx precedent).
+  const offsetDescriptors = {
+    offsetHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight"),
+    offsetWidth: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth"),
+  };
+
   beforeEach(() => {
     // The file's module-level ResizeObserver stub is removed by the global
     // afterEach's unstubAllGlobals (plugin web app tabs precedent). The
-    // collection surface's lazy chunk evaluates @dnd-kit, which reads BOTH
+    // collection surface's lazy chunk evaluates @dnd-kit, which reads both
     // observers while its module loads, so they must exist before the click.
     class ObserverStub {
       observe() {}
@@ -2111,10 +2089,24 @@ describe("collection folders", () => {
     }
     vi.stubGlobal("ResizeObserver", ObserverStub);
     vi.stubGlobal("IntersectionObserver", ObserverStub);
+    Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
+      configurable: true,
+      value: 900,
+    });
+  });
+
+  afterEach(() => {
+    for (const [name, descriptor] of Object.entries(offsetDescriptors)) {
+      if (descriptor) Object.defineProperty(HTMLElement.prototype, name, descriptor);
+    }
   });
 
   it("opens a collection folder as its views tab with the settled empty state", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles = vi.fn(async () => ({
       files: [{ path: "tasks/one.md", kind: "file" as const }],
       folders: ["tasks"],
@@ -2126,7 +2118,7 @@ describe("collection folders", () => {
     const user = userEvent.setup();
 
     // The list must carry the shell's workspace scope, and the row routes to
-    // the collection only once that list COMMITTED — the row's rendered
+    // the collection only once that list committed — the row's rendered
     // data-collection affordance is the observable proof, so the click
     // cannot race the commit.
     const row = await waitFor(() => {
@@ -2150,7 +2142,7 @@ describe("collection folders", () => {
         timeout: 15_000,
       }),
     ).toBeTruthy();
-    // The settled empty state is that line PLUS the New record action.
+    // The settled empty state is that line plus the New record action.
     // Activation is CollectionPage's own boundary, pinned in its tests.
     expect(screen.getByRole("button", { name: "New record" })).toBeTruthy();
     expect(bridge.getCollection).toHaveBeenCalledWith({
@@ -2159,32 +2151,176 @@ describe("collection folders", () => {
     });
   });
 
+  // The queue behind cell edits must outlive the page: the shell renders only
+  // a group's ACTIVE tab, so opening a file unmounts CollectionPage. An edit
+  // the cell already accepted must still reach its record's live document.
+  it("keeps a queued record edit when a file opens while the first save is pending", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: [
+        { path: "tasks/one.md", kind: "file" as const },
+        { path: "tasks/two.md", kind: "file" as const },
+        { path: "notes.md", kind: "file" as const },
+      ],
+      folders: ["tasks"],
+    }));
+    bridge.listCollections = vi.fn(async () => ({
+      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+    }));
+    bridge.getCollection = vi.fn(async () => ({
+      path: "tasks",
+      status: "valid" as const,
+      reasons: [],
+      schema: {
+        name: "Tasks",
+        description: null,
+        fields: [
+          { name: "title", type: "text" as const },
+          { name: "done", type: "checkbox" as const },
+        ],
+        views: [],
+      },
+      recordCount: 2,
+    }));
+    const taskRecord = (id: string, title: string, path: string) => ({
+      id,
+      path,
+      conflicted: false,
+      values: [
+        {
+          field: "title",
+          value: title,
+          validation: { status: "valid" as const },
+          resolvedRelations: [],
+        },
+        {
+          field: "done",
+          value: false,
+          validation: { status: "valid" as const },
+          resolvedRelations: [],
+        },
+      ],
+    });
+    bridge.queryCollectionRecords = vi.fn(async () => ({
+      collection: { path: "tasks", status: "valid" as const, reasons: [] },
+      records: [
+        taskRecord("rec-1", "One", "tasks/one.md"),
+        taskRecord("rec-2", "Two", "tasks/two.md"),
+      ],
+      groups: null,
+      nextCursor: null,
+    }));
+    const sessionsByPath = new Map<string, string>();
+    const updatesBySession = new Map<string, Uint8Array[]>();
+    const saveStateListeners = new Set<
+      (event: EngineYDocSaveStateEvent) => void
+    >();
+    const openEngineYDocSession = vi.fn(
+      async (payload: { path: string; sessionId: string }) => {
+        // Record files get live sessions; notes.md stays a plain editor.
+        if (!payload.path.startsWith("tasks/")) return { available: false };
+        sessionsByPath.set(payload.path, payload.sessionId);
+        return {
+          available: true,
+          initialUpdate: recordDocUpdate(
+            payload.path === "tasks/one.md" ? "rec-1" : "rec-2",
+          ),
+          lineageGeneration: 1,
+        };
+      },
+    );
+    const applyEngineYDocUpdate = vi.fn(
+      async (payload: { sessionId: string; update: Uint8Array }) => {
+        const applied = updatesBySession.get(payload.sessionId) ?? [];
+        applied.push(payload.update);
+        updatesBySession.set(payload.sessionId, applied);
+        return { accepted: true as const };
+      },
+    );
+    Object.assign(bridge, {
+      openEngineYDocSession,
+      applyEngineYDocUpdate,
+      closeEngineYDocSession: vi.fn(async () => undefined),
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(
+        (listener: (event: EngineYDocSaveStateEvent) => void) => {
+          saveStateListeners.add(listener);
+          return () => saveStateListeners.delete(listener);
+        },
+      ),
+    });
+    renderShell(bridge);
+
+    const row = await waitFor(() => {
+      const candidate = screen
+        .getAllByTestId("tree-row")
+        .find((entry) => entry.dataset.path === "tasks");
+      expect(candidate?.dataset.collection).toBe("true");
+      return candidate as HTMLElement;
+    });
+    await user.click(row);
+    const checkboxes = await screen.findAllByRole(
+      "checkbox",
+      {},
+      { timeout: 15_000 },
+    );
+    expect(checkboxes).toHaveLength(2);
+
+    // First edit: the record's session opens and the update is delivered, but
+    // the save never settles — the head write is still pending.
+    await user.click(checkboxes[0]!);
+    await waitFor(() => expect(sessionsByPath.has("tasks/one.md")).toBe(true));
+    await waitFor(() =>
+      expect(
+        updatesBySession.get(sessionsByPath.get("tasks/one.md")!)?.length ?? 0,
+      ).toBeGreaterThan(0),
+    );
+
+    // Second edit queues behind the pending head.
+    await user.click(screen.getAllByRole("checkbox")[1]!);
+
+    // Ordinary navigation: open a plain file; the collection page unmounts.
+    const fileRow = screen
+      .getAllByTestId("tree-row")
+      .find((entry) => entry.dataset.path === "notes.md")!;
+    await user.click(fileRow);
+    await screen.findByTestId("tab-notes.md");
+    await waitFor(() =>
+      expect(screen.queryByTestId("collection-page")).toBeNull(),
+    );
+
+    // The pending head settles only now, after the page is gone.
+    act(() => {
+      const sessionId = sessionsByPath.get("tasks/one.md")!;
+      for (const listener of [...saveStateListeners]) {
+        listener({ sessionId, state: "saved", seq: 1 });
+      }
+    });
+
+    // The second accepted edit still reaches its record's live document.
+    await waitFor(
+      () => expect(sessionsByPath.has("tasks/two.md")).toBe(true),
+      { timeout: 5_000 },
+    );
+    await waitFor(() => {
+      const updates =
+        updatesBySession.get(sessionsByPath.get("tasks/two.md")!) ?? [];
+      const probe = new Y.Doc();
+      for (const update of updates) Y.applyUpdate(probe, update);
+      expect(probe.getMap("frontmatter").get("done")).toBe(true);
+    });
+  }, 40_000);
+
   it("offers New collection from the palette for an engine-enabled writable workspace", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.keyboard("{Control>}k{/Control}");
     const palette = await screen.findByTestId("command-palette");
     expect(await within(palette).findByText("New collection")).toBeTruthy();
-  });
-
-  it("does not offer New collection when the workspace engine is disabled", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    const user = userEvent.setup();
-    renderShell(bridge);
-    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalled());
-    await act(async () => {});
-
-    await user.keyboard("{Control>}k{/Control}");
-    const palette = await screen.findByTestId("command-palette");
-    await within(palette).findByText("New editor group right");
-    expect(within(palette).queryByText("New collection")).toBeNull();
-
-    // The application menu feeds the same registry. A command that is not
-    // present must not reach the dialog even if main emits its closed id.
-    act(() => bridge.emitMenuCommand("new-collection"));
-    expect(screen.queryByLabelText("Collection name")).toBeNull();
   });
 
   // assertWritableWorkspace refuses createWorkspaceFile on the share's
@@ -3287,7 +3423,7 @@ describe("editor groups", () => {
     "keeps $destination selected when an older duplicate-file open finishes flushing",
     async ({ tabPath, navigate }) => {
       const save = deferred<{ status: "written"; contentHash: string }>();
-      const bridge = makeEngineBridge(
+      const bridge = makeBridge(
         Promise.resolve({
           ...STORED_STATE,
           editorGroups: [
@@ -3341,7 +3477,7 @@ describe("editor groups", () => {
       }));
       const user = userEvent.setup();
       renderShell(bridge);
-      await settleEngineOnRead(bridge);
+      await settleShareView();
 
       const left = await screen.findByRole("region", {
         name: "Editor group 1",
@@ -3551,7 +3687,7 @@ describe("editor groups", () => {
   });
 
   it("shares one live document session when the active Markdown file is split", async () => {
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     const doc = markdownToYDoc("# Shared\n");
@@ -3625,7 +3761,7 @@ describe("editor groups", () => {
   });
 
   it("does not keep save-first state after a dirty editor unmounts", async () => {
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
     );
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -3668,14 +3804,12 @@ describe("editor groups", () => {
 
 describe("application menu command routing", () => {
   it("toggles the Chats panel when the command exists", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
     await screen.findByTestId("chats-panel");
     // Flush the commit's passive effects before emitting: the menu-command
-    // listener re-subscribes with a closure that sees the chats surface in
-    // an effect, and under load the panel's DOM node appears before that
-    // effect runs — the emit would land on a listener still holding
-    // chatsSurfaceExists=false and no-op.
+    // listener subscribes in an effect, and under load the panel's DOM node
+    // appears before that effect runs.
     await act(async () => {});
 
     act(() => bridge.emitMenuCommand("toggle-chats"));
@@ -3685,393 +3819,6 @@ describe("application menu command routing", () => {
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
   });
 
-  it("ignores Toggle Chats when the workspace has no Chats command", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    renderShell(bridge);
-    await screen.findByTestId("side-panel");
-
-    act(() => bridge.emitMenuCommand("toggle-chats"));
-
-    expect(screen.queryByTestId("chats-panel")).toBeNull();
-    expect(screen.getByTestId("side-panel")).toBeTruthy();
-  });
-});
-
-describe("targeted chat navigation", () => {
-  const threadNav = (threadId: string, focusMessageId?: string): ChatsNav => ({
-    level: "thread",
-    channel: {
-      id: "channel-1",
-      name: "general",
-      slug: "general",
-      kind: "channel",
-      createdAtMs: 0,
-      updatedAtMs: 0,
-      threadCount: 1,
-      unreadCount: 0,
-    },
-    thread: {
-      id: threadId,
-      channelId: "channel-1",
-      title: "Discussion",
-      createdAtMs: 0,
-      updatedAtMs: 0,
-      messageCount: 2,
-      lastReadSequence: 0,
-      unreadCount: 0,
-    },
-    ...(focusMessageId ? { focusMessageId } : {}),
-  });
-
-  it("remounts the live chat for a message backlink inside the current thread", () => {
-    expect(
-      chatsNavigationRequiresRemount(
-        threadNav("thread-1", "message-1"),
-        threadNav("thread-1", "message-2"),
-      ),
-    ).toBe(true);
-    expect(
-      chatsNavigationRequiresRemount(
-        threadNav("thread-1", "message-1"),
-        threadNav("thread-1"),
-      ),
-    ).toBe(false);
-  });
-
-  // Two keys, two purposes. Cancelling a pending DM lookup asks "did the user
-  // go somewhere?", and a focused message is somewhere. Scoping drafts asks
-  // the narrower "did they leave the conversation?", because the draft they
-  // typed there must survive a jump inside it.
-  it("separates leaving a conversation from going somewhere inside it", () => {
-    const focused = threadNav("thread-1", "message-1");
-    const otherMessage = threadNav("thread-1", "message-2");
-    const otherThread = threadNav("thread-2");
-
-    // A backlink to another message in the open thread: going somewhere...
-    expect(chatsNavigationChangesDestination(focused, otherMessage)).toBe(true);
-    // ...without leaving the conversation, so the draft stays.
-    expect(chatsNavigationLeavesConversation(focused, otherMessage)).toBe(false);
-
-    // Another conversation is both.
-    expect(chatsNavigationChangesDestination(focused, otherThread)).toBe(true);
-    expect(chatsNavigationLeavesConversation(focused, otherThread)).toBe(true);
-
-    // The panel re-reporting where it already is, is neither.
-    expect(
-      chatsNavigationChangesDestination(focused, threadNav("thread-1", "message-1")),
-    ).toBe(false);
-    expect(chatsNavigationLeavesConversation(focused, focused)).toBe(false);
-  });
-
-  it("keeps metadata-light file mentions and graph chats on their known file thread", () => {
-    const thread = {
-      id: "thread-file",
-      title: "File discussion",
-      createdAtMs: 10,
-      updatedAtMs: 20,
-    };
-    const mentionTarget = chatMentionOpenTarget({
-      attachment: {
-        attachmentId: "attachment-1",
-        messageId: "message-1",
-        threadId: thread.id,
-        targetKind: "file",
-        objectId: "object-1",
-        pathHint: "docs/plan.md",
-        createdAtMs: 10,
-      },
-      message: {
-        id: "message-1",
-        threadId: thread.id,
-        authorKind: "human",
-        authorDisplayName: "Ice",
-        body: "See the plan",
-        createdAtMs: 10,
-      },
-      thread,
-    });
-    expect(mentionTarget).toEqual({
-      surface: "file",
-      thread,
-      focusMessageId: "message-1",
-    });
-
-    expect(graphChatOpenTarget({
-      path: `chat-thread:${thread.id}`,
-      kind: "chat-thread",
-      threadId: thread.id,
-      title: thread.title,
-      incoming: 1,
-      outgoing: 0,
-    })).toEqual({
-      surface: "file",
-      thread: { ...thread, createdAtMs: 0, updatedAtMs: 0 },
-    });
-  });
-
-  it("keeps full channel metadata on targeted tab navigation", () => {
-    const target = graphChatOpenTarget({
-      path: "chat-thread:thread-channel",
-      kind: "chat-thread",
-      threadId: "thread-channel",
-      channelId: "channel-1",
-      channelName: "planning",
-      channelSlug: "planning",
-      channelKind: "channel",
-      title: "Planning discussion",
-      incoming: 1,
-      outgoing: 0,
-    });
-
-    expect(target.surface).toBe("channel");
-    if (target.surface === "channel") {
-      expect(target.nav.level).toBe("thread");
-      expect(target.nav.channel.id).toBe("channel-1");
-      expect(target.nav.thread.id).toBe("thread-channel");
-    }
-
-    const mentionTarget = chatMentionOpenTarget({
-      attachment: {
-        attachmentId: "attachment-channel",
-        messageId: "message-channel",
-        threadId: "thread-channel",
-        targetKind: "file",
-        createdAtMs: 0,
-      },
-      message: {
-        id: "message-channel",
-        threadId: "thread-channel",
-        authorKind: "agent",
-        authorDisplayName: "Ice",
-        body: "Updated the plan",
-        createdAtMs: 0,
-      },
-      thread: {
-        id: "thread-channel",
-        title: "Planning discussion",
-        createdAtMs: 0,
-        updatedAtMs: 0,
-      },
-      channelId: "channel-1",
-      channelName: "planning",
-    });
-    expect(mentionTarget.surface).toBe("channel");
-    if (mentionTarget.surface === "channel") {
-      expect(mentionTarget.nav.thread.id).toBe("thread-channel");
-      expect(mentionTarget.nav.focusMessageId).toBe("message-channel");
-    }
-  });
-
-  it("routes DM mentions and graph nodes only through a matching canonical DM", () => {
-    const dm = {
-      channelId: "dm-local",
-      channelWireId: "dm-wire",
-      name: "alice@example.com",
-      peerLabel: "Alice",
-      role: "owner" as const,
-      shareId: null,
-      threadId: "dm-thread",
-      unreadCount: 1,
-      connected: true,
-    };
-    const mentionTarget = chatMentionOpenTarget({
-      attachment: {
-        attachmentId: "attachment-dm",
-        messageId: "message-dm",
-        threadId: "dm-thread",
-        targetKind: "file",
-        createdAtMs: 0,
-      },
-      message: {
-        id: "message-dm",
-        threadId: "dm-thread",
-        authorKind: "human",
-        authorDisplayName: "Alice",
-        body: "DM attachment",
-        createdAtMs: 0,
-      },
-      thread: {
-        id: "dm-thread",
-        title: "Direct message",
-        createdAtMs: 0,
-        updatedAtMs: 0,
-      },
-      channelId: "dm-local",
-      channelWireId: "dm-wire",
-      channelName: "alice@example.com",
-      channelKind: "dm",
-    });
-    expect(mentionTarget).toEqual({
-      surface: "dm",
-      channelId: "dm-local",
-      channelWireId: "dm-wire",
-      threadId: "dm-thread",
-      focusMessageId: "message-dm",
-    });
-    if (mentionTarget.surface !== "dm") throw new Error("Expected DM target");
-    expect(resolveCanonicalDm(mentionTarget, [dm])).toEqual(dm);
-    expect(resolveCanonicalDm({ ...mentionTarget, threadId: "other-thread" }, [dm]))
-      .toBeNull();
-    expect(resolveCanonicalDm({ ...mentionTarget, channelWireId: "other-wire" }, [dm]))
-      .toBeNull();
-
-    expect(graphChatOpenTarget({
-      path: "chat-thread:dm-thread",
-      kind: "chat-thread",
-      threadId: "dm-thread",
-      channelId: "dm-local",
-      channelWireId: "dm-wire",
-      channelName: "alice@example.com",
-      channelKind: "dm",
-      title: "Direct message",
-      incoming: 1,
-      outgoing: 0,
-    })).toEqual({
-      surface: "dm",
-      channelId: "dm-local",
-      channelWireId: "dm-wire",
-      threadId: "dm-thread",
-    });
-  });
-
-  it("preserves a DM mention message target through canonical navigation", async () => {
-    const dm = {
-      channelId: "dm-local",
-      channelWireId: "dm-wire",
-      name: "alice@example.com",
-      peerLabel: "Alice",
-      role: "owner" as const,
-      shareId: null,
-      threadId: "dm-thread",
-      unreadCount: 0,
-      connected: true,
-    };
-    const open = vi.fn();
-
-    await runCanonicalDmNavigation({
-      locator: {
-        channelId: dm.channelId,
-        channelWireId: dm.channelWireId,
-        threadId: dm.threadId,
-        focusMessageId: "message-dm",
-      },
-      syncDms: async () => ({ available: true, dms: [dm] }),
-      isCurrent: () => true,
-      open,
-    });
-
-    expect(open).toHaveBeenCalledWith({
-      level: "dm",
-      dm,
-      focusMessageId: "message-dm",
-    });
-    expect(
-      chatsNavigationRequiresRemount(
-        { level: "dm", dm, focusMessageId: "message-old" },
-        { level: "dm", dm, focusMessageId: "message-dm" },
-      ),
-    ).toBe(true);
-  });
-
-  it("opens an existing local DM when new-DM creation is unavailable", async () => {
-    const dm = {
-      channelId: "dm-local",
-      channelWireId: "dm-wire",
-      name: "alice@example.com",
-      peerLabel: "Alice",
-      role: "owner" as const,
-      shareId: null,
-      threadId: "dm-thread",
-      unreadCount: 0,
-      connected: false,
-    };
-    const open = vi.fn();
-
-    await runCanonicalDmNavigation({
-      locator: {
-        channelId: dm.channelId,
-        channelWireId: dm.channelWireId,
-        threadId: dm.threadId,
-      },
-      syncDms: async () => ({ available: false, dms: [dm] }),
-      isCurrent: () => true,
-      open,
-    });
-
-    expect(open).toHaveBeenCalledWith({ level: "dm", dm });
-  });
-
-  it("does not reopen Chats when destination navigation supersedes a delayed DM lookup", async () => {
-    const delayed = deferred<{
-      available: boolean;
-      dms: Array<{
-        channelId: string;
-        channelWireId: string;
-        name: string;
-        peerLabel: string;
-        role: "owner";
-        shareId: null;
-        threadId: string;
-        unreadCount: number;
-        connected: boolean;
-      }>;
-    }>();
-    let current = true;
-    const open = vi.fn();
-    const pending = runCanonicalDmNavigation({
-      locator: {
-        channelId: "dm-local",
-        channelWireId: "dm-wire",
-        threadId: "dm-thread",
-      },
-      syncDms: () => delayed.promise,
-      isCurrent: () => current,
-      open,
-    });
-
-    // Models the centralized workbench mutation invalidation used by file,
-    // graph, history, and arbitrary editor-tab navigation.
-    current = false;
-    delayed.resolve({
-      available: true,
-      dms: [{
-        channelId: "dm-local",
-        channelWireId: "dm-wire",
-        name: "alice@example.com",
-        peerLabel: "Alice",
-        role: "owner",
-        shareId: null,
-        threadId: "dm-thread",
-        unreadCount: 0,
-        connected: true,
-      }],
-    });
-    await pending;
-    expect(open).not.toHaveBeenCalled();
-  });
-
-  it("clears stale chat navigation to channels when DM canonicalization fails", async () => {
-    const open = vi.fn();
-    const base = {
-      locator: { channelId: "dm-local", threadId: "dm-thread" },
-      isCurrent: () => true,
-      open,
-    };
-    await runCanonicalDmNavigation({
-      ...base,
-      syncDms: async () => ({ available: true, dms: [] }),
-    });
-    expect(open).toHaveBeenLastCalledWith({ level: "channels" });
-
-    open.mockClear();
-    await runCanonicalDmNavigation({
-      ...base,
-      syncDms: async () => {
-        throw new Error("offline");
-      },
-    });
-    expect(open).toHaveBeenLastCalledWith({ level: "channels" });
-  });
 });
 
 describe("heading-target file opens", () => {
@@ -4086,10 +3833,10 @@ describe("heading-target file opens", () => {
   });
 });
 
-// THE merge-on-load race (codex P2): the load gate used to compare COMMITTED
+// The merge-on-load race: the load gate used to compare committed
 // state (wbRef, synced in a passive effect) against defaults. A user action
 // whose commit/effects had not flushed yet read as "untouched", and the
-// stored state clobbered it. The gate must be a ref set SYNCHRONOUSLY inside
+// stored state clobbered it. The gate must be a ref set synchronously inside
 // the mutation, before React even queues the update.
 // One share's durable skip record, as the registry holds it.
 const SKIPPED_RECORD = {
@@ -4114,7 +3861,7 @@ describe("workspace switch admission", () => {
     let selectedWorkspace = WORKSPACE;
     let admittedWorkspaceId = WORKSPACE.workspaceId;
     const rejectedReads: string[] = [];
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.getWorkspaceUiState = vi.fn(async () => {
       if (admittedWorkspaceId !== selectedWorkspace.workspaceId) {
         rejectedReads.push(`ui-state:${selectedWorkspace.workspaceId}`);
@@ -4123,25 +3870,6 @@ describe("workspace switch admission", () => {
       return selectedWorkspace.workspaceId === OTHER_WORKSPACE.workspaceId
         ? storedStateWithTabs(["b.md"], "b.md")
         : null;
-    });
-    bridge.getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => {
-      if (admittedWorkspaceId !== selectedWorkspace.workspaceId) {
-        rejectedReads.push(`settings:${selectedWorkspace.workspaceId}`);
-        throw new Error(
-          "Workspace settings read stopped because this window changed workspaces.",
-        );
-      }
-      return {
-        settings: {
-          ...DEFAULT_WORKSPACE_SETTINGS,
-          experimental: {
-            ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-            workspaceEngineAlpha:
-              selectedWorkspace.workspaceId === OTHER_WORKSPACE.workspaceId,
-          },
-        },
-        source: "stored",
-      };
     });
     bridge.openWorkspace = vi.fn(async () => {
       admittedWorkspaceId = selectedWorkspace.workspaceId;
@@ -4162,7 +3890,6 @@ describe("workspace switch admission", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
     bridge.getWorkspaceUiState.mockClear();
-    bridge.getWorkspaceSettings.mockClear();
     bridge.openWorkspace.mockClear();
 
     selectedWorkspace = OTHER_WORKSPACE;
@@ -4176,13 +3903,421 @@ describe("workspace switch admission", () => {
     await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
     await act(async () => {});
 
-    expect(rejectedReads).toEqual([
-      `ui-state:${OTHER_WORKSPACE.workspaceId}`,
-      `settings:${OTHER_WORKSPACE.workspaceId}`,
-    ]);
+    expect(rejectedReads).toEqual([`ui-state:${OTHER_WORKSPACE.workspaceId}`]);
     expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2);
-    expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(2);
     expect(bridge.openWorkspace).toHaveBeenCalledOnce();
+  });
+});
+
+describe("collection input during a version switch", () => {
+  it.each(["success", "failure"] as const)(
+    "retains late input after switch %s without crossing versions",
+    async (outcome) => {
+      const user = userEvent.setup();
+      const bridge = makeBridge(Promise.resolve(null));
+      let activeVersionId = "main";
+      bridge.listWorkspaceVersions = vi.fn(async () => ({
+        versions: [
+          { id: "main", name: "Main", kind: "main" as const, createdAtMs: 0, canMergeIntoMain: false },
+          { id: "v2", name: "Draft two", kind: "named" as const, createdAtMs: 1, canMergeIntoMain: true },
+        ],
+        activeVersionId,
+      }));
+      const switching = deferred<SwitchWorkspaceVersionResult>();
+      bridge.switchWorkspaceVersion = vi.fn(() => switching.promise);
+      renderShell(bridge);
+      await user.click(await screen.findByTestId("version-menu-button"));
+      const target = (await screen.findAllByTestId("version-item")).find(
+        (item) => item.dataset.versionId === "v2",
+      );
+      await user.click(target!);
+      await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalledOnce());
+      const change = { recordId: "rec-1", recordPath: "tasks/one.md", field: "status", value: "done" };
+      act(() => {
+        expect(enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", change)).toBe(false);
+      });
+      await act(async () => {
+        if (outcome === "success") {
+          activeVersionId = "v2";
+          switching.resolve({ activeVersionId, changedFileCount: 1 });
+        } else {
+          switching.reject(new Error("switch failed"));
+        }
+        await switching.promise.catch(() => undefined);
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", outcome === "success");
+        if (outcome === "success") expect(screen.getByTestId("collection-write-copy")).toBeTruthy();
+      });
+      expect(collectionWriteFailures()[0]?.change).toEqual(change);
+    },
+  );
+});
+
+describe("workspace admission over collection writes", () => {
+  // Models main's authority the way engineYDocSessionIpc holds it: a record
+  // session opens only for the workspace `openWorkspace` last admitted. If
+  // the shell admits B while A's accepted write is still queued, the write's
+  // open lands after the revocation and fails — exactly the data loss the
+  // admission gate exists to prevent.
+  function admissionHarness() {
+    const admitted = { workspaceId: WORKSPACE.workspaceId };
+    const openGates = new Map<string, Promise<void>>();
+    const sessions = new Map<string, string>();
+    const saveListeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
+    const openAvailability = { available: true };
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      openWorkspace: vi.fn(async (payload: { workspaceId: string }) => {
+        admitted.workspaceId = payload.workspaceId;
+        return SYNC_STATUS;
+      }),
+      openEngineYDocSession: vi.fn(
+        async (payload: {
+          workspaceId: string;
+          path: string;
+          sessionId: string;
+        }) => {
+          await openGates.get(payload.path);
+          if (
+            !openAvailability.available ||
+            payload.workspaceId !== admitted.workspaceId
+          ) {
+            return { available: false };
+          }
+          sessions.set(payload.path, payload.sessionId);
+          return {
+            available: true,
+            initialUpdate: recordDocUpdate(RECORD_EDIT.recordId),
+            lineageGeneration: 1,
+          };
+        },
+      ),
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+      closeEngineYDocSession: vi.fn(async () => undefined),
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(
+        (listener: (event: EngineYDocSaveStateEvent) => void) => {
+          saveListeners.add(listener);
+          return () => saveListeners.delete(listener);
+        },
+      ),
+    });
+    const shell = (workspace: Workspace) => (
+      <>
+        <CollectionFieldWriteHost />
+        <DesktopWorkspaceShell
+          key={workspace.workspaceId}
+          workspace={workspace}
+          workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+          {...shellBootstrapProps(bridge)}
+          onSwitchWorkspace={() => {}}
+        />
+      </>
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    return { bridge, openGates, sessions, saveListeners, openAvailability, shell };
+  }
+
+  const RECORD_EDIT = {
+    recordId: "rec-1",
+    recordPath: "tasks/one.md",
+    field: "done",
+    value: true,
+  };
+
+  it("keeps the destination workspace's queued edit when the previous workspace times out", async () => {
+    const harness = admissionHarness();
+    const oldOpen = deferred<void>();
+    const nextOpen = deferred<void>();
+    harness.openGates.set("tasks/one.md", oldOpen.promise);
+    harness.openGates.set("tasks/two.md", nextOpen.promise);
+    const view = render(harness.shell(WORKSPACE));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    act(() => {
+      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
+      enqueueCollectionFieldWrite(OTHER_WORKSPACE.workspaceId, "tasks", { ...RECORD_EDIT, recordPath: "tasks/two.md" });
+    });
+    await waitFor(() => expect(harness.bridge.openEngineYDocSession).toHaveBeenCalled());
+    harness.bridge.openWorkspace.mockClear();
+    vi.useFakeTimers();
+    try {
+      view.rerender(harness.shell(OTHER_WORKSPACE));
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      expect(collectionWriteFailures().map((failure) => failure.workspaceId)).toEqual([WORKSPACE.workspaceId]);
+      expect(hasPendingCollectionFieldWrites()).toBe(true);
+      expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
+      act(() => discardCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+    } finally {
+      vi.useRealTimers();
+    }
+    await waitFor(() => expect(harness.bridge.openWorkspace).toHaveBeenCalledWith({ workspaceId: OTHER_WORKSPACE.workspaceId }));
+    await act(async () => { oldOpen.resolve(); nextOpen.resolve(); });
+    await waitFor(() => expect(harness.bridge.applyEngineYDocUpdate).toHaveBeenCalled());
+    act(() => {
+      const sessionId = harness.sessions.get("tasks/two.md")!;
+      for (const listener of [...harness.saveListeners]) listener({ sessionId, state: "saved", seq: 1 });
+    });
+    await waitFor(() => expect(hasPendingCollectionFieldWrites()).toBe(false));
+    expect(collectionWriteFailures()).toHaveLength(0);
+  });
+
+  it("keeps an applied-only stalled save visible until its engine acknowledgement admits B", async () => {
+    const harness = admissionHarness();
+    const view = render(harness.shell(WORKSPACE));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    act(() => { enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT); });
+    await waitFor(() => expect(harness.bridge.applyEngineYDocUpdate).toHaveBeenCalled());
+    harness.bridge.openWorkspace.mockClear();
+
+    vi.useFakeTimers();
+    try {
+      view.rerender(harness.shell(OTHER_WORKSPACE));
+      await act(() => vi.advanceTimersByTimeAsync(20_000));
+      expect(collectionWriteFailures()).toEqual([]);
+      const blocked = screen.getByTestId("workspace-open-failed");
+      expect(blocked.textContent).toContain("dohc has not confirmed this save yet. Keep dohc open until saving finishes.");
+      expect(screen.queryByTestId("collection-write-retry")).toBeNull();
+      expect(screen.queryByTestId("collection-write-discard")).toBeNull();
+      expect(screen.queryByTestId("workspace-preparing")).toBeNull();
+
+      await act(() => vi.advanceTimersByTimeAsync(20_000));
+      expect(screen.getByTestId("workspace-open-failed")).toBe(blocked);
+      expect(screen.queryByTestId("workspace-preparing")).toBeNull();
+      expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
+
+      await act(async () => {
+        const sessionId = harness.sessions.get("tasks/one.md")!;
+        for (const listener of [...harness.saveListeners]) {
+          listener({ sessionId, state: "saved", seq: 1 });
+        }
+      });
+      expect(harness.bridge.openWorkspace).toHaveBeenCalledExactlyOnceWith({ workspaceId: OTHER_WORKSPACE.workspaceId });
+      expect(screen.queryByTestId("workspace-open-failed")).toBeNull();
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds B's open until A's queued collection write settles", async () => {
+    const harness = admissionHarness();
+    const gate = deferred<void>();
+    harness.openGates.set("tasks/one.md", gate.promise);
+    const view = render(harness.shell(WORKSPACE));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    act(() => {
+      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
+    });
+    await waitFor(() =>
+      expect(harness.bridge.openEngineYDocSession).toHaveBeenCalled(),
+    );
+    harness.bridge.openWorkspace.mockClear();
+
+    view.rerender(harness.shell(OTHER_WORKSPACE));
+    await act(async () => {});
+    expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
+
+    // A's write lands: the session opens under A's still-current authority,
+    // the update stages, and the engine reports the save settled.
+    await act(async () => {
+      gate.resolve();
+    });
+    await waitFor(() =>
+      expect(harness.bridge.applyEngineYDocUpdate).toHaveBeenCalled(),
+    );
+    act(() => {
+      const sessionId = harness.sessions.get("tasks/one.md")!;
+      for (const listener of [...harness.saveListeners]) {
+        listener({ sessionId, state: "saved", seq: 1 });
+      }
+    });
+    await waitFor(() =>
+      expect(harness.bridge.openWorkspace).toHaveBeenCalledWith({
+        workspaceId: OTHER_WORKSPACE.workspaceId,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    expect(collectionWriteFailures()).toEqual([]);
+  });
+
+  it("refuses admission over a retained failure until it is resolved", async () => {
+    const harness = admissionHarness();
+    harness.openAvailability.available = false;
+    const view = render(harness.shell(WORKSPACE));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    act(() => {
+      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
+    });
+    await waitFor(() => expect(collectionWriteFailures()).toHaveLength(1));
+    harness.bridge.openWorkspace.mockClear();
+
+    view.rerender(harness.shell(OTHER_WORKSPACE));
+    await screen.findByTestId("workspace-open-failed");
+    expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
+
+    // Resolving the failure re-runs admission without another click.
+    act(() => {
+      discardCollectionFieldWrite(collectionWriteFailures()[0]!.id);
+    });
+    await waitFor(() =>
+      expect(harness.bridge.openWorkspace).toHaveBeenCalledWith({
+        workspaceId: OTHER_WORKSPACE.workspaceId,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+  });
+
+  it("blocks admission when A's write fails during the wait", async () => {
+    const harness = admissionHarness();
+    const gate = deferred<void>();
+    harness.openGates.set("tasks/one.md", gate.promise);
+    const view = render(harness.shell(WORKSPACE));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    act(() => {
+      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
+    });
+    await waitFor(() =>
+      expect(harness.bridge.openEngineYDocSession).toHaveBeenCalled(),
+    );
+    harness.bridge.openWorkspace.mockClear();
+
+    view.rerender(harness.shell(OTHER_WORKSPACE));
+    await act(async () => {});
+    expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
+
+    // The write's session open settles without a session: the write is
+    // retained, and admission must stop on it instead of proceeding.
+    harness.openAvailability.available = false;
+    await act(async () => {
+      gate.resolve();
+    });
+    await waitFor(() => expect(collectionWriteFailures()).toHaveLength(1));
+    await screen.findByTestId("workspace-open-failed");
+    expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
+
+    act(() => {
+      discardCollectionFieldWrite(collectionWriteFailures()[0]!.id);
+    });
+    await waitFor(() =>
+      expect(harness.bridge.openWorkspace).toHaveBeenCalledWith({
+        workspaceId: OTHER_WORKSPACE.workspaceId,
+      }),
+    );
+  });
+});
+
+describe("explorer operations over collection writes", () => {
+  const RECORD_EDIT = {
+    recordId: "rec-a",
+    recordPath: "a.md",
+    field: "done",
+    value: true,
+  };
+
+  async function beginRename(bridge: ReturnType<typeof makeBridge>) {
+    const user = userEvent.setup();
+    renderShell(bridge);
+    const row = (await screen.findAllByTestId("tree-row")).find(
+      (candidate) => candidate.dataset.path === "a.md",
+    )!;
+    await user.click(row);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, "renamed.md{Enter}");
+    return user;
+  }
+
+  it("pauses cell edits across a rename and projects the retained edit", async () => {
+    const move = deferred<void>();
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn(() => move.promise),
+    });
+    await beginRename(bridge);
+    await waitFor(() =>
+      expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1),
+    );
+    // The pause covers the pending IPC: a racing cell edit (an editor commit
+    // already in flight) is refused and retained, never queued against the
+    // path the move is changing.
+    expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(true);
+    let accepted = true;
+    act(() => {
+      accepted = enqueueCollectionFieldWrite(
+        WORKSPACE.workspaceId,
+        "tasks",
+        RECORD_EDIT,
+      );
+    });
+    expect(accepted).toBe(false);
+    expect(collectionWriteFailures()).toHaveLength(1);
+
+    await act(async () => {
+      move.resolve();
+      await move.promise;
+    });
+    await waitFor(() =>
+      expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(false),
+    );
+    // The retained edit follows the rename, like tabs and set-aside drafts.
+    expect(collectionWriteFailures()[0]!.change.recordPath).toBe("renamed.md");
+  });
+
+  it("releases the pause when the rename fails and keeps the old path", async () => {
+    let rejectMove!: (error: Error) => void;
+    const move = new Promise<void>((_resolve, reject) => {
+      rejectMove = reject;
+    });
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn(() => move),
+    });
+    await beginRename(bridge);
+    await waitFor(() =>
+      expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1),
+    );
+    expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(true);
+    act(() => {
+      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
+    });
+
+    await act(async () => {
+      rejectMove(new Error("rename failed"));
+      await move.catch(() => undefined);
+    });
+    await screen.findByTestId("explorer-error");
+    await waitFor(() =>
+      expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(false),
+    );
+    // Nothing moved, so the retained edit keeps the path it was accepted on.
+    expect(collectionWriteFailures()[0]!.change.recordPath).toBe("a.md");
+  });
+
+  it("refuses a rename while a collection write failure is retained", async () => {
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn(async () => undefined),
+    });
+    // A retained failure with its accepted value, exactly as a stalled-queue
+    // abandonment leaves it.
+    act(() => {
+      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
+      abandonPendingCollectionFieldWrites("This change did not save.");
+    });
+    expect(collectionWriteFailures()).toHaveLength(1);
+    await beginRename(bridge);
+    await screen.findByTestId("explorer-error");
+    expect(bridge.moveWorkspacePath).not.toHaveBeenCalled();
+    expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(false);
   });
 });
 
@@ -4349,9 +4484,7 @@ describe("ui-state merge-on-load", () => {
       await first.promise;
     });
 
-    // MUTATION: omit the response guard's cleanup invalidation. The first
-    // workspace's late answer replaces b.md with a.md here.
-    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md"), "omit the response guard's cleanup invalidation. The first workspace's late answer replaces b.md with a.md here.").toBeTruthy();
     expect(screen.queryByTestId("tab-a.md")).toBeNull();
   });
 
@@ -4371,15 +4504,15 @@ describe("ui-state merge-on-load", () => {
     expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
   });
 
-  it("a user open QUEUED before the load resolves wins over stored state (the exact stale-ref race)", async () => {
+  it("a user open queued before the load resolves wins over stored state (the exact stale-ref race)", async () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
     renderShell(bridge);
     const row = await screen.findByText("a.md");
 
     await act(async () => {
-      // Resolve the load FIRST (queues its .then as a microtask), then click
-      // via a RAW dispatch: React commits the open synchronously but defers
+      // Resolve the load first (queues its.then as a microtask), then click
+      // via a raw dispatch: React commits the open synchronously but defers
       // passive effects (a scheduler macrotask), so when the awaited
       // microtask runs the .then, wbRef still holds the stale default. Only
       // the synchronous touched-ref can know the user already acted.
@@ -4388,7 +4521,7 @@ describe("ui-state merge-on-load", () => {
       await Promise.resolve();
     });
 
-    // The user's open survived; the stored tabs did NOT clobber it.
+    // The user's open survived; the stored tabs did not clobber it.
     expect(screen.getByTestId("tab-a.md")).toBeTruthy();
     expect(screen.queryByTestId("tab-b.md")).toBeNull();
     // And the pre-load action is durable: it gets written (immediate write on
@@ -4406,7 +4539,7 @@ describe("ui-state merge-on-load", () => {
     );
   });
 
-  // Journey 2 (#337): rolling back a rename left `assets/alpha-renamed.png`
+  // Journey 2: rolling back a rename left `assets/alpha-renamed.png`
   // in Open Editors for a path that no longer existed — through a restart,
   // because nothing reconciled the restored tabs against the workspace.
   it("restores only the tabs whose files still exist", async () => {
@@ -4433,7 +4566,7 @@ describe("ui-state merge-on-load", () => {
     });
   });
 
-  // A shared workspace lists its files TWICE on open: once at mount, once
+  // A shared workspace lists its files twice on open: once at mount, once
   // after refreshShareView pulls the changed paths. Reconciling against
   // whichever landed first would either miss a remote delete or judge the
   // restored tabs against a pre-pull snapshot.
@@ -4676,11 +4809,11 @@ describe("ui-state merge-on-load", () => {
     expect(readCallsWhenEnded).toBeGreaterThan(readCallsBeforeEnd);
     expect(
       screen.queryByTestId("share-changes-send"),
-      "MUTATION: an ended share still offers changes it can no longer send",
+      "an ended share still offers changes it can no longer send",
     ).toBeNull();
     expect(
       screen.queryByTestId("linked-chat-composer"),
-      "MUTATION: an ended share still offers generic chat it can no longer send",
+      "an ended share still offers generic chat it can no longer send",
     ).toBeNull();
   });
 
@@ -4879,13 +5012,13 @@ describe("ui-state merge-on-load", () => {
       await waitFor(() =>
         expect(
           bridge.getWorkspaceRegistry.mock.calls.length,
-          "MUTATION: refresh dropped the durable skip-marker read",
+          "refresh dropped the durable skip-marker read",
         ).toBeGreaterThan(registryReadsBeforeClick),
       );
       await waitFor(() =>
         expect(
           (screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled,
-          "MUTATION: waiting for the skip-marker read leaves Refresh disabled",
+          "waiting for the skip-marker read leaves Refresh disabled",
         ).toBe(false),
       );
     } finally {
@@ -5069,11 +5202,11 @@ describe("ui-state merge-on-load", () => {
     const refused = await screen.findByTestId("shared-view-refused");
     expect(
       refused.textContent,
-      "MUTATION: reading the record only after a successful refresh hides evidence the failed one already wrote",
+      "reading the record only after a successful refresh hides evidence the failed one already wrote",
     ).toContain("dohc skipped 1 update outside what this share covers");
   });
 
-  // The record is written DURING the pull, so a refusal that happens while
+  // The record is written during the pull, so a refusal that happens while
   // this shell is mounted has to appear without a remount. Reading the boot
   // snapshot in props would show it only after the workspace is reopened.
   it("shows a refusal recorded by a refresh that ran while the shell was open", async () => {
@@ -5137,11 +5270,11 @@ describe("ui-state merge-on-load", () => {
     const refused = await screen.findByTestId("shared-view-refused");
     expect(
       refused.textContent,
-      "MUTATION: reading the boot snapshot hides a refusal until the workspace is reopened",
+      "reading the boot snapshot hides a refusal until the workspace is reopened",
     ).toContain("dohc skipped 1 update outside what this share covers");
   });
 
-  // A refused op is SKIPPED and the pull keeps going, so the shared view goes
+  // A refused op is skipped and the pull keeps going, so the shared view goes
   // on looking healthy while it quietly stops carrying part of what the
   // granter shares. The warning comes from the RECORD, not from the last
   // refresh: the cursor has committed past those ops, so a quiet refresh must
@@ -5164,7 +5297,7 @@ describe("ui-state merge-on-load", () => {
       async (_payload: { workspaceId: string; generation: number }) => undefined,
     );
     bridge.dismissShareSkips = dismiss;
-    // The record the shell re-reads. Dismissing does NOT delete it: main
+    // The record the shell re-reads. Dismissing does not delete it: main
     // raises acknowledgedGeneration and the ops stay, so the fixture models
     // that rather than a record that vanishes.
     let acknowledged = 0;
@@ -5203,7 +5336,7 @@ describe("ui-state merge-on-load", () => {
     );
     expect(
       boundary?.textContent,
-      "MUTATION: reading the last refresh instead of the record clears the warning while the content is still missing",
+      "reading the last refresh instead of the record clears the warning while the content is still missing",
     ).toContain("dohc skipped 1 update outside what this share covers");
     expect(boundary?.textContent).toContain("granter@dohc.test");
     expect(boundary?.getAttribute("title")).toContain("version-other");
@@ -5218,7 +5351,7 @@ describe("ui-state merge-on-load", () => {
     expect(overflow?.textContent).not.toContain("granter@dohc.test");
 
     // The only honest recovery this surface has: the user says they have seen
-    // it. That is recorded durably — and it HIDES the warning rather than
+    // it. That is recorded durably — and it hides the warning rather than
     // deleting the evidence, because the content it names is gone for good.
     await userEvent.click(
       screen.getAllByTestId("shared-view-refused-dismiss")[0]!,
@@ -5234,7 +5367,7 @@ describe("ui-state merge-on-load", () => {
     });
   });
 
-  // P1: closing a DIRTY tab unmounts the inspector mid-draft, and its cleanup
+  // P1: closing a dirty tab unmounts the inspector mid-draft, and its cleanup
   // flushes best-effort to a path that no longer exists. resolveWorkspaceFile
   // requires the file, the write fails, the failure is swallowed — the draft
   // would be gone with no error and no way back.
@@ -5323,7 +5456,7 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getAllByText("pulled.md").length).toBeGreaterThan(0);
   });
 
-  // Closing the ACTIVE tab remounts the keyed inspector on its neighbour —
+  // Closing the active tab remounts the keyed inspector on its neighbour —
   // an open. Without the mark, that mount measure brackets a stale mark.
   it("marks file-open-start when closing the active tab hands over to a survivor", async () => {
     const mark = vi.spyOn(rendererMarks, "mark");
@@ -5335,7 +5468,7 @@ describe("ui-state merge-on-load", () => {
     const openStartCalls = () =>
       mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)).length;
 
-    // Wait for the RESTORE to land first, or the assertions below pass
+    // Wait for the restore to land first, or the assertions below pass
     // vacuously against the empty default state.
     expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
     await waitFor(() => {
@@ -5350,7 +5483,7 @@ describe("ui-state merge-on-load", () => {
   });
 
   // A failure is not an answer, so it cannot make an older snapshot
-  // authoritative for CLOSING: the listing that failed may have been the one
+  // authoritative for closing: the listing that failed may have been the one
   // that would have shown a file pulled back in. The close waits for a
   // success issued after the failure. It is not blocked forever — the next
   // successful listing re-enables it — and correctness beats eagerness for
@@ -5369,8 +5502,12 @@ describe("ui-state merge-on-load", () => {
       folders: string[];
     }>();
     let issued = 0;
+    // Keep Chats closed so the subscribers are notifications and listing refresh.
     const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["b.md", "gone.md"], "b.md")),
+      Promise.resolve({
+        ...storedStateWithTabs(["b.md", "gone.md"], "b.md"),
+        chatsVisible: false,
+      }),
     );
     bridge.listWorkspaceFiles = vi.fn(() => {
       issued += 1;
@@ -5378,7 +5515,11 @@ describe("ui-state merge-on-load", () => {
     });
     renderShell(bridge);
 
-    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+      expect(screen.getByTestId("tab-gone.md")).toBeTruthy();
+    });
     act(() => {
       bridge.emitWorkspaceActivity();
     });
@@ -5416,7 +5557,7 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
   });
 
-  // Codex's scenario: the pull brings a file BACK, and the listing that would
+  // Codex's scenario: the pull brings a file back, and the listing that would
   // have shown it is the one that failed. Closing on the pre-pull snapshot
   // would close a tab whose file exists.
   it("does not close on a pre-pull snapshot when the post-pull listing failed", async () => {
@@ -5433,8 +5574,17 @@ describe("ui-state merge-on-load", () => {
       folders: string[];
     }>();
     let issued = 0;
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["b.md", "pulled.md"], "b.md")),
+    // The subscriber count below pins the shell's listing refresh listener
+    // (notifications subscribes first). The Chats panel subscribes too, from
+    // a lazy chunk whose load time depends on whether an earlier test already
+    // imported it, so this stored state keeps the panel closed.
+    const bridge = holdHistory(
+      makeBridge(
+        Promise.resolve({
+          ...storedStateWithTabs(["b.md", "pulled.md"], "b.md"),
+          chatsVisible: false,
+        }),
+      ),
     );
     bridge.listWorkspaceFiles = vi.fn(() => {
       issued += 1;
@@ -5515,7 +5665,7 @@ describe("ui-state merge-on-load", () => {
     }>();
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["b.md", "gone.md"], "gone.md")),
     );
     // The listing is held so the close cannot happen before the navigation.
@@ -5559,7 +5709,7 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
   }, 20_000);
 
-  // The same invalidation from the other side: mutateWb is THE seam every
+  // The same invalidation from the other side: mutateWb is the seam every
   // user-driven transition routes through, so a file click has to cancel a
   // pending DM navigation. It incremented the pending request in place, and
   // since the navigation holds that very object, its isCurrent() compared the
@@ -5567,7 +5717,7 @@ describe("ui-state merge-on-load", () => {
   it("discards an in-flight DM navigation when the user opens a file", async () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
       nodes: [DM_GRAPH_NODE, { path: "a.md", title: "A", incoming: 0, outgoing: 0 }],
       edges: [],
@@ -5602,7 +5752,7 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
   }, 20_000);
 
-  // A chat thread opening in the PANEL moves no tab either, and it is the
+  // A chat thread opening in the panel moves no tab either, and it is the
   // destination change that conflicts most directly: the user chose another
   // conversation, so the DM they walked away from must not arrive as a tab on
   // top of it.
@@ -5617,7 +5767,7 @@ describe("ui-state merge-on-load", () => {
     };
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
       nodes: [DM_GRAPH_NODE, fileThreadNode],
       edges: [],
@@ -5651,7 +5801,7 @@ describe("ui-state merge-on-load", () => {
   }, 20_000);
 
   // The third seam of the same kind, and the reason the predicate now lives at
-  // the destination WRITE: with the Chats tab already active, moving to
+  // the destination write: with the Chats tab already active, moving to
   // another channel changes the chat destination while the active tab stays
   // put, so neither the tab check nor onChatsNav (which openChatsNavInTab
   // bypasses by writing the ref itself) can see it.
@@ -5672,7 +5822,7 @@ describe("ui-state merge-on-load", () => {
     const second = channelNode("thread-hiring", "hiring", "Hiring discussion");
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
       nodes: [DM_GRAPH_NODE, first, second],
       edges: [],
@@ -5727,12 +5877,12 @@ describe("ui-state merge-on-load", () => {
   }, 20_000);
 
   // The positive direction, and the reason it is not optional: every
-  // cancellation test above also passes when NOTHING ever lands, so a fix that
+  // cancellation test above also passes when nothing ever lands, so a fix that
   // cancelled the navigation the moment it started would read as green.
   it("lands a DM navigation that nothing interrupts", async () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
       nodes: [DM_GRAPH_NODE],
       edges: [],
@@ -5758,7 +5908,7 @@ describe("ui-state merge-on-load", () => {
     expect(await screen.findByTestId(`tab-${CHATS_TAB_PATH}`)).toBeTruthy();
   }, 20_000);
 
-  // Cancelling on EVERY workbench write would make this seam hostile: a user
+  // Cancelling on every workbench write would make this seam hostile: a user
   // who clicks a DM and then adjusts the sidebar would lose the click when the
   // final width commits — and the syncDms failure branch is isCurrent-gated
   // too, so nothing would surface. Only a destination change cancels.
@@ -5769,7 +5919,7 @@ describe("ui-state merge-on-load", () => {
     });
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
       nodes: [DM_GRAPH_NODE],
       edges: [],
@@ -5806,13 +5956,13 @@ describe("ui-state merge-on-load", () => {
     expect(await screen.findByTestId(`tab-${CHATS_TAB_PATH}`)).toBeTruthy();
   }, 20_000);
 
-  // A destination change inside the ACTIVE file moves no tab, so the check
+  // A destination change inside the active file moves no tab, so the check
   // above cannot see it — but the user did navigate, and a late DM would open
   // Chats over the line they just jumped to.
   it("discards an in-flight DM navigation when a search result moves within the active file", async () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
       nodes: [DM_GRAPH_NODE],
       edges: [],
@@ -5893,7 +6043,7 @@ describe("ui-state merge-on-load", () => {
     };
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
       nodes: [DM_GRAPH_NODE, channel],
       edges: [],
@@ -5921,7 +6071,7 @@ describe("ui-state merge-on-load", () => {
     );
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
 
-    // Command the SAME conversation again. Every check the seam has says
+    // Command the same conversation again. Every check the seam has says
     // nothing moved: same destination key, same active tab, same sidebar view.
     await user.click(
       (await screen.findAllByTestId("graph-file-row")).find(
@@ -5952,7 +6102,7 @@ describe("ui-state merge-on-load", () => {
     const sessionListeners: Array<
       (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void
     > = [];
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH),
         chatsVisible: false,
@@ -6027,7 +6177,7 @@ describe("ui-state merge-on-load", () => {
   // Chat mocks the Chats PAGE needs to load its feed and a thread. The base
   // engine bridge only stubs the navigator's overview surface.
   function chatsPageBridge(uiState: WorkspaceUiState) {
-    const bridge = makeEngineBridge(Promise.resolve(uiState));
+    const bridge = makeBridge(Promise.resolve(uiState));
     const syncAnswers: Array<(value: SyncDmsResult) => void> = [];
     bridge.syncDms = vi.fn(
       () =>
@@ -6122,7 +6272,7 @@ describe("ui-state merge-on-load", () => {
     chatsVisible: false,
   };
 
-  // #552: the Chats PAGE's feed/backlink click is a COMMAND. It must cancel a
+  // The Chats PAGE's feed/backlink click is a COMMAND. It must cancel a
   // pending DM lookup synchronously in the click — the passive nav report is
   // an effect that flushes after the microtask queue, so a DM answer landing
   // in the same tick as the click would pass its isCurrent() check first and
@@ -6167,13 +6317,13 @@ describe("ui-state merge-on-load", () => {
     // The sharp assertion: the destination views alone cannot distinguish a
     // won race from a lost one — chatsNav.current is last-write-wins, so the
     // late report can paper over the DM destination before the remount seed
-    // reads it. A DM answer that WINS calls openChatsNavInTab, which bumps
+    // reads it. A DM answer that wins calls openChatsNavInTab, which bumps
     // chatsPageRevision and remounts the page: a second overview load. The
     // cancel won only if no such load happened.
     expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore);
   }, 20_000);
 
-  // The same race through the BACK button: every BackHeader and the keyboard
+  // The same race through the back button: every BackHeader and the keyboard
   // shortcut route through goBack, which must issue the same synchronous
   // command — a DM answer queued in the tick of the Back click would
   // otherwise pass its isCurrent() check and remount the DM over the channel
@@ -6294,7 +6444,7 @@ describe("ui-state merge-on-load", () => {
     expect(screen.queryByTestId("chats-dm-view")).toBeNull();
   }, 20_000);
 
-  // #591: the in-thread reply-parent jump. It is the one command in the page
+  // The in-thread reply-parent jump. It is the one command in the page
   // that writes NO navigation — it only scrolls — so every other seam here
   // (the destination write, the remount, the nav report) sees nothing move.
   // A DM lookup that answers afterwards would still replace the page with the
@@ -6371,7 +6521,7 @@ describe("ui-state merge-on-load", () => {
     expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore);
   }, 20_000);
 
-  // The surviving mutant from #552's review: openFile's heading-target
+  // The surviving mutant from the review: openFile's heading-target
   // invalidation. A heading jump into the ALREADY-ACTIVE file moves no tab,
   // so mutateWb's transition check cannot see it — only openFile's own
   // `if (target)` branch cancels the pending DM.
@@ -6387,7 +6537,7 @@ describe("ui-state merge-on-load", () => {
     };
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs(["a.md"], "a.md"),
         chatsVisible: false,
@@ -6411,7 +6561,7 @@ describe("ui-state merge-on-load", () => {
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
 
-    // Jump to a heading in the file that is ALREADY the active tab: no tab
+    // Jump to a heading in the file that is already the active tab: no tab
     // moves, only the in-document destination changes.
     await user.click(
       (await screen.findAllByTestId("graph-file-row")).find(
@@ -6545,7 +6695,7 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getAllByText("live.md").length).toBeGreaterThan(0);
   });
 
-  // Either load can win. When the listing lands FIRST there is nothing
+  // Either load can win. When the listing lands first there is nothing
   // restored to judge yet, so the restore itself has to re-run the check —
   // otherwise the missing tab survives and gets written back out.
   it("prunes a restored tab when the file listing arrives before the stored state", async () => {
@@ -6615,16 +6765,13 @@ describe("ui-state merge-on-load", () => {
     expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
     expect((await screen.findByTestId("side-panel")).style.width).toBe("320px");
-    // chatsVisible is stored true, but this workspace is engine-off: the
-    // Chats panel (and its titlebar toggle) must not exist at all.
-    expect(screen.queryByTestId("chats-panel")).toBeNull();
-    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
+    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
   });
 });
 
-// #874: a data store the engine refuses gets a real recovery, not a dead
+// A data store the engine refuses gets a real recovery, not a dead
 // generic error. The notice explains what was found; the rebuild is explicit
-// (a confirmed click), states the destination BEFORE anything moves, and the
+// (a confirmed click), states the destination before anything moves, and the
 // success copy names the reverse path.
 describe("engine store recovery", () => {
   const refusedStatus = {
@@ -6714,7 +6861,7 @@ describe("engine store recovery", () => {
       }),
     ).toBe(dialog);
 
-    // The user learns what moves, where it goes, and what does NOT come
+    // The user learns what moves, where it goes, and what does not come
     // back, before anything moves.
     expect(dialog.textContent).toContain(".dohc/engine/pre-v2-backup");
     expect(dialog.textContent).toContain(
@@ -6776,7 +6923,7 @@ describe("engine store recovery", () => {
     async () => {
       const rebuild = deferred<RebuildEngineStoreResult>();
       let liveSessionsGeneration = 0;
-      const bridge = makeEngineBridge(
+      const bridge = makeBridge(
         Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
       );
       bridge.openWorkspace = vi.fn(async () => ({
@@ -6862,7 +7009,7 @@ describe("engine store recovery", () => {
   it("remounts live editors in every shell when one shell rebuilds the workspace", async () => {
     const rebuild = deferred<RebuildEngineStoreResult>();
     let liveSessionsGeneration = 0;
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.openWorkspace = vi.fn(async () => ({
@@ -6994,7 +7141,7 @@ describe("engine store recovery", () => {
       ...SYNC_STATUS,
       liveSessionsGeneration: 5,
     };
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.openWorkspace = vi.fn(async () => currentStatus);
@@ -7057,7 +7204,7 @@ describe("engine store recovery", () => {
   });
 
   it("keeps a mounted live document on its current session when the rebuild rejects", async () => {
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.openWorkspace = vi.fn(async () => refusedStatus);
@@ -7330,9 +7477,9 @@ describe("workspace shell errors", () => {
   });
 });
 
-// Spurious file-open-start marks (codex P2): a no-op click on the already-
+// Spurious file-open-start marks: a no-op click on the already-
 // active row used to mark anyway — no remount/measure follows, so the stale
-// mark corrupts the NEXT open's latency measure.
+// mark corrupts the next open's latency measure.
 describe("file-open-start marking", () => {
   it("marks the source fallback and target after a delayed move creates a group", async () => {
     const save = deferred<{ status: "written"; contentHash: string }>();
@@ -7632,7 +7779,7 @@ describe("file-open-start marking", () => {
     mark.mockRestore();
   });
 
-  it("marks on a real open, but NOT on a no-op click on the already-active file", async () => {
+  it("marks on a real open, but not on a no-op click on the already-active file", async () => {
     const mark = vi.spyOn(rendererMarks, "mark");
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
@@ -7737,7 +7884,7 @@ async function openDirtyMarkdown(
   editor: HTMLElement;
 }> {
   const user = userEvent.setup();
-  renderShell(bridge);
+  renderShell(holdHistory(bridge));
   const row = (await screen.findAllByTestId("tree-row")).find(
     (candidate) => candidate.dataset.path === "a.md",
   )!;
@@ -7947,6 +8094,7 @@ describe("dirty tab close boundaries", () => {
         activeEditorGroup: "left",
       }),
     );
+    holdHistory(bridge);
     bridge.writeWorkspaceText = vi.fn(
       async (payload: { relativePath: string }) => {
         if (firstPath === null) {
@@ -8093,127 +8241,13 @@ describe("active file sharing", () => {
   });
 });
 
-// The banner states the level's real rights (#646). PR2 opens chat at comment
-// and edit; edit's document writes land in PR3, so edit reads the comment
-// sentence until then — a banner promising editing now would be a lie.
+// The banner distinguishes document edits submitted for acceptance from
+// read-only access and conversations that continue in the browser.
 // Removing a mount reprojects path-keyed UI state only when the folder
 // actually went. Record-only cleanup leaves the files exactly where they
 // were, so their tabs, pins and drafts must survive it.
-// The closing line a manual refresh leaves behind. Damage has to reach it:
-// reporting damage in a separate notice meant the summary replaced it, and
-// the user was left with "Shares refreshed" — the wrong half.
-describe("share refresh summary", () => {
-  const row = (over: Partial<{ label: string; status: string; changedPaths: number }>) => ({
-    label: "alex",
-    status: "updated" as const,
-    changedPaths: 0,
-    ...over,
-  }) as Parameters<typeof shareRefreshSummary>[0][number];
-
-  it("states damage and how to fix it, alongside the refresh result", () => {
-    const summary = shareRefreshSummary([
-      row({ label: "kim", changedPaths: 2 }),
-      row({ label: "alex", status: "damaged" }),
-    ]);
-    expect(summary).toContain("Shares refreshed — 2 files updated.");
-    expect(
-      summary,
-      "MUTATION: the summary replaces the damage notice and the fix is lost",
-    ).toContain("dohc can't read what alex grants. Remove it and add the share again.");
-    expect(summary).not.toContain("grant.");
-  });
-
-  it("says nothing about damage when every mount is healthy", () => {
-    const summary = shareRefreshSummary([row({ changedPaths: 1 })]);
-    expect(summary).toBe("Shares refreshed — 1 file updated.");
-    expect(summary).not.toContain("can't read");
-  });
-
-  it("keeps the ended report when damage is present too", () => {
-    const summary = shareRefreshSummary([
-      row({ label: "kim", status: "ended" }),
-      row({ label: "alex", status: "damaged" }),
-      row({ label: "sam", status: "damaged" }),
-    ]);
-    expect(summary).toContain("kim ended");
-    // Plural subjects take the plural verb; the singular case keeps "grants".
-    expect(
-      summary,
-      "MUTATION: two shares reading as one — \"what alex, sam grants\"",
-    ).toContain("what alex, sam grant. Remove them and add those shares again.");
-  });
-
-  it("says so when there is nothing to refresh", () => {
-    expect(shareRefreshSummary([])).toBe("No shares are added to this workspace.");
-  });
-});
-
-describe("share unmount projection", () => {
-  it("reprojects like a folder delete when the folder went", () => {
-    expect(
-      shareUnmountProjection({
-        shareId: "share-1",
-        label: "alex",
-        folderLeft: false,
-      }),
-    ).toEqual([
-      {
-        id: "unmount-share-1",
-        kind: "delete-folder",
-        path: "shared-with-me/alex",
-      },
-    ]);
-  });
-
-  // Both removal surfaces funnel here. The Explorer records the share id
-  // itself; Settings reports it through the files-changed callback. Either
-  // way the reload must not delete state for files still on disk.
-  it("skips a vanished mount whose folder stayed, whichever surface removed it", () => {
-    const previous = [
-      { shareId: "s-gone", label: "alex" },
-      { shareId: "s-left", label: "sam" },
-      { shareId: "s-stays", label: "kim" },
-    ];
-    const next = [{ shareId: "s-stays" }];
-    const foldersLeftBehind = new Set(["s-left"]);
-
-    expect(
-      goneMountProjections({ previous, next, foldersLeftBehind }),
-      "MUTATION: projecting a delete for a mount whose folder is still there",
-    ).toEqual([
-      {
-        id: "unmount-s-gone",
-        kind: "delete-folder",
-        path: "shared-with-me/alex",
-      },
-    ]);
-    // Consumed, so an unrelated later reload cannot read a stale exemption.
-    expect(foldersLeftBehind.has("s-left")).toBe(false);
-  });
-
-  it("projects nothing when nothing vanished", () => {
-    expect(
-      goneMountProjections({
-        previous: [{ shareId: "s-1", label: "alex" }],
-        next: [{ shareId: "s-1" }],
-        foldersLeftBehind: new Set(),
-      }),
-    ).toEqual([]);
-  });
-
-  it("projects nothing when the folder stayed", () => {
-    expect(
-      shareUnmountProjection({
-        shareId: "share-1",
-        label: "alex",
-        folderLeft: true,
-      }),
-      "MUTATION: deleting path-keyed state for files that are still on disk",
-    ).toEqual([]);
-  });
-});
 describe("shared view banner", () => {
-  it("does not offer site creation in a received share workspace", async () => {
+  it("does not offer app creation in a received share workspace", async () => {
     const user = userEvent.setup();
     const bridge = Object.assign(makeShareBridge(), {
       listSites: vi.fn(async () => ({ sites: [] })),
@@ -8224,10 +8258,10 @@ describe("shared view banner", () => {
 
     expect(
       await screen.findByText(
-        "This shared view cannot create a site. Ask the workspace owner to add one.",
+        "This shared view cannot create an app. Ask the workspace owner to add one.",
       ),
     ).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Create site" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create app" })).toBeNull();
     expect(bridge.createWorkspaceFolder).not.toHaveBeenCalled();
     expect(bridge.createWorkspaceFile).not.toHaveBeenCalled();
   });
@@ -8292,14 +8326,12 @@ describe("shared view banner", () => {
     await screen.findByTestId("linked-chat-thread");
     expect(
       screen.queryByTestId("linked-chat-composer"),
-      "MUTATION: relay append authority restored a received-share composer",
+      "relay append authority restored a received-share composer",
     ).toBeNull();
     expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
       "Chats are read-only in this shared view.",
     );
-    // MUTATION: giving comment the edit sentence would promise a write-back
-    // lane a comment grant does not carry.
-    expect(banner.textContent).not.toContain("send your changes");
+    expect(banner.textContent, "giving comment the edit sentence would promise a write-back lane a comment grant does not carry.").not.toContain("send your changes");
   });
 
   it("keeps dependent Comment generic chats read-only and sends comments back to the browser", async () => {
@@ -8361,7 +8393,7 @@ describe("shared view banner", () => {
     expect(screen.queryByTestId("linked-chat-composer")).toBeNull();
   });
 
-  // Edit gets its own sentence (#646 PR3a). It states BOTH halves: the
+  // Edit gets its own sentence. It states both halves: the
   // recipient edits, and the granter decides.
   it("tells an edit recipient to edit and send changes for the granter to accept", async () => {
     const bridge = makeShareBridge();
@@ -8378,9 +8410,7 @@ describe("shared view banner", () => {
     expect(banner.textContent).toContain(
       "Shared view from sam@dohc.test. Edit these files and send your changes for sam@dohc.test to accept.",
     );
-    // MUTATION: falling through to the PR2 sentence tells an edit recipient
-    // they cannot edit, which is the exact lie PR3a removes.
-    expect(banner.textContent).not.toContain("not edit them");
+    expect(banner.textContent, "falling through to the PR2 sentence tells an edit recipient they cannot edit, which is the exact lie PR3a removes.").not.toContain("not edit them");
   });
 
   it("names an unknown granter the way every other share string does", async () => {
@@ -8414,12 +8444,12 @@ describe("shared view banner", () => {
     );
     expect(
       screen.queryByTestId("share-changes-send"),
-      "MUTATION: an ended share cannot carry changes anywhere",
+      "an ended share cannot carry changes anywhere",
     ).toBeNull();
   });
 });
 
-// The editor's read-only stance is the level, not the marker (#646 PR3a).
+// The editor's read-only stance is the level, not the marker.
 // The toggle is disabled exactly when the editor is read-only, so it is the
 // prop's own behaviour rather than a second reading of the level.
 describe("shared view editing", () => {
@@ -8458,7 +8488,7 @@ describe("shared view editing", () => {
     it(`keeps the editor read-only for ${name}`, async () => {
       expect(
         await editToggleDisabled(shareView),
-        "MUTATION: reading the level generously opens an editor the grant does not open",
+        "reading the level generously opens an editor the grant does not open",
       ).toBe(true);
     });
   }
@@ -8474,7 +8504,7 @@ describe("shared view editing", () => {
         access: "edit",
         damaged: true,
       }),
-      "MUTATION: dropping the damaged test acts on a level dohc could not read",
+      "dropping the damaged test acts on a level dohc could not read",
     ).toBe(true);
   });
 
@@ -8485,7 +8515,7 @@ describe("shared view editing", () => {
         granterEmail: "sam@dohc.test",
         access: "edit",
       }),
-      "MUTATION: an unconditional shareView read-only keeps edit locked out",
+      "an unconditional shareView read-only keeps edit locked out",
     ).toBe(false);
   });
 
@@ -8511,7 +8541,7 @@ describe("shared view editing", () => {
   });
 });
 
-// Sending changes back (#646 PR3a): the recipient's half of the lane.
+// Sending changes back: the recipient's half of the lane.
 describe("shared view send changes", () => {
   const EDIT_SHARE: Workspace = {
     ...SHARE_VIEW,
@@ -8542,7 +8572,7 @@ describe("shared view send changes", () => {
       await screen.findByTestId("shared-view-banner");
       expect(
         screen.queryByTestId("share-changes-send"),
-        "MUTATION: offering a send control the grant does not carry",
+        "offering a send control the grant does not carry",
       ).toBeNull();
     });
   }
@@ -8571,7 +8601,7 @@ describe("shared view send changes", () => {
     const state = await screen.findByTestId("share-changes-state");
     expect(
       state.dataset.state,
-      "MUTATION: gating the sent state on the level hides changes the recipient can still take back",
+      "gating the sent state on the level hides changes the recipient can still take back",
     ).toBe("open");
     expect(screen.queryByTestId("share-changes-send")).toBeNull();
 
@@ -8584,7 +8614,7 @@ describe("shared view send changes", () => {
     );
   });
 
-  // What a submit did NOT take. Both are things the recipient would otherwise
+  // What a submit did not take. Both are things the recipient would otherwise
   // discover by their work simply not arriving.
   it("states the files a submit left outside the share", async () => {
     const user = userEvent.setup();
@@ -8602,7 +8632,7 @@ describe("shared view send changes", () => {
     const line = await screen.findByTestId("share-changes-skipped");
     expect(
       line.textContent,
-      "MUTATION: a silent drop is work the recipient believes they sent",
+      "a silent drop is work the recipient believes they sent",
     ).toBe("2 files weren't sent — they're not part of this share.");
   });
 
@@ -8621,7 +8651,7 @@ describe("shared view send changes", () => {
     await waitFor(() =>
       expect(
         screen.getByTestId("share-changes-send").hasAttribute("disabled"),
-        "MUTATION: comparing the pre-reload token leaves Send stuck on Sending…",
+        "comparing the pre-reload token leaves Send stuck on Sending…",
       ).toBe(false),
     );
     expect(screen.getByTestId("share-changes-send").textContent).toContain("Send changes");
@@ -8747,7 +8777,7 @@ describe("shared view send changes", () => {
     await waitFor(() =>
       expect(
         screen.queryByTestId("share-changes-skipped"),
-        "MUTATION: a withdrawn submission keeps describing what it skipped",
+        "a withdrawn submission keeps describing what it skipped",
       ).toBeNull(),
     );
   });
@@ -8771,7 +8801,7 @@ describe("shared view send changes", () => {
     const line = await screen.findByTestId("share-changes-skipped");
     expect(
       line.textContent,
-      "MUTATION: an either/or line hides the ~97 changes still queued",
+      "an either/or line hides the ~97 changes still queued",
     ).toBe(
       "3 files weren't sent — they're not part of this share. " +
         "More changes are waiting. Send again to send the rest.",
@@ -8805,7 +8835,7 @@ describe("shared view send changes", () => {
     await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalled());
     expect(
       screen.queryByTestId("share-changes-skipped"),
-      "MUTATION: a warning on every ordinary submit is a warning nobody reads",
+      "a warning on every ordinary submit is a warning nobody reads",
     ).toBeNull();
   });
 
@@ -8905,7 +8935,7 @@ describe("shared view send changes", () => {
       expect(row.textContent, state).toContain(copy);
       expect(
         screen.queryByTestId("share-changes-withdraw"),
-        "MUTATION: offering Withdraw for a submission the granter already settled",
+        "offering Withdraw for a submission the granter already settled",
       ).toBeNull();
       // The declined Next works on this surface: the send control is still here.
       expect(screen.queryByTestId("share-changes-send")).not.toBeNull();
@@ -8952,7 +8982,7 @@ describe("share changes review", () => {
     expect(notice.textContent).toContain("friend@dohc.test sent you changes");
     expect(notice.textContent).toContain("Review them to choose what to keep.");
 
-    // The notice OPENS the review. What the review then decides is driven in
+    // The notice opens the review. What the review then decides is driven in
     // ProposalReviewDialog.test.tsx, against the same dialog.
     await user.click(within(notice).getByRole("button", { name: "Review" }));
     await screen.findByTestId("proposal-review-dialog");
@@ -8967,7 +8997,7 @@ describe("share changes review", () => {
     await screen.findByTestId("notice-center");
     expect(
       screen.queryByTestId("notice-share-changes-proposal-1"),
-      "MUTATION: announcing a review nobody submitted",
+      "announcing a review nobody submitted",
     ).toBeNull();
   });
 
@@ -8978,7 +9008,7 @@ describe("share changes review", () => {
     await screen.findByTestId("shared-view-banner");
     expect(
       bridge.listShareProposals,
-      "MUTATION: asking main a question it refuses, and surfacing the refusal",
+      "asking main a question it refuses, and surfacing the refusal",
     ).not.toHaveBeenCalled();
   });
 });
@@ -9068,14 +9098,14 @@ describe("automation failure notices", () => {
     });
     expect(
       bridge.listAutomationFailures.mock.calls.length,
-      "MUTATION: another workspace's failures repainting this one",
+      "another workspace's failures repainting this one",
     ).toBe(reads);
   });
 });
 
-// A share view whose stored grant cannot be read keeps its RESTRICTIVE
-// marker (#646). Dropping it would present someone else's files as an
-// ordinary writable workspace — damage failing OPEN, which is the one
+// A share view whose stored grant cannot be read keeps its restrictive
+// marker. Dropping it would present someone else's files as an
+// ordinary writable workspace — damage failing open, which is the one
 // direction this must never fail in.
 describe("shared view with an unreadable grant", () => {
   const damaged = {
@@ -9099,19 +9129,19 @@ describe("shared view with an unreadable grant", () => {
     expect(banner.textContent).not.toContain("read-only. Ask");
   });
 
-  // The chat half of the same stance (#646 PR2). A grant that names no
+  // The chat half of the same stance. A grant that names no
   // readable level grants no writes: the panel opens read-only, exactly as a
-  // `view` share does. Asking whether the level is NOT `view` would answer
+  // `view` share does. Asking whether the level is not `view` would answer
   // "writable" for a level nobody can read.
   it("opens chat read-only, because an unreadable grant grants no writes", async () => {
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge, damaged);
 
-    await settleEngineOnRead(bridge);
+    await settleShareView();
     await screen.findByTestId("chats-panel");
     expect(
       (await screen.findByTestId("linked-chat-readonly-note")).textContent,
-      "MUTATION: an unreadable level must not open the composer",
+      "an unreadable level must not open the composer",
     ).toBe("Chats are read-only in this shared view.");
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
   });
@@ -9125,14 +9155,14 @@ describe("shared view with an unreadable grant", () => {
     await screen.findByTestId("shared-view-banner");
     expect(
       screen.queryByTestId("shared-view-refresh"),
-      "MUTATION: a share with no readable grant must not offer a refresh",
+      "a share with no readable grant must not offer a refresh",
     ).toBeNull();
     expect(bridge.refreshSharedView).not.toHaveBeenCalled();
   });
 });
 
 describe("content search", () => {
-  // Journey 1 (#337): queries arrived with their leading characters missing
+  // Journey 1: queries arrived with their leading characters missing
   // ("MBERDRAFT-8831" for "EMBERDRAFT-8831"). The panel opened, but the input
   // only mounted when a lazy chunk resolved, so everything typed in that gap
   // went to the activity-bar button the user had just clicked.
@@ -9256,7 +9286,7 @@ describe("content search", () => {
     });
   });
 
-  // #476: the results outlive the panel, so the criteria that produced them
+  // The results outlive the panel, so the criteria that produced them
   // must too. A reopened empty input above surviving results named a query
   // the user never sees.
   it("reopens the panel showing the criteria its results belong to", async () => {
@@ -9327,7 +9357,7 @@ describe("content search", () => {
     expect(screen.getByTestId("search-exclude")).toBeTruthy();
   });
 
-  // Plugins moved out of the settings dialog and onto the rail (#791 round 9).
+  // Plugins moved out of the settings dialog and onto the rail.
   it("opens the plugin browser from the Plugins rail item", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
@@ -9655,7 +9685,7 @@ describe("explorer destructive change flush boundaries", () => {
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toBe(lateDraft),
     );
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Removing the tab awaited draft settlement; recovery now holds the late text.
     expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2);
   });
 
@@ -10067,90 +10097,14 @@ describe("graph view", () => {
 });
 
 describe("history page", () => {
-  it("opens history as a full editor tab showing the history-off placeholder for an opted-out workspace", async () => {
+  // The recorder failed to build. Without the status override the shell
+  // mounts the engine timeline, whose every listEngineMoments call can only
+  // error. Main's status gates the surface, and the engine fetch must never
+  // fire.
+  it("lets the status failure gate the history surface", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    // Main's status says the opt-out happened (#542): the placeholder's
-    // Settings copy is earned by that status, not by the renderer's own read.
-    const offStatus = { ...SYNC_STATUS, historyRecordingOff: true };
-    bridge.openWorkspace = vi.fn(async () => offStatus);
-    bridge.getSyncStatus = vi.fn(async () => offStatus);
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(screen.getByTestId("activity-history"));
-    await user.click(await screen.findByTestId("history-open-tab"));
-
-    const historyTab = await screen.findByTestId("tab-dohc://history");
-    expect(historyTab.dataset.active).toBe("true");
-    const page = await screen.findByTestId("history-page");
-    // Retirement Phase C: an opted-out workspace has no history source; the
-    // page says so instead of rendering an empty timeline.
-    const placeholder = within(page).getByTestId("history-off-placeholder");
-    await waitFor(() => {
-      expect(placeholder.textContent).toContain("History is off for this workspace");
-      expect(placeholder.textContent).toContain("turned off in Settings");
-    });
-  });
-
-  // The Next has to be the one that works (#687). Main decides the recorder
-  // once per workspace per app session — `openWorkspaceActivity` retains every
-  // workspace it opens and `workspaceActivity.open` no-ops for one it already
-  // watches — so leaving the workspace and coming back re-reads the flag
-  // nowhere. Same instruction the Chats surface gives, for the same cause.
-  it("tells the user to restart, not to reopen the workspace", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    const offStatus = { ...SYNC_STATUS, historyRecordingOff: true };
-    bridge.openWorkspace = vi.fn(async () => offStatus);
-    bridge.getSyncStatus = vi.fn(async () => offStatus);
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(screen.getByTestId("activity-history"));
-    const placeholder = await screen.findByTestId("history-off-placeholder");
-    await waitFor(() =>
-      expect(placeholder.textContent).toContain(
-        "Turn it on. Then restart dohc to record history.",
-      ),
-    );
-    expect(placeholder.textContent).not.toContain("reopen");
-  });
-
-  // #542: the renderer's own settings read failed, and main has NOT said
-  // recording is off — it may be recording right now. The placeholder must
-  // not blame Settings, and must not promise "not recorded": either would be
-  // a cause the renderer's silently-caught read invented.
-  it("claims neither a Settings cause nor 'not recorded' when its own read failed", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getWorkspaceSettings = vi.fn(async () => {
-      throw new Error("transient read failure");
-    });
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(screen.getByTestId("activity-history"));
-    const placeholder = await screen.findByTestId("history-off-placeholder");
-    expect(placeholder.textContent).toContain("History is unavailable");
-    expect(placeholder.textContent).toContain(
-      "dohc could not confirm whether this workspace records history.",
-    );
-    // The Next this state owes (#601 codex P2): the one action that re-runs
-    // both reads — no lighter re-read is wired on this surface.
-    expect(placeholder.textContent).toContain("Restart dohc to try again.");
-    // The false cause and the false privacy assurance this pins against.
-    expect(placeholder.textContent).not.toContain("Settings");
-    expect(placeholder.textContent).not.toContain("not being recorded");
-  });
-
-  // The masked vector (#601 codex P2): the recorder failed to build on an
-  // engine-ENABLED workspace. The renderer's own read still says engine-on,
-  // and without the status override the shell mounts the engine timeline —
-  // whose every listEngineMoments call can only error. Main's status must
-  // override the renderer capability, and the engine fetch must never fire.
-  it("lets the status failure override the renderer's engine-on read", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
     const failedStatus = {
       ...SYNC_STATUS,
-      historyRecordingOff: true,
       historyRecordingUnavailable: true,
     };
     bridge.openWorkspace = vi.fn(async () => failedStatus);
@@ -10158,10 +10112,8 @@ describe("history page", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
-    // Prove the renderer's read really said engine-ON before anything is
-    // asserted: this engine-only control exists only once the settings read
-    // resolved the flag true. Without this the pins below pass vacuously in
-    // the pre-read window where engineEnabled is still false.
+    // Wait for the shell's engine surfaces to mount before anything is
+    // asserted, so the pins below cannot pass vacuously.
     await screen.findByTestId("titlebar-chats-sidebar");
 
     await user.click(screen.getByTestId("activity-history"));
@@ -10169,11 +10121,10 @@ describe("history page", () => {
     expect(placeholder.textContent).toContain(
       "dohc could not start recording history for this workspace.",
     );
-    expect(placeholder.textContent).not.toContain("turned off in Settings");
 
     // Activity pushes take the no-engine refresh path too — the pin that
     // kills the recurring listEngineMoments error loop. The residual this
-    // used to name — one engine fetch firing before the FIRST status lands —
+    // used to name — one engine fetch firing before the first status lands —
     // is closed by the test below.
     const statusCalls = bridge.getSyncStatus.mock.calls.length;
     act(() => {
@@ -10186,7 +10137,7 @@ describe("history page", () => {
   });
 
   it("never asks a refused store for engine moments", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     const refusedStatus = {
       ...SYNC_STATUS,
       historyCaptureFailed: true as const,
@@ -10207,8 +10158,8 @@ describe("history page", () => {
     expect(bridge.listEngineMoments).not.toHaveBeenCalled();
   });
 
-  // #637 item 2: the window before main's capture decision. The refresh runs
-  // on ANY workspace's activity event, so it is not bounded by this
+  // The window before main's capture decision. The refresh runs
+  // on any workspace's activity event, so it is not bounded by this
   // workspace's open resolving — and in that window `statusSaysNoRecorder`
   // reads a missing or default status as a recorder, so the engine branch
   // asked for moments main was about to refuse. The rail could not state the
@@ -10216,11 +10167,10 @@ describe("history page", () => {
   it("asks for no history before main's capture decision lands", async () => {
     const FAILED_HISTORY_STATUS = {
       ...SYNC_STATUS,
-      historyRecordingOff: true,
       historyRecordingUnavailable: true,
     };
     const decision = deferred<typeof FAILED_HISTORY_STATUS>();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.openWorkspace = vi.fn(() => decision.promise);
     // Main's answer while the build runs: the entry exists, and its recorder
     // fields are still the defaults it registered before awaiting the build.
@@ -10246,7 +10196,7 @@ describe("history page", () => {
     });
     expect(bridge.listEngineMoments).not.toHaveBeenCalled();
     // And the rail claims nothing while it knows nothing: a placeholder here
-    // would name a cause main has not established (#542).
+    // would name a cause main has not established.
     expect(screen.queryByTestId("history-off-placeholder")).toBeNull();
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
 
@@ -10267,7 +10217,7 @@ describe("history page", () => {
   // load. Without this, holding the rail in its load state forever keeps the
   // test above green.
   it("loads history once main's capture decision says a recorder exists", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -10276,13 +10226,12 @@ describe("history page", () => {
     expect(screen.queryByTestId("history-off-placeholder")).toBeNull();
   });
 
-  // #505 on this surface: the recorder failed to build. Nothing records, but
-  // the cause is a failure — the opt-out's Settings copy would be false.
+  // The recorder failed to build. Nothing records, and the cause is a
+  // failure.
   it("names the failure, not Settings, when main says the recorder could not be built", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const failedStatus = {
       ...SYNC_STATUS,
-      historyRecordingOff: true,
       historyRecordingUnavailable: true,
     };
     bridge.openWorkspace = vi.fn(async () => failedStatus);
@@ -10297,36 +10246,12 @@ describe("history page", () => {
         "dohc could not start recording history for this workspace.",
       ),
     );
-    expect(placeholder.textContent).not.toContain("turned off in Settings");
   });
 
-  // #483 on this surface: an unreadable settings file is the cause main
-  // established, and its warning already names the file and the fix.
-  it("names the unreadable settings file when that read is the cause", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    const warnedStatus = {
-      ...SYNC_STATUS,
-      historyRecordingOff: true,
-      settingsWarning:
-        "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.",
-    };
-    bridge.openWorkspace = vi.fn(async () => warnedStatus);
-    bridge.getSyncStatus = vi.fn(async () => warnedStatus);
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(screen.getByTestId("activity-history"));
-    const placeholder = await screen.findByTestId("history-off-placeholder");
-    await waitFor(() =>
-      expect(placeholder.textContent).toContain("/ws/.dohc/settings.local.json"),
-    );
-    expect(placeholder.textContent).not.toContain("turned off in Settings");
-  });
-
-  // #540's class on this surface: a shared view records no history BY
-  // DESIGN — a capability, not an opt-out, so no Settings blame. The status
-  // is the one main REALLY produces for a shared view (capture === null sets
-  // historyRecordingOff, and the decision carries historyShareView): with a
+  // the class on this surface: a shared view records no history BY
+  // DESIGN — a capability, not a failure, so no Settings blame. The status
+  // is the one main really produces for a shared view (the decision carries
+  // historyShareView): with a
   // causeless fixture the share branch would be reached through a status no
   // real share view has, and demoting it below the status checks — the #540
   // bug reborn as Settings copy — would survive this suite.
@@ -10334,7 +10259,6 @@ describe("history page", () => {
     const bridge = makeBridge(Promise.resolve(null));
     const shareStatus = {
       ...SYNC_STATUS,
-      historyRecordingOff: true,
       historyShareView: true,
     };
     bridge.openWorkspace = vi.fn(async () => shareStatus);
@@ -10363,11 +10287,10 @@ describe("history page", () => {
   // capture, so every engine call can only error. The surface must state
   // the capability instead, and must never ask main for engine moments.
   it("gives a shared view the capability truth and never asks for engine moments", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     // The status a real share view carries (capture === null, share cause).
     const shareStatus = {
       ...SYNC_STATUS,
-      historyRecordingOff: true,
       historyShareView: true,
     };
     bridge.openWorkspace = vi.fn(async () => shareStatus);
@@ -10384,7 +10307,7 @@ describe("history page", () => {
 
     await user.click(screen.getByTestId("activity-history"));
     const placeholder = await screen.findByTestId("history-off-placeholder");
-    // The empty-state recipe (copy.md): ONE text-sm text-muted line carrying
+    // The empty-state recipe (copy.md): one text-sm text-muted line carrying
     // the state and the Next together.
     expect(placeholder.textContent).toContain(
       "A shared view records no history. Refresh the shared view to get the latest shared changes.",
@@ -10396,8 +10319,8 @@ describe("history page", () => {
     // The Next works on this surface: the share banner's Refresh control,
     // pinned to exist alongside the instruction that names it.
     expect(screen.getByTestId("shared-view-refresh")).toBeTruthy();
-    // The false cause this pins against: the opt-out's Settings copy, about
-    // a toggle nobody touched.
+    // The false cause this pins against: a Settings copy about a toggle
+    // nobody touched.
     expect(placeholder.textContent).not.toContain("Settings");
 
     // Activity pushes take the no-engine refresh path too — this is the pin
@@ -10413,11 +10336,10 @@ describe("history page", () => {
   // The ended share has no Refresh control, so its placeholder must not
   // instruct one — the false-instruction class this lane exists to kill.
   it("an ended share's placeholder does not name the Refresh it no longer has", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     // The status a real share view carries (capture === null, share cause).
     const shareStatus = {
       ...SYNC_STATUS,
-      historyRecordingOff: true,
       historyShareView: true,
     };
     bridge.openWorkspace = vi.fn(async () => shareStatus);
@@ -10474,7 +10396,7 @@ describe("history page", () => {
 
   it("persists a moment diff opened for a valid multibyte file path", async () => {
     const filePath = `目录/${"界".repeat(500)}.md`;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(async () =>
       historyPage([{ ...historyMoment("m-1", "Wrote the file"), path: filePath }]),
     );
@@ -10484,7 +10406,7 @@ describe("history page", () => {
     });
     const user = userEvent.setup();
     renderShell(bridge);
-    await settleEngineOnRead(bridge);
+    await settleShareView();
 
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-moment-open"));
@@ -10507,7 +10429,7 @@ describe("history page", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       let issued = 0;
-      const bridge = makeEngineBridge(Promise.resolve(null));
+      const bridge = makeBridge(Promise.resolve(null));
       bridge.listEngineMoments = vi.fn(async (): Promise<ListEngineMomentsResponse> => {
         issued += 1;
         return issued === 1
@@ -10539,7 +10461,7 @@ describe("history page", () => {
   it("stops retrying an updating history and leaves the retry inline", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
-      const bridge = makeEngineBridge(Promise.resolve(null));
+      const bridge = makeBridge(Promise.resolve(null));
       bridge.listEngineMoments = vi.fn(
         async (): Promise<ListEngineMomentsResponse> => ({ status: "updating" }),
       );
@@ -10561,14 +10483,14 @@ describe("history page", () => {
   });
 
   it("shows the protected truncation marker from the history page", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(async () => ({
       ...historyPage([historyMoment("m-1", "Wrote the plan")]),
       protectedTruncated: true,
     }));
     const user = userEvent.setup();
     renderShell(bridge);
-    await settleEngineOnRead(bridge);
+    await settleShareView();
 
     await user.click(screen.getByTestId("activity-history"));
 
@@ -10579,7 +10501,7 @@ describe("history page", () => {
 
   it("keeps a moment diff selected when an older duplicate-file open finishes flushing", async () => {
     const save = deferred<{ status: "written"; contentHash: string }>();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve({
         ...STORED_STATE,
         editorGroups: [
@@ -10607,7 +10529,7 @@ describe("history page", () => {
     bridge.writeWorkspaceText = vi.fn(() => save.promise);
     const user = userEvent.setup();
     renderShell(bridge);
-    await settleEngineOnRead(bridge);
+    await settleShareView();
 
     const left = await screen.findByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
@@ -10654,7 +10576,7 @@ describe("history page", () => {
 
   it("keeps a newer file selected when an older moment-diff flush finishes", async () => {
     const save = deferred<{ status: "written"; contentHash: string }>();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["race-a.txt", "b.md"], "race-a.txt")),
     );
     bridge.listWorkspaceFiles = vi.fn(async () => ({
@@ -10670,7 +10592,7 @@ describe("history page", () => {
     bridge.writeWorkspaceText = vi.fn(() => save.promise);
     const user = userEvent.setup();
     renderShell(bridge);
-    await settleEngineOnRead(bridge);
+    await settleShareView();
 
     const group = await screen.findByRole("region", { name: "Editor group 1" });
     const content = (await within(group).findByTestId("view-text-editor"))
@@ -10703,7 +10625,7 @@ describe("history page", () => {
 
   it("does not open a moment after its target group closes during the draft flush", async () => {
     const save = deferred<{ status: "written"; contentHash: string }>();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve({
         ...STORED_STATE,
         editorGroups: [
@@ -10731,7 +10653,7 @@ describe("history page", () => {
     bridge.writeWorkspaceText = vi.fn(() => save.promise);
     const user = userEvent.setup();
     renderShell(bridge);
-    await settleEngineOnRead(bridge);
+    await settleShareView();
 
     const left = await screen.findByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
@@ -10764,7 +10686,7 @@ describe("history page", () => {
   });
 
   // The listing loaders' rule, on the timeline: a request that is merely in
-  // flight has answered nothing, and one that FAILS never will. Superseding on
+  // flight has answered nothing, and one that fails never will. Superseding on
   // ISSUE threw away the only answer there was, and the panel stayed empty
   // until some later event refreshed it.
   it("commits an older history page when the newer refresh failed", async () => {
@@ -10774,7 +10696,7 @@ describe("history page", () => {
       failNewer = reject;
     });
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => (++issued === 1 ? older.promise : newer));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -10802,7 +10724,7 @@ describe("history page", () => {
     expect(await screen.findByText("Reordered the plan")).toBeTruthy();
   });
 
-  // The other half of the same rule: an answer OLDER than what is already
+  // The other half of the same rule: an answer older than what is already
   // displayed is still dropped, so a slow response cannot move the timeline
   // backward.
   it("ignores a history page that resolves after a newer one committed", async () => {
@@ -10810,7 +10732,7 @@ describe("history page", () => {
     const older = deferred<ListEngineMomentsResult>();
     const newer = deferred<ListEngineMomentsResult>();
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() =>
       ++issued === 1 ? older.promise : newer.promise,
     );
@@ -10845,7 +10767,7 @@ describe("history page", () => {
     expect(screen.getByText("Added the launch checklist")).toBeTruthy();
   });
 
-  // The pagination's cursor points into the DISPLAYED timeline, so an older
+  // The pagination's cursor points into the displayed timeline, so an older
   // refresh must not reset the timeline under it — the append would land
   // against a cursor that no longer describes what is on screen. The refresh
   // is issued first here, which is the ordinary ordering, not a rare race.
@@ -10855,7 +10777,7 @@ describe("history page", () => {
     const earlier = deferred<ListEngineMomentsResult>();
     const pages = [first, refreshed, earlier];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => pages[issued++]!.promise);
     const user = userEvent.setup();
     renderShell(bridge);
@@ -10905,7 +10827,7 @@ describe("history page", () => {
     const earlier = deferred<ListEngineMomentsResult>();
     const pages = [first, refreshed, earlier];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => pages[issued++]!.promise);
     const user = userEvent.setup();
     renderShell(bridge);
@@ -10944,7 +10866,7 @@ describe("history page", () => {
     expect(screen.queryByText("Rewrote the plan")).toBeNull();
   });
 
-  // #489 one layer over: a pagination that FAILS answered nothing either, so
+  // #489 one layer over: a pagination that fails answered nothing either, so
   // it must stop holding back the refresh it raced. If its token were left
   // standing, the dead pagination would block every older refresh for the rest
   // of the session and the timeline would go stale with nothing to retry it.
@@ -10961,7 +10883,7 @@ describe("history page", () => {
       page,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     const user = userEvent.setup();
     renderShell(bridge);
@@ -10999,7 +10921,7 @@ describe("history page", () => {
     expect(await screen.findByText("Rewrote the plan")).toBeTruthy();
   });
 
-  // #507, and the mirror of the test above: the refresh answers FIRST, while
+  // #507, and the mirror of the test above: the refresh answers first, while
   // the pagination is still in flight. Blocked is not refuted — when the
   // pagination then fails, this is again the only answer anyone has, so
   // discarding it at resolve time would leave the timeline stale with nothing
@@ -11017,7 +10939,7 @@ describe("history page", () => {
       page,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     const user = userEvent.setup();
     renderShell(bridge);
@@ -11057,8 +10979,8 @@ describe("history page", () => {
     expect(await screen.findByText("Rewrote the plan")).toBeTruthy();
   });
 
-  // #507's other half: the page the user asked for answered, and a newer
-  // refresh that merely FAILED took it away — leaving "Loading…" disabled on
+  // the other half: the page the user asked for answered, and a newer
+  // refresh that merely failed took it away — leaving "Loading…" disabled on
   // the button as well, so the earlier moments were unreachable.
   it("commits a pagination whose newer refresh failed, and frees the button", async () => {
     const first = deferred<ListEngineMomentsResult>();
@@ -11073,7 +10995,7 @@ describe("history page", () => {
       refreshed,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     const user = userEvent.setup();
     renderShell(bridge);
@@ -11147,7 +11069,7 @@ describe("history page", () => {
       page,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     // The main process keeps reporting the review until it is dismissed.
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
@@ -11211,7 +11133,7 @@ describe("history page", () => {
       page,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     // The main process keeps reporting the review until it is dismissed.
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
@@ -11278,7 +11200,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     // The workspace reports the try version until the switch runs, Main after.
@@ -11358,8 +11280,8 @@ describe("history page", () => {
     expect(screen.queryByText("Started the try version")).toBeNull();
   });
 
-  // The other side of that boundary. Main notifies the renderer BEFORE the
-  // switch invoke resolves, so an activity refresh can be ISSUED — and answer
+  // The other side of that boundary. Main notifies the renderer before the
+  // switch invoke resolves, so an activity refresh can be issued — and answer
   // — for the new version before the shell hears about the switch at all.
   // Rejecting by arrival order threw that valid answer away and left the panel
   // on the version the user had just left.
@@ -11376,7 +11298,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     let switched = false;
@@ -11415,7 +11337,7 @@ describe("history page", () => {
     expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
 
     // Set aside: the daemon switches and notifies, so the activity refresh for
-    // MAIN is ISSUED before the switch invoke resolves — and it is still in
+    // MAIN is issued before the switch invoke resolves — and it is still in
     // flight when the shell finally hears about the switch.
     await user.click(screen.getByTestId("try-review-set-aside"));
     await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
@@ -11444,7 +11366,7 @@ describe("history page", () => {
     expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
   });
 
-  // The boundary has to name the version the user LEFT, and before the FIRST
+  // The boundary has to name the version the user left, and before the first
   // page commits the panel displays none. Inferring that version from the
   // timeline left the guard with nothing to reject, so the answer describing
   // the version they had already left painted the panel — and stayed there
@@ -11460,7 +11382,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     let switched = false;
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -11522,7 +11444,7 @@ describe("history page", () => {
     expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
   });
 
-  // A boundary anyone has to AWAIT is not a boundary. When the old version's
+  // A boundary anyone has to await is not a boundary. When the old version's
   // answer lands first, it meets a guard that knows nothing, commits, and
   // whatever arrives later cannot retract it — so a failed switch-triggered
   // refresh left the previous version's moments on screen. Two awaits used to
@@ -11539,7 +11461,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     let switched = false;
     // Only the selector's mount read answers. Every later read hangs forever:
@@ -11606,7 +11528,7 @@ describe("history page", () => {
     expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
   });
 
-  // The residual window (#555): a switch that FAILED, whose recovery re-read
+  // The residual window: a switch that failed, whose recovery re-read
   // also failed, leaves the shell asking which version is active. That lookup
   // is a boundary arriving after the answers it must judge — an old-version
   // answer landing first meets a guard that knows nothing and paints. The
@@ -11626,7 +11548,7 @@ describe("history page", () => {
       repaint.promise,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     const versionList = [
       {
@@ -11735,7 +11657,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     const versionList = [
       {
@@ -11827,7 +11749,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     const versionList = [
       {
@@ -11906,13 +11828,13 @@ describe("history page", () => {
     expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2);
   });
 
-  // #593: a null page is not "no changes". Before the first read answers, the
+  // A null page is not "no changes". Before the first read answers, the
   // surface knows nothing, and it may claim neither an empty workspace nor a
-  // failure. The moment the read ANSWERS with an empty timeline, the empty
+  // failure. The moment the read answers with an empty timeline, the empty
   // copy is earned.
   it("claims neither empty nor failed until the first read answers", async () => {
     const first = deferred<ListEngineMomentsResult>();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => first.promise);
     const user = userEvent.setup();
     renderShell(bridge);
@@ -11930,12 +11852,12 @@ describe("history page", () => {
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
   });
 
-  // #610: one refresh issues four reads, and they answer four different
+  // One refresh issues four reads, and they answer four different
   // questions. Awaiting them as one batch made the timeline report a failure
   // that happened somewhere else — the engine had already served the page.
   // The failure is still reported; it is reported about the read that had it.
   it("keeps the history page a sibling read's failure never touched", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(async () =>
       historyPage([historyMoment("m-1", "Wrote the plan")]),
     );
@@ -11949,7 +11871,7 @@ describe("history page", () => {
     expect(await screen.findByText("Wrote the plan")).toBeTruthy();
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
     expect(screen.queryByText("No changes yet")).toBeNull();
-    // Three lanes share one banner, so the sentence has to say WHICH one went
+    // Three lanes share one banner, so the sentence has to say which one went
     // stale — the cause alone names none of them — and it has to offer the way
     // back that the rendered timeline has just hidden.
     const banner = await screen.findByTestId("workspace-shell-error");
@@ -11963,12 +11885,12 @@ describe("history page", () => {
   // The reverse path, end to end. Separating the lanes took one away: a
   // sibling that fails while the page succeeds renders the timeline, and the
   // timeline hides History's Try again — so the only control that could reach
-  // this read is the one on the banner. It has to WORK, not just be there.
+  // this read is the one on the banner. It has to work, not just be there.
   it("asks the failed lane again from the banner", async () => {
     const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
     let nextStatus: typeof SYNC_STATUS | typeof syncingStatus = SYNC_STATUS;
     let failNextRead = false;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(async () =>
       historyPage([historyMoment("m-1", "Wrote the plan")]),
     );
@@ -12027,7 +11949,7 @@ describe("history page", () => {
   // and no way to ask again — worse than the batch it replaced, which at
   // least gave up as soon as history did.
   it("says the history read failed while a sibling read never settles", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => Promise.reject(new Error("history failed")));
     bridge.getSyncStatus = vi.fn(() => new Promise<never>(() => {}));
     const user = userEvent.setup();
@@ -12042,7 +11964,7 @@ describe("history page", () => {
 
   // The mirror: a page the engine already served is nobody's hostage either.
   it("shows the history page while a sibling read never settles", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(async () =>
       historyPage([historyMoment("m-1", "Wrote the plan")]),
     );
@@ -12059,7 +11981,7 @@ describe("history page", () => {
   // answer either. A try session the main process reported still reaches its
   // card while the timeline says it could not load.
   it("shows the try review a failed history read did not answer for", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => Promise.reject(new Error("history failed")));
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     const user = userEvent.setup();
@@ -12081,7 +12003,7 @@ describe("history page", () => {
     });
     const newer = deferred<ListEngineMomentsResult>();
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => (++issued === 1 ? older : newer.promise));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -12118,7 +12040,7 @@ describe("history page", () => {
     });
     const second = deferred<ListEngineMomentsResult>();
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => (++issued === 1 ? first : second.promise));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -12143,7 +12065,7 @@ describe("history page", () => {
     expect(await screen.findByText("Wrote the plan")).toBeTruthy();
   });
 
-  // #593's vector, the double failure #588's review found: a switch fails, its
+  // the vector, the double failure the review found: a switch fails, its
   // recovery read fails, the lookup contradicts the stranded page, and the
   // re-fetch that drop owes fails too. The surface then has no page and no
   // way to get one — and it used to answer that by telling a workspace with
@@ -12166,7 +12088,7 @@ describe("history page", () => {
       retry.promise,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     const versionList = [
       {
@@ -12250,7 +12172,7 @@ describe("history page", () => {
       "dohc could not load this workspace's history.",
     );
 
-    // The Next has to WORK on this surface (copy.md): the control reads again.
+    // The Next has to work on this surface (copy.md): the control reads again.
     await user.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(4));
     await act(async () => {
@@ -12260,7 +12182,7 @@ describe("history page", () => {
     expect(await screen.findByText("Back on main")).toBeTruthy();
   });
 
-  // #594: the named road to the same wrong pixels. The switch SUCCEEDS, so it
+  // The named road to the same wrong pixels. The switch succeeds, so it
   // names the version it landed on and nothing has to be looked up — but the
   // page on screen is still the version the user left, and the follow-up
   // refresh is the only thing that would replace it. When that refresh fails,
@@ -12271,7 +12193,7 @@ describe("history page", () => {
       failSwitchRefresh = reject;
     });
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => {
       issued += 1;
       if (issued === 1) {
@@ -12345,7 +12267,7 @@ describe("history page", () => {
   // is simply the new version's.
   it("shows the new version's timeline when the switch and its refresh succeed", async () => {
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => {
       issued += 1;
       if (issued === 1) {
@@ -12404,14 +12326,14 @@ describe("history page", () => {
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
   });
 
-  // Announcing the switch FIRST re-keys this component, and the re-key used to
+  // Announcing the switch first re-keys this component, and the re-key used to
   // bump the same counter the operation checks itself against — so the switch
   // invalidated its own token while its follow-up re-read was still pending,
   // its finally skipped, and the selector sat disabled on "Switching…" for the
   // rest of the session. Liveness and operation identity are different
   // questions.
   it("re-enables the selector when the switch re-read outlives the epoch bump", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     let switched = false;
     // Only the mount read answers at once. Every read after it — the switch's
     // own re-read, and the one the re-key issues — is held open, so the
@@ -12493,7 +12415,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     let switched = false;
@@ -12590,7 +12512,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     let switched = false;
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -12657,7 +12579,7 @@ describe("history page", () => {
       await Promise.resolve();
     });
 
-    // The EARLIER of the two refreshes answers first, and it is right about
+    // The earlier of the two refreshes answers first, and it is right about
     // Main — it just says nothing the workspace has not already said.
     await act(async () => {
       late.resolve(historyPage([historyMoment("m-late", "Back on main")], "main"));
@@ -12705,7 +12627,7 @@ describe("history page", () => {
       dismissRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     const user = userEvent.setup();
@@ -12752,7 +12674,7 @@ describe("history page", () => {
     expect(await screen.findByText("Rewrote the plan")).toBeTruthy();
   });
 
-  // A failure is an ANSWER for the version rule: it answers about somewhere
+  // A failure is an answer for the version rule: it answers about somewhere
   // the user has left. The switch bumps the issue counter but not the
   // committed watermark, so the old pagination's rejection still read as
   // "about the open timeline" and posted a banner for a version nobody is
@@ -12773,7 +12695,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     let switched = false;
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -12847,7 +12769,7 @@ describe("history page", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  // Starting or ending a run is the user acting. Merely OBSERVING that the run
+  // Starting or ending a run is the user acting. Merely observing that the run
   // changed under the rendered label is not: that reading came from its own
   // request, which can be older than a refresh the shell is still waiting on.
   // Superseding on it threw the newer answer away, and a run seen alive just
@@ -12860,7 +12782,7 @@ describe("history page", () => {
       afterTheRun.promise,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     let activeRunId: string | null = null;
     bridge.getAgentRunStatus = vi.fn(async () => ({
@@ -12947,10 +12869,10 @@ describe("history page", () => {
   });
 
   // A failure reports, and it takes nothing. The lane's watermark is what an
-  // ANSWER earns: a read that failed proves nothing, and the older read still
+  // answer earns: a read that failed proves nothing, and the older read still
   // in flight may be the only answer anyone gets. Moving the watermark on a
   // rejection would reject that answer when it lands, and the status bar would
-  // sit on a value the workspace has left with nothing to correct it (#507).
+  // sit on a value the workspace has left with nothing to correct it.
   it("commits an older sync status when the newer read failed", async () => {
     const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
     const heldStatus = deferred<typeof SYNC_STATUS | typeof syncingStatus>();
@@ -12958,7 +12880,7 @@ describe("history page", () => {
     // reads status more than once while a workspace opens.
     let holdNextRead = false;
     let failNextRead = false;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.getSyncStatus = vi.fn(() => {
       if (holdNextRead) {
         holdNextRead = false;
@@ -13003,14 +12925,14 @@ describe("history page", () => {
     );
   });
 
-  // What `committed` is FOR, on the success path: latest-committed-wins. Two
+  // What `committed` is for, on the success path: latest-committed-wins. Two
   // refreshes overlap, the newer answers first, and the older must not paint
   // its stale value over it when it finally lands.
   it("keeps an older answer from overwriting a newer one on the same lane", async () => {
     const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
     const olderRead = deferred<typeof SYNC_STATUS | typeof syncingStatus>();
     let nextRead: "older" | null = null;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.getSyncStatus = vi.fn(() => {
       if (nextRead === "older") {
         nextRead = null;
@@ -13055,7 +12977,7 @@ describe("history page", () => {
 
   // The third way a failure can be superseded, and the one only `committed`
   // catches. The user acted, so this lane holds a value newer than every
-  // request in flight — but the lane ASKED nothing, so its newest issued read
+  // request in flight — but the lane asked nothing, so its newest issued read
   // is still the one now failing. A banner about a card the user dismissed
   // describes nothing on screen.
   it("keeps a failed read from reporting after the user superseded its lane", async () => {
@@ -13066,7 +12988,7 @@ describe("history page", () => {
       refreshed.promise,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     let failSecondTryRead!: (error: Error) => void;
     const secondTryRead = new Promise<never>((_resolve, reject) => {
@@ -13114,7 +13036,7 @@ describe("history page", () => {
   // The same rule, the other ordering. Above, the newer answer had already
   // committed when the older read failed. Here it has not answered yet — so
   // "what did this lane last write" cannot see it, and the failure looks like
-  // the newest thing there is. It is not: the lane has already ASKED again.
+  // the newest thing there is. It is not: the lane has already asked again.
   // Reporting raises a banner that the newer answer will not take down, and it
   // then sits over a value the user can see is current.
   it("keeps a failed read from reporting while a newer one is in flight", async () => {
@@ -13125,7 +13047,7 @@ describe("history page", () => {
     });
     const newerRead = deferred<typeof SYNC_STATUS | typeof syncingStatus>();
     let nextRead: "older" | "newer" | null = null;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.getSyncStatus = vi.fn(() => {
       if (nextRead === "older") {
         nextRead = null;
@@ -13176,7 +13098,7 @@ describe("history page", () => {
   });
 
   // The twin of the test above, on the other way a read settles. The lane's
-  // own reader answers the observation, and that read can FAIL — after a newer
+  // own reader answers the observation, and that read can fail — after a newer
   // refresh already committed the lane. A failure judged without the token
   // then raises a banner about a reading nothing is showing: the newer answer
   // is on screen, correct, and the user is told it could not be read.
@@ -13188,7 +13110,7 @@ describe("history page", () => {
       afterTheRun.promise,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     // The observation's own read is the one that fails, and it is the first
     // agent read issued after the held panel read is released — nothing else
@@ -13298,7 +13220,7 @@ describe("history page", () => {
       refreshed.promise,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     // The workspace moves on before the second refresh is issued, so that
@@ -13355,14 +13277,14 @@ describe("history page", () => {
     expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
   });
 
-  // #636: the opted-out refresh wrote both of its lanes with no request token
+  // The no-history refresh wrote both of its lanes with no request token
   // at all. Nothing else in the shell writes a lane untimed, so the rule read
   // as held everywhere — but these two lanes are shared, and an untimed write
   // is ranked by ARRIVAL. A refresh issued before the run started could land
   // after the refresh that saw it and turn the indicator back off, with
   // nothing to correct it: the write moved no watermark, so the lane still
   // believed nothing had answered.
-  it("keeps an older opted-out refresh from undoing a newer agent answer", async () => {
+  it("keeps an older no-history refresh from undoing a newer agent answer", async () => {
     const idle: AgentRunStatusResult = {
       mcpEnabled: false,
       activeRun: null,
@@ -13419,53 +13341,7 @@ describe("history page", () => {
     expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
   });
 
-  // The same door, on the lane whose stale answer states a CAUSE. An older
-  // status saying the recorder is off, landing over a newer one that says
-  // nothing of the kind, makes the placeholder name a Settings toggle the
-  // workspace has not got — the false-statement class of #626, from a lane
-  // that never claimed its write.
-  it("keeps an older opted-out refresh from naming a cause the newest status refutes", async () => {
-    const recordingOff = { ...SYNC_STATUS, historyRecordingOff: true };
-    const heldRead = deferred<typeof SYNC_STATUS | typeof recordingOff>();
-    let holdNextRead = false;
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getSyncStatus = vi.fn(() => {
-      if (holdNextRead) {
-        holdNextRead = false;
-        return heldRead.promise;
-      }
-      return Promise.resolve(SYNC_STATUS);
-    });
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(screen.getByTestId("activity-history"));
-    const placeholder = await screen.findByTestId("history-off-placeholder");
-    await waitFor(() =>
-      expect(placeholder.textContent).toContain("History is unavailable"),
-    );
-
-    // One refresh's status read is still in flight when a newer one answers.
-    holdNextRead = true;
-    act(() => {
-      bridge.emitWorkspaceActivity();
-    });
-    await waitFor(() => expect(holdNextRead).toBe(false));
-    act(() => {
-      bridge.emitWorkspaceActivity();
-    });
-    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(3));
-
-    // The older read answers last, and it says the workspace opted out.
-    await act(async () => {
-      heldRead.resolve(recordingOff);
-      await heldRead.promise;
-    });
-    expect(placeholder.textContent).toContain("History is unavailable");
-    expect(placeholder.textContent).not.toContain("Settings");
-  });
-
-  it("commits opted-out sync status when the sibling agent read fails", async () => {
+  it("commits sync status when the sibling agent read fails", async () => {
     const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
     let failNextAgentRead = false;
     let statusChanged = false;
@@ -13503,7 +13379,7 @@ describe("history page", () => {
     expect(error.textContent).not.toContain("Could not refresh history.");
   });
 
-  it("marks opted-out history ready when one status lane succeeds", async () => {
+  it("marks history ready when one status lane succeeds", async () => {
     const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
     const bridge = makeBridge(Promise.resolve(null));
     bridge.getAgentRunStatus = vi.fn(async () => {
@@ -13522,39 +13398,7 @@ describe("history page", () => {
     });
   });
 
-  it("does not mark opted-out history ready when both status lanes fail", async () => {
-    const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
-    const bridge = makeBridge(Promise.resolve(null));
-    const statusRead = deferred<SyncStatusResult>();
-    const agentRead = deferred<AgentRunStatusResult>();
-    bridge.getSyncStatus = vi.fn(() => statusRead.promise);
-    bridge.getAgentRunStatus = vi.fn(() => agentRead.promise);
-    renderShell(bridge);
-
-    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(1));
-    await act(async () => {
-      // refreshHistory registered its aggregate settlement before these reads
-      // left the synchronous call stack. Awaiting the same lane promises here
-      // is the exact completion fence for its all-settled continuation.
-      const refreshSettled = Promise.allSettled([
-        statusRead.promise,
-        agentRead.promise,
-      ]);
-      statusRead.reject(new Error("sync status failed"));
-      agentRead.reject(new Error("agent status failed"));
-      await refreshSettled;
-    });
-    await screen.findByTestId("workspace-shell-error");
-
-    const timeline = rendererMarks
-      .readSwitchTimeline()
-      .find((entry) => entry.ordinal > previousOrdinal);
-    expect(timeline).toBeDefined();
-    expect(timeline?.phases["history-ready"]).toBeUndefined();
-  });
-
-  it("does not report an older opted-out refresh after a newer one succeeds", async () => {
+  it("does not report an older no-history refresh after a newer one succeeds", async () => {
     let failOlderRead!: (error: Error) => void;
     let holdNextRead = false;
     const bridge = makeBridge(Promise.resolve(null));
@@ -13589,7 +13433,7 @@ describe("history page", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  it("commits an older opted-out refresh when the newer one fails", async () => {
+  it("commits an older no-history refresh when the newer one fails", async () => {
     const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
     const heldStatus = deferred<typeof SYNC_STATUS | typeof syncingStatus>();
     let holdNextRead = false;
@@ -13632,39 +13476,10 @@ describe("history page", () => {
     );
   });
 
-  it("does not reopen the workspace when the engine setting enables history", async () => {
-    const settings = deferred<WorkspaceSettingsResult>();
-    const bridge = makeEngineBridge(Promise.resolve(null));
-    bridge.getWorkspaceSettings = vi.fn(() => settings.promise);
-    renderShell(bridge);
-
-    await waitFor(() =>
-      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
-    );
-    expect(bridge.openWorkspace).toHaveBeenCalledOnce();
-
-    await act(async () => {
-      settings.resolve({
-        settings: {
-          ...DEFAULT_WORKSPACE_SETTINGS,
-          experimental: {
-            ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-            workspaceEngineAlpha: true,
-          },
-        },
-        source: "stored",
-      });
-      await settings.promise;
-    });
-
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
-    expect(bridge.openWorkspace).toHaveBeenCalledOnce();
-  });
 });
 
-// #589: a shared view materializes no settings file, so the renderer's
-// capability read comes back with the schema default ON — but its open
-// deliberately installed no capture, and main refuses every version call.
+// A shared view's open deliberately installed no capture, and main refuses
+// every version call.
 // The selector retried five times and then raised a danger-tone shell error
 // naming a Settings toggle nobody touched, and it came back on every share
 // refresh (the selector re-keys on versionEpoch).
@@ -13683,9 +13498,9 @@ describe("shared view versions surface", () => {
     const user = userEvent.setup();
     renderShell(bridge, SHARE_VIEW);
 
-    // Prove the renderer's read really said engine-ON first. Without it the
-    // pins below pass vacuously in the pre-read window.
-    await settleEngineOnRead(bridge);
+    // Let the shell's mount effects run first, so the pins below cannot pass
+    // vacuously.
+    await settleShareView();
     // The selector is the surface that made the call, and it carries the
     // Try-in-version and compare entry points inside its menu — all three go
     // with it.
@@ -13711,13 +13526,12 @@ describe("shared view versions surface", () => {
 
   // A shared view in the pre-status window. This test was written to isolate
   // the share clause, and it no longer can: once the versions gate required
-  // an ANSWERED status (#620), that clause stopped being the only thing that
-  // answers here, and main gives a shared view `capture: null` — hence
-  // `historyRecordingOff: true` — for the whole of its life
-  // (`workspaceActivity.ts`: `entry.historyRecordingOff = entry.capture ===
-  // null`). So `!isShareView` inside `versionsEnabled` is now redundant with
+  // an answered status, that clause stopped being the only thing that
+  // answers here, and main gives a shared view `historyShareView: true` for
+  // the whole of its life. So `!isShareView` inside `versionsEnabled` is now
+  // redundant with
   // the status clause and survives deletion. It is kept, and declared
-  // unpinned, because it is the SYNCHRONOUS registry fact #614's review
+  // unpinned, because it is the SYNCHRONOUS registry fact the review
   // asked for: it does not depend on main's status shape staying this way.
   // What this test still pins is the no-call itself, in the window where the
   // shell knows least.
@@ -13728,7 +13542,7 @@ describe("shared view versions surface", () => {
     bridge.getSyncStatus = vi.fn(() => status.promise);
     renderShell(bridge, SHARE_VIEW);
 
-    await settleEngineOnRead(bridge);
+    await settleShareView();
     // The premise: no status has answered, so the shell knows nothing about
     // the recorder yet.
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
@@ -13744,13 +13558,13 @@ describe("shared view versions surface", () => {
     expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
   });
 
-  // The other half of that branch: a workspace that is NOT a shared view must
+  // The other half of that branch: a workspace that is not a shared view must
   // still get the real page. Without this, replacing VersionComparePage with
-  // the placeholder for EVERY workspace keeps this suite green, and only an
+  // the placeholder for every workspace keeps this suite green, and only an
   // e2e — which the javascript gate does not run — would catch it.
   it("keeps the real compare page for a persisted compare tab outside a shared view", async () => {
     const comparePath = versionCompareTabPath("v-old");
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs([comparePath], comparePath)),
     );
     renderShell(bridge);
@@ -13781,7 +13595,7 @@ describe("shared view versions surface", () => {
   });
 });
 
-// #620: the same error loop from the other cause, on a workspace that is NOT
+// The same error loop from the other cause, on a workspace that is not
 // a shared view. After a failed capture build main has no capture, so every
 // version call is refused — while the renderer's own settings read still says
 // engine-on. History has carried main's status override since #601; versions
@@ -13789,15 +13603,14 @@ describe("shared view versions surface", () => {
 describe("versions surface after a failed capture build", () => {
   const FAILED_STATUS = {
     ...SYNC_STATUS,
-    historyRecordingOff: true,
     historyRecordingUnavailable: true,
   };
 
   it("renders no version surface and never asks for versions when the recorder failed to build", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.openWorkspace = vi.fn(async () => FAILED_STATUS);
     bridge.getSyncStatus = vi.fn(async () => FAILED_STATUS);
-    // Main's REAL answer once the capture build failed (#541 copy).
+    // Main's real answer once the capture build failed (#541 copy).
     bridge.listWorkspaceVersions = vi.fn(async (): Promise<never> => {
       throw new Error(
         "dohc could not start Versions for this workspace. Restart dohc to try again.",
@@ -13821,91 +13634,29 @@ describe("versions surface after a failed capture build", () => {
   });
 
   // The other half of the branch: a healthy engine workspace must still get
-  // the selector. Without this, dropping the version surface for EVERY
+  // the selector. Without this, dropping the version surface for every
   // workspace keeps the suite above green.
   it("keeps the version selector when main's status reports a live recorder", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     renderShell(bridge);
 
     expect(await screen.findByTestId("version-menu-button")).toBeTruthy();
     await waitFor(() => expect(bridge.listWorkspaceVersions).toHaveBeenCalled());
   });
 
-  it("does not reuse a late capability read after leaving and returning", async () => {
-    const staleFirstRead = deferred<WorkspaceSettingsResult>();
-    const freshReturnRead = deferred<WorkspaceSettingsResult>();
-    const engineOn: WorkspaceSettingsResult = {
-      settings: {
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        experimental: {
-          ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-          workspaceEngineAlpha: true,
-        },
-      },
-      source: "stored",
-    };
-    const engineOff: WorkspaceSettingsResult = {
-      settings: {
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        experimental: {
-          ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-          workspaceEngineAlpha: false,
-        },
-      },
-      source: "stored",
-    };
-    const bridge = makeEngineBridge(Promise.resolve(null));
-    bridge.getWorkspaceSettings = vi
-      .fn()
-      .mockImplementationOnce(() => staleFirstRead.promise)
-      .mockResolvedValueOnce(engineOff)
-      .mockImplementationOnce(() => freshReturnRead.promise);
-    const workspaces = [WORKSPACE, OTHER_WORKSPACE];
-    const view = renderShell(bridge, WORKSPACE, workspaces);
-
-    view.rerender(
-      <DesktopWorkspaceShell
-        workspace={OTHER_WORKSPACE}
-        workspaces={workspaces}
-        {...shellBootstrapProps(bridge)}
-        onSwitchWorkspace={() => {}}
-      />,
-    );
-    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(2));
-    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
-
-    await act(async () => {
-      staleFirstRead.resolve(engineOn);
-      await staleFirstRead.promise;
-    });
-    view.rerender(
-      <DesktopWorkspaceShell
-        workspace={WORKSPACE}
-        workspaces={workspaces}
-        {...shellBootstrapProps(bridge)}
-        onSwitchWorkspace={() => {}}
-      />,
-    );
-
-    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(3));
-    // MUTATION: let the first response commit after its dependency changes.
-    // Returning to that workspace exposes the obsolete engine-on answer.
-    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
-  });
-
   // The window the test above cannot see. Its status fake answers in the same
   // microtask flush as the settings read, and PRODUCTION NEVER DOES:
   // `getWorkspaceSettings` is one file read, while `openWorkspace` waits for
   // the capture build and then for main's watcher to finish its first scan.
-  // Engine-ON therefore lands first on every open, and a MISSING status used
+  // Engine-ON therefore lands first on every open, and a missing status used
   // to answer "there is a recorder": the selector mounted, called, retried
-  // five times and raised #620's banner inside a window the fixture had
+  // five times and raised the banner inside a window the fixture had
   // closed.
   //
-  // So this open does NOT resolve in the same flush.
+  // So this open does not resolve in the same flush.
   it("asks for no versions before main's capture decision lands", async () => {
     const decision = deferred<typeof FAILED_STATUS>();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.openWorkspace = vi.fn(() => decision.promise);
     bridge.getSyncStatus = vi.fn(() => decision.promise);
     bridge.listWorkspaceVersions = vi.fn(async (): Promise<never> => {
@@ -13939,28 +13690,28 @@ describe("versions surface after a failed capture build", () => {
   // an activity refresh, while main's entry still holds the defaults it
   // registered before it awaited the capture build.
   //
-  // `workspaceActivity.open` registers that entry BEFORE the build — it must,
+  // `workspaceActivity.open` registers that entry before the build — it must,
   // so a batch settling during the build finds a slot — and until the build
-  // answers it holds `historyRecordingOff: false` and
+  // answers it holds `historyRecordingUnavailable: false` and
   // `historyRecordingUnavailable: false`. Any workspace's activity event
   // makes this shell refresh, so the refresh is what used to read those
-  // defaults and commit them as a status. Reading THAT as "there is a
+  // defaults and commit them as a status. Reading that as "there is a
   // recorder" is the same defect as reading a missing status that way, one
   // indirection along.
   //
-  // The refresh no longer reads them at all (#637): before the decision it
+  // The refresh no longer reads them at all: before the decision it
   // returns, because both of its branches are wrong in this window — and the
-  // status it used to commit could arrive AFTER the decided one and put the
+  // status it used to commit could arrive after the decided one and put the
   // defaults back. So this pins two things at once: the refresh asks main
   // nothing here, and the gate stays shut through the whole window on the
   // decision alone.
   it("asks main for nothing while its capture decision is still pending", async () => {
     const settings = deferred<WorkspaceSettingsResult>();
     const decision = deferred<typeof FAILED_STATUS>();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.getWorkspaceSettings = vi.fn(() => settings.promise);
     bridge.openWorkspace = vi.fn(() => decision.promise);
-    // Main's answer BEFORE the decision: the entry exists and its recorder
+    // Main's answer before the decision: the entry exists and its recorder
     // fields are still at their defaults. After the decision it reports what
     // was decided. A fake that refused before the decision, or kept answering
     // with the defaults after it, would model something main cannot do — and
@@ -13991,10 +13742,6 @@ describe("versions surface after a failed capture build", () => {
       settings.resolve({
         settings: {
           ...DEFAULT_WORKSPACE_SETTINGS,
-          experimental: {
-            ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-            workspaceEngineAlpha: true,
-          },
         },
         source: "stored",
       });
@@ -14025,15 +13772,15 @@ describe("versions surface after a failed capture build", () => {
   it("states the capability for a persisted compare tab when the recorder failed to build", async () => {
     const comparePath = versionCompareTabPath("v-old");
     const status = deferred<typeof FAILED_STATUS>();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs([comparePath], comparePath)),
     );
     bridge.openWorkspace = vi.fn(() => status.promise);
     bridge.getSyncStatus = vi.fn(() => status.promise);
     renderShell(bridge);
 
-    // Before the decision lands, the tab mounts no page AND claims nothing:
-    // the renderer's own read proves nothing about what main recorded (#542).
+    // Before the decision lands, the tab mounts no page and claims nothing:
+    // the renderer's own read proves nothing about what main recorded.
     await screen.findByTestId("titlebar-chats-sidebar");
     expect(screen.queryByTestId("version-compare-page")).toBeNull();
     expect(screen.queryByTestId("version-compare-off")).toBeNull();
@@ -14063,153 +13810,25 @@ describe("versions surface after a failed capture build", () => {
   });
 });
 
-// A capability flag is not a count. Whatever main established about the
-// RECORDER, none of it establishes that no version exists: versions live on
-// disk and outlive a session whose capture failed to build, an engine the
-// user switched off, and a settings file dohc could not read. The compare tab
-// has no count to read, so it may never claim absence.
-describe("version-compare off copy", () => {
-  const base = {
-    state: "synced" as const,
-    pendingChangeCount: 0,
-    lastSyncedAtMs: null,
-    liveSessionsGeneration: 0,
-    historyRecordingUnavailable: false,
-    historyShareView: false,
-  };
-
-  it("calls a failed capture build unavailable, never empty", () => {
-    // #505's cause. `historyRecordingOff` rides with it, and reading that
-    // first would turn a startup failure into a claim about durable data.
-    const copy = versionCompareOffCopy({
-      ...base,
-      historyRecordingOff: true,
-      historyRecordingUnavailable: true,
-    });
-    expect(copy).toBe(
-      "dohc could not open versions for this workspace. Your files still save normally. Restart dohc to try again.",
-    );
-    expect(copy).not.toContain("no versions");
-  });
-
-  it("calls the opt-out off, never empty", () => {
-    const copy = versionCompareOffCopy({ ...base, historyRecordingOff: true });
-    expect(copy).toContain("Versions are off for this workspace.");
-    expect(copy).toContain("Settings → Advanced");
-    expect(copy).not.toContain("no versions");
-  });
-
-  // The Next has to be the one that works (#687). Main decides the recorder
-  // once per workspace per app session — `openWorkspaceActivity` retains every
-  // workspace it opens and `workspaceActivity.open` no-ops for one it already
-  // watches — so leaving the workspace and coming back re-reads the flag
-  // nowhere. Same instruction the Chats surface gives, for the same cause.
-  it("tells the user to restart, not to reopen the workspace", () => {
-    const copy = versionCompareOffCopy({ ...base, historyRecordingOff: true });
-    expect(copy).toContain("Turn it on. Then restart dohc to compare versions.");
-    expect(copy).not.toContain("reopen");
-  });
-
-  it("names the unreadable settings file instead of blaming the toggle", () => {
-    // #483: the opt-out line below names Settings, and nobody touched it.
-    const copy = versionCompareOffCopy({
-      ...base,
-      historyRecordingOff: true,
-      settingsWarning: "dohc could not read /w/x/.dohc/settings.json.",
-    });
-    expect(copy).toBe("dohc could not read /w/x/.dohc/settings.json.");
-  });
-
-  it("claims nothing when main established nothing", () => {
-    // The renderer's own read failed. It proves nothing either way (#542).
-    const copy = versionCompareOffCopy(base);
-    expect(copy).toContain("dohc could not confirm whether this workspace has versions.");
-    expect(copy).not.toContain("no versions");
-  });
-});
-
-// The same rule on the Chats surfaces (#628). Whatever main established about
-// the RECORDER, none of it establishes that no chat exists: chats live on disk
-// and outlive a session whose capture failed to build, an engine the user
-// switched off, and a settings file dohc could not read.
-describe("chats off copy", () => {
-  const base = {
-    state: "synced" as const,
-    pendingChangeCount: 0,
-    lastSyncedAtMs: null,
-    liveSessionsGeneration: 0,
-    historyRecordingUnavailable: false,
-    historyShareView: false,
-  };
-
-  it("calls a failed capture build unavailable, never empty", () => {
-    // #505's cause. `historyRecordingOff` rides with it, and reading that
-    // first would turn a startup failure into a claim about durable data.
-    const copy = chatsOffCopy({
-      ...base,
-      historyRecordingOff: true,
-      historyRecordingUnavailable: true,
-    });
-    expect(copy).toBe(
-      "dohc could not open chats for this workspace. Your files still save normally. Restart dohc to try again.",
-    );
-    expect(copy).not.toContain("no chats");
-  });
-
-  it("calls the opt-out off, never empty", () => {
-    const copy = chatsOffCopy({ ...base, historyRecordingOff: true });
-    expect(copy).toContain("Chats are off for this workspace.");
-    expect(copy).toContain("Settings → Advanced");
-    expect(copy).not.toContain("no chats");
-  });
-
-  // The Next has to be the one that works. Main decides the recorder once per
-  // app session — `openWorkspaceActivity` retains every workspace it opens and
-  // `workspaceActivity.open` no-ops for one it already watches — so leaving
-  // the workspace and coming back re-reads the flag nowhere.
-  it("tells the user to restart, not to reopen the workspace", () => {
-    const copy = chatsOffCopy({ ...base, historyRecordingOff: true });
-    expect(copy).toContain("Turn it on. Then restart dohc to use chats.");
-    expect(copy).not.toContain("reopen");
-  });
-
-  it("names the unreadable settings file instead of blaming the toggle", () => {
-    // #483: the opt-out line above names Settings, and nobody touched it.
-    const copy = chatsOffCopy({
-      ...base,
-      historyRecordingOff: true,
-      settingsWarning: "dohc could not read /w/x/.dohc/settings.json.",
-    });
-    expect(copy).toBe("dohc could not read /w/x/.dohc/settings.json.");
-  });
-
-  it("claims nothing when main established nothing", () => {
-    // The renderer's own read failed. It proves nothing either way (#542).
-    const copy = chatsOffCopy(base);
-    expect(copy).toContain("dohc could not confirm whether this workspace has chats.");
-    expect(copy).not.toContain("no chats");
-  });
-});
-
 // #615 pinned that a shared view gets no capture, so main refused every chat
 // call and the panel, the tab and the titlebar button all offered a capability
 // the share never had. #646 PR2 moves the line: main now answers the PER-FILE
 // chat from the share scope, so that surface opens. The property #615 really
 // protected survives, restated — a shared view reaches the per-file chat
-// surface and NEVER the workspace-wide listing. These pins cover the SHARE
+// surface and never the workspace-wide listing. These pins cover the SHARE
 // fact only; the failed capture build on a normal workspace is the describe
-// below (#628).
+// below.
 describe("shared view chats surface", () => {
   it("opens the per-file chat panel on a shared view and never asks for the workspace-wide listing", async () => {
     // The stored state opens with the Chats panel visible and b.md focused.
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge, SHARE_VIEW);
 
-    await settleEngineOnRead(bridge);
+    await settleShareView();
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
     expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
 
-    // The file tab is the ONLY tab. A workspace-wide listing would be a
+    // The file tab is the only tab. A workspace-wide listing would be a
     // superset to filter, which is the shape #627 came from.
     expect(screen.getByTestId("chats-panel-tab-file")).toBeTruthy();
     expect(screen.queryByTestId("chats-panel-tab-all")).toBeNull();
@@ -14241,7 +13860,7 @@ describe("shared view chats surface", () => {
     const user = userEvent.setup();
     renderShell(bridge, SHARE_VIEW);
 
-    await settleEngineOnRead(bridge);
+    await settleShareView();
     await screen.findByTestId("chats-panel");
 
     await user.keyboard("{Control>}{Alt>}b{/Alt}{/Control}");
@@ -14260,7 +13879,7 @@ describe("shared view chats surface", () => {
     renderShell(bridge, SHARE_VIEW);
 
     // One line, per the empty-state recipe (copy.md): what is missing, then
-    // the next step this surface really has. #646 PR2 changed BOTH halves —
+    // the next step this surface really has. #646 PR2 changed both halves —
     // a shared view has per-file chat now, so "no chats" became false and
     // "close this tab" stopped being the real next step.
     const placeholder = await screen.findByTestId("chats-page-share-view");
@@ -14275,12 +13894,12 @@ describe("shared view chats surface", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  // The other half of BOTH gates: a healthy engine workspace gets the real
+  // The other half of both gates: a healthy engine workspace gets the real
   // panel. Without this, hiding Chats from every workspace — or replacing the
   // panel with the failed-capture placeholder on every one — keeps the share
-  // pins above and the #628 pins below green.
+  // pins above and the pins below green.
   it("keeps Chats for a workspace that is not a shared view", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
 
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
@@ -14295,16 +13914,16 @@ describe("shared view chats surface", () => {
 
   // The graph's chat-mentions toggle, on its own. The test above proves the
   // panel is gone, and the panel's own gate hides it whatever this toggle
-  // reads — so reverting THIS gate alone changed nothing any pin could see.
+  // reads — so reverting this gate alone changed nothing any pin could see.
   // It is the most expensive one to lose: `includeChatMentions: true` is what
   // sends readWorkspaceGraph through requireEngineCapture, so an ungated
-  // toggle fails the WHOLE graph — a surface a shared view legitimately has.
+  // toggle fails the whole graph — a surface a shared view legitimately has.
   it("offers no chat mentions in the graph on a shared view", async () => {
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     const user = userEvent.setup();
     renderShell(bridge, SHARE_VIEW);
 
-    await settleEngineOnRead(bridge);
+    await settleShareView();
     await user.click(screen.getByTestId("activity-graph"));
 
     // The graph itself still works — that is the point.
@@ -14319,14 +13938,14 @@ describe("shared view chats surface", () => {
     );
   });
 
-  // Ctrl+Alt+B, on its own: whether the shell CLAIMS the chord from whatever
-  // else would handle it. A shared view has a Chats panel to toggle now
-  // (#646 PR2), so it claims the chord — the same rule as any other
+  // Ctrl+Alt+B, on its own: whether the shell claims the chord from whatever
+  // else would handle it. A shared view has a Chats panel to toggle now,
+  // so it claims the chord — the same rule as any other
   // workspace, and the pin below is the one that still separates the two.
   it("claims Ctrl+Alt+B on a shared view", async () => {
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge, SHARE_VIEW);
-    await settleEngineOnRead(bridge);
+    await settleShareView();
 
     // A fresh event per attempt: the handler re-registers in a passive
     // effect, and a stale event carries the previous attempt's verdict.
@@ -14343,38 +13962,19 @@ describe("shared view chats surface", () => {
     });
   });
 
-  // The gate's other half, and the reason it is not simply deleted: a
-  // workspace with the engine flag OFF still has no Chats panel and must not
-  // claim the chord.
-  it("does not claim Ctrl+Alt+B when the engine flag is off", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    renderShell(bridge);
-    await screen.findByTestId("file-tree");
-
-    const event = new KeyboardEvent("keydown", {
-      key: "b",
-      ctrlKey: true,
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    window.dispatchEvent(event);
-    expect(event.defaultPrevented).toBe(false);
-  });
-
   it.each([
     ["Control", { ctrlKey: true }],
     ["Command", { metaKey: true }],
   ] as const)(
     "claims %s+Alt+B for a workspace that is not a shared view",
     async (_name, modifier) => {
-      const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+      const bridge = makeBridge(Promise.resolve(STORED_STATE));
       renderShell(bridge);
       await screen.findByTestId("chats-panel");
 
       // The handler re-registers in a passive effect whenever `chatsEnabled`
       // changes, so a single dispatch can land in the commit before that effect
-      // runs. Retry with a FRESH event: a stale one carries the previous
+      // runs. Retry with a fresh event: a stale one carries the previous
       // attempt's defaultPrevented and would pass on the first arming forever.
       await waitFor(() => {
         const event = new KeyboardEvent("keydown", {
@@ -14391,7 +13991,7 @@ describe("shared view chats surface", () => {
   );
 
   it("claims Command+Option+B when macOS reports the Option glyph", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
     await screen.findByTestId("chats-panel");
 
@@ -14410,7 +14010,7 @@ describe("shared view chats surface", () => {
   });
 
   it("leaves AltGr characters on physical KeyB unclaimed", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
     await screen.findByTestId("chats-panel");
 
@@ -14446,7 +14046,7 @@ describe("shared view chats surface", () => {
   });
 
   it("still asks for chat mentions when a normal workspace opens a file", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
 
     await screen.findByTestId("tab-b.md");
@@ -14459,7 +14059,7 @@ describe("shared view chats surface", () => {
   });
 
   // The ordering interaction #626 found, on this surface. A shared view's
-  // status ALSO says no recorder, so once one lands the status clause alone
+  // status also says no recorder, so once one lands the status clause alone
   // would produce the same result and the share clause would survive
   // deletion. Holding the status pending is what isolates it: `isShareView`
   // is a synchronous registry fact, and it is the only thing that can answer
@@ -14480,7 +14080,7 @@ describe("shared view chats surface", () => {
   });
 });
 
-// #628: the same class as #620, one surface over. On a workspace that is NOT
+// The same class as #620, one surface over. On a workspace that is not
 // a shared view but whose capture build failed, main refuses every Chats call
 // — and the shell offered the panel, the tab and the mention surfaces anyway,
 // because they read the renderer's own engine flag and nothing else.
@@ -14491,14 +14091,13 @@ describe("shared view chats surface", () => {
 describe("chats surface after a failed capture build", () => {
   const FAILED_STATUS = {
     ...SYNC_STATUS,
-    historyRecordingOff: true,
     historyRecordingUnavailable: true,
   };
 
   // Main's real answers once the capture build failed: every Chats call goes
   // through requireEngineCapture, which has no capture to hand it.
   function makeFailedCaptureBridge() {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     bridge.openWorkspace = vi.fn(async () => FAILED_STATUS);
     bridge.getSyncStatus = vi.fn(async () => FAILED_STATUS);
     for (const call of [
@@ -14551,7 +14150,7 @@ describe("chats surface after a failed capture build", () => {
   // The linked-mentions panel rides every markdown open, and
   // listChatFileMentions goes through requireEngineCapture like every other
   // Chats call. Its own `.catch` swallows the refusal, which is why nothing
-  // caught it (#615's last ungated call, from the other cause).
+  // caught it (the last ungated call, from the other cause).
   it("asks for no chat mentions when a file opens", async () => {
     const bridge = makeFailedCaptureBridge();
     renderShell(bridge);
@@ -14598,7 +14197,7 @@ describe("chats surface after a failed capture build", () => {
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
     // The panel is mounted and states nothing: neither read the shell has
-    // done proves anything about what main decided (#542).
+    // done proves anything about what main decided.
     expect(screen.getByTestId("chats-panel")).toBeTruthy();
     expect(screen.queryByTestId("chats-panel-off")).toBeNull();
 
@@ -14614,9 +14213,9 @@ describe("chats surface after a failed capture build", () => {
 
 });
 
-// #621: virtual tabs survive restore, so a moment-diff tab outlives the
+// Virtual tabs survive restore, so a moment-diff tab outlives the
 // History surface that opened it — and a shared view has no History surface
-// at all (#540). The page asked main for a moment the share has none of and
+// at all. The page asked main for a moment the share has none of and
 // fell into its own error state.
 describe("shared view moment-diff tab", () => {
   const MOMENT_TAB = momentDiffTabPath("m-1");
@@ -14641,7 +14240,7 @@ describe("shared view moment-diff tab", () => {
   });
 
   it("keeps the real diff page for a persisted moment-diff tab outside a shared view", async () => {
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
     );
     bridge.readEngineMoment = vi.fn(async (): Promise<ReadEngineMomentResult> => ({
@@ -14689,7 +14288,7 @@ describe("shared view moment-diff tab", () => {
   });
 });
 
-// #637 item 1: the same tab, the other cause. #621 gated it on the share fact
+// The same tab, the other cause. #621 gated it on the share fact
 // alone, so a workspace whose recorder failed to build still mounted
 // EngineMomentDiffPage — which calls readEngineMoment on mount and falls into
 // its own error state. Reached by opening a moment diff while healthy and
@@ -14698,13 +14297,12 @@ describe("moment-diff tab after a failed capture build", () => {
   const MOMENT_TAB = momentDiffTabPath("m-1");
   const FAILED_STATUS = {
     ...SYNC_STATUS,
-    historyRecordingOff: true,
     historyRecordingUnavailable: true,
   };
 
   it("states the capability instead of a page that can only fail", async () => {
     const status = deferred<typeof FAILED_STATUS>();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
     );
     bridge.openWorkspace = vi.fn(() => status.promise);
@@ -14714,8 +14312,8 @@ describe("moment-diff tab after a failed capture build", () => {
     });
     renderShell(bridge);
 
-    // Before the decision lands the tab mounts no page AND claims nothing:
-    // the renderer's own read proves nothing about what main recorded (#542).
+    // Before the decision lands the tab mounts no page and claims nothing:
+    // the renderer's own read proves nothing about what main recorded.
     await screen.findByTestId("titlebar-chats-sidebar");
     expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
     expect(screen.queryByTestId("moment-diff-off")).toBeNull();
@@ -14741,78 +14339,6 @@ describe("moment-diff tab after a failed capture build", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  // The other ordering, which the tests above cannot reach because their open
-  // is the slow one (#637, codex r2). Main decides the recorder once per app
-  // session and RETAINS the workspace, so re-entering a healthy workspace
-  // mid-session resolves `openWorkspace` off that retained entry — before the
-  // renderer's own settings read, which is a real file read, has answered.
-  // `engineEnabled` still holds its "no answer" false in that window, so the
-  // tab took the unavailable branch and stated a restart main never asked for,
-  // then flipped to the diff.
-  it("states nothing while the settings read is still in flight", async () => {
-    const settings = deferred<WorkspaceSettingsResult>();
-    const bridge = makeEngineBridge(
-      Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
-    );
-    bridge.getWorkspaceSettings = vi.fn(() => settings.promise);
-    renderShell(bridge);
-
-    // The premise: main's decision has landed, and it says a recorder exists.
-    await waitFor(() =>
-      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
-    );
-    // MUTATION: read the capture decision alone -> "History is unavailable.
-    // dohc could not confirm…", on a workspace whose history is fine.
-    expect(screen.queryByTestId("moment-diff-off")).toBeNull();
-    expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
-    expect(bridge.readEngineMoment).not.toHaveBeenCalled();
-
-    await act(async () => {
-      settings.resolve({
-        settings: {
-          ...DEFAULT_WORKSPACE_SETTINGS,
-          experimental: {
-            ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-            workspaceEngineAlpha: true,
-          },
-        },
-        source: "stored",
-      });
-      await settings.promise;
-    });
-
-    // Both answers are in, and they agree: the real page, asking main for the
-    // moment the tab was opened on.
-    await waitFor(() =>
-      expect(bridge.readEngineMoment).toHaveBeenCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        momentId: "m-1",
-      }),
-    );
-    expect(screen.queryByTestId("moment-diff-off")).toBeNull();
-  });
-
-  // The half that keeps the wait from becoming a forever-load: the settings
-  // read can FAIL, and a failure is an answer. Held as "pending" it would
-  // leave this tab spinning for the rest of the session.
-  it("states the capability once the settings read fails", async () => {
-    const bridge = makeEngineBridge(
-      Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
-    );
-    bridge.getWorkspaceSettings = vi.fn(async (): Promise<never> => {
-      throw new Error("transient read failure");
-    });
-    renderShell(bridge);
-
-    // The renderer's read failed and main said nothing was wrong, so this
-    // surface knows only what IT could not do — no cause, no claim about what
-    // the workspace has (#542).
-    const placeholder = await screen.findByTestId("moment-diff-off");
-    expect(placeholder.textContent).toContain("History is unavailable.");
-    expect(placeholder.textContent).not.toContain("Settings");
-    expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
-    expect(bridge.readEngineMoment).not.toHaveBeenCalled();
-  });
 });
 
 describe("workbench resize commits", () => {
@@ -14821,7 +14347,7 @@ describe("workbench resize commits", () => {
       configurable: true,
       value: vi.fn(),
     });
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve({
         ...STORED_STATE,
         editorGroups: [
@@ -15035,8 +14561,7 @@ describe("open editors", () => {
     await waitFor(() =>
       expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(refreshCount),
     );
-    // MUTATION: an explicit refresh must not opt into the activity cache.
-    expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
+    expect(bridge.listWorkspaceFiles, "an explicit refresh must not opt into the activity cache.").toHaveBeenLastCalledWith({
       workspaceId: WORKSPACE.workspaceId,
     });
   });
@@ -15242,20 +14767,8 @@ describe("open editors", () => {
 });
 
 describe("chats panel (right side)", () => {
-  it("never renders a right panel (or a collapsed stub) for an engine-off workspace", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    renderShell(bridge);
-
-    await screen.findByText("a.md");
-    expect(screen.queryByTestId("chats-panel")).toBeNull();
-    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
-    // The old history rail is gone for good — no timeline, no restore stub.
-    expect(screen.queryByTestId("history-timeline")).toBeNull();
-    expect(screen.queryByTestId("history-restore")).toBeNull();
-  });
-
   it("toggles from the titlebar and hides entirely when collapsed", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -15269,7 +14782,7 @@ describe("chats panel (right side)", () => {
 
     await user.click(screen.getByTestId("chats-panel-collapse"));
     expect(screen.queryByTestId("chats-panel")).toBeNull();
-    // Collapsed means GONE — no 36px stub squatting on the right edge.
+    // Collapsed means gone — no 36px stub squatting on the right edge.
     expect(screen.queryByTestId("history-restore")).toBeNull();
 
     await user.click(screen.getByTestId("titlebar-chats-sidebar"));
@@ -15277,7 +14790,7 @@ describe("chats panel (right side)", () => {
   });
 
   it("keeps the navigator open and switches the editor between channels", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listChatChannels.mockResolvedValue({
       channels: [
         {
@@ -15337,7 +14850,7 @@ describe("chats panel (right side)", () => {
       configurable: true,
       value: vi.fn(),
     });
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
 
     const panel = await screen.findByTestId("chats-panel");
@@ -15367,7 +14880,7 @@ describe("chats panel (right side)", () => {
   });
 
   it("exposes the chats resize separator to keyboard users", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
 
     const panel = await screen.findByTestId("chats-panel");
@@ -15397,7 +14910,7 @@ describe("chats panel (right side)", () => {
   });
 
   it("the 'This file' tab shows the active file's chats surface", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -15606,16 +15119,6 @@ describe("settings entry points", () => {
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
   });
 
-  it("opens settings from the status bar context menu", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.showWorkbenchMenu.mockResolvedValue("settings");
-    renderShell(bridge);
-
-    fireEvent.contextMenu(await screen.findByTestId("status-workspace"));
-
-    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
-  });
-
   it("opens settings from the command palette and menu command", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
@@ -15735,7 +15238,7 @@ describe("drawing entry point", () => {
 
 describe("unavailable MCP launcher settings", () => {
   it("shows the launcher error without a copyable config", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.getMcpConfig = vi.fn(
       async (): Promise<McpConfigResult> => ({
         unavailable: true,
@@ -15767,7 +15270,7 @@ describe("unavailable MCP launcher settings", () => {
 
 // #687/#589: the note's precedence and exact copy are pinned at the
 // AgentsMcpSettings/RunnerSettingsCard layer, but every test there hands
-// sessionRecorderOn and sharedView straight to DesktopSettings — bypassing
+// sessionRecorderOn and sharedView straight to SettingsDialog — bypassing
 // the shell's own derivation. A regression that severs
 // DesktopWorkspaceShell's wiring (for example, replacing the syncStatus ->
 // sessionRecorderOn derivation with `undefined`, or dropping sharedView)
@@ -15775,8 +15278,8 @@ describe("unavailable MCP launcher settings", () => {
 // palette -> Settings -> Agents & MCP path through the shell itself.
 describe("runner note reaches the card through the shell's own wiring", () => {
   it("carries a recorder-less status into the restart note", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
-    const offStatus = { ...SYNC_STATUS, historyRecordingOff: true };
+    const bridge = makeBridge(Promise.resolve(null));
+    const offStatus = { ...SYNC_STATUS, historyRecordingUnavailable: true };
     bridge.openWorkspace = vi.fn(async () => offStatus);
     bridge.getSyncStatus = vi.fn(async () => offStatus);
     const user = userEvent.setup();
@@ -15818,97 +15321,11 @@ describe("runner note reaches the card through the shell's own wiring", () => {
   });
 });
 
-// AUDIT-OPTOUT: a settings file that cannot be read reads as opted out, so the
-// workspace records no history. The Settings dialog is not enough — the user
-// must see it without opening Settings.
-//
-// #483: the notice states what MAIN's open-time read found — the read that
-// decided whether anything is recorded. The renderer's own read of the same
-// file happens at a different moment and can disagree with it: one way round
-// the user gets a true "history is off" under a false cause, the other way a
-// recording workspace promises "no history".
-const UNREADABLE_WARNING =
-  "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.";
-
-const OPTED_OUT_READ = async (): Promise<WorkspaceSettingsResult> => ({
-  settings: {
-    ...DEFAULT_WORKSPACE_SETTINGS,
-    experimental: {
-      ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-      workspaceEngineAlpha: false,
-    },
-  },
-  source: "recovered" as const,
-  warning: UNREADABLE_WARNING,
-});
-
-describe("unreadable workspace settings", () => {
-  it("raises the settings warning in the notice center, not only in Settings", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getWorkspaceSettings = vi.fn(OPTED_OUT_READ);
-    const offStatus = {
-      ...SYNC_STATUS,
-      historyRecordingOff: true,
-      settingsWarning: UNREADABLE_WARNING,
-    };
-    bridge.openWorkspace = vi.fn(async () => offStatus);
-    bridge.getSyncStatus = vi.fn(async () => offStatus);
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(await screen.findByTestId("notice-center-toggle"));
-    expect(
-      (await screen.findByTestId("notice-workspace-settings-unreadable"))
-        .textContent,
-    ).toContain("/ws/.dohc/settings.local.json");
-  });
-
-  it("names main's cause even when the renderer's own read succeeded", async () => {
-    // Main's read hit a transient error at open, so nothing is recorded for
-    // this session. The renderer read the same file a moment later and it was
-    // fine — the notice must still say WHY, not blame the Settings toggle.
-    const bridge = makeBridge(Promise.resolve(null));
-    const offStatus = {
-      ...SYNC_STATUS,
-      historyRecordingOff: true,
-      settingsWarning: UNREADABLE_WARNING,
-    };
-    bridge.openWorkspace = vi.fn(async () => offStatus);
-    bridge.getSyncStatus = vi.fn(async () => offStatus);
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(await screen.findByTestId("notice-center-toggle"));
-    expect(
-      (await screen.findByTestId("notice-workspace-settings-unreadable"))
-        .textContent,
-    ).toContain("/ws/.dohc/settings.local.json");
-    expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
-  });
-
-  it("never promises 'no history' while the workspace is recording", async () => {
-    // The reverse race: the renderer's read failed, main's succeeded and the
-    // engine is recording. A notice sourced from the renderer's read would be
-    // a false privacy assurance.
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getWorkspaceSettings = vi.fn(OPTED_OUT_READ);
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(await screen.findByTestId("notice-center-toggle"));
-    // The panel opened, so a missing notice means no notice — not a missed
-    // render.
-    expect(await screen.findByTestId("notice-center")).toBeTruthy();
-    expect(screen.queryByTestId("notice-workspace-settings-unreadable")).toBeNull();
-    expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
-  });
-});
-
 // #567 / #579 review: set-aside draft recovery at the shell seams. The drafts
 // live in a module store keyed by workspace + path; the shell owns the two
 // integrations under test — path remapping on explorer renames, and the
 // distinction between recovery (dot, no save promise) and savable-dirty
-// (dot AND the version-switch save-first prompt).
+// (dot and the version-switch save-first prompt).
 describe("set-aside draft recovery", () => {
   it("keeps the notice reachable when the open file is renamed mid-notice", async () => {
     const user = userEvent.setup();
@@ -15938,10 +15355,7 @@ describe("set-aside draft recovery", () => {
     await user.type(input, "renamed.md{Enter}");
     await screen.findByTestId("tab-renamed.md");
 
-    // MUTATION (remap wiring): drop the remapOrphanedDraftPaths call from
-    // onExplorerPathsChanged. The store still keys by a.md, the tab is
-    // renamed.md, and the recovery text is unreachable from the UI.
-    expect(await screen.findByTestId("orphaned-draft-notice")).toBeTruthy();
+    expect(await screen.findByTestId("orphaned-draft-notice"), "remap wiring: drop the remapOrphanedDraftPaths call from onExplorerPathsChanged. The store still keys by a.md, the tab is renamed.md, and the recovery text is unreachable from the UI.").toBeTruthy();
     await user.click(screen.getByTestId("orphaned-draft-copy"));
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toBe("Kept!"),
@@ -15950,7 +15364,7 @@ describe("set-aside draft recovery", () => {
 
   it("marks the tab with recovery but lets a version switch proceed without a save promise", async () => {
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -15977,23 +15391,19 @@ describe("set-aside draft recovery", () => {
 
     // The recovery marks the tab: an unsaved edit exists, and hiding that
     // would be the engine-Saved lie one level up.
-    // MUTATION (dot): drop `|| activeTabRecovery` from the EditorTabs prop.
     await screen.findByTestId("view-markdown");
     await screen.findByTestId("tab-dirty");
 
-    // But it is NOT savable-dirty: switching versions must not prompt
+    // But it is not savable-dirty: switching versions must not prompt
     // "dohc will save them" about a draft the flush cannot write — the store
     // outlives the switch, so the switch just proceeds.
-    // MUTATION (lift): lift the recovery-derived state from MarkdownView's
-    // onSaveStateChange (the round-1 behavior). The save-first dialog then
-    // appears and the switch below never runs.
     await user.click(await screen.findByTestId("version-menu-button"));
     const item = (await screen.findAllByTestId("version-item")).find(
       (candidate) => candidate.dataset.versionId === "v2",
     );
     await user.click(item!);
     await waitFor(() =>
-      expect(bridge.switchWorkspaceVersion).toHaveBeenCalled(),
+      expect(bridge.switchWorkspaceVersion, "lift: lift the recovery-derived state from MarkdownView's onSaveStateChange (the round-1 behavior). The save-first dialog then appears and the switch below never runs.").toHaveBeenCalled(),
     );
     expect(screen.queryByTestId("version-switch-save-confirm")).toBeNull();
     // The notice survives the switch — recovery needed no save.
@@ -16002,7 +15412,7 @@ describe("set-aside draft recovery", () => {
 
   it("treats a deleted live document as terminal instead of save-first dirty", async () => {
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -16071,25 +15481,23 @@ describe("set-aside draft recovery", () => {
     expect(screen.queryByTestId("version-switch-save-confirm")).toBeNull();
   });
 
-  // #579 review r4: only the mounted inspector can report savable-dirty, but
-  // recovery is knowable for EVERY tab — an inactive tab must keep its
+  // Only the mounted inspector can report savable-dirty, but
+  // recovery is knowable for every tab — an inactive tab must keep its
   // marker or the user forgets the draft exists.
   it("marks an inactive tab that holds a set-aside draft", async () => {
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
     );
     captureOrphanedDraft(WORKSPACE.workspaceId, "b.md", "Kept!");
     renderShell(bridge);
 
-    // MUTATION (per-tab set): key the marker off the active tab only. The
-    // inactive b.md loses its marker while its draft still exists.
     const inactive = await screen.findByTestId("tab-b.md");
-    expect(within(inactive).getByTestId("tab-dirty")).toBeTruthy();
+    expect(within(inactive).getByTestId("tab-dirty"), "per-tab set: key the marker off the active tab only. The inactive b.md loses its marker while its draft still exists.").toBeTruthy();
     const active = screen.getByTestId("tab-a.md");
     expect(within(active).queryByTestId("tab-dirty")).toBeNull();
   });
 
-  // #579 review r10: the global recovery list labels rows with the NAME the
+  // The global recovery list labels rows with the NAME the
   // UI shows for the workspace, not its UUID — the shell registers it.
   it("registers the workspace's display name for the global recovery list", async () => {
     const bridge = makeBridge(Promise.resolve(null));
@@ -16098,22 +15506,20 @@ describe("set-aside draft recovery", () => {
     await screen.findByTestId("file-tree");
 
     // The same global list the close dialog embeds.
-    // MUTATION (label wiring): drop the shell's noteWorkspaceLabel effect —
-    // the row falls back to the raw workspace id.
     render(<GlobalRecoveryList />);
-    expect(screen.getByTestId("recovery-list-workspace").textContent).toBe(
+    expect(screen.getByTestId("recovery-list-workspace").textContent, "label wiring: drop the shell's noteWorkspaceLabel effect — the row falls back to the raw workspace id.").toBe(
       "personal",
     );
   });
 
-  // #579 review r7: a switch can fail AFTER its IPC started — main settles
+  // A switch can fail after its IPC started — main settles
   // and closes live Y.Doc sessions before it sets the active version, so
   // "the version never moved" does not mean "nothing happened". The reopen
   // must fire, or the editor keeps a session main already closed and later
   // edits vanish into swallowed IPC rejections.
   it("reopens the document when a switch fails after its IPC started", async () => {
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -16139,7 +15545,7 @@ describe("set-aside draft recovery", () => {
       throw new Error("switch failed mid-way");
     });
     const openEngineYDocSession = vi.fn(async () => ({ available: false }));
-    // Subscribed before every open (#697 P2-E) — a bridge missing this
+    // Subscribed before every open — a bridge missing this
     // degrades to not-engine-backed instead of ever attempting the open, so
     // this mock needs it even though this test never emits through it.
     const onEngineYDocSaveState = vi.fn(() => () => undefined);
@@ -16163,13 +15569,10 @@ describe("set-aside draft recovery", () => {
       expect(bridge.switchWorkspaceVersion).toHaveBeenCalled(),
     );
 
-    // MUTATION (switch-issued key): suppress the announce whenever the
-    // version did not move, regardless of where the failure happened. The
-    // reopen below never comes and the closed-session write path is live.
-    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(openEngineYDocSession, "switch-issued key: suppress the announce whenever the version did not move, regardless of where the failure happened. The reopen below never comes and the closed-session write path is live.").toHaveBeenCalledTimes(2));
   });
 
-  // #579 review r18: a SUCCESSFUL switch announces before its selector
+  // A successful switch announces before its selector
   // refresh, and announcing again after that refresh fails would bump the
   // version epoch a second time — the same-version reopen moves whatever the
   // user typed in between into set-aside recovery — a notice the user then
@@ -16180,11 +15583,11 @@ describe("set-aside draft recovery", () => {
   // still passes.
   //
   // An earlier round claimed that was because a successful switch re-keys this
-  // panel. That was WRONG: `<VersionMenu>` is mounted without a key
+  // panel. That was wrong: `<VersionMenu>` is mounted without a key
   // (DesktopWorkspaceShell.tsx), so it is not re-keyed, exactly as
   // WorkspaceVersions.tsx:105-115 intends. What actually absorbs the second
   // announcement is not established — measured on the mutated build, the
-  // catch path's recovery read DOES run (four listWorkspaceVersions calls) and
+  // catch path's recovery read does run (four listWorkspaceVersions calls) and
   // the reopen count still stays at two.
   //
   // So: unpinned, and reachable under an order these tests do not produce —
@@ -16193,11 +15596,12 @@ describe("set-aside draft recovery", () => {
   // guard stays because it makes the outcome hold regardless of that order.
   it("reopens once when a successful switch's selector refresh fails", async () => {
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     let switched = false;
     let refreshFailed = false;
+    const recovery = deferred();
     bridge.listWorkspaceVersions = vi.fn(async () => {
       // The switch's OWN refresh fails; the catch path's recovery read then
       // succeeds and reports the version the switch already announced. That
@@ -16206,6 +15610,7 @@ describe("set-aside draft recovery", () => {
         refreshFailed = true;
         throw new Error("selector refresh failed");
       }
+      if (switched) await recovery.promise;
       return {
         versions: [
           {
@@ -16231,7 +15636,7 @@ describe("set-aside draft recovery", () => {
       return { activeVersionId: "v2", changedFileCount: 0 };
     });
     const openEngineYDocSession = vi.fn(async () => ({ available: false }));
-    // Subscribed before every open (#697 P2-E) — a bridge missing this
+    // Subscribed before every open — a bridge missing this
     // degrades to not-engine-backed instead of ever attempting the open, so
     // this mock needs it even though this test never emits through it.
     const onEngineYDocSaveState = vi.fn(() => () => undefined);
@@ -16241,29 +15646,47 @@ describe("set-aside draft recovery", () => {
       onEngineYDocSaveState,
       onEngineYDocLineageReplacement,
     });
-    renderShell(bridge);
-    await screen.findByTestId("view-markdown");
-    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
+    try {
+      renderShell(bridge);
+      await screen.findByTestId("view-markdown");
+      await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
 
-    await user.click(await screen.findByTestId("version-menu-button"));
-    const item = (await screen.findAllByTestId("version-item")).find(
-      (candidate) => candidate.dataset.versionId === "v2",
-    );
-    await user.click(item!);
-    await waitFor(() =>
-      expect(bridge.switchWorkspaceVersion).toHaveBeenCalled(),
-    );
+      await user.click(await screen.findByTestId("version-menu-button"));
+      const item = (await screen.findAllByTestId("version-item")).find(
+        (candidate) => candidate.dataset.versionId === "v2",
+      );
+      await user.click(item!);
+      await waitFor(() =>
+        expect(bridge.switchWorkspaceVersion).toHaveBeenCalled(),
+      );
 
-    // The switch landed, so the reopen it announced is the RIGHT one.
-    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
-
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // The switch landed, so the reopen it announced is the right one.
+      await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
+      await waitFor(() => {
+        expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+          "selector refresh failed",
+        );
+        expect(
+          (screen.getByTestId("version-menu-button") as HTMLButtonElement).disabled,
+        ).toBe(true);
+      });
+    } finally {
+      await act(async () => {
+        recovery.resolve();
+        await recovery.promise;
+      });
+    }
+    // Recovery has finished when the selector leaves its busy state.
+    await waitFor(() => {
+      expect(
+        (screen.getByTestId("version-menu-button") as HTMLButtonElement).disabled,
+      ).toBe(false);
+      expect(screen.getByTestId("version-menu-active").textContent).toBe("Draft two");
     });
     expect(openEngineYDocSession).toHaveBeenCalledTimes(2);
   });
 
-  // #579 review r5: a deleted file's tab is gone, so no inspector will ever
+  // A deleted file's tab is gone, so no inspector will ever
   // render its notice again — the notice center is the path-independent
   // surface where the draft stays reachable, Copy/Dismiss included.
   it("keeps a deleted path's set-aside draft reachable from the notice center", async () => {
@@ -16272,24 +15695,19 @@ describe("set-aside draft recovery", () => {
     // The path is in no listing and no tab: only the store knows it.
     captureOrphanedDraft(WORKSPACE.workspaceId, "deleted/gone.md", "Kept!");
     // Another workspace's draft must NOT leak into this workspace's notice
-    // center (#579 review, r6) — the close guard is the global surface.
+    // center — the close guard is the global surface.
     captureOrphanedDraft("ws-somewhere-else", "private/notes.md", "Theirs");
     renderShell(bridge);
     await screen.findByTestId("file-tree");
 
-    // MUTATION (notice-center surface): drop the set-aside section from
-    // NoticeCenter. The draft exists, the close warning demands action, and
-    // no reachable surface offers it.
-    // MUTATION (workspace filter): drop the workspaceId filter — the other
-    // workspace's private path appears here and both assertions below fail.
     await user.click(await screen.findByTestId("notice-center-toggle"));
     await screen.findByTestId("notice-set-aside-edits");
     const rows = screen.getAllByTestId("recovery-list-row");
-    expect(rows).toHaveLength(1);
+    expect(rows, "notice-center surface: drop the set-aside section from NoticeCenter. The draft exists, the close warning demands action, and no reachable surface offers it.").toHaveLength(1);
     const row = rows[0];
     expect(row.textContent).toContain("deleted/gone.md");
     expect(row.textContent).not.toContain("private/notes.md");
-    // A workspace-scoped list needs no workspace label (#579 review, r7) —
+    // A workspace-scoped list needs no workspace label —
     // only the global close dialog carries them.
     expect(within(row).queryByTestId("recovery-list-workspace")).toBeNull();
     await user.click(screen.getByTestId("recovery-list-copy"));
@@ -16309,7 +15727,7 @@ describe("set-aside draft recovery", () => {
     );
   });
 
-  // #600: the store no longer dies on reload, quit, update-restart or crash —
+  // The store no longer dies on reload, quit, update-restart or crash —
   // a set-aside edit is written on capture and restored at launch. The #579
   // lifetime disclosure ("they live only in this window") became false with
   // it, and a false claim about durability is worse than none. The close
@@ -16322,20 +15740,17 @@ describe("set-aside draft recovery", () => {
     renderShell(bridge);
     await screen.findByTestId("file-tree");
 
-    // MUTATION (stale disclosure): put the sentence back. The panel then
-    // tells the user an edit that survives the next launch is about to be
-    // lost.
     await user.click(await screen.findByTestId("notice-center-toggle"));
     const section = await screen.findByTestId("notice-set-aside-edits");
-    expect(section.textContent).not.toContain("live only in this window");
+    expect(section.textContent, "stale disclosure: put the sentence back. The panel then tells the user an edit that survives the next launch is about to be lost.").not.toContain("live only in this window");
     // ...and it names both ways out, so the warning offers what it demands.
     expect(section.textContent).toContain("Copy an edit to keep its text");
     expect(section.textContent).toContain("Dismiss deletes it for good");
   });
 
-  // #600: dropping the blanket disclosure was right for the rows that now
-  // survive a quit, and it left the rows that still do NOT — a secret path
-  // plaintext storage refuses (#446), a write the quota refused — looking
+  // Dropping the blanket disclosure was right for the rows that now
+  // survive a quit, and it left the rows that still do not — a secret path
+  // plaintext storage refuses, a write the quota refused — looking
   // exactly like the durable ones. The lifetime moved onto the row.
   it("marks the set-aside edits that still die with the window", async () => {
     const user = userEvent.setup();
@@ -16345,9 +15760,6 @@ describe("set-aside draft recovery", () => {
     renderShell(bridge);
     await screen.findByTestId("file-tree");
 
-    // MUTATION (row lifetime): render the marker for every row, or for none.
-    // Either way the panel stops telling the two apart, and the user cannot
-    // see which edit the next quit destroys.
     await user.click(await screen.findByTestId("notice-center-toggle"));
     await screen.findByTestId("notice-set-aside-edits");
     const marked = screen
@@ -16355,18 +15767,18 @@ describe("set-aside draft recovery", () => {
       .filter(
         (row) => within(row).queryByTestId("recovery-list-window-only") !== null,
       );
-    expect(marked).toHaveLength(1);
+    expect(marked, "row lifetime: render the marker for every row, or for none. Either way the panel stops telling the two apart, and the user cannot see which edit the next quit destroys.").toHaveLength(1);
     expect(marked[0].textContent).toContain(".env");
     expect(marked[0].textContent).toContain("Only in this window");
   });
 
-  // #579 review r4: a failed save-first flush aborts the switch, the
+  // A failed save-first flush aborts the switch, the
   // workspace never leaves its version, and the recovery announcement must
   // not fire — announcing a version change reopens the live document and
-  // sets the still-editable draft aside on the SAME version.
+  // sets the still-editable draft aside on the same version.
   it("does not set the draft aside when a failed switch never left the version", async () => {
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -16414,12 +15826,8 @@ describe("set-aside draft recovery", () => {
     );
     expect(bridge.switchWorkspaceVersion).not.toHaveBeenCalled();
 
-    // MUTATION (failed-switch announce): announce the unchanged version from
-    // performSwitch's catch. The bookkeeping reopen then sets the draft
-    // aside on the same version — the notice appears and the editor loses
-    // the text the user could just keep editing.
     await waitFor(() =>
-      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+      expect(screen.queryByTestId("markdown-open-state"), "failed-switch announce: announce the unchanged version from performSwitch's catch. The bookkeeping reopen then sets the draft aside on the same version — the notice appears and the editor loses the text the user could just keep editing.").toBeNull(),
     );
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
     expect(
@@ -16437,9 +15845,9 @@ describe("set-aside draft recovery", () => {
 // suspendPolling plumb) makes these fail.
 describe("workbench render cost", () => {
   it("a shell re-render with unchanged props re-renders neither tree rows nor the inspector", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const bridge = holdHistory(makeBridge(Promise.resolve(STORED_STATE)));
     vi.stubGlobal("dohcDesktop", bridge);
-    // A FRESH element per render with identical prop values: rerendering the
+    // A fresh element per render with identical prop values: rerendering the
     // same element reference lets React skip the subtree outright, which
     // would pass without re-rendering the shell at all.
     const workspaces = [WORKSPACE];
@@ -16460,14 +15868,14 @@ describe("workbench render cost", () => {
     await screen.findByTestId("markdown-editor");
     expect(screen.getAllByTestId("tree-row").length).toBeGreaterThan(0);
 
-    // The deltas are measured across ONE synchronous re-render, so a read
+    // The deltas are measured across one synchronous re-render, so a read
     // still in flight cannot inflate them: nothing async can interleave
     // between the capture, the rerender, and the assertions.
     const keyCalls = vi.mocked(documentVersionKey).mock.calls.length;
-    const leafCalls = vi.mocked(leafOf).mock.calls.length;
+    const leafCalls = vi.mocked(basenameOf).mock.calls.length;
     view.rerender(shellElement());
     expect(vi.mocked(documentVersionKey).mock.calls.length).toBe(keyCalls);
-    expect(vi.mocked(leafOf).mock.calls.length).toBe(leafCalls);
+    expect(vi.mocked(basenameOf).mock.calls.length).toBe(leafCalls);
   });
 
   it("caps a sustained activity burst and keeps its trailing refresh", async () => {
@@ -16513,7 +15921,7 @@ describe("workbench render cost", () => {
   });
 
   it("skips only an all-hidden file window and still refreshes every history lane", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     renderShell(bridge);
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
@@ -16538,9 +15946,7 @@ describe("workbench render cost", () => {
         await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
       });
 
-      // MUTATION: refreshing files for every path-rich event makes the hidden
-      // engine and dependency churn pay for a disk walk it cannot change.
-      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings);
+      expect(bridge.listWorkspaceFiles, "refreshing files for every path-rich event makes the hidden engine and dependency churn pay for a disk walk it cannot change.").toHaveBeenCalledTimes(listings);
       // Path alone cannot prove history harmless. A deleted or retired path
       // may be absent from the current tree and still change these surfaces.
       expect(bridge.listEngineMoments).toHaveBeenCalledTimes(moments + 1);
@@ -16595,6 +16001,8 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+
     vi.useFakeTimers();
     try {
       const listings = bridge.listWorkspaceFiles.mock.calls.length;
@@ -16645,9 +16053,7 @@ describe("workbench render cost", () => {
       });
 
       expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1);
-      // MUTATION: once broad, a later scoped event must not downgrade the
-      // window to a cacheable request.
-      expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
+      expect(bridge.listWorkspaceFiles, "once broad, a later scoped event must not downgrade the window to a cacheable request.").toHaveBeenLastCalledWith({
         workspaceId: WORKSPACE.workspaceId,
       });
       expect(bridge.getSyncStatus).toHaveBeenCalledTimes(statusReads + 1);
@@ -16735,7 +16141,7 @@ describe("workbench render cost", () => {
 
   it("suspends the navigator's polling while a Chats tab is live", async () => {
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs([], null)),
     );
     renderShell(bridge);
@@ -16766,7 +16172,7 @@ describe("workbench render cost", () => {
   it("does not sync DMs from the suspended navigator when an open channel thread refreshes", async () => {
     const user = userEvent.setup();
     const bridge = Object.assign(
-      makeEngineBridge(Promise.resolve(storedStateWithTabs([], null))),
+      makeBridge(Promise.resolve(storedStateWithTabs([], null))),
       {
         listChatChannels: vi.fn(async () => ({
           channels: [
@@ -16877,7 +16283,7 @@ describe("workbench render cost", () => {
       let unreadCount = 1;
       const markRead = deferred<void>();
       const bridge = Object.assign(
-        makeEngineBridge(Promise.resolve(storedStateWithTabs([], null))),
+        makeBridge(Promise.resolve(storedStateWithTabs([], null))),
         {
           syncDms: vi.fn(async () =>
             dmSyncResult([{ ...CANONICAL_DM, unreadCount }]),

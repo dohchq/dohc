@@ -102,7 +102,7 @@ describe("AgentIntegration", () => {
       });
       const a = await integration.startAgentRun("ws");
       const b = await integration.startAgentRun("ws");
-      // End the OLDER run A: B still owns the workspace, so its attribution
+      // End the older run A: B still owns the workspace, so its attribution
       // slot must stay set (not silently cleared to local).
       await integration.endAgentRun("ws", a.id);
       expect(slots.at(-1)).toEqual({ agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: b.id });
@@ -149,9 +149,9 @@ describe("AgentIntegration", () => {
     });
   });
 
-  // PR 0N-2: endAgentRun is the single funnel every terminal run path goes
+  // endAgentRun is the single funnel every terminal run path goes
   // through (driver turn-completed, panel Stop, the endAgentRun IPC), so the
-  // try-in-version review card listens HERE, not on each caller.
+  // try-in-version review card listens here, not on each caller.
   it("notifies onRunEnded when a known run ends, and never for an unknown run id", async () => {
     await withWorkspace(async ({ root, setSlot }) => {
       const ended: Array<{ workspaceId: string; runId: string; status: string }> = [];

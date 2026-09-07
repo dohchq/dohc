@@ -11,10 +11,12 @@ use dohc_engine_domain::{
     AUTOMATION_RECLAIM_EXHAUSTED, AutomationClaimState, AutomationSettle, AutomationTrigger,
     ChangeActorKind, ChangeAttribution, VersionedTextStore, WriteText, subscribe_automation,
 };
-use dohc_engine_runtime::{CancellationToken, NoFaults, RuntimeError, WorkspaceSupervisor};
+use dohc_engine_runtime::{
+    CancellationToken, LifecycleState, NoFaults, RuntimeError, WorkspaceSupervisor,
+};
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_sync::{NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{GateFaults, PanicFaults, ScratchDir, ScriptedFaults, engine_db_path};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -182,9 +184,9 @@ fn claim_rows(db: &Path, workspace_id: &str) -> Vec<(String, String, Option<Stri
 async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
     let initial = format!("---\nid: {RECORD}\nstatus: open\n---\n\nAlpha");
     let source_scratch = ScratchDir::new().expect("source scratch");
-    let source_db = source_scratch.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source_scratch).expect("source db");
     let peer_scratch = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer_scratch.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer_scratch).expect("peer db");
     seed_collection_replica(&source_db, WS, OBJECT, PATH, &initial);
     seed_collection_replica(&peer_db, WS, OBJECT, PATH, &initial);
     enable_sync(&source_db, WS);
@@ -396,8 +398,14 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
             payload: op.payload.clone(),
             recorded_at_ms: op.recorded_at_ms,
         };
-        apply_ydoc_envelope(&mut peer, &envelope, &NoFaults, &NoLiveLeases)
-            .expect("peer applies replicated collection edit");
+        apply_ydoc_envelope(
+            &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("peer applies replicated collection edit");
     }
     drop(peer);
     let peer_claims = claim_rows(&peer_db, WS);
@@ -452,7 +460,7 @@ fn claim_ledger(db: &Path, workspace_id: &str, claim_id: &str) -> (String, i64, 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_pending_claim(&db, WS, CRASH_CLAIM, 100);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -514,6 +522,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let reclaimed = handle
         .automation_reclaim_running(
             WS.to_owned(),
+            None,
             2,
             1_000,
             1_000,
@@ -560,6 +569,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let reclaimed = handle
         .automation_reclaim_running(
             WS.to_owned(),
+            None,
             2,
             2_000,
             2_000,
@@ -598,7 +608,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_crashed_claim_next_rolls_back_and_the_retry_serves_one_attempt() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_pending_claim(&db, WS, CRASH_CLAIM, 100);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -652,7 +662,7 @@ async fn a_crashed_claim_next_rolls_back_and_the_retry_serves_one_attempt() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cancelled_token_short_circuits_every_automation_command_without_writing() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_pending_claim(&db, WS, CRASH_CLAIM, 100);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -667,6 +677,7 @@ async fn a_cancelled_token_short_circuits_every_automation_command_without_writi
     let error = handle
         .automation_reclaim_running(
             WS.to_owned(),
+            None,
             2,
             1_000,
             1_000,
@@ -727,4 +738,91 @@ async fn a_cancelled_token_short_circuits_every_automation_command_without_writi
         .expect("count subscriptions")
     };
     assert_eq!(subscriptions, 0, "a cancelled subscribe registers nothing");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn abandoning_a_claim_request_does_not_cancel_its_admitted_transaction() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    seed_pending_claim(&db, WS, CRASH_CLAIM, 100);
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let gate = GateFaults::at(FaultPoint::StorageBeforePersist);
+    let requester = {
+        let handle = handle.clone();
+        let gate = Arc::clone(&gate);
+        tokio::spawn(async move {
+            handle
+                .automation_claim_next(WS.to_owned(), 200, gate, CancellationToken::new())
+                .await
+        })
+    };
+    let waiting = Arc::clone(&gate);
+    tokio::task::spawn_blocking(move || waiting.wait_until_reached())
+        .await
+        .expect("claim reached the transaction gate");
+    requester.abort();
+    let abandoned = requester.await;
+    gate.release();
+    assert!(abandoned.expect_err("requester aborted").is_cancelled());
+
+    let running = handle
+        .automation_running_attempts(WS.to_owned())
+        .await
+        .expect("read after the admitted claim");
+    assert_eq!(running.len(), 1);
+    assert_eq!(running[0].claim_id, CRASH_CLAIM);
+    supervisor.close(&db).expect("close after draining");
+    assert_eq!(
+        claim_ledger(&db, WS, CRASH_CLAIM),
+        ("running".to_owned(), 1, None),
+        "losing the reply receiver does not roll back admitted work"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_panicked_claim_rolls_back_and_closes_async_and_blocking_handles() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    seed_pending_claim(&db, WS, CRASH_CLAIM, 100);
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let blocking = handle.clone();
+    assert!(
+        !std::thread::spawn(move || blocking.secret_state_exists_blocking(WS.to_owned()))
+            .join()
+            .expect("join blocking read")
+            .expect("empty secret state")
+    );
+
+    let error = handle
+        .automation_claim_next(
+            WS.to_owned(),
+            200,
+            PanicFaults::at(FaultPoint::StorageBeforePersist),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("panic drops the command reply");
+    assert!(matches!(error, RuntimeError::ActorUnavailable));
+    assert!(matches!(
+        supervisor.close(&db),
+        Err(RuntimeError::WorkerPanicked)
+    ));
+    assert_eq!(handle.lifecycle(), LifecycleState::Closed);
+    assert!(matches!(
+        handle.automation_running_attempts(WS.to_owned()).await,
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    assert!(matches!(
+        std::thread::spawn(move || handle.secret_state_exists_blocking(WS.to_owned()))
+            .join()
+            .expect("join closed blocking read"),
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    assert_eq!(
+        claim_ledger(&db, WS, CRASH_CLAIM),
+        ("pending".to_owned(), 0, None),
+        "a panicked transaction never commits its claim"
+    );
 }

@@ -1,4 +1,4 @@
-//! The evidence behind [`MAX_YDOC_UPDATE_BYTES`] (#549).
+//! The evidence behind [`MAX_YDOC_UPDATE_BYTES`].
 //!
 //! A Y.Doc base is a FULL STATE, so its size tracks the whole document rather
 //! than one edit. The bound therefore has to be measured against the largest
@@ -201,10 +201,6 @@ fn report(samples: &[Sample]) {
 /// accepts — must encode to a Y.Doc full state the collab layer still admits,
 /// or a document the engine happily holds cannot originate a shared lineage.
 ///
-/// MUTATION: set `MAX_YDOC_UPDATE_BYTES` back to 5 MiB and this fails, naming
-/// the projected size (~14.7 MiB) against the cap. Drop the 120-byte-block
-/// sample and the worst ratio falls from ~1.41 to ~1.13, which would let a
-/// 12 MiB bound look sufficient.
 #[test]
 fn the_bound_covers_the_largest_document_the_engine_accepts() {
     let mib = 1024 * 1024;

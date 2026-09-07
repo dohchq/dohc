@@ -1,6 +1,6 @@
 //! The open ritual and the v2 fingerprint fence.
 //!
-//! `open_engine_db` is the **only** place pragmas are set (`PORTING.md` §9). It
+//! `open_engine_db` is the **only** place pragmas are set. It
 //! is ordered so the **fingerprint fence never mutates a rejected database**:
 //!
 //! 1. Reject a non-empty file too small to hold a SQLite header, before the
@@ -12,14 +12,9 @@
 //!    presence). A v1/foreign store is rejected here, before any byte of the
 //!    file is touched.
 //! 5. Only for an accepted (fresh or v2) store: apply the *persistent* pragmas
-//!    (`journal_mode = WAL`, `synchronous = NORMAL`), then run the **ordered
-//!    migration ledger** (`migration.rs`) — which on a fresh store assembles the
-//!    day-one v2 schema and stamps the fingerprint, and on an existing v2 store
-//!    applies any pending migrations — then validate the frozen shape and
+//!    (`journal_mode = WAL`, `synchronous = NORMAL`), then run the migration
+//!    ledger (`migration.rs`), then validate the required tables and
 //!    `quick_check`.
-//!
-//! The schema is no longer created by an ad-hoc eager `CREATE`; it is migration
-//! 0 in the ledger (`plan §Day-one Rust schema`). R04 owns the frozen shape.
 
 use crate::error::StorageError;
 use crate::faults::{FaultInjector, NoFaults};
@@ -33,10 +28,10 @@ use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 
 /// `synchronous = NORMAL`: the SQLite-recommended WAL setting and the TS
-/// engine's effective posture (`LANGUAGE_SEMANTICS_MATRIX.md` §8.6). Durable
+/// engine's effective posture. Durable
 /// across application/process crashes (the crash tiers this crate tests); the
 /// last commit may be lost only on OS crash / power loss, honestly de-scoped to
-/// `TEST_ORACLE.md` tier 3. Pinned AND asserted on open so a weakened value
+/// `TEST_ORACLE.md` tier 3. Pinned and asserted on open so a weakened value
 /// fails a test rather than passing silently.
 const SYNCHRONOUS_NORMAL: i64 = 1;
 
@@ -46,8 +41,6 @@ const REQUIRED_TABLES: &[&str] = &[
     "engine_migrations",
     "engine_ownership",
     "engine_requests",
-    "documents",
-    "replication_journal",
     // CAL-2 versioning tables.
     "versioned_workspaces",
     "versions",
@@ -67,18 +60,18 @@ const REQUIRED_TABLES: &[&str] = &[
     "collection_relation_edges",
     "collection_historical_record_owners",
     "collection_historical_record_owner_backfills",
-    // R06 conflict-object tables (migration ordinal 7).
+    // R06 conflict-object tables.
     "conflicts",
-    // R13 shadow fence token (migration ordinal 8).
+    // R13 shadow fence token.
     "shadow_clone",
     // R04 durability tables.
     "binary_blobs",
     "materialization_jobs",
-    // R08 secret-backed-file tables (migration ordinal 1).
+    // R08 secret-backed-file tables.
     "secret_files",
     "secret_fork_bases",
     "secret_moments",
-    // R11a durable Y.Doc tables (migration ordinal 2).
+    // R11a durable Y.Doc tables.
     "ydoc_docs",
     "ydoc_updates",
     "ydoc_snapshots",
@@ -86,16 +79,15 @@ const REQUIRED_TABLES: &[&str] = &[
     "ydoc_inactive_lineages",
     "ydoc_base_relay_candidates",
     "ydoc_recovery_decisions",
+    "owner_ydoc_outboxes",
+    "owner_ydoc_outbox_entries",
     "share_view_file_lane",
     "replication_pending_conflict_bundles",
     "replication_pending_conflict_ops",
     "replication_pending_conflict_moments",
     "replication_pending_conflict_text_blobs",
     "replication_pending_conflict_binary_blobs",
-    // R09 chats-domain tables (migration ordinal 3). Unlike the TS engine's
-    // lazy-additive chat tables (missing = "no chats yet"), the Rust migration
-    // ledger always creates these on open, so their presence is a hard v2
-    // invariant here.
+    // R09 chats-domain tables.
     "chat_channels",
     "chat_channel_wire_ids",
     "chat_channel_placeholders",
@@ -118,17 +110,13 @@ const REQUIRED_TABLES: &[&str] = &[
     "agent_run_records",
     "run_message_links",
     "chat_dispatch_pause",
-    // R12 search tables (migration ordinal 4). The two FTS5 virtual tables show
-    // up in sqlite_schema with type='table', so the same presence probe applies;
-    // like the chats tables above, the Rust ledger always creates them, so
-    // absence is state-corrupt (not the TS engine's lazy-additive "no search
-    // yet"). Their internal FTS5 shadow tables are not listed — only the
-    // caller-facing tables are invariants.
+    // R12 search tables. The two FTS5 virtual tables show up in sqlite_schema
+    // with type='table', so the same presence probe applies. Their internal
+    // FTS5 shadow tables are not listed.
     "engine_search_files_fts",
     "engine_search_chat_messages_fts",
     "engine_search_index_state",
-    // R10 replication, relay, and share cursors (migration ordinal 5);
-    // replication_pending_refusals arrived with ordinal 22.
+    // R10 replication, relay, and share cursors.
     "sync_identity",
     "replication_log",
     "replication_pending_refusals",
@@ -141,12 +129,15 @@ const REQUIRED_TABLES: &[&str] = &[
     "share_view_cursors",
     // #646 PR3a proposal scan position.
     "share_proposal_push_state",
+    "chat_conversation_revisions",
+    "automation_subscriptions",
+    "automation_claims",
 ];
 
 /// How an existing file was classified by the fingerprint fence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Disposition {
-    /// Empty file (or brand-new): run the migration ledger from ordinal 0.
+    /// Empty file (or brand-new): run the migration ledger.
     Fresh,
     /// Already a v2 store: run pending migrations (if any), then validate.
     ExistingV2,
@@ -180,10 +171,8 @@ pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<OpenedEngineDb,
     // Step 4: the store is ours — the file-mutating pragmas are now safe.
     apply_persistent_pragmas(&conn)?;
 
-    // The ordered migration ledger. Fresh stores get the whole v2 schema +
-    // fingerprint; existing v2 stores get any pending migrations. Production
-    // uses `NoFaults`, so a `Crashed` outcome is unreachable here (the migration
-    // fault points are exercised by `migration.rs`'s crash/reopen unit tests).
+    // Production uses `NoFaults`, so a `Crashed` outcome is unreachable here
+    // (the migration fault points are exercised by `migration.rs`'s tests).
     let ctx = MigrationContext::current(now_ms);
     let no_faults = NoFaults;
     match run_migrations(
@@ -293,7 +282,7 @@ fn classify_fingerprint(conn: &Connection) -> Result<Disposition, StorageError> 
         ENGINE_SCHEMA_VERSION => Ok(Disposition::ExistingV2),
         0 => {
             // Either a brand-new empty file or a non-empty foreign database that
-            // never stamped a version. Refuse to init over the latter — ANY user
+            // never stamped a version. Refuse to init over the latter — any user
             // object (table, view, index, trigger) marks the file as someone
             // else's.
             if has_any_user_object(conn)? {
@@ -306,7 +295,7 @@ fn classify_fingerprint(conn: &Connection) -> Result<Disposition, StorageError> 
             // A non-recognized `user_version` is normally a real foreign
             // fingerprint (e.g. a valid v1 TS database) → export/reset. But a
             // corrupt page-1 header can read `user_version` as garbage; that is
-            // CORRUPTION (restore from backup), not an unsupported version.
+            // corruption (restore from backup), not an unsupported version.
             // Distinguish by a read-only integrity probe: a store that fails
             // `quick_check` is classified corrupt regardless of the version it
             // claims. (A genuine foreign db passes the probe.)
@@ -389,6 +378,28 @@ fn integrity_check(conn: &Connection) -> Result<(), StorageError> {
 #[cfg(test)]
 mod tests {
     use super::REQUIRED_TABLES;
+
+    #[test]
+    fn current_schema_rejects_missing_owner_outbox_tables() {
+        for table in ["owner_ydoc_outboxes", "owner_ydoc_outbox_entries"] {
+            let directory =
+                dohc_test_scratch::ScratchDir::new_named("owner-outbox-schema").unwrap();
+            let path = directory.path().join("store.sqlite");
+            drop(crate::EngineStore::open(&path, 0).unwrap());
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(&format!("DROP TABLE {table}"))
+                .unwrap();
+            drop(connection);
+            assert!(
+                matches!(
+                    crate::EngineStore::open(&path, 0),
+                    Err(crate::StorageError::StateCorrupt { .. })
+                ),
+                "open must reject a store missing {table}"
+            );
+        }
+    }
 
     #[test]
     fn current_schema_requires_pending_conflict_bundle_tables() {

@@ -9,7 +9,6 @@ import {
   openWorkspaceFromFirstRun,
   revealExplorerPath,
   seedWorkspaceManifest,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -66,14 +65,11 @@ test("a dohc-tracked run's edits show as \"You's agent\" in History; later edits
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
 
-    // Start a dohc-tracked agent run through the SAME integration the agent
+    // Start a dohc-tracked agent run through the same integration the agent
     // panel uses (AgentIntegration -> workspaceActivity.setAgentRun).
     const runId = await startAgentRun(page, workspace.workspaceId);
 
@@ -125,9 +121,6 @@ test("an MCP chat reply reaches the file rail as \"You's agent\", or is refused 
     // A known workspace id so the MCP process (which reads the manifest for
     // identity) and the app agree on the workspace.
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
     expect(workspace.workspaceId).toBe(workspaceId);
@@ -197,11 +190,11 @@ test("an MCP chat reply reaches the file rail as \"You's agent\", or is refused 
     );
 
     if (!CLI_TRANSPORT_SUPPORTED) {
-      // The refusal is NAMED, not a silent failure or a generic transport
+      // The refusal is named, not a silent failure or a generic transport
       // error. And the load-bearing half: a refused call wrote NOTHING. MCP
       // has no second path into engine.db, so the rail still holds only the
       // human question. Re-open the thread the same way the supported branch
-      // does, so both branches read a FRESH message list.
+      // does, so both branches read a fresh message list.
       expect(reply).toEqual({ ok: false, reason: CLI_TRANSPORT_REFUSAL });
       await page.getByTestId("linked-chat-back").click();
       await page.getByTestId("linked-chat-open").click();

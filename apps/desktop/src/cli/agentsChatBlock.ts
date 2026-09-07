@@ -1,3 +1,4 @@
+import { runInKeyedLane } from "../keyedLane";
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
@@ -124,23 +125,6 @@ async function replaceAgentsFile(input: {
   }
 }
 
-async function serializeUpdate<T>(path: string, task: () => Promise<T>): Promise<T> {
-  const predecessor = updateTails.get(path) ?? Promise.resolve();
-  let release = (): void => undefined;
-  const turn = new Promise<void>((resolveTurn) => {
-    release = resolveTurn;
-  });
-  const tail = predecessor.catch(() => undefined).then(() => turn);
-  updateTails.set(path, tail);
-  await predecessor.catch(() => undefined);
-  try {
-    return await task();
-  } finally {
-    release();
-    if (updateTails.get(path) === tail) updateTails.delete(path);
-  }
-}
-
 function appendManagedBlock(source: string): string {
   const separator = source.length === 0
     ? ""
@@ -152,7 +136,7 @@ function appendManagedBlock(source: string): string {
   return `${source}${separator}${AGENTS_CHAT_MANAGED_BLOCK}\n`;
 }
 
-export function updateAgentsChatBlock(source: string): string {
+function updateAgentsChatBlock(source: string): string {
   let endIndex = source.indexOf(AGENTS_CHAT_END_MARKER);
   let beginIndex = -1;
   while (endIndex !== -1) {
@@ -171,7 +155,7 @@ export function updateAgentsChatBlock(source: string): string {
 
 export async function ensureAgentsChatBlock(workspaceRoot: string): Promise<boolean> {
   const agentsPath = resolve(workspaceRoot, "AGENTS.md");
-  return serializeUpdate(agentsPath, async () => {
+  return runInKeyedLane(updateTails, agentsPath, async () => {
     const handle = await openAgentsFile(agentsPath);
     try {
       const current = await handle.readFile("utf8");

@@ -5,7 +5,6 @@ import {
   createTempWorkspace,
   explorerRow,
   openWorkspaceFromFirstRun,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -13,7 +12,7 @@ import {
 // Left-alignment audit for the WYSIWYG editor: the TEXT of every top-level
 // block type must share one left content edge — a straight vertical line down
 // the gutter touches all of it. Decorations (list markers, task checkboxes,
-// the quote bar) hang LEFT of that edge, and framed blocks (code, tables,
+// the quote bar) hang left of that edge, and framed blocks (code, tables,
 // callouts) extend --dohc-editor-block-inset past the column so their inner
 // padding lands their text back on the edge. This spec measures the first
 // text glyph of each block against a plain paragraph's.
@@ -124,9 +123,6 @@ test("every block type's text sits on one shared left content edge", async () =>
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await writeWorkspaceFiles(temp, [{ path: "notes/alignment.md", contents: ALIGNMENT_DOC }]);
 
     desktop = await launchDesktopApp({ workspace: temp });

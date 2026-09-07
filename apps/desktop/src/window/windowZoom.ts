@@ -12,7 +12,7 @@ export function nextZoomLevel(current: number, step: ZoomStep): number {
 }
 
 /**
- * What a window's launch read should do when it resolves. The FIRST level of
+ * What a window's launch read should do when it resolves. The first level of
  * a launch applies everywhere — hosts and guests — through the one window-wide
  * apply, or a guest attached before the read resolved would stay at 100%
  * until the next zoom change. A user zoom that landed first set the known
@@ -29,7 +29,7 @@ export function resolvePersistedZoomApplication(
 
 /** The three things guest zoom needs from a WebContents — no more, so the
  * behavior tests drive the real logic instead of a true-by-construction fake. */
-export interface GuestZoomTarget {
+interface GuestZoomTarget {
   isDestroyed(): boolean;
   setZoomLevel(level: number): void;
   on(event: "did-finish-load", handler: () => void): void;
@@ -39,7 +39,7 @@ export interface GuestZoomTarget {
  * Binds one embedded guest to the window zoom: the current level applies at
  * attach and re-applies on every load — Chromium scopes zoom per origin, so a
  * level set before the first navigation would not survive it. Reads the level
- * at APPLY time, so a zoom change while the guest is still loading wins.
+ * at apply time, so a zoom change while the guest is still loading wins.
  */
 export function createGuestZoomApplier(
   getLevel: () => number | null,
@@ -56,7 +56,7 @@ export function createGuestZoomApplier(
   };
 }
 
-export type UserSettingsWriteQueue = <T>(
+type UserSettingsWriteQueue = <T>(
   task: () => Promise<T>,
 ) => Promise<T>;
 

@@ -9,11 +9,22 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
+import type { EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
+import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
+import {
+  CollectionFieldWriteHost,
+  collectionWriteFailures,
+  enqueueCollectionFieldWrite,
+  resetCollectionFieldWritesForTests,
+} from "./collections/recordFieldWrites";
 import { AppErrorBoundary } from "./ErrorBoundary";
 import { Overlay } from "./Overlay";
 import {
   RecoveryCloseGuard,
+  requestGuardedReload,
   requestGuardedUpdateInstall,
   resetGuardedExits,
 } from "./RecoveryCloseGuard";
@@ -43,7 +54,7 @@ function seedStoredDraft(): void {
   );
 }
 
-// The quit bridge is a REQUIRED contract (#579 review, r15): the guard calls
+// The quit bridge is a required contract: the guard calls
 // onQuitRequested / onRecoveryCheckRequested directly, so a stub that omits
 // them is a mismatched build and must fail loudly. Every test therefore
 // stubs the whole surface and overrides only what it asserts on.
@@ -60,10 +71,10 @@ function stubBridge(overrides: Record<string, unknown> = {}): void {
 
 // Every test gets the full contract; overrides replace it where asserted on.
 //
-// Storage REFUSES every write here (#600). A persisted draft comes back on
+// Storage refuses every write here. A persisted draft comes back on
 // the next launch and the guard rightly ignores it, so a suite about the
 // guard must produce the drafts persistence cannot save — which is exactly
-// what a full quota produces. The block below covers the drafts that CAN be
+// what a full quota produces. The block below covers the drafts that can be
 // persisted, and the secret-path floor is pinned in orphanedDrafts.test.ts.
 beforeEach(() => {
   stubBridge();
@@ -72,13 +83,17 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
   resetGuardedExits();
+  await disposeEngineDocLeasesForTests();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   vi.clearAllMocks();
   resetOrphanedDrafts();
+  // The collection write queue is module state on purpose — a pending head
+  // left by one test must not hold the next test's unload.
+  resetCollectionFieldWritesForTests();
 });
 
 // #567 / #579 review r4+r5: a set-aside draft that storage cannot keep lives
@@ -153,7 +168,7 @@ describe("RecoveryCloseGuard", () => {
     const user = userEvent.setup();
     noteWorkspaceLabel("ws-1", "Personal notes");
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
-    // The guard is deliberately GLOBAL (#579 review, r6): the whole renderer
+    // The guard is deliberately GLOBAL: the whole renderer
     // dies at once, so every workspace's drafts are at stake here.
     captureOrphanedDraft("ws-2", "other.md", "Also kept!");
     render(
@@ -163,22 +178,18 @@ describe("RecoveryCloseGuard", () => {
     );
     screen.getByTestId("app-content");
 
-    // MUTATION (close guard): remove the beforeunload interception. The
-    // close proceeds unannounced and every set-aside edit dies with it.
     const first = new Event("beforeunload", { cancelable: true });
     act(() => {
       window.dispatchEvent(first);
     });
-    expect(first.defaultPrevented).toBe(true);
+    expect(first.defaultPrevented, "close guard: remove the beforeunload interception. The close proceeds unannounced and every set-aside edit dies with it.").toBe(true);
     await screen.findByTestId("recovery-close-warning");
 
-    // The dialog carries the recovery itself (#579 review, r5): Copy works
+    // The dialog carries the recovery itself: Copy works
     // right here, path-labeled, whether or not the file still exists — and
-    // BOTH workspaces' drafts are listed.
-    // MUTATION (dialog list): drop <RecoveryList /> from the dialog — the
-    // warning then demands actions it does not offer.
+    // both workspaces' drafts are listed.
     const rows = screen.getAllByTestId("recovery-list-row");
-    expect(rows).toHaveLength(2);
+    expect(rows, "dialog list: drop <RecoveryList /> from the dialog — the warning then demands actions it does not offer.").toHaveLength(2);
     const row = rows.find((candidate) =>
       candidate.textContent?.includes("a.md"),
     )!;
@@ -189,12 +200,10 @@ describe("RecoveryCloseGuard", () => {
     // the same path, and Copy/Dismiss must be tellable apart (#579 review,
     // r7) — with the NAME the UI shows, not the raw UUID (#579 review,
     // r10); an unregistered workspace falls back to its id.
-    // MUTATION (workspace labels): drop the label span or show the raw id.
-    // Identical paths from two workspaces are indistinguishable.
     const labels = screen
       .getAllByTestId("recovery-list-workspace")
       .map((label) => label.textContent);
-    expect(labels).toContain("Personal notes");
+    expect(labels, "workspace labels: drop the label span or show the raw id. Identical paths from two workspaces are indistinguishable.").toContain("Personal notes");
     expect(labels).toContain("ws-2");
     await user.click(within(row).getByTestId("recovery-list-copy"));
     await waitFor(async () =>
@@ -223,16 +232,13 @@ describe("RecoveryCloseGuard", () => {
     closeSpy.mockRestore();
   });
 
-  // #579 review r15: the bridge and the preload gained both quit listeners in
-  // this same change. Treating them as optional would define a SECOND
+  // The bridge and the preload gained both quit listeners in
+  // this same change. Treating them as optional would define a second
   // supported preload — one where the renderer silently drops native-quit
   // handling — and every future change would have to keep that path alive.
   // There are no users and no old preloads to carry.
   it("fails loudly on a preload without the quit contract", () => {
     vi.stubGlobal("dohcDesktop", { installUpdate: async () => undefined });
-    // MUTATION (optional contract): restore `onQuitRequested?.(...)` and the
-    // catch-based fallback. This render then succeeds with native-quit
-    // handling missing, and the mismatched build ships unnoticed.
     expect(() =>
       render(
         <RecoveryCloseGuard>
@@ -270,20 +276,18 @@ describe("RecoveryCloseGuard", () => {
     });
     await screen.findByTestId("recovery-close-warning");
 
-    // Dismiss deletes the ONLY copy, so the destructive path REQUIRES the
-    // confirm step (#579 review, r6): the first click arms it and deletes
+    // Dismiss deletes the only copy, so the destructive path requires the
+    // confirm step: the first click arms it and deletes
     // nothing, and Keep backs out whole.
-    // MUTATION (confirm gate): make the Dismiss button delete directly. The
-    // row is gone right here and the assertions below fail.
     await user.click(screen.getByTestId("recovery-dismiss"));
-    expect(screen.getByTestId("recovery-list-row")).toBeTruthy();
+    expect(screen.getByTestId("recovery-list-row"), "confirm gate: make the Dismiss button delete directly. The row is gone right here and the assertions below fail.").toBeTruthy();
     await user.click(screen.getByTestId("recovery-dismiss-cancel"));
     expect(screen.getByTestId("recovery-list-row")).toBeTruthy();
     expect(screen.queryByTestId("recovery-dismiss-confirm")).toBeNull();
 
     await user.click(screen.getByTestId("recovery-dismiss"));
     await user.click(screen.getByTestId("recovery-dismiss-confirm"));
-    // The last draft resolved: the dialog retires itself (#579 review, r10).
+    // The last draft resolved: the dialog retires itself.
     await waitFor(() =>
       expect(screen.queryByTestId("recovery-close-warning")).toBeNull(),
     );
@@ -295,7 +299,7 @@ describe("RecoveryCloseGuard", () => {
     expect(second.defaultPrevented).toBe(false);
   });
 
-  // #579 review r7: the user asked for a RELOAD by name; the guard's confirm
+  // The user asked for a reload by name; the guard's confirm
   // must resume that action, never swap it for an exit.
   it("a blocked reload resumes as a reload, never an exit", async () => {
     const user = userEvent.setup();
@@ -331,20 +335,18 @@ describe("RecoveryCloseGuard", () => {
       "Reload anyway",
     );
 
-    // MUTATION (retain the action): make the confirm call window.close()
-    // unconditionally. The user asked to RELOAD and gets an exit.
     const closeSpy = vi
       .spyOn(window, "close")
       .mockImplementation(() => undefined);
     await user.click(screen.getByTestId("recovery-close-anyway"));
-    expect(reloadRenderer).toHaveBeenCalledTimes(2);
+    expect(reloadRenderer, "retain the action: make the confirm call window.close() unconditionally. The user asked to reload and gets an exit.").toHaveBeenCalledTimes(2);
     expect(closeSpy).not.toHaveBeenCalled();
     closeSpy.mockRestore();
   });
 
-  // #579 review r10: electron-updater's quitAndInstall is ONE-SHOT, so the
-  // decision comes BEFORE the destructive call — with drafts present, the
-  // dialog opens INSTEAD of the install, and its confirm makes the one and
+  // Electron-updater's quitAndInstall is ONE-SHOT, so the
+  // decision comes before the destructive call — with drafts present, the
+  // dialog opens instead of the install, and its confirm makes the one and
   // only quitAndInstall request.
   it("a blocked update restart defers the install and confirms into the only call", async () => {
     const user = userEvent.setup();
@@ -359,7 +361,6 @@ describe("RecoveryCloseGuard", () => {
     };
     const installUpdate = vi.fn(async () => ({
       accepted: true,
-      completed: false,
       state: readyState,
     }));
     stubBridge({ installUpdate });
@@ -370,11 +371,8 @@ describe("RecoveryCloseGuard", () => {
       </RecoveryCloseGuard>,
     );
 
-    // MUTATION (decide-first): call installUpdate before the drafts check.
-    // The one-shot latch is burned while the quit gets vetoed, and no
-    // confirm can ever restart.
     const blocked = await requestGuardedUpdateInstall();
-    expect(blocked).toBeNull();
+    expect(blocked, "decide-first: call installUpdate before the drafts check. The one-shot latch is burned while the quit gets vetoed, and no confirm can ever restart.").toBeNull();
     expect(installUpdate).not.toHaveBeenCalled();
     await screen.findByTestId("recovery-close-warning");
     expect(screen.getByTestId("recovery-close-anyway").textContent).toBe(
@@ -393,7 +391,6 @@ describe("RecoveryCloseGuard", () => {
   it("installs at once when no set-aside edits exist", async () => {
     const installUpdate = vi.fn(async () => ({
       accepted: true,
-      completed: false,
       state: {
         status: "ready" as const,
         message: "Update 1.2.4 is ready.",
@@ -416,15 +413,14 @@ describe("RecoveryCloseGuard", () => {
     expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
   });
 
-  // #579 review r9: the bypass is scoped to the one resumed unload attempt.
-  // If the resume fails without unloading, the guard must come BACK — a
+  // The bypass is scoped to the one resumed unload attempt.
+  // If the resume fails without unloading, the guard must come back — a
   // stuck bypass would let the next ordinary close destroy every draft
   // silently.
   it("re-arms the guard when the resumed action fails to unload", async () => {
     const user = userEvent.setup();
     const installUpdate = vi.fn(async () => ({
       accepted: false,
-      completed: false,
       state: {
         status: "ready" as const,
         message: "Update 1.2.4 is ready.",
@@ -451,17 +447,15 @@ describe("RecoveryCloseGuard", () => {
       await Promise.resolve();
     });
 
-    // MUTATION (scoped bypass): leave the bypass set after a failed resume.
-    // This close then passes unguarded and the drafts die silently.
     const second = new Event("beforeunload", { cancelable: true });
     act(() => {
       window.dispatchEvent(second);
     });
-    expect(second.defaultPrevented).toBe(true);
+    expect(second.defaultPrevented, "scoped bypass: leave the bypass set after a failed resume. This close then passes unguarded and the drafts die silently.").toBe(true);
     expect(await screen.findByTestId("recovery-close-warning")).toBeTruthy();
   });
 
-  // #579 review r12: main re-asks at the QUIT BOUNDARY, because a reopen can
+  // Main re-asks at the quit boundary, because a reopen can
   // set an edit aside after the renderer's own pre-install check. The answer
   // must be read when main asks, not when the install was requested.
   it("answers main's boundary re-check with the state at answer time", async () => {
@@ -492,26 +486,23 @@ describe("RecoveryCloseGuard", () => {
       }),
     );
 
-    // A reopen sets an edit aside INSIDE the gap — the very race this
+    // A reopen sets an edit aside inside the gap — the very race this
     // re-check exists for.
-    // MUTATION (boundary re-check): answer a snapshot taken when the install
-    // was requested (or never register this listener). The install proceeds
-    // and quitAndInstall destroys the only copy.
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
     act(() => {
       checkListener?.(2);
     });
     await waitFor(() =>
-      expect(answerRecoveryCheck).toHaveBeenCalledWith({
+      expect(answerRecoveryCheck, "boundary re-check: answer a snapshot taken when the install was requested (or never register this listener). The install proceeds and quitAndInstall destroys the only copy.").toHaveBeenCalledWith({
         requestId: 2,
         blocked: true,
       }),
     );
   });
 
-  // #579 review r13 + r14: an approval is only valid for the store state it
-  // was given. "Restart anyway" approves losing the drafts the dialog LISTED,
-  // and quitAndInstall is one-shot — so the boundary re-check reads the LIVE
+  // An approval is only valid for the store state it
+  // was given. "Restart anyway" approves losing the drafts the dialog listed,
+  // and quitAndInstall is one-shot — so the boundary re-check reads the live
   // store instead of trusting the confirm, and a draft that appears after it
   // brings the decision back to the user with its text intact.
   function confirmedRestartHarness(
@@ -529,7 +520,7 @@ describe("RecoveryCloseGuard", () => {
     };
     const installUpdate = vi.fn(async () => {
       options.onInstall?.();
-      return { accepted, completed: false, state: readyState };
+      return { accepted, state: readyState };
     });
     const answerRecoveryCheck = vi.fn(async () => undefined);
     const resumeQuit = vi.fn(async () => undefined);
@@ -576,12 +567,9 @@ describe("RecoveryCloseGuard", () => {
     await user.click(screen.getByTestId("recovery-close-anyway"));
     await waitFor(() => expect(harness.installUpdate).toHaveBeenCalledTimes(1));
 
-    // MUTATION (approval snapshot): leave approvedDraftIds empty at the
-    // confirm. Every gate then reports the drafts the user JUST approved
-    // losing, and no restart can ever run.
     harness.askBoundaryCheck(1);
     await waitFor(() =>
-      expect(harness.answerRecoveryCheck).toHaveBeenCalledWith({
+      expect(harness.answerRecoveryCheck, "approval snapshot: leave approvedDraftIds empty at the confirm. Every gate then reports the drafts the user just approved losing, and no restart can ever run.").toHaveBeenCalledWith({
         requestId: 1,
         blocked: false,
       }),
@@ -593,7 +581,7 @@ describe("RecoveryCloseGuard", () => {
     expect(event.defaultPrevented).toBe(false);
   });
 
-  // #579 review r14: refusing the exit is only half an answer — the user
+  // Refusing the exit is only half an answer — the user
   // clicked "Restart anyway" and must not be left with a silent no-op. The
   // draft that stopped the restart comes back in the dialog, with its Copy
   // button, so the second confirm is made over the real full list.
@@ -626,18 +614,15 @@ describe("RecoveryCloseGuard", () => {
     await user.click(screen.getByTestId("recovery-close-anyway"));
     await waitFor(() => expect(harness.installUpdate).toHaveBeenCalledTimes(1));
 
-    // MUTATION (re-prompt): re-arm the guard without re-opening the warning.
-    // The restart silently never happens and the user is never shown the
-    // draft that stopped it.
     const rows = await screen.findAllByTestId("recovery-list-row");
-    expect(rows).toHaveLength(2);
+    expect(rows, "re-prompt: re-arm the guard without re-opening the warning. The restart silently never happens and the user is never shown the draft that stopped it.").toHaveLength(2);
     const fresh = rows.find((row) => row.textContent?.includes("b.md"))!;
     await user.click(within(fresh).getByTestId("recovery-list-copy"));
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toBe("Typed in the gap"),
     );
 
-    // The second confirm covers BOTH, so it is not asked a third time.
+    // The second confirm covers both, so it is not asked a third time.
     await user.click(screen.getByTestId("recovery-close-anyway"));
     await waitFor(() => expect(harness.installUpdate).toHaveBeenCalledTimes(2));
     await act(async () => {
@@ -665,10 +650,7 @@ describe("RecoveryCloseGuard", () => {
       await Promise.resolve();
     });
 
-    // MUTATION (scoped re-prompt): re-open the warning on ANY failed resume.
-    // An updater that is simply not ready then re-asks a question the user
-    // already answered, every time, with nothing new to show.
-    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
+    expect(screen.queryByTestId("recovery-close-warning"), "scoped re-prompt: re-open the warning on any failed resume. An updater that is simply not ready then re-asks a question the user already answered, every time, with nothing new to show.").toBeNull();
   });
 
   it("blocks the exit for a draft the approval never covered", async () => {
@@ -689,7 +671,7 @@ describe("RecoveryCloseGuard", () => {
     await waitFor(() => expect(harness.installUpdate).toHaveBeenCalledTimes(1));
 
     // A reopen queued behind the click sets one more edit aside. The guard
-    // must answer from what is THERE, not from "the user already confirmed".
+    // must answer from what is there, not from "the user already confirmed".
     // The approved draft is dismissed in the same window, so the COUNT is
     // unchanged: only the drafts' identity says the list is no longer the one
     // that was approved.
@@ -697,37 +679,29 @@ describe("RecoveryCloseGuard", () => {
     captureOrphanedDraft("ws-1", "b.md", "Never shown");
     expect(atRiskOrphanedDraftIds()).toHaveLength(1);
 
-    // MUTATION (stale bypass): answer `!bypassCloseGuard.current &&
-    // atRiskOrphanedDraftIds().length > 0`. The re-check reports clear and
-    // destroys the only copy of a draft that was in no warning.
     harness.askBoundaryCheck(1);
     await waitFor(() =>
-      expect(harness.answerRecoveryCheck).toHaveBeenCalledWith({
+      expect(harness.answerRecoveryCheck, "stale bypass: answer `!bypassCloseGuard.current && atRiskOrphanedDraftIds().length > 0`. The re-check reports clear and destroys the only copy of a draft that was in no warning.").toHaveBeenCalledWith({
         requestId: 1,
         blocked: true,
       }),
     );
 
     // The same live answer governs the unload the bypass was meant to permit.
-    // MUTATION (bypassed unload): return early whenever the bypass is set.
     const event = new Event("beforeunload", { cancelable: true });
     act(() => {
       window.dispatchEvent(event);
     });
-    expect(event.defaultPrevented).toBe(true);
+    expect(event.defaultPrevented, "bypassed unload: return early whenever the bypass is set.").toBe(true);
     // A fresh decision over what is actually there, approvals cleared.
     const rows = await screen.findAllByTestId("recovery-list-row");
     expect(rows).toHaveLength(1);
     expect(rows[0].textContent).toContain("b.md");
 
-    // ...and it is still the RESTART the user asked for (#579 review, r16).
+    // ...and it is still the restart the user asked for.
     // A warning that cannot tell close from restart passes either way, so
     // assert the action, not just its presence.
-    // MUTATION (update intent): stop claiming pendingUnload in beginInstall.
-    // The warning degrades to "Close", and confirming calls window.close()
-    // instead of resuming the quit quitAndInstall already started — whose
-    // one-shot latch is spent, so no later confirm can ever restart.
-    expect(screen.getByTestId("recovery-close-anyway").textContent).toBe(
+    expect(screen.getByTestId("recovery-close-anyway").textContent, "update intent: stop claiming pendingUnload in beginInstall. The warning degrades to 'Close', and confirming calls window.close() instead of resuming the quit quitAndInstall already started — whose one-shot latch is spent, so no later confirm can ever restart.").toBe(
       "Restart anyway",
     );
     const closeSpy = vi
@@ -740,7 +714,7 @@ describe("RecoveryCloseGuard", () => {
     closeSpy.mockRestore();
   });
 
-  // #579 review r19: the veto is the moment main's approval stops being true.
+  // The veto is the moment main's approval stops being true.
   // An update install pre-approves the quit before this veto is possible, and
   // an approval that outlives its quit makes the next Cmd+Q skip the ask.
   it("tells main the exit is off when it vetoes an unload", async () => {
@@ -753,17 +727,15 @@ describe("RecoveryCloseGuard", () => {
       </RecoveryCloseGuard>,
     );
 
-    // MUTATION (tell main): drop the holdQuit call from the veto path. Main
-    // keeps an approval for a quit that never happened.
     const event = new Event("beforeunload", { cancelable: true });
     act(() => {
       window.dispatchEvent(event);
     });
-    expect(event.defaultPrevented).toBe(true);
+    expect(event.defaultPrevented, "tell main: drop the holdQuit call from the veto path. Main keeps an approval for a quit that never happened.").toBe(true);
     await waitFor(() => expect(holdQuit).toHaveBeenCalledTimes(1));
   });
 
-  // #579 review r18: the renderer no longer holds "a restart is staged" — a
+  // The renderer no longer holds "a restart is staged" — a
   // reload reset that flag while main's latch stayed set, stranding the
   // update for the rest of the run. Main owns it now, so the renderer just
   // asks again and main completes the staged restart.
@@ -800,17 +772,13 @@ describe("RecoveryCloseGuard", () => {
     await user.click(await screen.findByTestId("recovery-close-goback"));
     resetOrphanedDrafts();
 
-    // MUTATION (renderer-local staged state): reintroduce an installStaged
-    // module flag and branch on it. A renderer reload between these two
-    // clicks then resets it while main stays latched — the shape this round
-    // removed. The renderer must simply ask again.
     await requestGuardedUpdateInstall();
-    await waitFor(() => expect(harness.installUpdate).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(harness.installUpdate, "renderer-local staged state: reintroduce an installStaged module flag and branch on it. A renderer reload between these two clicks then resets it while main stays latched — the shape this round removed. The renderer must simply ask again.").toHaveBeenCalledTimes(2));
   });
 
-  // #579 review r18: main's boundary re-check refuses the install when a
+  // Main's boundary re-check refuses the install when a
   // reopen set an edit aside after the renderer's own check. That is a
-  // RECOVERY decision, not an install failure — and the direct branch used to
+  // recovery decision, not an install failure — and the direct branch used to
   // report it as one, so the drafts were never mentioned and the user saw a
   // generic error. Both paths reach the same state; both must say so.
   it("opens the recovery warning when the boundary check refuses a clean install", async () => {
@@ -828,11 +796,8 @@ describe("RecoveryCloseGuard", () => {
     await harness.ready();
 
     // No drafts at click time, so this takes the direct branch.
-    // MUTATION (boundary re-prompt): return the refused result straight from
-    // this branch. The click becomes a generic install failure and the
-    // recovery decision never appears.
     const result = await requestGuardedUpdateInstall();
-    expect(result).toBeNull();
+    expect(result, "boundary re-prompt: return the refused result straight from this branch. The click becomes a generic install failure and the recovery decision never appears.").toBeNull();
     const rows = await screen.findAllByTestId("recovery-list-row");
     expect(rows).toHaveLength(1);
     expect(rows[0].textContent).toContain("late.md");
@@ -841,9 +806,9 @@ describe("RecoveryCloseGuard", () => {
     );
   });
 
-  // #579 review r17: answering the quit ask "clear" does not end the story. A
+  // Answering the quit ask "clear" does not end the story. A
   // queued reopen can still capture a draft before the quit's own unload, and
-  // the warning that blocks it must resume the QUIT — window.close() leaves
+  // the warning that blocks it must resume the quit — window.close() leaves
   // the process running on macOS and with agent dispatch alive.
   it("keeps a native quit's intent through a draft captured after the clear answer", async () => {
     const user = userEvent.setup();
@@ -882,10 +847,7 @@ describe("RecoveryCloseGuard", () => {
     });
     expect(event.defaultPrevented).toBe(true);
 
-    // MUTATION (quit intent): stop claiming pendingUnload before resumeQuit.
-    // The warning degrades to "Close", and confirming calls window.close() —
-    // which does not quit on macOS.
-    expect(screen.getByTestId("recovery-close-anyway").textContent).toBe(
+    expect(screen.getByTestId("recovery-close-anyway").textContent, "quit intent: stop claiming pendingUnload before resumeQuit. The warning degrades to 'Close', and confirming calls window.close() — which does not quit on macOS.").toBe(
       "Quit anyway",
     );
     const closeSpy = vi
@@ -897,8 +859,8 @@ describe("RecoveryCloseGuard", () => {
     closeSpy.mockRestore();
   });
 
-  // #579 review r10: a native quit (Cmd+Q, tray Quit) is main-initiated —
-  // main asks first, and the renderer's answer must resume the QUIT, never
+  // A native quit (Cmd+Q, tray Quit) is main-initiated —
+  // main asks first, and the renderer's answer must resume the quit, never
   // swap it for a window close that leaves the process running on macOS.
   it("holds a native quit for the dialog, and 'Quit anyway' resumes the quit", async () => {
     const user = userEvent.setup();
@@ -920,25 +882,21 @@ describe("RecoveryCloseGuard", () => {
     );
     await waitFor(() => expect(quitListener).not.toBeNull());
 
-    // MUTATION (quit hold): resume every quit ask unconditionally. The
-    // drafts die with the quit, unannounced.
     act(() => {
       quitListener?.();
     });
-    await waitFor(() => expect(holdQuit).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(holdQuit, "quit hold: resume every quit ask unconditionally. The drafts die with the quit, unannounced.").toHaveBeenCalledTimes(1));
     expect(resumeQuit).not.toHaveBeenCalled();
     await screen.findByTestId("recovery-close-warning");
     expect(screen.getByTestId("recovery-close-anyway").textContent).toBe(
       "Quit anyway",
     );
 
-    // MUTATION (resume the QUIT): make the confirm call window.close(). On
-    // macOS the process keeps running after the user asked to quit.
     const closeSpy = vi
       .spyOn(window, "close")
       .mockImplementation(() => undefined);
     await user.click(screen.getByTestId("recovery-close-anyway"));
-    await waitFor(() => expect(resumeQuit).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(resumeQuit, "resume the quit: make the confirm call window.close(). On macOS the process keeps running after the user asked to quit.").toHaveBeenCalledTimes(1));
     expect(closeSpy).not.toHaveBeenCalled();
     closeSpy.mockRestore();
   });
@@ -968,7 +926,7 @@ describe("RecoveryCloseGuard", () => {
     expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
   });
 
-  // #579 review r10: the dialog's count is LIVE. Dismissing rows from the
+  // The dialog's count is LIVE. Dismissing rows from the
   // dialog updates the sentence, and an emptied dialog has nothing left to
   // warn about — it retires itself and the next close proceeds.
   it("keeps the dialog's count live and retires it when the last draft resolves", async () => {
@@ -987,8 +945,6 @@ describe("RecoveryCloseGuard", () => {
     const dialog = await screen.findByTestId("recovery-close-warning");
     expect(dialog.textContent).toContain("2 set-aside edits are lost");
 
-    // MUTATION (live count): render the snapshot count. Dismissing a row
-    // leaves the dialog claiming two edits, then one that no longer exists.
     const firstRow = screen.getAllByTestId("recovery-list-row")[0];
     await user.click(within(firstRow).getByTestId("recovery-dismiss"));
     await user.click(
@@ -997,6 +953,7 @@ describe("RecoveryCloseGuard", () => {
     await waitFor(() =>
       expect(
         screen.getByTestId("recovery-close-warning").textContent,
+        "live count: render the snapshot count. Dismissing a row leaves the dialog claiming two edits, then one that no longer exists.",
       ).toContain("1 set-aside edit is lost"),
     );
 
@@ -1013,7 +970,7 @@ describe("RecoveryCloseGuard", () => {
     expect(second.defaultPrevented).toBe(false);
   });
 
-  // #579 review r5: the guard must survive a CRASH. A guard inside the
+  // The guard must survive a CRASH. A guard inside the
   // crashed tree unmounts with it, and the crash screen's "Reload dohc"
   // would destroy every draft silently.
   it("still warns above the crash screen, with the recovery list usable", async () => {
@@ -1049,7 +1006,7 @@ describe("RecoveryCloseGuard", () => {
   });
 });
 
-// #600: what durable recovery changed about the guard. A draft that comes
+// What durable recovery changed about the guard. A draft that comes
 // back on the next launch is not destroyed by closing, so warning that it is
 // would be false — and the guard is now the last line only for the drafts
 // storage could not take.
@@ -1066,21 +1023,18 @@ describe("RecoveryCloseGuard with working storage", () => {
         <div data-testid="app-content" />
       </RecoveryCloseGuard>,
     );
-    // MUTATION (at-risk gate): make the guard measure every draft again. The
-    // close is blocked and the user is told their edit is lost, on every
-    // quit, about text that survives the quit.
     const event = new Event("beforeunload", { cancelable: true });
     act(() => {
       window.dispatchEvent(event);
     });
-    expect(event.defaultPrevented).toBe(false);
+    expect(event.defaultPrevented, "at-risk gate: make the guard measure every draft again. The close is blocked and the user is told their edit is lost, on every quit, about text that survives the quit.").toBe(false);
     expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
     expect(atRiskOrphanedDraftIds()).toEqual([]);
   });
 
   it("warns about the drafts storage could not take, and lists only those", async () => {
     captureOrphanedDraft("ws-1", "a.md", "Persisted");
-    // A secret-classified path never enters plaintext storage (#446), so this
+    // A secret-classified path never enters plaintext storage, so this
     // one still dies with the app run.
     captureOrphanedDraft("ws-1", ".env", "API_KEY=shh");
     render(
@@ -1094,27 +1048,30 @@ describe("RecoveryCloseGuard with working storage", () => {
     });
     expect(event.defaultPrevented).toBe(true);
     await screen.findByTestId("recovery-close-warning");
-    // MUTATION (dialog list): hand <RecoveryList/> every row instead of
-    // `liveDrafts`. The warning then lists a draft it is not warning about.
     const rows = screen.getAllByTestId("recovery-list-row");
-    expect(rows).toHaveLength(1);
+    expect(rows, "dialog list: hand <RecoveryList/> every row instead of `liveDrafts`. The warning then lists a draft it is not warning about.").toHaveLength(1);
     expect(rows[0].textContent).toContain(".env");
   });
 
 });
 
 // The wiring, not just the components: main.tsx must restore the stored
-// recoveries BEFORE the root renders (#600), and must mount the guard ABOVE
+// recoveries before the root renders, and must mount the guard above
 // AppErrorBoundary — a crashed DesktopRoot leaves the crash screen up, and
 // the reload it offers must still be announced.
-// MUTATION (guard wiring): render `<AppErrorBoundary><DesktopRoot/></...>`
-// alone in main.tsx (the pre-r5 shape). No guard ever mounts and the
-// beforeunload below passes unprevented.
-// MUTATION (restore wiring): drop main.tsx's restoreOrphanedDrafts() call.
-// The relaunched app shows no notice and the text sits in storage nothing
-// reads.
 describe("main.tsx composition", () => {
   it("restores stored recoveries and keeps the close guard alive above a crashed root", async () => {
+    let mountedRoot: Root | null = null;
+    vi.doMock("react-dom/client", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("react-dom/client")>();
+      return {
+        ...actual,
+        createRoot: (...args: Parameters<typeof actual.createRoot>) => {
+          mountedRoot = actual.createRoot(...args);
+          return mountedRoot;
+        },
+      };
+    });
     vi.doMock("./DesktopRoot", () => ({
       DesktopRoot: (): never => {
         throw new Error("boom");
@@ -1135,7 +1092,7 @@ describe("main.tsx composition", () => {
     const container = document.createElement("div");
     container.id = "root";
     document.body.appendChild(container);
-    // A stored recovery from the last run, seeded through REAL storage; the
+    // A stored recovery from the last run, seeded through real storage; the
     // capture after it goes back to the suite's full quota, so it stays
     // at-risk and the guard still has something to announce.
     vi.restoreAllMocks();
@@ -1170,7 +1127,7 @@ describe("main.tsx composition", () => {
     });
     expect(event.defaultPrevented).toBe(true);
     await screen.findByTestId("recovery-close-warning");
-    // The dialog names the at-risk draft, and ONLY it: importing main.tsx
+    // The dialog names the at-risk draft, and only it: importing main.tsx
     // restored the stored one, which no exit can destroy.
     const listed = screen.getAllByTestId("recovery-list-row");
     expect(listed).toHaveLength(1);
@@ -1184,7 +1141,419 @@ describe("main.tsx composition", () => {
       restored.result.current.map((row) => `${row.path}:${row.persisted}`),
     ).toContain("notes/a.md:true");
     restored.unmount();
+    act(() => mountedRoot?.unmount());
     container.remove();
     vi.doUnmock("./DesktopRoot");
+    vi.doUnmock("react-dom/client");
+  });
+});
+
+// An accepted collection cell edit travels through a queue in renderer
+// memory (recordFieldWrites) to its record's live document. Every unload —
+// close, reload, native quit, update restart — destroys that memory, so the
+// guard must land the queue first and then rerun EXACTLY the requested
+// action. main.tsx mounts the host beside the guard; these tests mirror that
+// composition.
+describe("RecoveryCloseGuard with pending collection writes", () => {
+  const CHANGE_ONE = {
+    recordId: "rec-1",
+    recordPath: "tasks/one.md",
+    field: "done",
+    value: true,
+  };
+  const CHANGE_TWO = {
+    recordId: "rec-2",
+    recordPath: "tasks/two.md",
+    field: "done",
+    value: false,
+  };
+
+  // The real queue and the real writer, over a controllable engine: opens
+  // succeed (or are deferred), and a save settles only when a test emits its
+  // "saved" event — exactly how a pending write looks at an unload boundary.
+  function stubWriteBridge(overrides: Record<string, unknown> = {}) {
+    const sessionsByPath = new Map<string, string>();
+    const applied = vi.fn(async (_payload: { sessionId: string; seq: number }) => ({
+      accepted: true as const,
+    }));
+    const saveStateListeners = new Set<
+      (event: EngineYDocSaveStateEvent) => void
+    >();
+    stubBridge({
+      openEngineYDocSession: vi.fn(
+        async (payload: { path: string; sessionId: string }) => {
+          sessionsByPath.set(payload.path, payload.sessionId);
+          const doc = new Y.Doc();
+          doc.getMap("frontmatter").set("id", payload.path === "tasks/one.md" ? "rec-1" : "rec-2");
+          return {
+            available: true,
+            initialUpdate: Y.encodeStateAsUpdate(doc),
+            lineageGeneration: 1,
+          };
+        },
+      ),
+      applyEngineYDocUpdate: applied,
+      closeEngineYDocSession: vi.fn(async () => undefined),
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(
+        (listener: (event: EngineYDocSaveStateEvent) => void) => {
+          saveStateListeners.add(listener);
+          return () => saveStateListeners.delete(listener);
+        },
+      ),
+      ...overrides,
+    });
+    const settleSave = (path: string) => {
+      act(() => {
+        const sessionId = sessionsByPath.get(path);
+        expect(sessionId).toBeTruthy();
+        const seq = Math.max(
+          ...applied.mock.calls
+            .filter(([payload]) => payload.sessionId === sessionId)
+            .map(([payload]) => payload.seq),
+        );
+        expect(seq).toBeGreaterThan(0);
+        for (const listener of [...saveStateListeners]) {
+          listener({ sessionId: sessionId!, state: "saved", seq });
+        }
+      });
+    };
+    const awaitStaged = (path: string) =>
+      waitFor(() => {
+        const sessionId = sessionsByPath.get(path);
+        expect(sessionId).toBeTruthy();
+        expect(
+          applied.mock.calls.some(([payload]) => payload.sessionId === sessionId),
+        ).toBe(true);
+      });
+    return { settleSave, awaitStaged };
+  }
+
+  function renderGuardWithHost() {
+    return render(
+      <RecoveryCloseGuard>
+        <CollectionFieldWriteHost />
+      </RecoveryCloseGuard>,
+    );
+  }
+
+  function dispatchUnload(): Event {
+    const event = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    return event;
+  }
+
+  it("a close waits for the whole queued tail, then closes on its own", async () => {
+    const { settleSave, awaitStaged } = stubWriteBridge();
+    renderGuardWithHost();
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_TWO);
+    });
+    await awaitStaged("tasks/one.md");
+
+    const closeSpy = vi
+      .spyOn(window, "close")
+      .mockImplementation(() => undefined);
+    // MUTATION (write hold): drop the pending-writes branch from
+    // onBeforeUnload. The close proceeds here and the queued tail dies with
+    // the renderer.
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+    // No drafts are at stake, so no dialog: the guard is waiting, not asking.
+    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
+
+    settleSave("tasks/one.md");
+    // The head settled, but the TAIL is still queued: the close stays held.
+    await awaitStaged("tasks/two.md");
+    expect(closeSpy).not.toHaveBeenCalled();
+    settleSave("tasks/two.md");
+    await waitFor(() => expect(closeSpy).toHaveBeenCalled());
+    closeSpy.mockRestore();
+  });
+
+  it("a blocked reload resumes as a reload once the write lands", async () => {
+    const reloadRenderer = vi.fn(async () => undefined);
+    const { settleSave, awaitStaged } = stubWriteBridge({ reloadRenderer });
+    renderGuardWithHost();
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+    });
+    await awaitStaged("tasks/one.md");
+
+    requestGuardedReload();
+    expect(reloadRenderer).toHaveBeenCalledTimes(1);
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+
+    const closeSpy = vi
+      .spyOn(window, "close")
+      .mockImplementation(() => undefined);
+    settleSave("tasks/one.md");
+    // MUTATION (retain the action): resume with window.close() instead of
+    // the claimed intent. The user asked to RELOAD and gets an exit.
+    await waitFor(() => expect(reloadRenderer).toHaveBeenCalledTimes(2));
+    expect(closeSpy).not.toHaveBeenCalled();
+    closeSpy.mockRestore();
+  });
+
+  it("a native quit blocked by a pending write resumes as the quit", async () => {
+    let requestQuit: (() => void) | null = null;
+    const resumeQuit = vi.fn(async () => undefined);
+    const holdQuit = vi.fn(async () => undefined);
+    const { settleSave, awaitStaged } = stubWriteBridge({
+      onQuitRequested: (listener: () => void) => {
+        requestQuit = listener;
+        return () => undefined;
+      },
+      resumeQuit,
+      holdQuit,
+    });
+    renderGuardWithHost();
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+    });
+    await awaitStaged("tasks/one.md");
+
+    act(() => requestQuit!());
+    expect(holdQuit).toHaveBeenCalled();
+    expect(resumeQuit).not.toHaveBeenCalled();
+
+    settleSave("tasks/one.md");
+    await waitFor(() => expect(resumeQuit).toHaveBeenCalledTimes(1));
+    // The resumed quit's own unload finds nothing left to hold.
+    expect(dispatchUnload().defaultPrevented).toBe(false);
+  });
+
+  it("an update restart lands the write before starting the one-shot install", async () => {
+    const installUpdate = vi.fn(async () => ({ accepted: true }));
+    const resumeQuit = vi.fn(async () => undefined);
+    const { settleSave, awaitStaged } = stubWriteBridge({
+      installUpdate,
+      resumeQuit,
+    });
+    renderGuardWithHost();
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+    });
+    await awaitStaged("tasks/one.md");
+
+    const installing = requestGuardedUpdateInstall();
+    expect(installUpdate).not.toHaveBeenCalled();
+    settleSave("tasks/one.md");
+    expect(await installing).toEqual({ accepted: true });
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    expect(resumeQuit).not.toHaveBeenCalled();
+    expect(dispatchUnload().defaultPrevented).toBe(false);
+  });
+
+  it("drains an edit accepted during main's install check and retries the same restart", async () => {
+    let refuse!: (result: { accepted: false }) => void;
+    const refused = new Promise<{ accepted: false }>((resolve) => { refuse = resolve; });
+    const installUpdate = vi.fn().mockReturnValueOnce(refused).mockResolvedValue({ accepted: true });
+    const { settleSave, awaitStaged } = stubWriteBridge({ installUpdate });
+    renderGuardWithHost();
+    const installing = requestGuardedUpdateInstall();
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+    await awaitStaged("tasks/one.md");
+    await act(async () => { refuse({ accepted: false }); await refused; });
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    settleSave("tasks/one.md");
+    expect(await installing).toEqual({ accepted: true });
+    expect(installUpdate).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
+  });
+
+  it.each([false, true])("a newer reload supersedes an install retry drain (confirmed: %s)", async (confirmed) => {
+    let refuse!: (result: { accepted: false }) => void;
+    const refused = new Promise<{ accepted: false }>((resolve) => { refuse = resolve; });
+    const installUpdate = vi.fn().mockReturnValueOnce(refused).mockResolvedValue({ accepted: true });
+    const reloadRenderer = vi.fn(async () => { dispatchUnload(); });
+    const { settleSave, awaitStaged } = stubWriteBridge({ installUpdate, reloadRenderer });
+    if (confirmed) captureOrphanedDraft("ws-1", "old.md", "Before restart");
+    renderGuardWithHost();
+    let installing: Promise<unknown>;
+    if (confirmed) {
+      expect(await requestGuardedUpdateInstall()).toBeNull();
+      await userEvent.click(await screen.findByTestId("recovery-close-anyway"));
+      installing = Promise.resolve();
+    } else {
+      installing = requestGuardedUpdateInstall();
+    }
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+    await awaitStaged("tasks/one.md");
+    await act(async () => { refuse({ accepted: false }); await refused; });
+    act(() => {
+      captureOrphanedDraft("ws-1", "new.md", "During restart");
+      requestGuardedReload();
+    });
+    settleSave("tasks/one.md");
+    await installing;
+    await waitFor(() => expect(screen.getByTestId("recovery-close-anyway").textContent).toBe("Reload anyway"));
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("a write that fails while the unload waits keeps the app open", async () => {
+    let resolveOpen: ((result: { available: false }) => void) | null = null;
+    const open = new Promise<{ available: false }>((resolve) => {
+      resolveOpen = resolve;
+    });
+    stubWriteBridge({
+      openEngineYDocSession: vi.fn(() => open),
+    });
+    renderGuardWithHost();
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+    });
+
+    const closeSpy = vi
+      .spyOn(window, "close")
+      .mockImplementation(() => undefined);
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+
+    // The record's open settles without a session: the write FAILS while the
+    // close waits. Exiting now would destroy the only surface that can show
+    // the failure, so the close stays stopped.
+    // MUTATION (failure gate): resume regardless of `failed`. The renderer
+    // exits over an error the user never saw.
+    await act(async () => {
+      resolveOpen!({ available: false });
+      await open;
+    });
+    await screen.findByTestId("collection-write-failure");
+    expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE_ONE);
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+    expect(closeSpy).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Discard unsaved change" }));
+    expect(dispatchUnload().defaultPrevented).toBe(false);
+    closeSpy.mockRestore();
+  });
+
+  it("an earlier failure blocks close, native recovery approval, and update installation", async () => {
+    let checkRecovery: ((requestId: string) => void) | null = null;
+    const answerRecoveryCheck = vi.fn(async () => undefined);
+    const installUpdate = vi.fn(async () => ({ accepted: true }));
+    stubWriteBridge({
+      openEngineYDocSession: vi.fn(async () => ({ available: false })),
+      onRecoveryCheckRequested: (listener: (requestId: string) => void) => {
+        checkRecovery = listener;
+        return () => undefined;
+      },
+      answerRecoveryCheck,
+      installUpdate,
+    });
+    renderGuardWithHost();
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+    await screen.findByTestId("collection-write-failure");
+
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+    act(() => checkRecovery!("collection-recovery-check"));
+    expect(answerRecoveryCheck).toHaveBeenCalledWith({
+      requestId: "collection-recovery-check",
+      blocked: true,
+    });
+    expect(await requestGuardedUpdateInstall()).toBeNull();
+    expect(installUpdate).not.toHaveBeenCalled();
+    expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE_ONE);
+  });
+
+  it.each(["close", "quit"] as const)(
+    "a later %s replaces an update waiting for collection saves",
+    async (kind) => {
+      let requestQuit: (() => void) | null = null;
+      const installUpdate = vi.fn(async () => ({ accepted: true }));
+      const resumeQuit = vi.fn(async () => undefined);
+      const closeSpy = vi.spyOn(window, "close").mockImplementation(() => undefined);
+      const { settleSave, awaitStaged } = stubWriteBridge({
+        installUpdate,
+        resumeQuit,
+        onQuitRequested: (listener: () => void) => {
+          requestQuit = listener;
+          return () => undefined;
+        },
+      });
+      renderGuardWithHost();
+      act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+      await awaitStaged("tasks/one.md");
+      const installing = requestGuardedUpdateInstall();
+      if (kind === "close") expect(dispatchUnload().defaultPrevented).toBe(true);
+      else act(() => requestQuit!());
+      settleSave("tasks/one.md");
+      expect(await installing).toBeNull();
+      await waitFor(() => expect(kind === "close" ? closeSpy : resumeQuit).toHaveBeenCalledTimes(1));
+      expect(installUpdate).not.toHaveBeenCalled();
+    },
+  );
+
+  it("a later update replaces a close waiting for collection saves", async () => {
+    const installUpdate = vi.fn(async () => ({ accepted: true }));
+    const closeSpy = vi.spyOn(window, "close").mockImplementation(() => undefined);
+    const { settleSave, awaitStaged } = stubWriteBridge({ installUpdate });
+    renderGuardWithHost();
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+    await awaitStaged("tasks/one.md");
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+    const installing = requestGuardedUpdateInstall();
+    settleSave("tasks/one.md");
+    expect(await installing).toEqual({ accepted: true });
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    expect(closeSpy).not.toHaveBeenCalled();
+  });
+
+  it("a stalled save keeps its input and blocks exit until explicit discard", async () => {
+    let resolveOpen!: (result: { available: false }) => void;
+    const open = new Promise<{ available: false }>((resolve) => { resolveOpen = resolve; });
+    const openEngineYDocSession = vi.fn(() => open);
+    const closeSpy = vi.spyOn(window, "close").mockImplementation(() => undefined);
+    stubWriteBridge({ openEngineYDocSession });
+    renderGuardWithHost();
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalled());
+    vi.useFakeTimers();
+    try {
+      expect(dispatchUnload().defaultPrevented).toBe(true);
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE_ONE);
+      expect(screen.getByTestId("collection-write-failure").textContent)
+        .toContain("could not finish saving");
+      expect(dispatchUnload().defaultPrevented).toBe(true);
+      expect(closeSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await act(async () => { resolveOpen({ available: false }); await open; });
+    }
+    await userEvent.click(screen.getByRole("button", { name: "Discard unsaved change" }));
+    expect(dispatchUnload().defaultPrevented).toBe(false);
+    expect(closeSpy).not.toHaveBeenCalled();
+  });
+
+  it("the drafts warning still follows once the writes have landed", async () => {
+    const { settleSave, awaitStaged } = stubWriteBridge();
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    renderGuardWithHost();
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+    });
+    await awaitStaged("tasks/one.md");
+
+    const closeSpy = vi
+      .spyOn(window, "close")
+      .mockImplementation(() => undefined);
+    // Writes first, silently: the guard is waiting, not asking, and the
+    // draft decision belongs to the resumed attempt's own beforeunload.
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
+
+    settleSave("tasks/one.md");
+    await waitFor(() => expect(closeSpy).toHaveBeenCalled());
+    // The resumed close now meets the unapproved draft and asks, exactly as
+    // it would have without the write.
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+    await screen.findByTestId("recovery-close-warning");
+    closeSpy.mockRestore();
   });
 });

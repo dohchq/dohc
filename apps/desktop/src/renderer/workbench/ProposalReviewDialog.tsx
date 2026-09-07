@@ -1,3 +1,4 @@
+import { useRequestSequence } from "../useRequestSequence";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ReadShareProposalChangesResult,
@@ -5,14 +6,14 @@ import type {
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
-import { ipcErrorMessage } from "./WorkspaceVersions";
+import { ipcErrorMessage } from "../ipcError";
 import {
   UnifiedDiffLines,
   buildUnifiedDiffLines,
   computeTextDiff,
 } from "./unifiedDiff";
 
-// The granter's review of one recipient's submitted changes (#646 PR3a).
+// The granter's review of one recipient's submitted changes.
 // Modelled on ConflictReviewDialog: a notice opens it, it reads its own
 // window under a liveness token, and it decides one thing.
 //
@@ -65,7 +66,7 @@ type ContentState =
   | { status: "error"; message: string }
   | { status: "ready"; currentText: string | null; incomingText: string | null };
 
-// ONE file of the review, closed until the granter opens it.
+// One file of the review, closed until the granter opens it.
 //
 // Opening is what fetches the content. A review of a repository-sized folder
 // lists thousands of these, and fetching every file's two sides to show that
@@ -80,23 +81,17 @@ function ProposalFileSection(props: {
   const [content, setContent] = useState<ContentState | null>(null);
   // The renderer async-state invariant, at row scope: an answer may only
   // repaint the row that asked for it.
-  const liveToken = useRef(0);
-  useEffect(
-    () => () => {
-      liveToken.current += 1;
-    },
-    [],
-  );
+  const liveToken = useRequestSequence();
 
   const toggle = useCallback(() => {
     const nowOpen = !open;
     setOpen(nowOpen);
     // Fetched once per row. Closing and reopening shows what was already read
     // rather than asking again.
-    // Read once per row. A row that FAILED is read again, so a granter can
+    // Read once per row. A row that failed is read again, so a granter can
     // retry a file the relay could not serve without reopening the review.
     if (!nowOpen || (content !== null && content.status !== "error")) return;
-    const token = ++liveToken.current;
+    const token = liveToken.next();
     setContent({ status: "loading" });
     void (async () => {
       try {
@@ -105,10 +100,10 @@ function ProposalFileSection(props: {
           proposalId,
           opIndex: file.opIndex,
         });
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         setContent({ status: "ready", ...read });
       } catch (error) {
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         setContent({
           status: "error",
           message: ipcErrorMessage(error, "Couldn't load this file."),
@@ -202,30 +197,24 @@ export function ProposalReviewDialog(props: {
   // The renderer async-state invariant: an answer may only repaint the window
   // that asked for it. Every unmount, and every change of workspace or
   // proposal, retires the window in flight.
-  const liveToken = useRef(0);
-  useEffect(
-    () => () => {
-      liveToken.current += 1;
-    },
-    [],
-  );
+  const liveToken = useRequestSequence();
 
   useEffect(() => {
-    const token = ++liveToken.current;
+    const token = liveToken.next();
     setLoad({ status: "loading" });
     setSettleError(null);
     void (async () => {
       try {
-        // ONE read, and NO content: the files, their paths, sizes and drift.
+        // One read, and NO content: the files, their paths, sizes and drift.
         // A file's two sides are read when its row is opened.
         const changes = await bridge().readShareProposalChanges({
           workspaceId,
           proposalId,
         });
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         setLoad({ status: "ready", changes });
       } catch (error) {
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         setLoad({
           status: "error",
           message: ipcErrorMessage(error, "Couldn't load these changes."),
@@ -236,23 +225,23 @@ export function ProposalReviewDialog(props: {
 
   const settle = useCallback(
     async (decision: "accept" | "decline") => {
-      const token = liveToken.current;
+      const token = liveToken.current();
       setSettling(true);
       setSettleError(null);
       try {
         await bridge().settleShareProposal({ workspaceId, proposalId, decision });
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         props.onSettled();
         props.onClose();
       } catch (error) {
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         setSettleError(
           ipcErrorMessage(error, "dohc couldn't record your decision."),
         );
         setSettling(false);
       }
     },
-    [props, workspaceId, proposalId],
+    [props.onClose, props.onSettled, workspaceId, proposalId],
   );
 
   const sender = proposerName(load.status === "ready" ? load.changes : null);
@@ -320,7 +309,7 @@ export function ProposalReviewDialog(props: {
           >
             Finish later
           </button>
-          {/* Decline is the SAFE EXIT, so nothing about reading the changes
+          {/* Decline is the safe exit, so nothing about reading the changes
               can take it away. It moves nothing into this workspace, and a
               granter who cannot see a proposal must still be able to refuse
               it — otherwise the only way out is ending the share, which

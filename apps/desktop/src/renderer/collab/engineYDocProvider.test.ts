@@ -503,7 +503,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
-  it("ships a local editor edit to main, and does NOT ship engine-sourced updates back (no echo)", async () => {
+  it("ships a local editor edit to main, and does not ship engine-sourced updates back (no echo)", async () => {
     const mock = mockTransport();
     const batches = manualBatchScheduler();
     const binding = await bindEngineYDoc(mock.transport, batches.scheduler);
@@ -517,7 +517,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     expect(mock.staged()).toBe(1);
     expect(mock.shipped.length).toBe(0);
 
-    // A remote delta main forwards is applied to the mirror but is NOT shipped
+    // A remote delta main forwards is applied to the mirror but is not shipped
     // back (that would echo-storm).
     const before = Y.encodeStateVector(mock.mainDoc);
     typeIntoBody(mock.mainDoc, "Remote peer edit.");

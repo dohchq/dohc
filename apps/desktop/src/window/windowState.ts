@@ -4,7 +4,7 @@
 
 import { TITLEBAR_HEIGHT_PX } from "../renderer/tokens";
 
-export interface WindowBounds {
+interface WindowBounds {
   x: number;
   y: number;
   width: number;
@@ -16,7 +16,7 @@ export type ChromeTheme = "light" | "dark";
 export interface WindowState {
   bounds: WindowBounds;
   isMaximized: boolean;
-  // The last theme the renderer told main about — lets the NEXT launch paint
+  // The last theme the renderer told main about — lets the next launch paint
   // the native chrome (background, overlay controls) correctly before any
   // renderer JS runs. Absent on first launch: follow the OS.
   theme?: ChromeTheme;
@@ -26,7 +26,7 @@ export const WINDOW_STATE_FILE = "dohc-window-state.json";
 export const DEFAULT_WINDOW_SIZE = { width: 1280, height: 800 } as const;
 export const MIN_WINDOW_SIZE = { width: 840, height: 620 } as const;
 
-// How much of the window must remain on SOME display to trust saved bounds —
+// How much of the window must remain on some display to trust saved bounds —
 // enough to grab the titlebar and drag it back.
 const MIN_VISIBLE_PX = 64;
 
@@ -67,7 +67,7 @@ export function parseWindowState(raw: string | null | undefined): WindowState | 
 }
 
 // What the native chrome (backgroundColor + overlay controls) should paint at
-// window creation, BEFORE any renderer JS: the user's last explicit theme if
+// window creation, before any renderer JS: the user's last explicit theme if
 // one was persisted, else the OS preference. Prevents a light flash of the
 // window controls on dark-theme launches.
 export function initialChromeTheme(

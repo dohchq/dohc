@@ -1,4 +1,4 @@
-//! DOP1 stdio host for the shadow-only Rust workspace engine.
+//! DOP1 stdio host for the workspace engine daemon.
 
 #![forbid(unsafe_code)]
 
@@ -112,12 +112,12 @@ where
     // session. Generation 0 = pre-handshake: no authenticated consumer exists
     // yet (nor can any workspace be open), so such notices are dropped rather
     // than delivered ahead of the helloAck. The generation is stored only
-    // AFTER the ack is queued on output_tx, so an event can never overtake it.
+    // after the ack is queued on output_tx, so an event can never overtake it.
     //
-    // ONE seq counter for the whole session's Event stream. Safe today
+    // One seq counter for the whole session's Event stream. Safe today
     // because the daemon emits only capture.momentRecorded and no consumer
     // enforces contiguity over it — but ydocLiveAdapter.receiveEvent marks a
-    // session stale on ANY gap between consecutive ydoc.remoteUpdate seqs,
+    // session stale on any gap between consecutive ydoc.remoteUpdate seqs,
     // and it filters by name first, so interleaved capture events would read
     // as gaps. When daemon-side ydoc.remoteUpdate emission lands, it needs
     // its own per-session sequencing (or the adapter's gap rule must learn
@@ -149,6 +149,7 @@ where
     let mut read_buf = vec![0_u8; READ_CHUNK_BYTES];
     let mut authenticated = false;
     let mut negotiated_capabilities = HashSet::new();
+    let mut negotiated_max_frame_bytes = WireLimits::default().max_frame_bytes;
     let mut keep_running = true;
     let mut read_error: Option<io::Error> = None;
     let active_requests = Arc::new(Mutex::new(HashSet::new()));
@@ -171,7 +172,7 @@ where
         let read = match read {
             Ok(read) => read,
             Err(error) => {
-                // A read error (e.g. ECONNRESET -- the NORMAL close for a
+                // A read error (e.g. ECONNRESET -- the normal close for a
                 // socket transport) must still fall through to the shared
                 // cancel/drain/close tail below, never propagate straight out
                 // and abort in-flight work + skip the workspace close.
@@ -238,6 +239,7 @@ where
                     Ok(ack) => {
                         authenticated = true;
                         negotiated_capabilities.extend(ack.capabilities.iter().cloned());
+                        negotiated_max_frame_bytes = ack.limits.max_frame_bytes;
                         let generation = ack.session_generation;
                         if output_tx
                             .send(Envelope::HelloAck(ack).into())
@@ -246,7 +248,7 @@ where
                         {
                             keep_running = false;
                         } else {
-                            // Events unlock only once the ack is ORDERED on
+                            // Events unlock only once the ack is ordered on
                             // the output queue, so none can precede it.
                             session_generation.store(generation, Ordering::SeqCst);
                         }
@@ -278,6 +280,7 @@ where
                     &active_egress,
                     &mut request_tasks,
                     negotiated_capabilities.contains("blobs"),
+                    negotiated_max_frame_bytes,
                 )
                 .await
                 {
@@ -292,7 +295,7 @@ where
         cancel_active_requests(&supervisor, &active_requests);
     }
     let close_result = drain_requests_then_close(&mut request_tasks, close_workspaces).await;
-    // The forwarder holds an output_tx clone; end it BEFORE dropping ours or
+    // The forwarder holds an output_tx clone; end it before dropping ours or
     // the writer's channel never closes and the join below hangs forever.
     event_forwarder.abort();
     let _ = event_forwarder.await;
@@ -449,6 +452,7 @@ fn authenticate(envelope: Envelope, auth_token: &str) -> Result<HelloAck, WireEr
         protocol_version,
         auth_token: candidate,
         capabilities,
+        max_frame_bytes,
         ..
     }) = envelope
     else {
@@ -471,13 +475,27 @@ fn authenticate(envelope: Envelope, auth_token: &str) -> Result<HelloAck, WireEr
     }
     let negotiated = capabilities
         .into_iter()
-        .filter(|capability| capability == "shadow-r13" || capability == "blobs")
+        .filter(|capability| capability == "blobs")
         .collect();
+    // A client may lower its receive limit; the engine clamps the request
+    // into the negotiable range and echoes the effective value, which sizes
+    // this connection's in-band responses.
+    let default_limits = WireLimits::default();
+    let effective_max_frame_bytes =
+        max_frame_bytes.map_or(default_limits.max_frame_bytes, |requested| {
+            requested.clamp(
+                dohc_engine_protocol::limits::MIN_NEGOTIABLE_FRAME_BYTES,
+                default_limits.max_frame_bytes,
+            )
+        });
     Ok(HelloAck {
         protocol_version: PROTOCOL_VERSION,
         session_generation: NEXT_SESSION_GENERATION.fetch_add(1, Ordering::Relaxed),
         capabilities: negotiated,
-        limits: WireLimits::default(),
+        limits: WireLimits {
+            max_frame_bytes: effective_max_frame_bytes,
+            ..default_limits
+        },
     })
 }
 
@@ -491,6 +509,7 @@ async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
     active_egress: &Arc<Mutex<HashMap<u64, CancelSignal>>>,
     request_tasks: &mut JoinSet<()>,
     blobs_negotiated: bool,
+    max_frame_bytes: u32,
 ) -> bool {
     if *writer_gone.borrow() {
         return false;
@@ -504,17 +523,22 @@ async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
                 Arc::from([])
             };
             let completion_egress = Arc::clone(active_egress);
-            match supervisor.try_submit_with(request, capabilities, move |outcome| {
-                // The handoff runs before the supervisor drops its cancel
-                // registration. Cancel therefore always reaches either the
-                // request signal, this egress signal, or both.
-                if blobs_negotiated
-                    && let Ok(service_response) = outcome
-                    && let Some(egress) = &service_response.blob_egress
-                {
-                    lock(&completion_egress).insert(id, egress.cancel.clone());
-                }
-            }) {
+            match supervisor.try_submit_with(
+                request,
+                capabilities,
+                max_frame_bytes,
+                move |outcome| {
+                    // The handoff runs before the supervisor drops its cancel
+                    // registration. Cancel therefore always reaches either the
+                    // request signal, this egress signal, or both.
+                    if blobs_negotiated
+                        && let Ok(service_response) = outcome
+                        && let Some(egress) = &service_response.blob_egress
+                    {
+                        lock(&completion_egress).insert(id, egress.cancel.clone());
+                    }
+                },
+            ) {
                 Ok(receiver) => {
                     let output = output.clone();
                     let writer_gone = writer_gone.clone();
@@ -674,7 +698,7 @@ async fn drain_requests_then_close<C>(
 where
     C: FnOnce() -> Result<(), RuntimeError> + Send + 'static,
 {
-    // Join EVERY forwarder to completion. A JoinError on one must NOT
+    // Join every forwarder to completion. A JoinError on one must not
     // short-circuit and skip the guaranteed workspace close below, so record
     // the first one and keep draining.
     let mut forwarder_error: Option<io::Error> = None;
@@ -683,7 +707,7 @@ where
             forwarder_error = Some(io::Error::other("request forwarder task failed"));
         }
     }
-    // Close workspaces UNCONDITIONALLY -- the drain-before-close guarantee
+    // Close workspaces unconditionally -- the drain-before-close guarantee
     // must hold even when a forwarder panicked.
     let close_result = tokio::task::spawn_blocking(close_workspaces)
         .await
@@ -703,7 +727,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Compare the presented token against the expected one WITHOUT leaking how far
+/// Compare the presented token against the expected one without leaking how far
 /// they matched. A plain `==` returns as soon as two bytes differ, so a caller
 /// able to retry can recover the token a byte at a time from the timing.
 ///
@@ -740,7 +764,7 @@ mod tests {
     }
 
     fn encode_envelope(envelope: &Envelope) -> Vec<u8> {
-        // `encode_control` already returns a COMPLETE frame (header + JSON
+        // `encode_control` already returns a complete frame (header + JSON
         // payload) -- it calls `frame::encode_control_frame` internally. Do
         // not wrap it again here.
         encode_control(envelope, &WireLimits::default()).expect("envelope encodes")
@@ -752,6 +776,7 @@ mod tests {
             auth_token: TEST_AUTH_TOKEN.to_owned(),
             capabilities: Vec::new(),
             last_session_generation: None,
+            max_frame_bytes: None,
         }))
     }
 
@@ -999,7 +1024,6 @@ mod tests {
 
     #[tokio::test]
     async fn inbound_blob_start_is_refused_as_unsupported_ingest() {
-        // MUTATION: accept BlobStart or use the generic envelope error -> the exact refusal fails.
         let service = Arc::new(CountingService {
             calls: Arc::new(AtomicUsize::new(0)),
         });
@@ -1023,6 +1047,7 @@ mod tests {
             &active_egress,
             &mut request_tasks,
             false,
+            WireLimits::default().max_frame_bytes,
         )
         .await;
         assert!(!keep_running);
@@ -1037,8 +1062,6 @@ mod tests {
 
     #[tokio::test]
     async fn daemon_blob_writer_emits_start_bounded_chunks_fin_then_response() {
-        // MUTATION: drop FIN, use READ_CHUNK_BYTES, emit the response before
-        // the stream, or bypass write_blob_egress -> transcript assertions fail.
         let bytes = vec![0xa5; 2 * 256 * 1024 + 17];
         let response = WireResponse {
             id: 71,
@@ -1182,8 +1205,6 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_daemon_blob_writer_emits_no_blob_bytes() {
-        // MUTATION: remove the pre-egress cancellation guard -> BlobStart and
-        // plaintext blob bytes appear instead of the request-scoped error.
         let cancel = CancelSignal::new();
         cancel.cancel();
         let response = WireResponse {
@@ -1228,9 +1249,6 @@ mod tests {
 
     #[tokio::test]
     async fn blob_egress_requires_negotiated_blobs_capability() {
-        // MUTATION: fail to retain/pass the connection's negotiated set, or
-        // ignore it at dispatch -> the non-negotiating transcript contains raw
-        // blob frames, or the negotiating transcript loses its stream.
         for (id, blobs_negotiated) in [(81, false), (82, true)] {
             let mut input_bytes = encode_envelope(&Envelope::Hello(Hello {
                 protocol_version: PROTOCOL_VERSION,
@@ -1241,6 +1259,7 @@ mod tests {
                     Vec::new()
                 },
                 last_session_generation: None,
+                max_frame_bytes: None,
             }));
             input_bytes.extend_from_slice(&encode_envelope(&Envelope::Request(WireRequest {
                 id,
@@ -1352,16 +1371,12 @@ mod tests {
 
     #[tokio::test]
     async fn service_events_flow_as_event_envelopes_only_after_hello_ack() {
-        // MUTATION: dropping the event forwarder makes the event read hang
-        // (timeout); skipping the generation gate delivers the pre-handshake
-        // notice / stamps generation 0; resetting seq per notice breaks the
-        // seq == 1 assertion for the first DELIVERED event.
         let service = Arc::new(CountingService {
             calls: Arc::new(AtomicUsize::new(0)),
         });
         let supervisor = Arc::new(Supervisor::new(SupervisorConfig::default(), service));
         let (events_tx, events_rx) = tokio::sync::mpsc::channel(8);
-        // Queued BEFORE the handshake: must be dropped, never delivered ahead
+        // Queued before the handshake: must be dropped, never delivered ahead
         // of the helloAck.
         events_tx
             .try_send(EngineEventNotice {
@@ -1381,8 +1396,15 @@ mod tests {
             events_rx,
             || Ok(()),
         ));
-        // Let the forwarder consume the early notice against generation 0.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // This test uses one executor thread. The forwarder reads generation
+        // 0 and drops the notice before yielding with an empty channel.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while events_tx.capacity() < events_tx.max_capacity() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pre-handshake notice consumed");
         client_output
             .write_all(&hello_bytes())
             .await
@@ -1444,19 +1466,43 @@ mod tests {
 
     #[test]
     fn blob_capability_is_negotiated_only_when_requested() {
-        // MUTATION: omit "blobs" from the daemon's supported capabilities or
-        // advertise it unconditionally -> the exact intersection fails.
         let ack = authenticate(
             Envelope::Hello(Hello {
                 protocol_version: PROTOCOL_VERSION,
                 auth_token: TEST_AUTH_TOKEN.to_owned(),
                 capabilities: vec!["unknown".to_owned(), "blobs".to_owned()],
                 last_session_generation: None,
+                max_frame_bytes: None,
             }),
             TEST_AUTH_TOKEN,
         )
         .expect("authenticated hello");
         assert_eq!(ack.capabilities, vec!["blobs"]);
+    }
+
+    #[test]
+    fn hello_frame_limit_clamps_into_the_negotiable_range_and_echoes() {
+        let ack_for = |requested: Option<u32>| {
+            authenticate(
+                Envelope::Hello(Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    auth_token: TEST_AUTH_TOKEN.to_owned(),
+                    capabilities: vec![],
+                    last_session_generation: None,
+                    max_frame_bytes: requested,
+                }),
+                TEST_AUTH_TOKEN,
+            )
+            .expect("authenticated hello")
+            .limits
+            .max_frame_bytes
+        };
+        let default = WireLimits::default().max_frame_bytes;
+        let floor = dohc_engine_protocol::limits::MIN_NEGOTIABLE_FRAME_BYTES;
+        assert_eq!(ack_for(None), default);
+        assert_eq!(ack_for(Some(2 * 1024 * 1024)), 2 * 1024 * 1024);
+        assert_eq!(ack_for(Some(1024)), floor);
+        assert_eq!(ack_for(Some(u32::MAX)), default);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1523,7 +1569,7 @@ mod tests {
         // The request is now in flight (its handler is parked on `release`)
         // and the finite reader has already hit EOF, so the daemon is
         // already past `while keep_running` and into its shutdown path.
-        // Closing workspaces must NOT have happened yet.
+        // Closing workspaces must not have happened yet.
         tokio::time::timeout(Duration::from_secs(5), started.notified())
             .await
             .expect("request started");
@@ -1545,9 +1591,9 @@ mod tests {
     }
 
     /// F2 regression: a read ERROR (not just EOF) must still fall through to
-    /// the cancel/drain/close tail -- it must NOT propagate straight out,
+    /// the cancel/drain/close tail -- it must not propagate straight out,
     /// abandoning in-flight work and skipping the workspace close. Socket
-    /// transports report ECONNRESET as their NORMAL close.
+    /// transports report ECONNRESET as their normal close.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn read_error_still_drains_and_closes_workspaces() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1631,7 +1677,7 @@ mod tests {
         assert_eq!(tasks.len(), 0, "the set is empty once all tasks are reaped");
     }
 
-    /// Pins the FUNCTIONAL half of the contract: a correct prefix must not pass,
+    /// Pins the functional half of the contract: a correct prefix must not pass,
     /// and a last-byte difference must be as rejected as a first-byte one.
     ///
     /// The timing half cannot be pinned by a unit test — swapping `ct_eq` back

@@ -1,6 +1,7 @@
+import { basenameOf } from "../path";
 // Pure quick-open ranking (Phase E5.0 polish). Tier order is the plan's:
 // prefix > word-boundary > substring > fuzzy subsequence; PINNED paths sort
-// first overall, RECENT files are boosted within a tier (most recent wins),
+// first overall, recent files are boosted within a tier (most recent wins),
 // then shorter paths, then alphabetical. Case-insensitive throughout.
 
 // Match-quality tiers, best first.
@@ -8,11 +9,6 @@ const TIER_BASENAME_PREFIX = 0;
 const TIER_WORD_BOUNDARY = 1;
 const TIER_SUBSTRING = 2;
 const TIER_FUZZY = 3;
-
-function basenameOf(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash === -1 ? path : path.slice(slash + 1);
-}
 
 // Word boundaries: the string start and any position after a separator
 // (slash, dash, underscore, dot, space).
@@ -56,12 +52,12 @@ export function quickOpenMatchTier(query: string, path: string): number | null {
 }
 
 export interface QuickOpenContext {
-  // Most recent FIRST (workbench recentFiles).
+  // Most recent first (workbench recentFiles).
   recent: readonly string[];
   pinned: readonly string[];
 }
 
-export interface PreparedQuickOpenPath {
+interface PreparedQuickOpenPath {
   path: string;
   lowercasePath: string;
   lowercaseBasename: string;

@@ -1,5 +1,4 @@
-// One lane's share of a shared build machine (WINDOWS_DEV.md, "Build
-// economics").
+// One lane's share of a shared build machine.
 //
 // Several agent lanes run cargo on one host. Unbounded, every cargo asks for
 // every logical core — the resource that matters is concurrent rustc
@@ -32,20 +31,20 @@ import {
 import { join } from "node:path";
 import { availableParallelism, platform } from "node:os";
 import { randomBytes } from "node:crypto";
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+import { setTimeout as sleep } from "node:timers/promises";
 
 /**
  * The budget this host imposes, or null on a single-tenant host (CI runners
  * have no slot root and run uncapped). The root comes from
- * `DOHC_BUILD_SLOT_ROOT`, defaulting to `C:\w\_locks` on Windows — the shared
- * dev machine the budget exists for. Tests point the root at a private
+ * `DOHC_BUILD_SLOT_ROOT`, defaulting to `C:\w\_locks` on Windows outside CI —
+ * the shared dev machine the budget exists for. Tests point the root at a private
  * directory so a suite run never holds a real lane's slot.
  */
 export function resolveBuildBudget(env = process.env, host = {}) {
   const os = host.platform ?? platform();
+  const ci = env.CI && !["false", "0"].includes(env.CI.toLowerCase());
   const root =
-    env.DOHC_BUILD_SLOT_ROOT || (os === "win32" ? "C:\\w\\_locks" : null);
+    env.DOHC_BUILD_SLOT_ROOT || (os === "win32" && !ci ? "C:\\w\\_locks" : null);
   if (!root) return null;
   const slots = 4;
   const cores = host.cores ?? availableParallelism();
@@ -261,7 +260,7 @@ export function reclaimStaleSlots({ root, slots, staleMs }) {
   }
 }
 
-function claimSlot(dir, name, heartbeatMs) {
+function claimSlot(dir, name, heartbeatMs, cooperativeCancellation) {
   const ownerPath = join(dir, "owner.json");
   const ownerRecord = JSON.stringify({
     pid: process.pid,
@@ -290,6 +289,9 @@ function claimSlot(dir, name, heartbeatMs) {
     if (released) return;
     released = true;
     clearInterval(beat);
+    process.off("exit", release);
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
     try {
       // Release by identity, never by path: if this claim's own record is
       // no longer at the path — the slot was reclaimed out from under a
@@ -303,17 +305,25 @@ function claimSlot(dir, name, heartbeatMs) {
       // process is dead and the heartbeat goes stale.
     }
   };
+  function interrupt(code) {
+    if (cooperativeCancellation) {
+      process.exitCode = code;
+      return;
+    }
+    release();
+    process.exit(code);
+  }
+  function onSigint() {
+    interrupt(130);
+  }
+  function onSigterm() {
+    interrupt(143);
+  }
   process.once("exit", release);
-  // Signal death skips 'exit' listeners; release first so an interrupted gate
-  // frees its slot instead of parking it for the 30-minute reclaim window.
-  process.once("SIGINT", () => {
-    release();
-    process.exit(130);
-  });
-  process.once("SIGTERM", () => {
-    release();
-    process.exit(143);
-  });
+  // Standalone gates release before exiting. Cooperative callers retain the
+  // slot until their child cleanup finishes and finally releases it.
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
   return { name, dir, release };
 }
 
@@ -321,6 +331,9 @@ function claimSlot(dir, name, heartbeatMs) {
  * Take a build slot, waiting (and reclaiming dead owners) until one frees.
  * Resolves to `{ name, dir, release }`; `release` is idempotent and also runs
  * on process exit. Throws when `waitMs` elapses with every slot held.
+ * With cooperativeCancellation, the caller handles child termination and
+ * releases the slot in finally; signals set a nonzero exit code without exiting.
+ * Signals received while waiting reject acquisition so caller cleanup can run.
  */
 export async function acquireBuildSlot({
   root,
@@ -329,11 +342,24 @@ export async function acquireBuildSlot({
   pollMs = 15_000,
   staleMs = 30 * 60_000,
   heartbeatMs = 60_000,
+  cooperativeCancellation = false,
 }) {
   mkdirSync(root, { recursive: true });
   const deadline = Date.now() + waitMs;
   let denied = false;
-  for (;;) {
+  const cancellation = new AbortController();
+  const cancel = (signal, code) => {
+    process.exitCode = code;
+    cancellation.abort(new Error(`Build slot acquisition cancelled by ${signal}.`));
+  };
+  const onSigint = () => cancel("SIGINT", 130);
+  const onSigterm = () => cancel("SIGTERM", 143);
+  if (cooperativeCancellation) {
+    process.on("SIGINT", onSigint);
+    process.on("SIGTERM", onSigterm);
+  }
+  try { for (;;) {
+    cancellation.signal.throwIfAborted();
     for (let i = 1; i <= slots; i += 1) {
       const dir = slotDir(root, i);
       try {
@@ -342,7 +368,7 @@ export async function acquireBuildSlot({
         if (error.code === "EEXIST") continue; // Held.
         throw error; // EACCES etc. is a fault, not contention.
       }
-      return claimSlot(dir, `build-slot-${i}`, heartbeatMs);
+      return claimSlot(dir, `build-slot-${i}`, heartbeatMs, cooperativeCancellation);
     }
     if (reclaimStaleSlots({ root, slots, staleMs }) > 0) continue;
     if (!denied) {
@@ -353,13 +379,16 @@ export async function acquireBuildSlot({
       throw new Error(
         `no build slot freed within ${Math.round(waitMs / 60_000)} minutes: ` +
           `the concurrency budget is ${slots} concurrent cargo lanes ` +
-          `(WINDOWS_DEV.md build economics) and all ${slots} slots at ${root} ` +
+          `and all ${slots} slots at ${root} ` +
           `are held — ${holders(root, slots)}. Wait for a lane to finish and ` +
           `rerun; a dead lane's slot is reclaimed automatically once its ` +
           `heartbeat is 30 minutes stale.`,
       );
     }
     console.log(`  waiting for a build slot: all ${slots} held — ${holders(root, slots)}`);
-    await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())));
+    await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())), undefined, { signal: cancellation.signal });
+  } } finally {
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
   }
 }

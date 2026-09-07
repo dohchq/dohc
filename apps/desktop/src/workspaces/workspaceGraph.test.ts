@@ -2,7 +2,7 @@ import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// No widened deadline here, on purpose (#568). The long path — the
+// No widened deadline here, on purpose. The long path — the
 // budget-bound scan — is dominated by synchronous work the runner cannot
 // interrupt: under a 24-process load it passed at up to 6.4s against the 5s
 // default deadline in 36 runs, and the timer never fired, which means the
@@ -831,7 +831,7 @@ describe("computeBacklinks", () => {
   });
 
   it("bounds total mentions scanned by a workspace-wide budget", () => {
-    // MAX_GRAPH_LINK_CANDIDATES (20k) is spent ACROSS all source docs, like
+    // MAX_GRAPH_LINK_CANDIDATES (20k) is spent across all source docs, like
     // buildMarkdownGraph — not refreshed per file. A leading doc packed with
     // non-matching mentions exhausts the budget, so a later doc's real mention
     // is never scanned (bounded cost). Pre-fix, every file got the full 20k.

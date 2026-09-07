@@ -11,7 +11,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-export type SettingsScope = "User" | "Workspace" | "Mixed";
+type SettingsScope = "User" | "Workspace" | "Mixed";
 
 type SettingsSection = {
   id: string;
@@ -40,7 +40,7 @@ export const SETTINGS_SECTIONS = [
     id: "workbench",
     label: "Workbench",
     scope: "Workspace",
-    keywords: ["layout", "tabs", "history", "sidebar", "recent", "sites", "preview"],
+    keywords: ["layout", "tabs", "history", "sidebar", "recent", "apps", "preview"],
     Icon: SlidersHorizontal,
   },
   {

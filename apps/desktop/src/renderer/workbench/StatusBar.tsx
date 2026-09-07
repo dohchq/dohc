@@ -6,7 +6,7 @@ import type {
 import type { AgentNotification } from "./agentNotifications";
 import { NoticeCenter } from "./NoticeCenter";
 
-// Extracted shell footer (Phase E2). The sync-status testid + data-state,
+// Extracted shell footer. The sync-status testid + data-state,
 // the "Connect dohc Cloud" button name, and the open-settings testid are
 // pinned by many specs — they move here VERBATIM. New: conflict count,
 // agent-run indicator, theme toggle, and the auto-update "ready" toast
@@ -39,13 +39,13 @@ export function StatusBar(props: {
   onOpenHistory: () => void;
   onOpenConflicts: () => void;
   onRefreshShareView: () => void;
-  // Changes recipients sent to this workspace, and the review they open
-  // (#646 PR3a). Same shape as the conflict pair above: the shell owns the
+  // Changes recipients sent to this workspace, and the review they open.
+  // Same shape as the conflict pair above: the shell owns the
   // state, the notice center only announces it.
   shareChangeNotices?: readonly { proposalId: string; sender: string }[];
   onReviewShareChanges?: (proposalId: string) => void;
   onOpenSettings: () => void;
-  // Opens the rebuild confirmation for a refused data store (#874); the
+  // Opens the rebuild confirmation for a refused data store; the
   // shell owns the dialog, the notice center offers the way in.
   onRebuildEngineStore: (returnFocus: HTMLButtonElement) => void;
   onToggleTheme: () => void;

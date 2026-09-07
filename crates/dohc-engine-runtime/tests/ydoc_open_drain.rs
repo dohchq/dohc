@@ -1,22 +1,14 @@
 //! ydoc.open's deferred drain must be gated on the key the caller's lease
 //! covers: when the path's owner changes between the RPC's probe and the
-//! post-lease read, the derived key belongs to a DIFFERENT object and the
+//! post-lease read, the derived key belongs to a different object and the
 //! drain would mutate that doc behind any live editor of it.
 
 use dohc_engine_collab::DocKey;
 use dohc_engine_runtime::{CancellationToken, CaptureIngest, NoFaults, WorkspaceSupervisor};
 use dohc_engine_storage::EngineStore;
-use dohc_engine_sync::{LeaseProbe, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_sync::{AlwaysLive, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::sync::Arc;
-
-struct AlwaysLive;
-
-impl LeaseProbe for AlwaysLive {
-    fn is_live(&self, _key: &DocKey) -> bool {
-        true
-    }
-}
 
 fn ydoc_update_rows(db: &std::path::Path) -> i64 {
     let store = EngineStore::open(db, 9_000).expect("open store");
@@ -34,7 +26,7 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
     const WS: &str = "ws-drain-gate";
     const PATH: &str = "notes/live.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     // A captured head gives the path a real owner object.
     let supervisor = WorkspaceSupervisor::new();
@@ -90,8 +82,14 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
             }),
             recorded_at_ms: 110,
         };
-        apply_ydoc_envelope(&mut store, &base, &NoFaults, &NoLiveLeases)
-            .expect("apply verified base");
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("apply verified base");
 
         let update_bytes = doc.plaintext_insert(6, " parked");
         let blob_sha = store.put_binary_blob(&update_bytes).expect("blob");
@@ -112,11 +110,18 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
             }),
             recorded_at_ms: 120,
         };
-        apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLive).expect("park");
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &AlwaysLive,
+        )
+        .expect("park");
     }
     assert_eq!(ydoc_update_rows(&db), 0, "the envelope starts parked");
 
-    // An open whose lease covers a DIFFERENT key must not drain. Mutation
+    // An open whose lease covers a different key must not drain. Mutation
     // check: drop the `expected_key_matches` gate in ydoc_open_state_on_store
     // — this open then drains the parked row and the assertion below fails.
     let supervisor = WorkspaceSupervisor::new();
@@ -142,7 +147,7 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
         "a mismatched expected key must not drain another key's deferred rows"
     );
 
-    // The same open with the MATCHING expected key drains the parked update.
+    // The same open with the matching expected key drains the parked update.
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 3).expect("reopen actor").actor;
     handle

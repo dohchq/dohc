@@ -9,10 +9,11 @@ use common::*;
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
 use dohc_engine_collab::{
     close_session, ensure_marker, load_persisted, maybe_compact, read_marker, record_local_update,
-    record_local_update_creating_marker_guarded, record_update_in_tx, CollabError, CompactOutcome,
-    ContentKind, DocKey, Regime, WriterDocCache, Ydoc,
+    record_update_in_tx, CollabError, CompactOutcome, ContentKind, DocKey, LocalAppend,
+    MarkerCreation, Regime, WriterDocCache, Ydoc,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
+use dohc_engine_testkit::decode_hex;
 
 const OVERLAP_U1_HEX: &str = "01010c00040109706c61696e546578740461efbfbd00";
 /// A skip claims client 12 clocks `[0, 3)` but carries no integrable content.
@@ -51,17 +52,6 @@ fn setup(tag: &str, regime: Regime) -> (TempStore, DocKey) {
 /// base (no origin dependencies), so appends can be sequenced freely.
 fn independent_insert(text: &str) -> Vec<u8> {
     Ydoc::wire().plaintext_insert(0, text)
-}
-
-fn decode_hex(encoded: &str) -> Vec<u8> {
-    encoded
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let pair = std::str::from_utf8(pair).expect("hex utf8");
-            u8::from_str_radix(pair, 16).expect("hex byte")
-        })
-        .collect()
 }
 
 /// Redefine an update's plaintext payload in place (same client, same clocks,
@@ -126,7 +116,7 @@ fn inject_row(store: &mut EngineStore, key: &DocKey, bytes: &[u8], seq: i64) {
     committed(outcome);
 }
 
-/// Prune every CRDT row and rewind the head to 0 WITHOUT touching the cache —
+/// Prune every CRDT row and rewind the head to 0 without touching the cache —
 /// the raw shape of a local-only prune whose reset hook was skipped.
 fn raw_prune(store: &mut EngineStore, key: &DocKey) {
     let outcome = store
@@ -175,13 +165,33 @@ fn local_appends_install_then_hit_and_advance_the_cache() {
     let u1 = producer.plaintext_insert(0, "a");
     let u2 = producer.plaintext_insert(1, "b");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1"),
     );
     let s = ts.cache.stats();
     assert_eq!((s.hits, s.misses, s.installs), (0, 1, 1));
 
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_002).expect("u2"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u2,
+            LocalAppend::default(),
+            &NoFaults,
+            1_002,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u2"),
     );
     let s = ts.cache.stats();
     assert_eq!((s.hits, s.advances), (1, 1));
@@ -197,8 +207,17 @@ fn local_appends_install_then_hit_and_advance_the_cache() {
     // A dedupe resend changes no durable state and touches no counters.
     let before = ts.cache.stats();
     let resend = committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_003)
-            .expect("resend"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u2,
+            LocalAppend::default(),
+            &NoFaults,
+            1_003,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("resend"),
     );
     assert!(resend.deduped);
     assert_eq!(ts.cache.stats(), before);
@@ -206,8 +225,6 @@ fn local_appends_install_then_hit_and_advance_the_cache() {
 
 #[test]
 fn frontier_fold_retires_a_live_identity_covered_by_delete() {
-    // MUTATION: drop identity retirement from the fold and the frontier no
-    // longer equals the store re-encode after the delete.
     let (mut ts, key) = setup("frontier-retire-identity", Regime::LocalOnly);
     let producer = Ydoc::wire();
     let insert = producer.plaintext_insert(0, "ab");
@@ -217,8 +234,10 @@ fn frontier_fold_retires_a_live_identity_covered_by_delete() {
             &mut ts.cache,
             &key,
             &insert,
+            LocalAppend::default(),
             &NoFaults,
             1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("insert"),
     );
@@ -234,8 +253,10 @@ fn frontier_fold_retires_a_live_identity_covered_by_delete() {
             &mut ts.cache,
             &key,
             &delete,
+            LocalAppend::default(),
             &NoFaults,
             1_002,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("delete"),
     );
@@ -262,8 +283,10 @@ fn frontier_fold_splits_a_string_run_around_a_mid_run_delete() {
             &mut ts.cache,
             &key,
             &insert,
+            LocalAppend::default(),
             &NoFaults,
             1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("insert"),
     );
@@ -275,8 +298,10 @@ fn frontier_fold_splits_a_string_run_around_a_mid_run_delete() {
             &mut ts.cache,
             &key,
             &delete,
+            LocalAppend::default(),
             &NoFaults,
             1_002,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("mid-run delete"),
     );
@@ -294,8 +319,6 @@ fn frontier_fold_splits_a_string_run_around_a_mid_run_delete() {
 
 #[test]
 fn frontier_fold_retires_a_deleted_scalar_interior() {
-    // MUTATION: drop unsafe-interior retirement and the retained interior clock
-    // survives after the scalar itself is deleted.
     let (mut ts, key) = setup("frontier-retire-interior", Regime::LocalOnly);
     let producer = Ydoc::wire();
     let insert = producer.plaintext_insert(0, "😀");
@@ -305,8 +328,10 @@ fn frontier_fold_retires_a_deleted_scalar_interior() {
             &mut ts.cache,
             &key,
             &insert,
+            LocalAppend::default(),
             &NoFaults,
             1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("insert"),
     );
@@ -322,8 +347,10 @@ fn frontier_fold_retires_a_deleted_scalar_interior() {
             &mut ts.cache,
             &key,
             &delete,
+            LocalAppend::default(),
             &NoFaults,
             1_002,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("delete"),
     );
@@ -357,8 +384,10 @@ fn frontier_delete_endpoints_canonicalize_across_pending_integration() {
                 &mut ts.cache,
                 &key,
                 update,
+                LocalAppend::default(),
                 &NoFaults,
                 now_ms,
+                |_tx, _outcome, _update_sha| Ok(()),
             )
             .expect("parked delete"),
         );
@@ -392,8 +421,10 @@ fn frontier_delete_endpoints_canonicalize_across_pending_integration() {
             &mut ts.cache,
             &key,
             &dependency,
+            LocalAppend::default(),
             &NoFaults,
             1_003,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("dependency"),
     );
@@ -430,7 +461,17 @@ fn tuple_probe_rejects_a_hostile_candidate_after_raw_sql_injection() {
     let (mut ts, key) = setup("cache-t1-injection", Regime::LocalOnly);
     let u1 = independent_insert("a");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1"),
     );
 
     let u2 = independent_insert("z");
@@ -443,8 +484,10 @@ fn tuple_probe_rejects_a_hostile_candidate_after_raw_sql_injection() {
         &mut ts.cache,
         &key,
         &hostile,
+        LocalAppend::default(),
         &NoFaults,
         1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect_err("a clock redefinition must be rejected");
     assert!(
@@ -465,7 +508,17 @@ fn tuple_probe_rejects_a_hostile_candidate_after_raw_sql_injection() {
     // A benign append still admits over the rebuilt lineage — including U2.
     let u3 = independent_insert("c");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u3, &NoFaults, 1_003).expect("u3"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u3,
+            LocalAppend::default(),
+            &NoFaults,
+            1_003,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u3"),
     );
     let content = projected(&ts.store, &key);
     assert!(content.contains('z') && content.contains('c'));
@@ -473,13 +526,23 @@ fn tuple_probe_rejects_a_hostile_candidate_after_raw_sql_injection() {
 
 #[test]
 fn tuple_probe_detects_a_replaced_head_row() {
-    // Same head seq, same claim fields, DIFFERENT head-row bytes: only the
+    // Same head seq, same claim fields, different head-row bytes: only the
     // head-row sha probe can see this. Delete that probe and (in debug) the
     // differential check panics this test; the probe keeps it a plain miss.
     let (mut ts, key) = setup("cache-t1-head-row", Regime::LocalOnly);
     let u1 = independent_insert("z");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1"),
     );
 
     let u1b = independent_insert("q");
@@ -517,7 +580,17 @@ fn tuple_probe_detects_a_replaced_head_row() {
     let before = ts.cache.stats();
     let u2 = independent_insert("w");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_002).expect("u2"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u2,
+            LocalAppend::default(),
+            &NoFaults,
+            1_002,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u2"),
     );
     let after = ts.cache.stats();
     assert_eq!(
@@ -535,8 +608,8 @@ fn tuple_probe_detects_a_replaced_head_row() {
 #[test]
 #[should_panic(expected = "CACHE-VALID")]
 fn differential_check_catches_a_prune_aba_that_matches_the_tuple() {
-    // A prune + re-append that reaches the SAME head coordinates with the
-    // SAME head bytes over DIFFERENT earlier history is invisible to the
+    // A prune + re-append that reaches the same head coordinates with the
+    // same head bytes over different earlier history is invisible to the
     // tuple — exactly why every prune path must call the remove hook. With
     // the hook deliberately skipped, the debug differential check is the
     // last line and must fire.
@@ -544,11 +617,30 @@ fn differential_check_catches_a_prune_aba_that_matches_the_tuple() {
     let u1a = independent_insert("a");
     let u2 = independent_insert("b");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1a, &NoFaults, 1_001)
-            .expect("u1a"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1a,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1a"),
     );
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_002).expect("u2"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u2,
+            LocalAppend::default(),
+            &NoFaults,
+            1_002,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u2"),
     );
 
     raw_prune(&mut ts.store, &key); // reset hook deliberately skipped
@@ -566,7 +658,16 @@ fn differential_check_catches_a_prune_aba_that_matches_the_tuple() {
     // Tuple matches (head 2, same head-row sha, same claim fields) while the
     // replay bytes differ: the differential check must panic.
     let u3 = independent_insert("d");
-    let _ = record_local_update(&mut ts.store, &mut ts.cache, &key, &u3, &NoFaults, 1_005);
+    let _ = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &u3,
+        LocalAppend::default(),
+        &NoFaults,
+        1_005,
+        |_tx, _outcome, _update_sha| Ok(()),
+    );
 }
 
 #[cfg(debug_assertions)]
@@ -576,13 +677,32 @@ fn differential_check_catches_a_poisoned_entry() {
     let (mut ts, key) = setup("cache-t2-poison", Regime::LocalOnly);
     let u1 = independent_insert("a");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1"),
     );
 
     ts.cache.poison_doc_for_test(&key, Ydoc::wire());
 
     let u2 = independent_insert("b");
-    let _ = record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_002);
+    let _ = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &u2,
+        LocalAppend::default(),
+        &NoFaults,
+        1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
+    );
 }
 
 #[cfg(debug_assertions)]
@@ -592,12 +712,31 @@ fn frontier_oracle_catches_a_poisoned_identity() {
     let (mut ts, key) = setup("frontier-oracle-poison", Regime::LocalOnly);
     let u1 = independent_insert("a");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1"),
     );
     ts.cache.poison_frontier_for_test(&key);
 
     let u2 = independent_insert("b");
-    let _ = record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_002);
+    let _ = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &u2,
+        LocalAppend::default(),
+        &NoFaults,
+        1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
+    );
 }
 
 #[cfg(debug_assertions)]
@@ -608,12 +747,31 @@ fn frontier_oracle_catches_a_poisoned_multi_unit_string_run() {
     let producer = Ydoc::wire();
     let u1 = producer.plaintext_insert(0, "a😀b");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1"),
     );
     ts.cache.poison_frontier_for_test(&key);
 
     let u2 = producer.plaintext_insert(4, "c");
-    let _ = record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_002);
+    let _ = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &u2,
+        LocalAppend::default(),
+        &NoFaults,
+        1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
+    );
 }
 
 #[cfg(debug_assertions)]
@@ -623,13 +781,32 @@ fn scratch_oracle_catches_a_poisoned_scratch() {
     let (mut ts, key) = setup("scratch-oracle-poison", Regime::LocalOnly);
     let u1 = independent_insert("a");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1"),
     );
     assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
     ts.cache.poison_gate_scratch_for_test(&key);
 
     let u2 = independent_insert("b");
-    let _ = record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_002);
+    let _ = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &u2,
+        LocalAppend::default(),
+        &NoFaults,
+        1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
+    );
 }
 
 #[test]
@@ -637,8 +814,17 @@ fn frontier_refusal_leaves_the_persistent_scratch_untouched() {
     let (mut ts, key) = setup("scratch-frontier-refusal", Regime::LocalOnly);
     let base = independent_insert("z");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &base, &NoFaults, 1_001)
-            .expect("base"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &base,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("base"),
     );
     assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
 
@@ -648,8 +834,10 @@ fn frontier_refusal_leaves_the_persistent_scratch_untouched() {
         &mut ts.cache,
         &key,
         &hostile,
+        LocalAppend::default(),
         &NoFaults,
         1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect_err("a clock redefinition must fail before check 4");
     assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
@@ -670,7 +858,17 @@ fn check4_refusal_evicts_the_scratch_and_the_next_gate_rebuilds_cold() {
     let (mut ts, key) = setup("scratch-check4-refusal", Regime::LocalOnly);
     let u1 = decode_hex(OVERLAP_U1_HEX);
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1"),
     );
     assert!(ts.cache.contains_for_test(&key));
     assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
@@ -681,8 +879,10 @@ fn check4_refusal_evicts_the_scratch_and_the_next_gate_rebuilds_cold() {
         &mut ts.cache,
         &key,
         &hostile,
+        LocalAppend::default(),
         &NoFaults,
         1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect_err("a discarded skip must fail check 4");
     assert!(matches!(
@@ -709,8 +909,10 @@ fn check4_refusal_evicts_the_scratch_and_the_next_gate_rebuilds_cold() {
         &mut ts.cache,
         &key,
         &hostile,
+        LocalAppend::default(),
         &NoFaults,
         1_003,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect_err("the scratch-miss replay must agree");
     assert_eq!(rebuilt_error.to_string(), fresh_error.to_string());
@@ -730,11 +932,30 @@ fn a_pruned_lineage_with_the_reset_hook_rejects_a_hostile_re_encode() {
     let u1a = independent_insert("a");
     let u2 = independent_insert("b");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1a, &NoFaults, 1_001)
-            .expect("u1a"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1a,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1a"),
     );
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_002).expect("u2"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u2,
+            LocalAppend::default(),
+            &NoFaults,
+            1_002,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u2"),
     );
 
     raw_prune(&mut ts.store, &key);
@@ -742,12 +963,30 @@ fn a_pruned_lineage_with_the_reset_hook_rejects_a_hostile_re_encode() {
 
     let u1b = independent_insert("c");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1b, &NoFaults, 1_003)
-            .expect("u1b"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1b,
+            LocalAppend::default(),
+            &NoFaults,
+            1_003,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1b"),
     );
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_004)
-            .expect("u2 again"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u2,
+            LocalAppend::default(),
+            &NoFaults,
+            1_004,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u2 again"),
     );
 
     let hostile = flip_payload_byte(&u2, b'b', b'x');
@@ -756,8 +995,10 @@ fn a_pruned_lineage_with_the_reset_hook_rejects_a_hostile_re_encode() {
         &mut ts.cache,
         &key,
         &hostile,
+        LocalAppend::default(),
         &NoFaults,
         1_005,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect_err("a clock redefinition must be rejected on the hit path too");
     assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
@@ -767,34 +1008,44 @@ fn a_pruned_lineage_with_the_reset_hook_rejects_a_hostile_re_encode() {
 
 #[test]
 fn a_guarded_error_after_the_gate_evicts_only_the_mutated_scratch() {
-    // (a) The guarded closure fails AFTER the gate passed: the transaction
+    // (a) The guarded closure fails after the gate passed: the transaction
     // rolls back. The writer doc/frontier must not advance, while the scratch
     // that already applied the candidate must be evicted.
     let (mut ts, key) = setup("cache-t3-guarded-err", Regime::LocalOnly);
     let u1 = independent_insert("a");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1"),
     );
     assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
 
     let u2 = independent_insert("b");
     let before = ts.cache.stats();
-    record_local_update_creating_marker_guarded(
+    record_local_update(
         &mut ts.store,
         &mut ts.cache,
         &key,
-        None,
-        ContentKind::Plaintext,
-        Regime::LocalOnly,
         &u2,
-        None,
-        None,
-        false,
-        false,
-        None,
+        LocalAppend {
+            marker: Some(MarkerCreation {
+                path: None,
+                content_kind: ContentKind::Plaintext,
+                regime: Regime::LocalOnly,
+            }),
+            ..Default::default()
+        },
         &NoFaults,
         1_002,
-        |_tx, _outcome| {
+        |_tx, _outcome, _update_sha| {
             Err(CollabError::Corrupt {
                 reason: "injected post-append failure".to_owned(),
             })
@@ -821,8 +1072,17 @@ fn a_guarded_error_after_the_gate_evicts_only_the_mutated_scratch() {
     );
 
     let retry = committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_003)
-            .expect("retry"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u2,
+            LocalAppend::default(),
+            &NoFaults,
+            1_003,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("retry"),
     );
     assert!(!retry.deduped);
     assert_eq!(
@@ -844,7 +1104,17 @@ fn the_commit_token_observes_updates_appended_by_the_post_append_hook() {
     let (mut ts, key) = setup("cache-commit-token-extra", Regime::LocalOnly);
     let u1 = independent_insert("a");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1"),
     );
     assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
     let u2 = independent_insert("b");
@@ -852,22 +1122,22 @@ fn the_commit_token_observes_updates_appended_by_the_post_append_hook() {
     let before = ts.cache.stats();
 
     committed(
-        record_local_update_creating_marker_guarded(
+        record_local_update(
             &mut ts.store,
             &mut ts.cache,
             &key,
-            None,
-            ContentKind::Plaintext,
-            Regime::LocalOnly,
             &u2,
-            None,
-            None,
-            false,
-            false,
-            None,
+            LocalAppend {
+                marker: Some(MarkerCreation {
+                    path: None,
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                ..Default::default()
+            },
             &NoFaults,
             1_002,
-            |tx, _outcome| {
+            |tx, _outcome, _update_sha| {
                 let appended = record_update_in_tx(tx, &key, &extra, None, None, 1_003)?;
                 assert!(!appended.deduped, "the hook must append another row");
                 Ok(())
@@ -904,14 +1174,33 @@ fn a_pre_persist_crash_keeps_the_entry_valid() {
     let (mut ts, key) = setup("cache-t3-crash-rollback", Regime::LocalOnly);
     let u1 = independent_insert("a");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1"),
     );
     assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
 
     let u2 = independent_insert("b");
     let faults = OneShotCrash::at(FaultPoint::StorageBeforePersist);
-    let outcome = record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &faults, 1_002)
-        .expect("crash surfaces as an outcome");
+    let outcome = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &u2,
+        LocalAppend::default(),
+        &faults,
+        1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
+    )
+    .expect("crash surfaces as an outcome");
     assert!(matches!(outcome, TxnOutcome::Crashed { committed: false }));
     assert!(ts.cache.contains_for_test(&key), "rollback keeps the entry");
     assert!(
@@ -921,8 +1210,17 @@ fn a_pre_persist_crash_keeps_the_entry_valid() {
 
     let before = ts.cache.stats();
     let retry = committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_003)
-            .expect("retry"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u2,
+            LocalAppend::default(),
+            &NoFaults,
+            1_003,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("retry"),
     );
     assert!(!retry.deduped);
     assert_eq!(
@@ -948,13 +1246,32 @@ fn a_post_commit_crash_removes_the_entry_and_a_rebuild_matches_the_durable_head(
     let u2 = producer.plaintext_insert(1, "b");
     let u3 = producer.plaintext_insert(2, "c");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1"),
     );
     assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
 
     let faults = OneShotCrash::at(FaultPoint::StorageAfterCommitBeforeAck);
-    let outcome = record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &faults, 1_002)
-        .expect("crash surfaces as an outcome");
+    let outcome = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &u2,
+        LocalAppend::default(),
+        &faults,
+        1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
+    )
+    .expect("crash surfaces as an outcome");
     assert!(matches!(outcome, TxnOutcome::Crashed { committed: true }));
     assert!(
         !ts.cache.contains_for_test(&key),
@@ -962,8 +1279,17 @@ fn a_post_commit_crash_removes_the_entry_and_a_rebuild_matches_the_durable_head(
     );
 
     let retry = committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_003)
-            .expect("retry"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u2,
+            LocalAppend::default(),
+            &NoFaults,
+            1_003,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("retry"),
     );
     assert!(retry.deduped, "the committed bytes dedupe on retry");
     assert!(
@@ -972,7 +1298,17 @@ fn a_post_commit_crash_removes_the_entry_and_a_rebuild_matches_the_durable_head(
     );
 
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u3, &NoFaults, 1_004).expect("u3"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u3,
+            LocalAppend::default(),
+            &NoFaults,
+            1_004,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u3"),
     );
     let cold = load_persisted(&ts.store, &key).expect("load").expect("doc");
     assert_eq!(
@@ -1004,8 +1340,10 @@ fn compaction_rebases_the_entry_to_the_snapshot_byte_for_byte() {
                 &mut ts.cache,
                 &key,
                 &update,
+                LocalAppend::default(),
                 &NoFaults,
                 1_001 + i64::from(i),
+                |_tx, _outcome, _update_sha| Ok(()),
             )
             .expect("append"),
         );
@@ -1048,8 +1386,10 @@ fn compaction_rebases_the_entry_to_the_snapshot_byte_for_byte() {
             &mut ts.cache,
             &key,
             &update,
+            LocalAppend::default(),
             &NoFaults,
             2_000,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("append"),
     );
@@ -1087,8 +1427,17 @@ fn eviction_prefers_unpinned_lru_and_holds_the_entry_cap() {
     for (i, key) in keys.iter().enumerate() {
         let update = independent_insert(&format!("k{i}"));
         committed(
-            record_local_update(&mut ts.store, &mut cache, key, &update, &NoFaults, 1_001)
-                .expect("append"),
+            record_local_update(
+                &mut ts.store,
+                &mut cache,
+                key,
+                &update,
+                LocalAppend::default(),
+                &NoFaults,
+                1_001,
+                |_tx, _outcome, _update_sha| Ok(()),
+            )
+            .expect("append"),
         );
     }
     assert!(
@@ -1108,7 +1457,17 @@ fn the_byte_budget_bounds_residency_without_affecting_appends() {
     let mut cache = WriterDocCache::with_limits_for_test(16, 1);
     let u1 = independent_insert("a");
     committed(
-        record_local_update(&mut ts.store, &mut cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+        record_local_update(
+            &mut ts.store,
+            &mut cache,
+            &key,
+            &u1,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1"),
     );
     assert!(
         !cache.contains_for_test(&key),
@@ -1121,7 +1480,17 @@ fn the_byte_budget_bounds_residency_without_affecting_appends() {
     );
     let u2 = independent_insert("b");
     committed(
-        record_local_update(&mut ts.store, &mut cache, &key, &u2, &NoFaults, 1_002).expect("u2"),
+        record_local_update(
+            &mut ts.store,
+            &mut cache,
+            &key,
+            &u2,
+            LocalAppend::default(),
+            &NoFaults,
+            1_002,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u2"),
     );
     let content = projected(&ts.store, &key);
     assert!(content.contains('a') && content.contains('b'));
@@ -1137,8 +1506,10 @@ fn the_byte_budget_charges_the_persistent_scratch() {
             &mut measured.cache,
             &key,
             &update,
+            LocalAppend::default(),
             &NoFaults,
             1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("measure install"),
     );
@@ -1159,8 +1530,10 @@ fn the_byte_budget_charges_the_persistent_scratch() {
             &mut cache,
             &bounded_key,
             &update,
+            LocalAppend::default(),
             &NoFaults,
             1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("bounded append"),
     );
@@ -1170,18 +1543,28 @@ fn the_byte_budget_charges_the_persistent_scratch() {
     );
 }
 
-// ---- forced-close containment (#851) ----------------------------------------
+// ---- forced-close containment ----------------------------------------
 
 #[test]
 fn a_warmed_cache_does_not_change_forced_close_corruption_detection() {
     // Forced compaction (threshold 0 — the call close_session makes on a
-    // replicated lineage) must ALWAYS fully reconstruct: close is the audit
+    // replicated lineage) must always fully reconstruct: close is the audit
     // point where blob corruption surfaces. A warm cache entry for the same
     // lineage must not change that verdict.
     let (mut ts, key) = setup("cache-forced-close-pin", Regime::Replicated);
     let u1 = independent_insert("x");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1"),
     );
     assert!(ts.cache.contains_for_test(&key), "the cache is warm");
     assert!(
@@ -1221,7 +1604,17 @@ fn a_compact_outcome_is_what_the_forced_close_reports_when_healthy() {
     let (mut ts, key) = setup("cache-forced-close-healthy", Regime::Replicated);
     let u1 = independent_insert("x");
     committed(
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &u1,
+            LocalAppend::default(),
+            &NoFaults,
+            1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
+        )
+        .expect("u1"),
     );
     let first = committed(maybe_compact(&mut ts.store, &key, 0, &NoFaults, 1_002).expect("fold"));
     assert!(matches!(first, CompactOutcome::Compacted { .. }));

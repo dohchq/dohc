@@ -1,3 +1,4 @@
+import { useRequestSequence } from "../useRequestSequence";
 import {
   useCallback,
   useEffect,
@@ -33,7 +34,7 @@ function runnerSettingsEqual(left: RunnerSettings, right: RunnerSettings): boole
   );
 }
 
-// What the self-test surface may offer, and what it must say (#687). The
+// What the self-test surface may offer, and what it must say. The
 // SESSION decides, not the live setting: main builds the recorder when it
 // opens the workspace, so a workspace opened without one can only refuse a
 // self-test until dohc restarts — however the user sets the toggle now. The
@@ -43,19 +44,12 @@ function runnerSettingsEqual(left: RunnerSettings, right: RunnerSettings): boole
 // is heavier than needed but never false.
 function runnerEngineNote(
   sharedView: boolean,
-  engineEnabled: boolean,
   sessionRecorderOn: boolean | undefined,
 ): string | null {
   if (sharedView) {
     return "This workspace is a shared view. dohc records nothing here, so there is no chat to test.";
   }
-  if (!engineEnabled) {
-    return sessionRecorderOn
-      ? "The workspace engine is off, so there is no chat to test. Turn it on in Advanced to test the runner."
-      : "The workspace engine is off, so there is no chat to test. Turn it on in Advanced. Then restart dohc to test the runner.";
-  }
-  // Setting on, session without a recorder: the toggle is already where it
-  // needs to be, so the only step left is the restart that reads it.
+  // A session without a recorder: the restart is what rebuilds it.
   return sessionRecorderOn === false
     ? "The workspace engine starts when dohc starts. Restart dohc to test the runner."
     : null;
@@ -64,20 +58,16 @@ function runnerEngineNote(
 export function RunnerSettingsCard(props: {
   workspaceId: string;
   runner: RunnerSettings;
-  // The self-test spawns a runner that writes a chat thread. An opted-out
-  // workspace records nothing, so the main process refuses it there.
-  engineEnabled: boolean;
-  // Mirrors SettingsDialog's shared-view fact (#589/#687).
+  // Mirrors SettingsDialog's shared-view fact.
   sharedView?: boolean;
-  // Whether main built a recorder for this workspace in THIS app session
-  // (#687). Undefined until its status arrives. See `runnerEngineNote`.
+  // Whether main built a recorder for this workspace in this app session.
+  // Undefined until its status arrives. See `runnerEngineNote`.
   sessionRecorderOn: boolean | undefined;
   onRunnerChange: (runner: RunnerSettings) => Promise<void>;
 }) {
   const {
     workspaceId,
     runner,
-    engineEnabled,
     sharedView,
     sessionRecorderOn,
     onRunnerChange,
@@ -86,7 +76,7 @@ export function RunnerSettingsCard(props: {
   const [timeoutDraft, setTimeoutDraft] = useState(String(runner.timeoutMinutes));
   const [selfTest, setSelfTest] = useState<SelfTestState>({ status: "idle" });
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const requestVersionRef = useRef(0);
+  const requestVersionRef = useRequestSequence();
 
   useEffect(() => {
     setCommandDraft(runner.command);
@@ -97,10 +87,10 @@ export function RunnerSettingsCard(props: {
   }, [runner.timeoutMinutes]);
 
   useEffect(() => {
-    requestVersionRef.current += 1;
+    requestVersionRef.next();
     setSelfTest({ status: "idle" });
     return () => {
-      requestVersionRef.current += 1;
+      requestVersionRef.next();
     };
   }, [workspaceId]);
 
@@ -144,20 +134,20 @@ export function RunnerSettingsCard(props: {
   );
 
   const runSelfTest = useCallback(async () => {
-    const version = requestVersionRef.current;
+    const version = requestVersionRef.current();
     setSelfTest({ status: "running" });
     try {
       await commitDrafts();
       const result: RunnerSelfTestResult = await bridge().runnerSelfTest({
         workspaceId,
       });
-      if (requestVersionRef.current !== version) return;
+      if (!requestVersionRef.isCurrent(version)) return;
       setSelfTest({
         status: result.ok ? "success" : "error",
         detail: result.detail,
       });
     } catch (cause) {
-      if (requestVersionRef.current !== version) return;
+      if (!requestVersionRef.isCurrent(version)) return;
       setSelfTest({
         status: "error",
         detail:
@@ -170,11 +160,7 @@ export function RunnerSettingsCard(props: {
 
   const configured = commandDraft.trim().length > 0;
   const selfTestRunning = selfTest.status === "running";
-  const engineNote = runnerEngineNote(
-    Boolean(sharedView),
-    engineEnabled,
-    sessionRecorderOn,
-  );
+  const engineNote = runnerEngineNote(Boolean(sharedView), sessionRecorderOn);
 
   return (
     <section
@@ -320,7 +306,6 @@ export function RunnerSettingsCard(props: {
           // is a synchronous prop, so it must gate the button even in the
           // window before sessionRecorderOn's async status resolves.
           disabled={
-            !engineEnabled ||
             Boolean(sharedView) ||
             sessionRecorderOn === false ||
             !configured ||

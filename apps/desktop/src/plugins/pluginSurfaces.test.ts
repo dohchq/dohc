@@ -24,16 +24,7 @@ import {
   type PluginWebAppViewLike,
 } from "./pluginSurfaces";
 import { PluginWorkspaceEvents } from "./pluginWorkspaceEvents";
-
-function deferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-}
+import { deferred } from "../testing/deferred";
 
 class FakeView implements PluginWebAppViewLike {
   static created: FakeView[] = [];
@@ -958,7 +949,7 @@ describe("PluginSurfaces web app attempt ownership", () => {
       request,
       webAdmission({ ownedLease: secondLease, attempt: "replacement" }),
     );
-    while (firstLease.releases === 0) await Promise.resolve();
+    await vi.waitFor(() => expect(firstLease.releases).toBeGreaterThan(0));
     expect(FakeView.created).toHaveLength(2);
     expect(FakeView.created[1]!.closed).toBe(0);
 
@@ -1014,7 +1005,7 @@ describe("PluginSurfaces web app attempt ownership", () => {
         spawn: () => spawnId,
       }),
     );
-    while (firstLease.releases === 0) await Promise.resolve();
+    await vi.waitFor(() => expect(firstLease.releases).toBeGreaterThan(0));
 
     spawnId = "spawn-2";
     const rejected = expect(replacement).rejects.toThrow(/restarted/);
@@ -2836,7 +2827,7 @@ describe("PluginSurfaces panel authority", () => {
         url: "http://127.0.0.1:4101/replacement",
       }),
     );
-    while (firstLease.releases === 0) await Promise.resolve();
+    await vi.waitFor(() => expect(firstLease.releases).toBeGreaterThan(0));
     expect(disposedPanelIds).toEqual(["panel"]);
 
     surfaces.hostChanged({
@@ -3434,7 +3425,7 @@ describe("PluginSurfaces view operations", () => {
       webAdmission({ ownedLease: lease(), attempt: "later", steps }),
     );
 
-    while (!steps.includes("clear")) await Promise.resolve();
+    await vi.waitFor(() => expect(steps).toContain("clear"));
     expect(steps).not.toContain("host:later");
     clear.resolve();
     await Promise.all([stopping, later]);
@@ -3467,7 +3458,7 @@ describe("PluginSurfaces view operations", () => {
       clearPartition: { workspaceRoot: "C:/ws" },
     };
     const firstStop = surfaces.stop(target);
-    while (!steps.includes("clear:1")) await Promise.resolve();
+    await vi.waitFor(() => expect(steps).toContain("clear:1"));
 
     let secondSettled = false;
     const secondStop = surfaces.stop(target).then(() => {

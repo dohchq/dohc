@@ -1,9 +1,10 @@
+import { presenceColorHash } from "./presenceColorHash";
 import { useMemo } from "react";
 import { resolvePeerDisplayName, type PresencePeer } from "./presenceChannel";
 
 // MU-C1 — calm presence UI. Small initials for who's here and a subtle typing
 // line. Deliberately quiet: no layout thrash, no noisy badges, and it renders
-// NOTHING when nobody else is around (solo stays solo). Presence changes are
+// nothing when nobody else is around (solo stays solo). Presence changes are
 // announced politely (aria-live="polite"), never as a spam of alerts.
 
 function initials(name: string): string {
@@ -12,14 +13,6 @@ function initials(name: string): string {
   const parts = trimmed.split(/\s+/u);
   if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
   return `${parts[0]![0]}${parts[parts.length - 1]![0]}`.toUpperCase();
-}
-
-// A deterministic, muted hue per user so the same person keeps the same face
-// color across renders without a palette dependency.
-function hueFor(key: string): number {
-  let hash = 0;
-  for (let i = 0; i < key.length; i += 1) hash = (hash * 31 + key.charCodeAt(i)) % 360;
-  return hash;
 }
 
 const MAX_FACES = 3;
@@ -55,7 +48,7 @@ export function PresenceFaces(props: {
     >
       {shown.map((peer) => {
         const name = resolvePeerDisplayName(peer);
-        const hue = hueFor(peer.userId);
+        const hue = presenceColorHash(peer.userId) % 360;
         return (
           <span
             key={peer.userId}

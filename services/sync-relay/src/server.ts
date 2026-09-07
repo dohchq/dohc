@@ -1,4 +1,10 @@
-import { createHash, randomUUID } from "node:crypto";
+import { jsonResponse, sha256Hex, TokenBucketLimiter } from "@dohc/service-http";
+import { randomUUID } from "node:crypto";
+import {
+  LINK_SECRET_PATTERN,
+  SHA256_HEX_PATTERN,
+} from "@dohc/security-contract/wire-patterns";
+import { asRecord } from "@dohc/workspace-core";
 import {
   isChatShareAccessValue,
   isShareAccessValue,
@@ -15,8 +21,12 @@ import {
   hashLinkProfileSecret,
   hashRelayExchangeKey,
   LinkEgressRateLimiter,
-  LinkExchangeRateLimiter,
-  LinkReadRateLimiter,
+  LINK_EXCHANGE_BUCKET_CAPACITY,
+  LINK_EXCHANGE_REFILL_PER_SECOND,
+  LINK_EXCHANGE_MAX_IPS,
+  LINK_READ_BUCKET_CAPACITY,
+  LINK_READ_REFILL_PER_SECOND,
+  LINK_READ_MAX_CAPABILITIES,
   LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
   LINK_GRANT_LOG_READ_REFILL_PER_SECOND,
   LINK_GRANT_READ_BUCKET_CAPACITY,
@@ -41,52 +51,8 @@ import {
   presenceScopeKey,
   type PresenceSnapshot,
 } from "./presence";
-import {
-  MAIN_VERSION_ID,
-  filterOpForShare,
-  filterOpForShareAppend,
-  filterProposedChangeForShare,
-  hasValidShareMomentShape,
-  isChatChannelSelector,
-  parseShareOpPayloadWithReferencedPaths,
-  parseStoredAnyShareSelectorJson,
-  presenceTopicAllowedForShare,
-  targetVersionId,
-  validateChatChannelShareSelector,
-  validateChatShareAccess,
-  validateFileShareAccess,
-  validateShareSelector,
-  type AnyShareSelector,
-  type ChatShareChannelKind,
-  type ChatShareThreadResolver,
-  type ShareSelector,
-  type StoredAnyShareSelector,
-  type ThreadFileBinding,
-} from "./shareFilter";
-import {
-  SHARED_BLOB_CANDIDATE_LIMIT,
-  LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT,
-  LINK_DISCUSSION_PAGE_LIMIT,
-  normalizeDiscussionDisplayName,
-  SyncRelayBlobMissingError,
-  SyncRelayConflictError,
-  SyncRelayQuotaExceededError,
-  type EnforceWorkspaceIdentityResult,
-  type ObjectMomentRow,
-  type ShareProposalOpRow,
-  type SyncRelayLogInput,
-  type SyncRelayLogRow,
-  type SyncRelayIndependentGrantInventoryCursor,
-  type SyncRelayLinkInventoryCursor,
-  type SyncRelayLinkInventoryRow,
-  type SyncRelayShareDiscussionCursor,
-  type SyncRelayShareDiscussionMessageRow,
-  type SyncRelayShareDiscussionActivityPage,
-  type SyncRelayShareDiscussionPage,
-  type SyncRelayShareGrantRow,
-  type SyncRelayShareWithGrantRow,
-  type SyncRelayStorage,
-} from "./storage";
+import { filterOpForShare, filterOpForShareAppend, filterProposedChangeForShare, hasValidShareMomentShape, isChatChannelSelector, parseShareOpPayloadWithReferencedPaths, parseStoredAnyShareSelectorJson, presenceTopicAllowedForShare, targetVersionId, validateChatChannelShareSelector, validateChatShareAccess, validateFileShareAccess, validateShareSelector, type AnyShareSelector, type ChatShareChannelKind, type ChatShareThreadResolver, type ShareSelector, type ThreadFileBinding } from "./shareFilter";
+import { SHARED_BLOB_CANDIDATE_LIMIT, LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT, LINK_DISCUSSION_PAGE_LIMIT, normalizeDiscussionDisplayName, SyncRelayBlobMissingError, type EnforceWorkspaceIdentityResult, type ObjectMomentRow, type ShareProposalOpRow, type SyncRelayLogInput, type SyncRelayLogRow, type SyncRelayIndependentGrantInventoryCursor, type SyncRelayLinkInventoryCursor, type SyncRelayLinkInventoryRow, type SyncRelayShareDiscussionCursor, type SyncRelayShareDiscussionMessageRow, type SyncRelayShareDiscussionActivityPage, type SyncRelayShareDiscussionPage, type SyncRelayShareGrantRow, type SyncRelayShareWithGrantRow, type SyncRelayStorage } from "./storage";
 import {
   authorizeShareAction,
   authorizeLinkShareAction,
@@ -96,7 +62,7 @@ import {
   type ShareAction,
 } from "./shareAuthorization";
 import { destinationPath, proposalMomentPayload } from "./shareProposals";
-import { RELAY_ERRORS, type RelayErrorCode, type RelayErrorDefinition } from "./errorCodes";
+import { badRequest, errorResponse, notFound, RELAY_ERRORS, relayError, RelayError } from "./errors";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
 export { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
@@ -115,13 +81,10 @@ function isPublicLinkAccess(value: string): value is "view" | "comment" {
 function validatePublicLinkAccess(value: unknown): "view" | "comment" {
   const validation = validateFileShareAccess(value);
   if (!validation.ok) {
-    throw relayHttpError(RELAY_ERRORS[validation.code], validation.message);
+    throw relayError(validation.code, validation.message);
   }
   if (!isPublicLinkAccess(validation.access)) {
-    throw relayHttpError(
-      RELAY_ERRORS.invalid_access,
-      'access must be "view" or "comment"',
-    );
+    throw relayError("invalid_access", 'access must be "view" or "comment"');
   }
   return validation.access;
 }
@@ -142,7 +105,7 @@ export interface CreateSyncRelayHandlerOptions {
   ) => Promise<string | null> | string | null;
   newShareId?: () => string;
   newGrantId?: () => string;
-  // #646 PR3a: ids the relay MINTS — proposal ids, and the moment and object
+  // Ids the relay mints — proposal ids, and the moment and object
   // ids a proposal's accept stamps on the granter's own log. Minted, never
   // taken from the recipient: a recipient-supplied moment id could name a
   // moment the granter already holds. Injectable so tests can pin them.
@@ -160,14 +123,14 @@ export interface CreateSyncRelayHandlerOptions {
   linkKey?: string | Uint8Array;
   shareWebOrigin?: string;
   relayExchangeKey?: string;
-  linkExchangeRateLimiter?: LinkExchangeRateLimiter;
-  linkRedeemRateLimiter?: LinkReadRateLimiter;
-  linkReadRateLimiter?: LinkReadRateLimiter;
-  linkGrantReadRateLimiter?: LinkReadRateLimiter;
-  linkLogReadRateLimiter?: LinkReadRateLimiter;
-  linkGrantLogReadRateLimiter?: LinkReadRateLimiter;
+  linkExchangeRateLimiter?: TokenBucketLimiter;
+  linkRedeemRateLimiter?: TokenBucketLimiter;
+  linkReadRateLimiter?: TokenBucketLimiter;
+  linkGrantReadRateLimiter?: TokenBucketLimiter;
+  linkLogReadRateLimiter?: TokenBucketLimiter;
+  linkGrantLogReadRateLimiter?: TokenBucketLimiter;
   linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
-  linkCapabilityReadFallbackPageSize?: number;
+  linkFreshnessPageSize?: number;
   linkCurrentFileLimit?: number;
   newLinkBearer?: () => string;
   newLinkHandoffCode?: () => string;
@@ -208,7 +171,7 @@ type SyncRelayRoute =
   | { route: "share-discussion-activity"; shareId: string }
   | { route: "share-discussion-moderation"; shareId: string }
   | { route: "share-blob"; shareId: string; sha256: string }
-  // #646 PR3a. The recipient's half of the proposal lane is share-scoped; the
+  // The recipient's half of the proposal lane is share-scoped; the
   // granter's half is WORKSPACE-scoped, so its authorization is the one
   // ownership line every owner route already sits behind rather than a new
   // per-route check. A recipient cannot even address it: a received share
@@ -216,11 +179,11 @@ type SyncRelayRoute =
   | { route: "share-proposals"; shareId: string }
   | { route: "share-proposal-withdraw"; shareId: string; proposalId: string }
   | { route: "workspace-proposals"; workspaceId: string }
-  // ONE proposal, with its file rows. The listing above carries counts only,
+  // One proposal, with its file rows. The listing above carries counts only,
   // so opening a review reads the proposal the granter opened rather than
   // every open proposal in the workspace.
   | { route: "workspace-proposal"; workspaceId: string; proposalId: string }
-  // ONE op of one proposal. The review lists metadata and loads a file's
+  // One op of one proposal. The review lists metadata and loads a file's
   // content only when the granter opens that file, so this route answers the
   // opening — without re-serving every op of every open proposal to do it.
   | {
@@ -239,7 +202,7 @@ type SyncRelayRoute =
   | { route: "share-presence"; shareId: string };
 
 // Transport cap. The relay never parses content, so it cannot tell a captured
-// file from a document body from a Y.Doc payload; it carries the WIDEST engine
+// file from a document body from a Y.Doc payload; it carries the widest engine
 // ceiling and lets the Rust sync-apply path enforce the real one by referenced
 // kind on hydrate. A blob a peer smuggles under this cap but over its kind's
 // ceiling is rejected client-side as a protocol violation.
@@ -248,12 +211,12 @@ type SyncRelayRoute =
 // #549 measured a rich document at MAX_TEXT_BYTES encoding to 14.06 MiB of
 // Y.Doc full state, so MAX_YDOC_UPDATE_BYTES is 20 MiB. Under that number a
 // document the engine accepts would be refused 413 here, and the base it needs
-// could never reach a peer. `the_relay_transport_cap_covers_the_widest_engine_ingest_ceiling`
-// (crates/dohc-engine-sync-http/tests/relay_http.rs) reads this line and fails
-// if the two drift.
+// could never reach a peer. Keep this at or above the engine's
+// MAX_INGEST_BLOB_BYTES (crates/dohc-engine-sync/src/hydration.rs); no test
+// compares the two, so check both when widening either.
 export const MAX_BLOB_BYTES = 20 * 1024 * 1024;
 const LINK_STREAM_CHUNK_BYTES = 64 * 1024;
-export const LINK_BLOB_INFLIGHT_BYTES_PER_GRANT = 64 * 1024 * 1024;
+const LINK_BLOB_INFLIGHT_BYTES_PER_GRANT = 64 * 1024 * 1024;
 export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 // One PAGE of the continuous replication lane, for the two log routes. It is
 // not the submit bound: a submit is one user act carrying one intent, and it
@@ -261,27 +224,25 @@ export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 // page should hold. Raising this one would only lengthen each replication
 // stall.
 export const MAX_OPS_PER_REQUEST = 500;
-export const DEFAULT_LOG_PAGE_SIZE = 100;
-export const MAX_LOG_PAGE_SIZE = 500;
+const DEFAULT_LOG_PAGE_SIZE = 100;
+const MAX_LOG_PAGE_SIZE = 500;
 const DEFAULT_DISCUSSION_PAGE_SIZE = 50;
 export const DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS = 1_000;
-export const DEFAULT_DISCUSSION_ACTIVITY_HOLD_MS = 25_000;
+const DEFAULT_DISCUSSION_ACTIVITY_HOLD_MS = 25_000;
 export const MAX_DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
-const DISCUSSION_CURSOR_MAX_CHARS = 1_024;
 const DISCUSSION_MODERATION_HANDLE_MAX_CHARS = 512;
 const MAX_LINK_CURRENT_FILES = 5_000;
 // One accountless response may scan this many raw log rows for admitted ops.
 export const MAX_RAW_ROWS_PER_LINK_PAGE = 10_000;
-// Capability reads may synchronously inspect at most 10,000 fallback rows.
-export const LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET = 20;
+// Freshness reads inspect at most 20 pages, or 10,000 rows at the default page size.
+export const LINK_FRESHNESS_PAGE_BUDGET = 20;
 // Presence (ephemeral awareness) transport limits.
 export const MAX_PRESENCE_TOPIC_CHARS = 1024;
 export const MAX_CLIENT_ID_CHARS = 128;
 export const MAX_PRESENCE_STATE_BYTES = 8 * 1024;
 export const DEFAULT_PRESENCE_HOLD_MS = 25_000;
-export const MAX_PRESENCE_HOLD_MS = 30_000;
+const MAX_PRESENCE_HOLD_MS = 30_000;
 
-const SHA256_HEX = /^[a-f0-9]{64}$/u;
 const MAX_WORKSPACE_ID_CHARS = 256;
 const MAX_ORIGIN_ID_CHARS = 256;
 const MAX_OP_KIND_CHARS = 128;
@@ -293,14 +254,14 @@ const ACCOUNTLESS_FILE_REPLAY_OP_KINDS = new Set([
 const FILE_FRESHNESS_OP_KINDS = new Set(["moment.append", "version.create"]);
 const MAX_EMAIL_CHARS = 320;
 const MAX_SHARE_ID_CHARS = 128;
-const LINK_INVENTORY_CURSOR_MAX_CHARS = 1_024;
-// #646 PR3a. A submit's idempotency key is the client's own string, not a
+const CURSOR_MAX_CHARS = 1_024;
+// A submit's idempotency key is the client's own string, not a
 // share id; it takes the same length because both are one opaque identifier,
 // and its own name so the bound says what it bounds.
 const MAX_SUBMIT_ID_CHARS = 128;
 const MAX_IDENTITY_BYTES = 512;
 
-// #646 PR3a. Inside a share's origin namespace (`share:<shareId>:…`), this
+// Inside a share's origin namespace (`share:<shareId>:…`), this
 // prefix belongs to the relay: it names the stream one accepted proposal
 // writes. A recipient's own push may not claim it.
 const PROPOSAL_ORIGIN_PREFIX = "proposal:";
@@ -410,23 +371,26 @@ export function createSyncRelayHandler({
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
-  linkExchangeRateLimiter = new LinkExchangeRateLimiter(),
-  linkRedeemRateLimiter = new LinkReadRateLimiter(),
-  linkReadRateLimiter = new LinkReadRateLimiter(),
-  linkGrantReadRateLimiter = new LinkReadRateLimiter(
+  linkExchangeRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_BUCKET_CAPACITY, LINK_EXCHANGE_REFILL_PER_SECOND, LINK_EXCHANGE_MAX_IPS),
+  linkRedeemRateLimiter = new TokenBucketLimiter(LINK_READ_BUCKET_CAPACITY, LINK_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
+  linkReadRateLimiter = new TokenBucketLimiter(LINK_READ_BUCKET_CAPACITY, LINK_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
+  linkGrantReadRateLimiter = new TokenBucketLimiter(
     LINK_GRANT_READ_BUCKET_CAPACITY,
     LINK_GRANT_READ_REFILL_PER_SECOND,
+    LINK_READ_MAX_CAPABILITIES,
   ),
-  linkLogReadRateLimiter = new LinkReadRateLimiter(
+  linkLogReadRateLimiter = new TokenBucketLimiter(
     LINK_LOG_READ_BUCKET_CAPACITY,
     LINK_LOG_READ_REFILL_PER_SECOND,
+    LINK_READ_MAX_CAPABILITIES,
   ),
-  linkGrantLogReadRateLimiter = new LinkReadRateLimiter(
+  linkGrantLogReadRateLimiter = new TokenBucketLimiter(
     LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
     LINK_GRANT_LOG_READ_REFILL_PER_SECOND,
+    LINK_READ_MAX_CAPABILITIES,
   ),
   linkGrantEgressRateLimiter = new LinkEgressRateLimiter(),
-  linkCapabilityReadFallbackPageSize = MAX_LOG_PAGE_SIZE,
+  linkFreshnessPageSize = MAX_LOG_PAGE_SIZE,
   linkCurrentFileLimit = MAX_LINK_CURRENT_FILES,
   newLinkBearer = () => mintLinkBearer(),
   newLinkHandoffCode = () => mintLinkHandoffCode(),
@@ -558,7 +522,7 @@ export function createSyncRelayHandler({
   // Handle a publish (POST) or long-poll (GET) against an already-authorized
   // presence scope. The actor's user id is the SERVER-DERIVED attribution;
   // the client-supplied `state` is opaque display data only. `reauthorize`
-  // re-runs the caller's authorization AFTER a long-poll park: a grant revoked
+  // re-runs the caller's authorization after a long-poll park: a grant revoked
   // while the poll was parked must fail closed on wake, never return a final
   // snapshot for a scope the caller no longer has.
   const respondPresence = async (
@@ -602,16 +566,16 @@ export function createSyncRelayHandler({
       if (reauthorize) await reauthorize();
       return presenceResponse(snapshot);
     }
-    throw methodNotAllowed();
+    throw relayError("method_not_allowed");
   };
 
-  // #646 PR3a: whether a recipient may PROPOSE changes to the files this
+  // Whether a recipient may propose changes to the files this
   // selector shares. Edit and nothing else — and the refusal is the same
-  // `shareNotAppendable()` code and body a comment or a view share gets on the
+  // `relayError("share_read_only")` code and body a comment or a view share gets on the
   // append route, because a level-specific refusal would tell a probing
   // recipient the selector's level. Changes follow PATHS, so a version share
   // (no paths) proposes nothing at any level.
-  // #646 PR3a. The granter's own facts for one proposed change, in the ONE
+  // The granter's own facts for one proposed change, in the one
   // version the proposal was submitted against: which file it is, where that
   // file is now, and the moment that produced the content the recipient
   // started from.
@@ -642,7 +606,7 @@ export function createSyncRelayHandler({
     };
   };
 
-  // ONE op as the granter's review reads it. Shared by the listing and by the
+  // One op as the granter's review reads it. Shared by the listing and by the
   // single-op route, so a row and the file it opens can never disagree about
   // where a change lands or whether it drifted.
   //
@@ -655,7 +619,7 @@ export function createSyncRelayHandler({
       opIndex: op.opIndex,
       basedOnPath: op.basedOnPath,
       operation: op.operation,
-      // WHERE accepting will put it, resolved by the SAME rule the accept
+      // WHERE accepting will put it, resolved by the same rule the accept
       // door uses. The review must name the path the write will use: a
       // content-only change lands at the granter's current path, so showing
       // the recipient's path would tell the granter one thing and do another.
@@ -679,9 +643,9 @@ export function createSyncRelayHandler({
   };
 
   // MU-C4: the thread→channel resolver the chat share filter scopes by. Backed
-  // by the shared workspace's OWN log (earliest chat.thread.create wins), so a
+  // by the shared workspace's own log (earliest chat.thread.create wins), so a
   // member-pushed forgery can never re-bind an existing thread. Memoized per
-  // resolver (= per request): the filter asks about the SAME threadId across
+  // resolver (= per request): the filter asks about the same threadId across
   // thread-scoped rows on the hot read path, and the underlying lookup is a log
   // scan. Safe because a resolver never outlives its request and the log it
   // reads is append-only with earliest-binding-wins semantics.
@@ -705,7 +669,7 @@ export function createSyncRelayHandler({
         return bound;
       },
       // #646 PR2, memoized for the same reason: the file-chat filter asks
-      // about the SAME threadId and the SAME objectId across every
+      // about the same threadId and the same objectId across every
       // thread-scoped row of a page.
       threadFileBinding: (threadId) => {
         if (bindingCache.has(threadId)) return bindingCache.get(threadId);
@@ -728,7 +692,7 @@ export function createSyncRelayHandler({
     };
   };
 
-  // Lazy claim of pending email invites (PR 18 gate fix): the first time an
+  // Lazy claim of pending email invites: the first time an
   // invited account authenticates to the relay, any share addressed to its
   // email becomes a real grant (recipient_user_id filled in). The session
   // email is server-derived (never client-supplied), so this cannot be used
@@ -757,12 +721,14 @@ export function createSyncRelayHandler({
     const result = authorizeShareAction({ storage, actorUserId, shareId, action });
     if (result.ok) return result;
     if (result.reason === "denied" && (action === "append" || action === "propose")) {
-      throw shareNotAppendable();
+      throw relayError("share_read_only");
     }
     throw notFound();
   }
 
   type DiscussionViewer = "public" | "named" | "owner";
+
+  const privateRefused = (): Response => privateErrorResponse(notFound());
 
   const privateResponse = (response: Response): Response => {
     response.headers.set("cache-control", "private, no-store");
@@ -838,7 +804,7 @@ export function createSyncRelayHandler({
       authorized.grant.access !== "comment" &&
       authorized.grant.access !== "edit"
     ) {
-      throw shareNotAppendable();
+      throw relayError("share_read_only");
     }
     return { viewer: "named" };
   };
@@ -872,7 +838,7 @@ export function createSyncRelayHandler({
       nextCursor:
         page.nextCursor === null
           ? null
-          : encodeDiscussionCursor(page.nextCursor),
+          : discussionCursor.encode(page.nextCursor),
     };
   };
 
@@ -910,7 +876,10 @@ export function createSyncRelayHandler({
     profileName,
   });
 
-  function requireOwnedLinkGrant(
+  // The share and an active grant of `kind` on it, when the actor owns both
+  // the share and its workspace right now. Anything else is a generic 404.
+  function requireOwnedGrant(
+    kind: "link" | "user",
     shareId: string,
     grantId: string,
     actor: { userId: string },
@@ -923,30 +892,8 @@ export function createSyncRelayHandler({
       !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
       !grant ||
       grant.shareId !== share.shareId ||
-      grant.principalKind !== "link" ||
-      grant.status !== "active" ||
-      grant.revokedAtMs !== null
-    ) {
-      throw notFound();
-    }
-    return { share, grant };
-  }
-
-  function requireOwnedNamedGrant(
-    shareId: string,
-    grantId: string,
-    actor: { userId: string },
-  ): SyncRelayShareWithGrantRow {
-    const share = storage.getShare(shareId);
-    const grant = storage.getShareGrant(grantId);
-    if (
-      !share ||
-      share.granterUserId !== actor.userId ||
-      !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
-      !grant ||
-      grant.shareId !== share.shareId ||
-      grant.principalKind !== "user" ||
-      !grant.principalUserId ||
+      grant.principalKind !== kind ||
+      (kind === "user" && !grant.principalUserId) ||
       grant.status !== "active" ||
       grant.revokedAtMs !== null
     ) {
@@ -989,7 +936,7 @@ export function createSyncRelayHandler({
         : null;
     return {
       shareId: share.shareId,
-      // An unreadable row says so. It does NOT get a stand-in scope: empty
+      // An unreadable row says so. It does not get a stand-in scope: empty
       // paths with no version would claim the entire live workspace, on a row
       // whose own reads answer 404. The row stays listed because it is the
       // caller's own share and ending it must remain possible — the reverse
@@ -1351,13 +1298,13 @@ export function createSyncRelayHandler({
       : createAccountlessPathProjection(selector);
     for (
       let pagesRead = 0;
-      pagesRead < LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET;
+      pagesRead < LINK_FRESHNESS_PAGE_BUDGET;
       pagesRead += 1
     ) {
       const rows = storage.fetchLogPageDescending({
         workspaceId,
         beforeRelaySeq,
-        limit: linkCapabilityReadFallbackPageSize,
+        limit: linkFreshnessPageSize,
       });
       for (const row of rows) {
         if (row.relaySeq <= epochLogFloor) {
@@ -1384,7 +1331,7 @@ export function createSyncRelayHandler({
           return { lastSettledAtMs: row.recordedAtMs, lastSettledKnown: true };
         }
       }
-      if (rows.length < linkCapabilityReadFallbackPageSize) {
+      if (rows.length < linkFreshnessPageSize) {
         return { lastSettledAtMs: null, lastSettledKnown: true };
       }
       beforeRelaySeq = rows[rows.length - 1]!.relaySeq;
@@ -1434,8 +1381,8 @@ export function createSyncRelayHandler({
 
   const requireLinkRead = (
     request: Request,
-    capabilityRateLimiter: LinkReadRateLimiter,
-    grantRateLimiter: LinkReadRateLimiter,
+    capabilityRateLimiter: TokenBucketLimiter,
+    grantRateLimiter: TokenBucketLimiter,
   ) => {
     if (!linkKey) throw invalidLinkCapability();
     const match = /^LinkCapability ([A-Za-z0-9_-]{43})$/u.exec(
@@ -1457,7 +1404,7 @@ export function createSyncRelayHandler({
         admittedAtMs,
       ) || !grantRateLimiter.allow(capability.grantId, admittedAtMs)
     ) {
-      throw linkReadRateLimited();
+      throw relayError("link_read_rate_limited");
     }
     return { capabilityToken, capability };
   };
@@ -1495,7 +1442,7 @@ export function createSyncRelayHandler({
       bytes.byteLength,
       nowMs(),
     );
-    if (!settleEgress) throw linkReadRateLimited();
+    if (!settleEgress) throw relayError("link_read_rate_limited");
     return respondWithLinkBytes(
       bytes,
       shareId,
@@ -1507,23 +1454,22 @@ export function createSyncRelayHandler({
   };
 
   const respondToLinkDiscussion = async (request: Request): Promise<Response> => {
-    const refused = (): Response => privateErrorResponse(notFound());
-    if (!linkKey) return refused();
+    if (!linkKey) return privateRefused();
     if (request.method !== "GET" && request.method !== "POST") {
-      return privateErrorResponse(methodNotAllowed());
+      return privateErrorResponse(relayError("method_not_allowed"));
     }
     if (
       request.method === "POST" &&
       (relayExchangeKeyHash === undefined || !hasValidRelayExchangeKey(request))
     ) {
-      return refused();
+      return privateRefused();
     }
     const profileSecret = request.headers.get("x-dohc-link-profile-secret");
     if (
       (request.method === "POST" && profileSecret === null) ||
-      (profileSecret !== null && !/^[A-Za-z0-9_-]{43}$/u.test(profileSecret))
+      (profileSecret !== null && !LINK_SECRET_PATTERN.test(profileSecret))
     ) {
-      return refused();
+      return privateRefused();
     }
 
     try {
@@ -1534,7 +1480,7 @@ export function createSyncRelayHandler({
       );
       if (request.method === "GET") {
         const url = new URL(request.url);
-        const cursor = decodeDiscussionCursor(url.searchParams.get("cursor"));
+        const cursor = discussionCursor.decode(url.searchParams.get("cursor"));
         const limit = parseDiscussionLimit(url.searchParams.get("limit"));
         const direction = parseDiscussionDirection(
           url.searchParams.get("direction"),
@@ -1608,13 +1554,10 @@ export function createSyncRelayHandler({
           result.reason === "share-limit"
         ) {
           return privateErrorResponse(
-            relayHttpError(
-              RELAY_ERRORS.discussion_limit_reached,
-              "discussion message limit reached",
-            ),
+            relayError("discussion_limit_reached", "discussion message limit reached"),
           );
         }
-        return refused();
+        return privateRefused();
       }
       if (!result.replayed) discussionActivity.wake(capability.shareId);
       return privateResponse(
@@ -1625,10 +1568,10 @@ export function createSyncRelayHandler({
       );
     } catch (error) {
       if (
-        error instanceof HttpError &&
+        error instanceof RelayError &&
         (error.statusCode === 401 || error.code === RELAY_ERRORS.not_found.code)
       ) {
-        return refused();
+        return privateRefused();
       }
       return privateErrorResponse(error);
     }
@@ -1637,14 +1580,13 @@ export function createSyncRelayHandler({
   const respondToLinkDiscussionActivity = async (
     request: Request,
   ): Promise<Response> => {
-    const refused = (): Response => privateErrorResponse(notFound());
-    if (!linkKey) return refused();
+    if (!linkKey) return privateRefused();
     if (request.method !== "GET") {
-      return privateErrorResponse(methodNotAllowed());
+      return privateErrorResponse(relayError("method_not_allowed"));
     }
     const profileSecret = request.headers.get("x-dohc-link-profile-secret");
-    if (profileSecret === null || !/^[A-Za-z0-9_-]{43}$/u.test(profileSecret)) {
-      return refused();
+    if (profileSecret === null || !LINK_SECRET_PATTERN.test(profileSecret)) {
+      return privateRefused();
     }
 
     try {
@@ -1655,7 +1597,7 @@ export function createSyncRelayHandler({
       );
       const query = parseDiscussionActivityQuery(new URL(request.url).searchParams);
       const observedRevision = storage.getShareDiscussionRevision(capability.shareId);
-      if (observedRevision === null) return refused();
+      if (observedRevision === null) return privateRefused();
       if (query.since > observedRevision) {
         throw badRequest("since is ahead of discussion activity");
       }
@@ -1682,7 +1624,7 @@ export function createSyncRelayHandler({
           );
         } catch (error) {
           if (error instanceof DiscussionActivityCapacityError) {
-            throw linkReadRateLimited();
+            throw relayError("link_read_rate_limited");
           }
           throw error;
         }
@@ -1707,7 +1649,7 @@ export function createSyncRelayHandler({
           ? "blocked"
           : "available";
       const fresh = requireFreshLinkRead(capabilityToken, capability);
-      if (!isPublicLinkAccess(fresh.access)) return refused();
+      if (!isPublicLinkAccess(fresh.access)) return privateRefused();
       return privateResponse(
         linkJsonResponse(
           capability.shareId,
@@ -1722,10 +1664,10 @@ export function createSyncRelayHandler({
       );
     } catch (error) {
       if (
-        error instanceof HttpError &&
+        error instanceof RelayError &&
         (error.statusCode === 401 || error.code === RELAY_ERRORS.not_found.code)
       ) {
-        return refused();
+        return privateRefused();
       }
       return privateErrorResponse(error);
     }
@@ -1790,7 +1732,7 @@ export function createSyncRelayHandler({
         );
       }
       if (request.method !== "POST") {
-        return privateErrorResponse(methodNotAllowed());
+        return privateErrorResponse(relayError("method_not_allowed"));
       }
 
       const input = parseNamedDiscussionAppendBody(await readJsonObject(request));
@@ -1832,31 +1774,19 @@ export function createSyncRelayHandler({
       });
       if (!result.ok) {
         if (result.reason === "idempotency-conflict") {
-          throw relayHttpError(
-            RELAY_ERRORS.conflict,
-            "idempotency key was already used for a different message",
-          );
+          throw relayError("conflict", "idempotency key was already used for a different message");
         }
         if (result.reason === "rate-limit") {
-          throw relayHttpError(
-            RELAY_ERRORS.discussion_rate_limited,
-            "discussion message rate limit reached",
-          );
+          throw relayError("discussion_rate_limited", "discussion message rate limit reached");
         }
         if (result.reason === "lifetime-limit") {
-          throw relayHttpError(
-            RELAY_ERRORS.discussion_limit_reached,
-            "recipient discussion message limit reached",
-          );
+          throw relayError("discussion_limit_reached", "recipient discussion message limit reached");
         }
         if (result.reason === "share-limit") {
-          throw relayHttpError(
-            RELAY_ERRORS.discussion_limit_reached,
-            "share discussion message limit reached",
-          );
+          throw relayError("discussion_limit_reached", "share discussion message limit reached");
         }
         if (result.reason === "workspace-quota") {
-          throw relayHttpError(RELAY_ERRORS.quota_exceeded, "workspace quota exceeded");
+          throw relayError("quota_exceeded", "workspace quota exceeded");
         }
         throw badRequest("discussion message is invalid");
       }
@@ -1875,7 +1805,7 @@ export function createSyncRelayHandler({
     shareId: string,
   ): Promise<Response> => {
     if (request.method !== "GET") {
-      return privateErrorResponse(methodNotAllowed());
+      return privateErrorResponse(relayError("method_not_allowed"));
     }
     try {
       const url = new URL(request.url);
@@ -1928,7 +1858,7 @@ export function createSyncRelayHandler({
           });
         } catch (error) {
           if (error instanceof DiscussionActivityCapacityError) {
-            throw linkReadRateLimited();
+            throw relayError("link_read_rate_limited");
           }
           throw error;
         }
@@ -1975,8 +1905,7 @@ export function createSyncRelayHandler({
     request: Request,
     shareId: string,
   ): Promise<Response> => {
-    const refused = (): Response => privateErrorResponse(notFound());
-    if (request.method !== "POST") return refused();
+    if (request.method !== "POST") return privateRefused();
     let actorUserId: string;
     let action: DiscussionModerationAction;
     let workspaceId: string;
@@ -1997,13 +1926,13 @@ export function createSyncRelayHandler({
         !share ||
         !isCurrentDiscussionOwner(shareId, actor.userId)
       ) {
-        return refused();
+        return privateRefused();
       }
       requireShareWorkspace(share, workspaceId);
       actorUserId = actor.userId;
       action = parseDiscussionModerationAction(input);
     } catch {
-      return refused();
+      return privateRefused();
     }
     try {
       const changedAtMs = nowMs();
@@ -2015,7 +1944,7 @@ export function createSyncRelayHandler({
           deletedAtMs: changedAtMs,
           actorUserId,
         });
-        if (deleted === null) return refused();
+        if (deleted === null) return privateRefused();
         discussionActivity.wake(shareId);
         return privateJsonResponse({
           ok: true,
@@ -2037,7 +1966,7 @@ export function createSyncRelayHandler({
             blockedAtMs: blocked ? changedAtMs : null,
           })
         ) {
-          return refused();
+          return privateRefused();
         }
         discussionActivity.wake(shareId);
         return privateJsonResponse({ ok: true, blocked });
@@ -2051,7 +1980,7 @@ export function createSyncRelayHandler({
           pausedAtMs: linkCommentsPaused ? changedAtMs : null,
         })
       ) {
-        return refused();
+        return privateRefused();
       }
       discussionActivity.wake(shareId);
       return privateJsonResponse({ ok: true, linkCommentsPaused });
@@ -2099,7 +2028,6 @@ export function createSyncRelayHandler({
   };
 
   const respondToLinkExchange = async (request: Request): Promise<Response> => {
-    const refused = (): Response => errorResponse(notFound());
     if (!linkKey) return refused();
     if (!hasValidRelayExchangeKey(request)) return refused();
     const ip = request.headers.get("x-dohc-relay-client-ip") ?? "unknown";
@@ -2111,7 +2039,7 @@ export function createSyncRelayHandler({
       const input = await readJsonObject(request);
       if (typeof input.secret === "string") {
         secret = input.secret;
-        wellFormed = /^[A-Za-z0-9_-]{43}$/u.test(secret);
+        wellFormed = LINK_SECRET_PATTERN.test(secret);
       }
     } catch {
       // The exchange never distinguishes malformed JSON from a bad bearer.
@@ -2193,7 +2121,7 @@ export function createSyncRelayHandler({
       );
       return jsonResponse({ ok: true, ...exchange });
     } catch (error) {
-      if (error instanceof HttpError) return refused();
+      if (error instanceof RelayError) return refused();
       throw error;
     }
   };
@@ -2210,7 +2138,7 @@ export function createSyncRelayHandler({
       !linkReadRateLimiter.allow(current.capabilityHash, refreshedAtMs) ||
       !linkGrantReadRateLimiter.allow(current.session.grantId, refreshedAtMs)
     ) {
-      throw linkReadRateLimited();
+      throw relayError("link_read_rate_limited");
     }
     const authorized = authorizeLinkShareAction({
       storage,
@@ -2265,7 +2193,6 @@ export function createSyncRelayHandler({
   };
 
   const respondToLinkHandoff = (request: Request): Response => {
-    const refused = (): Response => errorResponse(notFound());
     if (!linkKey || relayExchangeKeyHash === undefined) return refused();
     if (!hasValidRelayExchangeKey(request)) return refused();
     if (request.body !== null) return refused();
@@ -2276,7 +2203,7 @@ export function createSyncRelayHandler({
         linkGrantReadRateLimiter,
       );
       const code = newLinkHandoffCode();
-      if (!/^[A-Za-z0-9_-]{43}$/u.test(code)) return refused();
+      if (!LINK_SECRET_PATTERN.test(code)) return refused();
       const mintedAtMs = nowMs();
       const expiresAtMs = mintedAtMs + LINK_HANDOFF_CODE_TTL_MS;
       const minted = storage.mintLinkHandoffCode({
@@ -2313,7 +2240,7 @@ export function createSyncRelayHandler({
       return jsonResponse({ ok: true, code, expiresAtMs });
     } catch (error) {
       if (
-        error instanceof HttpError &&
+        error instanceof RelayError &&
         error.code !== RELAY_ERRORS.link_read_rate_limited.code
       ) {
         return refused();
@@ -2326,7 +2253,6 @@ export function createSyncRelayHandler({
     request: Request,
     principalUserId: string,
   ): Promise<Response> => {
-    const refused = (): Response => errorResponse(notFound());
     if (!linkKey) return refused();
     let code = "";
     try {
@@ -2334,7 +2260,7 @@ export function createSyncRelayHandler({
       if (
         Object.keys(input).length !== 1 ||
         typeof input.code !== "string" ||
-        !/^[A-Za-z0-9_-]{43}$/u.test(input.code)
+        !LINK_SECRET_PATTERN.test(input.code)
       ) {
         return refused();
       }
@@ -2345,7 +2271,7 @@ export function createSyncRelayHandler({
 
     const admittedAtMs = nowMs();
     if (!linkRedeemRateLimiter.allow(principalUserId, admittedAtMs)) {
-      throw linkReadRateLimited();
+      throw relayError("link_read_rate_limited");
     }
     const codeHash = hashLinkHandoffCode(code, linkKey);
     if (!storage.hasLinkHandoffCode(codeHash)) return refused();
@@ -2385,19 +2311,19 @@ export function createSyncRelayHandler({
     try {
       const route = parseRoute(request);
       if (route.route === "link-exchange") {
-        if (request.method !== "POST") throw methodNotAllowed();
+        if (request.method !== "POST") throw relayError("method_not_allowed");
         return await respondToLinkExchange(request);
       }
       if (route.route === "link-refresh") {
-        if (request.method !== "POST") throw methodNotAllowed();
+        if (request.method !== "POST") throw relayError("method_not_allowed");
         return respondToLinkRefresh(request);
       }
       if (route.route === "link-handoff") {
-        if (request.method !== "POST") throw methodNotAllowed();
+        if (request.method !== "POST") throw relayError("method_not_allowed");
         return respondToLinkHandoff(request);
       }
       if (route.route === "link-redeem") {
-        if (request.method !== "POST") throw methodNotAllowed();
+        if (request.method !== "POST") throw relayError("method_not_allowed");
         const actor = await resolveActor(request, "");
         return await respondToLinkRedeem(request, actor.userId);
       }
@@ -2433,7 +2359,7 @@ export function createSyncRelayHandler({
           capabilityRateLimiter,
           grantRateLimiter,
         );
-        if (request.method !== "GET") throw methodNotAllowed();
+        if (request.method !== "GET") throw relayError("method_not_allowed");
         const share = storage.getShare(capability.shareId);
         if (!share) throw notFound();
 
@@ -2499,13 +2425,111 @@ export function createSyncRelayHandler({
           const requestedSince = parseCursor(url.searchParams.get("since"));
           const since = Math.max(requestedSince, epochLogFloor);
           const limit = parseLimit(url.searchParams.get("limit"));
-          const page = filteredLogPage(
+          const hold = parseLinkLogHold(url.searchParams.get("hold"));
+          let page = filteredLogPage(
             share.workspaceId,
             capability.effectiveSelector,
             since,
             limit,
             "accountless",
           );
+          if (
+            hold > 0 &&
+            page.ops.length === 0 &&
+            page.hasMore === false &&
+            page.nextCursor === since
+          ) {
+            const deadlineAtMs = Date.now() + hold;
+            let scanSince = since;
+            for (;;) {
+              requireFreshLinkRead(capabilityToken, capability);
+              const remainingHoldMs = Math.max(0, deadlineAtMs - Date.now());
+              if (remainingHoldMs === 0) break;
+              try {
+                await discussionActivity.wait(
+                  `log:${share.workspaceId}`,
+                  `link:${capability.session.capabilityHash}`,
+                  {
+                    holdMs: remainingHoldMs,
+                    signal: request.signal,
+                    shouldPark: () => {
+                      try {
+                        const fresh = requireFreshLinkRead(
+                          capabilityToken,
+                          capability,
+                        );
+                        const currentEpochLogFloor = storage.getEpochLogFloor(
+                          share.workspaceId,
+                        );
+                        if (currentEpochLogFloor !== epochLogFloor) return false;
+                        const checked = filteredLogPage(
+                          share.workspaceId,
+                          fresh.effectiveSelector,
+                          scanSince,
+                          limit,
+                          "accountless",
+                        );
+                        if (checked.ops.length > 0 || checked.hasMore) return false;
+                        scanSince = checked.nextCursor;
+                        return true;
+                      } catch {
+                        return false;
+                      }
+                    },
+                  },
+                );
+              } catch (error) {
+                if (error instanceof DiscussionActivityCapacityError) {
+                  throw relayError("link_read_rate_limited");
+                }
+                throw error;
+              }
+
+              const fresh = requireFreshLinkRead(capabilityToken, capability);
+              const currentEpochLogFloor = storage.getEpochLogFloor(
+                share.workspaceId,
+              );
+              page = filteredLogPage(
+                share.workspaceId,
+                fresh.effectiveSelector,
+                Math.max(scanSince, currentEpochLogFloor),
+                limit,
+                "accountless",
+              );
+              scanSince = page.nextCursor;
+              if (
+                page.ops.length > 0 ||
+                page.hasMore ||
+                currentEpochLogFloor !== epochLogFloor ||
+                Date.now() >= deadlineAtMs ||
+                request.signal.aborted
+              ) {
+                requireFreshLinkRead(capabilityToken, capability);
+                return linkJsonResponse(capability.shareId, capability.grantId, {
+                  ok: true,
+                  ...page,
+                  epochLogFloor: currentEpochLogFloor,
+                });
+              }
+            }
+            const fresh = requireFreshLinkRead(capabilityToken, capability);
+            const currentEpochLogFloor = storage.getEpochLogFloor(
+              share.workspaceId,
+            );
+            page = filteredLogPage(
+              share.workspaceId,
+              fresh.effectiveSelector,
+              Math.max(scanSince, currentEpochLogFloor),
+              limit,
+              "accountless",
+            );
+            requireFreshLinkRead(capabilityToken, capability);
+            return linkJsonResponse(capability.shareId, capability.grantId, {
+              ok: true,
+              ...page,
+              epochLogFloor: currentEpochLogFloor,
+            });
+          }
           requireFreshLinkRead(capabilityToken, capability);
           return linkJsonResponse(capability.shareId, capability.grantId, {
             ok: true,
@@ -2534,7 +2558,7 @@ export function createSyncRelayHandler({
           capability.grantId,
           byteLength,
         );
-        if (!releaseBytes) throw linkReadRateLimited();
+        if (!releaseBytes) throw relayError("link_read_rate_limited");
         const settleEgress = linkGrantEgressRateLimiter.reserve(
           capability.grantId,
           byteLength,
@@ -2542,7 +2566,7 @@ export function createSyncRelayHandler({
         );
         if (!settleEgress) {
           releaseBytes();
-          throw linkReadRateLimited();
+          throw relayError("link_read_rate_limited");
         }
         let streamOwnsAdmission = false;
         try {
@@ -2600,7 +2624,7 @@ export function createSyncRelayHandler({
         return jsonResponse({ ok: true, workspaceId, created: result === "created" });
       }
 
-      if (route.route === "workspaces") throw methodNotAllowed();
+      if (route.route === "workspaces") throw relayError("method_not_allowed");
 
       if (route.route === "shares-list" && request.method === "GET") {
         await claimPendingShares(actor.userId);
@@ -2668,7 +2692,7 @@ export function createSyncRelayHandler({
         });
         return jsonResponse({ ok: true, granted, received });
       }
-      if (route.route === "shares-list") throw methodNotAllowed();
+      if (route.route === "shares-list") throw relayError("method_not_allowed");
 
       if (route.route === "share" && request.method === "GET") {
         await claimPendingShares(actor.userId);
@@ -2689,12 +2713,13 @@ export function createSyncRelayHandler({
         );
         return jsonResponse({ ok: true, ...summary });
       }
-      if (route.route === "share") throw methodNotAllowed();
+      if (route.route === "share") throw relayError("method_not_allowed");
 
       if (route.route === "share-link-rotate" && request.method === "POST") {
         const input = await readJsonObject(request);
         const workspaceId = parseWorkspaceId(input.workspaceId);
-        const { share, grant } = requireOwnedLinkGrant(
+        const { share, grant } = requireOwnedGrant(
+          "link",
           route.shareId,
           route.grantId,
           actor,
@@ -2711,7 +2736,8 @@ export function createSyncRelayHandler({
           rotatedAtMs: nowMs(),
           expectedDependentGrantIds,
           guard: () => {
-            const current = requireOwnedLinkGrant(
+            const current = requireOwnedGrant(
+              "link",
               share.shareId,
               grant.grantId,
               actor,
@@ -2735,18 +2761,20 @@ export function createSyncRelayHandler({
         if (!secret) throw notFound();
         terminateLinkStreamsForGrant(result.grant.grantId);
         discussionActivity.wake(share.shareId);
+        discussionActivity.wake(`log:${share.workspaceId}`);
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
           url: composePublicLinkUrl(shareWebOrigin!, secret),
         });
       }
-      if (route.route === "share-link-rotate") throw methodNotAllowed();
+      if (route.route === "share-link-rotate") throw relayError("method_not_allowed");
 
       if (route.route === "share-link-retune" && request.method === "POST") {
         const input = await readJsonObject(request);
         const workspaceId = parseWorkspaceId(input.workspaceId);
-        const { share, grant } = requireOwnedLinkGrant(
+        const { share, grant } = requireOwnedGrant(
+          "link",
           route.shareId,
           route.grantId,
           actor,
@@ -2769,7 +2797,8 @@ export function createSyncRelayHandler({
           changedAtMs: nowMs(),
           expectedDependentGrantIds,
           guard: () => {
-            const current = requireOwnedLinkGrant(
+            const current = requireOwnedGrant(
+              "link",
               share.shareId,
               grant.grantId,
               actor,
@@ -2796,6 +2825,7 @@ export function createSyncRelayHandler({
         }
         if (widening) terminateLinkStreamsForGrant(result.grant.grantId);
         discussionActivity.wake(share.shareId);
+        discussionActivity.wake(`log:${share.workspaceId}`);
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
@@ -2804,12 +2834,13 @@ export function createSyncRelayHandler({
             : { url: composePublicLinkUrl(shareWebOrigin!, secret) }),
         });
       }
-      if (route.route === "share-link-retune") throw methodNotAllowed();
+      if (route.route === "share-link-retune") throw relayError("method_not_allowed");
 
       if (route.route === "share-grant-promote" && request.method === "POST") {
         const input = await readJsonObject(request);
         const workspaceId = parseWorkspaceId(input.workspaceId);
-        const { share } = requireOwnedNamedGrant(
+        const { share } = requireOwnedGrant(
+          "user",
           route.shareId,
           route.grantId,
           actor,
@@ -2823,7 +2854,8 @@ export function createSyncRelayHandler({
           expectedParentGrantId,
           expectedParentGeneration,
           guard: () => {
-            const current = requireOwnedNamedGrant(
+            const current = requireOwnedGrant(
+              "user",
               route.shareId,
               route.grantId,
               actor,
@@ -2833,12 +2865,13 @@ export function createSyncRelayHandler({
         });
         if (!result.ok) throw notFound();
         discussionActivity.wake(route.shareId);
+        discussionActivity.wake(`log:${share.workspaceId}`);
         return jsonResponse({
           ok: true,
           ...namedGrantTransitionBody(result.grant),
         });
       }
-      if (route.route === "share-grant-promote") throw methodNotAllowed();
+      if (route.route === "share-grant-promote") throw relayError("method_not_allowed");
 
       if (route.route === "share-grant-revoke" && request.method === "POST") {
         const input = await readJsonObject(request);
@@ -2846,7 +2879,8 @@ export function createSyncRelayHandler({
         if (Object.keys(input).some((key) => key !== "workspaceId")) {
           throw badRequest("request body contains an unknown field");
         }
-        const { share } = requireOwnedNamedGrant(
+        const { share } = requireOwnedGrant(
+          "user",
           route.shareId,
           route.grantId,
           actor,
@@ -2857,7 +2891,8 @@ export function createSyncRelayHandler({
           grantId: route.grantId,
           revokedAtMs: nowMs(),
           guard: () => {
-            const current = requireOwnedNamedGrant(
+            const current = requireOwnedGrant(
+              "user",
               route.shareId,
               route.grantId,
               actor,
@@ -2867,12 +2902,13 @@ export function createSyncRelayHandler({
         });
         if (!result.ok) throw notFound();
         discussionActivity.wake(route.shareId);
+        discussionActivity.wake(`log:${share.workspaceId}`);
         return jsonResponse({
           ok: true,
           ...namedGrantTransitionBody(result.grant),
         });
       }
-      if (route.route === "share-grant-revoke") throw methodNotAllowed();
+      if (route.route === "share-grant-revoke") throw relayError("method_not_allowed");
 
       if (route.route === "share-revoke" && request.method === "POST") {
         const share = storage.getShare(route.shareId);
@@ -2916,15 +2952,17 @@ export function createSyncRelayHandler({
           }
           terminateLinkStreamsForGrant(result.grant.grantId);
           discussionActivity.wake(share.shareId);
+          discussionActivity.wake(`log:${share.workspaceId}`);
           return jsonResponse({ ok: true, ...linkGrantBody(result.grant) });
         }
         if (storage.revokeShare(route.shareId, nowMs())) {
           terminateLinkStreamsForShare(route.shareId);
           discussionActivity.wake(route.shareId);
+          discussionActivity.wake(`log:${share.workspaceId}`);
         }
         return jsonResponse({ ok: true, shareId: route.shareId });
       }
-      if (route.route === "share-revoke") throw methodNotAllowed();
+      if (route.route === "share-revoke") throw relayError("method_not_allowed");
 
       if (route.route === "share-log" && request.method === "GET") {
         await claimPendingShares(actor.userId);
@@ -2967,18 +3005,18 @@ export function createSyncRelayHandler({
       //   1. authorizeShareAction: membership, grant status, granter standing —
       //      every denial is the same byte-identical generic 404.
       //   2. The selector must accept appends: a read-write chat-channel
-      //      grant, or (#646 PR2) a file share at comment or edit. A
-      //      read-only member and a VIEW file share are REFUSED with an
+      //      grant, or a file share at comment or edit. A
+      //      read-only member and a VIEW file share are refused with an
       //      explicit 403 — the member legitimately knows the share exists,
-      //      so this is a refusal, not a 404 — and with ONE code and one
+      //      so this is a refusal, not a 404 — and with one code and one
       //      body, because a level-specific refusal would tell a probing
       //      recipient the selector's level.
       //   3. MU-C0 verified authorship: every authored chat op must claim the
       //      AUTHENTICATED pusher (assertChatAuthorship verifies it) — a
       //      member cannot forge a message or reaction as another member.
-      //   4. Every op must pass the SAME fail-closed chat filter that scopes
+      //   4. Every op must pass the same fail-closed chat filter that scopes
       //      reads: chat.* only, granted channel only, earliest-thread-binding
-      //      honored. One rejected op rejects the WHOLE batch atomically.
+      //      honored. One rejected op rejects the whole batch atomically.
       // Accepted ops land in the OWNER's workspace bucket under a
       // share-namespaced origin id, so a member can never extend (or collide
       // with) the owner's — or another member's — origin sequence space; the
@@ -2992,7 +3030,7 @@ export function createSyncRelayHandler({
         const share = { ...authorized.share, selector: authorized.effectiveSelector };
         const input = await readJsonObject(request);
         const originId = parseString(input.originId, "originId", MAX_ORIGIN_ID_CHARS);
-        // #646 PR3a: a share's origin space is shared between the recipient's
+        // A share's origin space is shared between the recipient's
         // own pushes and the streams accept mints for its proposals. The
         // recipient names its half; this prefix is the relay's, and a client
         // that claimed it could take sequence numbers out of an accept stream.
@@ -3004,13 +3042,13 @@ export function createSyncRelayHandler({
         // Authorship runs before the filter and parseLogOp so neither admits nor
         // freezes a payload whose claimed author is missing or forged (MU-C0).
         assertChatAuthorship(input.ops, actor.userId);
-        // Batch-aware channel scoping: a thread created earlier in THIS batch
+        // Batch-aware channel scoping: a thread created earlier in this batch
         // is a valid target for later ops in the same batch (the composer's
-        // thread.create + first message.append), but the LOG's earliest
+        // thread.create + first message.append), but the log's earliest
         // binding always wins over the batch — a batch cannot re-bind an
         // existing thread.
         const pendingThreadBindings = new Map<string, string>();
-        // #646 PR2: the path sibling of the same rule, for a file share. A
+        // The path sibling of the same rule, for a file share. A
         // recipient's `chat.thread.create` names the granted PATH (its own
         // object ids mean nothing here), and the message it composes with
         // rides in the same batch.
@@ -3032,7 +3070,7 @@ export function createSyncRelayHandler({
         };
         const ops = input.ops.map(parseLogOp);
         for (const op of ops) {
-          // The WRITE filter, never the read one: what a recipient may see is
+          // The write filter, never the read one: what a recipient may see is
           // not what it may push into the granter's log (#646 PR3-0).
           const decision = filterOpForShareAppend(
             share.selector,
@@ -3040,14 +3078,14 @@ export function createSyncRelayHandler({
             op.payloadJson,
             resolver,
           );
-          if (!decision.allowed) throw shareOpRejected();
+          if (!decision.allowed) throw relayError("share_op_rejected");
           // Persist the filter's (possibly redacted) copy, never the pusher's
           // original bytes: the owner bucket is read back over the UNfiltered
           // owner lane, so any field the filter withholds (e.g. a member
           // attachment's objectId/pathHint) must not survive the append.
           op.payloadJson = JSON.stringify(decision.payload);
           if (op.opKind === "chat.thread.create") {
-            // Read back from the SERVED copy assigned above, which carries the
+            // Read back from the served copy assigned above, which carries the
             // path this relay proved — never the pusher's own string.
             const created = JSON.parse(op.payloadJson) as {
               threadId?: unknown;
@@ -3061,15 +3099,15 @@ export function createSyncRelayHandler({
                 typeof created.linkedPath === "string" &&
                 created.linkedPath.length > 0
               ) {
-                // THE ACCEPT DOOR converts the binding (#646 PR2, review).
+                // The accept door converts the binding.
                 //
                 // A recipient names its file by path because its own object
                 // ids mean nothing here. This is the one moment the relay can
-                // turn that into the granter's OWN object id: the filter just
+                // turn that into the granter's own object id: the filter just
                 // proved an object sits at this exact path. Persisting the
                 // object id instead of the path is what makes a recipient's
                 // thread behave like the granter's — it follows the file
-                // through a rename INSIDE the share, and stops at one that
+                // through a rename inside the share, and stops at one that
                 // leaves it, because both answers come from the same
                 // object→path lookup.
                 //
@@ -3084,7 +3122,7 @@ export function createSyncRelayHandler({
                 // so this is unreachable through the filter's own path. A
                 // batch that reaches it is refused whole rather than stored as
                 // a thread bound to nothing.
-                if (!objectId) throw shareOpRejected();
+                if (!objectId) throw relayError("share_op_rejected");
                 const bound: Record<string, unknown> = { ...created };
                 delete bound.linkedPath;
                 bound.linkedObjectId = objectId;
@@ -3100,14 +3138,14 @@ export function createSyncRelayHandler({
           // own corner of the owner bucket's origin space.
           originId: `share:${share.shareId}:${originId}`,
           ops,
-          // Close the revoke race COMPLETELY: the share is re-verified inside
+          // Close the revoke race completely: the share is re-verified inside
           // the append's own BEGIN IMMEDIATE transaction (the same write lock
           // revokeShare takes), so a revoke committed after the entry check
           // above can never slip a write in — the guard sees it and the whole
           // batch rolls back as the same generic 404. The guard re-runs the
           // full appendability gauntlet: recipient-owned, unrevoked, granter
-          // in standing, and STILL a selector that accepts appends at its
-          // current level (#646) on the same workspace bucket — a level
+          // in standing, and still a selector that accepts appends at its
+          // current level on the same workspace bucket — a level
           // narrowed mid-flight loses the race the same way a revoke does.
           guard: shareActionGuard(
             route.shareId,
@@ -3116,6 +3154,9 @@ export function createSyncRelayHandler({
             share.workspaceId,
           ),
         });
+        if (result.inserted > 0) {
+          discussionActivity.wake(`log:${share.workspaceId}`);
+        }
         return jsonResponse({
           ok: true,
           accepted: ops.length,
@@ -3124,14 +3165,14 @@ export function createSyncRelayHandler({
           currentMaxOriginSeq: result.currentMaxOriginSeq,
         });
       }
-      if (route.route === "share-log") throw methodNotAllowed();
+      if (route.route === "share-log") throw relayError("method_not_allowed");
 
       if (route.route === "share-blob" && request.method === "GET") {
         await claimPendingShares(actor.userId);
         const authorized = requireShareAction(route.shareId, actor.userId, "read");
         const share = { ...authorized.share, selector: authorized.effectiveSelector };
         assertSha256(route.sha256);
-        // A blob is served to a recipient ONLY when at least one op that
+        // A blob is served to a recipient only when at least one op that
         // passes the share filter legitimately references it. Everything
         // else — a blob of an unshared file, a secret ciphertext blob, a
         // random hash — is the same generic 404 as a nonexistent share.
@@ -3151,14 +3192,14 @@ export function createSyncRelayHandler({
           headers: { "content-type": "application/octet-stream" },
         });
       }
-      // #646 PR3a. A recipient's blob, charged to the GRANTER's workspace.
+      // A recipient's blob, charged to the GRANTER's workspace.
       // Same level gate as the proposal route, same refusal, so a probe cannot
       // tell the level from the code.
       //
       // It needs no bound of its own. Three already apply and all three are
       // the granter's: MAX_BLOB_BYTES per blob, the granter's workspace quota
       // per workspace (`putBlob` charges it), and the unreferenced-blob sweep,
-      // which reclaims anything no OPEN proposal claims. A blob count would
+      // which reclaims anything no open proposal claims. A blob count would
       // bound bytes less tightly than the byte quota that already refuses
       // them.
       if (route.route === "share-blob" && request.method === "PUT") {
@@ -3188,9 +3229,9 @@ export function createSyncRelayHandler({
           byteLength: put.byteLength,
         });
       }
-      if (route.route === "share-blob") throw methodNotAllowed();
+      if (route.route === "share-blob") throw relayError("method_not_allowed");
 
-      // #646 PR3a — the proposal lane's front door. The gauntlet mirrors the
+      // The proposal lane's front door. The gauntlet mirrors the
       // share-log POST above stage for stage, and the two routes stay
       // separate on purpose: one route with two destinations is the
       // conflation that let a recipient's file moments reach the granter's log
@@ -3211,14 +3252,14 @@ export function createSyncRelayHandler({
           );
         }
         const ops: ShareProposalOpRow[] = [];
-        // ONE net change per file, proven here rather than trusted. The
+        // One net change per file, proven here rather than trusted. The
         // recipient consolidates before it submits — it knows its own object
         // ids — but a proposal carrying two changes for one file would give
-        // both the SAME base and make them conflict with each other at accept.
+        // both the same base and make them conflict with each other at accept.
         // So the relay refuses the shape instead of relying on the client to
         // avoid it.
         //
-        // ONE set of every path ANY change touches, not one set per side: a
+        // One set of every path any change touches, not one set per side: a
         // delete of `docs/a.md` beside a create of `docs/a.md` is two changes
         // for one file, and a set per side would hold one path each and admit
         // the pair. Compared across changes, never within one — a change that
@@ -3227,7 +3268,7 @@ export function createSyncRelayHandler({
         const referencedShas = new Set<string>();
         for (const [index, raw] of (input.ops as unknown[]).entries()) {
           const decision = filterProposedChangeForShare(share.selector, raw);
-          if (!decision.allowed) throw shareOpRejected();
+          if (!decision.allowed) throw relayError("share_op_rejected");
           const change = decision.change;
           const paths = new Set(
             [change.basedOnPath, change.afterPath].filter(
@@ -3235,10 +3276,10 @@ export function createSyncRelayHandler({
             ),
           );
           for (const path of paths) {
-            if (touchedPaths.has(path)) throw shareOpRejected();
+            if (touchedPaths.has(path)) throw relayError("share_op_rejected");
           }
           for (const path of paths) touchedPaths.add(path);
-          // WHICH file the change is built on, resolved HERE rather than at
+          // Which file the change is built on, resolved here rather than at
           // accept. The path is where the granter had the file when the
           // recipient read it, and a path is not an identity: a rename between
           // submit and accept moves it to another file, and a delete leaves it
@@ -3288,7 +3329,7 @@ export function createSyncRelayHandler({
           // SERVER-derived. The body never states who proposed anything.
           proposedByUserId: actor.userId,
           // PINNED from the selector the recipient just proved against,
-          // through the SAME rule the read filter serves ops by, so a
+          // through the same rule the read filter serves ops by, so a
           // selector edited between submit and accept cannot move these
           // changes onto a version their author never read.
           versionId: targetVersionId(share.selector),
@@ -3315,7 +3356,7 @@ export function createSyncRelayHandler({
       }
 
       // Not level-gated, for the reason withdraw is not: a recipient must be
-      // able to SEE the changes it can still take back after a downgrade. A
+      // able to see the changes it can still take back after a downgrade. A
       // level that never submitted anything reads an empty list, which is the
       // same answer every level with nothing open gives.
       if (route.route === "share-proposals" && request.method === "GET") {
@@ -3337,12 +3378,12 @@ export function createSyncRelayHandler({
           })),
         });
       }
-      if (route.route === "share-proposals") throw methodNotAllowed();
+      if (route.route === "share-proposals") throw relayError("method_not_allowed");
 
       // The reverse path submitting owes (`AGENTS.md`): a recipient can take
       // its changes back while they are still open.
       //
-      // Deliberately NOT gated on the level. A downgrade from edit to comment
+      // Deliberately not gated on the level. A downgrade from edit to comment
       // stops new submits, and a reverse path that a downgrade removes is not
       // a reverse path — it would strand the recipient's already-sent changes
       // in front of a granter who may never answer them. Membership is still
@@ -3359,28 +3400,28 @@ export function createSyncRelayHandler({
         const proposal = storage.getShareProposal(route.proposalId);
         // A proposal of another share is the same generic 404 as one that
         // never existed — and that is also what makes it this person's:
-        // `authorizeShareAction` proved the caller is THIS share's recipient, and
+        // `authorizeShareAction` proved the caller is this share's recipient, and
         // a path share has exactly one.
         if (!proposal || proposal.shareId !== share.shareId) throw notFound();
         if (!storage.settleShareProposal(route.proposalId, "withdrawn", nowMs())) {
-          throw proposalNotOpen();
+          throw relayError("conflict", "these changes were already accepted, declined, or withdrawn");
         }
         return jsonResponse({ ok: true, proposalId: route.proposalId, state: "withdrawn" });
       }
-      if (route.route === "share-proposal-withdraw") throw methodNotAllowed();
+      if (route.route === "share-proposal-withdraw") throw relayError("method_not_allowed");
 
       if (route.route === "share-presence") {
         // Cross-user presence: a recipient joins the ephemeral scope for a
         // topic their grant exposes. The share is loaded FAIL-CLOSED (generic
         // 404 for no-grant / revoked / wrong-recipient), and the topic is
-        // gated by the SAME visibility check the durable filter uses, so a
+        // gated by the same visibility check the durable filter uses, so a
         // non-member can neither read nor even confirm presence for a
         // channel/DM they lack a grant for. The scope key resolves to the
         // granter's workspace, so the owner (workspace route) and recipients
-        // fan into ONE scope and see each other.
+        // fan into one scope and see each other.
         await claimPendingShares(actor.userId);
         const topic = parsePresenceTopic(new URL(request.url).searchParams.get("topic"));
-        // The share + topic gate, run BEFORE joining AND re-run after a parked
+        // The share + topic gate, run before joining and re-run after a parked
         // long-poll wakes (respondPresence's reauthorize): a revoke that lands
         // while a recipient's poll is parked fails closed on wake instead of
         // leaking one final snapshot. The resolver lets a chat-channel grant
@@ -3416,21 +3457,21 @@ export function createSyncRelayHandler({
 
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
 
-      // #646 PR3a — the granter's half. Everything below this line is
-      // owner-scoped by the ONE check above, which is why accept and decline
+      // The granter's half. Everything below this line is
+      // owner-scoped by the one check above, which is why accept and decline
       // live in the workspace namespace rather than the share's: ownership is
       // derived from the workspace, never from the share, so a recipient can
       // never accept its own changes.
       // What the granter still has to answer, and nothing else: this route
-      // serves OPEN proposals only, so it states no `state` and no
+      // serves open proposals only, so it states no `state` and no
       // `settledAtMs` — both would be constants. A settled proposal is
       // history, and this surface asks one question.
-      // A SUMMARY, because this is what a timer polls. The review surface
+      // A summary, because this is what a timer polls. The review surface
       // renders a sender and a count from it; it does not draw files until a
       // granter opens one. Serving every op of every open proposal here
       // resolved a base per op on every tick to build rows nobody read.
       //
-      // WHO sent them is resolved here from the server-derived user id on the
+      // Who sent them is resolved here from the server-derived user id on the
       // proposal row. The granter's client used to rebuild this by fetching
       // its whole share list and matching share ids — a second request per
       // review, and wrong the moment a share has more than one recipient.
@@ -3448,9 +3489,9 @@ export function createSyncRelayHandler({
         );
         return jsonResponse({ ok: true, proposals: rows });
       }
-      if (route.route === "workspace-proposals") throw methodNotAllowed();
+      if (route.route === "workspace-proposals") throw relayError("method_not_allowed");
 
-      // ONE proposal's file rows, for the review a granter opened. Still no
+      // One proposal's file rows, for the review a granter opened. Still no
       // content: the rows say where each change lands and whether it drifted,
       // and a file's text arrives through the op route below.
       if (route.route === "workspace-proposal" && request.method === "GET") {
@@ -3472,9 +3513,9 @@ export function createSyncRelayHandler({
           },
         });
       }
-      if (route.route === "workspace-proposal") throw methodNotAllowed();
+      if (route.route === "workspace-proposal") throw relayError("method_not_allowed");
 
-      // ONE op, for the review that opened one file. Same resolution as the
+      // One op, for the review that opened one file. Same resolution as the
       // listing above, so the row a granter expands states exactly what the
       // row it clicked stated.
       if (route.route === "workspace-proposal-op" && request.method === "GET") {
@@ -3490,19 +3531,19 @@ export function createSyncRelayHandler({
           op: reviewOpRow(route.workspaceId, proposal.versionId, op),
         });
       }
-      if (route.route === "workspace-proposal-op") throw methodNotAllowed();
+      if (route.route === "workspace-proposal-op") throw relayError("method_not_allowed");
 
       if (route.route === "workspace-proposal-settle" && request.method === "POST") {
         const proposal = storage.getShareProposal(route.proposalId);
         // A proposal of another workspace is the same generic 404 the relay
         // gives for one that never existed.
         if (!proposal || proposal.workspaceId !== route.workspaceId) throw notFound();
-        if (proposal.state !== "open") throw proposalNotOpen();
+        if (proposal.state !== "open") throw relayError("conflict", "these changes were already accepted, declined, or withdrawn");
         if (route.decision === "decline") {
           // Decline never moves the changes. They stay marked declined and are
           // swept with the share; the recipient's own copy still has them.
           if (!storage.settleShareProposal(route.proposalId, "declined", nowMs())) {
-            throw proposalNotOpen();
+            throw relayError("conflict", "these changes were already accepted, declined, or withdrawn");
           }
           return jsonResponse({ ok: true, proposalId: route.proposalId, state: "declined" });
         }
@@ -3514,7 +3555,7 @@ export function createSyncRelayHandler({
         // proposal record is the real provenance.
         const summary = proposerEmail ? `Accepted changes from ${proposerEmail}` : null;
         const versionId = proposal.versionId;
-        // THIS proposal's own origin stream, never the recipient's push
+        // This proposal's own origin stream, never the recipient's push
         // origin. The recipient numbers its own stream densely from its own
         // journal, so ops the relay inserted there would take sequence
         // numbers the recipient's next push claims — and `appendLogBatch`
@@ -3532,7 +3573,7 @@ export function createSyncRelayHandler({
           const resolved = proposalBase(route.workspaceId, versionId, op);
           const built = proposalMomentPayload(op, {
             versionId,
-            // A file the granter does not have gets a NEW object id, minted
+            // A file the granter does not have gets a new object id, minted
             // here. The recipient's own id names nothing in this workspace.
             objectId: op.basedOnObjectId ?? newId(),
             objectCreatedAtMs: op.recordedAtMs,
@@ -3552,12 +3593,12 @@ export function createSyncRelayHandler({
         }
         const result = storage.appendLogBatch({
           workspaceId: route.workspaceId,
-          // The SAME share-namespaced origin the chat path already writes, so
+          // The same share-namespaced origin the chat path already writes, so
           // accepted changes reach the granter over the owner lane the relay
           // already runs. Nothing new applies them.
           originId,
           ops: logOps,
-          // The settle rides INSIDE the release's own transaction: the changes
+          // The settle rides inside the release's own transaction: the changes
           // enter the log and the proposal leaves `open` together, or neither
           // happens. A second accept finds the row already moved and its whole
           // batch rolls back.
@@ -3566,10 +3607,13 @@ export function createSyncRelayHandler({
             if (
               !storage.settleShareProposalInTransaction(route.proposalId, "accepted", nowMs())
             ) {
-              throw proposalNotOpen();
+              throw relayError("conflict", "these changes were already accepted, declined, or withdrawn");
             }
           },
         });
+        if (result.inserted > 0) {
+          discussionActivity.wake(`log:${route.workspaceId}`);
+        }
         return jsonResponse({
           ok: true,
           proposalId: route.proposalId,
@@ -3577,7 +3621,7 @@ export function createSyncRelayHandler({
           inserted: result.inserted,
         });
       }
-      if (route.route === "workspace-proposal-settle") throw methodNotAllowed();
+      if (route.route === "workspace-proposal-settle") throw relayError("method_not_allowed");
 
       if (route.route === "presence") {
         // The owner's own workspace presence (multi-device co-presence in
@@ -3606,7 +3650,7 @@ export function createSyncRelayHandler({
           streamIdentity: bootstrap.identity?.streamIdentity ?? null,
         });
       }
-      if (route.route === "bootstrap") throw methodNotAllowed();
+      if (route.route === "bootstrap") throw relayError("method_not_allowed");
 
       if (route.route === "epoch" && request.method === "POST") {
         const input = await readJsonObject(request);
@@ -3626,7 +3670,7 @@ export function createSyncRelayHandler({
           rotatedAtMs: nowMs(),
         });
         if (result === "not-owner") throw notFound();
-        if (result === "epoch-superseded") throw epochSuperseded();
+        if (result === "epoch-superseded") throw relayError("epoch_superseded");
         return jsonResponse({
           ok: true,
           rotated: result === "rotated",
@@ -3634,7 +3678,7 @@ export function createSyncRelayHandler({
           streamIdentity,
         });
       }
-      if (route.route === "epoch") throw methodNotAllowed();
+      if (route.route === "epoch") throw relayError("method_not_allowed");
 
       if (route.route === "gc" && request.method === "POST") {
         const result = await storage.collectUnreferencedBlobs(route.workspaceId, {
@@ -3642,7 +3686,7 @@ export function createSyncRelayHandler({
         });
         return jsonResponse({ ok: true, ...result });
       }
-      if (route.route === "gc") throw methodNotAllowed();
+      if (route.route === "gc") throw relayError("method_not_allowed");
 
       if (route.route === "share-link-create-atomic" && request.method === "GET") {
         if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
@@ -3653,10 +3697,10 @@ export function createSyncRelayHandler({
         ) {
           throw badRequest("cursor is invalid");
         }
-        const linkCursor = decodeLinkInventoryCursor(
+        const linkCursor = linkInventoryCursor.decode(
           url.searchParams.get("cursor"),
         );
-        const independentGrantCursor = decodeIndependentGrantInventoryCursor(
+        const independentGrantCursor = independentGrantInventoryCursor.decode(
           url.searchParams.get("independentGrantCursor"),
         );
         const page = storage.listLinkGrantsByWorkspace(
@@ -3686,13 +3730,13 @@ export function createSyncRelayHandler({
           ...(independentGrantPage.nextCursor
             ? {
                 nextIndependentGrantCursor:
-                  encodeIndependentGrantInventoryCursor(
+                  independentGrantInventoryCursor.encode(
                     independentGrantPage.nextCursor,
                   ),
               }
             : {}),
           ...(page.nextCursor
-            ? { nextCursor: encodeLinkInventoryCursor(page.nextCursor) }
+            ? { nextCursor: linkInventoryCursor.encode(page.nextCursor) }
             : {}),
         });
       }
@@ -3712,7 +3756,7 @@ export function createSyncRelayHandler({
           versionId: input.versionId,
         });
         if (!validation.ok) {
-          throw relayHttpError(RELAY_ERRORS[validation.code], validation.message);
+          throw relayError(validation.code, validation.message);
         }
         const selector = validation.selector;
         const shareId = newShareId();
@@ -3763,7 +3807,7 @@ export function createSyncRelayHandler({
           url: composePublicLinkUrl(shareWebOrigin!, secret),
         });
       }
-      if (route.route === "share-link-create-atomic") throw methodNotAllowed();
+      if (route.route === "share-link-create-atomic") throw relayError("method_not_allowed");
 
       if (route.route === "share-link-create" && request.method === "POST") {
         const input = await readJsonObject(request);
@@ -3819,7 +3863,7 @@ export function createSyncRelayHandler({
           url: composePublicLinkUrl(shareWebOrigin!, secret),
         });
       }
-      if (route.route === "share-link-create") throw methodNotAllowed();
+      if (route.route === "share-link-create") throw relayError("method_not_allowed");
 
       if (route.route === "shares-create" && request.method === "POST") {
         const input = await readJsonObject(request);
@@ -3829,51 +3873,42 @@ export function createSyncRelayHandler({
         // anti-enumeration behavior below is identical for both.
         const { selector, access } = (() => {
           if (input.channelWireId !== undefined) {
-            // Fail closed on an AMBIGUOUS body: a chat-channel selector must not
+            // Fail closed on an ambiguous body: a chat-channel selector must not
             // also carry a path/version selector. Silently preferring
             // channelWireId (and dropping the paths) would turn a stale/leftover
             // `paths` field into a full chat-channel grant — a silent intent
             // mismatch. Reject it instead (hardens regular shared-channel grants
             // too).
             if (input.paths !== undefined || input.versionId !== undefined) {
-              throw relayHttpError(
-                RELAY_ERRORS.ambiguous_selector,
-                "a chat-channel share must not also carry paths or versionId",
-              );
+              throw relayError("ambiguous_selector", "a chat-channel share must not also carry paths or versionId");
             }
             const chatValidation = validateChatChannelShareSelector({
               channelWireId: input.channelWireId,
             });
             if (!chatValidation.ok) {
-              throw relayHttpError(RELAY_ERRORS[chatValidation.code], chatValidation.message);
+              throw relayError(chatValidation.code, chatValidation.message);
             }
             const accessValidation = validateChatShareAccess(input.access);
             if (!accessValidation.ok) {
-              throw relayHttpError(
-                RELAY_ERRORS[accessValidation.code],
-                accessValidation.message,
-              );
+              throw relayError(accessValidation.code, accessValidation.message);
             }
             const selector = chatValidation.selector;
             if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
-              throw relayHttpError(RELAY_ERRORS.invalid_channel, "channel is not shareable");
+              throw relayError("invalid_channel", "channel is not shareable");
             }
             return { selector, access: accessValidation.access };
           }
 
           const accessValidation = validateFileShareAccess(input.access);
           if (!accessValidation.ok) {
-            throw relayHttpError(
-              RELAY_ERRORS[accessValidation.code],
-              accessValidation.message,
-            );
+            throw relayError(accessValidation.code, accessValidation.message);
           }
           const validation = validateShareSelector({
             paths: input.paths,
             versionId: input.versionId,
           });
           if (!validation.ok) {
-            throw relayHttpError(RELAY_ERRORS[validation.code], validation.message);
+            throw relayError(validation.code, validation.message);
           }
           const selector = validation.selector;
           return { selector, access: accessValidation.access };
@@ -3890,9 +3925,9 @@ export function createSyncRelayHandler({
             "recipientUserId",
             MAX_ORIGIN_ID_CHARS,
           );
-          if (recipientUserId === actor.userId) throw selfShare();
+          if (recipientUserId === actor.userId) throw relayError("self_share");
           if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
-            throw relayHttpError(RELAY_ERRORS.invalid_channel, "channel is not shareable");
+            throw relayError("invalid_channel", "channel is not shareable");
           }
           storage.createShare({
             share: {
@@ -3930,9 +3965,9 @@ export function createSyncRelayHandler({
         }
 
         // Sharing by email. To close the account-enumeration oracle, the
-        // response is IDENTICAL whether or not the email has a dohc account:
+        // response is identical whether or not the email has a dohc account:
         // a known account becomes an immediate recipient, an unknown email
-        // becomes a PENDING invite (claimed when that account first touches
+        // becomes a pending invite (claimed when that account first touches
         // the relay). Either way the response never echoes a recipient user
         // id, so the granter cannot distinguish "has an account" from "does
         // not" by inspecting the reply.
@@ -3941,11 +3976,11 @@ export function createSyncRelayHandler({
           throw badRequest("recipient email lookup is not available on this relay");
         }
         const resolved = await resolveUserIdByEmail(email);
-        if (resolved === actor.userId) throw selfShare();
+        if (resolved === actor.userId) throw relayError("self_share");
         // Re-check after the asynchronous account lookup: a pre-provisioned
         // wire may have become an agent channel while this request was waiting.
         if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
-          throw relayHttpError(RELAY_ERRORS.invalid_channel, "channel is not shareable");
+          throw relayError("invalid_channel", "channel is not shareable");
         }
         storage.createShare({
           share: {
@@ -3980,7 +4015,7 @@ export function createSyncRelayHandler({
           createdAtMs,
         });
       }
-      if (route.route === "shares-create") throw methodNotAllowed();
+      if (route.route === "shares-create") throw relayError("method_not_allowed");
 
       if (route.route === "blob" && request.method === "PUT") {
         assertSha256(route.sha256);
@@ -4011,7 +4046,7 @@ export function createSyncRelayHandler({
         // ownership above, so this leaks nothing about other tenants, and
         // sync clients must be able to tell missing content apart from an
         // unavailable workspace.
-        if (!blob) throw blobNotFound();
+        if (!blob) throw relayError("blob_not_found");
         return new Response(arrayBufferForBytes(blob), {
           status: 200,
           headers: { "content-type": "application/octet-stream" },
@@ -4064,7 +4099,7 @@ export function createSyncRelayHandler({
 
       if (route.route === "keys" && request.method === "GET") {
         const envelope = storage.getKeyEnvelope(route.workspaceId);
-        if (!envelope) throw keyEnvelopeNotFound();
+        if (!envelope) throw relayError("key_envelope_not_found");
         return new Response(envelope.envelopeJson, {
           status: 200,
           headers: {
@@ -4106,6 +4141,9 @@ export function createSyncRelayHandler({
             );
           },
         });
+        if (result.inserted > 0) {
+          discussionActivity.wake(`log:${route.workspaceId}`);
+        }
         return jsonResponse({
           ok: true,
           accepted: ops.length,
@@ -4188,7 +4226,7 @@ export function createSyncRelayHandler({
         });
       }
 
-      throw methodNotAllowed();
+      throw relayError("method_not_allowed");
     } catch (error) {
       return errorResponse(error);
     }
@@ -4406,165 +4444,80 @@ function parseShareId(value: string | undefined): string {
   return value;
 }
 
-function encodeLinkInventoryCursor(cursor: SyncRelayLinkInventoryCursor): string {
-  return Buffer.from(JSON.stringify({ version: 1, ...cursor }), "utf8").toString(
-    "base64url",
-  );
-}
+type CursorField = "id" | "messageId" | "ms";
 
-function decodeLinkInventoryCursor(
-  value: string | null,
-): SyncRelayLinkInventoryCursor | undefined {
-  if (value === null) return undefined;
-  const invalid = () => badRequest("cursor is invalid");
-  if (
-    value.length === 0 ||
-    value.length > LINK_INVENTORY_CURSOR_MAX_CHARS ||
-    !/^[A-Za-z0-9_-]+$/u.test(value)
-  ) {
-    throw invalid();
-  }
-  let decoded: unknown;
-  try {
-    decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
-  } catch {
-    throw invalid();
-  }
-  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
-    throw invalid();
-  }
-  const row = decoded as Record<string, unknown>;
-  const keys = Object.keys(row).sort();
-  if (
-    keys.join("\0") !==
-      ["grantId", "linkCreatedAtMs", "shareCreatedAtMs", "shareId", "version"]
-        .sort()
-        .join("\0") ||
-    row.version !== 1 ||
-    !Number.isSafeInteger(row.shareCreatedAtMs) ||
-    Number(row.shareCreatedAtMs) < 0 ||
-    !Number.isSafeInteger(row.linkCreatedAtMs) ||
-    Number(row.linkCreatedAtMs) < 0 ||
-    typeof row.shareId !== "string" ||
-    row.shareId.length === 0 ||
-    row.shareId.length > MAX_SHARE_ID_CHARS ||
-    !/^[a-z0-9][a-z0-9-]*$/u.test(row.shareId) ||
-    typeof row.grantId !== "string" ||
-    row.grantId.length === 0 ||
-    row.grantId.length > MAX_SHARE_ID_CHARS ||
-    !/^[a-z0-9][a-z0-9-]*$/u.test(row.grantId)
-  ) {
-    throw invalid();
-  }
+// An opaque page cursor: base64url JSON with a version and the named fields,
+// nothing more. Ids are share-id shaped, message ids are bounded text, and
+// times are non-negative safe integers.
+function cursorCodec<Cursor extends object>(
+  fields: { [Key in keyof Cursor]: CursorField },
+  label: string,
+): {
+  encode: (cursor: Cursor) => string;
+  decode: (value: string | null) => Cursor | undefined;
+} {
+  const names = Object.keys(fields).sort();
+  const expectedKeys = [...names, "version"].sort().join("\0");
   return {
-    shareCreatedAtMs: Number(row.shareCreatedAtMs),
-    shareId: row.shareId,
-    linkCreatedAtMs: Number(row.linkCreatedAtMs),
-    grantId: row.grantId,
+    encode: (cursor) =>
+      Buffer.from(JSON.stringify({ version: 1, ...cursor }), "utf8").toString("base64url"),
+    decode: (value) => {
+      if (value === null) return undefined;
+      const invalid = () => badRequest(`${label} is invalid`);
+      if (value.length === 0 || value.length > CURSOR_MAX_CHARS || !/^[A-Za-z0-9_-]+$/u.test(value)) {
+        throw invalid();
+      }
+      let decoded: unknown;
+      try {
+        decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+      } catch {
+        throw invalid();
+      }
+      const row = asRecord(decoded);
+      if (!row || Object.keys(row).sort().join("\0") !== expectedKeys || row.version !== 1) {
+        throw invalid();
+      }
+      const cursor: Record<string, string | number> = {};
+      for (const name of names) {
+        const field = row[name];
+        const kind = fields[name as keyof Cursor];
+        if (kind === "ms") {
+          if (!Number.isSafeInteger(field) || Number(field) < 0) throw invalid();
+          cursor[name] = Number(field);
+        } else if (kind === "messageId") {
+          if (typeof field !== "string" || field.length === 0 || field.length > 512) {
+            throw invalid();
+          }
+          cursor[name] = field;
+        } else {
+          if (
+            typeof field !== "string" ||
+            field.length === 0 ||
+            field.length > MAX_SHARE_ID_CHARS ||
+            !/^[a-z0-9][a-z0-9-]*$/u.test(field)
+          ) {
+            throw invalid();
+          }
+          cursor[name] = field;
+        }
+      }
+      return cursor as unknown as Cursor;
+    },
   };
 }
 
-function encodeIndependentGrantInventoryCursor(
-  cursor: SyncRelayIndependentGrantInventoryCursor,
-): string {
-  return Buffer.from(JSON.stringify({ version: 1, ...cursor }), "utf8").toString(
-    "base64url",
-  );
-}
-
-function decodeIndependentGrantInventoryCursor(
-  value: string | null,
-): SyncRelayIndependentGrantInventoryCursor | undefined {
-  if (value === null) return undefined;
-  const invalid = () => badRequest("independentGrantCursor is invalid");
-  if (
-    value.length === 0 ||
-    value.length > LINK_INVENTORY_CURSOR_MAX_CHARS ||
-    !/^[A-Za-z0-9_-]+$/u.test(value)
-  ) {
-    throw invalid();
-  }
-  let decoded: unknown;
-  try {
-    decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
-  } catch {
-    throw invalid();
-  }
-  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
-    throw invalid();
-  }
-  const row = decoded as Record<string, unknown>;
-  if (
-    Object.keys(row).sort().join("\0") !==
-      ["grantCreatedAtMs", "grantId", "shareId", "version"]
-        .sort()
-        .join("\0") ||
-    row.version !== 1 ||
-    !Number.isSafeInteger(row.grantCreatedAtMs) ||
-    Number(row.grantCreatedAtMs) < 0 ||
-    typeof row.shareId !== "string" ||
-    row.shareId.length === 0 ||
-    row.shareId.length > MAX_SHARE_ID_CHARS ||
-    !/^[a-z0-9][a-z0-9-]*$/u.test(row.shareId) ||
-    typeof row.grantId !== "string" ||
-    row.grantId.length === 0 ||
-    row.grantId.length > MAX_SHARE_ID_CHARS ||
-    !/^[a-z0-9][a-z0-9-]*$/u.test(row.grantId)
-  ) {
-    throw invalid();
-  }
-  return {
-    shareId: row.shareId,
-    grantCreatedAtMs: Number(row.grantCreatedAtMs),
-    grantId: row.grantId,
-  };
-}
-
-function encodeDiscussionCursor(cursor: SyncRelayShareDiscussionCursor): string {
-  return Buffer.from(JSON.stringify({ version: 1, ...cursor }), "utf8").toString(
-    "base64url",
-  );
-}
-
-function decodeDiscussionCursor(
-  value: string | null,
-): SyncRelayShareDiscussionCursor | undefined {
-  if (value === null) return undefined;
-  const invalid = () => badRequest("cursor is invalid");
-  if (
-    value.length === 0 ||
-    value.length > DISCUSSION_CURSOR_MAX_CHARS ||
-    !/^[A-Za-z0-9_-]+$/u.test(value)
-  ) {
-    throw invalid();
-  }
-  let decoded: unknown;
-  try {
-    decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
-  } catch {
-    throw invalid();
-  }
-  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
-    throw invalid();
-  }
-  const row = decoded as Record<string, unknown>;
-  if (
-    Object.keys(row).sort().join("\0") !==
-      ["createdAtMs", "messageId", "version"].sort().join("\0") ||
-    row.version !== 1 ||
-    !Number.isSafeInteger(row.createdAtMs) ||
-    Number(row.createdAtMs) < 0 ||
-    typeof row.messageId !== "string" ||
-    row.messageId.length === 0 ||
-    row.messageId.length > 512
-  ) {
-    throw invalid();
-  }
-  return {
-    createdAtMs: Number(row.createdAtMs),
-    messageId: row.messageId,
-  };
-}
+const linkInventoryCursor = cursorCodec<SyncRelayLinkInventoryCursor>(
+  { shareCreatedAtMs: "ms", shareId: "id", linkCreatedAtMs: "ms", grantId: "id" },
+  "cursor",
+);
+const independentGrantInventoryCursor = cursorCodec<SyncRelayIndependentGrantInventoryCursor>(
+  { shareId: "id", grantCreatedAtMs: "ms", grantId: "id" },
+  "independentGrantCursor",
+);
+const discussionCursor = cursorCodec<SyncRelayShareDiscussionCursor>(
+  { createdAtMs: "ms", messageId: "messageId" },
+  "cursor",
+);
 
 function parseDiscussionLimit(value: string | null): number {
   if (value === null) return DEFAULT_DISCUSSION_PAGE_SIZE;
@@ -4611,7 +4564,7 @@ function parseDiscussionListQuery(searchParams: URLSearchParams): {
   }
   return {
     workspaceId: parseOptionalDiscussionWorkspaceId(searchParams),
-    cursor: decodeDiscussionCursor(searchParams.get("cursor")),
+    cursor: discussionCursor.decode(searchParams.get("cursor")),
     limit: parseDiscussionLimit(searchParams.get("limit")),
     direction: parseDiscussionDirection(searchParams.get("direction")),
   };
@@ -4840,15 +4793,15 @@ async function readOptionalJsonObject(
 
 async function readBytes(request: Request, maxBytes: number): Promise<Uint8Array> {
   const length = request.headers.get("content-length");
-  if (length !== null && Number(length) > maxBytes) throw payloadTooLarge();
+  if (length !== null && Number(length) > maxBytes) throw relayError("payload_too_large");
   const bytes = new Uint8Array(await request.arrayBuffer());
-  if (bytes.byteLength > maxBytes) throw payloadTooLarge();
+  if (bytes.byteLength > maxBytes) throw relayError("payload_too_large");
   return bytes;
 }
 
 function parseWorkspaceId(value: unknown): string {
   const workspaceId = parseString(value, "workspaceId", MAX_WORKSPACE_ID_CHARS);
-  // Reserved: "/sync/shares/..." is the share-route namespace (PR 18). A
+  // Reserved: "/sync/shares/..." is the share-route namespace. A
   // workspace with this id could never be addressed, so refuse the claim
   // rather than strand it.
   if (workspaceId === "shares") throw badRequest("workspaceId is reserved");
@@ -4857,7 +4810,7 @@ function parseWorkspaceId(value: unknown): string {
 
 // C0 controls (including NUL) and DEL. Rejected in every parsed string field:
 // the presence scope key joins workspaceId/topic with NUL separators, so an
-// embedded NUL in one component could collide with a DIFFERENT workspace's
+// embedded NUL in one component could collide with a different workspace's
 // scope (workspace "a" + topic "b\0c" vs workspace "a\0b" + topic "c") and
 // leak presence across tenants. Refusing control characters at the parse
 // boundary makes the composite keys unambiguous.
@@ -4943,7 +4896,7 @@ function enforceWorkspaceIdentity(
   }
   if (identity === null) {
     if (storage.getWorkspaceIdentity(workspaceId) !== null) {
-      throw identityRequired();
+      throw relayError("identity_required");
     }
     return 0;
   }
@@ -4959,10 +4912,10 @@ function enforceWorkspaceIdentity(
 function assertWorkspaceIdentityResult(
   result: EnforceWorkspaceIdentityResult,
 ): void {
-  if (result === "epoch-superseded") throw epochSuperseded();
-  if (result === "epoch-unknown") throw epochUnknown();
-  if (result === "stream-mismatch") throw streamIdentityMismatch();
-  if (result === "identity-required") throw identityRequired();
+  if (result === "epoch-superseded") throw relayError("epoch_superseded");
+  if (result === "epoch-unknown") throw relayError("identity_not_recognized");
+  if (result === "stream-mismatch") throw relayError("stream_identity_mismatch");
+  if (result === "identity-required") throw relayError("identity_required");
 }
 
 function parseLogOp(value: unknown): SyncRelayLogInput {
@@ -4989,19 +4942,19 @@ function parseLogOp(value: unknown): SyncRelayLogInput {
   return { originSeq, opKind, payloadJson, recordedAtMs };
 }
 
-// MU-C0 verified authorship. The relay authenticates WHO is pushing
+// MU-C0 verified authorship. The relay authenticates who is pushing
 // (actor.userId, server-derived from the Better Auth session — a client cannot
-// assert it). For every chat op that names an author, that author MUST be the
+// assert it). For every chat op that names an author, that author must be the
 // pusher, or the whole batch is rejected. This is the one place the relay reads
 // into a chat payload — a second narrow, tested relaxation of "payloads are
 // opaque", after PR-18's share filter, scoped to the author field, fail-closed.
 //
-// FAIL-CLOSED COMPLETENESS. The chat.* namespace is EXHAUSTIVE here: every
+// FAIL-CLOSED COMPLETENESS. The chat.* namespace is exhaustive here: every
 // chat op is either an explicitly-enumerated structural (no-author) op or an
 // authored op with a known author field. An unknown/unmapped chat.* op (a
-// future chat.thread.update, chat.message.edit, ...) is REJECTED, never
+// future chat.thread.update, chat.message.edit,...) is rejected, never
 // admitted unverified — shipping a new authored chat op without extending this
-// policy fails CLOSED, not open. Non-chat ops stay fully opaque and pass
+// policy fails closed, not open. Non-chat ops stay fully opaque and pass
 // through untouched.
 //
 // Author identity is always the OPAQUE relay user id (never a raw email — PII
@@ -5029,7 +4982,7 @@ const CHAT_OP_POLICY: Record<string, ChatOpPolicy> = {
   "chat.thread.create": { kind: "structural" },
   "chat.decision.set": { kind: "structural" },
   "chat.attachment.add": { kind: "structural" },
-  // Authored ops: a present author field MUST equal the authenticated pusher.
+  // Authored ops: a present author field must equal the authenticated pusher.
   "chat.message.append": {
     kind: "authored",
     field: "authorUserId",
@@ -5045,7 +4998,7 @@ const CHAT_OP_POLICY: Record<string, ChatOpPolicy> = {
 // Verifies chat authorship before parseLogOp freezes the exact payload bytes.
 // The relay never mutates replicated payloads because the author reads its own
 // operations back and compares those bytes with its local replication log.
-export function assertChatAuthorship(
+function assertChatAuthorship(
   rawOps: unknown[],
   actorUserId: string,
 ): void {
@@ -5058,21 +5011,21 @@ export function assertChatAuthorship(
     // opaque payload and passes through even if it carries an author-shaped field.
     if (!opKind.startsWith("chat.")) continue;
     const policy = CHAT_OP_POLICY[opKind];
-    if (!policy) throw unknownChatOp(); // fail-closed: an unrecognized chat op.
+    if (!policy) throw relayError("unknown_chat_op"); // fail-closed: an unrecognized chat op.
     if (policy.kind === "structural") continue;
     const payload = op.payload;
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
       // An authored op with no object payload cannot be verified — reject
       // (fail-closed). parseLogOp would also reject it, but authorship first.
-      throw authorshipMismatch();
+      throw relayError("authorship_mismatch");
     }
     const bag = payload as Record<string, unknown>;
     const claimed = bag[policy.field];
     if (claimed === undefined || claimed === null) {
-      throw authorshipMismatch();
+      throw relayError("authorship_mismatch");
     }
     if (typeof claimed !== "string" || claimed !== actorUserId) {
-      throw authorshipMismatch();
+      throw relayError("authorship_mismatch");
     }
   }
 }
@@ -5089,6 +5042,24 @@ function parseLimit(value: string | null): number {
   const limit = Number(value);
   if (!Number.isInteger(limit) || limit < 1) throw badRequest("limit must be a positive integer");
   return Math.min(limit, MAX_LOG_PAGE_SIZE);
+}
+
+function parseLinkLogHold(value: string | null): number {
+  if (value === null) return 0;
+  if (!/^(?:0|[1-9]\d*)$/u.test(value)) {
+    throw badRequest("hold must be a non-negative integer");
+  }
+  const hold = Number(value);
+  if (
+    !Number.isSafeInteger(hold) ||
+    hold < 0 ||
+    hold > MAX_DISCUSSION_ACTIVITY_HOLD_MS
+  ) {
+    throw badRequest(
+      `hold must be a non-negative integer no greater than ${String(MAX_DISCUSSION_ACTIVITY_HOLD_MS)}`,
+    );
+  }
+  return hold;
 }
 
 function parsePresenceTopic(value: string | null): string {
@@ -5125,13 +5096,13 @@ function presenceResponse(snapshot: PresenceSnapshot): Response {
 // well-behaved client backs off; anything else re-throws unchanged.
 function presenceCapacityAs429(error: unknown): unknown {
   if (error instanceof PresenceCapacityError) {
-    return relayHttpError(RELAY_ERRORS.presence_capacity, error.message);
+    return relayError("presence_capacity", error.message);
   }
   return error;
 }
 
 function assertSha256(value: string): void {
-  if (!SHA256_HEX.test(value)) throw badRequest("sha256 must be 64 lowercase hex characters");
+  if (!SHA256_HEX_PATTERN.test(value)) throw badRequest("sha256 must be 64 lowercase hex characters");
 }
 
 // If-Match for PUT /keys: absent means create-only; otherwise a (optionally
@@ -5141,209 +5112,23 @@ function assertSha256(value: string): void {
 function parseIfMatchSha256(header: string | null): string | null {
   if (header === null) return null;
   const value = header.trim().replace(/^"(.*)"$/u, "$1");
-  if (!SHA256_HEX.test(value)) {
+  if (!SHA256_HEX_PATTERN.test(value)) {
     throw badRequest("if-match must be the sha256 of the current key envelope");
   }
   return value;
-}
-
-function sha256Hex(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("hex");
 }
 
 function arrayBufferForBytes(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
-function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json", ...headers },
-  });
+// The public refusal: every route answers an unauthorized probe with the same bytes.
+function refused(): Response {
+  return errorResponse(notFound());
 }
 
-function errorResponse(error: unknown): Response {
-  // Classified errors carry an intentional 4xx statusCode: our own typed
-  // HttpError/SyncRelayConflictError, plus duck-typed auth errors from
-  // workspace-api (UnauthorizedError). Everything else is UNEXPECTED
-  // (SQLite failures, auth-DB hiccups): log it server-side and answer with a
-  // generic 500 — never echo error.message, which can leak internals.
-  const duckStatus =
-    typeof error === "object" && error && "statusCode" in error
-      ? Number((error as { statusCode?: unknown }).statusCode)
-      : undefined;
-  const classified =
-    error instanceof HttpError ||
-    error instanceof SyncRelayConflictError ||
-    error instanceof SyncRelayQuotaExceededError ||
-    error instanceof SyncRelayBlobMissingError ||
-    (Number.isInteger(duckStatus) && duckStatus! >= 400 && duckStatus! <= 499);
-  if (!classified) {
-    console.error("[sync-relay] unhandled error", error);
-    return jsonResponse(
-      { ok: false, error: "internal error", code: RELAY_ERRORS.internal_error.code },
-      RELAY_ERRORS.internal_error.status,
-    );
-  }
-  const status =
-    error instanceof HttpError ||
-    error instanceof SyncRelayConflictError ||
-    error instanceof SyncRelayQuotaExceededError ||
-    error instanceof SyncRelayBlobMissingError
-      ? error.statusCode
-      : duckStatus!;
-  const code =
-    error instanceof HttpError ||
-    error instanceof SyncRelayConflictError ||
-    error instanceof SyncRelayQuotaExceededError ||
-    error instanceof SyncRelayBlobMissingError
-      ? error.code
-      : typeof error === "object" && error && "code" in error
-        ? String((error as { code?: unknown }).code)
-        : undefined;
-  const message = error instanceof Error ? error.message : "request failed";
-  return jsonResponse(
-    {
-      ok: false,
-      error: message,
-      ...(code ? { code } : {}),
-    },
-    status,
-  );
-}
-
-class HttpError extends Error {
-  constructor(
-    readonly statusCode: number,
-    readonly code: RelayErrorCode,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
-function relayHttpError(error: RelayErrorDefinition, message: string): HttpError {
-  return new HttpError(error.status, error.code, message);
-}
-
-function badRequest(message: string): HttpError {
-  return relayHttpError(RELAY_ERRORS.bad_request, message);
-}
-
-function epochSuperseded(): HttpError {
-  return relayHttpError(
-    RELAY_ERRORS.epoch_superseded,
-    "replication epoch has been superseded",
-  );
-}
-
-// `identity_not_recognized` means the coordinate is unknown/newer, not proven
-// stale. Clients must preserve local state and must not discard/reseed it.
-function epochUnknown(): HttpError {
-  return relayHttpError(
-    RELAY_ERRORS.identity_not_recognized,
-    "replication coordinate is not recognized",
-  );
-}
-
-function identityRequired(): HttpError {
-  return relayHttpError(
-    RELAY_ERRORS.identity_required,
-    "this workspace requires replication identity",
-  );
-}
-
-function streamIdentityMismatch(): HttpError {
-  return relayHttpError(
-    RELAY_ERRORS.stream_identity_mismatch,
-    "stream identity does not match",
-  );
-}
-
-function selfShare(): HttpError {
-  return relayHttpError(
-    RELAY_ERRORS.self_share,
-    "a share needs a recipient other than yourself",
-  );
-}
-
-// MU-C0: a chat op claimed an author other than the authenticated pusher (or a
-// required author was missing). 403 (not 404): the caller IS authenticated and
-// owns the bucket — the request is forbidden, not hidden. Non-retryable; the
-// client must send its OWN identity. Deliberately does not name which op failed.
-function authorshipMismatch(): HttpError {
-  return relayHttpError(
-    RELAY_ERRORS.authorship_mismatch,
-    "chat op author does not match the authenticated actor",
-  );
-}
-
-// MU-C0 fail-closed completeness: a chat.* op the authorship policy does not
-// recognize. It may carry author-shaped fields the relay cannot verify, so it
-// is refused rather than admitted unverified. 403 (not 400): the caller is
-// authenticated and owns the bucket; the op is forbidden until the policy
-// learns to verify it. Non-retryable as sent.
-function unknownChatOp(): HttpError {
-  return relayHttpError(
-    RELAY_ERRORS.unknown_chat_op,
-    "unrecognized chat op cannot be authorship-verified",
-  );
-}
-
-// MU-C4: an append addressed to a share that takes no appends — a read-only
-// chat-channel grant (the broadcast opt-in) or a PR-18 path/version share
-// (read-only by contract). 403, not 404: the caller IS the legitimate
-// recipient and may keep reading; only writing is refused. Deliberately one
-// code for both cases so the response does not reveal the selector kind.
-function shareNotAppendable(): HttpError {
-  return relayHttpError(RELAY_ERRORS.share_read_only, "this share does not accept appends");
-}
-
-// MU-C4 fail-closed append scoping: an op in the batch is not something this
-// share admits — a chat op for another channel, a foreign thread, a forged
-// thread re-bind, a file/secret/unknown op, or (#646 PR3a) a proposed change
-// outside the shared paths or naming a file twice. The whole batch is rejected
-// atomically. Deliberately does not name which op failed or why: the same code
-// and body for every cause is what keeps a probing recipient from reading the
-// share's shape out of its refusals.
-function shareOpRejected(): HttpError {
-  return relayHttpError(RELAY_ERRORS.share_op_rejected, "an op is outside this share");
-}
-
-// #646 PR3a: the proposal already moved out of `open`. Every mover — accept,
-// decline, withdraw — races through the same single-row UPDATE, so exactly one
-// wins and the losers all land here rather than acting on stale state.
-function proposalNotOpen(): HttpError {
-  return relayHttpError(
-    RELAY_ERRORS.conflict,
-    "these changes were already accepted, declined, or withdrawn",
-  );
-}
-
-function notFound(): HttpError {
-  return relayHttpError(RELAY_ERRORS.not_found, "not found");
-}
-
-function invalidLinkCapability(): HttpError {
-  return new HttpError(401, RELAY_ERRORS.not_found.code, "not found");
-}
-
-function linkReadRateLimited(): HttpError {
-  return relayHttpError(RELAY_ERRORS.link_read_rate_limited, "too many link reads");
-}
-
-function blobNotFound(): HttpError {
-  return relayHttpError(RELAY_ERRORS.blob_not_found, "blob not found");
-}
-
-function keyEnvelopeNotFound(): HttpError {
-  return relayHttpError(RELAY_ERRORS.key_envelope_not_found, "key envelope not found");
-}
-
-function methodNotAllowed(): HttpError {
-  return relayHttpError(RELAY_ERRORS.method_not_allowed, "method not allowed");
-}
-
-function payloadTooLarge(): HttpError {
-  return relayHttpError(RELAY_ERRORS.payload_too_large, "payload too large");
+// A link credential that does not resolve answers 401 with the not-found body:
+// the status tells the viewer to re-exchange, and the body says nothing more.
+function invalidLinkCapability(): RelayError {
+  return new RelayError("not_found", undefined, 401);
 }

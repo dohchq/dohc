@@ -5,11 +5,12 @@
 
 mod common;
 
-use common::{Scratch, sha256_hex};
+use common::Scratch;
 use dohc_engine_files::{
     CancellationToken, ManifestEntry, OverCapPolicy, ScanBounds, ScanIoFaultInjector,
     ScanIoOperation, ScanListing, ScanManifest, ScanOutcome, Scanner, SkipReason,
 };
+use dohc_engine_storage::hex_sha256;
 use std::io::ErrorKind;
 use std::sync::Arc;
 
@@ -41,7 +42,7 @@ fn scan_produces_sorted_normalized_listing() {
     let a = &listing.files[0];
     assert_eq!(a.size, 4);
     assert_eq!(a.media_type, "text/markdown");
-    assert_eq!(a.sha256, sha256_hex(b"# A\n"));
+    assert_eq!(a.sha256, hex_sha256(b"# A\n"));
 }
 
 #[test]
@@ -189,7 +190,7 @@ fn scanner_reuses_one_pool_across_scans_within_cap() {
         let listing = scan(&scanner, ws.path());
         assert_eq!(listing.files.len(), 10);
     }
-    // Concurrency stayed capped across all three scans on the SAME pool.
+    // Concurrency stayed capped across all three scans on the same pool.
     assert!(scanner.pool().gauge().max_concurrent() <= workers);
     assert_eq!(scanner.pool().gauge().hashed(), 30);
 }
@@ -264,7 +265,7 @@ fn symlink_directory_cycle_terminates_and_tracks_nothing_under_loop() {
 }
 
 /// The amended-N8 short-circuit, pinned at the scanner seam: a matching
-/// (size, mtime) pairing returns the manifest's RECORDED hash — provably
+/// (size, mtime) pairing returns the manifest's recorded hash — provably
 /// without reading the file, because the recorded hash here is a deliberate
 /// lie that a re-hash could never produce — while a zero-mtime entry and a
 /// mismatched size each force the real hash.
@@ -278,7 +279,7 @@ fn scan_with_prior_reuses_the_recorded_hash_only_for_a_matching_pairing() {
     // Learn the observed pairing from a full-hash scan.
     let baseline = scan(&scanner, ws.path());
     let observed = &baseline.files[0];
-    assert_eq!(observed.sha256, sha256_hex(b"content\n"));
+    assert_eq!(observed.sha256, hex_sha256(b"content\n"));
     assert_ne!(observed.mtime_ms, 0, "the scratch file must carry an mtime");
     let hashed_after_baseline = scanner.pool().gauge().hashed();
 
@@ -321,7 +322,7 @@ fn scan_with_prior_reuses_the_recorded_hash_only_for_a_matching_pairing() {
         ScanOutcome::Completed(listing) => listing,
         ScanOutcome::Cancelled => panic!("unexpected cancellation"),
     };
-    assert_eq!(hashed.files[0].sha256, sha256_hex(b"content\n"));
+    assert_eq!(hashed.files[0].sha256, hex_sha256(b"content\n"));
 
     // A size mismatch forces the hash even when the mtime matches.
     let wrong_size = ScanManifest::from_entries([(
@@ -339,7 +340,7 @@ fn scan_with_prior_reuses_the_recorded_hash_only_for_a_matching_pairing() {
         ScanOutcome::Completed(listing) => listing,
         ScanOutcome::Cancelled => panic!("unexpected cancellation"),
     };
-    assert_eq!(rehashed.files[0].sha256, sha256_hex(b"content\n"));
+    assert_eq!(rehashed.files[0].sha256, hex_sha256(b"content\n"));
 }
 
 #[test]
@@ -482,7 +483,7 @@ impl ScanIoFaultInjector for MutateOnHashProbe {
 
 /// The recorded (mtime, hash) pairing takes its mtime from the enumerate-time
 /// stat and its hash from a later read. A same-size write between the two
-/// would pair the STALE mtime with the other bytes' hash — and an
+/// would pair the stale mtime with the other bytes' hash — and an
 /// mtime-preserving restore of the original bytes would then reuse the wrong
 /// hash forever. Pinned: any (size, mtime) drift between the enumerate stat
 /// and the post-hash re-stat voids the pairing (the entry records mtime 0),
@@ -502,7 +503,7 @@ fn mid_scan_write_voids_the_mtime_pairing_and_the_next_scan_rehashes() {
     let raced = scan(&scanner, ws.path());
     assert_eq!(
         raced.files[0].sha256,
-        sha256_hex(b"AAAAAAAA\n"),
+        hex_sha256(b"AAAAAAAA\n"),
         "the hash is of the bytes the pool actually read"
     );
     assert_eq!(
@@ -528,7 +529,7 @@ fn mid_scan_write_voids_the_mtime_pairing_and_the_next_scan_rehashes() {
         ScanOutcome::Completed(listing) => listing,
         ScanOutcome::Cancelled => panic!("unexpected cancellation"),
     };
-    assert_eq!(next.files[0].sha256, sha256_hex(b"BBBBBBBB\n"));
+    assert_eq!(next.files[0].sha256, hex_sha256(b"BBBBBBBB\n"));
     assert_eq!(
         scanner.pool().gauge().hashed(),
         hashed_before + 1,
@@ -558,7 +559,7 @@ fn mid_scan_replacement_with_matching_metadata_voids_the_mtime_pairing() {
         .iter()
         .find(|entry| entry.path == "doc.md")
         .expect("replacement path remains listed");
-    assert_eq!(doc.sha256, sha256_hex(b"AAAAAAAA\n"));
+    assert_eq!(doc.sha256, hex_sha256(b"AAAAAAAA\n"));
     assert_eq!(
         doc.mtime_ms, 0,
         "a different file identity must not borrow the opened file's pairing"
@@ -585,7 +586,7 @@ fn mid_scan_replacement_with_matching_metadata_voids_the_mtime_pairing() {
         .iter()
         .find(|entry| entry.path == "doc.md")
         .expect("replacement path remains listed");
-    assert_eq!(next_doc.sha256, sha256_hex(b"BBBBBBBB\n"));
+    assert_eq!(next_doc.sha256, hex_sha256(b"BBBBBBBB\n"));
     assert_eq!(
         scanner.pool().gauge().hashed(),
         hashed_before + 2,

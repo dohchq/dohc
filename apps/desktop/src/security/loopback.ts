@@ -1,4 +1,4 @@
-export function normalizeLoopbackHostname(hostname: string): string {
+function normalizeLoopbackHostname(hostname: string): string {
   // Node's WHATWG URL implementation currently returns "[::1]" for hostname,
   // so normalize both bracketed and unbracketed forms before comparison.
   return hostname.startsWith("[") && hostname.endsWith("]")

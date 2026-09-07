@@ -39,7 +39,7 @@ import {
 
 const BUILD_STOP_SETTLE_MS = 250;
 
-export type PluginBuildFailureCode =
+type PluginBuildFailureCode =
   | "invalid-manifest"
   | "invalid-plugin-id"
   | "invalid-snapshot"
@@ -51,12 +51,12 @@ export type PluginBuildFailureCode =
   | "output-locked"
   | "output-io";
 
-export interface PluginBuildDiagnostics {
+interface PluginBuildDiagnostics {
   errors: Message[];
   warnings: Message[];
 }
 
-export interface PluginBuildFailure {
+interface PluginBuildFailure {
   code: PluginBuildFailureCode;
   message: string;
   path: string | null;
@@ -82,7 +82,7 @@ export type PluginBuildResult =
     /** Swaps the built tree into the live root. A build is deliberately not
      * published by building: the caller persists the approval state for
      * `bundleHash` first, so nothing can serve bytes whose approval was
-     * never durably recorded (#779 round 6 F5). */
+     * never durably recorded. */
     publish: () => Promise<{ cleanupWarning: string | null }>;
     /** Drops the built tree. The live root was never touched, so there is
      * nothing to restore. */
@@ -119,7 +119,7 @@ interface BuildPaths {
   /** The manifest entry, already resolved and proven to be a regular file
    * inside the installed snapshot. esbuild reads it straight out of that
    * snapshot — live or staged — and the build never moves the live root's
-   * own contents (#779 round 7 A1). */
+   * own contents. */
   entryPath: string;
 }
 
@@ -232,7 +232,7 @@ async function inspectBuildPaths(
   const snapshotRoot = resolve(input.snapshotRoot);
   // The source this build reads is the published snapshot for a rebuild, or
   // the staged snapshot beside the live root when the tree it builds is not
-  // approved yet (#779 round 9 B1). isPluginSourceRoot names that family.
+  // approved yet. isPluginSourceRoot names that family.
   if (!isPluginSourceRoot(liveRoot, snapshotRoot)) {
     throw new PluginBuildRunnerError(
       "invalid-snapshot",
@@ -415,7 +415,7 @@ async function buildWithDeadline(
  * of the live root the build did not rebuild — the source publish put it
  * there already — so it rides across here. Three renames, not the whole
  * build, is the entire window in which the live root is anything other than
- * its complete previous or complete next contents (#779 round 7 A1).
+ * its complete previous or complete next contents.
  */
 async function publishStaging(
   liveRoot: string,
@@ -549,7 +549,7 @@ async function runBuildJob(
     // the live root made every unpublished byte reachable by the child-process
     // broker, whose containment is rooted at the live root, and made the live
     // root incomplete for the whole build — a panel start during a build then
-    // failed outright (#779 round 7 A1).
+    // failed outright.
     stagingRoot = `${paths.liveRoot}${BUILD_STAGING_SUFFIX}${randomUUID()}`;
     await mkdir(stagingRoot);
     const outfile = join(stagingRoot, "bundle.mjs");

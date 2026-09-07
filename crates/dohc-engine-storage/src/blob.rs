@@ -17,13 +17,17 @@ use sha2::{Digest, Sha256};
 /// discipline `dohc-engine-files` hashes scanned files with, so a scanned file
 /// hash and a stored blob hash are byte-identical (`semantics/sha256-parity`).
 pub fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
+    hex(&Sha256::digest(bytes))
+}
+
+/// Lowercase-hex encode `bytes`.
+pub fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
     }
-    hex
+    out
 }
 
 /// Store `bytes` as a content-addressed binary blob, returning its sha-256 key.
@@ -33,7 +37,7 @@ pub fn hex_sha256(bytes: &[u8]) -> String {
 /// "deduplicated" against. Bounded by [`MAX_BLOB_BYTES`]; over-cap input is a
 /// typed error, never a silent truncation. `conn` may be a plain connection or
 /// a `&Transaction` (which derefs to `&Connection`), so a caller can put a
-/// blob in the SAME transaction as the domain mutation that references it.
+/// blob in the same transaction as the domain mutation that references it.
 pub fn put_binary_blob(conn: &Connection, bytes: &[u8]) -> Result<String, StorageError> {
     if bytes.len() > MAX_BLOB_BYTES {
         return Err(StorageError::BlobTooLarge {
@@ -49,7 +53,7 @@ pub fn put_binary_blob(conn: &Connection, bytes: &[u8]) -> Result<String, Storag
 /// redundant full pass over the bytes is pure contention).
 ///
 /// The digest is the blob store's content address, so a wrong `sha256` would
-/// poison the store: only ever pass a digest THIS process computed (or
+/// poison the store: only ever pass a digest this process computed (or
 /// verified) from these exact bytes, never one received from outside — an
 /// untrusted claim goes through [`put_binary_blob_verified`]. Debug builds
 /// recompute and assert the digest, so the whole debug test fleet checks every

@@ -28,13 +28,13 @@ import {
 import { buildRunnerThreadContext } from "./runnerThreadContext";
 
 export const CHAT_DISPATCH_PUMP_MS = 15_000;
-export const CHAT_DISPATCH_BUDGET_WINDOW_MS = 10 * 60_000;
+const CHAT_DISPATCH_BUDGET_WINDOW_MS = 10 * 60_000;
 export const CHAT_DISPATCH_BUDGET_MAX = 10;
 export const RUNNER_SELF_TEST_TIMEOUT_MS = 120_000;
 export const RUNNER_KILL_GRACE_MS = 10_000;
 export const APP_QUIT_KILL_GRACE_MS = 1_500;
 export const CHAT_DISPATCH_RECOVERY_BACKOFF_MS = 1_000;
-export const CHAT_DISPATCH_RECOVERY_MAX_BACKOFF_MS = 30_000;
+const CHAT_DISPATCH_RECOVERY_MAX_BACKOFF_MS = 30_000;
 export const RUN_ID_LOG_TOKEN = "{runId}";
 export const APP_QUIT_EXIT_CODE = 143;
 
@@ -104,7 +104,7 @@ export interface ChatDispatchRecovery {
   attemptCount: number;
 }
 
-export interface ChatDispatchServiceOptions {
+interface ChatDispatchServiceOptions {
   workspaceFor(workspaceId: string): ChatDispatchWorkspace | null;
   listOpenWorkspaces(): ChatDispatchWorkspace[];
   listSyncWorkspaces(): ChatDispatchWorkspace[];
@@ -122,13 +122,6 @@ export interface ChatDispatchServiceOptions {
   isPackaged(): boolean;
   resourcesPath?: () => string | undefined;
   queueSync(workspace: ChatDispatchWorkspace): void | boolean | Promise<void | boolean>;
-  // The engine opt-out gate: when it resolves false, a scan is a no-op.
-  // Merely resolving the chat/dispatch stores opens the workspace in the
-  // engine daemon, which would create an engine store for a workspace that
-  // opted out of recording anything.
-  scanEligible?(
-    workspace: ChatDispatchWorkspace,
-  ): boolean | Promise<boolean>;
   prepareRunWorkspace?(
     workspace: ChatDispatchWorkspace,
   ): Promise<void | (() => Promise<void>)>;
@@ -165,7 +158,7 @@ export interface ChatDispatchServiceOptions {
   onError?: (error: unknown) => void;
 }
 
-export interface ChatDispatchThreadState {
+interface ChatDispatchThreadState {
   liveRunId: string | null;
   pendingCount: number;
   paused: boolean;
@@ -411,7 +404,7 @@ export function tokenizeRunnerCommand(command: string): string[] {
   return tokens;
 }
 
-export function buildRunnerPrompt(threadMarkdown: string, threadId: string): string {
+function buildRunnerPrompt(threadMarkdown: string, threadId: string): string {
   return `${threadMarkdown.trimEnd()}
 
 ## Report contract
@@ -473,7 +466,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   function reportError(error: unknown): void {
     try {
       options.onError?.(error);
-    } catch {}
+    } catch {
+      // The reporter is the last resort; a throwing reporter has nowhere to report to.
+    }
   }
 
   function notifyRunUpdated(workspace: ChatDispatchWorkspace): void {
@@ -681,7 +676,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     });
     const logFd = prepareLog(input.logPath);
     try {
-      // Inside the try: resolveSpawnCommand REFUSES some runner commands
+      // Inside the try: resolveSpawnCommand refuses some runner commands
       // (a double quote or percent sign in the configured command itself),
       // and it used to sit outside, so its throw escaped the spawn path
       // entirely instead of failing this one dispatch.
@@ -1562,7 +1557,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         return;
       }
       scannedWorkspace = workspace;
-      if ((await options.scanEligible?.(workspace)) === false) return;
       await scanAndDrain(workspace);
     });
     void scan.catch(() => {
@@ -1748,8 +1742,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (!command) return { ok: false, detail: "Configure a runner command first." };
 
       // A self-test spawns a real runner and writes a scratch thread, so it
-      // takes the same run lease and engine gate as a claimed run. An opted-out
-      // workspace refuses here, before chatStoreFor creates an engine store.
+      // takes the same run lease and engine gate as a claimed run. A workspace
+      // without a capture refuses here, before chatStoreFor opens the engine.
       try {
         releaseWorkspace = (await options.prepareRunWorkspace?.(workspace)) ?? null;
       } catch (error) {
@@ -1947,7 +1941,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       } catch (error) {
         try {
           await options.setRunAttribution(workspace, null);
-        } catch {}
+        } catch {
+          // The self-test already failed; the caller reads that failure, not this one.
+        }
         reportError(error);
         return {
           ok: false,
@@ -2016,7 +2012,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (test.killEscalation) clearTimeout(test.killEscalation);
       try {
         await options.setRunAttribution(test.workspace, null);
-      } catch {}
+      } catch {
+        // Ignore an attribution cleanup failure during quit; the next run
+        // overwrites it.
+      }
       test.resolve({
         ok: false,
         detail: "Runner self-test stopped because dohc is quitting.",

@@ -1,7 +1,7 @@
 //! The durable materialization pipeline — the filesystem half of the plan's
 //! filesystem/database crash boundary (`plan §Filesystem/database crash
 //! boundary`, `TEST_ORACLE.md` §3.3). The DB half (job rows, content blobs)
-//! lives in `dohc-engine-storage`; this module executes PENDING jobs against
+//! lives in `dohc-engine-storage`; this module executes pending jobs against
 //! the real user file tree and marks them terminal.
 //!
 //! Per job, the five durable steps:
@@ -12,7 +12,7 @@
 //! 2. Write a **sibling temp file**, bounded bytes, restrictive mode.
 //! 3. **Flush** per the per-OS [`DurabilityPolicy`].
 //! 4. **Revalidate the preimage** immediately before the replace: if an external
-//!    editor produced newer content after the DB commit, do NOT overwrite —
+//!    editor produced newer content after the DB commit, do not overwrite —
 //!    preserve both and mark the job `conflict`.
 //! 5. **Atomically replace without following links**, with bounded retry for
 //!    transient sharing violations (Windows AV/indexer), then mark complete or
@@ -24,18 +24,18 @@
 //! **Residual TOCTOU (documented, not closed).** The preimage revalidation
 //! (step 4) reads the current target and the atomic replace (step 5) renames
 //! over it; no filesystem offers a content-compare-and-swap, so these two steps
-//! are NOT atomic. An external write landing in the microsecond between the
+//! are not atomic. An external write landing in the microsecond between the
 //! revalidation read and the rename is clobbered. This is an inherent, narrow
 //! residual window — the pipeline closes the common case (an editor that wrote
 //! before the pipeline started is detected and preserved), not the sub-op race.
-//! Recorded in `BEHAVIOR_DELTA.md` (R04) so it is not mistaken for closed.
+//! It is a known, accepted window.
 //!
 //! Every materialization first canonicalizes the workspace root, then rejects
 //! symlinks/reparse points in each existing below-root target component.
 //! Ordinary writes create missing parents one component at a time through that
 //! same walk. Directories above the workspace root are intentionally outside
 //! this validation, and ordinary name-based operations retain the single-user
-//! rename-TOCTOU assumption recorded in `BEHAVIOR_DELTA.md`.
+//! rename-TOCTOU assumption.
 //!
 //! Secret plaintext uses a stronger path-binding rule after the shared walk.
 //! Unix pins the workspace root and target parent with `openat2`/`openat`, then
@@ -63,11 +63,11 @@ use std::time::Duration;
 pub const MAX_MATERIALIZE_BYTES: usize = dohc_engine_storage::MAX_MATERIALIZE_BYTES;
 
 /// The normative maximum atomic-replace attempts before failing closed
-/// (`TEST_ORACLE.md` §3.10). Re-exported from storage so both halves share ONE
+/// (`TEST_ORACLE.md` §3.10). Re-exported from storage so both halves share one
 /// constant.
 pub const MAX_REPLACE_ATTEMPTS: u32 = dohc_engine_storage::MAX_REPLACE_ATTEMPTS;
 
-/// A per-OS flush policy (`plan` step 3, `LANGUAGE_SEMANTICS_MATRIX` 8.6). The
+/// A per-OS flush policy. The
 /// TS engine never fsyncs; the Rust pipeline adds an explicit, documented policy
 /// (approved delta). Directory fsync is a POSIX affordance; on Windows `std`
 /// exposes no portable directory sync, so `fsync_parent_dir` is a documented
@@ -101,7 +101,7 @@ impl DurabilityPolicy {
 /// One replace attempt seam so the bounded retry loop can be exercised against
 /// injected transient sharing violations without racing a real AV process.
 pub trait AtomicReplacer: Send + Sync {
-    /// A single atomic replace of `to` by `from`, WITHOUT following links. On
+    /// A single atomic replace of `to` by `from`, without following links. On
     /// Windows this is `ReplaceFile`/`MoveFileEx(REPLACE_EXISTING)` semantics
     /// (what `std::fs::rename` maps to); on POSIX it is `rename(2)`.
     fn try_replace(&self, from: &Path, to: &Path) -> std::io::Result<()>;
@@ -217,11 +217,11 @@ pub enum JobOutcome {
     /// content.
     Superseded,
     /// Newer external content was found at revalidation; preserved-both, marked
-    /// conflict, target NOT overwritten.
+    /// conflict, target not overwritten.
     Conflict,
     /// An ordinary target operation encountered a symlink/reparse point,
     /// including in target ancestry or a predictable sibling. The job stays
-    /// PENDING (no DB mark) so it retries once containment is restored, and the
+    /// pending (no DB mark) so it retries once containment is restored, and the
     /// batch continues — one blocked path must not stall every other path's
     /// materialization.
     Blocked,
@@ -370,7 +370,7 @@ pub enum MaterializeError {
     #[error("job target path is not a safe workspace-relative path")]
     UnsafeTargetPath,
     /// The target or a below-root ancestor is a symlink/reparse point; refusing
-    /// to materialize through it. `LANGUAGE_SEMANTICS_MATRIX` 8.1.
+    /// to materialize through it.
     #[error("job target path contains a symlink; refusing materialization")]
     SymlinkTarget,
     /// A secret target exists but cannot safely be compared or replaced (for
@@ -497,7 +497,7 @@ fn materialize_one_ordinary(
         return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit));
     }
 
-    // Generation staleness gate: if a NEWER generation has already been
+    // Generation staleness gate: if a newer generation has already been
     // materialized at this path, this job is superseded — never regress the path
     // to older content (concurrent / out-of-order jobs). No-op; mark complete.
     if !job.job_id.starts_with("version-switch-")
@@ -887,7 +887,7 @@ fn materialize_write_content(
     }
 
     // Step 3: flush the temp FILE per the per-OS durability policy. The parent
-    // directory is synced AFTER the rename (below), which is where the rename's
+    // directory is synced after the rename (below), which is where the rename's
     // durability actually lives on POSIX.
     flush_temp_file(&temp_file, &tmp, policy)?;
     drop(temp_file);
@@ -899,7 +899,7 @@ fn materialize_write_content(
     }
 
     // Step 4: revalidate the preimage immediately before the replace. The fault
-    // point fires FIRST so a trace can mutate the target and prove we observe
+    // point fires first so a trace can mutate the target and prove we observe
     // the newer external content rather than clobbering it.
     if should_crash(faults, FaultPoint::MaterializeBeforePreimageRevalidate) {
         secret_temp_cleanup.disarm();
@@ -909,7 +909,7 @@ fn materialize_write_content(
     }
     // NOTE: this read and the rename below are not atomic (no fs content-CAS);
     // an external write in the gap is clobbered — the documented residual TOCTOU
-    // (module docs + BEHAVIOR_DELTA). The common case (an editor that wrote
+    // (see the module docs). The common case (an editor that wrote
     // before the pipeline ran) IS caught here.
     let current_now = if let Some(parent) = secret_parent.as_ref() {
         parent.read_current(target_name.as_os_str(), target)?
@@ -923,7 +923,7 @@ fn materialize_write_content(
         // External newer content: preserve BOTH. Keep the on-disk target
         // untouched; persist our intended content to a `.conflict` sibling so it
         // is not lost; mark the job conflict (never silently replayed). The
-        // `.conflict` artifact is on the path floor, so the scanner does NOT
+        // `.conflict` artifact is on the path floor, so the scanner does not
         // auto-capture it as a new tracked document — the user/agent inspects
         // and resolves it manually.
         if preserve_conflict_artifact {
@@ -1065,8 +1065,8 @@ fn read_current_no_follow(target: &Path) -> Result<CurrentTarget, MaterializeErr
             Ok(file) => file,
             Err(err) if err.kind() == ErrorKind::NotFound => return Ok(CurrentTarget::Absent),
             // A handle held without read sharing fails the preimage read
-            // BEFORE the replace loop can classify it. Name the lock here
-            // too (#554): the job stays pending either way, and callers key
+            // before the replace loop can classify it. Name the lock here
+            // too: the job stays pending either way, and callers key
             // their retry contract off `FileLocked`, not the io grab-bag.
             Err(err) => return Err(terminal_lock_classification(err, target)),
         }
@@ -1086,9 +1086,9 @@ fn read_current_file(
     file: std::fs::File,
     display_path: &Path,
 ) -> Result<CurrentTarget, MaterializeError> {
-    // The OPEN is not the only place a lock speaks (#595 round 14). A
+    // The open is not the only place a lock speaks. A
     // byte-range lock (`LockFileEx`) leaves the handle openable and fails the
-    // READ with ERROR_LOCK_VIOLATION, so classifying only the open sent that
+    // read with ERROR_LOCK_VIOLATION, so classifying only the open sent that
     // file down the terminal io path — no retry, for a lock that releases.
     // Same narrow rule as the open: 32/33 only, ACL denials stay terminal.
     let metadata = file
@@ -1612,7 +1612,7 @@ fn walk_secret_parent_unix_with_hook(
 
 /// Classify a failed no-follow open of `name` under `parent_fd`.
 ///
-/// `O_NOFOLLOW` does NOT report a symlink uniformly: with `O_DIRECTORY` Linux
+/// `O_NOFOLLOW` does not report a symlink uniformly: with `O_DIRECTORY` Linux
 /// returns `ENOTDIR`, FreeBSD returns `EMLINK` and NetBSD `EFTYPE`, and only
 /// the non-directory case gives `ELOOP`. Asking the filesystem what the entry
 /// actually is turns every one of those into the same honest answer instead of
@@ -1952,7 +1952,7 @@ fn flush_temp_file(
     Ok(())
 }
 
-/// Sync the parent directory AFTER the rename so the directory entry change (the
+/// Sync the parent directory after the rename so the directory entry change (the
 /// replace) is durable. POSIX only; on Windows `std` exposes no portable
 /// directory sync, so this is a documented no-op there (an honestly-scoped
 /// durability limit — `per_os()` sets `fsync_parent_dir = false` off POSIX).
@@ -1976,7 +1976,7 @@ fn sync_parent_dir(
     Ok(())
 }
 
-/// Classify a failed read-open of the preimage target. Deliberately NARROWER
+/// Classify a failed read-open of the preimage target. Deliberately narrower
 /// than [`is_transient_lock`]: only a real sharing/lock violation
 /// (`ERROR_SHARING_VIOLATION` = 32, `ERROR_LOCK_VIOLATION` = 33) is
 /// [`MaterializeError::FileLocked`] — the retryable contract callers poll on.
@@ -1984,13 +1984,13 @@ fn sync_parent_dir(
 /// ACL denial is TERMINAL: calling it a lock would put the caller into an
 /// endless retry under a false cause ("another program has this file open").
 ///
-/// This is THE terminal boundary rule for the preimage read-open. The replace
+/// This is the terminal boundary rule for the preimage read-open. The replace
 /// loops at exhaustion add one probe on top ([`terminal_replace_classification`])
 /// because Windows reports a held handle differently at the two boundaries:
 /// a no-share read-open fails 32, but a replace over a handle held without
 /// FILE_SHARE_DELETE fails with the same ERROR_ACCESS_DENIED an ACL denial
-/// produces. The loops still RETRY on the broad predicate within their cap;
-/// the error that outlives the cap must say what the cause really is (#595).
+/// produces. The loops still retry on the broad predicate within their cap;
+/// the error that outlives the cap must say what the cause really is.
 fn terminal_lock_classification(err: std::io::Error, target: &Path) -> MaterializeError {
     // Windows-only by construction: 32 and 33 are Win32 codes, and the same
     // raw numbers are EPIPE and EDOM on Unix. This helper now serves the
@@ -2009,9 +2009,9 @@ enum DeleteProbe {
     /// 32/33: another handle without FILE_SHARE_DELETE holds the target —
     /// the very access the replace needs and could not get. Proof of a lock.
     Contended,
-    /// The probe opened. This proves NOTHING about the replace failure: a
+    /// The probe opened. This proves nothing about the replace failure: a
     /// read-only attribute grants a DELETE-access open and still fails the
-    /// replace with ACCESS_DENIED (#595 round 6).
+    /// replace with ACCESS_DENIED.
     Opened,
     /// Any other failure (a DACL denies the probe too, the target vanished).
     Other,
@@ -2034,12 +2034,12 @@ fn probe_delete_open(target: &Path) -> DeleteProbe {
 }
 
 /// Resolve a bounded replace loop's exhaustion. `Ok(())` means the final
-/// reattempt LANDED the replace. 32/33 keep the retryable `FileLocked`
+/// reattempt landed the replace. 32/33 keep the retryable `FileLocked`
 /// contract outright. ERROR_ACCESS_DENIED is ambiguous at this boundary
-/// (#554's dogfood shape: a handle held without FILE_SHARE_DELETE fails the
+/// (the dogfood shape: a handle held without FILE_SHARE_DELETE fails the
 /// replace with 5, exactly like an ACL or a read-only attribute), and only
-/// an OBSERVED sharing violation proves the lock — the probe's verdict:
-/// contended is `FileLocked`; an OPEN probe proves nothing, so the replace
+/// an observed sharing violation proves the lock — the probe's verdict:
+/// contended is `FileLocked`; an open probe proves nothing, so the replace
 /// is reattempted once (the transient contender may be gone) and a repeat
 /// failure is terminal io; anything else is terminal io.
 fn resolve_replace_exhaustion(
@@ -2255,8 +2255,8 @@ mod tests {
 
     /// The replace loop retries an ACL denial to its full bounded budget —
     /// a Windows AV handle mid-scan often surfaces as ERROR_ACCESS_DENIED —
-    /// but the error that OUTLIVES the cap is a terminal io failure, never
-    /// the FileLocked contract the desktop polls forever (#595).
+    /// but the error that outlives the cap is a terminal io failure, never
+    /// the FileLocked contract the desktop polls forever.
     #[test]
     fn replace_exhaustion_classifies_acl_denials_as_terminal() {
         let scratch = Scratch::new("replace-exhaustion-acl");
@@ -2280,9 +2280,9 @@ mod tests {
     }
 
     /// The replace boundary's meanings of ERROR_ACCESS_DENIED (#554, #595
-    /// rounds 4+6). Only an OBSERVED sharing violation proves a lock: a
+    /// rounds 4+6). Only an observed sharing violation proves a lock: a
     /// handle held without FILE_SHARE_DELETE answers the probe with 32 —
-    /// `FileLocked`, and no reattempt is spent. A probe that OPENS proves
+    /// `FileLocked`, and no reattempt is spent. A probe that opens proves
     /// nothing (a read-only attribute opens fine for DELETE access and still
     /// fails the replace), so exactly one reattempt decides: landed means
     /// the transient contender left; a repeat denial is terminal io — never
@@ -2338,15 +2338,13 @@ mod tests {
         );
     }
 
-    /// #595 round 14 (codex P2): the OPEN is not the only boundary a lock
+    /// The open is not the only boundary a lock
     /// speaks at. A byte-range lock (`LockFileEx`, which `File::lock` takes on
-    /// Windows) leaves the target openable and fails the READ with
+    /// Windows) leaves the target openable and fails the read with
     /// ERROR_LOCK_VIOLATION. Classifying only the open sent that file down the
     /// terminal io path, so the pending job never retried a lock that does
     /// release.
     ///
-    /// MUTATION: map the `read_to_end` failure with `MaterializeError::io`
-    /// again -> this returns `Io` and the assertion fails.
     #[cfg(windows)]
     #[test]
     fn a_byte_range_lock_on_the_read_keeps_the_retryable_lock_contract() {
@@ -2529,7 +2527,7 @@ mod tests {
         }
     }
 
-    /// The component walk is the ONLY fd-based parent resolution on macOS and
+    /// The component walk is the only fd-based parent resolution on macOS and
     /// BSD — `openat2` is Linux-only — so its `O_NOFOLLOW` is what stops an
     /// ancestor swap there. Every end-to-end test reaches the path-based
     /// `ensure_secret_target_symlink_free` first and never exercises the walk,
@@ -2558,7 +2556,7 @@ mod tests {
             refused.map(|_| "Ok")
         );
 
-        // Control: the same walk through the REAL directory succeeds, so the
+        // Control: the same walk through the real directory succeeds, so the
         // refusal above is the symlink and not a broken walk.
         let root_fd: OwnedFd = std::fs::File::open(root).expect("open root").into();
         walk_secret_parent_unix(root_fd, Path::new("real/nested"), &root.join("real/nested"))
@@ -3184,8 +3182,6 @@ mod tests {
 
     #[test]
     fn secret_conflict_failed_best_effort_remove_keeps_cleanup_guard_armed() {
-        // MUTATION: disarm the plaintext-temp guard before/after the failed
-        // best-effort conflict remove -> the secret temp survives this return.
         let scratch = Scratch::new("secret-conflict-remove");
         let target = scratch.root.join(".env");
         std::fs::write(&target, b"ORIGINAL=preimage\n").expect("write initial target");

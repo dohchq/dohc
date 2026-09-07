@@ -41,12 +41,6 @@ export const WorkspaceSettings = z
         confirmExternalLinks: z.boolean(),
       })
       .strict(),
-    experimental: z
-      .object({
-        workspaceEngineAlpha: z.boolean(),
-      })
-      .strict()
-      .default(WORKSPACE_SETTINGS_DEFAULTS.experimental),
     files: z
       .object({
         attachmentLocation: z.enum(ATTACHMENT_LOCATIONS),
@@ -65,14 +59,14 @@ export const WorkspaceSettingsResult = z.object({
   // file names its own path in the warning, and the IPC contract bounds a path
   // at 4096. A shorter bound would reject the warning and fail the whole read.
   warning: z.string().min(1).max(4600).optional(),
-  // Set when a save was REFUSED because the file on disk cannot be read.
+  // Set when a save was refused because the file on disk cannot be read.
   // Same bound as the warning, and for the same reason: it names the path.
   refusal: z.string().min(1).max(4600).optional(),
 }).strict();
 export type WorkspaceSettingsResult = z.infer<typeof WorkspaceSettingsResult>;
 
 // What a save carries: the controls the user actually changed, never the whole
-// file. Main merges a patch onto the settings as they are on disk RIGHT NOW,
+// file. Main merges a patch onto the settings as they are on disk right now,
 // so a caller holding a stale copy of the file (a Settings dialog opened
 // before an external edit, or before the user repaired an unreadable file)
 // can no longer write its stale copy back over fields it never touched.
@@ -80,7 +74,6 @@ export const WorkspaceSettingsPatch = z.object({
   agents: WorkspaceSettings.shape.agents.partial().optional(),
   sites: WorkspaceSettings.shape.sites.partial().optional(),
   privacy: WorkspaceSettings.shape.privacy.partial().optional(),
-  experimental: WorkspaceSettings.shape.experimental.removeDefault().partial().optional(),
   files: WorkspaceSettings.shape.files.removeDefault().partial().optional(),
 }).strict();
 export type WorkspaceSettingsPatch = z.infer<typeof WorkspaceSettingsPatch>;
@@ -100,7 +93,6 @@ export function mergeWorkspaceSettings(
     agents: { ...current.agents, ...patch.agents },
     sites: { ...current.sites, ...patch.sites },
     privacy: { ...current.privacy, ...patch.privacy },
-    experimental: { ...current.experimental, ...patch.experimental },
     files: { ...current.files, ...patch.files },
   });
 }

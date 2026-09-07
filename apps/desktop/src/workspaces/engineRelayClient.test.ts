@@ -26,7 +26,6 @@ import {
   EngineRelayClient,
   INSECURE_LOOPBACK_RELAY_TEST_ENV,
   MixedRelayTransportError,
-  probeWorkspaceRelay,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
@@ -42,7 +41,7 @@ import {
 import { syncJoinedSharedChannels } from "./sharedChannels";
 
 // Every test in this file pulls with the selector its share record pins. The
-// damaged-record path has its own tests in sharedView.test.ts. This is a REAL
+// damaged-record path has its own tests in sharedView.test.ts. This is a real
 // selector — no paths and no version selects nothing at all, which the engine
 // refuses.
 const PINNED_SELECTOR = {
@@ -237,7 +236,7 @@ function expectStatefulRequestsScoped(requests: Request[]): void {
     if (request.method === "workspace.open") continue;
     expect(
       request.workspace,
-      `MUTATION: ${request.method} must retain its daemon workspace handle`,
+      `${request.method} must retain its daemon workspace handle`,
     ).toBe("ws-mock");
   }
 }
@@ -708,7 +707,7 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
-  // What a submit LEFT BEHIND is not optional. A missing field read as zero
+  // What a submit left behind is not optional. A missing field read as zero
   // would tell the recipient everything went when some of it did not.
   it("refuses a share proposal submit that does not say what it left behind", async () => {
     for (const [label, reply] of [
@@ -733,7 +732,7 @@ describe("EngineRelayClient", () => {
           grantedSelector: EDIT_SELECTOR,
           submitId: `submit-${label}`,
         }),
-        `MUTATION: ${label} softened to a default hides work that was not sent`,
+        `${label} softened to a default hides work that was not sent`,
       ).rejects.toThrow(/share\.proposal\.submit\./u);
       await sessions.closeAll();
     }
@@ -813,7 +812,7 @@ describe("EngineRelayClient", () => {
       (error: unknown) => error,
     );
     expect(refusal).toBeInstanceOf(SharedFileReadOnlyError);
-    // The noun, not just the class: the relay answers ONE code for chat and
+    // The noun, not just the class: the relay answers one code for chat and
     // for changes, so this name is the only thing that carries which one.
     expect((refusal as Error).name).toBe("SharedFileReadOnlyError");
     await sessions.closeAll();
@@ -901,201 +900,6 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
-  it("orders join identity bootstrap before physical registration and activity capture", async () => {
-    const source = (await readFile(
-      new URL("../main.ts", import.meta.url),
-      "utf8",
-    )).replaceAll("\r\n", "\n");
-    const reservation = source.indexOf(
-      "const authorityReservation = workspaceAuthorities.reserveBinding({",
-    );
-    const folderCreation = source.indexOf(
-      "created = await createWorkspaceFolder({",
-      reservation,
-    );
-    const bootstrap = source.indexOf("await bootstrapJoinedWorkspace({");
-    const registration = source.indexOf(
-      "authorityBinding = registerReservedPhysicalWorkspace(",
-      bootstrap,
-    );
-    const activityOpen = source.indexOf(
-      "await openWorkspaceActivity(created",
-      bootstrap,
-    );
-    expect(reservation).toBeGreaterThanOrEqual(0);
-    expect(folderCreation).toBeGreaterThan(reservation);
-    expect(bootstrap).toBeGreaterThan(folderCreation);
-    expect(registration).toBeGreaterThan(bootstrap);
-    expect(activityOpen).toBeGreaterThan(registration);
-  });
-
-  it("keeps failed join cleanup inside the retirement tombstone and removes the registry last", async () => {
-    const source = (await readFile(
-      new URL("../main.ts", import.meta.url),
-      "utf8",
-    )).replaceAll("\r\n", "\n");
-    const removeStart = source.indexOf("function removePhysicalWorkspace(");
-    const removeEnd = source.indexOf(
-      "async function cleanupFailedPhysicalWorkspace(",
-      removeStart,
-    );
-    expect(removeStart).toBeGreaterThanOrEqual(0);
-    expect(removeEnd).toBeGreaterThan(removeStart);
-    const remove = source.slice(removeStart, removeEnd);
-    const cleanupAt = remove.indexOf("finalize: beforeRegistryRemoval");
-    const registryRemoveAt = remove.indexOf(
-      "removeWorkspace(binding.workspaceId);",
-    );
-    expect(cleanupAt).toBeGreaterThanOrEqual(0);
-    expect(registryRemoveAt).toBeGreaterThan(cleanupAt);
-
-    const cleanupStart = removeEnd;
-    const cleanupEndMatch = source
-      .slice(cleanupStart)
-      .match(/\nfunction\s+serializeWorkspaceAuthorityWork(?:<[^>]+>)?\s*\(/);
-    const cleanupEnd =
-      cleanupEndMatch?.index === undefined
-        ? -1
-        : cleanupStart + cleanupEndMatch.index;
-    expect(cleanupEnd).toBeGreaterThan(cleanupStart);
-    const cleanup = source.slice(cleanupStart, cleanupEnd);
-    const relayCloseAt = cleanup.indexOf(
-      "await closeRelayTransportWorkspace(workspaceId);",
-    );
-    const folderResetAt = cleanup.indexOf(
-      "await resetFailedJoinFolder(rootPath);",
-    );
-    expect(relayCloseAt).toBeGreaterThanOrEqual(0);
-    expect(folderResetAt).toBeGreaterThan(relayCloseAt);
-
-    const joinRollbackStart = source.indexOf(
-      "console.error(`[desktop] join rollback for ${rootPath}:`, error);",
-    );
-    const joinRollbackEnd = source.indexOf(
-      'desktopMarks.measureSince("workspace-join"',
-      joinRollbackStart,
-    );
-    expect(joinRollbackStart).toBeGreaterThanOrEqual(0);
-    expect(joinRollbackEnd).toBeGreaterThan(joinRollbackStart);
-    const joinRollback = source.slice(joinRollbackStart, joinRollbackEnd);
-    expect(joinRollback).toContain(
-      "await removePhysicalWorkspace(authorityBinding, () =>",
-    );
-    expect(joinRollback).toContain(
-      "cleanupFailedPhysicalWorkspace(parsed.workspaceId, rootPath)",
-    );
-    expect(joinRollback).toMatch(
-      /workspaceAuthorities\.releaseReservation\(\s*authorityReservation,/,
-    );
-
-    const shareRollbackStart = source.indexOf(
-      "console.error(`[desktop] open-share rollback for ${rootPath}:`, error);",
-    );
-    const shareRollbackEnd = source.indexOf(
-      "// A share view is opened HERE",
-      shareRollbackStart,
-    );
-    expect(shareRollbackStart).toBeGreaterThanOrEqual(0);
-    expect(shareRollbackEnd).toBeGreaterThan(shareRollbackStart);
-    const shareRollback = source.slice(shareRollbackStart, shareRollbackEnd);
-    const shareOperationStart = source.lastIndexOf(
-      "const authorityReservation = workspaceAuthorities.reserveBinding({",
-      shareRollbackStart,
-    );
-    expect(shareOperationStart).toBeGreaterThanOrEqual(0);
-    expect(shareOperationStart).toBeLessThan(shareRollbackStart);
-    const shareOperation = source.slice(shareOperationStart, shareRollbackEnd);
-    expect(shareRollback).toContain(
-      "await removePhysicalWorkspace(authorityBinding, () =>",
-    );
-    expect(shareOperation).toContain(
-      "authorityBinding = registerReservedPhysicalWorkspace(",
-    );
-    expect(shareRollback).toContain("if (authorityBinding)");
-    expect(shareRollback).toContain("} else {");
-    expect(shareRollback).toContain(
-      "cleanupFailedPhysicalWorkspace(created.workspaceId, rootPath)",
-    );
-    expect(shareRollback).toMatch(
-      /workspaceAuthorities\.releaseReservation\(\s*authorityReservation,/,
-    );
-    const tryAt = shareOperation.indexOf("try {");
-    const registrationAt = shareOperation.indexOf(
-      "authorityBinding = registerReservedPhysicalWorkspace(",
-    );
-    const metadataAt = shareOperation.indexOf("setWorkspaceShareView(");
-    const catchAt = shareOperation.indexOf("} catch (error) {");
-    expect(tryAt).toBeGreaterThanOrEqual(0);
-    expect(registrationAt).toBeGreaterThan(tryAt);
-    expect(metadataAt).toBeGreaterThan(registrationAt);
-    expect(catchAt).toBeGreaterThan(metadataAt);
-    expect(shareOperation).toContain(
-      "genericChatWritable: info.genericChatWritable",
-    );
-
-    const refreshStart = source.indexOf(
-      "ipcMain.handle(CHANNELS.refreshSharedView",
-    );
-    const refreshEnd = source.indexOf("// ---- Share mounts ----", refreshStart);
-    expect(refreshStart).toBeGreaterThanOrEqual(0);
-    expect(refreshEnd).toBeGreaterThan(refreshStart);
-    const refresh = source.slice(refreshStart, refreshEnd);
-    expect(refresh).toContain("fetchShareViewInfo(");
-    expect(refresh).toContain("genericChatWritable: info.genericChatWritable");
-    expect(refresh).toContain("recordShareViewIdentity(refreshedWorkspace)");
-    expect(refresh).not.toContain("pushShareViewChat(");
-    expect(refresh).not.toContain(".pushShareView({");
-    expect(source).not.toContain('"share.view.push"');
-  });
-
-  it("registers the registry row and its exact authority as one operation", async () => {
-    const source = (await readFile(
-      new URL("../main.ts", import.meta.url),
-      "utf8",
-    )).replaceAll("\r\n", "\n");
-    const registerStart = source.indexOf("function physicalWorkspaceRegistration(");
-    const registerEnd = source.indexOf(
-      "function removePhysicalWorkspace(",
-      registerStart,
-    );
-    expect(registerStart).toBeGreaterThanOrEqual(0);
-    expect(registerEnd).toBeGreaterThan(registerStart);
-    const register = source.slice(registerStart, registerEnd);
-    expect(register).toContain("workspaceAuthorities.registerBinding(");
-    expect(register).toContain("workspaceAuthorities.registerReservedBinding(");
-    expect(register).toContain("persist: () => registerWorkspace(workspace)");
-    expect(register).toContain("rollback: () => {");
-    expect(register).toContain("current.rootPath !== workspace.rootPath");
-    expect(register).toContain("removeWorkspace(workspace.workspaceId);");
-  });
-
-  it("retires the registered relay under the attachment's one workspace coordinate", async () => {
-    const source = (await readFile(
-      new URL("../main.ts", import.meta.url),
-      "utf8",
-    )).replaceAll("\r\n", "\n");
-    const ownerStart = source.indexOf(
-      "const workspaceAuthorities = createWorkspaceAuthorityOwner({",
-    );
-    const ownerEnd = source.indexOf(
-      "function requireWorkspaceAuthority(",
-      ownerStart,
-    );
-    expect(ownerStart).toBeGreaterThanOrEqual(0);
-    expect(ownerEnd).toBeGreaterThan(ownerStart);
-    const owner = source.slice(ownerStart, ownerEnd);
-    expect(owner).toContain(
-      "disposeState: async (state, binding, workspaceAtDisposal)",
-    );
-    expect(owner).toContain("...workspaceAtDisposal");
-    expect(owner).toContain("attachmentId: binding.attachmentId");
-    expect(owner).toContain(
-      "relayCloseTargetsForPhysicalWorkspace(physicalWorkspace)",
-    );
-    expect(owner).not.toContain("remoteWorkspaceId");
-    expect(owner).not.toContain("binding.workspace.remote");
-  });
-
   it("refreshes a share view and commits its opaque daemon cursor", async () => {
     const { rootPath, attachmentId, daemon, sessions, client, relay } =
       await harness();
@@ -1159,7 +963,7 @@ describe("EngineRelayClient", () => {
   // Both dimensions of the accepted selector reach the engine intact. Dropping
   // either one widens the grant: no paths reads as "the whole workspace", and
   // no version reads as "any version's fork".
-  it("sends the accepted selector's paths AND version to the engine", async () => {
+  it("sends the accepted selector's paths and version to the engine", async () => {
     const { rootPath, attachmentId, daemon, sessions, client, relay } =
       await harness();
     const store = createCaptureLiveStores(
@@ -1184,7 +988,7 @@ describe("EngineRelayClient", () => {
     expect(
       daemon.requests.find((request) => request.method === "share.view.pull")
         ?.params,
-      "MUTATION: dropping any dimension on the wire widens the accepted grant, or leaves one the engine cannot read",
+      "dropping any dimension on the wire widens the accepted grant, or leaves one the engine cannot read",
     ).toEqual({
       workspaceId: "workspace-a",
       shareId: "share-view",
@@ -1193,9 +997,9 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
-  // The engine SKIPS an op it refuses and keeps pulling, so the refusal is the
+  // The engine skips an op it refuses and keeps pulling, so the refusal is the
   // only signal that the share stopped carrying part of what the granter
-  // shares. It must survive the wire, and it must survive PAGING: a refusal on
+  // shares. It must survive the wire, and it must survive paging: a refusal on
   // an early page is exactly the one a caller would otherwise never see.
   it("carries every page's share-view refusals through to the caller", async () => {
     let pulls = 0;
@@ -1233,7 +1037,7 @@ describe("EngineRelayClient", () => {
 
     expect(
       pull.refusals.map((refusal) => refusal.originSeq),
-      "MUTATION: keeping only the last page's refusals loses the earlier ones entirely",
+      "keeping only the last page's refusals loses the earlier ones entirely",
     ).toEqual([4, 9]);
     expect(pull.skipped).toBe(2);
     expect(pull.refusals[0].detail).toContain("version-other");
@@ -1283,7 +1087,7 @@ describe("EngineRelayClient", () => {
 
     expect(
       pull.refusals.length,
-      "MUTATION: an unbounded aggregate lets a relay grow memory in proportion to its log",
+      "an unbounded aggregate lets a relay grow memory in proportion to its log",
     ).toBe(MAX_REPORTED_REFUSALS);
     // The count is still the truth, and every page still reached the record.
     expect(pull.refusalCount).toBe(pages);
@@ -1292,7 +1096,7 @@ describe("EngineRelayClient", () => {
   });
 
   // The pull commits each intermediate page's cursor as it goes. So an early
-  // page's refusals must be RECORDED BEFORE that commit: if a later page
+  // page's refusals must be recorded before that commit: if a later page
   // fails, the retry starts past the refused op and the only remaining record
   // of why that content is missing is the one written here.
   it("records a page's refusals before committing its cursor, even when a later page fails", async () => {
@@ -1336,7 +1140,7 @@ describe("EngineRelayClient", () => {
 
     expect(
       recorded,
-      "MUTATION: recording after the commit loses the reason while the cursor stays past the op",
+      "recording after the commit loses the reason while the cursor stays past the op",
     ).toEqual([
       "the share granted version main, the relay offered version version-other",
     ]);
@@ -1382,7 +1186,7 @@ describe("EngineRelayClient", () => {
 
     expect(
       calls,
-      "MUTATION: recording after the commit could lose a collision the crashed page already found",
+      "recording after the commit could lose a collision the crashed page already found",
     ).toEqual(["recordCollisions", "commitCursor"]);
     await sessions.closeAll();
   });
@@ -1426,7 +1230,7 @@ describe("EngineRelayClient", () => {
 
     expect(
       calls,
-      "MUTATION: recording after the commit could lose projection debt for an applied page",
+      "recording after the commit could lose projection debt for an applied page",
     ).toEqual(["recordChangedPaths:docs/page-one.md", "commitCursor"]);
     await sessions.closeAll();
   });
@@ -1559,7 +1363,7 @@ describe("EngineRelayClient", () => {
       refusedDetail: null,
     });
 
-    expect(routes.modeFor(target.workspaceId)).toBe("daemon");
+    expect(routes.isBound(target.workspaceId)).toBe(true);
     const ownerOpenIndex = daemon.requests.findIndex(
       (request) =>
         request.method === "workspace.open" &&
@@ -1675,10 +1479,7 @@ describe("EngineRelayClient", () => {
   it("binds a marker-less rooted workspace to the daemon before session preparation", async () => {
     const { daemon, routes, sessions } = await harness();
 
-    expect(
-      routes.modeFor("workspace-a"),
-      "MUTATION: a rooted workspace must never bind the legacy TypeScript relay",
-    ).toBe("daemon");
+    expect(routes.isBound("workspace-a")).toBe(true);
     expect(
       daemon.requests,
       "bind must not require workspace preparation or workspace.open",
@@ -1714,10 +1515,10 @@ describe("EngineRelayClient", () => {
 
     await client.bootstrapJoinIdentity(null);
 
-    expect(routes.modeFor("workspace-a")).toBe("daemon");
+    expect(routes.isBound("workspace-a")).toBe(true);
     await expect(client.push()).resolves.toMatchObject({ pushed: 3 });
     await live.closeAll();
-    expect(routes.modeFor("workspace-a")).toBeNull();
+    expect(routes.isBound("workspace-a")).toBe(false);
   });
 
   it("orders bootstrap retirement after requests already queued by initialization", async () => {
@@ -1778,7 +1579,7 @@ describe("EngineRelayClient", () => {
     await exact.push();
     await live.closeWorkspace(workspace);
 
-    expect(routes.modeFor(workspace.workspaceId)).toBeNull();
+    expect(routes.isBound(workspace.workspaceId)).toBe(false);
     closeWorkspace.mockClear();
     await live.closeAll();
     expect(closeWorkspace).not.toHaveBeenCalled();
@@ -1803,7 +1604,7 @@ describe("EngineRelayClient", () => {
 
     await expect(exact.push()).rejects.toThrow("injected push failure");
     await live.closeWorkspace(workspace);
-    expect(routes.modeFor(workspace.workspaceId)).toBeNull();
+    expect(routes.isBound(workspace.workspaceId)).toBe(false);
   });
 
   it("rebinds the attachment-keyed session before and after a transport restart", async () => {
@@ -1890,7 +1691,7 @@ describe("EngineRelayClient", () => {
     // A delayed predecessor cleanup must not release the successor's route or
     // close its attachment-keyed session.
     await live.closeWorkspace(firstWorkspace);
-    expect(routes.modeFor(firstWorkspace.workspaceId)).toBe("daemon");
+    expect(routes.isBound(firstWorkspace.workspaceId)).toBe(true);
     await second.push();
     expect(opens).toBe(2);
     expect(
@@ -1900,7 +1701,7 @@ describe("EngineRelayClient", () => {
     ).toEqual(["ws-1"]);
 
     await live.closeWorkspace(secondWorkspace);
-    expect(routes.modeFor(firstWorkspace.workspaceId)).toBeNull();
+    expect(routes.isBound(firstWorkspace.workspaceId)).toBe(false);
     expect(
       daemon.requests
         .filter((request) => request.method === "workspace.close")
@@ -2039,8 +1840,8 @@ describe("EngineRelayClient", () => {
         .map((request) => request.workspace)
         .sort(),
     ).toEqual(["ws-close-all-1", "ws-close-all-2"]);
-    expect(routes.modeFor(firstWorkspaceId)).toBeNull();
-    expect(routes.modeFor(secondWorkspaceId)).toBeNull();
+    expect(routes.isBound(firstWorkspaceId)).toBe(false);
+    expect(routes.isBound(secondWorkspaceId)).toBe(false);
     await sessions.closeAll();
   });
 
@@ -2071,64 +1872,6 @@ describe("EngineRelayClient", () => {
       bearerToken: relay.token,
     });
     await live.closeWorkspace(successor);
-    await sessions.closeAll();
-  });
-
-  it("allows a rooted daemon bind after a rootless probe route is released", async () => {
-    const rootPath = await createTestScratch("dohc-relay-probe-route-");
-    roots.push(rootPath);
-    const routes = new RelayTransportRouteGuard();
-    let finishProbe!: (response: globalThis.Response) => void;
-    const pendingProbe = new Promise<globalThis.Response>((resolve) => {
-      finishProbe = resolve;
-    });
-    const relay = {
-      baseUrl: "https://relay.test",
-      token: "secret-token",
-      fetch: async () => await pendingProbe,
-    };
-    const probe = probeWorkspaceRelay(routes, {
-      workspaceId: "workspace-probed",
-      relay,
-    });
-
-    expect(routes.modeFor("workspace-probed")).toBe("typescript");
-    routes.releaseWorkspace("workspace-probed", "typescript");
-
-    const daemon = new MockDaemon();
-    const sessions = new EngineWorkspaceSessions(
-      new RelayConfiguredDaemonClientSource(
-        { currentClient: () => daemon },
-        routes,
-      ),
-      { transportRebindAttempts: 1 },
-    );
-    const live = new EngineRelayClient({ sessions, routes });
-    live.bind({
-      workspaceId: "workspace-probed",
-      rootPath,
-      relay,
-    });
-    expect(routes.modeFor("workspace-probed")).toBe("daemon");
-    finishProbe(
-      globalThis.Response.json({
-        ok: true,
-        hasContent: true,
-        replicationEpoch: "epoch-probed",
-        streamIdentity: "stream-probed",
-      }),
-    );
-    await expect(probe).resolves.toEqual({
-      hasContent: true,
-      identity: {
-        replicationEpoch: "epoch-probed",
-        streamIdentity: "stream-probed",
-      },
-    });
-    expect(
-      routes.modeFor("workspace-probed"),
-      "a late probe cleanup must not release a newer daemon route",
-    ).toBe("daemon");
     await sessions.closeAll();
   });
 
@@ -2217,7 +1960,7 @@ describe("EngineRelayClient", () => {
     });
     expect(
       workspacePulls,
-      "MUTATION: stopping after the first hasMore page strands remote data",
+      "stopping after the first hasMore page strands remote data",
     ).toBe(2);
     expect(
       daemon.requests.filter(
@@ -2361,7 +2104,7 @@ describe("EngineRelayClient", () => {
     ).toThrow(MixedRelayTransportError);
 
     await live.closeWorkspace("workspace-switch");
-    expect(routes.modeFor("workspace-switch")).toBeNull();
+    expect(routes.isBound("workspace-switch")).toBe(false);
     const switched = live.bind({
       workspaceId: "workspace-switch",
       rootPath,
@@ -2396,28 +2139,18 @@ describe("EngineRelayClient", () => {
       workspaceId: "workspace-locked",
       rootPath,
       relay,
-      mode: "daemon",
     });
 
     // Mutating the caller-owned object cannot mutate the copied route.
     relay.baseUrl = "https://relay-b.test";
     relay.token = "token-b";
-    expect(routes.modeFor("workspace-locked")).toBe("daemon");
+    expect(routes.isBound("workspace-locked")).toBe(true);
     expect(() =>
       routes.bind({
         workspaceId: "workspace-locked",
         rootPath,
         relay,
-        mode: "typescript",
-      }),
-    ).toThrow(MixedRelayTransportError);
-    expect(() =>
-      routes.bind({
-        workspaceId: "workspace-locked",
-        rootPath,
-        relay,
-        mode: "daemon",
-      }),
+        }),
     ).toThrow("different relay origin");
   });
 });

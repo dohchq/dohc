@@ -3,7 +3,7 @@ import type { NodeView } from "@tiptap/pm/view";
 
 // Resolving a workspace-relative image src → a servable URL, desktop-only.
 //
-// The canonical image node attr stays the ORIGINAL relative path (e.g.
+// The canonical image node attr stays the original relative path (e.g.
 // `assets/pic.png`, relative to the document) so the markdown round-trips
 // losslessly. Only at render time does the desktop editor rewrite that path to
 // the privileged `dohc-file://` scheme the main process serves bytes from —
@@ -47,9 +47,9 @@ export function documentDir(docPath: string): string {
 //
 // Upward-relative links (`../attachments/x.png`) are now first-class — the
 // global-folder attachment mode writes them so a nested doc can reference one
-// folder at the workspace root. If `..` climbs ABOVE the workspace root the
-// escaping `..` segments are PRESERVED at the front of the result (e.g.
-// "../escape.png"), so callers can DETECT the escape rather than have it
+// folder at the workspace root. If `..` climbs above the workspace root the
+// escaping `..` segments are preserved at the front of the result (e.g.
+// "../escape.png"), so callers can detect the escape rather than have it
 // silently flattened; resolveWorkspaceImageSrc refuses to serve such a path.
 export function joinWorkspacePath(docPath: string, src: string): string {
   const combined = documentDir(docPath) + src.replace(/\\/g, "/");
@@ -75,7 +75,7 @@ export function joinWorkspacePath(docPath: string, src: string): string {
 // True when a normalized workspace path escapes the workspace root — i.e. it is
 // (or begins with) a leftover `..` segment. Such a path must never be minted
 // into a dohc-file:// URL.
-export function escapesWorkspaceRoot(workspacePath: string): boolean {
+function escapesWorkspaceRoot(workspacePath: string): boolean {
   return workspacePath === ".." || workspacePath.startsWith("../");
 }
 
@@ -87,8 +87,8 @@ export function assetUrl(workspaceId: string, workspacePath: string): string {
   return `dohc-file://${workspaceId}/${encoded}`;
 }
 
-// The resolver's "serve nothing" answer, and the ONLY safe one for a src we
-// refuse to serve. Handing the RAW relative path back to the browser is not
+// The resolver's "serve nothing" answer, and the only safe one for a src we
+// refuse to serve. Handing the raw relative path back to the browser is not
 // containment: the renderer document is itself loaded from a real URL (file://
 // in a packaged app, the dev server otherwise), so `../../build/icon.png` would
 // resolve against the APP's own page — outside the workspace entirely — and

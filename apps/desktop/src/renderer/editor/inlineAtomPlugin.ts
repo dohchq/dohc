@@ -1,3 +1,4 @@
+import { isCodeBlock, isCodeMark } from "./pmHelpers";
 // Inline-atom rendering — a ProseMirror decoration plugin.
 //
 // Deliberately a *decoration*, not a node/mark: the atom stays as
@@ -17,12 +18,11 @@ import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { parseInlineAtoms } from './inlineAtom'
 
-
 export const inlineAtomKey = new PluginKey('dohc-inline-atom')
 
 // Minimal structural shapes so the range logic is testable without a
 // real ProseMirror/jsdom instance.
-export type PMMarkLike = { type: { name: string; spec?: { code?: boolean } } }
+type PMMarkLike = { type: { name: string; spec?: { code?: boolean } } }
 export type PMNodeLike = {
   isText?: boolean
   text?: string | null
@@ -39,7 +39,7 @@ export type PMDocLike = {
   ) => void
 }
 
-export type AtomRange = {
+type AtomRange = {
   from: number
   to: number
   kind: 'value'
@@ -47,26 +47,11 @@ export type AtomRange = {
 
 /** A node is "code" (verbatim) if it is a code block or carries an
  *  inline-code mark. Tiptap's inline-code mark is `inlineCode`
- *  (NOT `code`); CommonMark presets may use `code`; some define
+ *  (not `code`); CommonMark presets may use `code`; some define
  *  `spec.code`. Check all three so atoms are never decorated inside
  *  code. */
-function isCodeMark(m: PMMarkLike): boolean {
-  return (
-    m.type.name === 'inlineCode' ||
-    m.type.name === 'code' ||
-    m.type.spec?.code === true
-  )
-}
-function isCodeBlock(node: PMNodeLike | null): boolean {
-  return (
-    !!node &&
-    (node.type.name === 'code_block' ||
-      node.type.name === 'codeBlock' ||
-      node.type.spec?.code === true)
-  )
-}
 
-/** PURE: walk text nodes, skip code, return atom decoration ranges in
+/** Pure: walk text nodes, skip code, return atom decoration ranges in
  *  absolute doc coordinates. Offsets map 1:1 because ProseMirror text
  *  node size === JS string length (UTF-16 units), same as the parser. */
 export function computeAtomRanges(doc: PMDocLike): AtomRange[] {

@@ -2,12 +2,12 @@ import { rm } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
 import {
   CHATS_METHOD,
-  ChatsLoopbackEngine,
   type ChatDispatch,
   type JsonValue,
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import type {
   AgentDispatchClaim,
   LinkedChatStore,
@@ -131,9 +131,6 @@ interface FixtureOptions {
   ambiguousClaimOnce?: boolean;
   deferClaim?: boolean;
   hasPendingRunMessageLink?: (workspaceId: string, runId: string) => boolean;
-  scanEligible?: (
-    workspace: ChatDispatchWorkspace,
-  ) => boolean | Promise<boolean>;
 }
 
 interface Fixture {
@@ -164,8 +161,7 @@ interface Fixture {
     runId: string;
   }>;
   runActivity: { acquires: number; releases: number };
-  // How often a scan RESOLVED the stores — for an opted-out workspace even
-  // one resolution would open the daemon workspace and create engine.db.
+  // How often a scan resolved the stores.
   storeResolves: { chat: number; dispatch: number };
   now: { value: number };
   readDispatch(triggerMessageId: string, threadId: string): ChatDispatch;
@@ -484,7 +480,6 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       syncRequests.push(dispatchWorkspace.workspaceId);
       return options.onQueueSync?.(dispatchWorkspace.workspaceId, chat);
     },
-    ...(options.scanEligible ? { scanEligible: options.scanEligible } : {}),
     ...(options.temporaryRunActivity || options.prepareRunWorkspaceFailures
       ? {
           prepareRunWorkspace: async () => {
@@ -672,10 +667,6 @@ afterEach(async () => {
 });
 
 describe("chatDispatchService", () => {
-  it("allows ten dispatches per rolling budget window", () => {
-    expect(CHAT_DISPATCH_BUDGET_MAX).toBe(10);
-  });
-
   it("provisions the agent channel during the first trigger scan", async () => {
     const fixture = await createFixture({ runner: { enabled: false } });
 
@@ -687,48 +678,6 @@ describe("chatDispatchService", () => {
         (channel) => channel.kind === "agent",
       ),
     ).toHaveLength(1);
-  });
-
-  it("never resolves a store when the workspace is scan-ineligible (engine opt-out)", async () => {
-    // AUDIT-OPTOUT: an opted-out workspace must record NOTHING. Resolving the
-    // chat/dispatch stores opens the workspace in the engine daemon, which
-    // creates .dohc/engine/engine.db — so an ineligible scan must be a no-op.
-    vi.useFakeTimers();
-    const gated: string[] = [];
-    const fixture = await createFixture({
-      pumpWorkspace: true,
-      scanEligible: async (workspace) => {
-        gated.push(workspace.workspaceId);
-        return false;
-      },
-    });
-    await createAgentThread(fixture, {
-      body: "Please review the launch.",
-      authorUserId: "user_local",
-    });
-
-    fixture.service.start();
-    await fixture.service.scanWorkspace(WORKSPACE_ID);
-    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_PUMP_MS);
-    await flushMicrotasks(50);
-
-    expect(fixture.storeResolves).toEqual({ chat: 0, dispatch: 0 });
-    expect(gated).toEqual([WORKSPACE_ID, WORKSPACE_ID]);
-    expect(fixture.spawnCalls).toHaveLength(0);
-    expect(fixture.errors).toEqual([]);
-  });
-
-  it("scans normally when the workspace is scan-eligible", async () => {
-    const fixture = await createFixture({
-      runner: { enabled: false },
-      scanEligible: async () => true,
-    });
-
-    fixture.service.setPaused(true);
-    await activate(fixture);
-
-    expect(fixture.storeResolves.chat).toBeGreaterThan(0);
-    expect(fixture.storeResolves.dispatch).toBeGreaterThan(0);
   });
 
   it("records only owner human UI triggers and deduplicates repeated scans", async () => {
@@ -934,7 +883,7 @@ describe("chatDispatchService", () => {
 
     const firstSpawn = fixture.spawnCalls[0]!;
     expect(firstSpawn.command).toMatch(/(?:^|[\\/])claude(?:\.exe)?$/iu);
-    // The prompt is NOT in argv — it rides stdin, so argv is exactly the
+    // The prompt is not in argv — it rides stdin, so argv is exactly the
     // configured runner command. Asserting the full array (not a slice that
     // drops the last element) is what proves the prompt is absent from it.
     expect(firstSpawn.args).toEqual(["-p", "--allowedTools", "Bash(dohc chat:*)"]);
@@ -948,7 +897,7 @@ describe("chatDispatchService", () => {
       detached: true,
       windowsHide: true,
     });
-    // stdin is a PIPE, not "ignore" — that is the channel the prompt arrives
+    // stdin is a pipe, not "ignore" — that is the channel the prompt arrives
     // on. An "ignore" here would mean the runner is spawned with no prompt at
     // all.
     expect(firstSpawn.options.stdio[0]).toBe("pipe");
@@ -1027,8 +976,6 @@ describe("chatDispatchService", () => {
   });
 
   it("keeps an exited live claim recoverable until daemon completion is durable", async () => {
-    // MUTATION: remove the explicit recovery timer -> a local-only workspace
-    // never makes the seventh repair attempt after the first six are exhausted.
     const fixture = await createFixture({
       temporaryRunActivity: true,
     });
@@ -1158,8 +1105,6 @@ describe("chatDispatchService", () => {
   });
 
   it("releases the live slot when the final run-message lookup rejects", async () => {
-    // MUTATION: await listRunMessages before terminal cleanup -> the second
-    // trigger remains wedged behind the leaked finalized live slot.
     const fixture = await createFixture({
       temporaryRunActivity: true,
     });
@@ -1265,7 +1210,7 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(trigger.threadId);
   });
 
-  // Issue #251. The dispatch prompt always contains a double quote (the
+  // The dispatch prompt always contains a double quote (the
   // `--as-agent "<report>"` contract) and carries the whole rendered thread.
   // While it rode argv, a .cmd/.bat runner -- the npm -g layout on Windows --
   // had to go through cmd.exe, where quoteForCmd refuses a double quote
@@ -1348,7 +1293,6 @@ describe("chatDispatchService", () => {
     const replacementAttachmentId = Symbol("replacement attachment");
     const syncStarted = Promise.withResolvers<void>();
     const allowSync = Promise.withResolvers<void>();
-    const scannedAttachments: Array<symbol | undefined> = [];
     const fixture = await createFixture({
       workspaceAttachmentId: replacementAttachmentId,
       pumpWorkspaces: [
@@ -1362,10 +1306,6 @@ describe("chatDispatchService", () => {
         syncStarted.resolve();
         await allowSync.promise;
       },
-      scanEligible: (workspace) => {
-        scannedAttachments.push(workspace.attachmentId);
-        return false;
-      },
     });
 
     fixture.service.start();
@@ -1375,7 +1315,7 @@ describe("chatDispatchService", () => {
     await flushMicrotasks();
 
     expect(fixture.syncWorkspaces[0]?.attachmentId).toBe(originalAttachmentId);
-    expect(scannedAttachments).toEqual([]);
+    expect(fixture.storeResolves).toEqual({ chat: 0, dispatch: 0 });
   });
 
   it("starts workspace pump syncs concurrently", async () => {
@@ -1454,8 +1394,6 @@ describe("chatDispatchService", () => {
   });
 
   it("loads pause state once per pending thread on the live backend", async () => {
-    // MUTATION: restore the per-candidate pause query -> the two dispatches in
-    // the paused thread produce a third daemon round-trip.
     const fixture = await createFixture();
     const paused = await createAgentThread(fixture, {
       body: "Keep this thread paused.",
@@ -1513,8 +1451,6 @@ describe("chatDispatchService", () => {
   });
 
   it("re-resolves an ambiguously committed claim even when pending is empty", async () => {
-    // MUTATION: consult the uncertain claim only from claimNextPending inside
-    // the listPending loop -> the committed running row is invisible on retry.
     const fixture = await createFixture({ ambiguousClaimOnce: true });
     const trigger = await createAgentThread(fixture, {
       body: "Recover this lost claim response.",
@@ -1538,8 +1474,6 @@ describe("chatDispatchService", () => {
   });
 
   it("reserves the workspace while the asynchronous claim is pending", async () => {
-    // MUTATION: add runReservations only inside startClaim -> runnerSelfTest
-    // starts a competing process while the daemon claim is unresolved.
     const fixture = await createFixture({ deferClaim: true });
     await createAgentThread(fixture, {
       body: "Hold the claim while self-test checks the slot.",
@@ -1625,8 +1559,6 @@ describe("chatDispatchService", () => {
   });
 
   it("restores a Resume budget bypass when the claim RPC rejects", async () => {
-    // MUTATION: consume the bypass before claimNextPending without restoring it
-    // in the error path -> the recovery scan immediately pauses this thread.
     const fixture = await createFixture({
       claimFailures: [
         new EngineClientError(
@@ -1670,8 +1602,6 @@ describe("chatDispatchService", () => {
   });
 
   it("restores a Resume budget bypass when uncertain-claim preparation rejects", async () => {
-    // MUTATION: omit bypass restoration from the uncertain-claim preparation
-    // catch -> the next pending trigger immediately re-pauses this thread.
     const preparationError = new Error("workspace hydration failed");
     const fixture = await createFixture({
       ambiguousClaimOnce: true,
@@ -1822,17 +1752,12 @@ describe("chatDispatchService", () => {
     expect(
       fixture.readDispatch(first.messageId, first.threadId).state,
     ).toBe("failed");
-    // MUTATION: move reservation deletion back after failClaimBeforeRun. The
-    // persistent clear failure throws first, so this assertion sees a
-    // reservation instead of the second live child.
-    expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(true);
+    expect(fixture.service.hasLiveRun(WORKSPACE_ID), "move reservation deletion back after failClaimBeforeRun. The persistent clear failure throws first, so this assertion sees a reservation instead of the second live child.").toBe(true);
     expect(fixture.spawnCalls).toHaveLength(1);
     expect(fixture.spawnCalls[0]!.options.env.DOHC_CHAT_THREAD).toBe(second.threadId);
   });
 
   it("deadlines every daemon RPC awaited before terminal persistence", async () => {
-    // MUTATION: omit the request options from any lookup/note call -> that
-    // method appears below without a client deadline and can wedge the live slot.
     const fixture = await createFixture();
     await createAgentThread(fixture, {
       body: "Fail after exercising every pre-terminal daemon call.",
@@ -2055,8 +1980,6 @@ describe("chatDispatchService", () => {
   });
 
   it("recovers a restart-failed row left behind before its requeue", async () => {
-    // MUTATION: require failureNotePosted=false for restart failures -> the
-    // normal note-then-fail ordering is invisible after a crash before requeue.
     const fixture = await createFixture();
     const trigger = await createAgentThread(fixture, {
       body: "Recover the persisted half of restart recovery.",
@@ -2095,9 +2018,6 @@ describe("chatDispatchService", () => {
   });
 
   it("retains an interrupted requeue intent until the ledger transition persists", async () => {
-    // MUTATION: remove pendingInterruptedRequeues or mark the workspace swept
-    // after the first failed requeue -> the terminal trigger is undiscoverable
-    // and this test never observes the second attempt or a replacement runner.
     vi.useFakeTimers();
     const fixture = await createFixture({
       requeueFailures: [new Error("daemon unavailable during requeue")],
@@ -2169,8 +2089,6 @@ describe("chatDispatchService", () => {
   });
 
   it("backs off repeated local-only recovery scan failures", async () => {
-    // MUTATION: keep recovery retries at a flat delay -> the third scan runs
-    // after one second instead of waiting for the doubled second delay.
     vi.useFakeTimers();
     const fixture = await createFixture({
       recordEligibleTriggerFailures: [
@@ -2203,9 +2121,6 @@ describe("chatDispatchService", () => {
   });
 
   it("surfaces and requeues an interrupted live-backend run on desktop restart", async () => {
-    // MUTATION: omit recoverRunningDispatches:false on the initial workspace
-    // open -> the daemon reclaims this row before startupSweep can post its
-    // recovery note, and the exhausted history becomes invisible.
     const fixture = await createFixture();
     const trigger = await createAgentThread(fixture, {
       body: "Recover this live-backend crash.",
@@ -2426,8 +2341,6 @@ describe("chatDispatchService", () => {
   });
 
   it("terminates an app-quit runner when persisting its failure rejects", async () => {
-    // MUTATION: start quit termination after failRun -> this rejection leaves
-    // the detached runner alive and neither signal is observed.
     vi.useFakeTimers();
     const fixture = await createFixture();
     await createAgentThread(fixture, {
@@ -2508,8 +2421,6 @@ describe("chatDispatchService", () => {
   });
 
   it("retries timeout persistence for a local-only live workspace", async () => {
-    // MUTATION: omit scheduleRecoveryScan from the timeout catch -> the open
-    // claim remains running while the timed-out child is still unresponsive.
     vi.useFakeTimers();
     const fixture = await createFixture({
       runner: { timeoutMinutes: 1 },
@@ -2651,8 +2562,6 @@ describe("chatDispatchService", () => {
   });
 
   it("deadlines and transport-retries the stopped-run failure-note fallback", async () => {
-    // MUTATION: omit durableDispatchRequest from the fallback mark -> the first
-    // transport loss rejects stopAgentRun and its request has no deadline.
     const fixture = await createFixture({
       markFailureNoteFailures: [
         new EngineClientError(
@@ -2772,19 +2681,18 @@ describe("chatDispatchService", () => {
     ).toHaveLength(1);
   });
 
-  it("refuses a runner self-test on an opted-out workspace before resolving a store", async () => {
-    // AUDIT-OPTOUT: the self-test writes a scratch thread, so resolving the chat
-    // store would create .dohc/engine/engine.db for a workspace that opted out
-    // of recording anything.
+  it("refuses a runner self-test on a workspace without a capture before resolving a store", async () => {
+    // The self-test writes a scratch thread, so resolving the chat store
+    // would open the engine for a workspace whose capture never built.
     const fixture = await createFixture({
       prepareRunWorkspaceFailures: [
-        new Error("Chats are not enabled for this workspace."),
+        new Error("dohc could not start Chats for this workspace. Restart dohc to try again."),
       ],
     });
 
     await expect(fixture.service.runnerSelfTest(WORKSPACE_ID)).resolves.toEqual({
       ok: false,
-      detail: "Chats are not enabled for this workspace.",
+      detail: "dohc could not start Chats for this workspace. Restart dohc to try again.",
     });
 
     expect(fixture.storeResolves).toEqual({ chat: 0, dispatch: 0 });

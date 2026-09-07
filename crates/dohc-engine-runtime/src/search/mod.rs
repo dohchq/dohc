@@ -1,10 +1,10 @@
-//! Workspace search (R12): an FTS index over file text and chat messages, with
+//! Workspace search: an FTS index over file text and chat messages, with
 //! policy-filtered visibility, a fail-closed FILE policy, and read-your-writes
 //! semantics on the single writer.
 //!
-//! This ports the TS `searchIndex.ts` (FTS maintenance + policy-filtered query)
+//! This ports the TS search index (FTS maintenance + policy-filtered query)
 //! and the pure preview slice of `workspaceSearch.ts`. The FTS tables are
-//! created by the storage migration ledger (ordinal 4, `v1-search`); this module
+//! created by the storage baseline migration; this module
 //! is the logic that fills and reads them, composed through the storage seams
 //! (`EngineStore::write_with` / `read_with`) exactly like the versioning and
 //! chat domains — the connection never leaves the actor thread.
@@ -17,20 +17,19 @@
 //!
 //! ## Fail-closed, scoped to files
 //!
-//! A `.dohc/files.toml` / `.dohc/visibility.toml` that EXISTS but cannot be read
+//! A `.dohc/files.toml` / `.dohc/visibility.toml` that exists but cannot be read
 //! or parsed never widens search: FILE results go empty (a hidden/secret/`.dohc`
 //! path can never appear), while CHAT search — which the FILE policy does not
-//! govern — stays fully available. An ABSENT policy file is defaults. This is
-//! the hotfix posture (`searchIndex.ts` after the fail-open→fail-closed fix),
-//! preserved here verbatim.
+//! govern — stays fully available. An absent policy file is defaults. This is
+//! the TS posture after its fail-open→fail-closed fix, preserved here verbatim.
 
 pub mod index;
 pub mod policy;
 pub mod query;
 
 pub use index::{
-    delete_file_search_index, ensure_search_index_for_version, floor_of,
-    upsert_chat_message_search_index, upsert_file_search_index, upsert_thread_header_search_index,
+    delete_file_search_index, ensure_search_index_for_version, upsert_chat_message_search_index,
+    upsert_file_search_index, upsert_thread_header_search_index,
 };
 pub use policy::{
     DiagnosticReason, EffectivePolicy, Export, FilesPolicyRule, POLICY_FILE_MAX_BYTES, PathFloor,
@@ -40,8 +39,8 @@ pub use policy::{
 };
 pub use query::{
     GranularChatMessageSearchBatch, GranularChatMessageSearchResult, SearchCandidate,
-    SearchCandidateAnchor, SearchCandidateBatch, query_chat_messages_granular,
-    query_chat_messages_granular_bounded, query_search_index, query_search_index_keyset,
+    SearchCandidateAnchor, SearchCandidateBatch, query_chat_messages_granular_bounded,
+    query_search_index_keyset,
 };
 
 use dohc_engine_domain::{MAX_MESSAGE_BODY_BYTES, is_js_trim_ws, linked_chat_projection_path};
@@ -87,9 +86,8 @@ pub const SHORT_QUERY_PAGE_ROW_BUDGET: usize = 1024;
 /// much chat source text before returning a keyset continuation.
 pub const CHAT_SEARCH_RESULT_SOURCE_BYTE_BUDGET: usize = MAX_MESSAGE_BODY_BYTES + 8 * 1024;
 pub const CHAT_SEARCH_PAGE_SOURCE_BYTE_BUDGET: usize = 256 * 1024;
-const UNPAGED_SEARCH_PAGE_CEILING: usize = MAX_RESULT_LIMIT + 1;
 
-/// Errors from the search index/query surface. Policy read failures are NOT
+/// Errors from the search index/query surface. Policy read failures are not
 /// errors — they fail closed and surface as diagnostics; only storage faults and
 /// fail-closed corruption are errors here.
 #[derive(Debug, thiserror::Error)]
@@ -132,7 +130,7 @@ pub enum SearchSurface {
     Chat,
 }
 
-/// One line-level search result (`WorkspaceEngineSearchResult`).
+/// One line-level search result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchResult {
     pub surface: SearchSurface,
@@ -331,82 +329,6 @@ pub fn preview_line_matches(text: &str, query: &str, remaining: usize) -> Vec<Pr
         }
     }
     out
-}
-
-/// Compatibility wrapper for the unpaged runtime surface.
-pub fn search_workspace(
-    conn: &Connection,
-    root_dir: &Path,
-    workspace_id: &str,
-    version_id: &str,
-    query: &str,
-    limit: Option<i64>,
-    now_ms: i64,
-) -> Result<Vec<SearchResult>, SearchError> {
-    let requested = limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
-    let Some(cap) = query::clamp_limit(requested, MAX_RESULT_LIMIT) else {
-        return Ok(Vec::new());
-    };
-    collect_search_pages(cap, |remaining, expected_generation, after| {
-        search_workspace_page(
-            conn,
-            root_dir,
-            workspace_id,
-            version_id,
-            query,
-            Some(i64::try_from(remaining).unwrap_or(i64::MAX)),
-            now_ms,
-            expected_generation,
-            after,
-        )
-    })
-}
-
-fn collect_search_pages(
-    cap: usize,
-    mut next_page: impl FnMut(
-        usize,
-        Option<u64>,
-        Option<SearchResultKey>,
-    ) -> Result<SearchPageBatch, SearchError>,
-) -> Result<Vec<SearchResult>, SearchError> {
-    let mut results = Vec::with_capacity(cap);
-    let mut expected_generation = None;
-    let mut after = None;
-    let mut iterations = 0usize;
-    loop {
-        iterations = iterations.saturating_add(1);
-        if iterations > UNPAGED_SEARCH_PAGE_CEILING {
-            return Err(SearchError::Bounds(
-                "search paging exceeded its page ceiling",
-            ));
-        }
-        let remaining = cap.saturating_sub(results.len());
-        let page = next_page(remaining, expected_generation, after)?;
-        if page.disposition == SearchPageDisposition::Restart {
-            return Err(SearchError::Corrupt(
-                "search generation changed during an unpaged read",
-            ));
-        }
-        expected_generation = Some(page.generation);
-        results.extend(page.results.into_iter().map(|keyed| keyed.result));
-        if results.len() >= cap || !page.has_more {
-            break;
-        }
-        let Some(next) = page.continuation else {
-            return Err(SearchError::Bounds(
-                "search page made no progress while continuation was required",
-            ));
-        };
-        if after == Some(next) {
-            return Err(SearchError::Bounds(
-                "search page repeated its continuation cursor",
-            ));
-        }
-        after = Some(next);
-    }
-    results.truncate(cap);
-    Ok(results)
 }
 
 /// Ensure the index, bind the read to a monotonic connection generation, and
@@ -939,8 +861,6 @@ mod tests {
 
     #[test]
     fn preview_is_bounded_in_utf16_units_on_astral_text() {
-        // MUTATION: window by Rust scalar count and this becomes 360 UTF-16
-        // units, exceeding the renderer's 250-unit IPC contract.
         let line = format!(
             "{}needle{}",
             "\u{1f600}".repeat(120),
@@ -948,7 +868,10 @@ mod tests {
         );
         let hits = preview_line_matches(&line, "needle", 1);
         let hit = hits.first().expect("astral hit");
-        assert!(hit.preview.encode_utf16().count() <= WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS);
+        assert!(
+            hit.preview.encode_utf16().count() <= WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS,
+            "window by Rust scalar count and this becomes 360 UTF-16 units, exceeding the renderer's 250-unit IPC contract."
+        );
         let start_utf16 = hit.preview[..hit.match_start].encode_utf16().count();
         let end_utf16 = hit.preview[..hit.match_end].encode_utf16().count();
         assert_eq!(
@@ -959,35 +882,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             "needle".encode_utf16().collect::<Vec<_>>()
         );
-    }
-
-    #[test]
-    fn unpaged_search_rejects_runaway_alternating_continuations() {
-        // MUTATION: remove the iteration ceiling and this finite pathological
-        // pager eventually returns success after alternating beyond the bound.
-        let mut calls = 0usize;
-        let error = collect_search_pages(1, |_remaining, _generation, _after| {
-            calls = calls.saturating_add(1);
-            let has_more = calls <= UNPAGED_SEARCH_PAGE_CEILING.saturating_add(1);
-            Ok(SearchPageBatch {
-                disposition: SearchPageDisposition::Results,
-                generation: 7,
-                results: Vec::new(),
-                has_more,
-                continuation: has_more.then_some(SearchResultKey {
-                    surface: SearchSurface::File,
-                    rowid: if calls.is_multiple_of(2) { 2 } else { 1 },
-                    line: 0,
-                }),
-            })
-        })
-        .expect_err("runaway pager must hit the hard page ceiling");
-
-        assert!(matches!(
-            error,
-            SearchError::Bounds("search paging exceeded its page ceiling")
-        ));
-        assert_eq!(calls, UNPAGED_SEARCH_PAGE_CEILING);
     }
 
     #[test]

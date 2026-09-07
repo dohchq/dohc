@@ -32,7 +32,7 @@ export function workspaceActivityPayload(
 }
 
 // One send decision for the workspace-activity channel: a scoped event
-// reaches only windows whose ACTIVE workspace matches (exactly like
+// reaches only windows whose active workspace matches (exactly like
 // pluginStatusChanged); a global event reaches every window. A window on
 // workspace B must never be made to refetch its world for workspace A's
 // activity.

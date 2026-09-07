@@ -1,5 +1,5 @@
 // "Export as HTML" / "Export as PDF" (ViewHeader's document menu) both
-// render through this ONE pure function: a SELF-CONTAINED HTML document —
+// render through this one pure function: a SELF-CONTAINED HTML document —
 // title, the body rendered through the same tiptap schema the editor uses
 // (markdownBodyToHtml, import-export.ts), and an inline print-quality
 // stylesheet. No external assets (fonts, scripts, stylesheets) — the file
@@ -200,12 +200,12 @@ function typesetMath(content: DocumentFragment): boolean {
 // neither: the file is opened from wherever the user saved it (HTML), or from a
 // throwaway temp dir (PDF — documentPdfExport writes the HTML to os.tmpdir()
 // and loads it with `file://`). The only base an exported document actually has
-// is its OWN directory, so its containment rule is stricter than the editor's:
+// is its own directory, so its containment rule is stricter than the editor's:
 //
 //   http(s)                              → kept (a remote image is still remote)
 //   plain path at/below the export dir   → kept ("assets/x.png" still resolves
 //                                          when the HTML is saved beside the doc)
-//   ANYTHING else                        → emitted with NO src
+//   anything else → emitted with NO src
 //
 // "Anything else" is every src that could climb out of the export directory or
 // name a local resource: `../` traversal (which a global-folder attachment src
@@ -257,7 +257,7 @@ function prepareExportedBodyHtml(bodyHtml: string): {
   return { html: template.innerHTML, hasMath }
 }
 
-// Builds the full standalone HTML document. `markdown` is the WHOLE document
+// Builds the full standalone HTML document. `markdown` is the whole document
 // source (frontmatter included, exactly what "Copy as Markdown" copies) —
 // frontmatter drives the title; everything after it is the rendered body.
 export function buildStandaloneDocumentHtml(

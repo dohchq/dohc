@@ -14,40 +14,18 @@ use dohc_engine_domain::{
     WriteBinary, attachment_id_for, channel_slug_for_name,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{
+    ScratchDir, ScriptedFaults, decode_hex, engine_db_path, flip_byte, open_store,
+};
 use rusqlite::{OptionalExtension, params};
-use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::apply::apply_chat_tx;
 use crate::*;
 
-/// A skip claims client 12 clocks `[0, 3)` but carries no integrable content.
-/// Against `clock_collision_pair()`'s first `[0, 2)` update it passes checks
-/// 1-3, reaches the persistent apply, then check 4 observes that clock 2 was
-/// neither integrated nor parked.
-const CHECK4_DISCARDED_SKIP_HEX: &str = "01010c000a0300";
-
-macro_rules! assert_invalid_refusal {
-    ($result:expr) => {
-        assert!(matches!(
-            $result,
-            Ok(ApplyOutcome::Refused(ReplicationRefusal {
-                reason: RefusalReason::InvalidInput { .. },
-                ..
-            }))
-        ))
-    };
-}
-
-fn store() -> (ScratchDir, std::path::PathBuf, EngineStore) {
-    let scratch = ScratchDir::new().expect("scratch");
-    let path = scratch.engine_db_path().expect("db path");
-    let store = EngineStore::open(&path, 1_000).expect("open");
-    (scratch, path, store)
-}
-
+/// A relay-acked envelope for workspace `ws`, recorded at 2_000 ms, whose
+/// relay sequence equals its origin sequence.
 fn envelope(origin: &str, seq: i64, kind: &str, payload: serde_json::Value) -> ReplicationEnvelope {
     ReplicationEnvelope {
         workspace_id: "ws".to_owned(),
@@ -60,31 +38,26 @@ fn envelope(origin: &str, seq: i64, kind: &str, payload: serde_json::Value) -> R
     }
 }
 
-fn decode_hex(encoded: &str) -> Vec<u8> {
-    encoded
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let pair = std::str::from_utf8(pair).expect("hex utf8");
-            u8::from_str_radix(pair, 16).expect("hex byte")
-        })
-        .collect()
-}
+/// A skip claims client 12 clocks `[0, 3)` but carries no integrable content.
+/// Against `clock_collision_pair()`'s first `[0, 2)` update it passes checks
+/// 1-3, reaches the persistent apply, then check 4 observes that clock 2 was
+/// neither integrated nor parked.
+const CHECK4_DISCARDED_SKIP_HEX: &str = "01010c000a0300";
 
-fn flip_payload_byte(update: &[u8], from: u8, to: u8) -> Vec<u8> {
-    let positions: Vec<usize> = update
-        .iter()
-        .enumerate()
-        .filter_map(|(index, byte)| (*byte == from).then_some(index))
-        .collect();
-    assert_eq!(
-        positions.len(),
-        1,
-        "payload byte must be unambiguous in the wire bytes"
-    );
-    let mut hostile = update.to_vec();
-    hostile[positions[0]] = to;
-    hostile
+macro_rules! assert_invalid_refusal {
+    ($result:expr) => {
+        assert!(matches!(
+            $result,
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Refused(ReplicationRefusal {
+                    reason: RefusalReason::InvalidInput { .. },
+                    ..
+                }),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ))
+    };
 }
 
 fn clock_collision_pair() -> (Vec<u8>, Vec<u8>) {
@@ -130,8 +103,8 @@ fn seed_text_head(engine: &mut EngineStore, object_id: &str, path: &str, text: &
 
 fn insert_probe(tx: &rusqlite::Transaction<'_>, op: &ReplicationEnvelope) -> Result<(), SyncError> {
     tx.execute(
-        "INSERT OR REPLACE INTO documents (doc_id,body,updated_at_ms) VALUES (?1,?2,?3)",
-        params![op.origin_id, op.op_kind, op.recorded_at_ms],
+        "INSERT OR REPLACE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+        params![op.origin_id, op.op_kind.len() as i64, op.op_kind],
     )
     .map_err(SyncError::persist)?;
     Ok(())
@@ -194,7 +167,7 @@ fn decision_winner(engine: &EngineStore) -> (String, i64, String, i64) {
 
 #[test]
 fn imported_decision_refuses_unsafe_at_ms_without_row_and_acks() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let operation = envelope(
         "unsafe-decision-time",
         0,
@@ -202,8 +175,6 @@ fn imported_decision_refuses_unsafe_at_ms_without_row_and_acks() {
         decision_payload("open", i64::MAX, None),
     );
 
-    // MUTATION: dropping the persisted-safe atMs bound journals a decision that
-    // the cross-engine read contract cannot represent.
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
     let row_count: i64 = engine
         .read_with(|conn| {
@@ -211,7 +182,10 @@ fn imported_decision_refuses_unsafe_at_ms_without_row_and_acks() {
                 .map_err(dohc_engine_storage::StorageError::corrupt_public)
         })
         .expect("decision row count");
-    assert_eq!(row_count, 0);
+    assert_eq!(
+        row_count, 0,
+        "dropping the persisted-safe atMs bound journals a decision that the cross-engine read contract cannot represent."
+    );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "unsafe-decision-time").expect("ack"),
         0
@@ -220,7 +194,7 @@ fn imported_decision_refuses_unsafe_at_ms_without_row_and_acks() {
 
 #[test]
 fn imported_decision_refuses_an_explicit_null_resolver() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let mut payload = decision_payload("resolved", 100, None);
     payload["resolvedByMessageId"] = serde_json::Value::Null;
     let operation = envelope("null-decision-resolver", 0, "chat.decision.set", payload);
@@ -271,21 +245,23 @@ fn decision_lww_is_permutation_convergent_and_resolved_wins_ties() {
     ];
     let mut winners = Vec::new();
     for order in permutations {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         for index in order {
             apply_chat_envelope(&mut engine, &ops[index], &NoFaults).expect("apply");
         }
         winners.push(decision_winner(&engine));
     }
-    // MUTATION: using arrival order or origin before resolvedRank -> equal-time peers disagree or an open cell beats resolved.
-    assert!(winners.iter().all(|winner| winner == &winners[0]));
+    assert!(
+        winners.iter().all(|winner| winner == &winners[0]),
+        "using arrival order or origin before resolvedRank -> equal-time peers disagree or an open cell beats resolved."
+    );
     assert_eq!(winners[0].0, "resolved");
     assert_eq!(winners[0].2, "beta");
 }
 
 #[test]
 fn local_only_decision_resolver_producer_converges_through_apply() {
-    let (_source_scratch, _source_path, mut source) = store();
+    let (_source_scratch, _source_path, mut source) = open_store();
     LinkedChatStore::new(&mut source)
         .create_channel(
             "ws",
@@ -401,12 +377,12 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
             != Some("local-resolver")
     }));
 
-    let (_target_scratch, _target_path, mut target) = store();
+    let (_target_scratch, _target_path, mut target) = open_store();
     for operation in &outbound {
         assert_eq!(
             apply_chat_envelope(&mut target, operation, &NoFaults)
                 .expect("apply produced chat envelope"),
-            ApplyOutcome::Applied(())
+            ApplyOutcome::new(ApplyDisposition::Applied(()))
         );
     }
     let applied: (String, Option<String>) = target
@@ -451,7 +427,7 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
 
 #[test]
 fn reaction_lww_remove_wins_equal_time_and_origin_breaks_remaining_ties() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let added = envelope(
         "omega",
         0,
@@ -466,8 +442,11 @@ fn reaction_lww_remove_wins_equal_time_and_origin_breaks_remaining_ties() {
     );
     apply_chat_envelope(&mut engine, &added, &NoFaults).expect("added");
     apply_chat_envelope(&mut engine, &removed, &NoFaults).expect("removed");
-    // MUTATION: ranking origin before state -> lexically larger added beats an equal-time remove.
-    assert_eq!(reaction_winner(&engine).0, "removed");
+    assert_eq!(
+        reaction_winner(&engine).0,
+        "removed",
+        "ranking origin before state -> lexically larger added beats an equal-time remove."
+    );
 
     let low = envelope(
         "beta",
@@ -493,8 +472,10 @@ fn reaction_lww_remove_wins_equal_time_and_origin_breaks_remaining_ties() {
             .map_err(dohc_engine_storage::StorageError::corrupt_public)
         })
         .expect("winner");
-    // MUTATION: omitting the origin tie-break -> equal-time/equal-state application becomes arrival-dependent.
-    assert_eq!(winner, "zeta");
+    assert_eq!(
+        winner, "zeta",
+        "omitting the origin tie-break -> equal-time/equal-state application becomes arrival-dependent."
+    );
 }
 
 #[test]
@@ -529,20 +510,22 @@ fn reaction_lww_is_permutation_convergent() {
     ];
     let mut winners = Vec::new();
     for order in permutations {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         for index in order {
             apply_chat_envelope(&mut engine, &ops[index], &NoFaults).expect("apply");
         }
         winners.push(reaction_winner(&engine));
     }
-    // MUTATION: replacing the total-order max with last-writer arrival -> permutations settle to different rows.
-    assert!(winners.iter().all(|winner| winner == &winners[0]));
+    assert!(
+        winners.iter().all(|winner| winner == &winners[0]),
+        "replacing the total-order max with last-writer arrival -> permutations settle to different rows."
+    );
     assert_eq!(winners[0], ("added".to_owned(), 101, "omega".to_owned(), 0));
 }
 
 #[test]
 fn reaction_import_preserves_remote_time_verbatim() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let future = envelope(
         "peer",
         0,
@@ -550,13 +533,16 @@ fn reaction_import_preserves_remote_time_verbatim() {
         reaction_payload("added", "👍", 9_999_999_999, "Ada"),
     );
     apply_chat_envelope(&mut engine, &future, &NoFaults).expect("apply");
-    // MUTATION: receiver-clock clamping remote atMs -> identical envelopes store different total-order keys on different peers.
-    assert_eq!(reaction_winner(&engine).1, 9_999_999_999);
+    assert_eq!(
+        reaction_winner(&engine).1,
+        9_999_999_999,
+        "receiver-clock clamping remote atMs -> identical envelopes store different total-order keys on different peers."
+    );
 }
 
 #[test]
 fn imported_reaction_refuses_unsafe_at_ms_without_row_and_acks() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let operation = envelope(
         "unsafe-reaction-time",
         0,
@@ -564,8 +550,6 @@ fn imported_reaction_refuses_unsafe_at_ms_without_row_and_acks() {
         reaction_payload("added", "👍", i64::MAX, "Ada"),
     );
 
-    // MUTATION: dropping the persisted-safe atMs bound journals a reaction that
-    // subsequently makes reaction reads state-corrupt.
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
     let row_count: i64 = engine
         .read_with(|conn| {
@@ -573,7 +557,10 @@ fn imported_reaction_refuses_unsafe_at_ms_without_row_and_acks() {
                 .map_err(dohc_engine_storage::StorageError::corrupt_public)
         })
         .expect("reaction row count");
-    assert_eq!(row_count, 0);
+    assert_eq!(
+        row_count, 0,
+        "dropping the persisted-safe atMs bound journals a reaction that subsequently makes reaction reads state-corrupt."
+    );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "unsafe-reaction-time").expect("ack"),
         0
@@ -582,7 +569,7 @@ fn imported_reaction_refuses_unsafe_at_ms_without_row_and_acks() {
 
 #[test]
 fn reaction_import_accepts_negative_time_and_preserves_lww_order() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let winner_payload = reaction_payload("added", "👍", -10, "Ada");
     let winner = envelope("peer", 0, "chat.reaction.set", winner_payload);
     apply_chat_envelope(&mut engine, &winner, &NoFaults).expect("negative-time reaction");
@@ -603,9 +590,11 @@ fn reaction_import_accepts_negative_time_and_preserves_lww_order() {
             .map_err(dohc_engine_storage::StorageError::corrupt_public)
         })
         .expect("stored reaction");
-    // MUTATION: rejecting negative imported time stalls the envelope; replacing
-    // the LWW comparison lets the later-arriving older row win.
-    assert_eq!(stored, ("added".to_owned(), "Ada".to_owned(), -10));
+    assert_eq!(
+        stored,
+        ("added".to_owned(), "Ada".to_owned(), -10),
+        "rejecting negative imported time stalls the envelope; replacing the LWW comparison lets the later-arriving older row win."
+    );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "peer").expect("ack"),
         1
@@ -615,7 +604,7 @@ fn reaction_import_accepts_negative_time_and_preserves_lww_order() {
 #[test]
 fn reaction_import_rejects_non_emoji_graphemes() {
     for hostile in ["hello", "http://evil.invalid", "👍 nice", "✁"] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let invalid = envelope(
             "mallory",
             0,
@@ -623,26 +612,19 @@ fn reaction_import_rejects_non_emoji_graphemes() {
             reaction_payload("added", hostile, 100, "Mallory"),
         );
         let result = apply_chat_envelope(&mut engine, &invalid, &NoFaults);
-        // MUTATION: trusting peer-side IPC validation -> arbitrary text lands in the reaction cell key.
         assert_invalid_refusal!(result);
     }
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let flag = envelope(
         "peer",
         0,
         "chat.reaction.set",
         reaction_payload("added", "🇺🇸", 100, "Ada"),
     );
-    // MUTATION: validating one scalar instead of one emoji grapheme -> a valid regional-indicator flag is rejected.
-    assert!(apply_chat_envelope(&mut engine, &flag, &NoFaults).is_ok());
-}
-
-struct AlwaysLive;
-
-impl LeaseProbe for AlwaysLive {
-    fn is_live(&self, _key: &dohc_engine_collab::DocKey) -> bool {
-        true
-    }
+    assert!(
+        apply_chat_envelope(&mut engine, &flag, &NoFaults).is_ok(),
+        "validating one scalar instead of one emoji grapheme -> a valid regional-indicator flag is rejected."
+    );
 }
 
 struct FirstLeaseCheckLive(AtomicUsize);
@@ -655,7 +637,7 @@ impl LeaseProbe for FirstLeaseCheckLive {
 
 #[test]
 fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     // The defer path refuses non-replicated lineages (they can never drain),
     // so the test needs the replicated marker scaffolding first.
     engine
@@ -683,7 +665,7 @@ fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
         1_500,
     )
     .expect("replicated marker");
-    // A MISSING blob must refuse BEFORE any ack — a deferred coordinate is
+    // A missing blob must refuse before any ack — a deferred coordinate is
     // already acknowledged, and a blob that can never load would strand the
     // drain forever while the peer cursor is past the row.
     let missing = envelope(
@@ -701,7 +683,13 @@ fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &missing, &NoFaults, &AlwaysLive),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &missing,
+            &NoFaults,
+            &AlwaysLive
+        ),
         Err(SyncError::BlobInvalid)
     ));
     assert_eq!(
@@ -725,9 +713,18 @@ fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
             "isBaseState": false
         }),
     );
-    let outcome = apply_replication_envelope(&mut engine, &op, &NoFaults, &AlwaysLive)
-        .expect("live lineage defers");
-    assert_eq!(outcome, ApplyOutcome::Applied(RoutedApply::default()));
+    let outcome = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &op,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("live lineage defers");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::new(ApplyDisposition::Applied(RoutedApply::default()))
+    );
     let deferred_rows: i64 = engine
         .read_with(|conn| {
             conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
@@ -756,7 +753,7 @@ fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
 
 #[test]
 fn fault_sync_during_journal_txn_rolls_back_domain_and_position() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncDuringJournalTxn);
     let outcome = journal_local_replication_op(
         &mut engine,
@@ -795,7 +792,7 @@ fn fault_sync_during_journal_txn_rolls_back_domain_and_position() {
 
 #[test]
 fn join_identity_adoption_creates_only_an_absent_coordinate_and_is_idempotent() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     assert_eq!(
         adopt_join_identity(
             &mut engine,
@@ -843,7 +840,7 @@ fn join_identity_adoption_creates_only_an_absent_coordinate_and_is_idempotent() 
 
 #[test]
 fn join_identity_adoption_rejects_non_relay_identity_text_without_writing() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let cases = [
         ("ws-origin", " origin-joined", "epoch-relay", "stream-relay"),
         ("ws-epoch", "origin-joined", "epoch-relay ", "stream-relay"),
@@ -885,7 +882,7 @@ fn join_identity_adoption_rejects_non_relay_identity_text_without_writing() {
 
 #[test]
 fn join_identity_adoption_refuses_a_different_existing_identity() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     engine
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -923,7 +920,7 @@ fn join_identity_adoption_refuses_a_different_existing_identity() {
 
 #[test]
 fn join_identity_adoption_refuses_any_existing_replication_state() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     engine
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -1110,28 +1107,38 @@ fn join_identity_adoption_refuses_any_existing_replication_state() {
 
 #[test]
 fn fault_sync_before_apply_commit_reopens_unapplied_and_unacked() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     let op = envelope("peer", 0, "probe.apply", json!({}));
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncBeforeApplyCommit);
     let outcome = apply_envelope_with(&mut engine, &op, faults.as_ref(), insert_probe)
         .expect("fault outcome");
-    assert_eq!(outcome, ApplyOutcome::Crashed { committed: false });
+    assert_eq!(
+        outcome,
+        ApplyOutcome::new(ApplyDisposition::Crashed { committed: false })
+    );
     drop(engine);
     let mut reopened = EngineStore::open(&path, 2_001).expect("reopen");
-    assert!(reopened.read_document("peer").expect("read").is_none());
+    let probe_rows: i64 = reopened
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM blobs WHERE sha256='peer'", [], |r| {
+                r.get(0)
+            })
+        })
+        .expect("probe rows");
+    assert_eq!(probe_rows, 0);
     assert_eq!(
         read_replication_acked_seq(&reopened, "ws", "peer").expect("ack"),
         -1
     );
     assert_eq!(
         apply_envelope_with(&mut reopened, &op, &NoFaults, insert_probe).expect("retry"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
 }
 
 #[test]
 fn fault_sync_before_blob_hydrate_commit_leaves_no_blob_or_cursor() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     let bytes = b"replicated bytes".to_vec();
     let blob = BlobHydration {
         sha256: dohc_engine_storage::hex_sha256(&bytes),
@@ -1160,12 +1167,9 @@ fn fault_sync_before_blob_hydrate_commit_leaves_no_blob_or_cursor() {
 /// `MAX_TEXT_BYTES`: the HTTP transport's blob response bound sat near it by
 /// coincidence, and any other `RelayTransport` could store an over-cap body.
 ///
-/// MUTATION: delete the ceiling check in `hydrate_blob_content` and the over-cap
-/// half of this test fails; raise the limit above `MAX_TEXT_BYTES` and the
-/// refusal message stops naming the real bound.
 #[test]
 fn text_blob_over_the_text_ceiling_is_refused_at_ingest() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
 
     let at_cap = "a".repeat(MAX_TEXT_BYTES);
     let accepted = BlobHydration {
@@ -1223,7 +1227,7 @@ fn text_blob_over_the_text_ceiling_is_refused_at_ingest() {
     assert_eq!(refused_rows, 0);
 }
 
-/// The store's text cap answers the sync path with a REFUSAL, not an abort.
+/// The store's text cap answers the sync path with a refusal, not an abort.
 ///
 /// The gap between the caps makes it reachable: `project` allows
 /// `MAX_PROJECTION_BYTES` (16 MiB) and an update may reach
@@ -1236,12 +1240,9 @@ fn text_blob_over_the_text_ceiling_is_refused_at_ingest() {
 /// Any other class returns `Err`, the coordinate is never ACKed, and the relay
 /// redelivers it forever with every later operation stuck behind it.
 ///
-/// MUTATION: map `DomainError::PayloadTooLarge` to `SyncError::BlobTooLarge`
-/// in `map_domain_payload_error` and both halves fail — the apply answers
-/// `Err(BlobTooLarge)` and the ack stays at -1.
 #[test]
 fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
 
     let source = dohc_engine_collab::Ydoc::wire();
@@ -1268,8 +1269,18 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base_op,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let delta = source.plaintext_insert(4, &"a".repeat(MAX_TEXT_BYTES));
@@ -1294,18 +1305,24 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
         }),
     );
 
-    let refusal = apply_ydoc_envelope(&mut engine, &over_cap, &NoFaults, &NoLiveLeases)
-        .expect("oversized projection is an acknowledged refusal");
+    let refusal = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &over_cap,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("oversized projection is an acknowledged refusal");
     let expected_reason = format!(
         "plaintext projection exceeds MAX_TEXT_BYTES: limit {MAX_TEXT_BYTES} bytes, observed at least {} bytes",
         MAX_TEXT_BYTES + 4
     );
     assert!(matches!(
         refusal,
-        ApplyOutcome::Refused(ReplicationRefusal {
+        ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput { ref reason },
             ..
-        }) if reason == &expected_reason
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == &expected_reason)
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "over-cap-projection-peer").expect("ack"),
@@ -1359,7 +1376,7 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
 /// persist and return that terminal refusal before it removes the queue row.
 #[test]
 fn deferred_ydoc_projection_over_the_text_cap_is_persisted_and_returned() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
 
     let source = dohc_engine_collab::Ydoc::wire();
@@ -1384,12 +1401,22 @@ fn deferred_ydoc_projection_over_the_text_cap_is_persisted_and_returned() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &delta_op, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            reason: Some("ydoc-lineage-absent"),
-            ..
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &delta_op,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                deferred: true,
+                reason: Some("ydoc-lineage-absent"),
+                ..
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let base_op = envelope(
@@ -1406,10 +1433,20 @@ fn deferred_ydoc_projection_over_the_text_cap_is_persisted_and_returned() {
             "isBaseState": true,
         }),
     );
-    let outcome = apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases)
-        .expect("base applies and drains the oversized update");
-    let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
-    assert!(matches!(primary, ApplyOutcome::Applied(_)));
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies and drains the oversized update");
+    let ApplyOutcome {
+        primary,
+        refusals,
+        sharing_declined,
+    } = outcome;
+    assert!(matches!(primary, ApplyDisposition::Applied(_)));
     assert!(sharing_declined.is_empty());
     let expected_reason = format!(
         "plaintext projection exceeds MAX_TEXT_BYTES: limit {MAX_TEXT_BYTES} bytes, observed at least {} bytes",
@@ -1463,15 +1500,12 @@ fn deferred_ydoc_projection_over_the_text_cap_is_persisted_and_returned() {
 
 /// The relay pull checks the ceiling on the undecoded response, before it
 /// hashes the bytes and before it copies them into a `String`. The served
-/// bytes deliberately do NOT hash to the requested sha256, so the refusal can
+/// bytes deliberately do not hash to the requested sha256, so the refusal can
 /// only be `BlobTooLarge` while the size check runs first.
 ///
-/// MUTATION: move the check below `hex_sha256` and this refuses with
-/// `BlobInvalid` instead; drop it and the refusal comes from the chokepoint
-/// after the wasted hash and copy.
 #[test]
 fn oversized_relay_blob_is_refused_before_it_is_hashed_or_copied() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let sha256 = dohc_engine_storage::hex_sha256(b"an honest sha the relay does not serve");
@@ -1496,7 +1530,14 @@ fn oversized_relay_blob_is_refused_before_it_is_hashed_or_copied() {
     let client = RelaySyncClient::new(relay);
 
     assert_eq!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Err(RelayError::BlobTooLarge {
             constraint: "MAX_TEXT_BYTES",
             limit_bytes: MAX_TEXT_BYTES,
@@ -1512,15 +1553,15 @@ fn oversized_relay_blob_is_refused_before_it_is_hashed_or_copied() {
 
 #[test]
 fn exact_duplicate_is_noop_and_gap_is_rejected() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let op = envelope("peer", 0, "probe.apply", json!({"v":1}));
     assert_eq!(
         apply_envelope_with(&mut engine, &op, &NoFaults, insert_probe).expect("apply"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(
         apply_envelope_with(&mut engine, &op, &NoFaults, insert_probe).expect("dedup"),
-        ApplyOutcome::Skipped
+        ApplyOutcome::new(ApplyDisposition::Skipped)
     );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "peer").expect("ack"),
@@ -1535,7 +1576,7 @@ fn exact_duplicate_is_noop_and_gap_is_rejected() {
 
 #[test]
 fn imported_opening_message_uses_zero_based_order() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let channel = envelope(
         "opening-order",
         0,
@@ -1576,7 +1617,7 @@ fn imported_opening_message_uses_zero_based_order() {
     for op in [&channel, &thread, &opening] {
         assert_eq!(
             apply_chat_envelope(&mut engine, op, &NoFaults).expect("apply chat op"),
-            ApplyOutcome::Applied(())
+            ApplyOutcome::new(ApplyDisposition::Applied(()))
         );
     }
     let order: i64 = engine
@@ -1595,7 +1636,7 @@ fn imported_opening_message_uses_zero_based_order() {
 #[test]
 fn imported_channel_refuses_non_timestamp_created_at_ms_without_row_and_acks() {
     for (suffix, created_at_ms) in [("negative", -1), ("unsafe", i64::MAX)] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let origin = format!("{suffix}-channel-time");
         let operation = envelope(
             &origin,
@@ -1610,11 +1651,6 @@ fn imported_channel_refuses_non_timestamp_created_at_ms_without_row_and_acks() {
             }),
         );
 
-        // MUTATION: using the signed persisted-safe bound accepts -1 even
-        // though ChannelCreate.createdAtMs is a replicated timestamp; and
-        // dropping the bound entirely journals a channel the typed client
-        // cannot decode. Under refuse-and-ack the invalid op is refused,
-        // rolled back, and ACKED so the origin is not wedged.
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
         let row_count: i64 = engine
             .read_with(|conn| {
@@ -1636,15 +1672,12 @@ fn imported_channel_refuses_non_timestamp_created_at_ms_without_row_and_acks() {
 
 #[test]
 fn imported_thread_rejects_linked_object_without_linked_timestamp() {
-    // A file-linked thread MUST carry linkedAtMs. The oracle accepts this op
-    // (storing linked_at_ms NULL) but then bricks its OWN read (threadFromRow
+    // A file-linked thread must carry linkedAtMs. The oracle accepts this op
+    // (storing linked_at_ms NULL) but then bricks its own read (threadFromRow
     // numberValue(null) throws corruptStore) — a latent oracle bug. We reject
-    // the malformed op at apply, deliberately STRICTER than the oracle, so no
+    // the malformed op at apply, deliberately stricter than the oracle, so no
     // durable-unreadable linked thread is ever persisted. Honest mint always
     // pairs the fields; only a corrupt/hostile peer hits this.
-    // MUTATION: drop the linkedObjectId-requires-linkedAtMs guard -> the op is
-    // accepted, stored with linked_at_ms NULL, and every later thread read for
-    // it throws state-corrupt.
     assert_imported_thread_rejected(json!({
         "threadId": "thread-half-linked",
         "title": "Half linked",
@@ -1654,7 +1687,7 @@ fn imported_thread_rejects_linked_object_without_linked_timestamp() {
 }
 
 fn assert_imported_thread_rejected(payload: serde_json::Value) {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let operation = envelope("invalid-thread", 0, "chat.thread.create", payload);
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
     let thread_rows: i64 = engine
@@ -1703,7 +1736,6 @@ fn imported_thread_rejects_negative_or_unsafe_timestamps() {
             "linkedAtMs": MAX_WIRE_INTEGER + 1
         }),
     ] {
-        // MUTATION: accept signed i64 timestamps without the oracle's nonnegative safe-integer gate.
         assert_imported_thread_rejected(payload);
     }
 }
@@ -1737,7 +1769,6 @@ fn imported_thread_rejects_unbounded_untrimmed_or_control_identifiers() {
             "linkedObjectId": "object"
         }),
     ] {
-        // MUTATION: use the generic byte-only bounded check -> trim-unstable/control ids can persist.
         assert_imported_thread_rejected(payload);
     }
 }
@@ -1749,7 +1780,6 @@ fn imported_thread_rejects_overlong_or_trim_unstable_titles() {
         "\u{FEFF}title".to_owned(),
         "a".repeat(201),
     ] {
-        // MUTATION: omit the title UTF-16 length/JS-trim stability gate.
         assert_imported_thread_rejected(json!({
             "threadId": "thread",
             "title": title,
@@ -1767,7 +1797,6 @@ fn imported_thread_rejects_channel_slugs_outside_oracle_grammar() {
         "-leading".to_owned(),
         "a".repeat(201),
     ] {
-        // MUTATION: treat channelSlug as a generic non-empty id -> invalid aliases create placeholders.
         assert_imported_thread_rejected(json!({
             "threadId": "thread",
             "title": "",
@@ -1814,14 +1843,13 @@ fn imported_thread_rejects_invalid_owner_shape_and_linked_path() {
             "linkedPathHint": "notes/../escape.md"
         }),
     ] {
-        // MUTATION: relax exact-one-owner or normalized-path enforcement.
         assert_imported_thread_rejected(payload);
     }
 }
 
 #[test]
 fn imported_slug_only_thread_binds_the_existing_channel() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let channel = envelope(
         "slug-only",
         0,
@@ -1869,15 +1897,17 @@ fn imported_slug_only_thread_binds_the_existing_channel() {
             ))
         })
         .expect("binding");
-    // MUTATION: treating channelSlug as a wire id mints a duplicate placeholder.
-    assert_eq!(channel_id, "existing-channel");
+    assert_eq!(
+        channel_id, "existing-channel",
+        "treating channelSlug as a wire id mints a duplicate placeholder."
+    );
     assert_eq!(channel_count, 1);
     assert_eq!(placeholder_count, 0);
 }
 
 #[test]
 fn imported_thread_with_forged_agent_slug_is_refused() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let operation = envelope(
         "forged-agent-slug",
         0,
@@ -1889,12 +1919,11 @@ fn imported_thread_with_forged_agent_slug_is_refused() {
             "channelSlug": channel_slug_for_name(AGENT_CHANNEL_NAME)
         }),
     );
-    // MUTATION: dropping the canonical-agent-slug iff reserved-wire invariant
-    // lets an ordinary channel impersonate the dispatch channel.
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "forged-agent-slug").expect("ack"),
-        0
+        0,
+        "dropping the canonical-agent-slug iff reserved-wire invariant lets an ordinary channel impersonate the dispatch channel.",
     );
 }
 
@@ -1987,7 +2016,7 @@ fn seed_unowned_chat_thread(engine: &mut EngineStore, thread_id: &str) {
 
 #[test]
 fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_unowned_chat_thread(&mut engine, "thread");
     assert_eq!(chat_content_revision(&engine, "thread"), 0);
 
@@ -2006,7 +2035,11 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &message, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(chat_content_revision(&engine, "thread"), 1);
 
@@ -2027,7 +2060,11 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &attachment, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(chat_content_revision(&engine, "thread"), 2);
 
@@ -2039,7 +2076,11 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &reaction_winner, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(chat_content_revision(&engine, "thread"), 3);
     let reaction_loser = envelope(
@@ -2050,7 +2091,11 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &reaction_loser, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         chat_content_revision(&engine, "thread"),
@@ -2066,7 +2111,11 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &decision_winner, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(chat_content_revision(&engine, "thread"), 4);
     let decision_loser = envelope(
@@ -2077,7 +2126,11 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &decision_loser, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         chat_content_revision(&engine, "thread"),
@@ -2088,7 +2141,7 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
 
 #[test]
 fn imported_parent_arrival_repairs_the_child_and_bumps_the_conversation() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_unowned_chat_thread(&mut engine, "parent-thread");
     let child = envelope(
         "child-origin",
@@ -2138,7 +2191,7 @@ fn imported_parent_arrival_repairs_the_child_and_bumps_the_conversation() {
 
 #[test]
 fn ready_pending_replay_bumps_every_conversation_it_materializes() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     for (origin, thread_id, message_id) in [
         ("pending-a", "thread-a", "message-a"),
         ("pending-b", "thread-b", "message-b"),
@@ -2180,7 +2233,7 @@ fn ready_pending_replay_bumps_every_conversation_it_materializes() {
 
 #[test]
 fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let message = envelope(
         "early-message-peer",
         0,
@@ -2197,7 +2250,11 @@ fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &message, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "early-message-peer").expect("message ack"),
@@ -2262,13 +2319,13 @@ fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
             "Ice\narrived first".to_owned(),
             0
         ),
-        "MUTATION: missing-thread refusal loses the message instead of replaying it"
+        "missing-thread refusal loses the message instead of replaying it"
     );
 }
 
 #[test]
 fn terminal_pending_chat_replay_is_persisted_and_returned_to_the_triggering_apply() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let follow = envelope(
         "pending-terminal-follow",
         0,
@@ -2283,7 +2340,7 @@ fn terminal_pending_chat_replay_is_persisted_and_returned_to_the_triggering_appl
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park follow"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     let private_channel = envelope(
         "private-channel-source",
@@ -2300,9 +2357,13 @@ fn terminal_pending_chat_replay_is_persisted_and_returned_to_the_triggering_appl
     );
     let outcome =
         apply_chat_envelope(&mut engine, &private_channel, &NoFaults).expect("private channel");
-    let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
+    let ApplyOutcome {
+        primary,
+        refusals,
+        sharing_declined,
+    } = outcome;
     assert!(sharing_declined.is_empty());
-    assert_eq!(primary, ApplyOutcome::Applied(()));
+    assert_eq!(primary, ApplyDisposition::Applied(()));
     assert_eq!(
         refusals,
         vec![ReplicationRefusal {
@@ -2314,7 +2375,7 @@ fn terminal_pending_chat_replay_is_persisted_and_returned_to_the_triggering_appl
                 reason: "chat follow target is not followable".to_owned(),
             },
         }],
-        "MUTATION: deleting a terminal pending coordinate without returning it loses the disposition"
+        "deleting a terminal pending coordinate without returning it loses the disposition"
     );
     let disposition: (i64, i64) = engine
         .read_with(|conn| {
@@ -2338,13 +2399,13 @@ fn terminal_pending_chat_replay_is_persisted_and_returned_to_the_triggering_appl
     assert_eq!(
         disposition,
         (0, 1),
-        "MUTATION: deleting without persistence makes the ACKed terminal coordinate unobservable"
+        "deleting without persistence makes the ACKed terminal coordinate unobservable"
     );
 }
 
 #[test]
 fn imported_follow_parks_until_its_cross_origin_thread_arrives() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let follow = envelope(
         "late-follow",
         0,
@@ -2360,7 +2421,7 @@ fn imported_follow_parks_until_its_cross_origin_thread_arrives() {
 
     assert_eq!(
         apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park follow"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
     assert_eq!(
@@ -2400,7 +2461,7 @@ fn imported_follow_parks_until_its_cross_origin_thread_arrives() {
 
 #[test]
 fn imported_feed_read_parks_until_its_cross_origin_message_arrives() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let thread = envelope(
         "feed-thread-origin",
         0,
@@ -2441,7 +2502,7 @@ fn imported_feed_read_parks_until_its_cross_origin_message_arrives() {
 
     assert_eq!(
         apply_chat_envelope(&mut engine, &feed_read, &NoFaults).expect("park feed read"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
 
@@ -2478,7 +2539,7 @@ fn imported_feed_read_parks_until_its_cross_origin_message_arrives() {
 
 #[test]
 fn imported_attachment_parks_until_its_cross_origin_message_arrives() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let thread = envelope(
         "attachment-thread-origin",
         0,
@@ -2509,7 +2570,7 @@ fn imported_attachment_parks_until_its_cross_origin_message_arrives() {
 
     assert_eq!(
         apply_chat_envelope(&mut engine, &attachment, &NoFaults).expect("park attachment"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
 
@@ -2545,7 +2606,7 @@ fn imported_attachment_parks_until_its_cross_origin_message_arrives() {
 
 #[test]
 fn imported_feed_read_waits_for_placeholder_channel_resolution() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let thread = envelope(
         "placeholder-feed-thread",
         0,
@@ -2599,7 +2660,7 @@ fn imported_feed_read_waits_for_placeholder_channel_resolution() {
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &read, &NoFaults).expect("defer placeholder feed read"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
 
@@ -2635,7 +2696,7 @@ fn imported_feed_read_waits_for_placeholder_channel_resolution() {
 
 #[test]
 fn imported_person_follow_waits_for_a_non_dm_message() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     for operation in [
         envelope(
             "dm-person-source",
@@ -2693,7 +2754,7 @@ fn imported_person_follow_waits_for_a_non_dm_message() {
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("defer DM-only person"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
 
@@ -2750,7 +2811,7 @@ fn incoming_placeholder_never_displaces_bootstrapped_general_regardless_of_clock
     let expected_newcomer_slug = collision_slug_for_test("general", newcomer_wire, 0);
 
     for (local_created_at_ms, label) in [(1_000, "local-earlier"), (9_000, "local-later")] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let local_channel_id = format!("general-{label}");
         LinkedChatStore::new(&mut engine)
             .ensure_general_channel("ws", &local_channel_id, local_created_at_ms, &NoFaults)
@@ -2818,7 +2879,7 @@ fn colliding_newcomer_hash_is_stable_across_local_occupancy_histories() {
     let mut newcomer_slugs = Vec::new();
 
     for (peer, incumbent_created_at_ms) in [("alpha", 10), ("omega", 90)] {
-        let (scratch, _path, mut engine) = store();
+        let (scratch, _path, mut engine) = open_store();
         LinkedChatStore::new(&mut engine)
             .create_channel(
                 "ws",
@@ -2864,7 +2925,7 @@ fn colliding_newcomer_hash_is_stable_across_local_occupancy_histories() {
 
 #[test]
 fn authoritative_channel_materialization_only_reallocates_its_own_placeholder() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let occupied = envelope(
         "materialization-owner",
         0,
@@ -2935,7 +2996,7 @@ fn authoritative_channel_materialization_only_reallocates_its_own_placeholder() 
 
 #[test]
 fn noncolliding_channel_apply_does_not_rewrite_unchanged_slugs() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let first = envelope(
         "no-op-slug-first",
         0,
@@ -3012,7 +3073,7 @@ fn noncolliding_channel_apply_does_not_rewrite_unchanged_slugs() {
 
 #[test]
 fn local_thread_write_replays_a_parked_remote_follow() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let follow = envelope(
         "local-wakeup-follow",
         0,
@@ -3061,7 +3122,7 @@ fn local_thread_write_replays_a_parked_remote_follow() {
 
 #[test]
 fn general_wire_backfill_replays_a_parked_remote_follow() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     LinkedChatStore::new(&mut engine)
         .create_channel(
             "ws",
@@ -3110,7 +3171,7 @@ fn general_wire_backfill_replays_a_parked_remote_follow() {
 
 #[test]
 fn default_follow_seed_replays_a_parked_remote_feed_read() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     LinkedChatStore::new(&mut engine)
         .create_channel(
             "ws",
@@ -3177,7 +3238,7 @@ fn default_follow_seed_replays_a_parked_remote_feed_read() {
 
 #[test]
 fn local_follow_write_replays_a_parked_remote_feed_read_at_the_domain_boundary() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "local-follow-fixture");
     let feed_read = envelope(
         "local-follow-feed-read",
@@ -3225,7 +3286,7 @@ fn local_follow_write_replays_a_parked_remote_feed_read_at_the_domain_boundary()
 
 #[test]
 fn set_follow_returns_the_post_boundary_replay_winner() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     LinkedChatStore::new(&mut engine)
         .create_channel(
             "ws",
@@ -3306,18 +3367,13 @@ fn collision_slug_for_test(requested: &str, allocation_identity: &str, attempt: 
         end = index + ch.len_utf8();
     }
     let bounded = requested[..end].trim_end_matches('-');
-    let digest = hasher.finalize();
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    format!("{bounded}-{hex}")
+    let suffix = dohc_engine_storage::hex(&hasher.finalize());
+    format!("{bounded}-{suffix}")
 }
 
 #[test]
 fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal() {
-    let (_scratch, _path, mut first_peer) = store();
+    let (_scratch, _path, mut first_peer) = open_store();
     let long_wire_id = "a".repeat(240);
     let seed = envelope(
         "long-wire-seed",
@@ -3404,17 +3460,17 @@ fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal(
         "the local thread must journal the bounded persisted slug"
     );
 
-    let (_second_scratch, _second_path, mut second_peer) = store();
+    let (_second_scratch, _second_path, mut second_peer) = open_store();
     assert_eq!(
         apply_chat_envelope(&mut second_peer, &outbound, &NoFaults)
             .expect("second peer accepts bounded outbound channelSlug"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
 }
 
 #[test]
 fn collision_slug_truncation_is_bounded_and_does_not_leave_a_dash_boundary() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let long_base = format!("{}-{}", "a".repeat(134), "b".repeat(20));
     assert!(long_base.len() > 135);
     for (origin, thread_id, wire_id, created_at_ms) in [
@@ -3472,7 +3528,7 @@ fn collision_slug_truncation_is_bounded_and_does_not_leave_a_dash_boundary() {
 
 #[test]
 fn replay_only_touches_coordinates_for_the_changed_dependency() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     for (origin, target) in [
         ("targeted-follow-a", "targeted-thread-a"),
         ("targeted-follow-b", "targeted-thread-b"),
@@ -3546,7 +3602,7 @@ fn replay_only_touches_coordinates_for_the_changed_dependency() {
 
 #[test]
 fn imported_follow_refuses_a_resolved_dm_without_parking() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let channel = envelope(
         "dm-target-origin",
         0,
@@ -3597,7 +3653,7 @@ fn imported_follow_refuses_a_resolved_dm_without_parking() {
 
 #[test]
 fn parked_chat_coordinate_survives_store_reopen() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     let follow = envelope(
         "reopen-follow-origin",
         0,
@@ -3612,7 +3668,7 @@ fn parked_chat_coordinate_survives_store_reopen() {
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park before reopen"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
     drop(engine);
@@ -3650,7 +3706,7 @@ fn parked_chat_coordinate_survives_store_reopen() {
 
 #[test]
 fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "verbatim");
 
     let mut reaction = reaction_payload("added", "👍", -10, "Ada");
@@ -3736,14 +3792,13 @@ fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
         .list_thread_attachments("ws", "thread-imported", None, 10)
         .expect("list imported attachment");
 
-    // MUTATION: reject the still-permitted negative timestamps or tighten their
-    // row mappers and the corresponding read fails here.
     assert_eq!(
         (
             reactions[0].at_ms,
             reactions[0].author_display_name.as_str()
         ),
-        (-10, "Ada")
+        (-10, "Ada"),
+        "reject the still-permitted negative timestamps or tighten their row mappers and the corresponding read fails here.",
     );
     assert_eq!(feed.items[0].reactions[0].at_ms, -10);
     assert_eq!(decisions[0].at_ms, -9);
@@ -3892,22 +3947,21 @@ fn imported_message_append_refuses_each_oracle_invalid_field() {
         }),
     ];
     for payload in invalid_payloads {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         imported_chat_fixture(&mut engine, "invalid-message");
         let operation = envelope("invalid-message", 3, "chat.message.append", payload);
-        // MUTATION: omitting any message.append oracle predicate journals a
-        // payload that the TypeScript receiver refuses.
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
         assert_eq!(
             read_replication_acked_seq(&engine, "ws", "invalid-message").expect("ack"),
-            3
+            3,
+            "omitting any message.append oracle predicate journals a payload that the TypeScript receiver refuses.",
         );
     }
 }
 
 #[test]
 fn refused_message_log_cannot_export_local_derived_state_or_parent() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "refused-message-collision");
     let refused = envelope(
         "refused-message-collision",
@@ -4067,7 +4121,7 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
 
 #[test]
 fn refused_thread_log_cannot_suppress_the_current_thread_export() {
-    let (_scratch, _path, mut first_peer) = store();
+    let (_scratch, _path, mut first_peer) = open_store();
     imported_chat_fixture(&mut first_peer, "refused-thread-collision");
     let refused = envelope(
         "refused-thread-collision",
@@ -4199,12 +4253,12 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
         "the current origin must export one valid structure before its messages"
     );
 
-    let (_second_scratch, _second_path, mut second_peer) = store();
+    let (_second_scratch, _second_path, mut second_peer) = open_store();
     for operation in &outbound {
         assert_eq!(
             apply_chat_envelope(&mut second_peer, operation, &NoFaults)
                 .expect("apply collision recovery envelope"),
-            ApplyOutcome::Applied(())
+            ApplyOutcome::new(ApplyDisposition::Applied(()))
         );
     }
     let (message_body, message_rows, pending_rows): (String, i64, i64) = second_peer
@@ -4239,7 +4293,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
 
 #[test]
 fn imported_message_refuses_unsafe_created_at_ms_without_row_and_acks() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "unsafe-message-time");
     let operation = envelope(
         "unsafe-message-time",
@@ -4255,8 +4309,6 @@ fn imported_message_refuses_unsafe_created_at_ms_without_row_and_acks() {
         }),
     );
 
-    // MUTATION: dropping the persisted-safe createdAtMs bound journals a
-    // message that makes every typed response carrying it undecodable.
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
     let row_count: i64 = engine
         .read_with(|conn| {
@@ -4277,7 +4329,7 @@ fn imported_message_refuses_unsafe_created_at_ms_without_row_and_acks() {
 
 #[test]
 fn imported_message_normalizes_before_enforcing_the_local_body_cap() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "body-validation");
     let boundary = envelope(
         "body-validation",
@@ -4294,7 +4346,11 @@ fn imported_message_normalizes_before_enforcing_the_local_body_cap() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &boundary, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let stored: String = engine
         .read_with(|conn| {
@@ -4339,7 +4395,7 @@ fn imported_message_normalizes_before_enforcing_the_local_body_cap() {
 
 #[test]
 fn imported_feed_read_rejects_an_invisible_coordinate_without_changing_unread_state() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "feed-fixture");
     engine
         .write_with(&NoFaults, |tx| {
@@ -4394,7 +4450,11 @@ fn imported_feed_read_rejects_an_invisible_coordinate_without_changing_unread_st
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &visible, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let before: (i64, String, i64) = engine
         .read_with(|conn| {
@@ -4442,7 +4502,7 @@ fn imported_feed_read_rejects_an_invisible_coordinate_without_changing_unread_st
 
 #[test]
 fn imported_thread_header_message_id_cannot_replace_the_search_header() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "thread-header");
     engine
         .write_with(&NoFaults, |tx| {
@@ -4483,8 +4543,6 @@ fn imported_thread_header_message_id_cannot_replace_the_search_header() {
             .optional()
         })
         .expect("collision message lookup");
-    // MUTATION: without the reserved-id refusal this re-indexes the imported
-    // collision, making the header-text assertion exercise the regression.
     if let Some((display_name, body)) = imported_collision {
         engine
             .write_with(&NoFaults, |tx| {
@@ -4520,7 +4578,7 @@ fn imported_thread_header_message_id_cannot_replace_the_search_header() {
 
 #[test]
 fn replicated_chat_writers_index_thread_title_message_and_redelivery_idempotently() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let thread = envelope(
         "search-peer",
         0,
@@ -4549,15 +4607,27 @@ fn replicated_chat_writers_index_thread_title_message_and_redelivery_idempotentl
 
     assert!(matches!(
         apply_chat_envelope(&mut engine, &thread, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
         apply_chat_envelope(&mut engine, &message, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
         apply_chat_envelope(&mut engine, &message, &NoFaults),
-        Ok(ApplyOutcome::Skipped)
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let rows: Vec<(String, String)> = engine
@@ -4589,7 +4659,7 @@ fn replicated_chat_writers_index_thread_title_message_and_redelivery_idempotentl
 
 #[test]
 fn replicated_untitled_thread_without_messages_matches_rebuild_fallback() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let thread = envelope(
         "fallback-peer",
         0,
@@ -4623,7 +4693,7 @@ fn replicated_untitled_thread_without_messages_matches_rebuild_fallback() {
 
 #[test]
 fn replicated_untitled_thread_indexes_its_first_message_snippet() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let thread = envelope(
         "snippet-peer",
         0,
@@ -4667,7 +4737,7 @@ fn replicated_untitled_thread_indexes_its_first_message_snippet() {
 
 #[test]
 fn refused_chat_mutation_rolls_back_all_fts_rows() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let thread = envelope(
         "refused-search-peer",
         0,
@@ -4714,7 +4784,7 @@ fn imported_channel_create_reuses_the_local_channel_id_rule() {
         ("long-channel-id", "x".repeat(257)),
         ("padded-channel-id", " padded-channel ".to_owned()),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let operation = envelope(
             origin,
             0,
@@ -4747,7 +4817,7 @@ fn imported_channel_create_refuses_reserved_local_channel_ids() {
         ("reserved-general-id", GENERAL_CHANNEL_WIRE_ID),
         ("reserved-agent-id", AGENT_CHANNEL_WIRE_ID),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let operation = envelope(
             origin,
             0,
@@ -4776,7 +4846,7 @@ fn imported_channel_create_refuses_reserved_local_channel_ids() {
 
 #[test]
 fn imported_channel_name_uses_local_nfc_and_utf16_validation() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let decomposed = envelope(
         "channel-name",
         0,
@@ -4791,7 +4861,11 @@ fn imported_channel_name_uses_local_nfc_and_utf16_validation() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &decomposed, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let stored_name: String = engine
         .read_with(|conn| {
@@ -4825,7 +4899,7 @@ fn imported_channel_name_uses_local_nfc_and_utf16_validation() {
 
 #[test]
 fn imported_channel_slug_is_validated_but_derived_from_the_normalized_name() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let caller_slug = envelope(
         "derived-channel-slug",
         0,
@@ -4840,7 +4914,11 @@ fn imported_channel_slug_is_validated_but_derived_from_the_normalized_name() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &caller_slug, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let stored_slug: String = engine
         .read_with(|conn| {
@@ -4874,7 +4952,7 @@ fn imported_channel_slug_is_validated_but_derived_from_the_normalized_name() {
 
 #[test]
 fn imported_attachment_requires_its_workspace_thread_message_without_fabricating_a_row() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "attachment-owner");
     let fabricated = envelope(
         "attachment-owner",
@@ -4906,7 +4984,7 @@ fn imported_attachment_requires_its_workspace_thread_message_without_fabricating
     );
     assert_eq!(
         result.expect("park missing attachment"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
     assert_eq!(
@@ -4917,7 +4995,7 @@ fn imported_attachment_requires_its_workspace_thread_message_without_fabricating
 
 #[test]
 fn imported_attachment_refuses_a_message_resolved_in_another_thread_without_parking() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "attachment-cross-thread-owner");
     let other_thread = envelope(
         "attachment-cross-thread-target",
@@ -4976,7 +5054,7 @@ fn imported_attachment_refuses_a_message_resolved_in_another_thread_without_park
 
 #[test]
 fn imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "follow-fixture");
     engine
         .write_with(&NoFaults, |tx| {
@@ -5048,7 +5126,7 @@ fn imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks() 
     assert_eq!(
         apply_chat_envelope(&mut engine, &dm_only_person, &NoFaults)
             .expect("park DM-only person follow"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     let unresolved = envelope(
         "follow-fabricated-channel",
@@ -5064,7 +5142,7 @@ fn imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks() 
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &unresolved, &NoFaults).expect("park unresolved follow"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 2);
     let leaked = LinkedChatStore::new(&mut engine)
@@ -5086,7 +5164,7 @@ fn imported_authored_fields_reuse_local_display_and_author_id_bounds() {
         ),
         ("message-author-bound", "authorUserId", "x".repeat(201)),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         imported_chat_fixture(&mut engine, origin);
         let mut payload = json!({
             "messageId": format!("message-{origin}"),
@@ -5114,7 +5192,7 @@ fn imported_authored_fields_reuse_local_display_and_author_id_bounds() {
         ),
         ("reaction-author-bound", "authorId", "x".repeat(201)),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let mut payload = reaction_payload("added", "👍", 1, "user");
         payload[field] = json!(value);
         let operation = envelope(origin, 0, "chat.reaction.set", payload);
@@ -5134,7 +5212,7 @@ fn imported_follow_set_refuses_unbounded_or_empty_identities() {
         ("😀".repeat(129), "target".to_owned()),
         ("owner".to_owned(), "😀".repeat(129)),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let operation = envelope(
             "invalid-follow",
             0,
@@ -5147,14 +5225,13 @@ fn imported_follow_set_refuses_unbounded_or_empty_identities() {
                 "atMs": -1
             }),
         );
-        // MUTATION: dropping either 1..=256 UTF-16 bound admits an oracle-invalid cell key.
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
     }
 }
 
 #[test]
 fn imported_follow_refuses_unsafe_at_ms_without_row_and_acks() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let operation = envelope(
         "unsafe-follow-time",
         0,
@@ -5168,8 +5245,6 @@ fn imported_follow_refuses_unsafe_at_ms_without_row_and_acks() {
         }),
     );
 
-    // MUTATION: dropping the persisted-safe bound persists an LWW value that
-    // follow-bearing JavaScript responses cannot represent.
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
     let row_count: i64 = engine
         .read_with(|conn| {
@@ -5177,7 +5252,10 @@ fn imported_follow_refuses_unsafe_at_ms_without_row_and_acks() {
                 .map_err(dohc_engine_storage::StorageError::corrupt_public)
         })
         .expect("follow row count");
-    assert_eq!(row_count, 0);
+    assert_eq!(
+        row_count, 0,
+        "dropping the persisted-safe bound persists an LWW value that follow-bearing JavaScript responses cannot represent."
+    );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "unsafe-follow-time").expect("ack"),
         0
@@ -5192,7 +5270,7 @@ fn imported_feed_read_set_refuses_unbounded_or_empty_identities() {
         ("😀".repeat(129), "message".to_owned()),
         ("owner".to_owned(), "😀".repeat(129)),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let operation = envelope(
             "invalid-feed-read",
             0,
@@ -5204,7 +5282,6 @@ fn imported_feed_read_set_refuses_unbounded_or_empty_identities() {
                 "atMs": -1
             }),
         );
-        // MUTATION: dropping either 1..=256 UTF-16 bound admits an oracle-invalid read row.
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
     }
 }
@@ -5215,7 +5292,7 @@ fn imported_feed_read_refuses_unsafe_timestamps_without_row_and_acks() {
         ("unsafe-feed-read-time", 1, i64::MAX),
         ("unsafe-feed-read-cursor", i64::MAX, 1),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let operation = envelope(
             origin,
             0,
@@ -5228,8 +5305,6 @@ fn imported_feed_read_refuses_unsafe_timestamps_without_row_and_acks() {
             }),
         );
 
-        // MUTATION: dropping either persisted-safe timestamp bound journals a
-        // feed-read row that cannot cross the DOP1/JavaScript read contract.
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
         let row_count: i64 = engine
             .read_with(|conn| {
@@ -5267,7 +5342,7 @@ fn live_bookmark(engine: &mut EngineStore) -> String {
 
 #[test]
 fn imported_message_requeues_active_live_bookmarks() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "message-bookmark");
     let bookmark_id = live_bookmark(&mut engine);
     engine
@@ -5305,13 +5380,16 @@ fn imported_message_requeues_active_live_bookmarks() {
             )
         })
         .expect("outbox");
-    // MUTATION: omit the receiver-local bump from imported message apply -> stale generation/state remains.
-    assert_eq!(state, (2, "pending".to_owned(), None, 40));
+    assert_eq!(
+        state,
+        (2, "pending".to_owned(), None, 40),
+        "omit the receiver-local bump from imported message apply -> stale generation/state remains."
+    );
 }
 
 #[test]
 fn imported_message_indexes_mentions_only_when_inserted() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "mention-index");
     let first = envelope(
         "mention-index",
@@ -5349,13 +5427,16 @@ fn imported_message_indexes_mentions_only_when_inserted() {
             stmt.query_map([], |row| row.get(0))?.collect()
         })
         .expect("mention handles");
-    // MUTATION: indexing before checking INSERT OR IGNORE admits the duplicate payload's handle.
-    assert_eq!(handles, vec!["one"]);
+    assert_eq!(
+        handles,
+        vec!["one"],
+        "indexing before checking INSERT OR IGNORE admits the duplicate payload's handle."
+    );
 }
 
 #[test]
 fn imported_attachment_cross_origin_duplicate_requeues_active_live_bookmarks() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "attachment-bookmark");
     let bookmark_id = live_bookmark(&mut engine);
     let attachment = envelope(
@@ -5383,8 +5464,11 @@ fn imported_attachment_cross_origin_duplicate_requeues_active_live_bookmarks() {
             )
         })
         .expect("outbox");
-    // MUTATION: omit the receiver-local bump from imported attachment apply -> bookmark is not reprojected.
-    assert_eq!(state, (2, "pending".to_owned(), 41));
+    assert_eq!(
+        state,
+        (2, "pending".to_owned(), 41),
+        "omit the receiver-local bump from imported attachment apply -> bookmark is not reprojected."
+    );
 
     let cross_origin_duplicate = envelope(
         "attachment-peer-two",
@@ -5404,13 +5488,15 @@ fn imported_attachment_cross_origin_duplicate_requeues_active_live_bookmarks() {
             )
         })
         .expect("outbox after cross-origin duplicate");
-    // MUTATION: gate the bump on INSERT OR IGNORE's affected-row count -> this reachable duplicate stays at 2.
-    assert_eq!(duplicated, 3);
+    assert_eq!(
+        duplicated, 3,
+        "gate the bump on INSERT OR IGNORE's affected-row count -> this reachable duplicate stays at 2."
+    );
 }
 
 #[test]
 fn imported_attachment_recomputes_id_and_rejects_mismatch() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let invalid = envelope(
         "hostile-attachment",
         0,
@@ -5425,11 +5511,11 @@ fn imported_attachment_recomputes_id_and_rejects_mismatch() {
         }),
     );
     let result = apply_chat_envelope(&mut engine, &invalid, &NoFaults);
-    // MUTATION: trust the peer's attachment id -> forged content identity is persisted and acked.
     assert_invalid_refusal!(result);
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "hostile-attachment").expect("ack"),
-        0
+        0,
+        "trust the peer's attachment id -> forged content identity is persisted and acked.",
     );
 }
 
@@ -5462,16 +5548,13 @@ fn imported_attachment_rejects_invalid_heading_and_bounds() {
             json!({"objectId":"object","headingText":"Heading","headingAnchor":"a".repeat(401),"headingOccurrence":0}),
         ),
         ("object_id_bound", json!({"objectId":"o".repeat(201)})),
-        // MUTATION: drop the created_at_ms bound -> an at_ms beyond the JS-safe
-        // range is accepted here, then map_attachment_row rejects the row and
-        // every attachment read for the thread becomes state-corrupt.
         (
             "created_at_ms_bound",
             json!({"objectId":"object","createdAtMs": i64::MAX}),
         ),
     ];
     for (case, fields) in cases {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let mut payload = json!({
             "attachmentId": "placeholder",
             "threadId": "thread",
@@ -5499,14 +5582,17 @@ fn imported_attachment_rejects_invalid_heading_and_bounds() {
         }
         let operation = envelope(case, 0, "chat.attachment.add", payload);
         let result = apply_chat_envelope(&mut engine, &operation, &NoFaults);
-        // MUTATION: remove this hostile-peer heading/path guard -> the named malformed case applies.
         assert!(
             matches!(
                 &result,
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
-                    reason: RefusalReason::InvalidInput { .. },
-                    ..
-                }))
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Refused(ReplicationRefusal {
+                        reason: RefusalReason::InvalidInput { .. },
+                        ..
+                    }),
+                    refusals: outcome_refusals,
+                    sharing_declined: outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ),
             "case {case}"
         );
@@ -5515,8 +5601,8 @@ fn imported_attachment_rejects_invalid_heading_and_bounds() {
 
 #[test]
 fn chat_reaction_lww_converges_across_origin_arrival_order() {
-    let (_a, _path_a, mut first) = store();
-    let (_b, _path_b, mut second) = store();
+    let (_a, _path_a, mut first) = open_store();
+    let (_b, _path_b, mut second) = open_store();
     let low = envelope(
         "a",
         0,
@@ -5550,7 +5636,7 @@ fn chat_reaction_lww_converges_across_origin_arrival_order() {
 
 #[test]
 fn share_view_and_shared_channel_fail_closed_outside_boundary() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let view = ShareBoundary {
         share_id: "share-view".to_owned(),
         surface: ShareSurface::ShareView,
@@ -5591,7 +5677,7 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
 
 #[test]
 fn shared_channel_channel_create_without_wire_id_is_rejected() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let boundary = ShareBoundary {
         share_id: "share-channel".to_owned(),
         surface: ShareSurface::SharedChannel,
@@ -5618,7 +5704,7 @@ fn shared_channel_channel_create_without_wire_id_is_rejected() {
 
 #[test]
 fn shared_channel_cross_channel_thread_and_message_are_rejected() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let other = ShareBoundary {
         share_id: "share-other".to_owned(),
         surface: ShareSurface::SharedChannel,
@@ -5640,7 +5726,11 @@ fn shared_channel_cross_channel_thread_and_message_are_rejected() {
     );
     assert!(matches!(
         apply_shared_envelope(&mut engine, &other, &channel, &NoFaults),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let thread = envelope(
         "cross-channel",
@@ -5655,7 +5745,11 @@ fn shared_channel_cross_channel_thread_and_message_are_rejected() {
     );
     assert!(matches!(
         apply_shared_envelope(&mut engine, &other, &thread, &NoFaults),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let allowed = ShareBoundary {
@@ -5700,7 +5794,7 @@ fn shared_channel_cross_channel_thread_and_message_are_rejected() {
 
 #[test]
 fn shared_channel_correctly_scoped_ops_apply() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let boundary = ShareBoundary {
         share_id: "share-allowed".to_owned(),
         surface: ShareSurface::SharedChannel,
@@ -5722,7 +5816,11 @@ fn shared_channel_correctly_scoped_ops_apply() {
     );
     assert!(matches!(
         apply_shared_envelope(&mut engine, &boundary, &channel, &NoFaults),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let thread = envelope(
         "allowed-channel",
@@ -5737,7 +5835,11 @@ fn shared_channel_correctly_scoped_ops_apply() {
     );
     assert!(matches!(
         apply_shared_envelope(&mut engine, &boundary, &thread, &NoFaults),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let message = envelope(
         "allowed-channel",
@@ -5754,7 +5856,11 @@ fn shared_channel_correctly_scoped_ops_apply() {
     );
     assert!(matches!(
         apply_shared_envelope(&mut engine, &boundary, &message, &NoFaults),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let rows: Vec<(String, String)> = engine
         .read_with(|conn| {
@@ -5781,7 +5887,7 @@ fn shared_channel_correctly_scoped_ops_apply() {
 
 #[test]
 fn share_view_secondary_path_out_of_boundary_is_rejected() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let boundary = ShareBoundary {
         share_id: "share-view".to_owned(),
         surface: ShareSurface::ShareView,
@@ -5818,7 +5924,11 @@ fn share_view_secondary_path_out_of_boundary_is_rejected() {
     );
     assert!(matches!(
         apply_shared_envelope(&mut engine, &boundary, &inside, &NoFaults),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 }
 
@@ -5841,11 +5951,11 @@ fn share_view_moment(payload: serde_json::Value) -> ReplicationEnvelope {
     envelope("view-version", 0, "moment.append", payload)
 }
 
-/// The version rule from the recipient's side, on BOTH selector shapes the
+/// The version rule from the recipient's side, on both selector shapes the
 /// relay can state. The relay serves a `moment.append` only when the moment's
 /// version equals the share's target version — the selector's `versionId`, or
 /// `main` when it names none (`services/sync-relay/src/shareFilter.ts`). This
-/// proves the recipient states the SAME rule for both, so a relay whose
+/// proves the recipient states the same rule for both, so a relay whose
 /// selection diverges from the pinned grant cannot land another lineage's
 /// moments in the shared view.
 ///
@@ -5855,7 +5965,7 @@ fn share_view_moment(payload: serde_json::Value) -> ReplicationEnvelope {
 /// shape.
 #[test]
 fn share_view_moment_from_an_ungranted_version_is_refused_naming_both_versions() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let moment = |version: &str| {
         share_view_moment(json!({
             "versionId": version,
@@ -5877,7 +5987,7 @@ fn share_view_moment_from_an_ungranted_version_is_refused_naming_both_versions()
                         && granted == entitled
                         && offered == "version-other"
             ),
-            "MUTATION: a {granted:?} grant compares nothing, so the recipient replays a lineage              the grant never named: {refusal:?}"
+            "a {granted:?} grant compares nothing, so the recipient replays a lineage              the grant never named: {refusal:?}"
         );
         let message = refusal.to_string();
         assert!(
@@ -5887,22 +5997,26 @@ fn share_view_moment_from_an_ungranted_version_is_refused_naming_both_versions()
         assert!(
             matches!(
                 apply_shared_envelope(&mut engine, &boundary, &moment(entitled), &NoFaults),
-                Ok(ApplyOutcome::Applied(_))
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Applied(_),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ),
             "the granted version's own moments still apply"
         );
     }
 }
 
-/// Fail closed on SHAPE, not only on value: a served moment whose `versionId`
+/// Fail closed on shape, not only on value: a served moment whose `versionId`
 /// is not one the relay could have issued cannot be version-checked at all, so
 /// it is refused rather than applied unchecked. Otherwise a relay disarms the
 /// rule above by dropping or corrupting one field. The refusal does not depend
-/// on WHICH version the share pinned, and it is counted as the share-boundary
+/// on which version the share pinned, and it is counted as the share-boundary
 /// event it is rather than as a generic malformed payload.
 #[test]
 fn share_view_moment_without_a_version_identity_is_refused_as_malformed() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     // Both selector shapes the relay can state: live-follow main, and a
     // named version share.
     for version_id in [None, Some("version-granted")] {
@@ -5927,7 +6041,7 @@ fn share_view_moment_without_a_version_identity_is_refused_as_malformed() {
             );
             assert!(
                 matches!(outcome, Err(SyncError::ShareVersionUnusable { .. })),
-                "MUTATION: an unchecked payload is accepted, so stripping versionId disarms the version rule: {stripped} -> {outcome:?}"
+                "an unchecked payload is accepted, so stripping versionId disarms the version rule: {stripped} -> {outcome:?}"
             );
         }
     }
@@ -5943,7 +6057,7 @@ fn share_view_moment_without_a_version_identity_is_refused_as_malformed() {
 /// inventing a zero.
 #[test]
 fn an_unusable_version_id_names_the_limit_the_unit_and_the_observed_length() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let boundary = share_view_version_boundary(None);
     let astral = "\u{1f600}".repeat(MAX_SHARE_VERSION_ID_CHARS / 2 + 1);
     assert_eq!(astral.chars().count(), 65);
@@ -5963,19 +6077,19 @@ fn an_unusable_version_id_names_the_limit_the_unit_and_the_observed_length() {
                 observed: Some(130)
             } if op_kind == "moment.append"
         ),
-        "MUTATION: counting characters reports 65 against a 128 limit, which reads as inside it: {oversized:?}"
+        "counting characters reports 65 against a 128 limit, which reads as inside it: {oversized:?}"
     );
     let message = oversized.to_string();
     assert!(
         message.contains("128 UTF-16 code units") && message.contains("130 UTF-16 code units"),
         "the refusal must name the limit, the unit, and the observed length: {message}"
     );
-    // This message is PERSISTED as the refusal detail and shown on a notice
+    // This message is persisted as the refusal detail and shown on a notice
     // whose copy deliberately claims no scope. A scope claim here contradicts
     // both that copy and the code that classifies this as malformed.
     assert!(
         !message.contains("outside the share boundary"),
-        "MUTATION: the detail claims the share excluded an op it may well cover: {message}"
+        "the detail claims the share excluded an op it may well cover: {message}"
     );
 
     let absent = apply_shared_envelope(
@@ -6209,7 +6323,7 @@ fn key_envelope_conflict_is_surfaced_without_rebasing_over_the_winner() {
     assert_eq!(
         *client.transport().uploads.lock().expect("key uploads"),
         [request],
-        "MUTATION: conflict rebasing sends the stale bytes a second time"
+        "conflict rebasing sends the stale bytes a second time"
     );
     assert_eq!(
         *client.transport().downloads.lock().expect("key downloads"),
@@ -6220,21 +6334,29 @@ fn key_envelope_conflict_is_surfaced_without_rebasing_over_the_winner() {
 
 #[test]
 fn fresh_coordinate_does_not_canonicalize_payload_for_a_comparison_that_cannot_exist() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let incoming = envelope("canonical-peer", 0, "probe", json!({"z": 1, "a": [2, 3]}));
     let _ = crate::relay::take_canonical_json_call_count();
     assert!(matches!(
         apply_envelope_with(&mut engine, &incoming, &NoFaults, |_, _| Ok(())),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         crate::relay::take_canonical_json_call_count(),
         0,
-        "MUTATION: eager canonicalization does unused work on every fresh coordinate"
+        "eager canonicalization does unused work on every fresh coordinate"
     );
     assert!(matches!(
         apply_envelope_with(&mut engine, &incoming, &NoFaults, |_, _| Ok(())),
-        Ok(ApplyOutcome::Skipped)
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         crate::relay::take_canonical_json_call_count(),
@@ -6436,13 +6558,13 @@ struct PagedShareRelay {
     shared_pushes: Mutex<Vec<ShareLogPushRequest>>,
     view_pulls: Mutex<Vec<(i64, usize)>>,
     view_blobs: BTreeMap<String, Vec<u8>>,
-    /// What the TRANSPORT answers for a blob instead of serving it. The real
+    /// What the transport answers for a blob instead of serving it. The real
     /// HTTP transport stops reading at its own bound and reports
     /// `BlobTooLarge` on a body it never finished (`blob_body_overflow`), and
     /// nothing else in this file can produce that shape.
     view_blob_errors: BTreeMap<String, RelayError>,
     share_blob_calls: Mutex<Vec<String>>,
-    /// #646 PR3a. `proposal_calls` records the ORDER the submit lane touches
+    /// `proposal_calls` records the ORDER the submit lane touches
     /// the transport in, which is the property the blob ordering test needs
     /// and neither typed vector can state on its own.
     proposal_calls: Mutex<Vec<String>>,
@@ -6673,7 +6795,7 @@ fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
             (None, 1_i64, 0_i64),
         ),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         seed_identity(&mut engine);
         VersionedTextStore::new(&mut engine)
             .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -6789,6 +6911,7 @@ fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
         .with_coordinate("legacy-peer", 0, response);
         let result = RelaySyncClient::new(relay).pull_chat_workspace(
             &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             "ws",
             &NoFaults,
             &NoLiveLeases,
@@ -6826,7 +6949,7 @@ fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
 
 #[test]
 fn invalid_pull_page_leaves_legacy_base_repair_and_pull_state_unchanged() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -6925,6 +7048,7 @@ fn invalid_pull_page_leaves_legacy_base_repair_and_pull_state_unchanged() {
     assert_eq!(
         RelaySyncClient::new(relay).pull_chat_workspace(
             &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             "ws",
             &NoFaults,
             &NoLiveLeases,
@@ -6970,7 +7094,7 @@ fn invalid_pull_page_leaves_legacy_base_repair_and_pull_state_unchanged() {
 
 #[test]
 fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -7042,7 +7166,14 @@ fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present(
     let client = RelaySyncClient::new(relay);
 
     client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_200)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_200,
+        )
         .expect("pull before push");
     let pending = engine
         .read_with(|conn| {
@@ -7068,7 +7199,14 @@ fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present(
         .push_workspace(&mut engine, "ws", &NoFaults, 1_300)
         .expect("push local coordinate");
     client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_400)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_400,
+        )
         .expect("repair after push");
     let repaired = engine
         .read_with(|conn| {
@@ -7093,7 +7231,7 @@ fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present(
 
 #[test]
 fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     engine
         .write_with(&NoFaults, |tx| {
@@ -7156,6 +7294,7 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
     assert!(matches!(
         dohc_engine_collab::apply_remote_update(
             &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             &dohc_engine_collab::RemoteUpdate {
                 origin_id: "loser".to_owned(),
@@ -7203,11 +7342,24 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
         }),
     );
     incoming.relay_seq = Some(10);
-    let applied = apply_ydoc_envelope(&mut engine, &incoming, &NoFaults, &NoLiveLeases)
-        .expect("winning base applies");
-    let ApplyOutcome::Applied(result) = applied else {
+    let applied = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &incoming,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("winning base applies");
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(result),
+        refusals: ref outcome_refusals,
+        sharing_declined: ref outcome_sharing_declined,
+    } = applied
+    else {
         panic!("winning base did not apply: {applied:?}");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     let replacement = result.lineage_replacement.expect("replacement result");
     assert_eq!(replacement.winner_lineage_claim_id, winner_claim);
     assert_eq!(replacement.recovered_paths.len(), 1);
@@ -7312,8 +7464,18 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
     );
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &incoming, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Skipped)
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &incoming,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let counts: (i64, i64) = engine
         .read_with(|conn| {
@@ -7449,7 +7611,7 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
 
 #[test]
 fn lower_relay_scene_base_recovers_the_loser_as_one_ordinary_sibling() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -7548,11 +7710,24 @@ fn lower_relay_scene_base_recovers_the_loser_as_one_ordinary_sibling() {
         }),
     );
     incoming.relay_seq = Some(10);
-    let applied = apply_ydoc_envelope(&mut engine, &incoming, &NoFaults, &NoLiveLeases)
-        .expect("winning scene base applies");
-    let ApplyOutcome::Applied(result) = applied else {
+    let applied = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &incoming,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("winning scene base applies");
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(result),
+        refusals: ref outcome_refusals,
+        sharing_declined: ref outcome_sharing_declined,
+    } = applied
+    else {
         panic!("winning scene base did not apply: {applied:?}");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     let replacement = result
         .lineage_replacement
         .expect("scene replacement result");
@@ -7630,7 +7805,7 @@ fn lower_relay_scene_base_recovers_the_loser_as_one_ordinary_sibling() {
 
 #[test]
 fn lower_relay_base_recovers_the_loser_even_when_the_text_matches() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -7685,12 +7860,23 @@ fn lower_relay_base_recovers_the_loser_even_when_the_text_matches() {
         }),
     );
     incoming.relay_seq = Some(10);
-    let ApplyOutcome::Applied(result) =
-        apply_ydoc_envelope(&mut engine, &incoming, &NoFaults, &NoLiveLeases)
-            .expect("winning base applies")
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(result),
+        refusals: ref outcome_refusals,
+        sharing_declined: ref outcome_sharing_declined,
+    } = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &incoming,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("winning base applies")
     else {
         panic!("winning base did not apply");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     let replacement = result.lineage_replacement.expect("replacement result");
     assert_eq!(replacement.recovered_paths.len(), 1);
     let recovered_text: String = engine
@@ -7721,7 +7907,7 @@ fn lower_relay_base_recovers_the_loser_even_when_the_text_matches() {
 
 #[test]
 fn captured_disk_occupant_relocates_the_recovery_exactly_once() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -7784,9 +7970,22 @@ fn captured_disk_occupant_relocates_the_recovery_exactly_once() {
         }),
     );
     winner_base.relay_seq = Some(10);
-    let applied = apply_ydoc_envelope(&mut engine, &winner_base, &NoFaults, &NoLiveLeases)
-        .expect("winning base");
-    assert!(matches!(applied, ApplyOutcome::Applied(_)));
+    let applied = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &winner_base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("winning base");
+    assert!(matches!(
+        applied,
+        ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
     let recovery_projection = dohc_engine_storage::hex_sha256(b"losing local draft");
     let first_recovery_path = format!(
         "notes/disk-occupant (recovered {} {recovery_projection}).md",
@@ -7932,7 +8131,7 @@ fn captured_disk_occupant_relocates_the_recovery_exactly_once() {
 
 #[test]
 fn live_drain_stops_before_a_foreign_lineage_without_replacing_the_session() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -7984,11 +8183,18 @@ fn live_drain_stops_before_a_foreign_lineage_without_replacing_the_session() {
     );
     same_lineage.relay_seq = Some(10);
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &same_lineage, &NoFaults, &AlwaysLive),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            ..
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &same_lineage,
+            &NoFaults,
+            &AlwaysLive
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let foreign = dohc_engine_collab::Ydoc::wire();
@@ -8013,16 +8219,28 @@ fn live_drain_stops_before_a_foreign_lineage_without_replacing_the_session() {
     );
     foreign_lineage.relay_seq = Some(20);
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &foreign_lineage, &NoFaults, &AlwaysLive),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            ..
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &foreign_lineage,
+            &NoFaults,
+            &AlwaysLive
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
-    let drained =
-        drain_deferred_ydoc_for_live_session(&mut engine, &key, Some(&current_claim), &NoFaults)
-            .expect("live-session drain");
+    let drained = drain_deferred_ydoc_for_live_session(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        Some(&current_claim),
+        &NoFaults,
+    )
+    .expect("live-session drain");
     assert_eq!(drained.drained, 1, "the current-lineage delta drains");
     assert!(drained.lineage_replacements.is_empty());
     let state: (String, i64, i64, String) = engine
@@ -8071,7 +8289,7 @@ fn live_drain_stops_before_a_foreign_lineage_without_replacing_the_session() {
 
 #[test]
 fn a_losing_lineage_delta_is_acked_without_entering_the_winner() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -8126,11 +8344,21 @@ fn a_losing_lineage_delta_is_acked_without_entering_the_winner() {
     );
     incoming.relay_seq = Some(2);
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &incoming, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            reason: Some("ydoc-lineage-lost"),
-            ..
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &incoming,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                reason: Some("ydoc-lineage-lost"),
+                ..
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let persisted = dohc_engine_collab::load_persisted(&engine, &key)
         .expect("persisted doc")
@@ -8364,7 +8592,7 @@ fn seed_recovery_decision_conflict(
     );
     assert_eq!(
         apply_chat_envelope(engine, &peer_operation, &NoFaults).expect("apply peer decision"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     let local_seq = journal_test_op(
         engine,
@@ -8443,7 +8671,7 @@ fn relay_pull_recovers_only_a_diverged_local_origin() {
         ("local", RelayError::OriginDiverged),
         ("peer", RelayError::InvalidResponse),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         seed_identity(&mut engine);
         if origin_id == "peer" {
             engine
@@ -8478,7 +8706,14 @@ fn relay_pull_recovers_only_a_diverged_local_origin() {
         });
 
         assert_eq!(
-            client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+            client.pull_chat_workspace(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &NoLiveLeases,
+                1_000
+            ),
             Err(expected),
             "{origin_id}"
         );
@@ -8487,7 +8722,7 @@ fn relay_pull_recovers_only_a_diverged_local_origin() {
 
 #[test]
 fn fault_sync_after_push_before_cursor_persist_repushes_without_local_double_advance() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);
     let client = RelaySyncClient::new(FakeRelay::default());
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
@@ -8515,13 +8750,13 @@ fn fault_sync_after_push_before_cursor_persist_repushes_without_local_double_adv
 
 #[test]
 fn journal_rejects_payloads_above_the_relay_contract() {
-    // MUTATION: restoring the former 10 MiB journal limit accepts `oversized`.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let overhead = br#"{"data":""}"#.len();
     let exact = json!({"data": "x".repeat(MAX_PAYLOAD_JSON_BYTES - overhead)});
     assert_eq!(
         serde_json::to_vec(&exact).expect("exact payload").len(),
-        MAX_PAYLOAD_JSON_BYTES
+        MAX_PAYLOAD_JSON_BYTES,
+        "restoring the former 10 MiB journal limit accepts `oversized`.",
     );
     assert_eq!(
         journal_local_replication_op(
@@ -8581,7 +8816,7 @@ fn canonical_json_matches_javascript_number_boundaries() {
 
 #[test]
 fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);
     let remote = envelope(
         "peer",
@@ -8600,7 +8835,14 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
     let client = RelaySyncClient::new(fake);
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncBetweenApplyAndCursorCommit);
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            faults.as_ref(),
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("pull fault");
     assert!(matches!(
         first,
@@ -8614,7 +8856,14 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
             .is_none()
     );
     let retry = client
-        .pull_chat_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut reopened,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("retry pull");
     let pending = match retry {
         SyncPassOutcome::Complete {
@@ -8635,7 +8884,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
 
 #[test]
 fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let object_id = "retained-scene";
@@ -8669,9 +8918,22 @@ fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
             "isBaseState": true
         }),
     );
-    let base_outcome = apply_replication_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases);
+    let base_outcome = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     assert!(
-        matches!(base_outcome, Ok(ApplyOutcome::Applied(_))),
+        matches!(
+            base_outcome,
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ),
         "unexpected scene base outcome: {base_outcome:?}"
     );
     let (scene_sha, updated_at_ms, latest_moment_id): (String, i64, String) = engine
@@ -8720,8 +8982,18 @@ fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
         delete_payload("first-scene-delete"),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &first_delete, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &first_delete,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let key = dohc_engine_collab::DocKey::new("ws", "main", object_id).expect("scene key");
     assert!(
@@ -8748,7 +9020,14 @@ fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
     });
 
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 3_200)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            3_200,
+        )
         .expect("retained scene delete must not wedge the relay");
     let first_cursor = match first {
         SyncPassOutcome::Complete {
@@ -8767,7 +9046,14 @@ fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
     );
 
     let replay = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 3_300)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            3_300,
+        )
         .expect("cursor-crash replay must dedupe");
     let replay_cursor = match replay {
         SyncPassOutcome::Complete {
@@ -8836,9 +9122,9 @@ fn seeded_relay_fault_model_converges_without_double_apply() {
         ),
     ];
 
-    let (scratch_a, path_a, mut a) = store();
-    let (_scratch_b, _path_b, mut b) = store();
-    let (_scratch_c, _path_c, mut c) = store();
+    let (scratch_a, path_a, mut a) = open_store();
+    let (_scratch_b, _path_b, mut b) = open_store();
+    let (_scratch_c, _path_c, mut c) = open_store();
 
     // Seed 0xR10's deterministic schedule: reordered delivery, a dropped
     // packet, a partitioned peer, a duplicate, and a restart after a prefix.
@@ -8896,14 +9182,14 @@ fn seeded_relay_fault_model_converges_without_double_apply() {
     drop(scratch_a);
 }
 
-// -------------------------------------------------------------------- round 2
+// ----------------------------------------------------------------------------
 // Regression coverage for the Codex-bot review findings triaged in round 2.
 
 /// #6 (apply dedup ordering): a redelivered coordinate at or below the ack with
-/// a DIVERGENT payload must fail closed (never silently skip, never mutate).
+/// a divergent payload must fail closed (never silently skip, never mutate).
 #[test]
 fn redelivered_divergent_coordinate_at_acked_seq_is_rejected() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let first = envelope(
         "peer",
         0,
@@ -8912,7 +9198,11 @@ fn redelivered_divergent_coordinate_at_acked_seq_is_rejected() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &first, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     // Same coordinate (origin peer, seq 0), different payload — a tamper/replay.
     let divergent = envelope(
@@ -8937,10 +9227,14 @@ fn redelivered_divergent_coordinate_at_acked_seq_is_rejected() {
         })
         .expect("channel name");
     assert_eq!(name, "First");
-    // An EXACT redelivery is still an idempotent skip (not a divergence).
+    // An exact redelivery is still an idempotent skip (not a divergence).
     assert!(matches!(
         apply_chat_envelope(&mut engine, &first, &NoFaults),
-        Ok(ApplyOutcome::Skipped)
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 }
 
@@ -8948,7 +9242,7 @@ fn redelivered_divergent_coordinate_at_acked_seq_is_rejected() {
 /// must be rejected before apply, and the fetch cursor must not advance.
 #[test]
 fn pull_rejects_op_for_foreign_workspace() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let foreign = ReplicationEnvelope {
         workspace_id: "other".to_owned(),
@@ -8969,22 +9263,29 @@ fn pull_rejects_op_for_foreign_workspace() {
     };
     let client = RelaySyncClient::new(fake);
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Err(RelayError::InvalidResponse)
     ));
     // Fail closed: the cursor was never persisted, so the pass is retryable.
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
 }
 
-/// #4 (secret tombstone): once a delete wins, a later delivery of an OLDER put
-/// must NOT resurrect the deleted secret (rank against tombstones, not the
+/// #4 (secret tombstone): once a delete wins, a later delivery of an older put
+/// must not resurrect the deleted secret (rank against tombstones, not the
 /// materialized secret_files tip).
 #[test]
 fn secret_delete_tombstone_blocks_older_put_resurrection() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let cipher_a: &[u8] = b"ciphertext-A-payload";
     let cipher_b: &[u8] = b"ciphertext-B-different-payload";
     let sha_a = dohc_engine_storage::hex_sha256(cipher_a);
@@ -9031,7 +9332,11 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
             &put(0, 10, &sha_a, cipher_a.len() as i64),
             &NoFaults
         ),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     // delete @20 wins and removes the materialized secret_files row.
     let delete = ReplicationEnvelope {
@@ -9045,16 +9350,24 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
     };
     assert!(matches!(
         apply_secret_envelope(&mut engine, &delete, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
-    // A late delivery of an OLDER put (@5) must NOT resurrect the secret.
+    // A late delivery of an older put (@5) must not resurrect the secret.
     assert!(matches!(
         apply_secret_envelope(
             &mut engine,
             &put(2, 5, &sha_b, cipher_b.len() as i64),
             &NoFaults
         ),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let materialized: i64 = engine
         .read_with(|conn| {
@@ -9072,11 +9385,11 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
     );
 }
 
-/// #5b (feed-read ranking): a delayed OLDER read receipt with a NEWER wall clock
+/// #5b (feed-read ranking): a delayed older read receipt with a newer wall clock
 /// must not move the read cursor backwards.
 #[test]
 fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "feed-rank-fixture");
     engine
         .write_with(&NoFaults, |tx| {
@@ -9106,7 +9419,11 @@ fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &ahead, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     // Older read position (50 < 100) but a newer clock (20 > 10).
     let behind = envelope(
@@ -9117,7 +9434,11 @@ fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &behind, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let last_seen: i64 = engine
         .read_with(|conn| {
@@ -9135,11 +9456,11 @@ fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
     );
 }
 
-/// #5c (reserved agent-channel): the agent kind/name/slug hold IFF the reserved
+/// #5c (reserved agent-channel): the agent kind/name/slug hold iff the reserved
 /// agent wire id is present; malformed shapes are rejected, a correct one applies.
 #[test]
 fn reserved_agent_channel_shapes_rejected() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     // kind=agent but a non-agent wire id -> rejected.
     let rogue_agent = envelope(
         "rogue-agent-peer",
@@ -9171,16 +9492,20 @@ fn reserved_agent_channel_shapes_rejected() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &canonical, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 }
 
 #[test]
 fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     // The replicated lineage exists before envelopes arrive (base claim);
     // apply_remote_update refuses NoMarker rather than conjuring one. The
-    // version row exists because the drain now PROJECTS drained content to
+    // version row exists because the drain now projects drained content to
     // the visible head (a real workspace always has its version).
     dohc_engine_domain::VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
@@ -9233,25 +9558,37 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
             "isBaseState": false
         }),
     );
-    let outcome =
-        apply_ydoc_envelope(&mut engine, &op, &NoFaults, &AlwaysLive).expect("live lineage defers");
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &op,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("live lineage defers");
     assert_eq!(
         outcome,
-        ApplyOutcome::Applied(YdocApplyResult {
+        ApplyOutcome::new(ApplyDisposition::Applied(YdocApplyResult {
             deferred: true,
             reason: Some("ydoc-session-live"),
             conflicts_opened: 0,
             lineage_replacement: None,
             record_facts: Vec::new(),
-        })
+        }))
     );
 
     // The lease is gone (close/eviction/crash — any teardown): the drain must
     // land the acked-but-parked envelope in the durable lineage.
-    let drained = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("drain");
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("drain");
     assert_eq!(drained.drained, 1, "the parked envelope must apply");
     assert!(drained.refusals.is_empty());
-    // The drain PROJECTS: the drained content is the visible head, not just
+    // The drain projects: the drained content is the visible head, not just
     // CRDT rows (a redelivery of the acked coordinate skips the apply
     // closure, so nothing else would ever project it).
     let head_text: String = engine
@@ -9273,7 +9610,13 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
         .expect("count Y.Doc updates");
     assert_eq!(update_rows, 1, "the drained update reaches the Y.Doc log");
 
-    let redrained = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("redrain");
+    let redrained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("redrain");
     assert_eq!(
         redrained.drained, 0,
         "replaying the parked row is content-deduped"
@@ -9287,7 +9630,7 @@ fn drained_parked_update_derives_its_record_facts() {
     const OBJECT_ID: &str = "history-redelivery-object";
     const PATH: &str = "tasks/history.md";
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -9342,8 +9685,10 @@ fn drained_parked_update_derives_its_record_facts() {
             &mut cache,
             &key,
             &filler,
+            dohc_engine_collab::LocalAppend::default(),
             &NoFaults,
             1_600 + index as i64,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("append filler update");
         assert!(matches!(outcome, TxnOutcome::Committed(_)));
@@ -9368,16 +9713,29 @@ fn drained_parked_update_derives_its_record_facts() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &operation, &NoFaults, &AlwaysLive),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            ..
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &AlwaysLive
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     // The base arrives and the drain applies the parked edit: its facts
     // surface with the drain, so the pass that completes the dependency
     // fires the parked update's record events.
-    let drained = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("drain");
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("drain");
     assert_eq!(drained.drained, 1);
     assert_eq!(drained.record_facts.len(), 1, "{:?}", drained.record_facts);
     let facts = &drained.record_facts[0];
@@ -9393,7 +9751,7 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
     const OBJECT_ID: &str = "history-redelivery-object";
     const PATH: &str = "tasks/history.md";
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -9448,8 +9806,10 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
             &mut cache,
             &key,
             &filler,
+            dohc_engine_collab::LocalAppend::default(),
             &NoFaults,
             1_600 + index as i64,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("append filler update");
         assert!(matches!(outcome, TxnOutcome::Committed(_)));
@@ -9474,11 +9834,18 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &operation, &NoFaults, &AlwaysLive),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            ..
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &AlwaysLive
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     engine
         .write_with(&NoFaults, |tx| {
@@ -9493,7 +9860,12 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
         .expect("install projection failure");
 
     assert!(matches!(
-        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults),
+        drain_deferred_ydoc_for_key(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults
+        ),
         Err(SyncError::Storage(_))
     ));
     let after_failure: (i64, i64, i64) = engine
@@ -9531,14 +9903,19 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
             Ok::<_, SyncError>(())
         })
         .expect("clear projection failure");
-    let redrained =
-        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("redrain update");
+    let redrained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("redrain update");
     assert_eq!(redrained.drained, 1);
     // The failed first drain committed the update, its history row, and its
     // record-event decision, then dropped the derived facts with its error —
     // nothing was emitted. The redrain's replay derives no second fact set
     // (the history insert dedupes by coordinate); it returns the persisted
-    // decision instead, so the facts surface exactly once (#1004).
+    // decision instead, so the facts surface exactly once.
     assert_eq!(
         redrained.record_facts.len(),
         1,
@@ -9573,7 +9950,7 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
     assert_eq!(deferred_rows, 0, "successful projection clears the marker");
 }
 
-/// #1004: a deferred drain whose final projection fails has already committed
+/// A deferred drain whose final projection fails has already committed
 /// the parked update, its history row, and its record-event decision — but
 /// returns an error, dropping the derived facts unemitted. The redrain
 /// dedupes the update and returns the persisted decision; the successful
@@ -9585,7 +9962,7 @@ fn a_failed_drain_projection_surfaces_record_facts_exactly_once_on_the_redrain()
     const OBJECT_ID: &str = "projection-failure-object";
     const PATH: &str = "tasks/projection.md";
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -9650,11 +10027,18 @@ fn a_failed_drain_projection_surfaces_record_facts_exactly_once_on_the_redrain()
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &operation, &NoFaults, &AlwaysLive),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            ..
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &AlwaysLive
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     engine
@@ -9669,10 +10053,15 @@ fn a_failed_drain_projection_surfaces_record_facts_exactly_once_on_the_redrain()
         })
         .expect("install projection failure");
     assert!(matches!(
-        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults),
+        drain_deferred_ydoc_for_key(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults
+        ),
         Err(SyncError::Storage(_))
     ));
-    // The apply's transaction committed the update, the history row, AND the
+    // The apply's transaction committed the update, the history row, and the
     // event decision on the still-parked coordinate; the projection failure
     // dropped only the returned facts.
     let (history_after_failure, decision): (i64, Option<String>) = engine
@@ -9708,8 +10097,13 @@ fn a_failed_drain_projection_surfaces_record_facts_exactly_once_on_the_redrain()
             Ok::<_, SyncError>(())
         })
         .expect("clear projection failure");
-    let redrained =
-        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("redrain update");
+    let redrained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("redrain update");
     assert_eq!(redrained.drained, 1);
     assert_eq!(
         redrained.record_facts.len(),
@@ -9758,15 +10152,21 @@ fn a_failed_drain_projection_surfaces_record_facts_exactly_once_on_the_redrain()
 
     // Exactly once: with the decision consumed, a further drain has nothing
     // to apply and nothing to surface.
-    let idle = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("idle drain");
+    let idle = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("idle drain");
     assert_eq!(idle.drained, 0);
     assert!(idle.record_facts.is_empty());
 }
 
 #[test]
 fn cached_defer_and_drain_match_the_cold_path() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let mut cold_seed_cache = dohc_engine_collab::WriterDocCache::new();
     let key = dohc_engine_collab::DocKey::new("ws", "main", "object-cache-pair").expect("key");
@@ -9808,8 +10208,17 @@ fn cached_defer_and_drain_match_the_cold_path() {
                 }) => base_snapshot_sha,
                 other => panic!("unexpected claim: {other:?}"),
             };
-            dohc_engine_collab::record_local_update(store, cache, &key, &local, &NoFaults, 1_003)
-                .expect("warm local append");
+            dohc_engine_collab::record_local_update(
+                store,
+                cache,
+                &key,
+                &local,
+                dohc_engine_collab::LocalAppend::default(),
+                &NoFaults,
+                1_003,
+                |_tx, _outcome, _update_sha| Ok(()),
+            )
+            .expect("warm local append");
             claim
         };
     let warm_claim = setup(&mut warm_store, &mut warm_cache);
@@ -9860,7 +10269,7 @@ fn cached_defer_and_drain_match_the_cold_path() {
     ];
 
     for operation in &deferred {
-        let warm = apply_ydoc_envelope_cached(
+        let warm = apply_ydoc_envelope(
             &mut warm_store,
             &mut warm_cache,
             operation,
@@ -9868,16 +10277,26 @@ fn cached_defer_and_drain_match_the_cold_path() {
             &AlwaysLive,
         )
         .expect("warm defer");
-        let cold = apply_ydoc_envelope(&mut cold_store, operation, &NoFaults, &AlwaysLive)
-            .expect("cold defer");
+        let cold = apply_ydoc_envelope(
+            &mut cold_store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            operation,
+            &NoFaults,
+            &AlwaysLive,
+        )
+        .expect("cold defer");
         assert_eq!(warm, cold);
     }
 
-    let warm_drain =
-        drain_deferred_ydoc_for_key_cached(&mut warm_store, &mut warm_cache, &key, &NoFaults)
-            .expect("warm drain");
-    let cold_drain =
-        drain_deferred_ydoc_for_key(&mut cold_store, &key, &NoFaults).expect("cold drain");
+    let warm_drain = drain_deferred_ydoc_for_key(&mut warm_store, &mut warm_cache, &key, &NoFaults)
+        .expect("warm drain");
+    let cold_drain = drain_deferred_ydoc_for_key(
+        &mut cold_store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("cold drain");
     assert_eq!(warm_drain, cold_drain);
 
     let warm_doc = dohc_engine_collab::load_persisted(&warm_store, &key)
@@ -9973,11 +10392,16 @@ fn seed_warm_and_cold_remote_lineage(
             "isBaseState": true
         }),
     );
-    let warm_base =
-        apply_ydoc_envelope_cached(warm_store, warm_cache, &base, &NoFaults, &NoLiveLeases)
-            .expect("warm base");
-    let cold_base =
-        apply_ydoc_envelope(cold_store, &base, &NoFaults, &NoLiveLeases).expect("cold base");
+    let warm_base = apply_ydoc_envelope(warm_store, warm_cache, &base, &NoFaults, &NoLiveLeases)
+        .expect("warm base");
+    let cold_base = apply_ydoc_envelope(
+        cold_store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("cold base");
     assert_eq!(warm_base, cold_base);
 
     // This valid empty-state row changes no content. It establishes identical
@@ -9988,8 +10412,10 @@ fn seed_warm_and_cold_remote_lineage(
         warm_cache,
         &key,
         &empty_base,
+        dohc_engine_collab::LocalAppend::default(),
         &NoFaults,
         2_001,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("warm cache seed");
     let cold_seed = dohc_engine_collab::record_local_update(
@@ -9997,8 +10423,10 @@ fn seed_warm_and_cold_remote_lineage(
         &mut cold_seed_cache,
         &key,
         &empty_base,
+        dohc_engine_collab::LocalAppend::default(),
         &NoFaults,
         2_001,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("cold cache seed");
     assert_eq!(warm_seed, cold_seed);
@@ -10056,14 +10484,26 @@ fn apply_remote_cache_pair(
         json!(cold_sha),
         "paired stores address the same remote bytes"
     );
-    let warm =
-        apply_ydoc_envelope_cached(warm_store, warm_cache, &operation, &NoFaults, &NoLiveLeases)
-            .expect("warm remote apply");
-    let cold = apply_ydoc_envelope(cold_store, &operation, &NoFaults, &NoLiveLeases)
-        .expect("cold remote apply");
+    let warm = apply_ydoc_envelope(warm_store, warm_cache, &operation, &NoFaults, &NoLiveLeases)
+        .expect("warm remote apply");
+    let cold = apply_ydoc_envelope(
+        cold_store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("cold remote apply");
     assert_eq!(warm, cold, "cached and cold remote verdicts");
     assert!(
-        matches!(&warm, ApplyOutcome::Applied(_)),
+        matches!(
+            &warm,
+            ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: outcome_refusals,
+                sharing_declined: outcome_sharing_declined,
+            } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ),
         "ordinary remote candidate must apply: {warm:?}"
     );
     warm
@@ -10101,8 +10541,8 @@ fn assert_remote_cache_matches_cold(
 
 #[test]
 fn remote_frontier_fold_retires_a_live_identity_covered_by_delete() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-retire-identity";
     let path = "cache/remote-retire-identity.md";
@@ -10155,8 +10595,8 @@ fn remote_frontier_fold_retires_a_live_identity_covered_by_delete() {
 
 #[test]
 fn remote_frontier_fold_splits_a_string_run_around_a_mid_run_delete() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-split-run";
     let path = "cache/remote-split-run.md";
@@ -10204,8 +10644,8 @@ fn remote_frontier_fold_splits_a_string_run_around_a_mid_run_delete() {
 
 #[test]
 fn remote_frontier_fold_retires_a_deleted_scalar_interior() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-retire-interior";
     let path = "cache/remote-retire-interior.md";
@@ -10258,8 +10698,8 @@ fn remote_frontier_fold_retires_a_deleted_scalar_interior() {
 
 #[test]
 fn remote_frontier_delete_endpoints_canonicalize_across_pending_integration() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-pending-delete";
     let path = "cache/remote-pending-delete.md";
@@ -10335,8 +10775,8 @@ fn remote_frontier_delete_endpoints_canonicalize_across_pending_integration() {
 
 #[test]
 fn cached_remote_frontier_refusal_leaves_the_persistent_scratch_untouched() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-frontier-refusal";
     let path = "cache/remote-frontier-refusal.md";
@@ -10366,7 +10806,7 @@ fn cached_remote_frontier_refusal_leaves_the_persistent_scratch_untouched() {
     );
     assert!(warm_cache.gate_scratch_is_resident_for_test(&key));
 
-    let hostile = flip_payload_byte(&base, b'z', b'y');
+    let hostile = flip_byte(&base, b'z', b'y');
     let operation = remote_delta_operation(
         &mut warm_store,
         target,
@@ -10377,7 +10817,7 @@ fn cached_remote_frontier_refusal_leaves_the_persistent_scratch_untouched() {
     cold_store
         .put_binary_blob(&hostile)
         .expect("cold hostile blob");
-    let warm = apply_ydoc_envelope_cached(
+    let warm = apply_ydoc_envelope(
         &mut warm_store,
         &mut warm_cache,
         &operation,
@@ -10385,10 +10825,23 @@ fn cached_remote_frontier_refusal_leaves_the_persistent_scratch_untouched() {
         &NoLiveLeases,
     )
     .expect("warm frontier refusal");
-    let cold = apply_ydoc_envelope(&mut cold_store, &operation, &NoFaults, &NoLiveLeases)
-        .expect("cold frontier refusal");
+    let cold = apply_ydoc_envelope(
+        &mut cold_store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("cold frontier refusal");
     assert_eq!(warm, cold);
-    assert!(matches!(warm, ApplyOutcome::Refused(_)));
+    assert!(matches!(
+        warm,
+        ApplyOutcome {
+            primary: ApplyDisposition::Refused(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
     assert!(
         warm_cache.gate_scratch_is_resident_for_test(&key),
         "checks 1-3 refuse before mutating the remote scratch"
@@ -10398,8 +10851,8 @@ fn cached_remote_frontier_refusal_leaves_the_persistent_scratch_untouched() {
 
 #[test]
 fn cached_remote_check4_refusal_evicts_only_scratch_and_a_valid_gate_rebuilds_it() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-check4-refusal";
     let path = "cache/remote-check4-refusal.md";
@@ -10440,7 +10893,7 @@ fn cached_remote_check4_refusal_evicts_only_scratch_and_a_valid_gate_rebuilds_it
     cold_store
         .put_binary_blob(&hostile)
         .expect("cold check4 blob");
-    let warm = apply_ydoc_envelope_cached(
+    let warm = apply_ydoc_envelope(
         &mut warm_store,
         &mut warm_cache,
         &operation,
@@ -10448,10 +10901,23 @@ fn cached_remote_check4_refusal_evicts_only_scratch_and_a_valid_gate_rebuilds_it
         &NoLiveLeases,
     )
     .expect("warm check4 refusal");
-    let cold = apply_ydoc_envelope(&mut cold_store, &operation, &NoFaults, &NoLiveLeases)
-        .expect("cold check4 refusal");
+    let cold = apply_ydoc_envelope(
+        &mut cold_store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("cold check4 refusal");
     assert_eq!(warm, cold);
-    assert!(matches!(warm, ApplyOutcome::Refused(_)));
+    assert!(matches!(
+        warm,
+        ApplyOutcome {
+            primary: ApplyDisposition::Refused(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
     assert!(
         warm_cache.contains_for_test(&key),
         "check4 refusal preserves the writer doc and frontier"
@@ -10483,8 +10949,8 @@ fn cached_remote_check4_refusal_evicts_only_scratch_and_a_valid_gate_rebuilds_it
 #[cfg(debug_assertions)]
 #[test]
 fn cached_remote_scratch_apply_error_evicts_only_scratch_and_a_valid_gate_rebuilds_it() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-scratch-apply-error";
     let path = "cache/remote-scratch-apply-error.md";
@@ -10524,7 +10990,7 @@ fn cached_remote_scratch_apply_error_evicts_only_scratch_and_a_valid_gate_rebuil
     );
     let outcome =
         dohc_engine_collab::replay_parity::with_armed_scratch_apply_error_for_test(|| {
-            apply_ydoc_envelope_cached(
+            apply_ydoc_envelope(
                 &mut warm_store,
                 &mut warm_cache,
                 &operation,
@@ -10533,7 +10999,14 @@ fn cached_remote_scratch_apply_error_evicts_only_scratch_and_a_valid_gate_rebuil
             )
         })
         .expect("scratch apply error is a contained refusal");
-    assert!(matches!(outcome, ApplyOutcome::Refused(_)));
+    assert!(matches!(
+        outcome,
+        ApplyOutcome {
+            primary: ApplyDisposition::Refused(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
     assert!(warm_cache.contains_for_test(&key));
     assert_eq!(
         warm_cache
@@ -10560,8 +11033,8 @@ fn cached_remote_scratch_apply_error_evicts_only_scratch_and_a_valid_gate_rebuil
 #[test]
 #[should_panic(expected = "FR1-VALID")]
 fn remote_frontier_oracle_catches_a_poisoned_identity() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-frontier-poison";
     let path = "cache/remote-frontier-poison.md";
@@ -10594,7 +11067,7 @@ fn remote_frontier_oracle_catches_a_poisoned_identity() {
     let u2 = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "b");
     let operation =
         remote_delta_operation(&mut warm_store, target, "remote-frontier-poison", 1, &u2);
-    let _ = apply_ydoc_envelope_cached(
+    let _ = apply_ydoc_envelope(
         &mut warm_store,
         &mut warm_cache,
         &operation,
@@ -10607,8 +11080,8 @@ fn remote_frontier_oracle_catches_a_poisoned_identity() {
 #[test]
 #[should_panic(expected = "FR1-VALID")]
 fn remote_frontier_oracle_catches_a_poisoned_multi_unit_string_run() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-frontier-run-poison";
     let path = "cache/remote-frontier-run-poison.md";
@@ -10647,7 +11120,7 @@ fn remote_frontier_oracle_catches_a_poisoned_multi_unit_string_run() {
         1,
         &u2,
     );
-    let _ = apply_ydoc_envelope_cached(
+    let _ = apply_ydoc_envelope(
         &mut warm_store,
         &mut warm_cache,
         &operation,
@@ -10660,8 +11133,8 @@ fn remote_frontier_oracle_catches_a_poisoned_multi_unit_string_run() {
 #[test]
 #[should_panic(expected = "FR2-VALID")]
 fn remote_scratch_oracle_catches_a_poisoned_scratch() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-scratch-poison";
     let path = "cache/remote-scratch-poison.md";
@@ -10694,7 +11167,7 @@ fn remote_scratch_oracle_catches_a_poisoned_scratch() {
     let u2 = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "b");
     let operation =
         remote_delta_operation(&mut warm_store, target, "remote-scratch-poison", 1, &u2);
-    let _ = apply_ydoc_envelope_cached(
+    let _ = apply_ydoc_envelope(
         &mut warm_store,
         &mut warm_cache,
         &operation,
@@ -10703,12 +11176,12 @@ fn remote_scratch_oracle_catches_a_poisoned_scratch() {
     );
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct RemoteCacheFixtureCorpus {
     scenarios: Vec<RemoteCacheScenario>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct RemoteCacheScenario {
     name: String,
     #[serde(rename = "contentKind")]
@@ -10719,7 +11192,7 @@ struct RemoteCacheScenario {
     replay_order: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct RemoteCacheAuthoredUpdate {
     id: String,
     #[serde(rename = "updateBase64")]
@@ -10738,8 +11211,8 @@ fn cross_engine_replay_fixtures_match_cold_through_a_warmed_remote_cache() {
     assert!(fixtures.scenarios.len() >= 6, "retain the full T6 corpus");
 
     for (scenario_index, scenario) in fixtures.scenarios.iter().enumerate() {
-        let (_warm_scratch, _warm_path, mut warm_store) = store();
-        let (_cold_scratch, _cold_path, mut cold_store) = store();
+        let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+        let (_cold_scratch, _cold_path, mut cold_store) = open_store();
         let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
         let object_id = format!("object-remote-cache-{scenario_index}");
         let extension = if scenario.content_kind == "scene" {
@@ -10793,7 +11266,7 @@ fn cross_engine_replay_fixtures_match_cold_through_a_warmed_remote_cache() {
                 }),
             );
             operation.relay_seq = Some(i64::try_from(step + 1).expect("relay sequence"));
-            let warm = apply_ydoc_envelope_cached(
+            let warm = apply_ydoc_envelope(
                 &mut warm_store,
                 &mut warm_cache,
                 &operation,
@@ -10801,8 +11274,14 @@ fn cross_engine_replay_fixtures_match_cold_through_a_warmed_remote_cache() {
                 &NoLiveLeases,
             )
             .unwrap_or_else(|error| panic!("{} {update_id} warm: {error}", scenario.name));
-            let cold = apply_ydoc_envelope(&mut cold_store, &operation, &NoFaults, &NoLiveLeases)
-                .unwrap_or_else(|error| panic!("{} {update_id} cold: {error}", scenario.name));
+            let cold = apply_ydoc_envelope(
+                &mut cold_store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &operation,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap_or_else(|error| panic!("{} {update_id} cold: {error}", scenario.name));
             assert_eq!(
                 warm, cold,
                 "{} {update_id} warm/cold verdict",
@@ -10894,8 +11373,8 @@ fn cross_engine_replay_fixtures_match_cold_through_a_warmed_remote_cache() {
 
 #[test]
 fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-cache-refusal";
     let path = "notes/cache-refusal.md";
@@ -10945,7 +11424,7 @@ fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
         }),
     );
     let before = warm_cache.stats();
-    let warm_refusal = apply_ydoc_envelope_cached(
+    let warm_refusal = apply_ydoc_envelope(
         &mut warm_store,
         &mut warm_cache,
         &refused,
@@ -10953,10 +11432,23 @@ fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
         &NoLiveLeases,
     )
     .expect("warm retained refusal");
-    let cold_refusal = apply_ydoc_envelope(&mut cold_store, &refused, &NoFaults, &NoLiveLeases)
-        .expect("cold retained refusal");
+    let cold_refusal = apply_ydoc_envelope(
+        &mut cold_store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &refused,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("cold retained refusal");
     assert_eq!(warm_refusal, cold_refusal);
-    assert!(matches!(warm_refusal, ApplyOutcome::Refused(_)));
+    assert!(matches!(
+        warm_refusal,
+        ApplyOutcome {
+            primary: ApplyDisposition::Refused(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
     let after_refusal = warm_cache.stats();
     assert_eq!(after_refusal.hits, before.hits + 1);
     assert_eq!(
@@ -11001,7 +11493,7 @@ fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
             "isBaseState": false
         }),
     );
-    let warm_descendant = apply_ydoc_envelope_cached(
+    let warm_descendant = apply_ydoc_envelope(
         &mut warm_store,
         &mut warm_cache,
         &descendant,
@@ -11009,11 +11501,23 @@ fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
         &NoLiveLeases,
     )
     .expect("warm descendant");
-    let cold_descendant =
-        apply_ydoc_envelope(&mut cold_store, &descendant, &NoFaults, &NoLiveLeases)
-            .expect("cold descendant");
+    let cold_descendant = apply_ydoc_envelope(
+        &mut cold_store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &descendant,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("cold descendant");
     assert_eq!(warm_descendant, cold_descendant);
-    assert!(matches!(warm_descendant, ApplyOutcome::Applied(_)));
+    assert!(matches!(
+        warm_descendant,
+        ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
     let final_stats = warm_cache.stats();
     assert_eq!(final_stats.hits, before.hits + 2);
     assert_eq!(final_stats.advances, before.advances + 2);
@@ -11056,8 +11560,8 @@ fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
 }
 
 fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = format!("object-cache-crash-{}", point.as_str().replace('.', "-"));
     let path = format!("notes/{object_id}.md");
@@ -11092,7 +11596,7 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
     let before = warm_cache.stats();
     let warm_faults = ScriptedFaults::crash_at(point);
     let cold_faults = ScriptedFaults::crash_at(point);
-    let warm_outcome = apply_ydoc_envelope_cached(
+    let warm_outcome = apply_ydoc_envelope(
         &mut warm_store,
         &mut warm_cache,
         &operation,
@@ -11102,13 +11606,17 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
     .expect("warm crash outcome");
     let cold_outcome = apply_ydoc_envelope(
         &mut cold_store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &operation,
         cold_faults.as_ref(),
         &NoLiveLeases,
     )
     .expect("cold crash outcome");
     assert_eq!(warm_outcome, cold_outcome);
-    assert_eq!(warm_outcome, ApplyOutcome::Crashed { committed });
+    assert_eq!(
+        warm_outcome,
+        ApplyOutcome::new(ApplyDisposition::Crashed { committed })
+    );
     assert_eq!(warm_cache.stats().hits, before.hits + 1);
     assert_eq!(
         warm_cache.stats().advances,
@@ -11132,7 +11640,7 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
                 .expect("post-commit crash parity")
         );
         assert_eq!(
-            apply_ydoc_envelope_cached(
+            apply_ydoc_envelope(
                 &mut warm_store,
                 &mut warm_cache,
                 &operation,
@@ -11140,7 +11648,7 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
                 &NoLiveLeases,
             )
             .expect("warm crash retry"),
-            ApplyOutcome::Skipped
+            ApplyOutcome::new(ApplyDisposition::Skipped)
         );
         assert!(!warm_cache.contains_for_test(&key));
 
@@ -11166,7 +11674,7 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
             }),
         );
         let before_rebuild = warm_cache.stats();
-        let warm_second = apply_ydoc_envelope_cached(
+        let warm_second = apply_ydoc_envelope(
             &mut warm_store,
             &mut warm_cache,
             &second_operation,
@@ -11174,9 +11682,14 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
             &NoLiveLeases,
         )
         .expect("warm post-crash append");
-        let cold_second =
-            apply_ydoc_envelope(&mut cold_store, &second_operation, &NoFaults, &NoLiveLeases)
-                .expect("cold post-crash append");
+        let cold_second = apply_ydoc_envelope(
+            &mut cold_store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &second_operation,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("cold post-crash append");
         assert_eq!(warm_second, cold_second);
         assert_eq!(warm_cache.stats().misses, before_rebuild.misses + 1);
         assert_eq!(warm_cache.stats().installs, before_rebuild.installs + 1);
@@ -11210,7 +11723,7 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
             "the accepted candidate mutated the rollback-less scratch"
         );
         let retry_before = warm_cache.stats();
-        let warm_retry = apply_ydoc_envelope_cached(
+        let warm_retry = apply_ydoc_envelope(
             &mut warm_store,
             &mut warm_cache,
             &operation,
@@ -11218,10 +11731,23 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
             &NoLiveLeases,
         )
         .expect("warm rollback retry");
-        let cold_retry = apply_ydoc_envelope(&mut cold_store, &operation, &NoFaults, &NoLiveLeases)
-            .expect("cold rollback retry");
+        let cold_retry = apply_ydoc_envelope(
+            &mut cold_store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("cold rollback retry");
         assert_eq!(warm_retry, cold_retry);
-        assert!(matches!(warm_retry, ApplyOutcome::Applied(_)));
+        assert!(matches!(
+            warm_retry,
+            ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ));
         assert_eq!(warm_cache.stats().hits, retry_before.hits + 1);
         assert_eq!(warm_cache.stats().advances, retry_before.advances + 1);
         assert_eq!(
@@ -11259,7 +11785,7 @@ fn storage_committed_crash_evicts_and_rebuilds_the_remote_cache() {
 
 #[test]
 fn pulled_lineage_replacement_evicts_the_warmed_remote_path_entry() {
-    let (_scratch, _path, mut store) = store();
+    let (_scratch, _path, mut store) = open_store();
     seed_replication_version(&mut store, "main", "main");
     let key = dohc_engine_collab::DocKey::new("ws", "main", "object-cache-replaced")
         .expect("replacement key");
@@ -11285,8 +11811,17 @@ fn pulled_lineage_replacement_evicts_the_warmed_remote_path_entry() {
     .expect("local marker");
     let local = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "local draft");
     let mut cache = dohc_engine_collab::WriterDocCache::new();
-    dohc_engine_collab::record_local_update(&mut store, &mut cache, &key, &local, &NoFaults, 1_001)
-        .expect("warm local lineage");
+    dohc_engine_collab::record_local_update(
+        &mut store,
+        &mut cache,
+        &key,
+        &local,
+        dohc_engine_collab::LocalAppend::default(),
+        &NoFaults,
+        1_001,
+        |_tx, _outcome, _update_sha| Ok(()),
+    )
+    .expect("warm local lineage");
     assert!(cache.contains_for_test(&key));
     let before = cache.stats();
 
@@ -11310,12 +11845,18 @@ fn pulled_lineage_replacement_evicts_the_warmed_remote_path_entry() {
             "isBaseState": true
         }),
     );
-    let outcome =
-        apply_ydoc_envelope_cached(&mut store, &mut cache, &base, &NoFaults, &NoLiveLeases)
-            .expect("replace local lineage");
-    let ApplyOutcome::Applied(result) = outcome else {
+    let outcome = apply_ydoc_envelope(&mut store, &mut cache, &base, &NoFaults, &NoLiveLeases)
+        .expect("replace local lineage");
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(result),
+        refusals: ref outcome_refusals,
+        sharing_declined: ref outcome_sharing_declined,
+    } = outcome
+    else {
         panic!("replacement did not apply: {outcome:?}");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     assert!(result.lineage_replacement.is_some());
     assert!(!cache.contains_for_test(&key));
     assert_eq!(
@@ -11328,13 +11869,13 @@ fn pulled_lineage_replacement_evicts_the_warmed_remote_path_entry() {
 #[test]
 fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
     // Oracle parity (`projectYDocUpdate` → `writeTextFileInDb` → CRDT rows):
-    // an APPLIED (non-deferred) ydoc envelope must advance the VISIBLE head
+    // an applied (non-deferred) ydoc envelope must advance the visible head
     // (moment + snapshot + pending materialization job) in the same
     // admission transaction as its ack — not just the CRDT log. Mutation
     // check: drop the `project_and_write_in_tx` calls in
     // `apply_ydoc_envelope`'s base/update arms — both head assertions below
     // fail while the ops still report applied.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     dohc_engine_domain::VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -11370,7 +11911,14 @@ fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
             "isBaseState": true
         }),
     );
-    apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies");
     let (head_text, head_origin): (String, String) = engine
         .read_with(|conn| {
             conn.query_row(
@@ -11416,7 +11964,14 @@ fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
             "isBaseState": false
         }),
     );
-    apply_ydoc_envelope(&mut engine, &update_op, &NoFaults, &NoLiveLeases).expect("update applies");
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &update_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("update applies");
     let updated_text: String = engine
         .read_with(|conn| {
             conn.query_row(
@@ -11436,13 +11991,13 @@ fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
 
 #[test]
 fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
-    // #546: the receiver's head came from capture/local writes and belongs to
-    // no shared lineage. The FIRST inbound base must not silently replace it:
+    // The receiver's head came from capture/local writes and belongs to
+    // no shared lineage. The first inbound base must not silently replace it:
     // the lineage lands (claimed, acked), the head stays, and one moment-lane
     // shaped sync conflict opens. Mutation check: restore the unconditional
     // `project_and_write_in_tx` call in the base branch — the head assertion
     // and the conflict-count assertion below both fail.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -11498,17 +12053,23 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
             "isBaseState": true
         }),
     );
-    let outcome =
-        apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies");
     assert_eq!(
         outcome,
-        ApplyOutcome::Applied(YdocApplyResult {
+        ApplyOutcome::new(ApplyDisposition::Applied(YdocApplyResult {
             deferred: false,
             reason: Some("ydoc-base-conflict"),
             conflicts_opened: 1,
             lineage_replacement: None,
             record_facts: Vec::new(),
-        })
+        }))
     );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "peer").expect("ack"),
@@ -11594,7 +12155,14 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
             "isBaseState": false
         }),
     );
-    apply_ydoc_envelope(&mut engine, &delta_op, &NoFaults, &NoLiveLeases).expect("delta applies");
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &delta_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("delta applies");
     let head_after_delta: String = engine
         .read_with(|conn| {
             conn.query_row(
@@ -11628,12 +12196,12 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
 
 #[test]
 fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
-    // `lineage_has_state` was a PROXY for "the head was merged", and the two
+    // `lineage_has_state` was a proxy for "the head was merged", and the two
     // come apart exactly where it matters. A local-only session crashes
     // leaving durable unmaterialized rows; capture then records an external
     // disk edit, so the visible head is newer than anything the lineage
     // produced. The union is the crashed draft plus the peer's base — the
-    // captured head is in NEITHER — yet the proxy said "rows exist, so the
+    // captured head is in neither — yet the proxy said "rows exist, so the
     // CRDT is the merge" and the projection overwrote the user's edit with
     // no conflict at all.
     //
@@ -11641,10 +12209,7 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
     // disk. Same move as the resolve path, where `metadata_origin == "sync"`
     // was replaced by the head ids the payload already carried.
     //
-    // MUTATION: gate the divergence check on `!lineage_has_state` again —
-    // the external edit is silently overwritten and the assertions below
-    // fail.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -11663,17 +12228,22 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
 
     // A local-only session that crashed: durable rows, never settled.
     let draft = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "crashed draft");
-    dohc_engine_collab::record_local_update_creating_marker(
+    dohc_engine_collab::record_local_update(
         &mut engine,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
-        Some("notes/crashed.md"),
-        dohc_engine_collab::ContentKind::Plaintext,
-        dohc_engine_collab::Regime::LocalOnly,
         &draft,
-        None,
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some("notes/crashed.md"),
+                content_kind: dohc_engine_collab::ContentKind::Plaintext,
+                regime: dohc_engine_collab::Regime::LocalOnly,
+            }),
+            ..Default::default()
+        },
         &NoFaults,
         1_500,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("crashed draft rows");
 
@@ -11710,6 +12280,7 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
         .expect("base blob");
     let outcome = apply_ydoc_envelope(
         &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &envelope(
             "peer",
             0,
@@ -11728,9 +12299,16 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
         &NoLiveLeases,
     )
     .expect("base applies");
-    let ApplyOutcome::Applied(result) = outcome else {
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(result),
+        refusals: ref outcome_refusals,
+        sharing_declined: ref outcome_sharing_declined,
+    } = outcome
+    else {
         panic!("base did not apply: {outcome:?}");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     assert_eq!(result.reason, Some("ydoc-base-conflict"));
     assert_eq!(result.conflicts_opened, 1);
     let replacement = result
@@ -11771,7 +12349,7 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
 fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
     // The convergent twin of the divergence test: a head whose bytes already
     // equal the base's projection fast-forwards silently.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -11822,17 +12400,23 @@ fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
             "isBaseState": true
         }),
     );
-    let outcome =
-        apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies");
     assert_eq!(
         outcome,
-        ApplyOutcome::Applied(YdocApplyResult {
+        ApplyOutcome::new(ApplyDisposition::Applied(YdocApplyResult {
             deferred: false,
             reason: None,
             conflicts_opened: 0,
             lineage_replacement: None,
             record_facts: Vec::new(),
-        })
+        }))
     );
     let conflicts: i64 = engine
         .read_with(|conn| {
@@ -11848,12 +12432,11 @@ fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
 
 #[test]
 fn a_coalesced_conflict_still_recounts_on_redelivery() {
-    // Codex #596 P2: a later delta coalesces the conflict and rewrites its
+    // A later delta coalesces the conflict and rewrites its
     // incoming anchor, so a crash-redelivery recount keyed on the conflict
     // row finds nothing. The count now lives in an immutable per-envelope
-    // decision record. MUTATION: drop the `record_ydoc_conflicts_opened`
-    // call (or key the recount back on the conflict row) — this returns 0.
-    let (_scratch, _path, mut engine) = store();
+    // decision record.
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -11905,7 +12488,14 @@ fn a_coalesced_conflict_still_recounts_on_redelivery() {
             "isBaseState": true
         }),
     );
-    apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base conflicts");
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base conflicts");
     // A later delta coalesces the conflict, rewriting its incoming anchor.
     let delta = base_doc.plaintext_insert(0, "more ");
     let delta_sha = engine.put_binary_blob(&delta).expect("delta blob");
@@ -11923,7 +12513,14 @@ fn a_coalesced_conflict_still_recounts_on_redelivery() {
             "isBaseState": false
         }),
     );
-    apply_ydoc_envelope(&mut engine, &delta_op, &NoFaults, &NoLiveLeases).expect("delta coalesces");
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &delta_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("delta coalesces");
     assert_eq!(
         crate::router::redelivered_conflicts_opened(&engine, &base_op).expect("recount"),
         1,
@@ -11933,12 +12530,11 @@ fn a_coalesced_conflict_still_recounts_on_redelivery() {
 
 #[test]
 fn resolution_fold_refuses_while_deferred_updates_are_parked() {
-    // Codex #596 P1: acked-but-parked remote updates were never part of
+    // Acked-but-parked remote updates were never part of
     // either reviewed side, and their drain runs after the review gate
     // closes. The fold — and with it the whole resolution transaction —
-    // refuses until they drain. MUTATION: drop the deferred-updates check in
-    // `fold_resolution_into_ydoc_in_tx` — the Err assertion fails.
-    let (_scratch, _path, mut engine) = store();
+    // refuses until they drain.
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -11993,10 +12589,7 @@ fn a_fold_that_cannot_reproduce_the_choice_refuses_instead_of_diverging() {
     // another, and the marker asserting they agree. That is the silent
     // reversal this PR exists to close, arriving through the fold itself.
     //
-    // MUTATION: delete the re-projection check in
-    // `fold_resolution_into_ydoc_in_tx` — this fold succeeds and the
-    // divergence assertion below fails, proving the guard is what stops it.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -12090,9 +12683,7 @@ fn recounting_a_malformed_redelivery_returns_zero_instead_of_wedging() {
     // The decision record is keyed by the ENVELOPE coordinate and needs no
     // payload, so absence reads as zero.
     //
-    // MUTATION: reparse the payload in `redelivered_conflicts_opened` — this
-    // returns Err and the assertion below fails.
-    let (_scratch, _path, engine) = store();
+    let (_scratch, _path, engine) = open_store();
     let malformed = envelope(
         "peer",
         0,
@@ -12102,7 +12693,8 @@ fn recounting_a_malformed_redelivery_returns_zero_instead_of_wedging() {
     assert_eq!(
         crate::router::redelivered_conflicts_opened(&engine, &malformed)
             .expect("a malformed redelivery must recount as zero, not abort the pull"),
-        0
+        0,
+        "reparse the payload in `redelivered_conflicts_opened` — this returns Err and the assertion below fails.",
     );
     assert!(
         crate::router::redelivered_materialization_changes(&engine, &malformed)
@@ -12113,13 +12705,13 @@ fn recounting_a_malformed_redelivery_returns_zero_instead_of_wedging() {
 
 #[test]
 fn a_resolution_over_an_incomplete_lineage_refuses() {
-    // ONE property with the orientation fix: the reviewed bytes are the
+    // One property with the orientation fix: the reviewed bytes are the
     // bytes that end up in the lineage, permanently.
     //
     // An out-of-order cross-origin update is appended to `ydoc_updates`
     // while its predecessor is missing, and `apply_ydoc_envelope` skips its
     // projection for exactly that reason. Resolving over that document
-    // reviews a PARTIAL lineage: when the predecessor lands it integrates
+    // reviews a partial lineage: when the predecessor lands it integrates
     // the unseen update and projects it through a review gate that has
     // already closed, changing the approved head with no second review.
     //
@@ -12128,10 +12720,7 @@ fn a_resolution_over_an_incomplete_lineage_refuses() {
     // Two different records of "not whole yet", which is how consulting one
     // of them missed the other.
     //
-    // MUTATION: delete the `has_pending_dependencies()` guard in
-    // `fold_resolution_into_ydoc_in_tx` — the fold succeeds over the partial
-    // document and this refusal assertion fails.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -12156,6 +12745,7 @@ fn a_resolution_over_an_incomplete_lineage_refuses() {
         .expect("base blob");
     apply_ydoc_envelope(
         &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &envelope(
             "peer",
             0,
@@ -12175,7 +12765,7 @@ fn a_resolution_over_an_incomplete_lineage_refuses() {
     )
     .expect("base claims");
 
-    // A THIRD origin's dependent update lands without its predecessor: it is
+    // A third origin's dependent update lands without its predecessor: it is
     // durably in `ydoc_updates` and the doc reports a missing dependency.
     let dep_doc = dohc_engine_collab::Ydoc::wire();
     let _predecessor = dep_doc.plaintext_insert(0, "dep base");
@@ -12183,6 +12773,7 @@ fn a_resolution_over_an_incomplete_lineage_refuses() {
     let dependent_sha = engine.put_binary_blob(&dependent).expect("dependent blob");
     apply_ydoc_envelope(
         &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &envelope(
             "dep-peer",
             0,
@@ -12305,7 +12896,7 @@ fn a_resolution_over_an_incomplete_lineage_refuses() {
 fn a_fold_the_parser_can_reproduce_still_commits() {
     // The guard must not refuse everything: a rich choice the parser does
     // model folds and journals as before.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -12362,10 +12953,9 @@ fn a_fold_the_parser_can_reproduce_still_commits() {
 
 #[test]
 fn resolution_fold_names_the_cap_it_hits() {
-    // Codex #596 P2: the fold's size refusal must name the constraint, the
-    // limit, and the observed bytes. MUTATION: revert it to a static
-    // InvalidInput — the BlobTooLarge match fails.
-    let (_scratch, _path, mut engine) = store();
+    // The fold's size refusal must name the constraint, the
+    // limit, and the observed bytes.
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -12423,7 +13013,7 @@ fn resolution_fold_names_the_cap_it_hits() {
 
 #[test]
 fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let install_abort_trigger = |engine: &mut EngineStore, trigger_name: &str, table_name: &str| {
         let sql = format!(
             "CREATE TRIGGER {trigger_name} BEFORE INSERT ON {table_name} \
@@ -12485,7 +13075,13 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
         "ydoc_snapshots",
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::Storage(_))
     ));
     assert_eq!(
@@ -12494,7 +13090,14 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
         "a base-claim storage failure must leave the coordinate retryable"
     );
     drop_trigger(&mut engine, "inject_ydoc_base_storage_failure");
-    apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases).expect("base applies");
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies");
 
     let update_sha = engine
         .put_binary_blob(&doc.plaintext_insert(0, "updated "))
@@ -12523,7 +13126,13 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
     ] {
         install_abort_trigger(&mut engine, trigger_name, table_name);
         assert!(matches!(
-            apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
+            apply_ydoc_envelope(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &update,
+                &NoFaults,
+                &NoLiveLeases
+            ),
             Err(SyncError::Storage(_))
         ));
         assert_eq!(
@@ -12547,14 +13156,24 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
     }
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: false,
-            reason: None,
-            conflicts_opened: 0,
-            lineage_replacement: None,
-            record_facts: _,
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                deferred: false,
+                reason: None,
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: _,
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "storage-update-peer").expect("retry ack"),
@@ -12564,7 +13183,7 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
 
 #[test]
 fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -12592,15 +13211,21 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
         }),
     );
     assert_eq!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases)
-            .expect("early update parks"),
-        ApplyOutcome::Applied(YdocApplyResult {
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases
+        )
+        .expect("early update parks"),
+        ApplyOutcome::new(ApplyDisposition::Applied(YdocApplyResult {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
             lineage_replacement: None,
             record_facts: Vec::new(),
-        })
+        }))
     );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "early-update-peer").expect("update ack"),
@@ -12630,8 +13255,14 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
             "isBaseState": true
         }),
     );
-    apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases)
-        .expect("base arrives and drains");
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base arrives and drains");
     let (parked, updates, head): (i64, i64, String) = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
@@ -12657,7 +13288,7 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
 
 #[test]
 fn external_text_write_to_a_closed_scene_retires_the_lineage_for_reseed() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let object_id = "closed-scene";
@@ -12691,9 +13322,22 @@ fn external_text_write_to_a_closed_scene_retires_the_lineage_for_reseed() {
             "isBaseState": true
         }),
     );
-    let base_outcome = apply_replication_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases);
+    let base_outcome = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     assert!(
-        matches!(base_outcome, Ok(ApplyOutcome::Applied(_))),
+        matches!(
+            base_outcome,
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ),
         "unexpected scene base outcome: {base_outcome:?}"
     );
 
@@ -12756,7 +13400,7 @@ fn external_text_write_to_a_closed_scene_retires_the_lineage_for_reseed() {
 
 #[test]
 fn replicated_text_write_to_a_scene_retires_the_receiver_lineage() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let object_id = "replicated-scene";
@@ -12790,9 +13434,22 @@ fn replicated_text_write_to_a_scene_retires_the_receiver_lineage() {
             "isBaseState": true
         }),
     );
-    let base_outcome = apply_replication_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases);
+    let base_outcome = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     assert!(
-        matches!(base_outcome, Ok(ApplyOutcome::Applied(_))),
+        matches!(
+            base_outcome,
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ),
         "unexpected scene base outcome: {base_outcome:?}"
     );
 
@@ -12857,7 +13514,7 @@ fn oversized_hydrated_scene_base_is_refused_without_storing_the_projection() {
     const ASSET_BYTES: usize = 3 * 1024 * 1024;
     const ASSET_IDS: [&str; 4] = ["image-a", "image-b", "image-c", "image-d"];
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let object_id = "scene-over-projection-cap";
@@ -12985,17 +13642,23 @@ fn oversized_hydrated_scene_base_is_refused_without_storing_the_projection() {
         }),
     );
 
-    let outcome = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases)
-        .expect("oversized projection is a terminal refusal");
+    let outcome = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("oversized projection is a terminal refusal");
     assert!(
         matches!(
             outcome,
-            ApplyOutcome::Refused(ReplicationRefusal {
+            ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
                 reason: RefusalReason::InvalidInput { ref reason },
                 ..
-            }) if reason == &format!(
+            }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == &format!(
                 "scene projection exceeds MAX_PROJECTION_BYTES: limit {limit_bytes} bytes, observed at least {actual_bytes} bytes"
-            )
+            ))
         ),
         "unexpected oversized scene outcome: {outcome:?}"
     );
@@ -13032,7 +13695,7 @@ fn oversized_hydrated_scene_base_is_refused_without_storing_the_projection() {
 
 #[test]
 fn an_old_scene_asset_tombstone_cannot_authorize_a_reused_path() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -13312,7 +13975,7 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
         (asset, scene, asset_ref, portable)
     };
 
-    let (scratch_a, path_a, mut asset_first) = store();
+    let (scratch_a, path_a, mut asset_first) = open_store();
     let (asset_a, scene_a, asset_ref_a, _) = make_ops(&mut asset_first);
     let asset_first_pull = RelaySyncClient::new(FakeRelay {
         pushes: Mutex::new(Vec::new()),
@@ -13328,13 +13991,20 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
         refused: 0,
         ..
     } = asset_first_pull
-        .pull_chat_workspace(&mut asset_first, "ws", &NoFaults, &NoLiveLeases, 2_100)
+        .pull_chat_workspace(
+            &mut asset_first,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            2_100,
+        )
         .expect("asset-first relay pull")
     else {
         panic!("asset-first relay pull must complete");
     };
 
-    let (scratch_b, path_b, mut scene_first) = store();
+    let (scratch_b, path_b, mut scene_first) = open_store();
     let (asset_b, scene_b, asset_ref_b, portable) = make_ops(&mut scene_first);
     let scene_first_pull = RelaySyncClient::new(FakeRelay {
         pushes: Mutex::new(Vec::new()),
@@ -13350,7 +14020,14 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
         refused: 0,
         ..
     } = scene_first_pull
-        .pull_chat_workspace(&mut scene_first, "ws", &NoFaults, &NoLiveLeases, 2_100)
+        .pull_chat_workspace(
+            &mut scene_first,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            2_100,
+        )
         .expect("scene-first relay pull retries after the asset moment")
     else {
         panic!("scene-first relay pull must complete");
@@ -13506,7 +14183,7 @@ fn scene_base_permanently_refuses_forged_asset_authority() {
         ("cross-workspace", "image/png", cross_workspace_ref),
         ("cross-version", "image/png", cross_version_ref),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         seed_replication_version(&mut engine, "main", "main");
         let portable = json!({
             "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
@@ -13547,11 +14224,21 @@ fn scene_base_permanently_refuses_forged_asset_authority() {
         );
         assert!(
             matches!(
-                apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
-                    reason: RefusalReason::InvalidInput { .. },
-                    ..
-                }))
+                apply_replication_envelope(
+                    &mut engine,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &operation,
+                    &NoFaults,
+                    &NoLiveLeases
+                ),
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Refused(ReplicationRefusal {
+                        reason: RefusalReason::InvalidInput { .. },
+                        ..
+                    }),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ),
             "{case}"
         );
@@ -13579,7 +14266,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
         ("plaintext-base", "plaintext", "richdoc"),
         ("richdoc-base", "richdoc", "plaintext"),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         VersionedTextStore::new(&mut engine)
             .ensure_main_version("ws", "main", 1_300, &NoFaults)
             .expect("main version");
@@ -13630,14 +14317,24 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
             }),
         );
         assert!(matches!(
-            apply_ydoc_envelope(&mut engine, &queued, &NoFaults, &NoLiveLeases),
-            Ok(ApplyOutcome::Applied(YdocApplyResult {
-                deferred: true,
-                reason: Some("ydoc-lineage-absent"),
-                conflicts_opened: 0,
-                lineage_replacement: None,
-                record_facts: _,
-            }))
+            apply_ydoc_envelope(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &queued,
+                &NoFaults,
+                &NoLiveLeases
+            ),
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(YdocApplyResult {
+                    deferred: true,
+                    reason: Some("ydoc-lineage-absent"),
+                    conflicts_opened: 0,
+                    lineage_replacement: None,
+                    record_facts: _,
+                }),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         let descendant = envelope(
             &queued_origin,
@@ -13654,14 +14351,24 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
             }),
         );
         assert!(matches!(
-            apply_ydoc_envelope(&mut engine, &descendant, &NoFaults, &NoLiveLeases),
-            Ok(ApplyOutcome::Applied(YdocApplyResult {
-                deferred: true,
-                reason: Some("ydoc-lineage-absent"),
-                conflicts_opened: 0,
-                lineage_replacement: None,
-                record_facts: _,
-            }))
+            apply_ydoc_envelope(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &descendant,
+                &NoFaults,
+                &NoLiveLeases
+            ),
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(YdocApplyResult {
+                    deferred: true,
+                    reason: Some("ydoc-lineage-absent"),
+                    conflicts_opened: 0,
+                    lineage_replacement: None,
+                    record_facts: _,
+                }),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
 
         let base = envelope(
@@ -13678,11 +14385,21 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 "isBaseState": true
             }),
         );
-        let outcome = apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases)
-            .expect("base applies and mismatched kind is drained");
-        let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
+        let outcome = apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("base applies and mismatched kind is drained");
+        let ApplyOutcome {
+            primary,
+            refusals,
+            sharing_declined,
+        } = outcome;
         assert!(sharing_declined.is_empty());
-        assert!(matches!(primary, ApplyOutcome::Applied(_)));
+        assert!(matches!(primary, ApplyDisposition::Applied(_)));
         assert_eq!(
             refusals,
             vec![ReplicationRefusal {
@@ -13695,7 +14412,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                         .to_owned(),
                 },
             }],
-            "MUTATION ({case}): omitting the marker-kind comparison silently accepts the hidden-root edit"
+            "{case}: omitting the marker-kind comparison silently accepts the hidden-root edit"
         );
 
         let key = dohc_engine_collab::DocKey::new("ws", "main", &object_id).expect("doc key");
@@ -13716,7 +14433,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
         );
         assert!(
             !persisted.doc.has_pending_dependencies(),
-            "MUTATION ({case}): refusing before applying the mismatched coordinate strands its descendant"
+            "{case}: refusing before applying the mismatched coordinate strands its descendant"
         );
         let (deferred, updates, refusal_rows): (i64, i64, i64) = engine
             .read_with(|conn| {
@@ -13752,7 +14469,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
 
 #[test]
 fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     dohc_engine_domain::VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
@@ -13800,7 +14517,14 @@ fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
 
     for (expected_applied, expected_skipped) in [(1, 0), (0, 1)] {
         let outcome = client
-            .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+            .pull_chat_workspace(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &NoLiveLeases,
+                1_000,
+            )
             .expect("pull ydoc projection");
         let SyncPassOutcome::Complete {
             applied,
@@ -13820,14 +14544,14 @@ fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
                 operation: "write",
                 content_kind: "text",
             }],
-            "MUTATION: dropping non-moment durable-intent reconstruction loses the owed path"
+            "dropping non-moment durable-intent reconstruction loses the owed path"
         );
     }
 }
 
 #[test]
 fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let head_sha = dohc_engine_storage::hex_sha256(b"existing");
     engine
@@ -13878,7 +14602,13 @@ fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
     );
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc.update object already occupies another path"
         })
@@ -13902,7 +14632,7 @@ fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "prebase-path-peer").expect("retryable ack"),
         -1,
-        "MUTATION: classifying the local identity pin InvalidInput permanently ACKs the update"
+        "classifying the local identity pin InvalidInput permanently ACKs the update"
     );
 
     engine
@@ -13925,14 +14655,24 @@ fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
         })
         .expect("later delete frees the identity");
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            reason: Some("ydoc-lineage-absent"),
-            conflicts_opened: 0,
-            lineage_replacement: None,
-            record_facts: _,
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                deferred: true,
+                reason: Some("ydoc-lineage-absent"),
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: _,
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let deferred: i64 = engine
         .read_with(|conn| {
@@ -13954,7 +14694,7 @@ fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
 
 #[test]
 fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let binary = b"device X binary";
     let binary_sha = engine.put_binary_blob(binary).expect("binary payload");
@@ -13981,8 +14721,18 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &binary_write, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &binary_write,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let binary_head: (String, String) = engine
         .read_with(|conn| {
@@ -14019,7 +14769,13 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc.update targets a binary head"
         })
@@ -14027,7 +14783,7 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "device-y").expect("base retry ack"),
         -1,
-        "MUTATION: InvalidInput would ACK and permanently lose device Y's base"
+        "InvalidInput would ACK and permanently lose device Y's base"
     );
     let ydoc_rows: i64 = engine
         .read_with(|conn| {
@@ -14075,19 +14831,39 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &binary_delete, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &binary_delete,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: false,
-            reason: None,
-            conflicts_opened: 0,
-            lineage_replacement: None,
-            record_facts: _,
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                deferred: false,
+                reason: None,
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: _,
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "device-y").expect("base ack"),
@@ -14110,7 +14886,7 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
 
 #[test]
 fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_create() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let update_bytes = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "orphan");
     let update_sha = engine
         .put_binary_blob(&update_bytes)
@@ -14131,7 +14907,13 @@ fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_crea
     );
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc.update version is missing"
         })
@@ -14168,18 +14950,28 @@ fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_crea
     assert_eq!(
         (objects, deferred, refusal_rows),
         (0, 0, 0),
-        "MUTATION: classifying the dependency as invalid input journals and retires the coordinate"
+        "classifying the dependency as invalid input journals and retires the coordinate"
     );
     seed_replication_version(&mut engine, "never-created", "branch");
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            reason: Some("ydoc-lineage-absent"),
-            conflicts_opened: 0,
-            lineage_replacement: None,
-            record_facts: _,
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                deferred: true,
+                reason: Some("ydoc-lineage-absent"),
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: _,
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "missing-version-ydoc-peer")
@@ -14190,7 +14982,7 @@ fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_crea
 
 #[test]
 fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -14219,14 +15011,24 @@ fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
     );
     update.recorded_at_ms = 2_000;
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            reason: Some("ydoc-lineage-absent"),
-            conflicts_opened: 0,
-            lineage_replacement: None,
-            record_facts: _,
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                deferred: true,
+                reason: Some("ydoc-lineage-absent"),
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: _,
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let placeholder_timestamp: i64 = engine
         .read_with(|conn| {
@@ -14255,7 +15057,14 @@ fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
         }),
     );
     base.recorded_at_ms = 7_000;
-    apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases).expect("base arrives");
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base arrives");
     let created_at_ms: i64 = engine
         .read_with(|conn| {
             conn.query_row(
@@ -14268,13 +15077,13 @@ fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
         .expect("base timestamp");
     assert_eq!(
         created_at_ms, 7_000,
-        "MUTATION: retaining the placeholder time (or only the earliest time) loses base provenance"
+        "retaining the placeholder time (or only the earliest time) loses base provenance"
     );
 }
 
 #[test]
 fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -14322,14 +15131,24 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
             }),
         );
         assert!(matches!(
-            apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
-            Ok(ApplyOutcome::Applied(YdocApplyResult {
-                deferred: true,
-                reason: Some("ydoc-lineage-absent"),
-                conflicts_opened: 0,
-                lineage_replacement: None,
-                record_facts: _,
-            }))
+            apply_ydoc_envelope(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &update,
+                &NoFaults,
+                &NoLiveLeases
+            ),
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(YdocApplyResult {
+                    deferred: true,
+                    reason: Some("ydoc-lineage-absent"),
+                    conflicts_opened: 0,
+                    lineage_replacement: None,
+                    record_facts: _,
+                }),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
     }
 
@@ -14347,12 +15166,21 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
             "isBaseState": true
         }),
     );
-    let base_outcome = apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases)
-        .expect("base applies and drains");
-    let (base_primary, drain_refusals, sharing_declined) =
-        base_outcome.into_primary_and_diagnostics();
+    let base_outcome = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies and drains");
+    let ApplyOutcome {
+        primary: base_primary,
+        refusals: drain_refusals,
+        sharing_declined,
+    } = base_outcome;
     assert!(sharing_declined.is_empty());
-    assert!(matches!(base_primary, ApplyOutcome::Applied(_)));
+    assert!(matches!(base_primary, ApplyDisposition::Applied(_)));
     assert_eq!(
         drain_refusals,
         vec![ReplicationRefusal {
@@ -14364,7 +15192,7 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
                 reason: "parked ydoc.update could not be applied".to_owned(),
             },
         }],
-        "MUTATION: persisting without returning the drain refusal hides it from the base caller"
+        "persisting without returning the drain refusal hides it from the base caller"
     );
 
     let key =
@@ -14410,21 +15238,26 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
     );
     assert_eq!(
         refusal_rows, 1,
-        "MUTATION: omitting refusal persistence loses the invalid coordinate"
+        "omitting refusal persistence loses the invalid coordinate"
     );
     assert_eq!(reason, "parked ydoc.update could not be applied");
     assert_eq!(
-        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults)
-            .expect("redrain")
-            .drained,
+        drain_deferred_ydoc_for_key(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults
+        )
+        .expect("redrain")
+        .drained,
         0,
-        "MUTATION: retaining the invalid marker wedges every later drain"
+        "retaining the invalid marker wedges every later drain"
     );
 }
 
 #[test]
 fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let base_doc = dohc_engine_collab::Ydoc::wire();
     base_doc.plaintext_insert(0, "base");
@@ -14449,14 +15282,24 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            reason: Some("ydoc-lineage-absent"),
-            conflicts_opened: 0,
-            lineage_replacement: None,
-            record_facts: _,
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                deferred: true,
+                reason: Some("ydoc-lineage-absent"),
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: _,
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let base = envelope(
         "prebase-mismatch-base-peer",
@@ -14473,11 +15316,21 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
         }),
     );
 
-    let outcome = apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases)
-        .expect("base applies and mismatched path drains");
-    let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies and mismatched path drains");
+    let ApplyOutcome {
+        primary,
+        refusals,
+        sharing_declined,
+    } = outcome;
     assert!(sharing_declined.is_empty());
-    assert!(matches!(primary, ApplyOutcome::Applied(_)));
+    assert!(matches!(primary, ApplyDisposition::Applied(_)));
     assert_eq!(
         refusals,
         vec![ReplicationRefusal {
@@ -14489,7 +15342,7 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
                 reason: "ydoc.update object already occupies another path".to_owned(),
             },
         }],
-        "MUTATION: validating only after apply silently admits path B's bytes"
+        "validating only after apply silently admits path B's bytes"
     );
     let key =
         dohc_engine_collab::DocKey::new("ws", "main", "object-prebase-mismatch").expect("doc key");
@@ -14520,13 +15373,13 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
     assert_eq!(
         (deferred, updates, path_b),
         (0, 1, 0),
-        "MUTATION: dropping refused CRDT bytes loses clocks needed by dependent descendants"
+        "dropping refused CRDT bytes loses clocks needed by dependent descendants"
     );
 }
 
 #[test]
 fn retried_identity_blocked_ydoc_base_does_not_drain_its_prebase_queue() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
 
     let source = dohc_engine_collab::Ydoc::wire();
@@ -14552,11 +15405,18 @@ fn retried_identity_blocked_ydoc_base_does_not_drain_its_prebase_queue() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &queued, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            ..
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &queued,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     seed_text_head(
         &mut engine,
@@ -14580,13 +15440,25 @@ fn retried_identity_blocked_ydoc_base_does_not_drain_its_prebase_queue() {
     );
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc.update path is occupied by another object"
         })
     ));
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc.update path is occupied by another object"
         })
@@ -14620,7 +15492,7 @@ fn retried_identity_blocked_ydoc_base_does_not_drain_its_prebase_queue() {
     assert_eq!(
         (queued_rows, update_rows),
         (1, 0),
-        "MUTATION: ACKing the identity-blocked base lets replay drain against a lineage that never materialized"
+        "ACKing the identity-blocked base lets replay drain against a lineage that never materialized"
     );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "refused-base-peer").expect("retryable ack"),
@@ -14630,7 +15502,7 @@ fn retried_identity_blocked_ydoc_base_does_not_drain_its_prebase_queue() {
 
 #[test]
 fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
 
     let source = dohc_engine_collab::Ydoc::wire();
@@ -14659,8 +15531,18 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     seed_text_head(
         &mut engine,
@@ -14683,11 +15565,21 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &refused, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
-            reason: RefusalReason::InvalidInput { .. },
-            ..
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &refused,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Refused(ReplicationRefusal {
+                reason: RefusalReason::InvalidInput { .. },
+                ..
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let descendant = envelope(
         "clock-update-peer",
@@ -14704,8 +15596,18 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &descendant, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &descendant,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let key = dohc_engine_collab::DocKey::new("ws", "main", "object-causal-refusal").expect("key");
@@ -14715,7 +15617,7 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
     let causal_text = persisted.doc.plaintext_string();
     assert!(
         !persisted.doc.has_pending_dependencies(),
-        "MUTATION: rolling back the refused update strands its descendant behind a missing clock"
+        "rolling back the refused update strands its descendant behind a missing clock"
     );
     assert!(
         causal_text.contains("refused-clock") && causal_text.contains("descendant"),
@@ -14740,7 +15642,7 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
 
 #[test]
 fn later_losing_base_and_delta_are_acked_without_touching_the_winner() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let first_doc = dohc_engine_collab::Ydoc::wire();
     first_doc.plaintext_insert(0, "first");
@@ -14773,15 +15675,21 @@ fn later_losing_base_and_delta_are_acked_without_touching_the_winner() {
     assert!(matches!(
         apply_ydoc_envelope(
             &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &base("first-base-peer", 1, &first_sha),
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let losing_base = apply_ydoc_envelope(
         &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &base("second-base-peer", 2, &second_sha),
         &NoFaults,
         &NoLiveLeases,
@@ -14789,11 +15697,15 @@ fn later_losing_base_and_delta_are_acked_without_touching_the_winner() {
     .expect("later base is handled");
     assert!(matches!(
         losing_base,
-        ApplyOutcome::Applied(YdocApplyResult {
-            reason: Some("ydoc-base-already-won"),
-            lineage_replacement: None,
-            ..
-        })
+        ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                reason: Some("ydoc-base-already-won"),
+                lineage_replacement: None,
+                ..
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let losing_delta = second_doc.plaintext_insert(6, " delta");
@@ -14814,12 +15726,22 @@ fn later_losing_base_and_delta_are_acked_without_touching_the_winner() {
     );
     delta.relay_seq = Some(3);
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &delta, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            reason: Some("ydoc-lineage-lost"),
-            lineage_replacement: None,
-            ..
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &delta,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                reason: Some("ydoc-lineage-lost"),
+                lineage_replacement: None,
+                ..
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "second-base-peer").expect("loser ack"),
@@ -14863,7 +15785,7 @@ fn later_losing_base_and_delta_are_acked_without_touching_the_winner() {
 
 #[test]
 fn live_lease_on_local_only_lineage_is_retryable_unacked_and_unjournaled() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -14907,7 +15829,13 @@ fn live_lease_on_local_only_lineage_is_retryable_unacked_and_unjournaled() {
     );
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &AlwaysLive),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &AlwaysLive
+        ),
         Err(SyncError::RetryableState {
             reason: "live lease on a non-replicated Y.Doc lineage"
         })
@@ -14928,7 +15856,7 @@ fn live_lease_on_local_only_lineage_is_retryable_unacked_and_unjournaled() {
         .expect("lease-race journal count");
     assert_eq!(
         journaled, 0,
-        "MUTATION: treating the lease race as a terminal refusal journals the coordinate"
+        "treating the lease race as a terminal refusal journals the coordinate"
     );
 }
 
@@ -14937,7 +15865,7 @@ fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
     // A local-only lineage has no relay identity. The pulled base becomes the
     // active lineage, and the durable local content becomes an ordinary
     // recovery sibling. The two independent CRDT histories never merge.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     dohc_engine_domain::VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -14967,11 +15895,13 @@ fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
         &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
         &local_update,
+        dohc_engine_collab::LocalAppend::default(),
         &NoFaults,
         1_460,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("local row");
-    // A lineage the client seeded from a captured head (#815). The
+    // A lineage the client seeded from a captured head. The
     // replacement below must clear this witness — the winning base holds
     // content the file does not, and a surviving stamp would feed the
     // seed-only settle skip a lie about the replaced lineage.
@@ -15006,11 +15936,23 @@ fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
             "isBaseState": true
         }),
     );
-    let ApplyOutcome::Applied(result) =
-        apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies")
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(result),
+        refusals: ref outcome_refusals,
+        sharing_declined: ref outcome_sharing_declined,
+    } = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies")
     else {
         panic!("base did not apply");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     let replacement = result
         .lineage_replacement
         .expect("local-only lineage replacement");
@@ -15063,7 +16005,7 @@ fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
 
 #[test]
 fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -15095,11 +16037,13 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
         &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
         &local_update,
+        dohc_engine_collab::LocalAppend::default(),
         &NoFaults,
         1_460,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("local row");
-    // Same witness pin as the pulled-base twin (#815): the deferred drain's
+    // Same witness pin as the pulled-base twin: the deferred drain's
     // replacement must clear the seed source with the rows it described.
     engine
         .write_with(&NoFaults, |tx| {
@@ -15147,8 +16091,13 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
         })
         .expect("deferred base row");
 
-    let drained =
-        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("drain deferred base");
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("drain deferred base");
     assert_eq!(drained.drained, 1);
     let replacement = drained
         .lineage_replacements
@@ -15202,7 +16151,7 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
 
 #[test]
 fn divergent_base_waits_for_the_existing_base_relay_position() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -15259,7 +16208,13 @@ fn divergent_base_waits_for_the_existing_base_relay_position() {
     );
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "Y.Doc base is waiting for its authenticated relay position"
         })
@@ -15310,7 +16265,7 @@ fn secret_and_version_missing_dependencies_retry_and_apply_after_version_arrival
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_secret_scratch, _secret_path, mut secret_engine) = store();
+    let (_secret_scratch, _secret_path, mut secret_engine) = open_store();
     let ciphertext = b"late secret";
     let sha = secret_engine
         .put_binary_blob(ciphertext)
@@ -15339,10 +16294,14 @@ fn secret_and_version_missing_dependencies_retry_and_apply_after_version_arrival
     seed_replication_version(&mut secret_engine, "late-secret-version", "named");
     assert!(matches!(
         apply_secret_envelope(&mut secret_engine, &secret, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
-    let (_version_scratch, _version_path, mut version_engine) = store();
+    let (_version_scratch, _version_path, mut version_engine) = open_store();
     seed_replication_version(&mut version_engine, "main", "main");
     let child = envelope(
         "late-version-child-peer",
@@ -15359,7 +16318,13 @@ fn secret_and_version_missing_dependencies_retry_and_apply_after_version_arrival
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut version_engine, &child, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut version_engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &child,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "version.create source version is missing"
         })
@@ -15378,12 +16343,32 @@ fn secret_and_version_missing_dependencies_retry_and_apply_after_version_arrival
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut version_engine, &source, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_replication_envelope(
+            &mut version_engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &source,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
-        apply_replication_envelope(&mut version_engine, &child, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_replication_envelope(
+            &mut version_engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &child,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let created: bool = version_engine
         .read_with(|conn| {
@@ -15397,7 +16382,7 @@ fn secret_and_version_missing_dependencies_retry_and_apply_after_version_arrival
         .expect("late child version");
     assert!(
         created,
-        "MUTATION: terminal missing-version classification prevents later dependency arrival from reviving the operation"
+        "terminal missing-version classification prevents later dependency arrival from reviving the operation"
     );
 }
 
@@ -15418,23 +16403,43 @@ fn assert_unacked_and_unjournaled(engine: &EngineStore, origin_id: &str) {
         .expect("retry journal");
     assert_eq!(
         journaled, 0,
-        "MUTATION: a retryable dependency must not be journaled before it applies"
+        "a retryable dependency must not be journaled before it applies"
     );
 }
 
 #[test]
 fn workspace_init_router_apply_is_idempotent_on_replay() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let seed = envelope("workspace-seed-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &seed, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &seed,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let operation = envelope("workspace-replay-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let main: (String, String, String, i64) = engine
         .read_with(|conn| {
@@ -15451,14 +16456,24 @@ fn workspace_init_router_apply_is_idempotent_on_replay() {
         .expect("main version");
     assert_eq!(main, ("main".into(), "main".into(), "Main".into(), 2_000));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Skipped)
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 }
 
 #[test]
 fn workspace_init_repairs_a_workspace_row_missing_its_main_version() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     engine
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -15473,8 +16488,18 @@ fn workspace_init_repairs_a_workspace_row_missing_its_main_version() {
 
     let operation = envelope("partial-workspace-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let main: (String, String, String, i64) = engine
         .read_with(|conn| {
@@ -15496,7 +16521,7 @@ fn workspace_init_repairs_a_workspace_row_missing_its_main_version() {
 
 #[test]
 fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempotently() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
 
     let local_sha = dohc_engine_storage::hex_sha256(b"local source state");
@@ -15578,8 +16603,18 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     type CopiedSnapshot = (
         String,
@@ -15652,8 +16687,6 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
             .collect()
         })
         .expect("shipped fork-base metadata");
-    // MUTATION: the dynamic shipped-snapshot insert runs for both destination
-    // tables; dropping either optional metadata binding changes these rows.
     assert_eq!(
         fork_base_metadata,
         vec![
@@ -15664,7 +16697,8 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
                 Some("origin".into()),
                 None
             ),
-        ]
+        ],
+        "the dynamic shipped-snapshot insert runs for both destination tables; dropping either optional metadata binding changes these rows.",
     );
     let counts: (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -15689,8 +16723,18 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
         .expect("fork row counts");
     assert_eq!(counts, (2, 2, 2));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Skipped)
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let replay_counts: (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -15718,14 +16762,24 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
         .expect("replayed fork row counts");
     assert_eq!(replay_counts, (2, 2, 2));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Skipped)
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 }
 
 #[test]
 fn later_version_create_chunk_preserves_a_local_write_to_its_pending_path() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let first_sha = dohc_engine_storage::hex_sha256(b"first chunk");
     let pending_sha = dohc_engine_storage::hex_sha256(b"origin pending");
@@ -15764,7 +16818,11 @@ fn later_version_create_chunk_preserves_a_local_write_to_its_pending_path() {
     let second = chunk(1, "origin-pending-object", "pending.md", &pending_sha);
     assert!(matches!(
         apply_version_envelope(&mut engine, &first, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     VersionedTextStore::new(&mut engine)
@@ -15789,7 +16847,14 @@ fn later_version_create_chunk_preserves_a_local_write_to_its_pending_path() {
 
     let second_result = apply_version_envelope(&mut engine, &second, &NoFaults);
     assert!(
-        matches!(second_result, Ok(ApplyOutcome::Applied(()))),
+        matches!(
+            second_result,
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(()),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ),
         "later chunk failed: {second_result:?}"
     );
     let head = VersionedTextStore::new(&mut engine)
@@ -15846,7 +16911,7 @@ fn version_create_with_shipped_snapshots(
 
 #[test]
 fn version_create_stamps_a_shipped_capture_head_as_replicated() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let sha = dohc_engine_storage::hex_sha256(b"captured fork state");
     engine
@@ -15868,8 +16933,18 @@ fn version_create_stamps_a_shipped_capture_head_as_replicated() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let (head_origin, base_origin): (String, String) = engine
         .read_with(|conn| {
@@ -15897,7 +16972,7 @@ fn version_create_stamps_a_shipped_capture_head_as_replicated() {
 
 #[test]
 fn version_create_shipped_snapshot_rejects_a_missing_blob_deliberately() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let missing_sha = dohc_engine_storage::hex_sha256(b"missing");
     let operation = version_create_with_shipped_snapshots(
@@ -15911,7 +16986,13 @@ fn version_create_shipped_snapshot_rejects_a_missing_blob_deliberately() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::BlobInvalid)
     ));
     assert_eq!(
@@ -15934,7 +17015,7 @@ fn version_create_shipped_snapshot_rejects_a_missing_blob_deliberately() {
 #[test]
 fn version_create_shipped_snapshot_accepts_only_oracle_content_kinds() {
     for (index, content_kind) in [None, Some("text"), Some("binary")].into_iter().enumerate() {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         seed_replication_version(&mut engine, "main", "main");
         let text_sha = dohc_engine_storage::hex_sha256(b"content");
         engine
@@ -15970,8 +17051,18 @@ fn version_create_shipped_snapshot_accepts_only_oracle_content_kinds() {
 
         assert!(
             matches!(
-                apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-                Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+                apply_replication_envelope(
+                    &mut engine,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &operation,
+                    &NoFaults,
+                    &NoLiveLeases
+                ),
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ),
             "{content_kind:?} must remain accepted"
         );
@@ -15980,7 +17071,7 @@ fn version_create_shipped_snapshot_accepts_only_oracle_content_kinds() {
 
 #[test]
 fn version_create_unknown_content_kind_is_refused_and_acked() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let text_sha = dohc_engine_storage::hex_sha256(b"content");
     engine
@@ -16002,13 +17093,13 @@ fn version_create_unknown_content_kind_is_refused_and_acked() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "version.create shipped snapshot content kind is invalid"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "version.create shipped snapshot content kind is invalid")
     ));
     let (journaled, versions, snapshots): (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -16058,8 +17149,18 @@ fn version_create_unknown_content_kind_is_refused_and_acked() {
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &next, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &next,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "richdoc-refusal-peer").expect("ack"),
@@ -16070,7 +17171,7 @@ fn version_create_unknown_content_kind_is_refused_and_acked() {
 
 #[test]
 fn version_create_shipped_snapshot_rejects_duplicate_paths_deliberately() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let sha = dohc_engine_storage::hex_sha256(b"content");
     engine
@@ -16093,13 +17194,13 @@ fn version_create_shipped_snapshot_rejects_duplicate_paths_deliberately() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "version.create shipped snapshot paths must be unique"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "version.create shipped snapshot paths must be unique")
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "duplicate-path-peer").expect("ack"),
@@ -16110,7 +17211,7 @@ fn version_create_shipped_snapshot_rejects_duplicate_paths_deliberately() {
 #[test]
 fn version_create_shipped_snapshot_rejects_unsafe_and_secret_paths() {
     for (index, path) in ["../escape.md", "config/.env"].into_iter().enumerate() {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         seed_replication_version(&mut engine, "main", "main");
         let sha = dohc_engine_storage::hex_sha256(b"content");
         engine
@@ -16132,13 +17233,13 @@ fn version_create_shipped_snapshot_rejects_unsafe_and_secret_paths() {
         );
 
         assert!(matches!(
-            apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-            Ok(ApplyOutcome::Refused(ReplicationRefusal {
+            apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
+            Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
                 reason: RefusalReason::InvalidInput {
                     ref reason
                 },
                 ..
-            })) if reason == "version.create shipped snapshot path must be tracked"
+            }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "version.create shipped snapshot path must be tracked")
         ));
         assert_eq!(
             read_replication_acked_seq(&engine, "ws", &origin).expect("ack"),
@@ -16149,14 +17250,14 @@ fn version_create_shipped_snapshot_rejects_unsafe_and_secret_paths() {
 }
 
 /// A `version.create` shipping a TEXT fork snapshot at a secret-classified path
-/// is a DISCLOSURE op: `blobs`/`snapshots`/`path_aliases` are the ordinary
+/// is a disclosure op: `blobs`/`snapshots`/`path_aliases` are the ordinary
 /// plaintext surface, and `read_text` deliberately admits secret paths so an
 /// absence check answers honestly — so a persisted `.env` alias hands the
 /// plaintext straight back through the normal read surface. Asserting the error
-/// is not enough; this asserts the plaintext is NOT READABLE afterwards.
+/// is not enough; this asserts the plaintext is not readable afterwards.
 #[test]
 fn version_create_secret_fork_snapshot_never_becomes_readable_plaintext() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let plaintext = "AWS_SECRET_ACCESS_KEY=hunter2";
     let sha = dohc_engine_storage::hex_sha256(plaintext.as_bytes());
@@ -16176,7 +17277,13 @@ fn version_create_secret_fork_snapshot_never_becomes_readable_plaintext() {
         "feature",
         vec![shipped_text_snapshot("secret-object", "app/.env", &sha)],
     );
-    let refusal = apply_replication_envelope(&mut engine, &disclosure, &NoFaults, &NoLiveLeases);
+    let refusal = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &disclosure,
+        &NoFaults,
+        &NoLiveLeases,
+    );
 
     // Create `feature` honestly. If the disclosure op had persisted anything,
     // this becomes a no-op over the already-created version and the secret
@@ -16195,8 +17302,18 @@ fn version_create_secret_fork_snapshot_never_becomes_readable_plaintext() {
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &honest, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &honest,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     assert_eq!(
@@ -16221,12 +17338,12 @@ fn version_create_secret_fork_snapshot_never_becomes_readable_plaintext() {
     assert_eq!(alias_rows, 0, "nothing from the disclosure op may persist");
     assert!(matches!(
         refusal,
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "version.create shipped snapshot path must be tracked"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "version.create shipped snapshot path must be tracked")
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "secret-snapshot-peer").expect("ack"),
@@ -16245,7 +17362,7 @@ fn version_create_fork_snapshot_refuses_a_non_canonical_tracked_path() {
         .into_iter()
         .enumerate()
     {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         seed_replication_version(&mut engine, "main", "main");
         let sha = dohc_engine_storage::hex_sha256(b"content");
         engine
@@ -16268,13 +17385,13 @@ fn version_create_fork_snapshot_refuses_a_non_canonical_tracked_path() {
 
         assert!(
             matches!(
-                apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
+                apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
+                Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
                     reason: RefusalReason::InvalidInput {
                         ref reason
                     },
                     ..
-                })) if reason == "version.create shipped snapshot path must be canonical"
+                }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "version.create shipped snapshot path must be canonical")
             ),
             "{path}"
         );
@@ -16311,7 +17428,7 @@ fn version_create_fork_snapshot_refuses_a_non_canonical_tracked_path() {
 
 #[test]
 fn version_create_shipped_payload_materializes_only_workspace_scoped_rows() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     seed_replication_version_in_workspace(&mut engine, "foreign-ws", "main", "main");
     let source_sha = dohc_engine_storage::hex_sha256(b"legacy source");
@@ -16400,8 +17517,18 @@ fn version_create_shipped_payload_materializes_only_workspace_scoped_rows() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let counts: (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -16453,10 +17580,10 @@ fn version_create_shipped_payload_materializes_only_workspace_scoped_rows() {
         Some("legacy summary".to_owned()),
         Some("legacy correlation".to_owned()),
     );
-    // MUTATION: either shipped insert dropping a metadata column changes this tuple.
     assert_eq!(
         copied_metadata,
-        (expected_metadata.clone(), expected_metadata)
+        (expected_metadata.clone(), expected_metadata),
+        "either shipped insert dropping a metadata column changes this tuple.",
     );
     let foreign_destination_rows: (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -16487,7 +17614,7 @@ fn version_create_shipped_payload_materializes_only_workspace_scoped_rows() {
 
 #[test]
 fn version_create_rejects_a_version_id_owned_by_another_workspace() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     seed_replication_version_in_workspace(&mut engine, "foreign-ws", "foreign-version", "named");
     let operation = envelope(
@@ -16504,13 +17631,13 @@ fn version_create_rejects_a_version_id_owned_by_another_workspace() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "version id belongs to another workspace"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "version id belongs to another workspace")
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "collision-peer").expect("ack"),
@@ -16585,7 +17712,7 @@ fn map_secret_snapshot_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SecretSn
 
 #[test]
 fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotently() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let ciphertext = b"sealed source bytes";
     let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
     let operation = envelope(
@@ -16616,8 +17743,18 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let rows: (Vec<String>, Vec<String>) = engine
         .read_with(|conn| {
@@ -16646,8 +17783,18 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
     let mut applier_replay = operation.clone();
     applier_replay.origin_id = "secret-fork-applier-replay-peer".into();
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &applier_replay,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let replayed_rows: (i64, i64) = engine
         .read_with(|conn| {
@@ -16669,8 +17816,18 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
         .expect("replayed secret fork rows");
     assert_eq!(replayed_rows, (2, 2));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Skipped)
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &applier_replay,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 }
 
@@ -16679,7 +17836,7 @@ fn later_secret_version_fork_chunk_preserves_a_local_write_to_its_pending_path()
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let origin_ciphertext = b"origin pending secret";
     let (sha, iv, tag) = seed_secret_fork_state(&mut engine, origin_ciphertext);
     let chunk = |seq, chunk_index, path: &str| {
@@ -16706,8 +17863,18 @@ fn later_secret_version_fork_chunk_preserves_a_local_write_to_its_pending_path()
     let first = chunk(0, 0, "app/.env");
     let second = chunk(1, 1, "pending.env");
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &first, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &first,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let local_ciphertext = b"local edit";
@@ -16725,11 +17892,21 @@ fn later_secret_version_fork_chunk_preserves_a_local_write_to_its_pending_path()
         })
         .expect("write pending secret locally");
 
-    let second_result = apply_replication_envelope(&mut engine, &second, &NoFaults, &NoLiveLeases);
+    let second_result = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &second,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     assert!(
         matches!(
             second_result,
-            Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ),
         "later chunk failed: {second_result:?}"
     );
@@ -16760,7 +17937,7 @@ fn secret_version_fork_refuses_divergent_chunk_assembly() {
         ("skipped chunk", 2, 2, "config/prod.env"),
         ("changed total", 1, 3, "config/prod.env"),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let ciphertext = b"fork assembly bytes";
         let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
         let chunk = |seq, chunk_index, total_rows, path: &str| {
@@ -16787,14 +17964,20 @@ fn secret_version_fork_refuses_divergent_chunk_assembly() {
         assert!(matches!(
             apply_replication_envelope(
                 &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
                 &chunk(0, 0, 2, "app/.env"),
                 &NoFaults,
                 &NoLiveLeases
             ),
-            Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         let result = apply_replication_envelope(
             &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &chunk(1, chunk_index, total_rows, path),
             &NoFaults,
             &NoLiveLeases,
@@ -16802,10 +17985,14 @@ fn secret_version_fork_refuses_divergent_chunk_assembly() {
         assert!(
             matches!(
                 result,
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
-                    reason: RefusalReason::InvalidInput { .. },
-                    ..
-                }))
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Refused(ReplicationRefusal {
+                        reason: RefusalReason::InvalidInput { .. },
+                        ..
+                    }),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ),
             "{label} was not refused: {result:?}"
         );
@@ -16817,7 +18004,7 @@ fn secret_version_fork_applies_the_shipped_snapshot_after_a_peer_source_edit() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let fork_point_ciphertext = b"sealed source bytes";
     let (fork_point_sha, fork_point_iv, fork_point_tag) =
         seed_secret_fork_state(&mut engine, fork_point_ciphertext);
@@ -16843,7 +18030,11 @@ fn secret_version_fork_applies_the_shipped_snapshot_after_a_peer_source_edit() {
     );
     assert!(matches!(
         apply_secret_envelope(&mut engine, &peer_edit, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let fork = envelope(
@@ -16873,12 +18064,22 @@ fn secret_version_fork_applies_the_shipped_snapshot_after_a_peer_source_edit() {
         }),
     );
 
-    let outcome = apply_replication_envelope(&mut engine, &fork, &NoFaults, &NoLiveLeases);
+    let outcome = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &fork,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     let ack = read_replication_acked_seq(&engine, "ws", "fork-after-peer-edit").expect("ack");
     assert!(
         matches!(
             outcome,
-            Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ) && ack == 0,
         "fork outcome: {outcome:?}; ack: {ack}"
     );
@@ -16911,7 +18112,7 @@ fn secret_version_fork_applies_the_shipped_snapshot_after_a_peer_source_edit() {
 
 #[test]
 fn secret_version_fork_refuses_duplicate_paths() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let ciphertext = b"sealed source bytes";
     let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
     let row = json!({
@@ -16938,11 +18139,11 @@ fn secret_version_fork_refuses_duplicate_paths() {
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &duplicate, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &duplicate, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput { ref reason },
             ..
-        })) if reason == "secret fork contains duplicate paths"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "secret fork contains duplicate paths")
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "duplicate-fork-peer").expect("duplicate ack"),
@@ -16975,7 +18176,7 @@ fn secret_version_fork_refuses_each_invalid_row_boundary() {
             "secret fork chunk claims more rows than its declared total",
         ),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let ciphertext = b"sealed source bytes";
         let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
         let mut payload = json!({
@@ -17001,11 +18202,11 @@ fn secret_version_fork_refuses_each_invalid_row_boundary() {
 
         assert!(
             matches!(
-                apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
+                apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
+                Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
                     reason: RefusalReason::InvalidInput { reason },
                     ..
-                })) if reason == expected_reason
+                }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == expected_reason)
             ),
             "{origin} must reject with {expected_reason}"
         );
@@ -17016,7 +18217,7 @@ fn secret_version_fork_refuses_each_invalid_row_boundary() {
 /// destination from an empty source.
 #[test]
 fn secret_version_fork_with_no_rows_clears_the_destination_secrets() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let ciphertext = b"sealed source bytes";
     seed_secret_fork_state(&mut engine, ciphertext);
     seed_replication_version(&mut engine, "empty-source", "named");
@@ -17035,8 +18236,18 @@ fn secret_version_fork_with_no_rows_clears_the_destination_secrets() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let destination: (Vec<String>, Vec<String>) = engine
         .read_with(|conn| {
@@ -17073,7 +18284,7 @@ fn secret_version_fork_uses_peer_local_tip_ids() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     seed_replication_version(&mut engine, "feature", "named");
     let ciphertext = b"sealed source bytes";
@@ -17097,8 +18308,18 @@ fn secret_version_fork_uses_peer_local_tip_ids() {
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &put, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &put,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let fork = envelope(
@@ -17121,8 +18342,18 @@ fn secret_version_fork_uses_peer_local_tip_ids() {
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &fork, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &fork,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let tips: (String, String) = engine
@@ -17157,7 +18388,7 @@ fn secret_put_over_the_domain_cap_is_refused_without_a_tip_or_moment() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let oversized = vec![7_u8; MAX_SECRET_FILE_BYTES + 1];
     let sha = engine
@@ -17179,7 +18410,13 @@ fn secret_put_over_the_domain_cap_is_refused_without_a_tip_or_moment() {
         }),
     );
 
-    let refusal = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases);
+    let refusal = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     let stored: (i64, i64) = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
@@ -17191,12 +18428,12 @@ fn secret_put_over_the_domain_cap_is_refused_without_a_tip_or_moment() {
     assert_eq!(stored, (0, 0), "an over-cap put must persist nothing");
     assert!(matches!(
         refusal,
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "secret ciphertext metadata is invalid"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "secret ciphertext metadata is invalid")
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "oversized-secret-peer").expect("ack"),
@@ -17224,8 +18461,18 @@ fn secret_put_over_the_domain_cap_is_refused_without_a_tip_or_moment() {
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &admitted, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &admitted,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 }
 
@@ -17234,7 +18481,7 @@ fn secret_put_ciphertext_length_mismatch_is_refused_and_acked() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let ciphertext = b"sealed";
     let sha = engine.put_binary_blob(ciphertext).expect("ciphertext blob");
@@ -17254,13 +18501,13 @@ fn secret_put_ciphertext_length_mismatch_is_refused_and_acked() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "secret ciphertext blob does not match declared metadata"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "secret ciphertext blob does not match declared metadata")
     ));
     let stored: (i64, i64) = engine
         .read_with(|conn| {
@@ -17282,7 +18529,7 @@ fn secret_put_corrupt_local_ciphertext_blob_is_hard_and_unacked() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let honest_ciphertext = b"honest";
     let corrupt_ciphertext = b"sealed";
@@ -17318,7 +18565,13 @@ fn secret_put_corrupt_local_ciphertext_blob_is_hard_and_unacked() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::Storage(
             dohc_engine_storage::StorageError::BlobIntegrity { .. }
         ))
@@ -17350,7 +18603,7 @@ fn secret_put_corrupt_local_ciphertext_length_is_hard_and_unacked() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let ciphertext = b"honest";
     let sha = dohc_engine_storage::hex_sha256(ciphertext);
@@ -17380,7 +18633,13 @@ fn secret_put_corrupt_local_ciphertext_length_is_hard_and_unacked() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::Storage(
             dohc_engine_storage::StorageError::StateCorrupt { .. }
         ))
@@ -17388,7 +18647,7 @@ fn secret_put_corrupt_local_ciphertext_length_is_hard_and_unacked() {
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "corrupt-secret-length-peer").expect("ack"),
         -1,
-        "MUTATION: local length corruption must stay hard and retryable"
+        "local length corruption must stay hard and retryable"
     );
 }
 
@@ -17397,7 +18656,7 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let ciphertext = b"canonical-secret-ciphertext";
     let sha = engine
@@ -17422,8 +18681,18 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
         payload("a/b.env"),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &seed, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &seed,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let shadow = envelope(
@@ -17432,7 +18701,13 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
         "secret.file.put",
         payload("a//b.env"),
     );
-    let refusal = apply_replication_envelope(&mut engine, &shadow, &NoFaults, &NoLiveLeases);
+    let refusal = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &shadow,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     let paths = engine
         .read_with(|conn| {
             conn.prepare(
@@ -17445,7 +18720,10 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
         .expect("secret paths");
     if matches!(
         refusal,
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            ..
+        })
     ) {
         assert_eq!(
             paths,
@@ -17455,17 +18733,17 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
     }
     assert!(matches!(
         refusal,
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "secret replication path must be canonical"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "secret replication path must be canonical")
     ));
     assert_eq!(
         paths,
         vec!["a/b.env"],
-        "MUTATION: without the canonical guard, the raw wire spelling persists as a shadow row"
+        "without the canonical guard, the raw wire spelling persists as a shadow row"
     );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "noncanonical-secret-peer").expect("ack"),
@@ -17480,8 +18758,18 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
     );
     canonical.recorded_at_ms = 3_000;
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &canonical, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &canonical,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "canonical-secret-update").expect("ack"),
@@ -17494,7 +18782,7 @@ fn secret_put_rejects_synthesized_moment_id_owned_by_unrelated_local_history() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let ciphertext = b"collision-secret-ciphertext";
     let sha = engine
@@ -17527,7 +18815,13 @@ fn secret_put_rejects_synthesized_moment_id_owned_by_unrelated_local_history() {
             "byteLength": ciphertext.len()
         }),
     );
-    let refusal = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases);
+    let refusal = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     let state = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
@@ -17548,7 +18842,10 @@ fn secret_put_rejects_synthesized_moment_id_owned_by_unrelated_local_history() {
         .expect("secret collision state");
     if matches!(
         refusal,
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            ..
+        })
     ) {
         assert_eq!(
             state,
@@ -17558,12 +18855,12 @@ fn secret_put_rejects_synthesized_moment_id_owned_by_unrelated_local_history() {
     }
     assert!(matches!(
         refusal,
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "replicated secret moment id collides with existing history"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "replicated secret moment id collides with existing history")
     ));
     assert_eq!(
         state,
@@ -17581,7 +18878,7 @@ fn secret_put_refuses_and_acks_synthesized_moment_id_owned_by_plaintext_history(
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let plaintext_sha = dohc_engine_storage::hex_sha256(b"plaintext owner");
     engine
@@ -17630,15 +18927,16 @@ fn secret_put_refuses_and_acks_synthesized_moment_id_owned_by_plaintext_history(
         }),
     );
 
-    // MUTATION: checking only secret_moments permits the synthesized secret ID
-    // to alias an unrelated plaintext row in the shared identity namespace.
-    assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
-            reason: RefusalReason::InvalidInput { ref reason },
-            ..
-        })) if reason == "replicated secret moment id collides with existing history"
-    ));
+    assert!(
+        matches!(
+            apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
+            Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
+                reason: RefusalReason::InvalidInput { ref reason },
+                ..
+            }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "replicated secret moment id collides with existing history")
+        ),
+        "checking only secret_moments permits the synthesized secret ID to alias an unrelated plaintext row in the shared identity namespace."
+    );
     let state: (i64, i64, i64) = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
@@ -17677,7 +18975,7 @@ fn secret_put_redelivery_skips_its_own_synthesized_moment() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let ciphertext = b"redelivery-secret-ciphertext";
     let sha = engine
@@ -17698,12 +18996,32 @@ fn secret_put_redelivery_skips_its_own_synthesized_moment() {
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Skipped)
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let history_rows: i64 = engine
         .read_with(|conn| {
@@ -17727,7 +19045,7 @@ fn secret_put_reports_active_protected_disk_work_on_apply_and_redelivery() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     seed_replication_version(&mut engine, "feature", "branch");
     let ciphertext = b"protected relay bytes";
@@ -17749,19 +19067,25 @@ fn secret_put_reports_active_protected_disk_work_on_apply_and_redelivery() {
         }),
     );
 
-    let applied = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases)
-        .expect("apply protected put");
+    let applied = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply protected put");
     assert!(matches!(
         applied,
-        ApplyOutcome::Applied(RoutedApply {
+        ApplyOutcome { primary: ApplyDisposition::Applied(RoutedApply {
             materialization_changes,
             ..
-        }) if materialization_changes == [MomentMaterializationChange {
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (materialization_changes == [MomentMaterializationChange {
             version_id: "main".to_owned(),
             path: ".env".to_owned(),
             operation: "write",
             content_kind: "secret",
-        }]
+        }])
     ));
 
     engine
@@ -17776,8 +19100,18 @@ fn secret_put_reports_active_protected_disk_work_on_apply_and_redelivery() {
         .expect("switch active version after protected put");
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases,),
-        Ok(ApplyOutcome::Skipped)
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases,
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         crate::router::redelivered_materialization_changes(&engine, &operation)
@@ -17794,7 +19128,7 @@ fn secret_put_reports_active_protected_disk_work_on_apply_and_redelivery() {
 
 #[test]
 fn secret_delete_reports_active_protected_disk_work_on_apply_and_redelivery() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     seed_replication_version(&mut engine, "feature", "branch");
     let operation = envelope(
@@ -17808,19 +19142,25 @@ fn secret_delete_reports_active_protected_disk_work_on_apply_and_redelivery() {
         }),
     );
 
-    let applied = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases)
-        .expect("apply protected delete");
+    let applied = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply protected delete");
     assert!(matches!(
         applied,
-        ApplyOutcome::Applied(RoutedApply {
+        ApplyOutcome { primary: ApplyDisposition::Applied(RoutedApply {
             materialization_changes,
             ..
-        }) if materialization_changes == [MomentMaterializationChange {
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (materialization_changes == [MomentMaterializationChange {
             version_id: "main".to_owned(),
             path: ".env".to_owned(),
             operation: "delete",
             content_kind: "secret",
-        }]
+        }])
     ));
 
     engine
@@ -17835,8 +19175,18 @@ fn secret_delete_reports_active_protected_disk_work_on_apply_and_redelivery() {
         .expect("switch active version after protected delete");
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases,),
-        Ok(ApplyOutcome::Skipped)
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases,
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         crate::router::redelivered_materialization_changes(&engine, &operation)
@@ -17853,7 +19203,7 @@ fn secret_delete_reports_active_protected_disk_work_on_apply_and_redelivery() {
 
 #[test]
 fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);
     let ciphertext = b"protected fork bytes";
     let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
@@ -17887,12 +19237,12 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &first, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply {
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &first, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome { primary: ApplyDisposition::Applied(RoutedApply {
             materialization_changes,
             conflict: None,
             ..
-        })) if materialization_changes.is_empty()
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (materialization_changes.is_empty())
     ));
     assert!(
         crate::router::redelivered_materialization_changes(&engine, &first)
@@ -17975,7 +19325,14 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
 
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncBetweenApplyAndCursorCommit);
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases, 2_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            faults.as_ref(),
+            &NoLiveLeases,
+            2_000,
+        )
         .expect("pull active secret fork");
     assert!(matches!(
         first,
@@ -17998,7 +19355,14 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
         })
         .expect("switch active version after apply");
     let retry = client
-        .pull_chat_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases, 3_000)
+        .pull_chat_workspace(
+            &mut reopened,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            3_000,
+        )
         .expect("redeliver active secret fork");
     assert!(matches!(
         retry,
@@ -18035,41 +19399,57 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
 #[test]
 fn central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compatibly() {
     for kind in crate::router::owned_op_kinds() {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let operation = envelope("router-peer", 0, kind, json!({}));
         assert!(
             !matches!(
-                apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+                apply_replication_envelope(
+                    &mut engine,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &operation,
+                    &NoFaults,
+                    &NoLiveLeases
+                ),
                 Err(SyncError::UnsupportedOperation)
             ),
             "{kind} fell through the router"
         );
     }
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let workspace = envelope("router-workspace", 0, "workspace.init", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &workspace, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &workspace,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     // moment.append is no longer the not-implemented stub: it routes to the real
     // applier, so a malformed payload is rejected by that applier rather than by
     // the router.
     let moment = envelope("router-moment", 0, "moment.append", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &moment, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &moment, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput { ref reason },
             ..
-        })) if reason == "moment.append payload is malformed"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "moment.append payload is malformed")
     ));
     let unknown = envelope("router-unknown", 0, "version.rename", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &unknown, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &unknown, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput { ref reason },
             ..
-        })) if reason == "operation kind is not supported by this client"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "operation kind is not supported by this client")
     ));
     let next = envelope(
         "router-unknown",
@@ -18084,21 +19464,29 @@ fn central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compa
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &next, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &next,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "router-unknown")
             .expect("forward-compatible ack"),
         1,
-        "MUTATION: returning UnsupportedOperation hard-wedges an older client on a newer peer op"
+        "returning UnsupportedOperation hard-wedges an older client on a newer peer op"
     );
 }
 #[test]
 fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
-    // MUTATION: removing the pass ceiling fetches cursor 500 in the first call
-    // and advances the returned prefix through the second page.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let first_page = (0..crate::model::MAX_PULL_OPS_PER_PASS)
         .map(|seq| {
@@ -18142,7 +19530,14 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
     ]));
 
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("bounded first pass");
     let SyncPassOutcome::Complete {
         fetched,
@@ -18171,7 +19566,14 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
         .expect("commit bounded prefix");
 
     let second = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("resume after bounded prefix");
     assert!(matches!(
         second,
@@ -18185,8 +19587,7 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
 
 #[test]
 fn relay_pull_page_ceiling_stops_an_advancing_sparse_stream() {
-    // MUTATION: removing the page ceiling walks the unbounded advancing stream.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let mut pages = Vec::new();
     for cursor in 0..crate::model::MAX_PULL_PAGES_PER_PASS {
@@ -18223,7 +19624,14 @@ fn relay_pull_page_ceiling_stops_an_advancing_sparse_stream() {
     let client = RelaySyncClient::new(PagedRelay::new(pages));
 
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("page-bounded pull");
     let SyncPassOutcome::Complete {
         fetched,
@@ -18248,7 +19656,7 @@ fn relay_pull_page_ceiling_stops_an_advancing_sparse_stream() {
 
 #[test]
 fn recover_origin_continues_an_advancing_stream_past_the_pull_page_ceiling() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let pages = (0..=crate::model::MAX_PULL_PAGES_PER_PASS)
         .map(|cursor| {
@@ -18279,13 +19687,13 @@ fn recover_origin_continues_an_advancing_stream_past_the_pull_page_ceiling() {
     assert_eq!(
         client.transport().pulls.lock().expect("pull calls").len(),
         crate::model::MAX_PULL_PAGES_PER_PASS + 1,
-        "MUTATION: restoring the recover page ceiling rejects before the terminal page"
+        "restoring the recover page ceiling rejects before the terminal page"
     );
 }
 
 #[test]
 fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() {
-    let (source_scratch, source_path, mut source) = store();
+    let (source_scratch, source_path, mut source) = open_store();
     seed_identity(&mut source);
     VersionedTextStore::new(&mut source)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -18321,7 +19729,7 @@ fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() 
     drop(source);
 
     let clone_scratch = ScratchDir::new().expect("clone scratch");
-    let clone_path = clone_scratch.engine_db_path().expect("clone db path");
+    let clone_path = engine_db_path(&clone_scratch).expect("clone db path");
     std::fs::copy(&source_path, &clone_path).expect("clone engine database");
     let mut left = EngineStore::open(&source_path, 1_200).expect("open original engine");
     let mut right = EngineStore::open(&clone_path, 1_200).expect("open cloned engine");
@@ -18370,8 +19778,8 @@ fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() 
         original_op.payload["momentId"]
     );
 
-    let (_peer_a_scratch, _peer_a_path, mut peer_a) = store();
-    let (_peer_b_scratch, _peer_b_path, mut peer_b) = store();
+    let (_peer_a_scratch, _peer_a_path, mut peer_a) = open_store();
+    let (_peer_b_scratch, _peer_b_path, mut peer_b) = open_store();
     for engine in [&mut peer_a, &mut peer_b] {
         seed_replication_version(engine, "main", "main");
         engine
@@ -18388,28 +19796,52 @@ fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() 
             .expect("hydrate peer text");
         assert!(matches!(
             apply_envelope_with(engine, &shared_probe, &NoFaults, insert_probe),
-            Ok(ApplyOutcome::Applied(()))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(()),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         assert!(matches!(
             apply_moment_envelope(engine, &shared_base, &NoFaults, &NoLiveLeases),
-            Ok(ApplyOutcome::Applied(_))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
     }
     assert!(matches!(
         apply_moment_envelope(&mut peer_a, &original_op, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
         apply_moment_envelope(&mut peer_a, &recovered_op, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
         apply_moment_envelope(&mut peer_b, &recovered_op, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
         apply_moment_envelope(&mut peer_b, &original_op, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let conflict_ids = |engine: &EngineStore| {
         engine
@@ -18432,7 +19864,7 @@ fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() 
 
 #[test]
 fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     seed_text_head(
@@ -18651,7 +20083,14 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
         .push_workspace(&mut engine, "ws", &NoFaults, 1_200)
         .expect("push recovered suffix");
     client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_300)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_300,
+        )
         .expect("stamp recovered base relay position");
     let winner = dohc_engine_collab::Ydoc::wire();
     winner.plaintext_insert(0, "relay winner");
@@ -18675,23 +20114,29 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
         ),
     );
     competing.relay_seq = Some(50);
-    let applied = apply_ydoc_envelope(&mut engine, &competing, &NoFaults, &NoLiveLeases)
-        .expect("apply lower relay base");
+    let applied = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &competing,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply lower relay base");
     assert!(matches!(
         applied,
-        ApplyOutcome::Applied(YdocApplyResult {
+        ApplyOutcome { primary: ApplyDisposition::Applied(YdocApplyResult {
             lineage_replacement: Some(YdocLineageReplacement {
                 winner_lineage_claim_id,
                 ..
             }),
             ..
-        }) if winner_lineage_claim_id == winner_claim
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (winner_lineage_claim_id == winner_claim)
     ));
 }
 
 #[test]
 fn recover_origin_rebases_each_current_lww_projection_coordinate() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let (reaction_seq, decision_seq, follow_seq, feed_seq) = journal_lww_ops(&mut engine);
     seed_lww_projections(
@@ -18743,7 +20188,7 @@ fn recover_origin_rebases_each_current_lww_projection_coordinate() {
 
 #[test]
 fn recover_origin_recomputes_when_rebased_decision_winner_becomes_a_loser() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let peer_operation = seed_recovery_decision_conflict(&mut engine, "k-peer", true);
     assert_eq!(
         conflicted_decision_projection(&engine),
@@ -18758,22 +20203,22 @@ fn recover_origin_recomputes_when_rebased_decision_winner_becomes_a_loser() {
     );
 
     let rebased_operation = rebased_decision_operation(&engine, "a-recovered");
-    let (_peer_scratch, _peer_path, mut peer) = store();
+    let (_peer_scratch, _peer_path, mut peer) = open_store();
     assert_eq!(
         apply_chat_envelope(&mut peer, &peer_operation, &NoFaults).expect("apply peer winner"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(
         apply_chat_envelope(&mut peer, &rebased_operation, &NoFaults)
             .expect("apply rebased losing decision"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(conflicted_decision_projection(&peer), recovered_projection);
 }
 
 #[test]
 fn recover_origin_recomputes_when_rebased_decision_loser_becomes_the_winner() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let peer_operation = seed_recovery_decision_conflict(&mut engine, "middle-peer", false);
     assert_eq!(
         conflicted_decision_projection(&engine),
@@ -18796,22 +20241,22 @@ fn recover_origin_recomputes_when_rebased_decision_loser_becomes_the_winner() {
     );
 
     let rebased_operation = rebased_decision_operation(&engine, "z-recovered");
-    let (_peer_scratch, _peer_path, mut peer) = store();
+    let (_peer_scratch, _peer_path, mut peer) = open_store();
     assert_eq!(
         apply_chat_envelope(&mut peer, &peer_operation, &NoFaults).expect("apply peer winner"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(
         apply_chat_envelope(&mut peer, &rebased_operation, &NoFaults)
             .expect("apply rebased winning decision"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(conflicted_decision_projection(&peer), recovered_projection);
 }
 
 #[test]
 fn recover_origin_clears_shared_push_positions_before_rebased_ops_are_scanned() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     assert!(matches!(
         journal_local_replication_op(
@@ -18862,7 +20307,7 @@ fn recover_origin_clears_shared_push_positions_before_rebased_ops_are_scanned() 
         .expect("read shared state");
     assert!(
         !retained,
-        "MUTATION: retaining the old physical cursor skips every renumbered operation"
+        "retaining the old physical cursor skips every renumbered operation"
     );
 
     let pushing = RelaySyncClient::new(PagedShareRelay::new([], []));
@@ -18877,7 +20322,7 @@ fn recover_origin_clears_shared_push_positions_before_rebased_ops_are_scanned() 
 
 #[test]
 fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let client = RelaySyncClient::new(PagedShareRelay::new(
         [
             (
@@ -18908,7 +20353,7 @@ fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor()
     assert_eq!((first.fetched, first.next_cursor), (0, 1));
     assert!(
         first.has_more,
-        "MUTATION: dropping has_more prevents the desktop adapter from draining page two"
+        "dropping has_more prevents the desktop adapter from draining page two"
     );
     assert_eq!(
         *client
@@ -18917,7 +20362,7 @@ fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor()
             .lock()
             .expect("shared pull calls"),
         [0],
-        "MUTATION: restoring the hasMore loop consumes the second page in one actor turn"
+        "restoring the hasMore loop consumes the second page in one actor turn"
     );
     assert_eq!(
         read_share_cursor(&engine, "ws", "share", CursorKind::SharedChannel)
@@ -18933,7 +20378,7 @@ fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor()
 
 #[test]
 fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let rejected = ShareReplicationEnvelope {
         origin_id: "shared-peer".to_owned(),
         origin_seq: 0,
@@ -19010,7 +20455,7 @@ fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds(
         read_share_cursor(&engine, "ws", "share", CursorKind::SharedChannel)
             .expect("rejected page cursor"),
         1,
-        "MUTATION: returning ShareOperationRejected before commit leaves this at zero"
+        "returning ShareOperationRejected before commit leaves this at zero"
     );
 
     let second = client
@@ -19032,13 +20477,13 @@ fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds(
             .lock()
             .expect("shared pull calls"),
         [0, 1],
-        "MUTATION: failing to commit the rejected boundary refetches cursor zero"
+        "failing to commit the rejected boundary refetches cursor zero"
     );
 }
 
 #[test]
 fn shared_channel_push_resumes_from_durable_physical_and_dense_positions() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     engine
         .write_with(&NoFaults, |tx| {
@@ -19131,7 +20576,7 @@ fn shared_channel_push_resumes_from_durable_physical_and_dense_positions() {
     assert_eq!(pushes[0].ops[0].origin_seq, 0);
     assert_eq!(
         pushes[1].ops[0].origin_seq, 1,
-        "MUTATION: rescanning from -1 recomputes the removed op as ineligible and reuses dense zero"
+        "rescanning from -1 recomputes the removed op as ineligible and reuses dense zero"
     );
     drop(pushes);
     let state: (i64, Option<i64>) = engine
@@ -19149,7 +20594,7 @@ fn shared_channel_push_resumes_from_durable_physical_and_dense_positions() {
 
 #[test]
 fn shared_channel_push_bootstraps_legacy_state_without_a_dense_position() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     assert_eq!(
         journal_local_replication_op(
@@ -19216,7 +20661,7 @@ fn shared_channel_push_bootstraps_legacy_state_without_a_dense_position() {
 
 #[test]
 fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let client = RelaySyncClient::new(PagedShareRelay::new(
         [],
         [
@@ -19251,7 +20696,7 @@ fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
     assert_eq!((first.fetched, first.pending_cursor.cursor), (0, 1));
     assert!(
         first.has_more,
-        "MUTATION: dropping has_more prevents the desktop adapter from draining page two"
+        "dropping has_more prevents the desktop adapter from draining page two"
     );
     assert_eq!(
         *client
@@ -19260,7 +20705,7 @@ fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
             .lock()
             .expect("view pull calls"),
         [(0, crate::model::MAX_PULL_OPS_PER_PASS)],
-        "MUTATION: restoring the hasMore loop accumulates the second page"
+        "restoring the hasMore loop accumulates the second page"
     );
     assert_eq!(
         read_share_cursor(&engine, "ws", "share", CursorKind::ShareView)
@@ -19285,7 +20730,7 @@ fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
 
 #[test]
 fn share_view_pull_accepts_every_tracked_path_selected_by_the_relay() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let op = |seq, path: &str| ShareReplicationEnvelope {
         origin_id: "peer".to_owned(),
         origin_seq: seq,
@@ -19316,7 +20761,7 @@ fn share_view_pull_accepts_every_tracked_path_selected_by_the_relay() {
     assert_eq!(
         (outcome.fetched, outcome.skipped),
         (2, 0),
-        "MUTATION: matching only the first granted path permanently drops the other selected path"
+        "matching only the first granted path permanently drops the other selected path"
     );
 }
 
@@ -19338,7 +20783,7 @@ fn share_view_write_op(seq: i64, path: &str, sha256: &str) -> ShareReplicationEn
 }
 
 /// The same served write, on the version a share pinned. A version share's
-/// served moments name THAT version, never `main` — the relay's
+/// served moments name that version, never `main` — the relay's
 /// `targetVersionId` decides which, and this mirrors it in the fixture.
 fn share_view_write_op_on(
     seq: i64,
@@ -19351,13 +20796,13 @@ fn share_view_write_op_on(
     op
 }
 
-/// The WIRING for the version rule's shape half: `pull_share_view` turns the
-/// malformed-payload refusal into a skip BEFORE replay, so a relay that
+/// The wiring for the version rule's shape half: `pull_share_view` turns the
+/// malformed-payload refusal into a skip before replay, so a relay that
 /// strips `versionId` from a served moment gets nothing replayed and its blob
 /// is never requested.
 #[test]
 fn share_view_pull_skips_a_moment_with_no_version_identity_before_requesting_its_blob() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let versioned = b"versioned body".to_vec();
     let stripped = b"stripped body".to_vec();
@@ -19404,7 +20849,7 @@ fn share_view_pull_skips_a_moment_with_no_version_identity_before_requesting_its
             .lock()
             .expect("share blob calls"),
         [versioned_sha],
-        "MUTATION: accepting a moment with no version identity replays it and downloads its blob"
+        "accepting a moment with no version identity replays it and downloads its blob"
     );
     assert_eq!(
         (outcome.fetched, outcome.applied, outcome.skipped),
@@ -19423,7 +20868,7 @@ fn share_view_pull_skips_a_moment_with_no_version_identity_before_requesting_its
 
 /// The sibling of the bootstrap case. A version share's `version.create`
 /// carries the SOURCE version's files at fork time, redacted to the grant —
-/// legitimately EMPTY when that version forked with no files, or when none of
+/// legitimately empty when that version forked with no files, or when none of
 /// its files sit inside the granted paths. The relay serves that op either
 /// way (`shareFilter.ts` keeps the op and redacts the list), so refusing it
 /// for naming no path reports damage on a healthy share.
@@ -19432,7 +20877,7 @@ fn share_view_pull_skips_a_moment_with_no_version_identity_before_requesting_its
 /// scoped by its own path, and there are none.
 #[test]
 fn share_view_admits_a_granted_version_create_that_carries_no_snapshots() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let boundary = ShareBoundary {
         share_id: "share-view".to_owned(),
         surface: ShareSurface::ShareView,
@@ -19452,9 +20897,13 @@ fn share_view_admits_a_granted_version_create_that_carries_no_snapshots() {
     assert!(
         matches!(
             apply_shared_envelope(&mut engine, &boundary, &empty, &NoFaults),
-            Ok(ApplyOutcome::Applied(_))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ),
-        "MUTATION: refusing an empty snapshot list records damage on a healthy version share"
+        "refusing an empty snapshot list records damage on a healthy version share"
     );
     // The version dimension still decides: another version's create is refused
     // whether or not it carries snapshots.
@@ -19464,7 +20913,7 @@ fn share_view_admits_a_granted_version_create_that_carries_no_snapshots() {
         "version.create",
         json!({ "versionId": "version-other", "forkSnapshots": [] }),
     );
-    // And it names BOTH versions, like the moment path: a reader who cannot
+    // And it names both versions, like the moment path: a reader who cannot
     // see which lineage was offered against the one granted cannot tell a
     // relay serving the wrong version from a share that was never widened.
     let refusal = apply_shared_envelope(&mut engine, &boundary, &ungranted, &NoFaults);
@@ -19476,9 +20925,9 @@ fn share_view_admits_a_granted_version_create_that_carries_no_snapshots() {
                     && granted == "version-granted"
                     && offered == "version-other"
         ),
-        "MUTATION: an ungranted create names neither version, so the reader is told only that something was outside the share: {refusal:?}"
+        "an ungranted create names neither version, so the reader is told only that something was outside the share: {refusal:?}"
     );
-    // And it says WHICH operation was refused. This detail is persisted and
+    // And it says which operation was refused. This detail is persisted and
     // read back later, so calling a create a moment describes an operation
     // that never happened, on a surface where the op itself is gone.
     let detail = refusal
@@ -19486,7 +20935,7 @@ fn share_view_admits_a_granted_version_create_that_carries_no_snapshots() {
         .to_string();
     assert!(
         detail.contains("version.create") && !detail.contains("moment"),
-        "MUTATION: a refused version.create reports itself as a moment: {detail}"
+        "a refused version.create reports itself as a moment: {detail}"
     );
     // The malformed twin says the same thing: a create whose version id is not
     // one the relay could have issued must not report a moment either.
@@ -19501,7 +20950,7 @@ fn share_view_admits_a_granted_version_create_that_carries_no_snapshots() {
         .to_string();
     assert!(
         malformed.contains("version.create") && !malformed.contains("moment"),
-        "MUTATION: a create carrying an unreadable version id reports itself as a moment: {malformed}"
+        "a create carrying an unreadable version id reports itself as a moment: {malformed}"
     );
     // A moment that references no path stays refused — and as MALFORMED, not
     // as a scope decision: there is nothing to place, and the grant may well
@@ -19512,9 +20961,9 @@ fn share_view_admits_a_granted_version_create_that_carries_no_snapshots() {
             apply_shared_envelope(&mut engine, &boundary, &pathless, &NoFaults),
             Err(SyncError::InvalidInput { .. })
         ),
-        "MUTATION: a payload with nothing to place is reported as the share excluding it"
+        "a payload with nothing to place is reported as the share excluding it"
     );
-    // Only the EXPLICIT empty list is healthy. A missing, null, or non-array
+    // Only the explicit empty list is healthy. A missing, null, or non-array
     // field is a payload this boundary cannot read: admitting it would replay
     // a version with no files and commit the cursor past it, which is the
     // silent loss this whole mechanism exists to make visible.
@@ -19533,28 +20982,28 @@ fn share_view_admits_a_granted_version_create_that_carries_no_snapshots() {
     ] {
         let op = envelope("granter", 2, "version.create", malformed.clone());
         let outcome = apply_shared_envelope(&mut engine, &boundary, &op, &NoFaults);
-        // The CODE is the contract: it is what gets persisted and what the
+        // The code is the contract: it is what gets persisted and what the
         // reader's copy branches on. Any malformed-class variant is right
         // here; a scope claim is not.
         assert!(
             matches!(&outcome, Err(error) if error.code() == "invalid-input"),
-            "MUTATION: an unreadable payload is admitted like an empty one, or reported as the share excluding it: {malformed} -> {outcome:?}"
+            "an unreadable payload is admitted like an empty one, or reported as the share excluding it: {malformed} -> {outcome:?}"
         );
     }
 }
 
 /// The relay serves `workspace.init` to every path/version share as its
 /// bootstrap op, and the relay's own tests pin that. This recipient needs
-/// nothing from it, so it is skipped — but a HEALTHY first pull must not
+/// nothing from it, so it is skipped — but a healthy first pull must not
 /// report a refusal, or the banner that says "this share stopped carrying
 /// changes" fires on every share the moment it is opened.
 #[test]
 fn share_view_pull_skips_the_relay_bootstrap_op_without_calling_it_a_refusal() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let body = b"granted body".to_vec();
     let sha = dohc_engine_storage::hex_sha256(&body);
-    // A REAL origin id. The bootstrap op the relay serves carries the
+    // A real origin id. The bootstrap op the relay serves carries the
     // granter's own origin, so it reaches the boundary — an empty one would
     // be refused as a malformed envelope first and prove nothing.
     let bootstrap = ShareReplicationEnvelope {
@@ -19593,7 +21042,7 @@ fn share_view_pull_skips_the_relay_bootstrap_op_without_calling_it_a_refusal() {
     assert_eq!(
         outcome.refusals,
         Vec::new(),
-        "MUTATION: reporting the bootstrap skip as a refusal makes every healthy share look damaged"
+        "reporting the bootstrap skip as a refusal makes every healthy share look damaged"
     );
 }
 
@@ -19605,7 +21054,7 @@ fn share_view_pull_skips_the_relay_bootstrap_op_without_calling_it_a_refusal() {
 /// introduced the variant.
 #[test]
 fn share_view_pull_completes_past_an_unknown_op_kind_and_applies_its_neighbours() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let body = b"granted body".to_vec();
     let sha = dohc_engine_storage::hex_sha256(&body);
@@ -19641,7 +21090,7 @@ fn share_view_pull_completes_past_an_unknown_op_kind_and_applies_its_neighbours(
             &tracked_grant(["docs"]),
             &NoFaults,
         )
-        .expect("MUTATION: an unlisted refusal class aborts the pull and the page retries forever");
+        .expect("an unlisted refusal class aborts the pull and the page retries forever");
 
     assert_eq!(
         (outcome.applied, outcome.skipped),
@@ -19655,19 +21104,19 @@ fn share_view_pull_completes_past_an_unknown_op_kind_and_applies_its_neighbours(
             .map(|refusal| (refusal.op_kind.as_str(), refusal.code))
             .collect::<Vec<_>>(),
         [("future.op", "invalid-input")],
-        "MUTATION: the promised refusal is never persisted: {:?}",
+        "the promised refusal is never persisted: {:?}",
         outcome.refusals
     );
     assert_eq!(share_view_pull_changed(&outcome), ["docs/b.md"]);
 }
 
-/// The page-position identity has to be IDEMPOTENT, or the durable record it
+/// The page-position identity has to be idempotent, or the durable record it
 /// exists to feed counts the same skipped op again on every re-pull. A page is
 /// fetched at a cursor and the log is append-only, so the same cursor returns
 /// the same ops in the same order.
 #[test]
 fn share_view_pull_files_a_coordinateless_skip_under_a_stable_page_position() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let page = || {
         (
@@ -19696,7 +21145,7 @@ fn share_view_pull_files_a_coordinateless_skip_under_a_stable_page_position() {
             &NoFaults,
         )
         .expect("a coordinateless op is skipped, not fatal");
-    // The cursor is NOT committed here, so the next pull re-fetches the page —
+    // The cursor is not committed here, so the next pull re-fetches the page —
     // exactly the retry the record has to survive.
     let again = client
         .pull_share_view(
@@ -19724,17 +21173,17 @@ fn share_view_pull_files_a_coordinateless_skip_under_a_stable_page_position() {
     assert_eq!(
         identity(&again),
         identity(&first),
-        "MUTATION: an unstable page identity counts the same skipped op again on every re-pull"
+        "an unstable page identity counts the same skipped op again on every re-pull"
     );
 }
 
 /// An op kind this engine cannot interpret is not a scope decision: no grant
 /// admits it, widening the share changes nothing, and only the sender can fix
-/// it. A KNOWN kind a share does not carry is the opposite — chats and secrets
+/// it. A known kind a share does not carry is the opposite — chats and secrets
 /// are outside what any file share covers.
 #[test]
 fn share_view_separates_an_unknown_op_kind_from_one_a_share_does_not_carry() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let boundary = share_view_version_boundary(None);
     let unknown = envelope(
         "granter",
@@ -19745,7 +21194,7 @@ fn share_view_separates_an_unknown_op_kind_from_one_a_share_does_not_carry() {
     let outcome = apply_shared_envelope(&mut engine, &boundary, &unknown, &NoFaults);
     assert!(
         matches!(&outcome, Err(error) if error.code() == "invalid-input"),
-        "MUTATION: an op kind nothing can interpret is reported as the share excluding it, and the reader is sent to a granter who cannot widen a grant to admit it: {outcome:?}"
+        "an op kind nothing can interpret is reported as the share excluding it, and the reader is sent to a granter who cannot widen a grant to admit it: {outcome:?}"
     );
     // A known kind a share does not carry stays a scope decision.
     let chat = envelope(
@@ -19759,11 +21208,11 @@ fn share_view_separates_an_unknown_op_kind_from_one_a_share_does_not_carry() {
             apply_shared_envelope(&mut engine, &boundary, &chat, &NoFaults),
             Err(SyncError::ShareBoundaryViolation)
         ),
-        "MUTATION: a chat op is reported as unreadable rather than out of scope"
+        "a chat op is reported as unreadable rather than out of scope"
     );
 }
 
-/// A refusal is data the recipient PERSISTS and reads back, so it has to be
+/// A refusal is data the recipient persists and reads back, so it has to be
 /// well formed whatever it is diagnosing. The relay picks the op kind: an
 /// empty one makes the client's strict decode throw, wedging the pull on
 /// every retry, and an oversized one lands in the registry and breaks the
@@ -19771,7 +21220,7 @@ fn share_view_separates_an_unknown_op_kind_from_one_a_share_does_not_carry() {
 /// choosing how this client fails.
 #[test]
 fn share_view_pull_reports_an_unusable_op_kind_under_a_bounded_placeholder() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let client = RelaySyncClient::new(PagedShareRelay::new(
         [],
@@ -19817,7 +21266,7 @@ fn share_view_pull_reports_an_unusable_op_kind_under_a_bounded_placeholder() {
             .map(|refusal| refusal.op_kind.as_str())
             .collect::<Vec<_>>(),
         ["invalid-op-kind", "invalid-op-kind"],
-        "MUTATION: copying the relay's op kind wedges the client's decode or poisons its registry: {:?}",
+        "copying the relay's op kind wedges the client's decode or poisons its registry: {:?}",
         outcome.refusals
     );
     for refusal in &outcome.refusals {
@@ -19831,12 +21280,12 @@ fn share_view_pull_reports_an_unusable_op_kind_under_a_bounded_placeholder() {
         assert_eq!(refusal.origin_id, "peer");
     }
     // The placeholder took the value away, so the numbers are the only thing
-    // left that says HOW unusable it was: a one-byte overrun and a kilobyte
+    // left that says how unusable it was: a one-byte overrun and a kilobyte
     // of junk read identically without them.
     assert!(
         outcome.refusals[1].detail.contains("at most 128 bytes")
             && outcome.refusals[1].detail.contains("offered 200 bytes"),
-        "MUTATION: the refusal names no limit and no observed size for a value it also hid: {}",
+        "the refusal names no limit and no observed size for a value it also hid: {}",
         outcome.refusals[1].detail
     );
     assert!(
@@ -19854,7 +21303,7 @@ fn share_view_pull_reports_an_unusable_op_kind_under_a_bounded_placeholder() {
 /// limit named.
 #[test]
 fn share_view_pull_reports_a_malformed_op_that_still_has_a_coordinate() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let oversized = "x".repeat(MAX_PAYLOAD_JSON_BYTES + 1);
     let oversized_payload = json!({ "versionId": "main", "path": oversized });
@@ -19901,7 +21350,7 @@ fn share_view_pull_reports_a_malformed_op_that_still_has_a_coordinate() {
 
     assert_eq!((outcome.applied, outcome.skipped), (0, 2));
     // Both are recorded. The one with a usable coordinate is filed under it;
-    // the one without is filed under WHERE IT SAT in the page, because its
+    // the one without is filed under WHERE IT sat in the page, because its
     // cursor commits past it either way and "no identity" must not mean "no
     // durable record".
     assert_eq!(
@@ -19911,7 +21360,7 @@ fn share_view_pull_reports_a_malformed_op_that_still_has_a_coordinate() {
             .map(|refusal| (refusal.origin_id.as_str(), refusal.origin_seq))
             .collect::<Vec<_>>(),
         [("peer", 0), ("\u{1f}share-page:0", 1)],
-        "MUTATION: a malformed op loses its reason — the one with a coordinate, or the one whose only identity is its page position: {:?}",
+        "a malformed op loses its reason — the one with a coordinate, or the one whose only identity is its page position: {:?}",
         outcome.refusals
     );
     // The op filed under its page position never shows the reader its origin
@@ -19920,13 +21369,13 @@ fn share_view_pull_reports_a_malformed_op_that_still_has_a_coordinate() {
     let page_filed = &outcome.refusals[1].detail;
     assert!(
         page_filed.contains("it is empty"),
-        "MUTATION: an origin id the reader never sees is refused without naming what was wrong with it: {page_filed}"
+        "an origin id the reader never sees is refused without naming what was wrong with it: {page_filed}"
     );
     let detail = &outcome.refusals[0].detail;
     assert!(
         detail.contains(&MAX_PAYLOAD_JSON_BYTES.to_string())
             && detail.contains(&encoded.to_string()),
-        "MUTATION: the refusal names no limit and no observed size, so one byte over reads like ten times over: {detail}"
+        "the refusal names no limit and no observed size, so one byte over reads like ten times over: {detail}"
     );
 }
 
@@ -19935,12 +21384,12 @@ fn share_view_pull_reports_a_malformed_op_that_still_has_a_coordinate() {
 ///
 /// This reader never sees the value — the op is filed under its page position
 /// — so the message is all they get. Citing the length bound for a short id
-/// carrying a control byte reports a constraint the op SATISFIED, which reads
+/// carrying a control byte reports a constraint the op satisfied, which reads
 /// as a contradiction and sends the reader looking for a size problem that
 /// does not exist.
 #[test]
 fn a_refused_origin_id_names_the_clause_it_broke() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let malformed = |origin_id: String| ShareReplicationEnvelope {
         origin_id,
@@ -19986,7 +21435,7 @@ fn a_refused_origin_id_names_the_clause_it_broke() {
     assert_eq!(details.len(), 3, "{details:?}");
     assert!(
         details[0].contains("it is empty") && !details[0].contains("bytes"),
-        "MUTATION: an empty origin id is reported against a size bound it did not break: {}",
+        "an empty origin id is reported against a size bound it did not break: {}",
         details[0]
     );
     assert!(
@@ -19995,17 +21444,17 @@ fn a_refused_origin_id_names_the_clause_it_broke() {
             crate::model::MAX_IDENTIFIER_BYTES,
             crate::model::MAX_IDENTIFIER_BYTES + 1
         )),
-        "MUTATION: the one clause that HAS numbers reports none, so one byte over reads like ten times over: {}",
+        "the one clause that has numbers reports none, so one byte over reads like ten times over: {}",
         details[1]
     );
     assert!(
         details[2].contains("it carries a control byte") && !details[2].contains("bytes,"),
-        "MUTATION: a short origin id refused for a control byte is told a length limit it satisfies: {}",
+        "a short origin id refused for a control byte is told a length limit it satisfies: {}",
         details[2]
     );
 }
 
-/// A sequence outside the wire range is the coordinate's OTHER half, and it is
+/// A sequence outside the wire range is the coordinate's other half, and it is
 /// refused for the same reason it cannot be one: the op is filed under its page
 /// position, so the reader never sees the value.
 ///
@@ -20014,7 +21463,7 @@ fn a_refused_origin_id_names_the_clause_it_broke() {
 /// off-by-one at the boundary, and a number a hundred times too large.
 #[test]
 fn a_refused_origin_seq_names_the_range_and_what_was_offered() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let out_of_range = |origin_seq: i64| ShareReplicationEnvelope {
         origin_id: "peer".to_owned(),
@@ -20057,13 +21506,13 @@ fn a_refused_origin_seq_names_the_range_and_what_was_offered() {
     assert_eq!(details.len(), 2, "{details:?}");
     assert!(
         details[0].contains(&range) && details[0].contains("offered -1"),
-        "MUTATION: a sequence the reader never sees is refused with no range and no offered value: {}",
+        "a sequence the reader never sees is refused with no range and no offered value: {}",
         details[0]
     );
     assert!(
         details[1].contains(&range)
             && details[1].contains(&format!("offered {}", crate::model::MAX_WIRE_INTEGER + 1)),
-        "MUTATION: one past the range reads the same as a number a hundred times too large: {}",
+        "one past the range reads the same as a number a hundred times too large: {}",
         details[1]
     );
 }
@@ -20079,7 +21528,7 @@ fn page_position_origins_cannot_alias_a_relay_origin() {
     let (origin_id, _) = crate::relay::page_position_origin(0, 1);
     assert!(
         crate::model::bounded(&origin_id, "origin").is_err(),
-        "MUTATION: a page position is spelled with characters a relay may also use, so the relay can name this recipient's own coordinates: {origin_id:?}"
+        "a page position is spelled with characters a relay may also use, so the relay can name this recipient's own coordinates: {origin_id:?}"
     );
 }
 
@@ -20092,7 +21541,7 @@ fn page_position_origins_cannot_alias_a_relay_origin() {
 /// then hide a later, different refusal that never spoke for itself.
 #[test]
 fn a_relay_origin_named_like_a_page_position_stays_a_separate_refusal() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let client = RelaySyncClient::new(PagedShareRelay::new(
         [],
@@ -20144,18 +21593,18 @@ fn a_relay_origin_named_like_a_page_position_stays_a_separate_refusal() {
     assert_eq!(
         coordinates,
         [("share-page:0", 1), ("\u{1f}share-page:0", 1)],
-        "MUTATION: a relay origin can occupy a page-position coordinate, so one refusal is merged away as a retry of the other: {coordinates:?}"
+        "a relay origin can occupy a page-position coordinate, so one refusal is merged away as a retry of the other: {coordinates:?}"
     );
 }
 
 /// A skipped op must not be a silent one. The pull keeps going — one op a
-/// diverging relay serves must not wedge the share — so the ONLY way the
+/// diverging relay serves must not wedge the share — so the only way the
 /// recipient learns its shared view stopped carrying a granter's edits is the
 /// refusal the outcome carries. It has to hold the constraint, and for a
 /// version refusal the limit, the unit and the observed usage.
 #[test]
 fn share_view_pull_reports_why_it_skipped_a_version_refused_op() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let body = b"granted body".to_vec();
     let sha = dohc_engine_storage::hex_sha256(&body);
@@ -20203,7 +21652,7 @@ fn share_view_pull_reports_why_it_skipped_a_version_refused_op() {
             // granter about a field only the relay can fix.
             (1, "moment.append", "invalid-input")
         ],
-        "MUTATION: dropping the refusal detail leaves the caller a bare skipped count, or files a malformed field under the share's scope: {:?}",
+        "dropping the refusal detail leaves the caller a bare skipped count, or files a malformed field under the share's scope: {:?}",
         outcome.refusals
     );
     assert!(
@@ -20227,7 +21676,7 @@ fn share_view_pull_reports_why_it_skipped_a_version_refused_op() {
 /// refusal; this proves the pull runs it.
 #[test]
 fn share_view_pull_refuses_a_moment_from_an_ungranted_version_before_requesting_its_blob() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let granted_body = b"granted lineage body".to_vec();
     let ungranted_body = b"ungranted lineage body".to_vec();
@@ -20271,7 +21720,7 @@ fn share_view_pull_refuses_a_moment_from_an_ungranted_version_before_requesting_
             .lock()
             .expect("share blob calls"),
         [granted_sha],
-        "MUTATION: a pull that does not carry the pinned version downloads the ungranted lineage's blob"
+        "a pull that does not carry the pinned version downloads the ungranted lineage's blob"
     );
     assert_eq!(
         (outcome.fetched, outcome.applied, outcome.skipped),
@@ -20285,25 +21734,25 @@ fn share_view_pull_refuses_a_moment_from_an_ungranted_version_before_requesting_
             .map(|changed| changed.path.as_str())
             .collect::<Vec<_>>(),
         ["docs/granted.md"],
-        "MUTATION: the ungranted lineage's moment is replayed into the local view"
+        "the ungranted lineage's moment is replayed into the local view"
     );
     assert_eq!(
         VersionedTextStore::new(&mut engine)
             .read_text("ws", "main", "docs/ungranted.md")
             .expect("share-view path read is answerable"),
         None,
-        "MUTATION: the ungranted lineage lands in the recipient's shared view"
+        "the ungranted lineage lands in the recipient's shared view"
     );
 }
 
 /// The secret-path refusal itself is proven at the enforcement function by
 /// `share_view_and_shared_channel_fail_closed_outside_boundary`. What this
-/// proves is the WIRING: `pull_share_view` turns that refusal into a skip
-/// BEFORE replay, so a misbehaving relay never gets the blob requested and no
+/// proves is the wiring: `pull_share_view` turns that refusal into a skip
+/// before replay, so a misbehaving relay never gets the blob requested and no
 /// secret plaintext lands.
 #[test]
 fn share_view_pull_skips_a_secret_path_write_before_requesting_its_blob() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let tracked = b"tracked body".to_vec();
     let secret = b"AWS_SECRET_ACCESS_KEY=hunter2".to_vec();
@@ -20327,7 +21776,7 @@ fn share_view_pull_skips_a_secret_path_write_before_requesting_its_blob() {
         .with_view_blobs([(tracked_sha.clone(), tracked), (secret_sha, secret)]),
     );
 
-    // Both paths sit INSIDE the grant, so only the secret classification can
+    // Both paths sit inside the grant, so only the secret classification can
     // refuse `app/.env`.
     let result = client.pull_share_view(
         &mut engine,
@@ -20339,15 +21788,15 @@ fn share_view_pull_skips_a_secret_path_write_before_requesting_its_blob() {
 
     // Nothing landed. Two independent floors say so — the boundary refusal
     // here, and `write_text`'s storable-path floor in `store.rs` — so this
-    // fires only when BOTH regress.
+    // fires only when both regress.
     assert_eq!(
         VersionedTextStore::new(&mut engine)
             .read_text("ws", "main", "app/.env")
             .expect("secret path read is answerable"),
         None,
-        "MUTATION: losing the boundary refusal AND store.rs's storable floor lands secret plaintext on the read surface"
+        "losing the boundary refusal AND store.rs's storable floor lands secret plaintext on the read surface"
     );
-    // And the blob was never even asked for. Replay downloads it BEFORE the
+    // And the blob was never even asked for. Replay downloads it before the
     // storable floor refuses the path, so a swallowed refusal discloses the
     // secret bytes to the client even though nothing lands. Asserted before
     // the outcome so this disclosure, not the later error, is what fails.
@@ -20358,7 +21807,7 @@ fn share_view_pull_skips_a_secret_path_write_before_requesting_its_blob() {
             .lock()
             .expect("share blob calls"),
         [tracked_sha],
-        "MUTATION: continuing into replay after the boundary refusal downloads the secret blob"
+        "continuing into replay after the boundary refusal downloads the secret blob"
     );
     let outcome = result.expect("a secret op is skipped, not fatal");
     assert_eq!(
@@ -20382,7 +21831,7 @@ fn share_view_pull_skips_a_secret_path_write_before_requesting_its_blob() {
 /// only gate — a relay-sent delete for a secret path must leave the file.
 #[test]
 fn share_view_pull_skips_a_secret_path_delete_that_nothing_downstream_would_stop() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let plaintext = "AWS_SECRET_ACCESS_KEY=hunter2";
     seed_text_head(&mut engine, "secret-object", "app/.env", plaintext);
@@ -20422,7 +21871,7 @@ fn share_view_pull_skips_a_secret_path_delete_that_nothing_downstream_would_stop
     assert_eq!((outcome.applied, outcome.skipped), (0, 1));
     assert!(
         outcome.changed_paths.is_empty(),
-        "MUTATION: continuing into replay reports the secret path as changed"
+        "continuing into replay reports the secret path as changed"
     );
     assert_eq!(
         VersionedTextStore::new(&mut engine)
@@ -20430,7 +21879,7 @@ fn share_view_pull_skips_a_secret_path_delete_that_nothing_downstream_would_stop
             .expect("secret path read is answerable")
             .map(|snapshot| snapshot.text),
         Some(plaintext.to_owned()),
-        "MUTATION: continuing into replay lets a relay delete a secret-shadowed file"
+        "continuing into replay lets a relay delete a secret-shadowed file"
     );
 }
 
@@ -20464,13 +21913,13 @@ fn share_view_pull_changed(outcome: &ShareViewPullOutcome) -> Vec<&str> {
 
 /// The relay picks the page; the recipient re-checks it against the selector
 /// the relay itself stated first. A compromised or buggy relay can address an
-/// ORDINARY tracked path outside the granted share — no secret floor and no
+/// ordinary tracked path outside the granted share — no secret floor and no
 /// storable floor stops that one, so the pinned scope is the only gate. It
 /// must skip the op before replay, so the ungranted blob is never even
 /// requested.
 #[test]
 fn share_view_pull_skips_a_tracked_path_outside_the_recorded_grant_before_requesting_its_blob() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let granted_body = b"the granted doc".to_vec();
     let ungranted_body = b"salary review: everyone".to_vec();
@@ -20506,7 +21955,7 @@ fn share_view_pull_skips_a_tracked_path_outside_the_recorded_grant_before_reques
     let granted = tracked_grant(["docs"]);
     let result = client.pull_share_view(&mut engine, "ws", "share", &granted, &NoFaults);
 
-    // The disclosure comes FIRST in the causal chain: replay downloads the
+    // The disclosure comes first in the causal chain: replay downloads the
     // blob before anything downstream looks at the path, so an inert scope
     // check hands the recipient bytes the granter never shared with them —
     // whether or not the write then lands.
@@ -20517,20 +21966,20 @@ fn share_view_pull_skips_a_tracked_path_outside_the_recorded_grant_before_reques
             .lock()
             .expect("share blob calls"),
         [granted_sha],
-        "MUTATION: passing None (or dropping the containment) downloads blobs the share never granted"
+        "passing None (or dropping the containment) downloads blobs the share never granted"
     );
     let text = VersionedTextStore::new(&mut engine);
     assert_eq!(
         text.read_text("ws", "main", "private/hr.md")
             .expect("an ungranted tracked path read is answerable"),
         None,
-        "MUTATION: an ungranted ORDINARY path has no second floor — it lands"
+        "an ungranted ordinary path has no second floor — it lands"
     );
     assert_eq!(
         text.read_text("ws", "main", "docs-private/leak.md")
             .expect("a sibling-prefix read is answerable"),
         None,
-        "MUTATION: matching the grant by bare string prefix admits a sibling folder"
+        "matching the grant by bare string prefix admits a sibling folder"
     );
     let outcome = result.expect("an out-of-scope op is skipped, not fatal");
     assert_eq!(
@@ -20541,7 +21990,7 @@ fn share_view_pull_skips_a_tracked_path_outside_the_recorded_grant_before_reques
     assert_eq!(
         share_view_pull_changed(&outcome),
         ["docs/a.md"],
-        "MUTATION: equality-only matching drops a file BENEATH the granted path"
+        "equality-only matching drops a file BENEATH the granted path"
     );
 }
 
@@ -20551,7 +22000,7 @@ fn share_view_pull_skips_a_tracked_path_outside_the_recorded_grant_before_reques
 /// tracked path too.
 #[test]
 fn share_view_pull_applies_every_tracked_path_under_a_whole_workspace_version_grant() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let first = b"first body".to_vec();
     let second = b"second body".to_vec();
@@ -20588,7 +22037,7 @@ fn share_view_pull_applies_every_tracked_path_under_a_whole_workspace_version_gr
     assert_eq!(
         (outcome.applied, outcome.skipped),
         (2, 0),
-        "MUTATION: reading a versioned empty-path grant as 'nothing granted' refuses a whole-workspace share"
+        "reading a versioned empty-path grant as 'nothing granted' refuses a whole-workspace share"
     );
     assert_eq!(
         share_view_pull_changed(&outcome),
@@ -20596,14 +22045,14 @@ fn share_view_pull_applies_every_tracked_path_under_a_whole_workspace_version_gr
     );
 }
 
-/// A selector with no paths AND no version selects NOTHING. The relay refuses
+/// A selector with no paths and no version selects NOTHING. The relay refuses
 /// to create one (`validateShareSelector` -> `empty_selector`) and serves
 /// nothing through one that exists anyway, so the mirror must admit nothing —
 /// reading it as "the whole workspace" would turn the selector the relay is
 /// emptiest about into the widest grant the recipient holds.
 #[test]
 fn share_view_pull_admits_nothing_under_a_grant_that_selects_nothing() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let body = b"pulled under a grant that selects nothing".to_vec();
     let sha = dohc_engine_storage::hex_sha256(&body);
@@ -20629,7 +22078,7 @@ fn share_view_pull_admits_nothing_under_a_grant_that_selects_nothing() {
     assert_eq!(
         (outcome.applied, outcome.skipped),
         (0, 1),
-        "MUTATION: reading no paths as 'the whole workspace' admits every path the relay would serve none of"
+        "reading no paths as 'the whole workspace' admits every path the relay would serve none of"
     );
     assert!(
         client
@@ -20638,14 +22087,14 @@ fn share_view_pull_admits_nothing_under_a_grant_that_selects_nothing() {
             .lock()
             .expect("share blob calls")
             .is_empty(),
-        "MUTATION: the op's blob is downloaded before the empty grant refuses it"
+        "the op's blob is downloaded before the empty grant refuses it"
     );
     assert_eq!(
         VersionedTextStore::new(&mut engine)
             .read_text("ws", "main", "docs/a.md")
             .expect("a tracked read is answerable"),
         None,
-        "MUTATION: an op admitted by an empty grant lands on the read surface"
+        "an op admitted by an empty grant lands on the read surface"
     );
 }
 
@@ -20654,7 +22103,7 @@ fn share_view_pull_admits_nothing_under_a_grant_that_selects_nothing() {
 /// caller that builds the boundary directly.
 #[test]
 fn share_view_boundary_without_a_grant_admits_nothing() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let boundary = crate::ShareBoundary {
         share_id: "share".to_owned(),
@@ -20677,7 +22126,7 @@ fn share_view_boundary_without_a_grant_admits_nothing() {
             crate::apply_shared_envelope(&mut engine, &boundary, &envelope, &NoFaults),
             Err(SyncError::ShareBoundaryViolation)
         ),
-        "MUTATION: an absent grant reading as 'enforce nothing' admits every path"
+        "an absent grant reading as 'enforce nothing' admits every path"
     );
 }
 
@@ -20685,7 +22134,7 @@ fn share_view_boundary_without_a_grant_admits_nothing() {
 /// selects itself and its children independently.
 #[test]
 fn share_view_pull_enforces_every_path_of_a_multi_path_grant() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let bodies = ["docs body", "projects body", "private body"];
     let shas = bodies
@@ -20723,7 +22172,7 @@ fn share_view_pull_enforces_every_path_of_a_multi_path_grant() {
     assert_eq!(
         share_view_pull_changed(&outcome),
         ["docs/a.md", "projects/b.md"],
-        "MUTATION: matching only the first granted path drops the second"
+        "matching only the first granted path drops the second"
     );
     assert_eq!((outcome.applied, outcome.skipped), (2, 1));
     assert_eq!(
@@ -20733,7 +22182,7 @@ fn share_view_pull_enforces_every_path_of_a_multi_path_grant() {
             .lock()
             .expect("share blob calls"),
         shas[..2],
-        "MUTATION: the ungranted path's blob is downloaded before the scope is checked"
+        "the ungranted path's blob is downloaded before the scope is checked"
     );
 }
 
@@ -20755,13 +22204,13 @@ fn share_view_version_create_op(
     }
 }
 
-/// A version share grants ONE version. `version.create` is the only inbound op
+/// A version share grants one version. `version.create` is the only inbound op
 /// that still carries a version identity — the relay minimizes a served
 /// `moment.append` down to paths, blob and operation — so it is the only one
 /// the recipient can check, and it must name the granted version.
 #[test]
 fn share_view_pull_skips_a_version_create_from_a_version_the_share_did_not_grant() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let granted_body = b"the granted version".to_vec();
     let other_body = b"a version nobody shared".to_vec();
@@ -20785,7 +22234,7 @@ fn share_view_pull_skips_a_version_create_from_a_version_the_share_did_not_grant
         .with_view_blobs([(granted_sha.clone(), granted_body), (other_sha, other_body)]),
     );
 
-    // A whole-workspace path scope: the version is the ONLY thing separating
+    // A whole-workspace path scope: the version is the only thing separating
     // these two ops, so nothing else can be what refuses the second.
     let granted = ShareGrant {
         paths: Vec::new(),
@@ -20803,7 +22252,7 @@ fn share_view_pull_skips_a_version_create_from_a_version_the_share_did_not_grant
             .lock()
             .expect("share blob calls"),
         [granted_sha],
-        "MUTATION: dropping the version check downloads a blob from a version the share never granted"
+        "dropping the version check downloads a blob from a version the share never granted"
     );
     assert_eq!(
         share_view_pull_changed(&outcome),
@@ -20816,11 +22265,11 @@ fn share_view_pull_skips_a_version_create_from_a_version_the_share_did_not_grant
 /// A path share follows main and is never entitled to a `version.create` —
 /// the relay refuses to serve one (`shareFilter.ts`: `selector.versionId ===
 /// null` is `allowed: false`), so a recipient that replays one is trusting a
-/// relay that just broke its own rule. The snapshot path here is INSIDE the
+/// relay that just broke its own rule. The snapshot path here is inside the
 /// granted paths, so only the version rule can refuse it.
 #[test]
 fn share_view_pull_refuses_a_version_create_to_a_share_that_granted_only_paths() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let body = b"forked into a path share".to_vec();
     let sha = dohc_engine_storage::hex_sha256(&body);
@@ -20852,7 +22301,7 @@ fn share_view_pull_refuses_a_version_create_to_a_share_that_granted_only_paths()
     assert_eq!(
         (outcome.applied, outcome.skipped),
         (0, 1),
-        "MUTATION: an unconstrained version reading as 'any version' replays a fork the share never granted"
+        "an unconstrained version reading as 'any version' replays a fork the share never granted"
     );
     assert!(
         client
@@ -20861,13 +22310,13 @@ fn share_view_pull_refuses_a_version_create_to_a_share_that_granted_only_paths()
             .lock()
             .expect("share blob calls")
             .is_empty(),
-        "MUTATION: the fork's blob is downloaded before the version is checked"
+        "the fork's blob is downloaded before the version is checked"
     );
 }
 
 #[test]
 fn workspace_push_excludes_origins_imported_from_share_views() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     engine
         .write_with(&NoFaults, |tx| {
@@ -20888,13 +22337,13 @@ fn workspace_push_excludes_origins_imported_from_share_views() {
     assert_eq!(
         client.transport().pushes.lock().expect("push calls").len(),
         1,
-        "MUTATION: an unfiltered origin scan sends the imported share row through the owner lane"
+        "an unfiltered origin scan sends the imported share row through the owner lane"
     );
 }
 
 #[test]
 fn enrollment_backfill_refreshes_the_origin_bound_before_the_next_push() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     VersionedTextStore::new(&mut engine)
@@ -20946,7 +22395,7 @@ fn enrollment_backfill_refreshes_the_origin_bound_before_the_next_push() {
 
 #[test]
 fn pull_first_enrollment_does_not_echo_the_imported_moment_on_the_next_push() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let incoming = b"pulled before enrollment";
@@ -20993,7 +22442,14 @@ fn pull_first_enrollment_does_not_echo_the_imported_moment_on_the_next_push() {
     });
 
     let pull = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("first relay contact pulls the moment");
     let SyncPassOutcome::Complete {
         pending_cursor: Some(cursor),
@@ -21024,7 +22480,7 @@ fn a_second_relay_position_does_not_repeat_enrollment_backfill() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let ciphertext = b"local secret content";
@@ -21098,7 +22554,7 @@ fn a_second_relay_position_does_not_repeat_enrollment_backfill() {
 
 #[test]
 fn share_view_actor_replay_does_not_redownload_completed_blob_prefixes() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let blobs = [b"first".to_vec(), b"second".to_vec(), b"third".to_vec()];
     let snapshots = blobs
@@ -21163,13 +22619,13 @@ fn share_view_actor_replay_does_not_redownload_completed_blob_prefixes() {
             .expect("share blob calls")
             .len(),
         blobs.len(),
-        "MUTATION: fetching before the idempotency lookup redownloads the completed prefix"
+        "fetching before the idempotency lookup redownloads the completed prefix"
     );
 }
 
 #[test]
 fn invalid_blob_in_batch_stops_before_later_collection_order_hydration() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let mut ordered = [
@@ -21218,7 +22674,14 @@ fn invalid_blob_in_batch_stops_before_later_collection_order_hydration() {
     let client = RelaySyncClient::new(relay);
 
     assert_eq!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Err(RelayError::BlobInvalid)
     );
     let present = ordered
@@ -21262,7 +22725,7 @@ fn invalid_blob_in_batch_stops_before_later_collection_order_hydration() {
 
 #[test]
 fn crashed_blob_batch_reconstructs_the_same_request_after_reopen() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let blobs = [
@@ -21300,13 +22763,27 @@ fn crashed_blob_batch_reconstructs_the_same_request_after_reopen() {
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncBeforeBlobHydrateCommit);
 
     assert_eq!(
-        client.pull_chat_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases, 1_000,),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            faults.as_ref(),
+            &NoLiveLeases,
+            1_000,
+        ),
         Err(RelayError::Local("injected-crash".to_owned()))
     );
     drop(engine);
     let mut reopened = EngineStore::open(&path, 2_000).expect("reopen after hydration crash");
     assert!(matches!(
-        client.pull_chat_workspace(&mut reopened, "ws", faults.as_ref(), &NoLiveLeases, 2_000,),
+        client.pull_chat_workspace(
+            &mut reopened,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            faults.as_ref(),
+            &NoLiveLeases,
+            2_000,
+        ),
         Ok(SyncPassOutcome::Complete { .. })
     ));
 
@@ -21339,7 +22816,7 @@ fn crashed_blob_batch_reconstructs_the_same_request_after_reopen() {
 
 #[test]
 fn relay_hydration_failure_mid_page_leaves_no_cursor_and_applies_nothing() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let normal = envelope(
@@ -21368,7 +22845,14 @@ fn relay_hydration_failure_mid_page_leaves_no_cursor_and_applies_nothing() {
     )]));
 
     assert_eq!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Err(RelayError::BlobMissing)
     );
     assert!(
@@ -21390,8 +22874,7 @@ fn relay_hydration_failure_mid_page_leaves_no_cursor_and_applies_nothing() {
 
 #[test]
 fn relay_hydrates_text_and_binary_rows_for_one_shared_digest() {
-    // MUTATION: collapsing the digest to one BlobKind leaves one count at zero.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     // A canonical empty Yjs update is also valid UTF-8, so the same digest is
@@ -21437,7 +22920,14 @@ fn relay_hydrates_text_and_binary_rows_for_one_shared_digest() {
     relay.blobs.insert(sha256.clone(), bytes);
     let client = RelaySyncClient::new(relay);
 
-    let outcome = client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000);
+    let outcome = client.pull_chat_workspace(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        "ws",
+        &NoFaults,
+        &NoLiveLeases,
+        1_000,
+    );
     assert!(
         matches!(outcome, Ok(SyncPassOutcome::Complete { .. })),
         "dual-kind hydration pass must complete: {outcome:?}"
@@ -21467,7 +22957,7 @@ fn relay_hydrates_text_and_binary_rows_for_one_shared_digest() {
 
 #[test]
 fn pull_blob_existence_probe_does_not_read_and_rehash_present_content() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let text = "already local";
@@ -21500,13 +22990,20 @@ fn pull_blob_existence_probe_does_not_read_and_rehash_present_content() {
     )]));
     let _ = crate::relay::take_local_blob_bytes_call_count();
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Ok(SyncPassOutcome::Complete { .. })
     ));
     assert_eq!(
         crate::relay::take_local_blob_bytes_call_count(),
         0,
-        "MUTATION: using the blob reader as an existence probe reads and hashes present content"
+        "using the blob reader as an existence probe reads and hashes present content"
     );
     assert!(
         client
@@ -21521,7 +23018,7 @@ fn pull_blob_existence_probe_does_not_read_and_rehash_present_content() {
 
 #[test]
 fn relay_multi_page_pull_reports_conflicts_opened() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let normal = envelope(
@@ -21577,7 +23074,14 @@ fn relay_multi_page_pull_reports_conflicts_opened() {
     ]));
 
     let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("multi-page conflict pull");
     let SyncPassOutcome::Complete {
         fetched,
@@ -21593,7 +23097,7 @@ fn relay_multi_page_pull_reports_conflicts_opened() {
 
 #[test]
 fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let local_sha = dohc_engine_storage::hex_sha256(b"local");
@@ -21671,7 +23175,14 @@ fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
     });
 
     let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("pull");
     let SyncPassOutcome::Complete {
         applied,
@@ -21690,7 +23201,7 @@ fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
 
 #[test]
 fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let relay = |cursor| RelayCursor {
         cursor,
         replication_epoch: "epoch".to_owned(),
@@ -21729,17 +23240,17 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
         read_share_cursor(&engine, "ws", "share", CursorKind::ShareView)
             .expect("read share cursor"),
         10,
-        "MUTATION: unconditional conflict updates let an older acknowledgement regress the cursor"
+        "unconditional conflict updates let an older acknowledgement regress the cursor"
     );
 }
 #[test]
 fn relay_retry_surfaces_refusal_acked_before_later_error() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     // A mutation-level invalid input: the channel timestamp guard runs inside
     // the savepoint, so this refuses-and-acks. (moment.append with an empty
-    // payload is NOT usable here: since #243 implemented that applier, its
+    // payload is not usable here: since #243 implemented that applier, its
     // payload deserialization fails pre-savepoint and stays a hard error.)
     let refused = envelope(
         "retry-refusal-peer",
@@ -21781,7 +23292,14 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
     });
 
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Err(RelayError::Local(_))
     ));
     let persisted: i64 = engine
@@ -21797,7 +23315,7 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
         .expect("persisted refusal count");
     assert_eq!(
         persisted, 1,
-        "MUTATION: the refusal must persist before the later hard failure"
+        "the refusal must persist before the later hard failure"
     );
     assert!(
         read_relay_cursor(&engine, "ws")
@@ -21814,7 +23332,14 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
         .expect("clear later apply failure");
 
     let retry = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("retry pull");
     let SyncPassOutcome::Complete {
         applied,
@@ -21838,13 +23363,13 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
                 reason: "chat channel timestamp is invalid".to_owned(),
             },
         }],
-        "MUTATION: the Skipped path must reconstruct the persisted refusal"
+        "the Skipped path must reconstruct the persisted refusal"
     );
 }
 
 #[test]
 fn pull_keeps_a_genuine_origin_gap_hard() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let mut gap =
         version_create_with_shipped_snapshots("gapped-peer", "must-not-apply", Vec::new());
@@ -21859,7 +23384,14 @@ fn pull_keeps_a_genuine_origin_gap_hard() {
     });
 
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Err(RelayError::Local(_))
     ));
     assert_eq!(
@@ -21876,7 +23408,7 @@ fn pull_reaches_later_cross_origin_work_before_retrying_a_deferred_origin() {
         MetadataV1, PresentHeadV1, ResolutionV1, ResolveChoiceV1, build_conflict_resolve_v1,
     };
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let result_text = "resolved after retry";
@@ -21957,7 +23489,14 @@ fn pull_reaches_later_cross_origin_work_before_retrying_a_deferred_origin() {
     let leases = FirstLeaseCheckLive(AtomicUsize::new(0));
 
     let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &leases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &leases,
+            1_000,
+        )
         .expect("later cross-origin work must run before the deferred origin retry pass");
     assert!(
         matches!(outcome, SyncPassOutcome::Complete { applied: 4, .. }),
@@ -21983,7 +23522,7 @@ fn pull_reaches_later_cross_origin_work_before_retrying_a_deferred_origin() {
 
 #[test]
 fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let (base_bytes, invalid_bytes) = clock_collision_pair();
@@ -22006,14 +23545,24 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &deferred, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            reason: Some("ydoc-lineage-absent"),
-            conflicts_opened: 0,
-            lineage_replacement: None,
-            record_facts: _,
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &deferred,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                deferred: true,
+                reason: Some("ydoc-lineage-absent"),
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: _,
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let base = envelope(
@@ -22058,7 +23607,14 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
     });
 
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Err(RelayError::Local(_))
     ));
     assert!(
@@ -22075,7 +23631,14 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
         .expect("clear later apply failure");
 
     let retry = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("retry pull");
     let SyncPassOutcome::Complete {
         applied,
@@ -22099,13 +23662,13 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
                 reason: "parked ydoc.update could not be applied".to_owned(),
             },
         }],
-        "MUTATION: reading refusals only for retried page coordinates loses the drain disposition"
+        "reading refusals only for retried page coordinates loses the drain disposition"
     );
 }
 
 #[test]
 fn committed_pull_cursor_clears_persisted_refusals() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let client = RelaySyncClient::new(FakeRelay {
         pushes: Mutex::new(Vec::new()),
@@ -22128,7 +23691,14 @@ fn committed_pull_cursor_clears_persisted_refusals() {
     });
 
     let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("pull");
     let SyncPassOutcome::Complete {
         pending_cursor: Some(pending_cursor),
@@ -22157,13 +23727,13 @@ fn committed_pull_cursor_clears_persisted_refusals() {
     assert_eq!(
         persisted(&engine),
         0,
-        "MUTATION: cursor commit must sweep persisted refusal reports"
+        "cursor commit must sweep persisted refusal reports"
     );
 }
 
 #[test]
 fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let (base_bytes, invalid_bytes) = clock_collision_pair();
@@ -22186,11 +23756,18 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &deferred, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            ..
-        }))
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &deferred,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let first_client = RelaySyncClient::new(FakeRelay {
@@ -22213,7 +23790,14 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         })),
     });
     let first = first_client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("first pull");
     let SyncPassOutcome::Complete {
         pending_cursor: Some(first_cursor),
@@ -22246,8 +23830,14 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
             "isBaseState": true
         }),
     );
-    let _ignored_drain_result = apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases)
-        .expect("base triggers drain refusal");
+    let _ignored_drain_result = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base triggers drain refusal");
     let pending_before_commit: Vec<(String, Option<String>)> = engine
         .read_with(|conn| {
             let mut stmt = conn.prepare(
@@ -22282,7 +23872,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
     assert_eq!(
         survivors,
         vec![("post-pull-drain-peer".to_owned(), None)],
-        "MUTATION: a workspace-wide cursor sweep destroys this unread drain refusal"
+        "a workspace-wide cursor sweep destroys this unread drain refusal"
     );
 
     let second_client = RelaySyncClient::new(FakeRelay {
@@ -22305,7 +23895,14 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         })),
     });
     let second = second_client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("next pull surfaces drain refusal");
     let SyncPassOutcome::Complete {
         pending_cursor: Some(second_cursor),
@@ -22348,11 +23945,15 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
 
 #[test]
 fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let direct = envelope("direct-conflict-peer", 0, "conflict.open", json!({}));
     assert!(matches!(
         apply_conflict_envelope(&mut engine, &direct, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Refused(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     retain_refusal_for_direct_retry(&mut engine, &direct, &NoFaults)
         .expect("protect direct refusal");
@@ -22361,7 +23962,7 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
         .expect("unrelated relay claim");
     assert!(
         claimed.is_empty() && report_id.is_none(),
-        "MUTATION: claiming every workspace row steals the direct RPC retry disposition"
+        "claiming every workspace row steals the direct RPC retry disposition"
     );
     let cursor = RelayCursor {
         cursor: 0,
@@ -22383,7 +23984,7 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
 
 #[test]
 fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let cursor = RelayCursor {
         cursor: 42,
         replication_epoch: "epoch-1".to_owned(),
@@ -22430,7 +24031,7 @@ fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
 
 #[test]
 fn router_counts_only_newly_inserted_replicated_open_conflicts() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let side = |path: &str| {
         json!({
@@ -22456,12 +24057,23 @@ fn router_counts_only_newly_inserted_replicated_open_conflicts() {
     });
 
     let first = envelope("router-open-a", 0, "conflict.open", payload.clone());
-    let ApplyOutcome::Applied(first) =
-        apply_replication_envelope(&mut engine, &first, &NoFaults, &NoLiveLeases)
-            .expect("first routed open")
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(first),
+        refusals: ref outcome_refusals,
+        sharing_declined: ref outcome_sharing_declined,
+    } = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &first,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("first routed open")
     else {
         panic!("first conflict.open did not apply");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     assert_eq!(
         first.conflict.as_ref().and_then(|row| row.inserted),
         Some(true)
@@ -22469,31 +24081,43 @@ fn router_counts_only_newly_inserted_replicated_open_conflicts() {
     assert_eq!(first.conflicts_opened, 1);
 
     let duplicate = envelope("router-open-b", 0, "conflict.open", payload);
-    let ApplyOutcome::Applied(duplicate) =
-        apply_replication_envelope(&mut engine, &duplicate, &NoFaults, &NoLiveLeases)
-            .expect("idempotent routed open")
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(duplicate),
+        refusals: ref outcome_refusals,
+        sharing_declined: ref outcome_sharing_declined,
+    } = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &duplicate,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("idempotent routed open")
     else {
         panic!("duplicate conflict.open did not apply");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     assert_eq!(
         duplicate.conflict.as_ref().and_then(|row| row.inserted),
         Some(false)
     );
-    // MUTATION: flattening the structured result yields 0 for the first
-    // assertion; hardcoding every conflict.open as one breaks this assertion.
-    assert_eq!(duplicate.conflicts_opened, 0);
+    assert_eq!(
+        duplicate.conflicts_opened, 0,
+        "flattening the structured result yields 0 for the first assertion; hardcoding every conflict.open as one breaks this assertion."
+    );
 }
 
 #[test]
 fn malformed_moment_append_router_refuses_and_acks() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let operation = envelope("moment-peer", 0, "moment.append", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput { ref reason },
             ..
-        })) if reason == "moment.append payload is malformed"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "moment.append payload is malformed")
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "moment-peer").expect("ack"),
@@ -22503,26 +24127,46 @@ fn malformed_moment_append_router_refuses_and_acks() {
 
 #[test]
 fn refused_op_acks_and_the_next_same_origin_op_applies() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let refused = envelope(
         "progress-peer",
         0,
         "chat.decision.set",
         decision_payload("open", i64::MAX, None),
     );
-    let outcome = apply_replication_envelope(&mut engine, &refused, &NoFaults, &NoLiveLeases);
+    let outcome = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &refused,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     assert!(matches!(
         outcome,
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
-            reason: RefusalReason::InvalidInput { .. },
-            ..
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Refused(ReplicationRefusal {
+                reason: RefusalReason::InvalidInput { .. },
+                ..
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let next = envelope("progress-peer", 1, "workspace.init", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &next, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &next,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "progress-peer").expect("ack"),
@@ -22532,22 +24176,32 @@ fn refused_op_acks_and_the_next_same_origin_op_applies() {
 
 #[test]
 fn malformed_ydoc_op_is_refused_without_wedging_its_origin() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let malformed = envelope("ydoc-refusal-peer", 0, "ydoc.update", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &malformed, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &malformed, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "ydoc.update payload is malformed"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "ydoc.update payload is malformed")
     ));
 
     let next = envelope("ydoc-refusal-peer", 1, "workspace.init", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &next, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &next,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "ydoc-refusal-peer").expect("ack"),
@@ -22557,7 +24211,7 @@ fn malformed_ydoc_op_is_refused_without_wedging_its_origin() {
 
 #[test]
 fn relay_pull_surfaces_refusal_reason_to_the_caller() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let client = RelaySyncClient::new(FakeRelay {
         pushes: Mutex::new(Vec::new()),
@@ -22580,7 +24234,14 @@ fn relay_pull_surfaces_refusal_reason_to_the_caller() {
     });
 
     let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("a refused operation must not fail the pull");
     let SyncPassOutcome::Complete {
         applied,
@@ -22616,7 +24277,7 @@ fn relay_pull_surfaces_refusal_reason_to_the_caller() {
 
 #[test]
 fn coordinate_divergence_still_stops_a_pass_after_an_acked_refusal() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let first = envelope(
         "divergent-refusal-peer",
@@ -22646,7 +24307,14 @@ fn coordinate_divergence_still_stops_a_pass_after_an_acked_refusal() {
     });
 
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Err(RelayError::Local(_))
     ));
     assert_eq!(
@@ -22669,12 +24337,18 @@ fn coordinate_divergence_still_stops_a_pass_after_an_acked_refusal() {
 
 #[test]
 fn structurally_invalid_envelope_remains_unrecorded_and_unacked() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let mut invalid = envelope("structural-peer", 0, "moment.append", json!({}));
     invalid.origin_seq = MAX_WIRE_INTEGER + 1;
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &invalid, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &invalid,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::InvalidInput {
             reason: "origin_seq is outside the wire integer range"
         })
@@ -22699,7 +24373,7 @@ fn structurally_invalid_envelope_remains_unrecorded_and_unacked() {
 
 #[test]
 fn redelivered_refusal_is_recorded_once_and_skipped() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let refused = envelope(
         "refusal-replay-peer",
         0,
@@ -22712,17 +24386,37 @@ fn redelivered_refusal_is_recorded_once_and_skipped() {
             "createdAtMs": -1
         }),
     );
-    let first = apply_replication_envelope(&mut engine, &refused, &NoFaults, &NoLiveLeases);
+    let first = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &refused,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     assert!(matches!(
         first,
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
-            reason: RefusalReason::InvalidInput { .. },
-            ..
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Refused(ReplicationRefusal {
+                reason: RefusalReason::InvalidInput { .. },
+                ..
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &refused, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Skipped)
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &refused,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let recorded: i64 = engine
         .read_with(|conn| {
@@ -22740,7 +24434,7 @@ fn redelivered_refusal_is_recorded_once_and_skipped() {
 
 #[test]
 fn every_refusal_reason_round_trips_through_persist_and_read() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     for operation in [
         envelope("roundtrip-invalid-refusal", 0, "ydoc.update", json!({})),
         envelope(
@@ -22756,12 +24450,23 @@ fn every_refusal_reason_round_trips_through_persist_and_read() {
             }),
         ),
     ] {
-        let ApplyOutcome::Refused(expected) =
-            apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases)
-                .expect("refusal")
+        let ApplyOutcome {
+            primary: ApplyDisposition::Refused(expected),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } = apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("refusal")
         else {
             panic!("operation must be refused");
         };
+        assert!(outcome_refusals.is_empty());
+        assert!(outcome_sharing_declined.is_empty());
         assert_eq!(
             crate::apply::read_replayed_refusal(&engine, &operation)
                 .expect("read refusal")
@@ -22775,87 +24480,9 @@ fn every_refusal_reason_round_trips_through_persist_and_read() {
         assert_eq!(
             exhaustively_matched_message,
             expected.reason.message(),
-            "MUTATION: the exhaustive guard must execute for every persisted refusal variant"
+            "the exhaustive guard must execute for every persisted refusal variant"
         );
     }
-}
-
-#[test]
-fn local_corruption_constructor_has_one_shared_definition() {
-    let sources = [
-        include_str!("error.rs"),
-        include_str!("apply.rs"),
-        include_str!("conflict_apply.rs"),
-        include_str!("ydoc_apply.rs"),
-    ];
-    let constructors = sources
-        .iter()
-        .map(|source| {
-            source
-                .matches(&["std::io::Error::other", "(reason)"].concat())
-                .count()
-        })
-        .sum::<usize>();
-    assert_eq!(
-        constructors, 1,
-        "MUTATION: local-corruption construction must stay centralized in error.rs"
-    );
-    assert!(sources[0].contains("pub(crate) fn local_corruption"));
-}
-
-#[test]
-fn clock_collision_fixtures_are_shared() {
-    let source = include_str!("tests.rs");
-    assert_eq!(
-        source.matches(&["fn decode", "_hex("].concat()).count(),
-        1,
-        "MUTATION: hex decoding belongs in one shared fixture helper"
-    );
-    assert_eq!(
-        source
-            .matches(&["fn clock_collision", "_pair("].concat())
-            .count(),
-        1,
-        "MUTATION: the opaque collision payload pair belongs in one named fixture"
-    );
-    assert_eq!(
-        source.matches(&["let decode", "_hex = |"].concat()).count(),
-        0,
-        "MUTATION: per-test decoder closures duplicate an opaque fixture"
-    );
-}
-
-#[test]
-fn accepted_content_kind_test_has_no_unknown_kind_tail() {
-    let source = include_str!("tests.rs");
-    let accepted = source
-        .split_once("fn version_create_shipped_snapshot_accepts_only_oracle_content_kinds()")
-        .expect("accepted-kind test")
-        .1
-        .split_once("fn version_create_unknown_content_kind_is_refused_and_acked()")
-        .expect("dedicated unknown-kind test")
-        .0;
-    assert!(
-        !accepted.contains("version.create shipped snapshot content kind is invalid"),
-        "MUTATION: the accepted-kind test must not duplicate the dedicated refusal test"
-    );
-}
-
-#[test]
-fn corrupt_secret_fixture_asserts_equal_lengths() {
-    let source = include_str!("tests.rs");
-    let fixture = source
-        .split_once("fn secret_put_corrupt_local_ciphertext_blob_is_hard_and_unacked()")
-        .expect("corrupt-secret test")
-        .1
-        .split_once("#[test]")
-        .expect("next test")
-        .0;
-    assert!(
-        fixture.contains("honest_ciphertext.len(),")
-            && fixture.contains("corrupt_ciphertext.len(),"),
-        "MUTATION: the fixture must assert that only ciphertext content changed"
-    );
 }
 
 fn share_view_binary_write_op(seq: i64, path: &str, sha256: &str) -> ShareReplicationEnvelope {
@@ -22899,7 +24526,7 @@ fn share_view_binary_pull(
         )
         .with_view_blobs([(sha256, bytes)]),
     );
-    // The write must sit INSIDE the grant, or the op is skipped and this helper
+    // The write must sit inside the grant, or the op is skipped and this helper
     // stops exercising the ceiling it exists to test. Granting the exact path
     // keeps that true whatever path a caller passes.
     client.pull_share_view(engine, "ws", "share", &tracked_grant([path]), &NoFaults)
@@ -22910,16 +24537,13 @@ fn share_view_binary_pull(
 /// binary ceiling, so the only floor left was the generic 64 MiB blob store —
 /// a share could persist a binary an ordinary capture refuses.
 ///
-/// The refusal is a SKIP, not a failed pull — `a_refused_shared_blob_does_not
+/// The refusal is a skip, not a failed pull — `a_refused_shared_blob_does_not
 /// _freeze_the_share` holds that half — so this one pins the ceiling and the
 /// measurements the skip carries.
 ///
-/// MUTATION: delete the ceiling check in `replay_share_write` and the over-cap
-/// half lands the blob; narrow it to the text ceiling and the at-cap half stops
-/// refusing.
 #[test]
 fn an_oversized_shared_binary_is_refused_before_it_reaches_the_store() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -22932,7 +24556,7 @@ fn an_oversized_shared_binary_is_refused_before_it_reaches_the_store() {
         (1, 0, 1)
     );
     // The refusal keeps its measurements. The constraint, the limit and the
-    // observed usage are what tell a reader WHICH ceiling refused and by how
+    // observed usage are what tell a reader which ceiling refused and by how
     // much; a skip that flattened them to "something was skipped" would be
     // unactionable.
     assert_eq!(
@@ -22970,19 +24594,15 @@ fn an_oversized_shared_binary_is_refused_before_it_reaches_the_store() {
     );
 }
 
-/// A Y.Doc payload is its OWN blob kind, and `ydoc.update` must reference it.
+/// A Y.Doc payload is its own blob kind, and `ydoc.update` must reference it.
 /// While it referenced `BlobKind::Binary` the lineage inherited the
 /// captured-file ceiling — 5 MiB, a number about user uploads — and a base
 /// larger than that was refused on hydrate no matter what the collab layer
-/// allowed (#549).
+/// allowed.
 ///
-/// MUTATION: put `BlobKind::Binary` back in `collect_blob_refs` for
-/// `ydoc.update` and the pull fails with
-/// `BlobTooLarge { constraint: "MAX_CAPTURE_BINARY_FILE_BYTES" }` before the
-/// blob ever reaches the store.
 #[test]
 fn a_ydoc_base_over_the_captured_file_cap_still_hydrates() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let (ydoc_constraint, ydoc_limit) = blob_ceiling(BlobKind::Ydoc);
@@ -23026,11 +24646,18 @@ fn a_ydoc_base_over_the_captured_file_cap_still_hydrates() {
     )]);
     relay.blobs.insert(sha256.clone(), base);
 
-    // These bytes are not a Y.Doc, so the APPLY refuses them — but hydration
+    // These bytes are not a Y.Doc, so the apply refuses them — but hydration
     // runs first, and that is what this test is about. The refusal must not be
     // a ceiling refusal.
     let outcome = RelaySyncClient::new(relay)
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("the pull completes: an oversized-for-binary Y.Doc base is not a transport error");
     assert!(
         matches!(outcome, SyncPassOutcome::Complete { .. }),
@@ -23044,7 +24671,7 @@ fn a_ydoc_base_over_the_captured_file_cap_still_hydrates() {
 
 /// Splitting the ceiling split presence from validation, and only one half
 /// moved. `Binary` and `Ydoc` share `binary_blobs`, so once a Y.Doc base over
-/// the captured-file cap has hydrated legitimately, a LATER `moment.append`
+/// the captured-file cap has hydrated legitimately, a later `moment.append`
 /// naming the same digest as `binary` was reported already-satisfied — skipping
 /// `hydrate_blob_content`, the only place `MAX_CAPTURE_BINARY_FILE_BYTES` is
 /// enforced. `require_binary_blob` applies no ceiling at all, so an authorized
@@ -23053,25 +24680,22 @@ fn a_ydoc_base_over_the_captured_file_cap_still_hydrates() {
 /// The inverse of the defect #549 fixed: there a Y.Doc payload inherited a cap
 /// about user uploads; here a user upload borrows the Y.Doc payload's cap.
 ///
-/// The bytes must ALREADY be stored for the hole to open, and one batch cannot
+/// The bytes must already be stored for the hole to open, and one batch cannot
 /// do it: a pass accumulates every page into a single `ops` list and hydrates
 /// once, so both kinds come up missing together and the binary half refuses on
-/// its own ceiling. The precondition here is this machine's OWN origination —
+/// its own ceiling. The precondition here is this machine's own origination —
 /// `ydoc_originate_base_in_tx` writes the base through `put_binary_blob`,
 /// bounded only by the 64 MiB store — so no peer is needed to create it.
 ///
-/// MUTATION: restore the bare `EXISTS(...)` presence check in
-/// `local_blob_present` and the pull returns `Ok`, the snapshot lands, and the
-/// over-cap binary is materialized.
 #[test]
 fn a_ydoc_payload_cannot_be_reused_as_an_over_cap_captured_binary() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let (binary_constraint, binary_limit) = blob_ceiling(BlobKind::Binary);
     let (_, ydoc_limit) = blob_ceiling(BlobKind::Ydoc);
 
-    // A REAL Y.Doc full state, so the first pass genuinely applies and the
+    // A real Y.Doc full state, so the first pass genuinely applies and the
     // lineage really exists. Bytes that merely look like a base would be
     // refused by the apply, and then the second pass would be running against
     // a precondition no honest peer could produce.
@@ -23110,7 +24734,7 @@ fn a_ydoc_payload_cannot_be_reused_as_an_over_cap_captured_binary() {
 
     // Pass one: the Y.Doc base hydrates legitimately under its own ceiling.
     // The precondition: these bytes are already in `binary_blobs`. This is
-    // exactly what `ydoc_originate_base_in_tx` writes when THIS machine starts
+    // exactly what `ydoc_originate_base_in_tx` writes when this machine starts
     // a shared lineage — `put_binary_blob`, bounded only by the 64 MiB store —
     // so the state is one the engine produces itself, with no peer involved.
     let stored = engine.put_binary_blob(&payload).expect("store the base");
@@ -23129,6 +24753,7 @@ fn a_ydoc_payload_cannot_be_reused_as_an_over_cap_captured_binary() {
     assert_eq!(
         RelaySyncClient::new(relay).pull_chat_workspace(
             &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             "ws",
             &NoFaults,
             &NoLiveLeases,
@@ -23162,13 +24787,11 @@ fn a_ydoc_payload_cannot_be_reused_as_an_over_cap_captured_binary() {
 /// ceiling as a `5 * 1024 * 1024` literal — so a Y.Doc base this engine had just
 /// originated read back as `BlobInvalid`. Wrong constraint, wrong error, and it
 /// would have made the widened bound unusable in the direction that matters
-/// first (#549).
+/// first.
 ///
-/// MUTATION: put the literal back in `local_blob_bytes` and the Y.Doc read
-/// fails with `BlobInvalid`.
 #[test]
 fn the_local_blob_reader_measures_against_the_referenced_kind() {
-    let (_scratch, _path, engine) = store();
+    let (_scratch, _path, engine) = open_store();
     let (_, binary_limit) = blob_ceiling(BlobKind::Binary);
     let bytes = vec![4u8; binary_limit + 1];
     let sha256 = engine.put_binary_blob(&bytes).expect("store the blob");
@@ -23187,11 +24810,9 @@ fn the_local_blob_reader_measures_against_the_referenced_kind() {
 
 /// The Y.Doc half of the ingest chokepoint. Text and binary are pinned above.
 ///
-/// MUTATION: route `BlobContent::Ydoc` through the binary ceiling in
-/// `blob_ceiling` and the at-cap half stops hydrating.
 #[test]
 fn a_ydoc_blob_at_the_ydoc_ceiling_hydrates_and_one_byte_over_is_refused() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Ydoc);
     assert_eq!(
         (constraint, limit_bytes),
@@ -23244,12 +24865,9 @@ fn a_ydoc_blob_at_the_ydoc_ceiling_hydrates_and_one_byte_over_is_refused() {
 /// one was not, so the ceiling could be deleted for `BlobKind::Binary` alone
 /// and every other test stayed green.
 ///
-/// MUTATION: skip the ceiling for binary content in `hydrate_blob_content` and
-/// the over-cap half commits instead of refusing. The ceiling's own value is
-/// pinned below, so widening it moves no expectation with it.
 #[test]
 fn binary_blob_over_the_binary_ceiling_is_refused_at_ingest() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
     // Pinned, not derived. Every other expectation here reads the ceiling from
     // `blob_ceiling`, so without this a widened ceiling would carry the whole
@@ -23314,14 +24932,11 @@ fn binary_blob_over_the_binary_ceiling_is_refused_at_ingest() {
 /// comes back on every pull — so aborting there left the share cursor at 0,
 /// re-fetched the identical refusal forever, and held every later op in the
 /// share behind it with no recipient-side recovery. The cursor records how far
-/// the share was READ; the refusal records that this op never applied.
+/// the share was read; the refusal records that this op never applied.
 ///
-/// MUTATION: return `None` for `BlobTooLarge` in
-/// `RelayError::share_replay_refusal_code` and the pull aborts again — the
-/// later write never lands and the cursor never advances.
 #[test]
 fn a_refused_shared_blob_does_not_freeze_the_share() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -23355,16 +24970,16 @@ fn a_refused_shared_blob_does_not_freeze_the_share() {
             &tracked_grant(["docs"]),
             &NoFaults,
         )
-        .expect("MUTATION: one refused blob aborts the pull and freezes the share");
+        .expect("one refused blob aborts the pull and freezes the share");
     assert_eq!(
         (outcome.fetched, outcome.applied, outcome.skipped),
         (2, 1, 1)
     );
-    // The cursor advances PAST the refused op. Without this the same page is
+    // The cursor advances past the refused op. Without this the same page is
     // fetched forever and nothing later in this share can ever arrive.
     assert_eq!(
         outcome.pending_cursor.cursor, 2,
-        "MUTATION: the cursor stalls on the refused op and the share never moves"
+        "the cursor stalls on the refused op and the share never moves"
     );
     assert_eq!(
         VersionedTextStore::new(&mut engine)
@@ -23372,7 +24987,7 @@ fn a_refused_shared_blob_does_not_freeze_the_share() {
             .expect("share-view path read is answerable")
             .map(|snapshot| snapshot.text),
         Some("the update behind the refused one".to_owned()),
-        "MUTATION: the op behind the refused one never arrives"
+        "the op behind the refused one never arrives"
     );
     assert!(
         !engine
@@ -23406,7 +25021,7 @@ fn a_refused_shared_blob_does_not_freeze_the_share() {
             )
             .as_str()
         )],
-        "MUTATION: the skip is counted but the reason never reaches the recipient"
+        "the skip is counted but the reason never reaches the recipient"
     );
 }
 
@@ -23419,12 +25034,9 @@ fn a_refused_shared_blob_does_not_freeze_the_share() {
 /// `BlobMissing`'s claim in a different tense, and it gets `BlobMissing`'s
 /// answer.
 ///
-/// MUTATION: return `Some("invalid-input")` for `BlobInvalid` in
-/// `RelayError::share_replay_refusal_code` and the pull reports success,
-/// advancing the cursor past an op the relay could still serve correctly.
 #[test]
 fn a_repairable_blob_integrity_failure_stops_the_pull_instead_of_skipping() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
 
     let claimed = b"what the op says the blob is".to_vec();
@@ -23464,7 +25076,7 @@ fn a_repairable_blob_integrity_failure_stops_the_pull_instead_of_skipping() {
                 &tracked_grant(["docs"]),
                 &NoFaults
             )
-            .expect_err("MUTATION: a repairable integrity failure is skipped and lost"),
+            .expect_err("a repairable integrity failure is skipped and lost"),
         RelayError::BlobInvalid
     );
     // No cursor is returned at all, so nothing can commit past the refused op
@@ -23479,19 +25091,14 @@ fn a_repairable_blob_integrity_failure_stops_the_pull_instead_of_skipping() {
     );
 }
 
-/// The permanent twin that USED to share `BlobInvalid`'s variant and therefore
+/// The permanent twin that used to share `BlobInvalid`'s variant and therefore
 /// its disposition. An op naming a blob reference that is not a sha256 asks
 /// for nothing the relay could serve, so no repair makes it replayable and
 /// holding the cursor on it would freeze the share forever.
 ///
-/// MUTATION: return `None` for `ShareOpInvalid` in
-/// `RelayError::share_replay_refusal_code` and the pull aborts, wedging the
-/// share on an op that can never succeed. Restore the site to plain
-/// `RelayError::BlobInvalid` and the two classes collapse back into one
-/// disposition — this test then aborts as well.
 #[test]
 fn a_share_op_naming_an_unusable_blob_reference_is_permanent_and_skipped() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
 
     let later = b"the update behind the unusable reference".to_vec();
@@ -23522,7 +25129,7 @@ fn a_share_op_naming_an_unusable_blob_reference_is_permanent_and_skipped() {
             &tracked_grant(["docs"]),
             &NoFaults,
         )
-        .expect("MUTATION: an unusable blob reference freezes the share forever");
+        .expect("an unusable blob reference freezes the share forever");
     assert_eq!(
         (
             outcome.fetched,
@@ -23538,7 +25145,7 @@ fn a_share_op_naming_an_unusable_blob_reference_is_permanent_and_skipped() {
             .expect("share-view path read is answerable")
             .map(|snapshot| snapshot.text),
         Some("the update behind the unusable reference".to_owned()),
-        "MUTATION: the op behind the unusable reference never arrives"
+        "the op behind the unusable reference never arrives"
     );
     // The blob was never requested: there is no sha to request.
     assert_eq!(
@@ -23561,7 +25168,7 @@ fn a_share_op_naming_an_unusable_blob_reference_is_permanent_and_skipped() {
             "invalid-input",
             "share op is not replayable: share write names a blob reference that is not a sha256 — docs/unusable.md"
         )],
-        "MUTATION: the skip is counted but the reason never reaches the recipient"
+        "the skip is counted but the reason never reaches the recipient"
     );
 }
 
@@ -23572,17 +25179,14 @@ fn a_share_op_naming_an_unusable_blob_reference_is_permanent_and_skipped() {
 /// snapshot behind the refused one — permanently, because the cursor commits
 /// past the op either way. One oversized file silently cost its siblings.
 ///
-/// The invariant: after a refused blob, the remaining blobs in that op are ALL
+/// The invariant: after a refused blob, the remaining blobs in that op are all
 /// applied. Never a prefix. So the refused file is second of three here — a
 /// per-op skip keeps the first and loses the third, which is exactly the shape
 /// a first-only or last-only fixture cannot see.
 ///
-/// MUTATION: move the refusal handling in `replay_share_view_op` back out to
-/// the op level (propagate with `?` and record one refusal per op) and
-/// `docs/third.md` never lands.
 #[test]
 fn one_refused_snapshot_does_not_drop_the_rest_of_a_shared_version() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -23644,7 +25248,7 @@ fn one_refused_snapshot_does_not_drop_the_rest_of_a_shared_version() {
         "two snapshots applied and exactly the refused one is counted skipped"
     );
     let text = VersionedTextStore::new(&mut engine);
-    // BOTH survivors, asserted apart. The one AFTER the refusal is the whole
+    // Both survivors, asserted apart. The one after the refusal is the whole
     // point: a per-op skip keeps the first and silently loses this one.
     assert_eq!(
         text.read_text("ws", "main", "docs/first.md")
@@ -23658,7 +25262,7 @@ fn one_refused_snapshot_does_not_drop_the_rest_of_a_shared_version() {
             .expect("share-view path read is answerable")
             .map(|snapshot| snapshot.text),
         Some("third snapshot".to_owned()),
-        "MUTATION: refusing per op drops every snapshot behind the refused one"
+        "refusing per op drops every snapshot behind the refused one"
     );
     assert!(
         !engine
@@ -23695,11 +25299,9 @@ fn one_refused_snapshot_does_not_drop_the_rest_of_a_shared_version() {
 /// while its replacement never arrived, which loses the file outright — worse
 /// than not renaming it and worse than the freeze this change removes.
 ///
-/// MUTATION: drop the `return Ok(())` after `refuse_replay_unit` in the rename
-/// arm and `docs/old.md` disappears.
 #[test]
 fn a_rename_whose_replacement_is_refused_keeps_the_old_path() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -23744,7 +25346,7 @@ fn a_rename_whose_replacement_is_refused_keeps_the_old_path() {
             .expect("share-view path read is answerable")
             .map(|snapshot| snapshot.text),
         Some("the file that already exists".to_owned()),
-        "MUTATION: the rename's delete ran after its write was refused, losing the file"
+        "the rename's delete ran after its write was refused, losing the file"
     );
     assert_eq!(
         text.read_text("ws", "main", "docs/new.bin")
@@ -23764,15 +25366,13 @@ fn a_rename_whose_replacement_is_refused_keeps_the_old_path() {
 /// correctly. The transport's own overflow (`blob_body_overflow`, which cannot
 /// even report an exact size) is the same claim with even less evidence.
 ///
-/// MUTATION: check the size before the hash in `replay_share_write` and this
-/// pull reports success, advancing past a repairable op.
 #[test]
 fn an_oversized_body_that_is_not_the_named_blob_stops_the_pull() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
-    // The op names a SMALL file. The relay serves an oversized body for it, so
+    // The op names a small file. The relay serves an oversized body for it, so
     // the size is the served junk's and says nothing about the granter's file.
     let named = b"the small file the op actually names".to_vec();
     let named_sha = dohc_engine_storage::hex_sha256(&named);
@@ -23806,7 +25406,7 @@ fn an_oversized_body_that_is_not_the_named_blob_stops_the_pull() {
                 &tracked_grant(["docs"]),
                 &NoFaults
             )
-            .expect_err("MUTATION: an unauthenticated oversized body is skipped as permanent"),
+            .expect_err("an unauthenticated oversized body is skipped as permanent"),
         RelayError::BlobInvalid,
         "an oversized body that is not the named blob is an integrity failure, not a ceiling one"
     );
@@ -23816,7 +25416,7 @@ fn an_oversized_body_that_is_not_the_named_blob_stops_the_pull() {
 ///
 /// The recipient's durable record is keyed by origin coordinate and by nothing
 /// else (`mergeShareSkippedOps` in `apps/desktop/src/workspaces/registryStore.ts`
-/// — membership in `counted` is the ONLY duplicate test). Every blob in one
+/// — membership in `counted` is the only duplicate test). Every blob in one
 /// `version.create` shares that coordinate, so one refusal per blob meant the
 /// record kept the first and dropped the rest UNCOUNTED: two files gone, a
 /// notice saying one, and the cursor already past both.
@@ -23824,12 +25424,9 @@ fn an_oversized_body_that_is_not_the_named_blob_stops_the_pull() {
 /// So the op is the record. The count leads the detail, because the detail is
 /// bounded and a truncated list must still say how many files it is short.
 ///
-/// MUTATION: emit one refusal per blob instead of one per op and this reports
-/// two refusals sharing a coordinate — which the recipient's recorder collapses
-/// back to one, losing the second file silently.
 #[test]
 fn two_refused_snapshots_are_recorded_as_one_op_naming_both() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -23887,12 +25484,12 @@ fn two_refused_snapshots_are_recorded_as_one_op_naming_both() {
         (outcome.fetched, outcome.applied, outcome.skipped),
         (1, 1, 2)
     );
-    // ONE durable record, because the recipient can hold only one per
+    // One durable record, because the recipient can hold only one per
     // coordinate. Emitting two would silently become one.
     assert_eq!(
         outcome.refusals.len(),
         1,
-        "MUTATION: a second refusal shares this op's coordinate and the recipient drops it"
+        "a second refusal shares this op's coordinate and the recipient drops it"
     );
     let refusal = &outcome.refusals[0];
     assert_eq!(
@@ -23900,7 +25497,7 @@ fn two_refused_snapshots_are_recorded_as_one_op_naming_both() {
         ("peer", 0, "share-blob-over-ceiling")
     );
     // The count leads, then every lost file's measurements with its name. A
-    // reader must be able to see that TWO files are missing and which. Each
+    // reader must be able to see that two files are missing and which. Each
     // entry puts its reason before its path for the same reason the count
     // leads: the detail is bounded, and truncation must cost a path tail.
     assert_eq!(
@@ -23914,7 +25511,7 @@ fn two_refused_snapshots_are_recorded_as_one_op_naming_both() {
             limit_bytes + 1,
             limit_bytes + 2
         ),
-        "MUTATION: the record names one file, or loses the count, or loses a measurement"
+        "the record names one file, or loses the count, or loses a measurement"
     );
     assert_eq!(
         VersionedTextStore::new(&mut engine)
@@ -23933,12 +25530,9 @@ fn two_refused_snapshots_are_recorded_as_one_op_naming_both() {
 /// that as the granter's file being too big would commit the cursor past an op
 /// the relay can still serve correctly.
 ///
-/// MUTATION: return `Some("invalid-input")` for `BlobTooLarge` in
-/// `RelayError::share_replay_refusal_code` and this pull reports success,
-/// permanently dropping a file on the strength of a body nobody read.
 #[test]
 fn a_transport_overflow_stops_the_pull_rather_than_skipping_the_op() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
 
     let named = b"a perfectly small shared file".to_vec();
@@ -23975,7 +25569,7 @@ fn a_transport_overflow_stops_the_pull_rather_than_skipping_the_op() {
             &tracked_grant(["docs"]),
             &NoFaults,
         )
-        .expect_err("MUTATION: an unread oversized body is skipped as if it were permanent");
+        .expect_err("an unread oversized body is skipped as if it were permanent");
     assert!(
         matches!(error, RelayError::BlobTooLarge { .. }),
         "unexpected refusal: {error:?}"
@@ -23996,11 +25590,9 @@ fn a_transport_overflow_stops_the_pull_rather_than_skipping_the_op() {
 /// tail of a path, which the coordinate and op kind still place, instead of
 /// the whole reason.
 ///
-/// MUTATION: put the path first in `refuse_replay_unit` and the detail is
-/// 2048 units of path with every measurement cut off the end.
 #[test]
 fn a_refusal_keeps_its_measurements_when_the_path_exhausts_the_detail_bound() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -24048,13 +25640,13 @@ fn a_refusal_keeps_its_measurements_when_the_path_exhausts_the_detail_bound() {
         detail.encode_utf16().count() <= crate::relay::MAX_REFUSAL_DETAIL_UNITS,
         "the detail must be bounded to what the recipient can persist"
     );
-    // The path is cut to its OWN budget, not to whatever is left of the
+    // The path is cut to its own budget, not to whatever is left of the
     // detail's. Cut to the detail's, one refusal fills the record and the next
     // one in the same op gets nothing —
     // `a_long_path_does_not_cost_the_next_refusals_measurements` is that case.
     assert!(
         detail.encode_utf16().count() < crate::relay::MAX_REFUSAL_DETAIL_UNITS,
-        "MUTATION: the path is unbounded and spends the whole detail budget"
+        "the path is unbounded and spends the whole detail budget"
     );
     // And it still opens with the reason, measurements intact.
     assert!(
@@ -24062,14 +25654,14 @@ fn a_refusal_keeps_its_measurements_when_the_path_exhausts_the_detail_bound() {
             "shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes — docs/",
             limit_bytes + 1
         )),
-        "MUTATION: the path pushed the constraint, limit, unit and usage out of the record: {detail}"
+        "the path pushed the constraint, limit, unit and usage out of the record: {detail}"
     );
 }
 
 /// Reason-before-path saved one entry's measurements. It did not save the
 /// next entry's.
 ///
-/// A `version.create` refusing several snapshots writes ONE record, and the
+/// A `version.create` refusing several snapshots writes one record, and the
 /// entries were concatenated whole: `reason — path; reason — path`. An
 /// unbounded path in entry one therefore spent the budget entry two's
 /// measurements needed, and the aggregate truncation put the same rejection
@@ -24079,12 +25671,9 @@ fn a_refusal_keeps_its_measurements_when_the_path_exhausts_the_detail_bound() {
 /// that fits and says how many it did not list. Every entry the record shows
 /// is complete. None is ever half-written.
 ///
-/// MUTATION: drop the path bound in `record_refused_blobs`, or concatenate
-/// every entry and let `ShareViewRefusal::new` cut the tail, and the second
-/// snapshot's constraint, limit, unit and usage vanish.
 #[test]
 fn a_long_path_does_not_cost_the_next_refusals_measurements() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -24156,17 +25745,17 @@ fn a_long_path_does_not_cost_the_next_refusals_measurements() {
         detail.starts_with("2 files in this operation were not applied: "),
         "the record must still say how many files it is short: {detail}"
     );
-    // And the SECOND file's measurements survived the first file's path.
+    // And the second file's measurements survived the first file's path.
     assert!(
         detail.contains(&format!(
             "shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes — docs/second.bin",
             limit_bytes + 2
         )),
-        "MUTATION: entry one's path pushed entry two's constraint, limit, unit and usage out of the record: {detail}"
+        "entry one's path pushed entry two's constraint, limit, unit and usage out of the record: {detail}"
     );
 }
 
-/// One record per coordinate means ONE code for however many blobs an op
+/// One record per coordinate means one code for however many blobs an op
 /// refused, so a mixed op has to choose — and it must not choose the one that
 /// carries an instruction.
 ///
@@ -24176,11 +25765,9 @@ fn a_long_path_does_not_cost_the_next_refusals_measurements() {
 /// smaller file repairs. So a mixed op reports the generic code, which claims
 /// nothing it cannot keep, and the detail still names both.
 ///
-/// MUTATION: take the first blob's code in `refusal_code` and this op tells
-/// the reader to go ask for a smaller file about a malformed reference.
 #[test]
 fn an_op_refusing_two_classes_at_once_claims_neither_instruction() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -24232,7 +25819,7 @@ fn an_op_refusing_two_classes_at_once_claims_neither_instruction() {
     let refusal = &outcome.refusals[0];
     assert_eq!(
         refusal.code, "invalid-input",
-        "MUTATION: a mixed op reports an instruction that is false for one of its blobs"
+        "a mixed op reports an instruction that is false for one of its blobs"
     );
     // Both are still named, so nothing is hidden by the cautious code.
     for path in ["docs/over-cap.bin", "docs/unusable.md"] {
@@ -24251,17 +25838,15 @@ fn an_op_refusing_two_classes_at_once_claims_neither_instruction() {
 /// carries a snapshot per file. Concatenating them all and letting
 /// `ShareViewRefusal::new` cut the tail leaves the last entry sliced through
 /// its measurements or its path, and says nothing about the ones past it. So
-/// entries are added only while the WHOLE detail still fits, and the record
+/// entries are added only while the whole detail still fits, and the record
 /// says how many it did not list.
 ///
 /// The invariant: every entry the record shows is complete, and the ones it
 /// cannot show are counted. Never a fragment.
 ///
-/// MUTATION: concatenate every entry and let the record's own bound cut it,
-/// and the last entry is a fragment with no count behind it.
 #[test]
 fn a_record_too_small_for_every_refusal_lists_whole_ones_and_counts_the_rest() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -24347,17 +25932,15 @@ fn a_record_too_small_for_every_refusal_lists_whole_ones_and_counts_the_rest() {
     let unlisted: usize = tail[0]
         .strip_prefix("and ")
         .and_then(|rest| rest.strip_suffix(" more"))
-        .unwrap_or_else(|| {
-            panic!("MUTATION: the record stops mid-entry and counts nothing: {detail}")
-        })
+        .unwrap_or_else(|| panic!("the record stops mid-entry and counts nothing: {detail}"))
         .parse()
         .expect("the unlisted count is a number");
     assert_eq!(
         entries.len() + unlisted,
         refused_count,
-        "MUTATION: the record's own count does not add up to the files it lost"
+        "the record's own count does not add up to the files it lost"
     );
-    // Every entry it DID show is whole: its measurements and its full path.
+    // Every entry it did show is whole: its measurements and its full path.
     for (index, entry) in entries.iter().enumerate() {
         assert_eq!(
             *entry,
@@ -24367,12 +25950,12 @@ fn a_record_too_small_for_every_refusal_lists_whole_ones_and_counts_the_rest() {
                 limit_bytes + 1 + index,
                 paths[index]
             ),
-            "MUTATION: entry {index} is a fragment rather than a whole refusal"
+            "entry {index} is a fragment rather than a whole refusal"
         );
     }
 }
 
-/// A refused blob is fetched ONCE, however many rows of an op name it.
+/// A refused blob is fetched once, however many rows of an op name it.
 ///
 /// Skipping per blob made the replay a loop, and `replay_share_write` is keyed
 /// by PATH: its request record is per path, and a refused write writes no
@@ -24382,14 +25965,12 @@ fn a_record_too_small_for_every_refusal_lists_whole_ones_and_counts_the_rest() {
 /// gigabytes to reach the same refusal thousands of times — and, because
 /// nothing is recorded, move them again on the next pull.
 ///
-/// The decision is a property of the BYTES and the kind the op claims for
+/// The decision is a property of the bytes and the kind the op claims for
 /// them, not of the path, so it is remembered under that key for the pull.
 ///
-/// MUTATION: drop the `blob_refusals` lookup in `replay_share_write` and the
-/// transport is asked for the same body once per row.
 #[test]
 fn one_refused_blob_is_fetched_once_however_many_rows_name_it() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -24445,7 +26026,7 @@ fn one_refused_blob_is_fetched_once_however_many_rows_name_it() {
             .lock()
             .expect("share blob calls"),
         [over_cap_sha],
-        "MUTATION: the same refused body is downloaded and hashed once per row"
+        "the same refused body is downloaded and hashed once per row"
     );
     // And the record still names each row, so the saving costs no detail.
     let detail = &outcome.refusals[0].detail;
@@ -24465,14 +26046,12 @@ fn one_refused_blob_is_fetched_once_however_many_rows_name_it() {
 /// not pathological: the relay admits a granted path of `MAX_SHARE_PATH_CHARS`
 /// (1,024) and the files under it are longer still, while one refusal's share
 /// of the detail is 200. So the cut is marked, the file name is kept, and the
-/// marker carries how much went — two paths sharing a head AND a tail still
+/// marker carries how much went — two paths sharing a head and a tail still
 /// differ by that count.
 ///
-/// MUTATION: cut the head only (`bounded_units`) and both refusals read as the
-/// same file.
 #[test]
 fn two_refused_paths_that_differ_past_the_budget_are_still_told_apart() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -24533,12 +26112,12 @@ fn two_refused_paths_that_differ_past_the_budget_are_still_told_apart() {
     assert_eq!(entries.len(), 2, "both refusals must be listed: {detail}");
     assert_ne!(
         entries[0], entries[1],
-        "MUTATION: two different missing files are recorded identically"
+        "two different missing files are recorded identically"
     );
     // The file name is what the reader needs to act, so it survives the cut.
     assert!(
         detail.contains("quarterly-report.bin") && detail.contains("annual-report.bin"),
-        "MUTATION: the cut kept the shared folders and dropped the file names: {detail}"
+        "the cut kept the shared folders and dropped the file names: {detail}"
     );
     assert!(
         detail.encode_utf16().count() <= crate::relay::MAX_REFUSAL_DETAIL_UNITS,
@@ -24546,7 +26125,7 @@ fn two_refused_paths_that_differ_past_the_budget_are_still_told_apart() {
     );
 }
 
-/// A path the store door will never accept must be SKIPPED, not held.
+/// A path the store door will never accept must be skipped, not held.
 ///
 /// `classify_share_path` admits these — no segment is `.`, `..`, or empty —
 /// so the boundary passes them to replay, where `write_text` refuses them:
@@ -24555,15 +26134,12 @@ fn two_refused_paths_that_differ_past_the_budget_are_still_told_apart() {
 /// arrive as `DomainError::InvalidPath`, which the generic `domain` mapping
 /// turned into `RelayError::Local("invalid-path")` — no refusal code, so the
 /// pull ABORTED. The cursor never committed and every op behind the bad path
-/// never arrived (#649, #571's failure mode).
+/// never arrived (#649, the failure mode).
 ///
 /// The rules are pure over a path fixed in the served op, so asking again
 /// returns the same refusal forever: permanent, therefore skipped, and the
 /// cursor commits past it.
 ///
-/// MUTATION: restore `.map_err(domain)` in `replay_share_write` and this pull
-/// returns `Local("invalid-path")` instead of an outcome. Drop the
-/// `InvalidPath` arm from `replayed_domain` and the same thing happens.
 #[test]
 fn a_permanently_invalid_share_path_is_skipped_instead_of_freezing_the_share() {
     for (bad_path, reason) in [
@@ -24577,7 +26153,7 @@ fn a_permanently_invalid_share_path_is_skipped_instead_of_freezing_the_share() {
             "path is not eligible for plaintext storage",
         ),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         seed_replication_version(&mut engine, "main", "main");
         assert_eq!(
             classify_share_path(bad_path),
@@ -24615,9 +26191,7 @@ fn a_permanently_invalid_share_path_is_skipped_instead_of_freezing_the_share() {
                 &tracked_grant(["docs"]),
                 &NoFaults,
             )
-            .unwrap_or_else(|error| {
-                panic!("MUTATION: {bad_path} freezes the share forever: {error}")
-            });
+            .unwrap_or_else(|error| panic!("{bad_path} freezes the share forever: {error}"));
         assert_eq!(
             (
                 outcome.fetched,
@@ -24634,7 +26208,7 @@ fn a_permanently_invalid_share_path_is_skipped_instead_of_freezing_the_share() {
                 .expect("share-view path read is answerable")
                 .map(|snapshot| snapshot.text),
             Some("the update behind the unusable path".to_owned()),
-            "MUTATION: the op behind {bad_path} never arrives"
+            "the op behind {bad_path} never arrives"
         );
         // The blob was never requested. The store door's rules are pure over
         // the path, so the refusal needs no bytes to reach — and asked after
@@ -24648,7 +26222,7 @@ fn a_permanently_invalid_share_path_is_skipped_instead_of_freezing_the_share() {
                 .lock()
                 .expect("share blob calls"),
             [later_sha],
-            "MUTATION: move the path check back below `share_blob` and the \
+            "move the path check back below `share_blob` and the \
              refused path fetches its blob first"
         );
         // The refusal NAMES the constraint and the file it cost, because the
@@ -24664,12 +26238,12 @@ fn a_permanently_invalid_share_path_is_skipped_instead_of_freezing_the_share() {
                 "invalid-input",
                 format!("share op is not replayable: {reason} — {bad_path}").as_str()
             )],
-            "MUTATION: the skip is counted but the reason never reaches the recipient"
+            "the skip is counted but the reason never reaches the recipient"
         );
     }
 }
 
-/// The other half of the same answer: a domain failure that is NOT about the
+/// The other half of the same answer: a domain failure that is not about the
 /// path keeps the pull's abort.
 ///
 /// `replayed_domain` reclassifies exactly one class. A store that was busy or
@@ -24677,29 +26251,26 @@ fn a_permanently_invalid_share_path_is_skipped_instead_of_freezing_the_share() {
 /// cursor past it would drop content this recipient can still receive — the
 /// dropped-data failure the skip rule exists to avoid.
 ///
-/// MUTATION: widen `replayed_domain` to skip every `DomainError` and this
-/// pull reports success, committing the cursor past an op a retry would have
-/// applied.
 #[test]
 fn a_domain_failure_that_is_not_the_path_still_stops_the_pull() {
     use dohc_engine_domain::DomainError;
     use dohc_engine_storage::StorageError;
 
-    // TYPED across the replay route, so `store_busy` in the workspace-engine
+    // Typed across the replay route, so `store_busy` in the workspace-engine
     // crate answers it the same way it answers every other route. Under
     // `Local("file-locked")` it reached the wire as INTERNAL / retry "no",
-    // because that recognizer matches storage VARIANTS and a relay error
+    // because that recognizer matches storage variants and a relay error
     // carries none.
     let busy = crate::relay::replayed_domain(DomainError::Storage(StorageError::FileLocked));
     assert_eq!(
         busy,
         RelayError::StoreBusy,
-        "MUTATION: the busy store loses its type on the replay route"
+        "the busy store loses its type on the replay route"
     );
     assert_eq!(
         busy.share_replay_refusal_code(),
         None,
-        "MUTATION: a busy store is skipped as if it were permanent"
+        "a busy store is skipped as if it were permanent"
     );
     assert_eq!(
         crate::relay::replayed_domain(DomainError::Storage(StorageError::StateCorrupt {
@@ -24707,12 +26278,12 @@ fn a_domain_failure_that_is_not_the_path_still_stops_the_pull() {
         }))
         .share_replay_refusal_code(),
         None,
-        "MUTATION: a corrupt read commits the cursor past content still coming"
+        "a corrupt read commits the cursor past content still coming"
     );
 }
 
-// #646 PR2 — the recipient's half of "chat follows the share". The relay
-// decides what to serve; this boundary decides what to PLACE, against the
+// The recipient's half of "chat follows the share". The relay
+// decides what to serve; this boundary decides what to place, against the
 // selector the recipient pinned. Every case drives the real
 // `apply_shared_envelope`, because a test that faked the resolving would
 // prove nothing about the boundary.
@@ -24720,7 +26291,7 @@ fn a_domain_failure_that_is_not_the_path_still_stops_the_pull() {
 // The world each case builds: `shared/docs/in.md` is inside the grant and
 // `private/out.md` is not, both as real file objects with real path aliases.
 fn share_view_chat_fixture() -> (ScratchDir, std::path::PathBuf, EngineStore, ShareBoundary) {
-    let (scratch, path, mut engine) = store();
+    let (scratch, path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -24797,7 +26368,7 @@ fn share_view_applies_chat_about_an_in_grant_file_and_binds_it_locally() {
     assert_eq!(
         thread_row_path(&engine, "thread-in").as_deref(),
         Some("shared/docs/in.md"),
-        "MUTATION: the served path must bind to THIS store's object for that path",
+        "the served path must bind to THIS store's object for that path",
     );
 
     let message = thread_message(1, "thread-in", "m-1");
@@ -24834,7 +26405,7 @@ fn share_view_refuses_a_thread_create_carrying_a_shape_a_share_never_carries() {
                 apply_shared_envelope(&mut engine, &boundary, &create, &NoFaults),
                 Err(SyncError::InvalidInput { .. })
             ),
-            "MUTATION: {extra} must be refused outright",
+            "{extra} must be refused outright",
         );
         assert_eq!(thread_row_path(&engine, "thread-in"), None);
     }
@@ -24858,7 +26429,7 @@ fn share_view_refuses_a_thread_about_a_file_outside_the_grant() {
         apply_shared_envelope(&mut engine, &boundary, &secret, &NoFaults),
         Err(SyncError::ShareBoundaryViolation)
     ));
-    // A create naming a path INSIDE the grant that this store does not track
+    // A create naming a path inside the grant that this store does not track
     // is refused at apply, not at the boundary: the grant covers it, and the
     // file simply has not arrived. It lands in the refusal lane rather than as
     // an error, which is what makes the skip visible instead of silent.
@@ -24870,7 +26441,11 @@ fn share_view_refuses_a_thread_about_a_file_outside_the_grant() {
     let outcome = apply_shared_envelope(&mut engine, &boundary, &absent, &NoFaults)
         .expect("a missing file is a refusal, not a failed pull");
     let refusal = match outcome {
-        ApplyOutcome::Refused(refusal) => refusal,
+        ApplyOutcome {
+            primary: ApplyDisposition::Refused(refusal),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() => refusal,
         other => panic!("expected a recorded refusal, got {other:?}"),
     };
     assert_eq!(refusal.op_kind, "chat.thread.create");
@@ -24879,7 +26454,7 @@ fn share_view_refuses_a_thread_about_a_file_outside_the_grant() {
             .reason
             .message()
             .contains("names no file in this workspace"),
-        "MUTATION: the refusal must say WHICH constraint the op hit, got {:?}",
+        "the refusal must say which constraint the op hit, got {:?}",
         refusal.reason,
     );
     assert_eq!(thread_row_path(&engine, "thread-absent"), None);
@@ -24946,7 +26521,7 @@ fn share_view_refuses_a_thread_scoped_op_whose_thread_is_unknown_or_out_of_grant
                 ),
                 Err(SyncError::ShareBoundaryViolation)
             ),
-            "MUTATION: {kind} on an out-of-grant thread must be refused",
+            "{kind} on an out-of-grant thread must be refused",
         );
     }
 }
@@ -24954,7 +26529,7 @@ fn share_view_refuses_a_thread_scoped_op_whose_thread_is_unknown_or_out_of_grant
 #[test]
 fn share_view_never_carries_the_readers_own_state_or_any_other_chat_kind() {
     // The allowlist is exactly five kinds. `chat.follow.set` and
-    // `chat.feed.read.set` are the reader's OWN state and fall through to the
+    // `chat.feed.read.set` are the reader's own state and fall through to the
     // file boundary's terminal deny, the same way they do for a channel share.
     let (_scratch, _path, mut engine, boundary) = share_view_chat_fixture();
     for (kind, payload) in [
@@ -24981,7 +26556,7 @@ fn share_view_never_carries_the_readers_own_state_or_any_other_chat_kind() {
                 ),
                 Err(SyncError::ShareBoundaryViolation)
             ),
-            "MUTATION: {kind} must never cross a file share",
+            "{kind} must never cross a file share",
         );
     }
 }
@@ -25014,7 +26589,7 @@ fn share_view_refuses_a_thread_create_that_names_no_file_at_all() {
             apply_shared_envelope(&mut engine, &boundary, &create, &NoFaults),
             Err(SyncError::InvalidInput { .. })
         ),
-        "MUTATION: a create with no linkedPath must be refused, never defaulted",
+        "a create with no linkedPath must be refused, never defaulted",
     );
     assert_eq!(thread_row_path(&engine, "thread-bare"), None);
 }
@@ -25022,10 +26597,10 @@ fn share_view_refuses_a_thread_create_that_names_no_file_at_all() {
 #[test]
 fn a_chat_thread_create_naming_its_file_twice_is_refused_on_the_owner_lane() {
     // The share boundary refuses this shape before apply ever sees it, so this
-    // covers the OTHER door: the granter's own lane, where a recipient's
+    // covers the other door: the granter's own lane, where a recipient's
     // pushed op arrives through the owner bucket. Reading either half of a
     // doubly-named link would let one op bind one thread to two files.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -25058,12 +26633,12 @@ fn a_chat_thread_create_naming_its_file_twice_is_refused_on_the_owner_lane() {
 }
 
 /// Addendum B: the granter's own lane applying a RECIPIENT's create. The op
-/// arrives naming the file by path, and the granter binds it to ITS object for
+/// arrives naming the file by path, and the granter binds it to its object for
 /// that path — the mirror image of what the recipient does with the granter's
 /// threads, through the one apply rule both sides share.
 #[test]
 fn a_recipient_thread_create_binds_to_the_granters_own_object_on_the_owner_lane() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -25099,7 +26674,7 @@ fn a_recipient_thread_create_binds_to_the_granters_own_object_on_the_owner_lane(
             "granter-object".to_owned(),
             Some("shared/docs/in.md".to_owned())
         )),
-        "MUTATION: the granter must resolve the path to ITS OWN object, never store the path as an id",
+        "the granter must resolve the path to its own object, never store the path as an id",
     );
 }
 
@@ -25108,7 +26683,7 @@ fn a_recipient_thread_create_binds_to_the_granters_own_object_on_the_owner_lane(
 /// channel.
 #[test]
 fn a_recipient_thread_create_for_an_untracked_path_is_refused_on_the_owner_lane() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -25150,20 +26725,20 @@ fn share_view_carries_no_chat_through_a_version_share() {
             apply_shared_envelope(&mut engine, &version_only, &create, &NoFaults),
             Err(SyncError::ShareBoundaryViolation)
         ),
-        "MUTATION: a version share must carry no conversation about any file",
+        "a version share must carry no conversation about any file",
     );
     assert_eq!(thread_row_path(&engine, "thread-in"), None);
 }
 
 // ---------------------------------------------------------------------------
-// #646 PR3a — the recipient submits its own changes as a proposal.
+// The recipient submits its own changes as a proposal.
 // ---------------------------------------------------------------------------
 
 /// A share-view store with an identity, a main version, and the blobs a
 /// proposed change names. `seed_identity` journals the origin's op 0, so the
 /// first moment below lands at origin_seq 1.
 fn proposal_fixture(texts: &[&str]) -> (ScratchDir, std::path::PathBuf, EngineStore) {
-    let (scratch, path, mut engine) = store();
+    let (scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -25264,7 +26839,7 @@ fn proposal_scan_position(engine: &EngineStore, share_id: &str) -> Option<i64> {
         .expect("scan position")
 }
 
-/// The pinned level decides what this replica OFFERS, not just what the relay
+/// The pinned level decides what this replica offers, not just what the relay
 /// accepts. A view or comment share must not reach the relay at all.
 #[test]
 fn share_proposal_submit_offers_nothing_below_edit_level() {
@@ -25293,12 +26868,12 @@ fn share_proposal_submit_offers_nothing_below_edit_level() {
             .expect("submit");
         assert_eq!(
             outcome.submitted, expected,
-            "MUTATION: the pinned level must decide whether this replica offers a change ({access:?})",
+            "the pinned level must decide whether this replica offers a change ({access:?})",
         );
         assert_eq!(
             outcome.proposal_id.is_some(),
             expected > 0,
-            "MUTATION: a submit that offered nothing must name no proposal ({access:?})",
+            "a submit that offered nothing must name no proposal ({access:?})",
         );
         if expected == 0 {
             assert!(
@@ -25308,7 +26883,7 @@ fn share_proposal_submit_offers_nothing_below_edit_level() {
                     .lock()
                     .expect("calls")
                     .is_empty(),
-                "MUTATION: a share below edit level must not contact the relay at all ({access:?})",
+                "a share below edit level must not contact the relay at all ({access:?})",
             );
         }
     }
@@ -25369,7 +26944,7 @@ fn share_proposal_submit_keeps_changes_inside_the_grant() {
         .expect("submit");
     assert_eq!(
         outcome.submitted, 1,
-        "MUTATION: a change to a file outside the grant must not be offered",
+        "a change to a file outside the grant must not be offered",
     );
     let submits = client.transport().proposal_submits.lock().expect("submits");
     let ops = &submits.first().expect("one submit").ops;
@@ -25378,7 +26953,7 @@ fn share_proposal_submit_keeps_changes_inside_the_grant() {
             .filter_map(|op| op.after_path.as_deref())
             .collect::<Vec<_>>(),
         vec!["shared/docs/in.md"],
-        "MUTATION: only the in-grant file may be named on the wire",
+        "only the in-grant file may be named on the wire",
     );
     assert!(
         client
@@ -25388,11 +26963,11 @@ fn share_proposal_submit_keeps_changes_inside_the_grant() {
             .expect("calls")
             .iter()
             .all(|call| call != &format!("blob:{}", dohc_engine_storage::hex_sha256(b"outside"))),
-        "MUTATION: an out-of-grant file's content must never be uploaded to the granter",
+        "an out-of-grant file's content must never be uploaded to the granter",
     );
 }
 
-/// A run of local writes to ONE file is ONE change: the base the recipient
+/// A run of local writes to one file is one change: the base the recipient
 /// started from, and the content it ended with.
 #[test]
 fn share_proposal_submit_consolidates_repeated_edits_to_one_change() {
@@ -25435,7 +27010,7 @@ fn share_proposal_submit_consolidates_repeated_edits_to_one_change() {
         .expect("submit");
     assert_eq!(
         outcome.submitted, 1,
-        "MUTATION: two writes to one file are one net change, not two",
+        "two writes to one file are one net change, not two",
     );
     let submits = client.transport().proposal_submits.lock().expect("submits");
     let change = submits
@@ -25448,12 +27023,12 @@ fn share_proposal_submit_consolidates_repeated_edits_to_one_change() {
     assert_eq!(
         change.based_on_blob_sha256,
         Some(dohc_engine_storage::hex_sha256(b"v0")),
-        "MUTATION: the base is what the recipient started from, not the last local before-side",
+        "the base is what the recipient started from, not the last local before-side",
     );
     assert_eq!(
         change.after_blob_sha256,
         Some(dohc_engine_storage::hex_sha256(b"v2")),
-        "MUTATION: the destination is the LAST write's content, not the first",
+        "the destination is the LAST write's content, not the first",
     );
     assert_eq!(change.after_byte_length, Some(2));
     assert_eq!(change.operation, "write");
@@ -25513,16 +27088,16 @@ fn share_proposal_submit_carries_a_rename_and_an_edit_as_one_change() {
     assert_eq!(
         change.based_on_path.as_deref(),
         Some("shared/docs/a.md"),
-        "MUTATION: the base path must be the ORIGINAL path, which is the one the granter has",
+        "the base path must be the original path, which is the one the granter has",
     );
     assert_eq!(
         change.after_path.as_deref(),
         Some("shared/docs/b.md"),
-        "MUTATION: the destination must be the new path",
+        "the destination must be the new path",
     );
     assert_eq!(
         change.operation, "write",
-        "MUTATION: a proposal states where the file must end up; the relay derives the moment's own label",
+        "a proposal states where the file must end up; the relay derives the moment's own label",
     );
 }
 
@@ -25567,10 +27142,10 @@ fn share_proposal_submit_bounds_the_scan_at_the_submit_moment() {
     assert_eq!(
         proposal_scan_position(&engine, "share-bound"),
         Some(2),
-        "MUTATION: the recorded position is the journal's high-water mark, not the last op offered",
+        "the recorded position is the journal's high-water mark, not the last op offered",
     );
 
-    // Journaled AFTER the first submit read its mark, so it belongs to the
+    // Journaled after the first submit read its mark, so it belongs to the
     // next one — and to that one only.
     journal_local_moment(
         &mut engine,
@@ -25596,7 +27171,7 @@ fn share_proposal_submit_bounds_the_scan_at_the_submit_moment() {
         .expect("second submit");
     assert_eq!(
         second.submitted, 1,
-        "MUTATION: a submit must carry only what was journaled after the last one",
+        "a submit must carry only what was journaled after the last one",
     );
     let submits = client.transport().proposal_submits.lock().expect("submits");
     assert_eq!(
@@ -25608,7 +27183,7 @@ fn share_proposal_submit_bounds_the_scan_at_the_submit_moment() {
             .filter_map(|op| op.after_path.as_deref())
             .collect::<Vec<_>>(),
         vec!["shared/docs/c.md"],
-        "MUTATION: the second submit must not re-offer the first submit's change",
+        "the second submit must not re-offer the first submit's change",
     );
     assert_eq!(proposal_scan_position(&engine, "share-bound"), Some(3));
 }
@@ -25661,7 +27236,7 @@ fn share_proposal_submit_uploads_blobs_before_the_ops() {
             format!("blob:{}", dohc_engine_storage::hex_sha256(b"beta")),
             "submit".to_owned(),
         ],
-        "MUTATION: every referenced blob must reach the relay BEFORE the submit that names it",
+        "every referenced blob must reach the relay before the submit that names it",
     );
     let uploads = client.transport().blob_uploads.lock().expect("uploads");
     assert_eq!(
@@ -25670,7 +27245,7 @@ fn share_proposal_submit_uploads_blobs_before_the_ops() {
             .map(|upload| upload.bytes.clone())
             .collect::<Vec<_>>(),
         vec![b"alpha".to_vec(), b"beta".to_vec()],
-        "MUTATION: the upload must carry the file's own bytes",
+        "the upload must carry the file's own bytes",
     );
 }
 
@@ -25678,7 +27253,7 @@ fn share_proposal_submit_uploads_blobs_before_the_ops() {
 /// a fall-through.
 ///
 /// Containment happens to refuse every other op this engine journals today,
-/// because none of them names a tracked path AND an after blob. That is a
+/// because none of them names a tracked path and an after blob. That is a
 /// coincidence of the current op set, not a rule: an op naming both would be
 /// read as a file change on the strength of its fields alone. The kind is
 /// what decides, so the kind is what this asserts.
@@ -25712,7 +27287,7 @@ fn share_proposal_submit_proposes_only_file_moments() {
         .expect("submit");
     assert_eq!(
         outcome.submitted, 0,
-        "MUTATION: only a moment.append is a file change this share may propose",
+        "only a moment.append is a file change this share may propose",
     );
     assert!(
         client
@@ -25721,11 +27296,11 @@ fn share_proposal_submit_proposes_only_file_moments() {
             .lock()
             .expect("calls")
             .is_empty(),
-        "MUTATION: an op that is not a file moment must reach the relay by no route",
+        "an op that is not a file moment must reach the relay by no route",
     );
 }
 
-/// A base names a file AND what the recipient read from it. One half without
+/// A base names a file and what the recipient read from it. One half without
 /// the other cannot be resolved to a granter moment, so neither half travels.
 #[test]
 fn share_proposal_submit_drops_a_half_stated_base() {
@@ -25759,7 +27334,7 @@ fn share_proposal_submit_drops_a_half_stated_base() {
     assert_eq!(
         (change.based_on_path, change.based_on_blob_sha256),
         (None, None),
-        "MUTATION: a base stated by half must be sent as no base at all",
+        "a base stated by half must be sent as no base at all",
     );
 }
 
@@ -25780,7 +27355,7 @@ fn share_proposal_submit_offers_no_delete_of_a_file_the_granter_never_had() {
         &local_moment_payload("m-2", "object-a", "delete", None, "shared/docs/a.md", "v1"),
         1_002,
     );
-    // A second file the granter DOES have, so the submit is not empty for an
+    // A second file the granter does have, so the submit is not empty for an
     // unrelated reason.
     journal_local_moment(
         &mut engine,
@@ -25808,7 +27383,7 @@ fn share_proposal_submit_offers_no_delete_of_a_file_the_granter_never_had() {
         .expect("submit");
     assert_eq!(
         outcome.submitted, 1,
-        "MUTATION: a delete with no stated base names nothing to remove",
+        "a delete with no stated base names nothing to remove",
     );
     let submits = client.transport().proposal_submits.lock().expect("submits");
     let change = submits
@@ -25828,7 +27403,7 @@ fn share_proposal_submit_offers_no_delete_of_a_file_the_granter_never_had() {
             change.after_byte_length
         ),
         (None, None, None, None),
-        "MUTATION: a delete lands nowhere, so it states no after side",
+        "a delete lands nowhere, so it states no after side",
     );
 }
 
@@ -25873,15 +27448,15 @@ fn share_proposal_submit_sends_a_bounded_batch_and_then_the_rest() {
             "submit-1",
             &NoFaults,
         )
-        .expect("MUTATION: an over-limit recipient must still be able to send");
+        .expect("an over-limit recipient must still be able to send");
     assert_eq!(
         first.submitted,
         crate::MAX_SHARE_PROPOSAL_OPS,
-        "MUTATION: one submit carries at most the batch the relay accepts",
+        "one submit carries at most the batch the relay accepts",
     );
     assert!(
         first.more_pending,
-        "MUTATION: a submit that left changes behind must say so, or the recipient \
+        "a submit that left changes behind must say so, or the recipient \
          has no reason to press again",
     );
 
@@ -25898,11 +27473,11 @@ fn share_proposal_submit_sends_a_bounded_batch_and_then_the_rest() {
     assert_eq!(
         second.submitted,
         over_limit - crate::MAX_SHARE_PROPOSAL_OPS,
-        "MUTATION: the changes the bound held back must travel in the NEXT submit",
+        "the changes the bound held back must travel in the next submit",
     );
     assert!(
         !second.more_pending,
-        "MUTATION: a submit that emptied the window must not ask for another",
+        "a submit that emptied the window must not ask for another",
     );
 
     let submits = client.transport().proposal_submits.lock().expect("submits");
@@ -25915,7 +27490,7 @@ fn share_proposal_submit_sends_a_bounded_batch_and_then_the_rest() {
     assert_eq!(
         (offered.len(), distinct.len()),
         (over_limit, over_limit),
-        "MUTATION: across the two submits every file must reach the granter exactly once",
+        "across the two submits every file must reach the granter exactly once",
     );
 }
 
@@ -25940,7 +27515,7 @@ fn the_submit_bound_matches_the_relay_contract() {
     assert_eq!(
         declared,
         crate::MAX_SHARE_PROPOSAL_OPS,
-        "MUTATION: a scan bound above the relay's own bound makes every large submit fail",
+        "a scan bound above the relay's own bound makes every large submit fail",
     );
 }
 
@@ -25955,7 +27530,7 @@ fn the_submit_bound_matches_the_relay_contract() {
 /// the constants, not about any run.
 const _: () = assert!(
     crate::MAX_SHARE_PROPOSAL_OPS > crate::MAX_PUSH_OPS_PER_BATCH,
-    "MUTATION: a submit bounded by the page size rejects a week of ordinary work",
+    "a submit bounded by the page size rejects a week of ordinary work",
 );
 
 #[test]
@@ -25974,7 +27549,7 @@ fn share_proposal_submit_never_splits_one_file_across_two_submits() {
     for index in 0..crate::MAX_SHARE_PROPOSAL_OPS {
         journal_numbered_write(&mut engine, index, 1_001 + index as i64);
     }
-    // A LATER edit to a file already held. It must fold into this submit.
+    // A later edit to a file already held. It must fold into this submit.
     seed_blob(&mut engine, "0-final");
     journal_local_moment(
         &mut engine,
@@ -25988,7 +27563,7 @@ fn share_proposal_submit_never_splits_one_file_across_two_submits() {
         ),
         9_001,
     );
-    // The NEW file that stops the scan.
+    // The new file that stops the scan.
     journal_numbered_write(&mut engine, crate::MAX_SHARE_PROPOSAL_OPS, 9_002);
 
     let client = RelaySyncClient::new(PagedShareRelay::new([], []));
@@ -26025,12 +27600,12 @@ fn share_proposal_submit_never_splits_one_file_across_two_submits() {
     assert_eq!(
         for_file_zero.len(),
         1,
-        "MUTATION: a file the scan already holds must not be offered once per submit",
+        "a file the scan already holds must not be offered once per submit",
     );
     assert_eq!(
         for_file_zero[0].after_blob_sha256.as_deref(),
         Some(dohc_engine_storage::hex_sha256(b"0-final").as_str()),
-        "MUTATION: the offered change must be the file's LAST state, not the state \
+        "the offered change must be the file's LAST state, not the state \
          it had when the bound filled up",
     );
     assert_eq!(
@@ -26042,14 +27617,14 @@ fn share_proposal_submit_never_splits_one_file_across_two_submits() {
             .filter_map(|op| op.after_path.as_deref())
             .collect::<Vec<_>>(),
         vec![format!("shared/docs/{}.md", crate::MAX_SHARE_PROPOSAL_OPS)],
-        "MUTATION: the second submit carries the file the bound refused, and only it",
+        "the second submit carries the file the bound refused, and only it",
     );
     assert_eq!(second.submitted, 1);
 }
 
-/// A file the recipient edited OUT of the shared paths is not this share's to
+/// A file the recipient edited out of the shared paths is not this share's to
 /// offer at all — not even the state it held before it left. It is dropped
-/// whole and COUNTED, because a silent drop leaves the recipient believing it
+/// whole and counted, because a silent drop leaves the recipient believing it
 /// sent work it never sent.
 #[test]
 fn share_proposal_submit_counts_a_file_edited_out_of_the_share() {
@@ -26092,7 +27667,7 @@ fn share_proposal_submit_counts_a_file_edited_out_of_the_share() {
         .expect("submit");
     assert_eq!(
         outcome.skipped_outside_share, 1,
-        "MUTATION: a file dropped for leaving the share must be counted to the recipient",
+        "a file dropped for leaving the share must be counted to the recipient",
     );
     assert_eq!(outcome.submitted, 1);
     let submits = client.transport().proposal_submits.lock().expect("submits");
@@ -26102,13 +27677,13 @@ fn share_proposal_submit_counts_a_file_edited_out_of_the_share() {
             .filter_map(|op| op.after_path.as_deref())
             .collect::<Vec<_>>(),
         vec!["shared/docs/b.md"],
-        "MUTATION: the pre-move state of a file that left the share must not be offered",
+        "the pre-move state of a file that left the share must not be offered",
     );
     let calls = client.transport().proposal_calls.lock().expect("calls");
     for text in [&b"v1"[..], &b"v2"[..]] {
         assert!(
             !calls.contains(&format!("blob:{}", dohc_engine_storage::hex_sha256(text))),
-            "MUTATION: the content of a file outside the share must reach the granter by no route",
+            "the content of a file outside the share must reach the granter by no route",
         );
     }
 }
@@ -26124,7 +27699,7 @@ fn share_proposal_submit_counts_a_file_edited_out_of_the_share() {
 #[test]
 fn share_proposal_submit_counts_files_outside_the_shared_paths_when_it_offers_nothing() {
     let (_scratch, _path, mut engine) = proposal_fixture(&["one", "two"]);
-    // NEITHER file was ever inside the shared paths. Both are counted anyway.
+    // Neither file was ever inside the shared paths. Both are counted anyway.
     for (index, (moment_id, object_id, path, text)) in [
         ("m-1", "object-a", "other/a.md", "one"),
         ("m-2", "object-b", "elsewhere/b.md", "two"),
@@ -26153,7 +27728,7 @@ fn share_proposal_submit_counts_files_outside_the_shared_paths_when_it_offers_no
     assert_eq!(
         (outcome.submitted, outcome.skipped_outside_share),
         (0, 2),
-        "MUTATION: a submit that offered nothing must still count the files that \
+        "a submit that offered nothing must still count the files that \
          sit outside the shared paths, whether or not they ever sat inside them",
     );
     assert!(
@@ -26181,7 +27756,7 @@ fn journal_numbered_outside_write(engine: &mut EngineStore, index: usize, at_ms:
 }
 
 /// The count crosses a contract that caps it at the batch bound, and the cap
-/// is parsed AFTER the submit succeeded and the scan position moved on. An
+/// is parsed after the submit succeeded and the scan position moved on. An
 /// honest larger number would therefore report a working submit as a failure
 /// whose retry offers nothing, because the window is already consumed.
 #[test]
@@ -26215,20 +27790,17 @@ fn share_proposal_submit_saturates_the_skipped_count_at_the_bound() {
             "submit-1",
             &NoFaults,
         )
-        .expect("MUTATION: dropping more files than the bound must not fail the submit");
+        .expect("dropping more files than the bound must not fail the submit");
     assert_eq!(
         outcome.skipped_outside_share,
         crate::MAX_SHARE_PROPOSAL_OPS,
-        "MUTATION: the reported count must saturate at the bound the contract accepts",
+        "the reported count must saturate at the bound the contract accepts",
     );
-    assert_eq!(
-        outcome.submitted, 1,
-        "MUTATION: the in-grant file must still travel",
-    );
+    assert_eq!(outcome.submitted, 1, "the in-grant file must still travel",);
 }
 
 /// The bound stops the scan at the op that would admit one file too many, so a
-/// scan holding EXACTLY the bound stopped at nothing and has nothing left to
+/// scan holding exactly the bound stopped at nothing and has nothing left to
 /// offer. Saying otherwise sends the recipient back for a submit that carries
 /// no change.
 #[test]
@@ -26252,11 +27824,11 @@ fn share_proposal_submit_at_exactly_the_bound_asks_for_no_second_press() {
     assert_eq!(
         outcome.submitted,
         crate::MAX_SHARE_PROPOSAL_OPS,
-        "MUTATION: a scan that fits exactly must carry every file it holds",
+        "a scan that fits exactly must carry every file it holds",
     );
     assert!(
         !outcome.more_pending,
-        "MUTATION: a scan that ended AT the bound left nothing behind and must not \
+        "a scan that ended AT the bound left nothing behind and must not \
          ask for another press",
     );
 }
@@ -26270,7 +27842,7 @@ fn share_proposal_submit_at_exactly_the_bound_asks_for_no_second_press() {
 ///
 /// It does not: `replay_share_write` writes through
 /// `VersionedTextStore::write_text` in `dohc-engine-domain`, and that door
-/// touches `replication_journal` only. The `replication_log` row the scan
+/// appends no `replication_log` row. The `replication_log` row the scan
 /// reads is appended by `journal_moment_outbound_in_tx`
 /// (`dohc-engine-runtime/src/actor.rs`), which sits on the LOCAL write path
 /// alone. This test is the standing proof of that gap.
@@ -26342,7 +27914,7 @@ fn share_proposal_submit_never_offers_a_pulled_granter_change_back() {
         .expect("submit");
     assert_eq!(
         outcome.submitted, 1,
-        "MUTATION: a pulled granter change must not join this replica's own offer",
+        "a pulled granter change must not join this replica's own offer",
     );
     let submits = client.transport().proposal_submits.lock().expect("submits");
     assert_eq!(
@@ -26352,7 +27924,7 @@ fn share_proposal_submit_never_offers_a_pulled_granter_change_back() {
             .filter_map(|op| op.after_path.as_deref())
             .collect::<Vec<_>>(),
         vec!["shared/docs/mine.md"],
-        "MUTATION: the granter's own path must never be named back to the granter",
+        "the granter's own path must never be named back to the granter",
     );
     assert!(
         !client
@@ -26361,14 +27933,14 @@ fn share_proposal_submit_never_offers_a_pulled_granter_change_back() {
             .lock()
             .expect("calls")
             .contains(&format!("blob:{granter_sha}")),
-        "MUTATION: the granter's own content must not be uploaded back to the granter",
+        "the granter's own content must not be uploaded back to the granter",
     );
 }
 
 /// The granter's two moments for one file: `granter-m0` produced `v0`, and
 /// `granter-m1` produced `v1` and is the head.
 fn granter_fixture() -> (ScratchDir, std::path::PathBuf, EngineStore) {
-    let (scratch, path, mut engine) = store();
+    let (scratch, path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -26426,7 +27998,7 @@ fn seed_granter_lineage(engine: &mut EngineStore) {
 }
 
 /// The moment the relay builds at accept, with the base rewritten to the
-/// granter's OWN moment (decision 5).
+/// granter's own moment (decision 5).
 fn accepted_change_payload(
     base_moment_id: &str,
     base_text: &str,
@@ -26471,7 +28043,11 @@ fn apply_accepted_change(
     match apply_moment_envelope_detailed(engine, &operation, &NoFaults, &NoLiveLeases)
         .expect("accepted change applies")
     {
-        ApplyOutcome::Applied(result) => result,
+        ApplyOutcome {
+            primary: ApplyDisposition::Applied(result),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() => result,
         other => panic!("accepted change must apply: {other:?}"),
     }
 }
@@ -26488,7 +28064,7 @@ fn an_accepted_change_on_the_granters_head_applies_without_a_conflict() {
     );
     assert_eq!(
         result.conflicts_opened, 0,
-        "MUTATION: a change based on the granter's own head must not open a conflict",
+        "a change based on the granter's own head must not open a conflict",
     );
     let head: (String, String) = engine
         .read_with(|conn| {
@@ -26507,12 +28083,12 @@ fn an_accepted_change_on_the_granters_head_applies_without_a_conflict() {
             "relay-minted-moment".to_owned(),
             dohc_engine_storage::hex_sha256(b"v2")
         ),
-        "MUTATION: a clean accept must move the granter's head to the accepted content",
+        "a clean accept must move the granter's head to the accepted content",
     );
 }
 
 /// The file drifted after the recipient read it, so the rewritten base is a
-/// real, OLDER granter moment. One conflict, with a correct three-way base —
+/// real, older granter moment. One conflict, with a correct three-way base —
 /// never a silent overwrite.
 #[test]
 fn an_accepted_change_on_a_stale_base_opens_one_conflict_against_that_base() {
@@ -26524,7 +28100,7 @@ fn an_accepted_change_on_a_stale_base_opens_one_conflict_against_that_base() {
     );
     assert_eq!(
         result.conflicts_opened, 1,
-        "MUTATION: a drifted file must open exactly one conflict, never overwrite",
+        "a drifted file must open exactly one conflict, never overwrite",
     );
     let base: (String, String, String) = engine
         .read_with(|conn| {
@@ -26544,7 +28120,7 @@ fn an_accepted_change_on_a_stale_base_opens_one_conflict_against_that_base() {
             dohc_engine_storage::hex_sha256(b"v0"),
             dohc_engine_storage::hex_sha256(b"v1")
         ),
-        "MUTATION: the conflict's base must be the OLDER granter moment the recipient read, \
+        "the conflict's base must be the OLDER granter moment the recipient read, \
          with the granter's current content on the other side",
     );
     let head: String = engine
@@ -26561,16 +28137,16 @@ fn an_accepted_change_on_a_stale_base_opens_one_conflict_against_that_base() {
     assert_eq!(
         head,
         dohc_engine_storage::hex_sha256(b"v1"),
-        "MUTATION: a conflicted accept must leave the granter's content untouched",
+        "a conflicted accept must leave the granter's content untouched",
     );
 }
 
 /// The allowlist and the match arms that act on it must name the same kinds.
 ///
 /// The previous version of this test asserted the outcome was not
-/// `UnsupportedOperation`, which BOTH the chat branch and the terminal deny
+/// `UnsupportedOperation`, which both the chat branch and the terminal deny
 /// satisfy — it could not fail for the mutation it was labelled with. This one
-/// makes the dispatch observable: an in-grant op of each kind must APPLY, and
+/// makes the dispatch observable: an in-grant op of each kind must apply, and
 /// the terminal deny can never produce that.
 #[test]
 fn share_view_chat_kinds_and_the_boundary_match_agree() {
@@ -26629,7 +28205,7 @@ fn share_view_chat_kinds_and_the_boundary_match_agree() {
     let mut seq = 2_i64;
     for kind in SHARE_VIEW_CHAT_KINDS {
         // The first two already applied above; the rest apply here. Every kind
-        // on the list must reach the chat branch and be APPLIED by it.
+        // on the list must reach the chat branch and be applied by it.
         if kind == "chat.thread.create" || kind == "chat.message.append" {
             continue;
         }
@@ -26641,20 +28217,27 @@ fn share_view_chat_kinds_and_the_boundary_match_agree() {
         )
         .unwrap_or_else(|error| panic!("{kind} was refused: {error:?}"));
         assert!(
-            matches!(outcome, ApplyOutcome::Applied(_)),
-            "MUTATION: {kind} is on SHARE_VIEW_CHAT_KINDS but the match does not apply it",
+            matches!(
+                outcome,
+                ApplyOutcome {
+                    primary: ApplyDisposition::Applied(_),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+            ),
+            "{kind} is on SHARE_VIEW_CHAT_KINDS but the match does not apply it",
         );
         seq += 1;
     }
 }
 
-/// The other half of the accept-door conversion (#646 PR2, review): a
+/// The other half of the accept-door conversion: a
 /// recipient's create reaches the GRANTER naming the granter's own object,
 /// because the relay converted it. It takes the ordinary object lane — the
 /// same one the granter's own creates take — with no share context needed.
 #[test]
 fn a_recipient_thread_create_arrives_object_bound_on_the_owner_lane() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -26687,7 +28270,7 @@ fn a_recipient_thread_create_arrives_object_bound_on_the_owner_lane() {
     assert_eq!(bound.as_deref(), Some("granter-object"));
 }
 
-/// The same composability question on the recipient's side, at BOTH of its
+/// The same composability question on the recipient's side, at both of its
 /// denial sites. `paths` and `versionId` are independent dimensions, so the
 /// paths-only rule must key on "names no paths" — never on "names a version".
 #[test]
@@ -26721,12 +28304,12 @@ fn share_view_chat_composes_paths_with_a_version() {
         let applied = apply_shared_envelope(&mut engine, &boundary, &create, &NoFaults).is_ok();
         assert_eq!(
             applied, expect_chat,
-            "MUTATION: the inbound boundary read the wrong dimension ({label})",
+            "the inbound boundary read the wrong dimension ({label})",
         );
     }
 }
 
-// #646 PR3-1 — a share view's own sync identity, and the narrow lane term
+// A share view's own sync identity, and the narrow lane term
 // that lets its file writes journal.
 //
 // A share view replicates through a SHARE, so it holds `share_view_cursors`
@@ -26804,28 +28387,28 @@ fn lane_answers(engine: &mut EngineStore) -> (bool, bool) {
 /// Comment at the storage boundary; the runtime level test pins each answer.
 ///
 /// This is also the safety test for that conjunct.
-/// `journal_local_payload_json_in_tx` REFUSES without an identity, and the
+/// `journal_local_payload_json_in_tx` Refuses without an identity, and the
 /// refusal rolls the user's edit back with it — so a predicate that answered
 /// true here would not journal a moment, it would destroy the write.
 #[test]
 fn a_read_only_share_view_enrols_nothing_and_its_writes_stay_local() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_share_view_cursor(&mut engine, "share-view-only");
     assert_eq!(
         recorded_origin(&engine),
         None,
-        "MUTATION: a read-only share must never be given an identity",
+        "a read-only share must never be given an identity",
     );
     assert_eq!(
         lane_answers(&mut engine),
         (false, false),
-        "MUTATION: a share cursor without an identity must journal nothing",
+        "a share cursor without an identity must journal nothing",
     );
 }
 
 #[test]
 fn enrolling_twice_keeps_the_first_identity() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_share_view_cursor(&mut engine, "share-comment");
     assert_eq!(
         record(&mut engine, "origin-first"),
@@ -26834,12 +28417,12 @@ fn enrolling_twice_keeps_the_first_identity() {
     assert_eq!(
         record(&mut engine, "origin-second"),
         ShareViewIdentityOutcome::AlreadyRecorded,
-        "MUTATION: a refresh must not re-mint an origin",
+        "a refresh must not re-mint an origin",
     );
     assert_eq!(
         recorded_origin(&engine).as_deref(),
         Some("origin-first"),
-        "MUTATION: a second origin would split this replica's log in two",
+        "a second origin would split this replica's log in two",
     );
 }
 
@@ -26855,8 +28438,8 @@ fn enrolling_twice_keeps_the_first_identity() {
 /// drains a `ydoc.update` from one, so widening it would leave rows in the
 /// recipient's database forever.
 ///
-/// The shared-channel rows are the term this PR deliberately did NOT add: a
-/// channel is joined by an ORDINARY workspace, so counting it would make
+/// The shared-channel rows are the term this PR deliberately did not add: a
+/// channel is joined by an ordinary workspace, so counting it would make
 /// every local file moment journal in a workspace whose owner never enabled
 /// cloud sync.
 #[test]
@@ -26899,7 +28482,7 @@ fn only_the_file_moment_journal_reads_the_share_lane() {
             (false, false),
         ),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         if recorded {
             assert_eq!(
                 record(&mut engine, "origin-lane"),
@@ -26946,7 +28529,7 @@ fn only_the_file_moment_journal_reads_the_share_lane() {
         assert_eq!(
             lane_answers(&mut engine),
             expected,
-            "MUTATION: a predicate read the wrong lane ({label})",
+            "a predicate read the wrong lane ({label})",
         );
     }
 }
@@ -26965,7 +28548,7 @@ fn only_the_file_moment_journal_reads_the_share_lane() {
 /// What it protects: a share carries the ops the share covers, so a
 /// `ydoc.update` journaled in a share view is a row nothing ever drains. The
 /// same holds for the conflict outbox and cursor advancement. A recovered
-/// FILE moment is the opposite case — an edit share CAN drain it through the
+/// FILE moment is the opposite case — an edit share can drain it through the
 /// proposal submit — so `ydoc_recovery` is pinned to the other predicate.
 #[test]
 fn the_ydoc_journal_reads_the_owner_lane_predicate() {
@@ -26977,25 +28560,25 @@ fn the_ydoc_journal_reads_the_owner_lane_predicate() {
     ] {
         assert!(
             source.contains("workspace_replicates_with_relay_in_tx"),
-            "MUTATION: {label} must ask the OWNER-lane predicate",
+            "{label} must ask the OWNER-lane predicate",
         );
         assert!(
             !source.contains("workspace_journals_file_moments_in_tx"),
-            "MUTATION: {label} must NOT read the share lane — a share cannot \
+            "{label} must NOT read the share lane — a share cannot \
              carry what it journals, so the rows would never drain",
         );
     }
     // The other direction. A recovered FILE moment is drainable by an edit
-    // share, so this site must ask the SAME question the ordinary moment
+    // share, so this site must ask the same question the ordinary moment
     // journal asks. The two disagreeing would strand a recovered change the
     // recipient can see and never send.
     let recovery = include_str!("ydoc_recovery.rs");
     assert!(
         recovery.contains("workspace_journals_file_moments_in_tx"),
-        "MUTATION: the recovery moment journal must read the share lane",
+        "the recovery moment journal must read the share lane",
     );
     assert!(
         !recovery.contains("workspace_replicates_with_relay_in_tx"),
-        "MUTATION: the recovery moment journal must not fall back to the owner lane",
+        "the recovery moment journal must not fall back to the owner lane",
     );
 }

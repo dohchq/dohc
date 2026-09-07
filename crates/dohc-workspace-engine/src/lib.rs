@@ -1,13 +1,11 @@
-//! Shadow-only composition host for the Rust workspace engine.
+//! The workspace engine daemon: composes the engine crates behind the protocol.
 
 #![forbid(unsafe_code)]
 
+mod automation_recovery;
 pub(crate) mod capture_driver;
 pub mod capture_sink;
-pub mod cutover_rehearse;
-#[cfg(feature = "harness")]
-pub mod rehearsal_harness;
-pub mod shadow_fence;
+pub mod root_binding;
 
 #[cfg(feature = "harness")]
 pub use capture_driver::{CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES};
@@ -15,7 +13,9 @@ pub use capture_sink::{SelfWriteSuppression, StoreCaptureSink};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use dohc_engine_collab::{CollabError, ContentKind, DocKey, Lease, LeaseRegistry, Regime};
+use dohc_engine_collab::{
+    CollabError, ContentKind, DocKey, Lease, LeaseRegistry, OwnerOutboxError, Regime,
+};
 use dohc_engine_domain::{
     AgentRunRecord, AutomationClaim, AutomationFailure, AutomationSettle, AutomationTrigger,
     BookmarkMode, BookmarkTargetKind, ChannelThreadSummary, ChatActorKind, ChatAgentReadState,
@@ -45,10 +45,10 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_runtime::actor::YdocSeedMaterialization;
 use dohc_engine_runtime::{
-    ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, LifecycleState, NoFaults,
-    PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
-    RuntimeError, SearchError, SearchPageDisposition, SearchResultKey, SearchSurface,
-    WorkspaceSupervisor,
+    ActorHandle, ApplyDisposition, ApplyOutcome, CancellationToken, ConflictApplyResult,
+    FaultInjector, LifecycleState, NoFaults, PostCommitMaterializeOutcome, RelayConfiguration,
+    RelayOperation, RelayOperationOutcome, RuntimeError, SearchError, SearchPageDisposition,
+    SearchResultKey, SearchSurface, WorkspaceSupervisor,
 };
 use dohc_engine_sync::{
     RelayCursor, RelayError, ReplicationEnvelope, ShareCursor, SyncError, SyncPassOutcome,
@@ -67,14 +67,14 @@ const MAX_OPEN_HANDLES: usize = 64;
 const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 const AUTOMATION_CLAIM_MAX_ATTEMPTS: i64 = 2;
 
-/// The startup reaper only reclaims a running automation claim idle at least
+/// Startup recovery only reclaims a running automation claim idle at least
 /// this long. A desktop that outlives a daemon rebind may still be running
 /// its handler; a claim younger than this bound is presumed alive and left
 /// running rather than double-fired.
 const AUTOMATION_CLAIM_REAP_IDLE_MS: i64 = 10 * 60 * 1000;
 
 /// Emitted once per settled capture batch / reconcile pass that settled any
-/// path — a REPAINT PING, not a moment ledger. Most emissions follow new
+/// path — a repaint ping, not a moment ledger. Most emissions follow new
 /// moment rows (ingests, retires, policy/non-ownable/secret untracks), but
 /// content-equality dedupes and no-op retires fire it too: the renderer
 /// re-lists cheaply, and under-notifying is the staleness bug this event
@@ -167,7 +167,7 @@ impl EngineEvents {
     }
 }
 
-/// In-band CONTENT (binary bytes, secret plaintext) uses the capture contract's
+/// In-band content (binary bytes, secret plaintext) uses the capture contract's
 /// smaller request cap. Larger binary blobs use the full-range write endpoint
 /// or raw blob-chunk egress.
 const MAX_INBAND_CONTENT_BYTES: usize = dohc_engine_domain::INBAND_CONTENT_CAP_BYTES;
@@ -400,18 +400,108 @@ fn collection_query_response_value(
     Ok(response)
 }
 
-fn collection_response_json(response: impl Serialize) -> Result<Value, WireError> {
-    let response = collection_response_value(response)?;
+/// Approximate serialized-bytes budget for one `collections.getRecord`
+/// history page — the same measured discipline as every other list family.
+/// Rows carry full previous and next field values, so a row count alone can
+/// never bound the frame.
+const COLLECTION_HISTORY_PAGE_BYTE_BUDGET: usize = 256 * 1024;
+
+/// Cuts an encoded `collections.getRecord` response's history page to the
+/// byte budget and repoints `nextBeforeHistoryId` at the cut, so a caller
+/// keeps paging instead of hitting a frame refusal. A single over-budget row
+/// still ships (progress guarantee) and rides blob egress when oversized.
+fn bound_collection_history_page(response: &mut Value) {
+    let Some(history) = response.get_mut("history").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let included = byte_budget_cut_serialized(history, COLLECTION_HISTORY_PAGE_BYTE_BUDGET)
+        .max(1)
+        .min(history.len());
+    if included == history.len() {
+        return;
+    }
+    history.truncate(included);
+    let next_before_history_id = history
+        .last()
+        .map_or(Value::Null, |row| row["historyId"].clone());
+    response["nextBeforeHistoryId"] = next_before_history_id;
+}
+
+/// Approximate serialized-bytes budget for one `collections.list` page.
+const COLLECTIONS_PAGE_BYTE_BUDGET: usize = 256 * 1024;
+
+/// The most one summary's serialized degradation-reason list may occupy in a
+/// `collections.list` page. The reason COUNT is capped at the wire collection
+/// limit, but 16,384 reasons with long paths can still pass the frame; the
+/// full list stays readable through `collections.get`, which rides blob
+/// egress.
+const COLLECTION_SUMMARY_REASONS_BYTE_BUDGET: usize = 64 * 1024;
+
+/// Bounds an encoded `collections.list` page by serialized bytes: each
+/// summary's reason list truncates to its budget with an `omittedReasons`
+/// count, then the page cuts to its budget and `nextCursor` repoints at the
+/// cut so a caller keeps paging instead of hitting a frame refusal.
+fn bound_collections_list_page(response: &mut Value) {
+    let Some(collections) = response
+        .get_mut("collections")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for summary in collections.iter_mut() {
+        let Some(reasons) = summary.get_mut("reasons").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let included = byte_budget_cut_serialized(reasons, COLLECTION_SUMMARY_REASONS_BYTE_BUDGET);
+        if included < reasons.len() {
+            let omitted = reasons.len() - included;
+            reasons.truncate(included);
+            summary["omittedReasons"] = json!(omitted);
+        }
+    }
+    let included = byte_budget_cut_serialized(collections, COLLECTIONS_PAGE_BYTE_BUDGET)
+        .max(1)
+        .min(collections.len());
+    if included < collections.len() {
+        collections.truncate(included);
+        let next_cursor = collections
+            .last()
+            .map_or(Value::Null, |summary| summary["path"].clone());
+        response["nextCursor"] = next_cursor;
+    }
+}
+
+/// This request's in-band collection response cap: the negotiated client
+/// frame minus envelope headroom, never above the engine default cap. The
+/// hello clamp keeps the negotiated frame at 1 MiB or more, so the cap always
+/// clears the single-row hard cap and page byte budgets.
+fn collection_in_band_cap(ctx: &RequestContext) -> usize {
+    (ctx.max_frame_bytes as usize)
+        .saturating_sub(64 * 1024)
+        .min(COLLECTION_RESPONSE_HARD_CAP_BYTES)
+}
+
+fn in_band_collection_response(response: Value, cap: usize) -> Result<Value, WireError> {
     let encoded_len = serde_json::to_vec(&response)
         .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?
         .len();
-    if encoded_len > COLLECTION_RESPONSE_HARD_CAP_BYTES {
+    if encoded_len > cap {
         return Err(wire(
             ErrorCode::LimitExceeded,
             "collection-response-exceeds-wire-limit",
         ));
     }
     Ok(response)
+}
+
+fn collection_response_json(
+    response: impl Serialize,
+    ctx: &RequestContext,
+) -> Result<Value, WireError> {
+    in_band_collection_response(
+        collection_response_value(response)?,
+        collection_in_band_cap(ctx),
+    )
 }
 
 /// Aggregate hydrated blob bytes allowed to wait for or flow through framed
@@ -440,12 +530,12 @@ fn json_string_encoded_len(text: &str) -> usize {
 /// The encoded size of the request envelope that carried these params — what
 /// the control frame actually held.
 ///
-/// Every field is the CALLER'S OWN: this request's id, deadline, workspace
+/// Every field is the caller'S OWN: this request's id, deadline, workspace
 /// handle, idempotency key and params, re-encoded by the same encoder the
 /// transport uses. Nothing is reserved and nothing is substituted. A
 /// worst-case stand-in for a field the daemon can read (this one used
 /// `u64::MAX` and `u32::MAX` for the id and deadline) inflates the total by
-/// about thirty bytes, which rejects requests that DID cross the frame and
+/// about thirty bytes, which rejects requests that did cross the frame and
 /// reports a size that never existed — a limit must name what happened.
 fn resolve_request_encoded_bytes(
     id: u64,
@@ -537,7 +627,7 @@ impl EncodedMomentPage {
 }
 
 /// How many leading serialized rows fit a byte budget (at least one always
-/// ships — every string is wire-capped, so a single row fits). MEASURED on
+/// ships — every string is wire-capped, so a single row fits). Measured on
 /// the serialized JSON, not estimated from raw lengths: escaping can expand
 /// a control-character-heavy string up to 6x, and an estimate that ignores
 /// that can pass the budget while the encoded frame exceeds the limit.
@@ -704,13 +794,7 @@ fn chat_cursor_binding(method: &str, workspace_id: &str, filters: &[&str]) -> St
         hasher.update(field.as_bytes());
         hasher.update([0]);
     }
-    let digest = hasher.finalize();
-    let mut binding = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(binding, "{byte:02x}");
-    }
-    binding
+    dohc_engine_storage::hex(&hasher.finalize())
 }
 
 fn encode_chat_cursor(cursor: &ChatKeysetCursor) -> Result<String, WireError> {
@@ -819,9 +903,10 @@ struct OpenWorkspace {
     handle_kind: WorkspaceHandleKind,
     relay: Option<RelayConfiguration>,
     /// The autonomous capture driver (files actor + watcher + reconcile
-    /// loop), spawned only after the shadow binding succeeded. Shared so the
+    /// loop), spawned only after the root binding succeeded. Shared so the
     /// teardown paths can take it exactly once.
     capture: Arc<Mutex<Option<capture_driver::CaptureDriver>>>,
+    automation_recovery: Arc<Mutex<Option<automation_recovery::AutomationRecovery>>>,
     /// Held by every capture reconcile+apply and by versions.setActive across
     /// its forced full scan plus switch transaction. This drains an in-flight
     /// apply and prevents a new one from resolving the destination version
@@ -904,29 +989,36 @@ impl OpenWorkspace {
         }
     }
 
-    /// Signal the capture loop to stop without removing its handle. A version
+    /// Signal the background tasks to stop without removing their handles. A version
     /// fence that already owns the apply gate can still finish against the
     /// driver; teardown takes the handle only after acquiring that gate.
     fn request_capture_shutdown(&self) {
+        if let Some(recovery) = lock(&self.automation_recovery).as_ref() {
+            recovery.request_shutdown();
+        }
         if let Some(driver) = lock(&self.capture).as_ref() {
             driver.request_shutdown();
         }
     }
 
-    /// Take the driver and cancel it SYNCHRONOUSLY (no await point, so an
-    /// aborted RPC future can never leave a driver un-cancelled), returning
-    /// the join handle for callers that must await the full drain.
-    fn begin_capture_shutdown(&self) -> Option<tokio::task::JoinHandle<()>> {
-        lock(&self.capture)
+    /// Take and cancel the background tasks without an await point, so an
+    /// aborted RPC future cannot leave them running. Return
+    /// the join handles for callers that must await the full drain.
+    fn begin_capture_shutdown(&self) -> [Option<tokio::task::JoinHandle<()>>; 2] {
+        let capture = lock(&self.capture)
             .take()
-            .and_then(capture_driver::CaptureDriver::begin_shutdown)
+            .and_then(capture_driver::CaptureDriver::begin_shutdown);
+        let recovery = lock(&self.automation_recovery)
+            .take()
+            .and_then(automation_recovery::AutomationRecovery::begin_shutdown);
+        [capture, recovery]
     }
 
-    /// Cancel and await the capture driver's full drain (idempotent).
-    /// Strictly BEFORE the store-actor close: the driver may be mid-apply
+    /// Cancel and await capture and automation recovery (idempotent).
+    /// Strictly before the store-actor close: the driver may be mid-apply
     /// against the actor.
     async fn shutdown_capture(&self) {
-        if let Some(task) = self.begin_capture_shutdown() {
+        for task in self.begin_capture_shutdown().into_iter().flatten() {
             let _ = task.await;
         }
     }
@@ -968,7 +1060,7 @@ pub struct EngineService {
     sessions: Arc<Mutex<HashMap<String, YdocSession>>>,
     leases: LeaseRegistry,
     next_session: std::sync::atomic::AtomicU64,
-    /// Unique per service INSTANCE (process id + construction time):
+    /// Unique per service instance (process id + construction time):
     /// session ids seed client-side idempotency keys that persist in
     /// `engine_requests`, so ids restarting from 1 each daemon lifetime
     /// would collide a fresh session's first requests with a prior
@@ -984,7 +1076,16 @@ pub struct EngineService {
         Arc<tokio::sync::Notify>,
         Arc<std::sync::atomic::AtomicBool>,
     )>,
-    /// PER-EngineService by design. Production runs exactly ONE EngineService per
+    #[cfg(test)]
+    owner_outbox_append_probe: Option<(
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
+    /// Faults for the root-binding stamp a fresh open writes.
+    #[cfg(test)]
+    bind_root_faults: Option<Arc<dyn FaultInjector>>,
+    /// PER-EngineService by design. Production runs exactly one EngineService per
     /// daemon process (the stdio host constructs a single service), so the
     /// `BLOB_EGRESS_BYTE_BUDGET` resident-memory ceiling is per-process there.
     /// The budget is per-instance (not a process-global static) so tests can
@@ -1099,9 +1200,10 @@ impl EngineService {
         operation: &str,
         response: Value,
     ) -> Result<(Value, Option<BlobEgress>), WireError> {
+        let cap = collection_in_band_cap(ctx);
         let bytes = serde_json::to_vec(&response)
             .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
-        if bytes.len() <= COLLECTION_RESPONSE_HARD_CAP_BYTES {
+        if bytes.len() <= cap {
             return Ok((response, None));
         }
         if !ctx.has_capability("blobs") {
@@ -1122,7 +1224,7 @@ impl EngineService {
                 "collectionJson": Value::Null,
                 "blobSha256": sha256,
                 "byteLength": byte_length,
-                "inbandLimitBytes": COLLECTION_RESPONSE_HARD_CAP_BYTES,
+                "inbandLimitBytes": cap,
             }),
             Some(BlobEgress {
                 stream_id: request_id,
@@ -1157,7 +1259,7 @@ impl EngineService {
             next_handle: std::sync::atomic::AtomicU64::new(1),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             leases: {
-                // ONE process-wide registry remains a defense in depth for
+                // One process-wide registry remains a defense in depth for
                 // non-service actor users. EngineService itself rejects a
                 // second attachment to an already-live physical engine.db, so
                 // one service owns all session admission for that actor.
@@ -1193,6 +1295,10 @@ impl EngineService {
             capture_apply_probe: None,
             #[cfg(test)]
             open_install_probe: None,
+            #[cfg(test)]
+            owner_outbox_append_probe: None,
+            #[cfg(test)]
+            bind_root_faults: None,
             blob_egress_budget: BlobEgressBudget::new(BLOB_EGRESS_BYTE_BUDGET),
         }
     }
@@ -1377,12 +1483,24 @@ impl EngineService {
                 )
                 .await?
             }
-            "ydoc.settle" => {
-                self.ydoc_settle(&ctx, request.workspace, request.params)
+            "ydoc.ownerOutbox.append" => {
+                self.owner_ydoc_outbox_append(&ctx, request.workspace, request.params)
                     .await?
             }
-            "ydoc.applyExternalMarkdownEdit" => {
-                self.ydoc_apply_external_markdown_edit(&ctx, request.workspace, request.params)
+            "ydoc.ownerOutbox.readPending" => {
+                self.owner_ydoc_outbox_read_pending(&ctx, request.workspace, request.params, id)
+                    .await?
+            }
+            "ydoc.ownerOutbox.acknowledge" => {
+                self.owner_ydoc_outbox_acknowledge(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.ownerOutbox.quarantine" => {
+                self.owner_ydoc_outbox_quarantine(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.settle" => {
+                self.ydoc_settle(&ctx, request.workspace, request.params)
                     .await?
             }
             "ydoc.close" => {
@@ -1411,10 +1529,6 @@ impl EngineService {
                     request.idempotency_key,
                 )
                 .await?
-            }
-            "search.query" => {
-                self.search_query(&ctx, request.workspace, request.params)
-                    .await?
             }
             "search.queryPage" => {
                 self.search_query_page(&ctx, request.workspace, request.params)
@@ -1903,9 +2017,9 @@ impl EngineService {
     }
 
     /// Tear down every open workspace's capture driver (watcher joined,
-    /// files actor closed). Called at daemon shutdown AFTER the transport's
+    /// files actor closed). Called at daemon shutdown after the transport's
     /// workspace close hook: store actors are already gone by then, so any
-    /// in-flight capture write fails CONTAINED (never acked — the next
+    /// in-flight capture write fails contained (never acked — the next
     /// daemon start re-offers it from the dirty baseline), and this drain
     /// joins the watcher/files threads so the process exits clean.
     pub async fn shutdown_all_capture(&self) {
@@ -1935,7 +2049,7 @@ impl EngineService {
             .is_some_and(|object| object.contains_key("captureAuthor"));
         let params: WorkspaceOpenParams = parse(params)?;
         let capture_author_json = if capture_author_supplied {
-            Some(validated_author(params.capture_author.as_ref(), None)?)
+            Some(validated_author(params.capture_author.as_ref())?)
         } else {
             None
         };
@@ -1954,10 +2068,8 @@ impl EngineService {
             }
             serial = Arc::clone(&self.open_lock).lock_owned() => serial,
         };
-        let validated =
-            shadow_fence::validate_shadow_root(PathBuf::from(&params.root_dir).as_path())
-                .map_err(map_shadow_fence)?;
-        let root = validated.root;
+        let root = root_binding::canonical_root(PathBuf::from(&params.root_dir).as_path())
+            .map_err(map_root_binding)?;
         let requested_mode = if params.skip_startup_maintenance {
             WorkspaceOpenMode::ReadOnly
         } else {
@@ -1982,7 +2094,7 @@ impl EngineService {
             // A maintenance-free open is read intent, not a request for
             // ownership. Mint a non-owning token over the live binding so its
             // close cannot tear down the desktop's actor, capture, or relay.
-            // Same workspace: short-circuit only on a LIVE binding. A bound-but-
+            // Same workspace: short-circuit only on a live binding. A bound-but-
             // closed actor (its worker died) is stale — drop it and reopen fresh.
             if open.actor.lifecycle() != LifecycleState::Closed {
                 if requested_mode == WorkspaceOpenMode::ReadOnly {
@@ -2075,7 +2187,7 @@ impl EngineService {
                 session.workspace != handle && !attached_handles.contains(&session.workspace)
             });
             // The evicted binding's files layer must not outlive it. Clear
-            // suppression only AFTER the shutdown drain — an in-flight
+            // suppression only after the shutdown drain — an in-flight
             // reconcile apply still consults the registry.
             open.shutdown_capture().await;
             self.self_writes
@@ -2094,6 +2206,14 @@ impl EngineService {
         let now_ms = now_ms()?;
         #[cfg(test)]
         let open_install_probe = self.open_install_probe.clone();
+        #[cfg(test)]
+        let bind_root_faults: Arc<dyn FaultInjector> = self
+            .bind_root_faults
+            .clone()
+            .unwrap_or_else(|| Arc::new(NoFaults));
+        #[cfg(not(test))]
+        let bind_root_faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
+        let binding_root = root.clone();
         let mut opening = tokio::task::spawn_blocking(move || {
             let opened = match requested_mode {
                 WorkspaceOpenMode::Full => supervisor.open(&actor_path, now_ms),
@@ -2111,6 +2231,50 @@ impl EngineService {
                     .and_then(|open| open.created_actor.then_some(actor_path)),
                 _open_serial,
             };
+            // The root binding runs here, inside the task no cancellation can
+            // interrupt, not as the first await after it. The first open of a
+            // workspace creates and migrates engine.db; a request dropped
+            // between that commit and the bind left the store migrated but
+            // unbound, and every later open then refused it as a mismatch,
+            // permanently. Now the store is either bound or the actor
+            // is closed before the request can observe either.
+            //
+            // A root with no binding yet gets a fresh token only when the
+            // store is fresh too: an existing engine.db under an unbound root
+            // was copied or moved here, and adopting it would let one
+            // database serve two roots.
+            //
+            // A fresh store whose binding cannot be read, written, or
+            // stamped is deleted again before the refusal returns. Leaving it
+            // would make the next open find an existing engine.db under a
+            // bound root it never recorded and refuse it as a mismatch, for
+            // good. So the stamp's storage failure lands in the same `bound`
+            // error as the marker's, not in the open's own error.
+            let opened = opened.map(|open| {
+                if !open.created_actor {
+                    return (open, Ok(()));
+                }
+                let bound = (|| {
+                    let token = match root_binding::read_root_binding(&binding_root)? {
+                        Some(token) => token,
+                        None if open.store_freshly_created => {
+                            root_binding::write_new_root_binding(&binding_root)?
+                        }
+                        None => return Err(root_binding::RootBindingError::DatabaseMismatch),
+                    };
+                    match tokio::runtime::Handle::current()
+                        .block_on(open.actor.bind_root(token, bind_root_faults))
+                    {
+                        Ok(true) => Ok(()),
+                        Ok(false) => Err(root_binding::RootBindingError::DatabaseMismatch),
+                        Err(error) => {
+                            eprintln!("engine: root binding stamp failed: {error}");
+                            Err(root_binding::RootBindingError::Unstamped)
+                        }
+                    }
+                })();
+                (open, bound)
+            });
             #[cfg(test)]
             if open_guard.db_path.is_some()
                 && let Some((reached, release, armed)) = open_install_probe
@@ -2133,7 +2297,7 @@ impl EngineService {
                 opened.map_err(|_| wire(ErrorCode::Internal, "workspace open task failed"))?
             }
         };
-        let actor_open = actor_open.map_err(map_runtime)?;
+        let (actor_open, bound) = actor_open.map_err(map_runtime)?;
         // The supervisor deduplicates by physical engine.db identity, including
         // root aliases and hard links. EngineService state (capture driver,
         // session registry, and version barriers) deliberately has one owner:
@@ -2148,16 +2312,33 @@ impl EngineService {
             ));
         }
         let actor = actor_open.actor;
-        let binding = actor.bind_shadow_clone(validated.token).await;
-        let binding_error = match binding {
-            Ok(true) => None,
-            Ok(false) => Some(map_shadow_fence(
-                shadow_fence::ShadowFenceError::DatabaseTokenMismatch,
-            )),
-            Err(error) => Some(map_runtime(error)),
-        };
-        if let Some(error) = binding_error {
-            return Err(error);
+        if let Err(error) = bound {
+            if actor_open.store_freshly_created {
+                // The guard's close finishes on a blocking task; the delete
+                // has to wait for it, or SQLite still holds the file.
+                drop(actor);
+                let removed = supervisor.begin_close(&db_path);
+                if let Ok(Some(closing)) = removed {
+                    let _ = tokio::task::spawn_blocking(move || closing.finish()).await;
+                }
+                open_guard.disarm();
+                // A delete that fails leaves the store the next open refuses
+                // as a mismatch. The refusal stands; the path says why.
+                for suffix in ["", "-wal", "-shm"] {
+                    let mut path = db_path.clone().into_os_string();
+                    path.push(suffix);
+                    let path = std::path::PathBuf::from(path);
+                    if let Err(error) = std::fs::remove_file(&path)
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        eprintln!(
+                            "engine: could not delete the orphaned store file {}: {error}",
+                            path.display()
+                        );
+                    }
+                }
+            }
+            return Err(map_root_binding(error));
         }
         let sequence = self
             .next_handle
@@ -2179,7 +2360,7 @@ impl EngineService {
                 ),
             )
             .await?;
-            // Startup replay BEFORE the files layer exists: jobs left pending by
+            // Startup replay before the files layer exists: jobs left pending by
             // a crash, a transient settle failure, or a pulled replication apply
             // land on disk while nothing is watching (no suppression window),
             // and the baseline reconcile below then scans the POST-replay disk.
@@ -2187,9 +2368,9 @@ impl EngineService {
                 .materialize_replay_pending(root.clone(), params.workspace_id.clone(), now_ms)
                 .await
                 .map_err(map_runtime)?;
-            // The files layer spawns ONLY here — after the shadow binding
-            // succeeded — so an unmarked or mismatched root can never grow a
-            // watcher or files actor (the shadow-scope dormancy invariant).
+            // The files layer spawns only here, after the root binding
+            // succeeded, so an unbound or mismatched root can never grow a
+            // watcher or files actor.
             let capture = capture_enabled.then(|| {
                 capture_driver::CaptureDriver::spawn(
                     root.clone(),
@@ -2211,7 +2392,7 @@ impl EngineService {
             // capture never claims a foreign head, so a caller's first write
             // wins while the bounded import finishes behind the handle.
             //
-            // CANCELLATION: nothing owns the store actor yet (the handle is
+            // Cancellation: nothing owns the store actor yet (the handle is
             // inserted below), so an abort here would leak it. The `open_guard`
             // armed above the startup replay closes the actor on an early drop
             // and is disarmed once the handle is inserted; `CaptureDriver`'s own
@@ -2219,7 +2400,7 @@ impl EngineService {
             // Desktop rebinds opt out because their runner processes outlive the daemon.
             if actor_open.created_actor && params.recover_running_dispatches.unwrap_or(true) {
                 // Cancellation-aware like every other actor wait in this flow:
-                // a caller abort stops WAITING promptly (the actor still finishes
+                // a caller abort stops waiting promptly (the actor still finishes
                 // the reclaim it already accepted — it is idempotent on the next
                 // open) and the open_guard above closes the actor on early drop.
                 Self::read_under_ctx(
@@ -2246,6 +2427,7 @@ impl EngineService {
                     "workspace.open (automation reclaim)",
                     actor.automation_reclaim_running(
                         params.workspace_id.clone(),
+                        None,
                         AUTOMATION_CLAIM_MAX_ATTEMPTS,
                         now_ms - AUTOMATION_CLAIM_REAP_IDLE_MS,
                         now_ms,
@@ -2260,6 +2442,24 @@ impl EngineService {
             }
             capture
         };
+        let automation_recovery = if requested_mode == WorkspaceOpenMode::Full {
+            let attempts = Self::read_under_ctx(
+                &cancellation,
+                "workspace.open (automation recovery snapshot)",
+                actor.automation_running_attempts(params.workspace_id.clone()),
+            )
+            .await?;
+            (!attempts.is_empty()).then(|| {
+                automation_recovery::AutomationRecovery::spawn(
+                    actor.clone(),
+                    params.workspace_id.clone(),
+                    attempts,
+                    self.events.clone(),
+                )
+            })
+        } else {
+            None
+        };
         lock(&self.handles).insert(
             handle.clone(),
             OpenWorkspace {
@@ -2273,6 +2473,7 @@ impl EngineService {
                     .relay
                     .map(|configuration| configuration.configuration()),
                 capture: Arc::new(Mutex::new(capture)),
+                automation_recovery: Arc::new(Mutex::new(automation_recovery)),
                 capture_apply_gate,
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
             },
@@ -2351,7 +2552,7 @@ impl EngineService {
                 lock(&self.sessions).retain(|_, session| session.workspace != handle);
                 return Ok(json!({ "closed": false, "attachmentClosed": removed }));
             }
-            // Install the GLOBAL Closing marker BEFORE removing the handle, so a
+            // Install the GLOBAL Closing marker before removing the handle, so a
             // workspace_open on another EngineService (which does not take this
             // service's open_lock) observes Closing at supervisor.open and waits
             // for a fresh actor instead of the one being torn down.
@@ -2379,7 +2580,7 @@ impl EngineService {
         let capture_gate = Arc::clone(&removed.capture_apply_gate);
         let session_gate = Arc::clone(&removed.session_ops);
         let sessions = Arc::clone(&self.sessions);
-        // Suppression entries clear AFTER the capture drain: an in-flight
+        // Suppression entries clear after the capture drain: an in-flight
         // reconcile apply still consults the registry, and clearing first
         // would let it re-ingest the daemon's own just-settled file as a
         // capture write (provenance flip) during teardown.
@@ -2392,7 +2593,13 @@ impl EngineService {
         // owns the gate can still read the driver and finish. Cancellation is
         // idempotent when the detached task takes the driver below.
         removed.request_capture_shutdown();
+        #[cfg(feature = "harness")]
+        let probe = self.capture_apply_probe.clone();
         let close_task = tokio::spawn(async move {
+            #[cfg(feature = "harness")]
+            if let Some(probe) = &probe {
+                probe.observe_gate_wait_if_armed();
+            }
             let _capture = capture_gate.lock_owned().await;
             let capture_drain = removed.begin_capture_shutdown();
             let _session = session_gate.lock_owned().await;
@@ -2401,7 +2608,7 @@ impl EngineService {
             lock(&sessions).retain(|_, session| {
                 session.workspace != handle && !attached_handles.contains(&session.workspace)
             });
-            if let Some(drain) = capture_drain {
+            for drain in capture_drain.into_iter().flatten() {
                 let _ = drain.await;
             }
             clear_suppression.0.clear_workspace(&clear_suppression.1);
@@ -2443,10 +2650,7 @@ impl EngineService {
             let mut bytes = [0_u8; 32];
             getrandom::fill(&mut bytes)
                 .map_err(|_| wire(ErrorCode::Internal, "pending-cursor-token-failed"))?;
-            let token = bytes
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
+            let token = dohc_engine_storage::hex(&bytes);
             let (kind, wire_kind) = match &cursor {
                 IssuedCursor::Relay(_) => (PendingCursorKind::Relay, "relay"),
                 IssuedCursor::ShareView(_) => (PendingCursorKind::ShareView, "shareView"),
@@ -2874,7 +3078,7 @@ impl EngineService {
         Ok(result)
     }
 
-    /// Record this share view's own replica identity (#646 PR3-1). Run at
+    /// Record this share view's own replica identity. Run at
     /// open and again at every refresh; the engine writes the row once and
     /// later calls answer `already-recorded`.
     ///
@@ -2884,7 +3088,7 @@ impl EngineService {
     /// and Comment record nothing — and refuses an unreadable level the same
     /// way the pull does.
     ///
-    /// The three identity components are minted HERE, not by the caller, for
+    /// The three identity components are minted here, not by the caller, for
     /// the same reason `sync.claim` mints its own: the durable row is the
     /// record, so a refresh cannot re-mint an origin and split this replica's
     /// log in two. The origin is a REPLICA id — the relay namespaces this
@@ -2904,7 +3108,7 @@ impl EngineService {
                 ctx,
                 &open,
                 configuration,
-                // The RPC still parses the WHOLE selector above, because a
+                // The RPC still parses the whole selector above, because a
                 // caller that sends a malformed one must be refused here. The
                 // operation carries only the access: the level is the entire
                 // decision it makes, and handing it paths would suggest they
@@ -2923,8 +3127,7 @@ impl EngineService {
         relay_outcome_json(outcome)
     }
 
-    /// Offer this replica's own edits of a RECEIVED file share to the granter
-    /// (#646 PR3).
+    /// Offer this replica's own edits of a received file share to the granter.
     ///
     /// Takes the same pinned selector the pull takes and refuses an unreadable
     /// level the same way. The client refuses again below `edit` — the caller
@@ -2977,17 +3180,11 @@ impl EngineService {
             digest.update((field.len() as u64).to_le_bytes());
             digest.update(field);
         }
-        let digest = digest.finalize();
-        let mut hex = String::with_capacity(digest.len() * 2);
-        for byte in digest {
-            use std::fmt::Write as _;
-            let _ = write!(hex, "{byte:02x}");
-        }
-        format!("{prefix}-{hex}")
+        format!("{prefix}-{}", dohc_engine_storage::hex(&digest.finalize()))
     }
 
     /// Acquire the ordering guard shared with `ydoc.open` before probing a
-    /// path lease. The caller must retain the returned OWNED guard until its
+    /// path lease. The caller must retain the returned owned guard until its
     /// actor mutation has completed: check-without-lease -> mutation and
     /// probe -> lease -> authoritative re-read are mutually exclusive orders.
     async fn mutation_session_guard(
@@ -3057,9 +3254,9 @@ impl EngineService {
         if text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
         }
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedText.write (queued)")
@@ -3127,9 +3324,9 @@ impl EngineService {
         if bytes.len() > MAX_INBAND_CONTENT_BYTES {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
         }
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedBinary.write (queued)")
@@ -3206,9 +3403,9 @@ impl EngineService {
         }
         let sha256 = params.sha256.to_ascii_lowercase();
         let path = params.path.clone();
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let bytes = match params.bytes_base64 {
             Some(encoded) => {
@@ -3221,10 +3418,7 @@ impl EngineService {
                         "content-exceeds-capture-cap",
                     ));
                 }
-                let actual = Sha256::digest(&bytes)
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>();
+                let actual = dohc_engine_storage::hex_sha256(&bytes);
                 if actual != sha256 {
                     return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
                 }
@@ -3314,9 +3508,9 @@ impl EngineService {
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let from_path = params.from_path.clone();
         let to_path = params.to_path.clone();
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedText.rename (queued)")
@@ -3383,9 +3577,9 @@ impl EngineService {
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = params.path.clone();
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedText.delete (queued)")
@@ -3443,8 +3637,8 @@ impl EngineService {
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = validate_addressable_plaintext_path(&params.path)
             .map_err(|error| map_runtime(RuntimeError::Domain(error)))?;
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedText.rollback (queued)")
@@ -3485,7 +3679,6 @@ impl EngineService {
                     path,
                     mutation_moment_id: params.mutation_moment_id,
                     request_id,
-                    legacy_before_text: params.legacy_before_text,
                     metadata_origin: origin,
                     author_json,
                 },
@@ -3540,9 +3733,9 @@ impl EngineService {
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = params.path.clone();
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versions.merge (queued)")
@@ -3723,7 +3916,7 @@ impl EngineService {
 
     /// Freeze the active workspace snapshot before a version fork or switch.
     ///
-    /// Lock order is per-workspace capture gate FIRST, then that workspace's
+    /// Lock order is per-workspace capture gate first, then that workspace's
     /// Y.Doc/session mutation gate — the same helper used by workspace.close.
     /// Once both are held, no capture apply or session admission can straddle
     /// the session sweep, forced reconcile, and version transaction. After the
@@ -3841,9 +4034,9 @@ impl EngineService {
         let events = self.events.clone();
         let detached_operation = operation.to_owned();
         let settle_summary = settle_summary.to_owned();
-        // The fence's forced reconcile is a capture PASS (TS parity:
+        // The fence's forced reconcile is a capture pass (TS parity:
         // `version-switch-${id}` / `version-create-${id}`): its moments carry
-        // the fence's own summary and ONE correlation id so the pre-switch
+        // the fence's own summary and one correlation id so the pre-switch
         // "nothing is ever lost" capture groups in history instead of
         // rendering as unrelated per-file rows.
         let reconcile_provenance = capture_sink::CaptureProvenance {
@@ -4065,7 +4258,7 @@ impl EngineService {
         let params: VersionedTextReadParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        // ONE actor turn decides the in-band cap: an over-cap body never
+        // One actor turn decides the in-band cap: an over-cap body never
         // leaves SQLite, and no concurrent write can grow the body between
         // a size probe and the load (there is no probe).
         let snapshot = Self::read_under_ctx(
@@ -4107,23 +4300,33 @@ impl EngineService {
         })
     }
 
-    /// Returns every collection in the workspace's active version, ordered by path.
+    /// Returns one path-ordered page of the workspace's active-version
+    /// collections with an exclusive continuation cursor.
     async fn collections_list(
         &self,
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let _: CollectionsListParams = parse(params)?;
+        let params: CollectionsListParams = parse(params)?;
+        if params.limit == 0 || params.limit > MAX_COLLECTION_QUERY_LIMIT {
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "collection-list-limit-out-of-range",
+            ));
+        }
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let collections = Self::read_under_ctx(
+        let page = Self::read_under_ctx(
             &cancellation,
             "collections.list",
-            open.actor.collections_list(open.workspace_id),
+            open.actor
+                .collections_list(open.workspace_id, params.limit, params.cursor),
         )
         .await?;
-        collection_response_json(json!({ "collections": collections }))
+        let mut response = collection_response_value(page)?;
+        bound_collections_list_page(&mut response);
+        in_band_collection_response(response, collection_in_band_cap(ctx))
     }
 
     /// Returns active-version collection bindings waiting for the shared
@@ -4153,7 +4356,7 @@ impl EngineService {
             ),
         )
         .await?;
-        collection_response_json(page)
+        collection_response_json(page, ctx)
     }
 
     async fn collections_get(
@@ -4264,12 +4467,14 @@ impl EngineService {
         )
         .await?
         .ok_or_else(|| wire(ErrorCode::InvalidParams, "collection-record-not-found"))?;
+        let mut response = collection_response_value(result)?;
+        bound_collection_history_page(&mut response);
         self.collection_response_with_blob(
             ctx,
             &cancellation,
             request_id,
             "collections.getRecord",
-            collection_response_value(result)?,
+            response,
         )
         .await
     }
@@ -4279,7 +4484,7 @@ impl EngineService {
         let guard = lock(&open.capture);
         Ok(match guard.as_ref() {
             Some(driver) => {
-                // ONE snapshot — the three flags must come from the same
+                // One snapshot — the three flags must come from the same
                 // atomic load, or a reader racing a transition could report
                 // running && terminal.
                 let snapshot = driver.status().snapshot();
@@ -4301,10 +4506,10 @@ impl EngineService {
         })
     }
 
-    /// Drive capture to quiescence and report what was achieved. THE
+    /// Drive capture to quiescence and report what was achieved. The
     /// determinism seam for the capture differential: without it a harness
     /// can only sleep and hope, which turns timing blips into parity
-    /// failures. Quiescence covers every change the WATCHER has noticed — a
+    /// failures. Quiescence covers every change the watcher has noticed — a
     /// write still inside the OS debounce is invisible to flush too; callers
     /// needing a specific write poll for it (flush + check), which the
     /// differential does. `settled: false` is an honest answer (layer down, teardown
@@ -4331,7 +4536,7 @@ impl EngineService {
         open: &OpenWorkspace,
         operation: &'static str,
     ) -> Result<capture_driver::FlushOutcome, WireError> {
-        // Clone the sender OUT of the lock and await OUTSIDE it: a flush can
+        // Clone the sender out of the lock and await outside it: a flush can
         // legitimately take many reconcile cycles, and the workspace table
         // must not be blocked for its duration.
         let capture = lock(&open.capture).as_ref().map(|driver| {
@@ -4359,7 +4564,7 @@ impl EngineService {
         }
         // A flush can drive up to MAX_FLUSH_CYCLES reconciles or sit behind
         // a full flush queue — a cancelled/deadlined caller must get its
-        // answer NOW, like every other workspace RPC. The driver still
+        // answer now, like every other workspace RPC. The driver still
         // finishes its pass; only the wait is abandoned (the reply send
         // fails harmlessly).
         let cancellation = OperationCancellation::new(ctx);
@@ -4407,7 +4612,7 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: CaptureSetAuthorParams = parse(params)?;
-        let author_json = validated_author(params.author.as_ref(), None)?;
+        let author_json = validated_author(params.author.as_ref())?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let _apply = tokio::select! {
@@ -4655,7 +4860,7 @@ impl EngineService {
         let params: VersionedTextListParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        // METADATA ONLY, PAGED: bodies come one path at a time via
+        // METADATA ONLY, paged: bodies come one path at a time via
         // versionedText.read (aggregated bodies trivially exceed the 1 MiB
         // frame limit), and even metadata rows are paged so a large
         // workspace cannot exceed it either. The +1 row probes for more.
@@ -4671,7 +4876,7 @@ impl EngineService {
             ),
         )
         .await?;
-        // An unknown version must REFUSE, never read as empty — on EVERY
+        // An unknown version must refuse, never read as empty — on every
         // page: a stale cursor plus a typo'd version would otherwise read
         // as "exhausted". A legitimately-empty tail page for a real
         // version pays one extra membership read; correctness wins.
@@ -4687,7 +4892,7 @@ impl EngineService {
                 .any(|version| version.version_id == params.version_id)
             {
                 // The domain code, like every other refusal (`map_runtime`).
-                // Spelling this one as prose gave the SAME refusal two wire
+                // Spelling this one as prose gave the same refusal two wire
                 // messages depending on which method the caller reached it
                 // through, and a client that keys on the code saw neither.
                 return Err(wire(ErrorCode::InvalidParams, "version-not-found"));
@@ -4743,7 +4948,7 @@ impl EngineService {
         let params: VersionPathParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        // ONE actor turn: the cap is decided in the query, so a replaced
+        // One actor turn: the cap is decided in the query, so a replaced
         // head can never smuggle an over-cap blob into memory, and the
         // recorded length is integrity-checked against the stored bytes.
         let head = tokio::select! {
@@ -4800,10 +5005,6 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let cancellation = OperationCancellation::new(ctx);
-        // MUTATION: hydrate directly before reserving its recorded byte length
-        // -> concurrent over-cap reads can retain queue-capacity full blobs.
-        // Metadata/in-band first: over-cap bytes do not leave SQLite until the
-        // exact-byte egress reservation has been acquired.
         let read = Self::read_under_ctx(
             &cancellation,
             "versionedBinary.readBlob",
@@ -4961,7 +5162,7 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: MomentsListParams = parse(params)?;
-        // The filter rejects ONLY what the write path can never store
+        // The filter rejects only what the write path can never store
         // (the empty string): every id versionedText.list or
         // moments.list can return — whitespace/control-carrying
         // included — must stay filterable verbatim.
@@ -5079,8 +5280,8 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: MomentsGetParams = parse(params)?;
-        // Reject ONLY what the write path can never store (the empty
-        // string): all-whitespace ids ARE storable and moments.list
+        // Reject only what the write path can never store (the empty
+        // string): all-whitespace ids are storable and moments.list
         // returns them verbatim — they must stay fetchable verbatim.
         if params.moment_id.is_empty() {
             return Err(wire(ErrorCode::InvalidParams, "momentId must not be empty"));
@@ -5126,7 +5327,7 @@ impl EngineService {
         .await?;
         let has_more = secrets.len() > limit;
         let secrets = &secrets[..secrets.len().min(limit)];
-        // Metadata-only AND keyset-paged (afterPath/nextAfterPath); the
+        // Metadata-only and keyset-paged (afterPath/nextAfterPath); the
         // byte budget is the second bound so no page can outgrow the
         // frame even when rows are string-heavy.
         let row_values: Vec<Value> = secrets
@@ -5234,7 +5435,7 @@ impl EngineService {
         if text.len() > dohc_engine_domain::MAX_SECRET_FILE_BYTES {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
         }
-        let origin = validated_origin(Some(&params.origin), None)?;
+        let origin = validated_origin(Some(&params.origin))?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         // Prove the version reference and secret-floor routing keylessly before
@@ -5289,7 +5490,7 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let path = params.path.clone();
-        let origin = validated_origin(Some(&params.origin), None)?;
+        let origin = validated_origin(Some(&params.origin))?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let moment = open
@@ -5513,7 +5714,7 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: SecretsApplyParams = parse(params)?;
-        // Secret-path gate UP FRONT so the error surface is identical across
+        // Secret-path gate UP front so the error surface is identical across
         // key states (a non-secret path refuses the same way with or without
         // a key on disk).
         if dohc_engine_files::policy::classify_engine_file_path(&params.path)
@@ -5523,7 +5724,7 @@ impl EngineService {
         }
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
-        let origin = validated_origin(Some(&params.origin), None)?;
+        let origin = validated_origin(Some(&params.origin))?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let path = params.path.clone();
         let cancellation = OperationCancellation::new(ctx);
@@ -5607,7 +5808,7 @@ impl EngineService {
         let params: SecretsRestoreParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
-        let origin = validated_origin(Some(&params.origin), None)?;
+        let origin = validated_origin(Some(&params.origin))?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let path = params.path.clone();
         let cancellation = OperationCancellation::new(ctx);
@@ -5634,7 +5835,7 @@ impl EngineService {
         }))
     }
 
-    /// THE single authorized plaintext accessor over RPC (TS parity:
+    /// The single authorized plaintext accessor over RPC (TS parity:
     /// `materializeSecretFile`). The key is loaded from the workspace root
     /// per call — the daemon holds no key custody — and a missing key with
     /// live secret state fails closed rather than returning nothing.
@@ -5645,18 +5846,18 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: VersionPathParams = parse(params)?;
-        // Normalize ONCE and use the normalized spelling everywhere: the
-        // policy stable-decodes percent disguises (%2eenv classifies as
-        // .env), and querying with the raw spelling would answer "absent
+        // Normalize once and use the normalized spelling everywhere: the
+        // policy stable-decodes percent disguises (%2eenv classifies as.
+        // Env), and querying with the raw spelling would answer "absent
         // secret" for a real one. This also runs the fail-closed secret
-        // gate up front, before ANY state-dependent branch, so the error
+        // gate up front, before any state-dependent branch, so the error
         // surface is identical across key states.
         if dohc_engine_files::policy::classify_engine_file_path(&params.path)
             != dohc_engine_files::policy::PathClassification::Secret
         {
             return Err(wire(ErrorCode::InvalidParams, "not a secret path"));
         }
-        // QUERY VERBATIM: the domain stores the spelling the write
+        // Query verbatim: the domain stores the spelling the write
         // carried, and a path secrets.list returns must materialize
         // verbatim — rewriting to the normalized spelling would orphan
         // stored tips (the classification above still uses it, so the
@@ -5664,9 +5865,9 @@ impl EngineService {
         let secret_path = params.path.clone();
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        // PRECEDENCE stat (keyless): validates the secret path and the
-        // version BEFORE any key work, so caller mistakes error
-        // identically regardless of local key-file state — and an ABSENT
+        // Precedence stat (keyless): validates the secret path and the
+        // version before any key work, so caller mistakes error
+        // identically regardless of local key-file state — and an absent
         // secret answers null right here: no key material is needed to
         // say "nothing stored", and a stale malformed key file must not
         // turn that answer into an error. The in-band cap itself is
@@ -5685,7 +5886,7 @@ impl EngineService {
             return Ok(Value::Null);
         }
         // Blocking filesystem work stays off the tokio worker — and the
-        // WAIT for it is cancellation/deadline-raced like every other
+        // wait for it is cancellation/deadline-raced like every other
         // await on this surface (the blocking task finishes on its own;
         // only the caller's wait abandons).
         let key_root = open.root.clone();
@@ -5703,7 +5904,7 @@ impl EngineService {
         let Some(key) = key else {
             // Path and version already validated above (gate + stat).
             // The state check: a workspace that never minted a key has no
-            // secrets; one WITH secret rows and no key is
+            // secrets; one with secret rows and no key is
             // corrupt/misrestored state and fails closed.
             let has_state = Self::read_under_ctx(
                 &cancellation,
@@ -8152,6 +8353,245 @@ impl EngineService {
         Ok(json!({ "failed": true }))
     }
 
+    async fn owner_ydoc_outbox_append(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: OwnerYDocOutboxAppendParams = parse(params)?;
+        validate_owner_outbox_wire_binding(&params.binding)?;
+        validate_owner_outbox_limit(params.limits.max_pending_bytes)?;
+        validate_owner_outbox_limit(params.limits.max_pending_age_ms)?;
+        let handle = handle.ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(&handle))?;
+        #[cfg(test)]
+        if let Some((reached, release, armed)) = &self.owner_outbox_append_probe
+            && armed.swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            reached.notify_one();
+            release.notified().await;
+        }
+        let base_update = decode_owner_outbox_base64(&params.base_update_base64)?;
+        let update = decode_owner_outbox_base64(&params.update_base64)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = self
+            .mutation_session_guard(&open, &cancellation, "ydoc.ownerOutbox.append (queued)")
+            .await?;
+        let open = self.open(Some(&handle))?;
+        let result = open
+            .actor
+            .owner_ydoc_outbox_append(
+                open.workspace_id.clone(),
+                dohc_engine_collab::OwnerOutboxAppendInput {
+                    binding: params.binding,
+                    base_update,
+                    append_key: params.append_key,
+                    update,
+                    limits: dohc_engine_collab::OwnerOutboxLimits {
+                        max_pending_bytes: params.limits.max_pending_bytes,
+                        max_pending_age_ms: params.limits.max_pending_age_ms,
+                    },
+                    created_at_ms: now_ms()?,
+                },
+                cancellation.token(),
+            )
+            .await
+            .map_err(|error| match error {
+                RuntimeError::Cancelled => cancellation.interruption("ydoc.ownerOutbox.append"),
+                error => map_runtime(error),
+            })?
+            .map_err(map_owner_outbox)?;
+        Ok(json!({
+            "outboxId": result.outbox_id,
+            "sequence": result.sequence,
+            "deliveryId": result.delivery_id,
+            "updateDigest": result.update_digest,
+            "pendingBytes": result.pending_bytes,
+            "oldestEntryAtMs": result.oldest_entry_at_ms,
+            "state": result.state.as_str(),
+        }))
+    }
+
+    async fn owner_ydoc_outbox_read_pending(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+        request_id: u64,
+    ) -> Result<Value, WireError> {
+        let params: OwnerYDocOutboxIdParams = parse(params)?;
+        // Base64 consumes four bytes per three input bytes. The existing
+        // collection cap reserves envelope space; the final check below uses
+        // the actual response envelope and this request's negotiated limit.
+        let max_bytes = collection_in_band_cap(ctx) / 4 * 3;
+        if max_bytes == 0 {
+            return Err(wire(
+                ErrorCode::LimitExceeded,
+                "owner-outbox-page-exceeds-wire-limit",
+            ));
+        }
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id;
+        let db_path = open.db_path;
+        let cancellation = OperationCancellation::new(ctx);
+        let read = async move {
+            tokio::task::spawn_blocking(move || {
+                let store = dohc_engine_storage::EngineStore::open_read_only(&db_path)?;
+                dohc_engine_collab::read_pending_owner_outbox_page(
+                    &store,
+                    &workspace_id,
+                    &params.outbox_id,
+                    params.cursor,
+                    max_bytes,
+                )
+            })
+            .await
+            .map_err(|_| wire(ErrorCode::Internal, "owner-outbox-worker-failed"))?
+            .map_err(map_owner_outbox)
+        };
+        let pending = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("ydoc.ownerOutbox.readPending"));
+            }
+            result = read => result?,
+        };
+        let result = match pending {
+            dohc_engine_collab::OwnerOutboxPageResult::ReadChanged => {
+                json!({ "kind": "readChanged" })
+            }
+            dohc_engine_collab::OwnerOutboxPageResult::Page(page) => json!({
+                "kind": "page",
+                "snapshot": page.cursor.snapshot,
+                "part": page.cursor.part,
+                "sequence": page.cursor.sequence,
+                "offset": page.cursor.offset,
+                "totalBytes": page.total_bytes,
+                "digest": page.digest,
+                "bytesBase64": base64::engine::general_purpose::STANDARD.encode(page.bytes),
+                "nextCursor": page.next_cursor,
+            }),
+        };
+        let envelope = dohc_engine_protocol::wire::Envelope::Response(Response {
+            id: request_id,
+            result,
+        });
+        if serde_json::to_vec(&envelope)
+            .map_err(|_| wire(ErrorCode::Internal, "owner-outbox-state-corrupt"))?
+            .len()
+            > ctx.max_frame_bytes as usize
+        {
+            return Err(wire(
+                ErrorCode::LimitExceeded,
+                "owner-outbox-page-exceeds-wire-limit",
+            ));
+        }
+        let dohc_engine_protocol::wire::Envelope::Response(response) = envelope else {
+            unreachable!()
+        };
+        Ok(response.result)
+    }
+
+    async fn owner_ydoc_outbox_acknowledge(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: OwnerYDocOutboxAcknowledgeParams = parse(params)?;
+        for receipt in &params.receipts {
+            if receipt.accepting_host_epoch < 1
+                || receipt.accepting_host_epoch > dohc_engine_protocol::MAX_WIRE_INTEGER as i64
+                || receipt.journal_cursor < 1
+                || receipt.journal_cursor > dohc_engine_protocol::MAX_WIRE_INTEGER as i64
+            {
+                return Err(wire(
+                    ErrorCode::InvalidParams,
+                    "invalid-owner-outbox-receipt",
+                ));
+            }
+        }
+        let receipts = params
+            .receipts
+            .into_iter()
+            .map(|receipt| dohc_engine_collab::OwnerDeliveryReceipt {
+                delivery_id: receipt.delivery_id,
+                update_digest: receipt.update_digest,
+                journal_cursor: receipt.journal_cursor,
+                accepting_host_epoch: receipt.accepting_host_epoch,
+            })
+            .collect::<Vec<_>>();
+        let handle = handle.ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(&handle))?;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = self
+            .mutation_session_guard(
+                &open,
+                &cancellation,
+                "ydoc.ownerOutbox.acknowledge (queued)",
+            )
+            .await?;
+        let open = self.open(Some(&handle))?;
+        let result = open
+            .actor
+            .owner_ydoc_outbox_acknowledge(
+                open.workspace_id.clone(),
+                params.outbox_id,
+                receipts,
+                cancellation.token(),
+            )
+            .await
+            .map_err(|error| match error {
+                RuntimeError::Cancelled => {
+                    cancellation.interruption("ydoc.ownerOutbox.acknowledge")
+                }
+                error => map_runtime(error),
+            })?
+            .map_err(map_owner_outbox)?;
+        Ok(json!({
+            "acknowledged": result.acknowledged,
+            "pendingBytes": result.pending_bytes,
+            "oldestEntryAtMs": result.oldest_entry_at_ms,
+        }))
+    }
+
+    async fn owner_ydoc_outbox_quarantine(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: OwnerYDocOutboxQuarantineParams = parse(params)?;
+        if let Some(binding) = &params.observed_binding {
+            validate_owner_outbox_wire_binding(binding)?;
+        }
+        let handle = handle.ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(&handle))?;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = self
+            .mutation_session_guard(&open, &cancellation, "ydoc.ownerOutbox.quarantine (queued)")
+            .await?;
+        let open = self.open(Some(&handle))?;
+        open.actor
+            .owner_ydoc_outbox_quarantine(
+                open.workspace_id.clone(),
+                dohc_engine_collab::OwnerOutboxQuarantineInput {
+                    outbox_id: params.outbox_id,
+                    reason: params.reason,
+                    observed_binding: params.observed_binding,
+                },
+                cancellation.token(),
+            )
+            .await
+            .map_err(|error| match error {
+                RuntimeError::Cancelled => cancellation.interruption("ydoc.ownerOutbox.quarantine"),
+                error => map_runtime(error),
+            })?
+            .map_err(map_owner_outbox)?;
+        Ok(json!({ "quarantined": true }))
+    }
+
     async fn ydoc_open(
         &self,
         ctx: &RequestContext,
@@ -8182,7 +8622,7 @@ impl EngineService {
             }
             serial = Arc::clone(&open.session_ops).lock_owned() => serial,
         };
-        // The first read only DERIVES the key (head resolution can't happen
+        // The first read only derives the key (head resolution can't happen
         // without it). The lease is then taken on that key and the state is
         // RE-READ under it, so the second read is authoritative for the
         // acquired session.
@@ -8262,11 +8702,11 @@ impl EngineService {
             .map_err(map_ydoc_open_runtime)?;
         if state.key != probe.key {
             // The path's owner changed between the probe and the lease: the
-            // held lease guards the WRONG key. Refuse; the client retries.
+            // held lease guards the wrong key. Refuse; the client retries.
             return Err(wire(ErrorCode::InvalidParams, "ydoc-session-busy"));
         }
         // Post-commit: the open's drain committed these history rows, and no
-        // other path fires a parked update's events (#1002). Never claims —
+        // other path fires a parked update's events. Never claims —
         // drained updates are synced, and only the origin device claims its
         // automation triggers (ADR 0008).
         for facts in &state.record_facts {
@@ -8409,7 +8849,7 @@ impl EngineService {
         let params: YdocRecordUpdateParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
         let open = self.open(handle.as_ref())?;
-        // An OWNED guard: it moves INTO the spawned task below, so a dropped
+        // An owned guard: it moves INTO the spawned task below, so a dropped
         // RPC future cannot release the session serial while the record (and
         // its first_update_pending transition) is still running — a second
         // recordUpdate would otherwise read the stale flag and refuse
@@ -8439,8 +8879,8 @@ impl EngineService {
             return Err(wire(ErrorCode::InvalidParams, "seed-not-first-update"));
         }
         let seed_source_sha256 = params.seed.then(|| session.open_head_sha.clone()).flatten();
-        // The record and the first-seed flag transition run in a SPAWNED
-        // task: if the seed COMMITS but a deadline/cancel drops this future
+        // The record and the first-seed flag transition run in a spawned
+        // task: if the seed commits but a deadline/cancel drops this future
         // before the post-await assignment, the session would keep
         // `first_update_pending` and send its next distinct edit with
         // `require_empty_lineage = true` — a spurious
@@ -8496,7 +8936,7 @@ impl EngineService {
         };
         // A lineage that could have started sharing and did not is the one
         // origination outcome a person can act on, so it does not pass in
-        // silence (#632). The wire result reports the append; stderr keeps the
+        // silence. The wire result reports the append; stderr keeps the
         // server-side trail, the same split the post-commit materialize path
         // uses. The per-document sharing surface that will show this to the
         // user arrives with #356 — until a workspace can replicate at all,
@@ -8576,9 +9016,9 @@ impl EngineService {
             dohc_engine_runtime::YdocSettleOutcome::Settled(settlement) => *settlement,
             // A distinct wire message the client acts on: remote edits
             // drained under this session's lease mean the client's doc is
-            // BEHIND — it must resync (which returns the full drained
+            // behind — it must resync (which returns the full drained
             // state) and settle again. The drained updates' record facts
-            // ride the refusal and fire here, post-commit (#1002).
+            // ride the refusal and fire here, post-commit.
             dohc_engine_runtime::YdocSettleOutcome::RemoteUpdatesPending { record_facts } => {
                 for facts in &record_facts {
                     emit_record_events(&self.events, &open.workspace_id, facts);
@@ -8608,30 +9048,6 @@ impl EngineService {
             },
         })
         .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
-    }
-
-    async fn ydoc_apply_external_markdown_edit(
-        &self,
-        ctx: &RequestContext,
-        handle: Option<WorkspaceHandle>,
-        params: Value,
-    ) -> Result<Value, WireError> {
-        let params: YdocApplyExternalMarkdownEditParams = parse(params)?;
-        let cancellation = OperationCancellation::new(ctx);
-        let open = self.open(handle.as_ref())?;
-        let _serial = tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption("ydoc.applyExternalMarkdownEdit (queued)"));
-            }
-            serial = open.session_ops.lock() => serial,
-        };
-        let _ = self.ydoc_session(handle.as_ref(), &params.session_id)?;
-        let _ = params.markdown;
-        Err(wire(
-            ErrorCode::InvalidParams,
-            "external-edit-unsupported-live",
-        ))
     }
 
     async fn ydoc_close(
@@ -8665,7 +9081,7 @@ impl EngineService {
         handle: Option<&WorkspaceHandle>,
         params: YdocCloseParams,
     ) -> Result<Value, WireError> {
-        // Missing `settle` means SETTLE — the TS driver treats close() as
+        // Missing `settle` means settle — the TS driver treats close() as
         // settle-unless-explicitly-false, and defaulting to false here would
         // fail dirty local-only closes (UnsettledClose) and let a replicated
         // close compact while the artifact projection is stale.
@@ -8687,9 +9103,9 @@ impl EngineService {
                 .await;
             match settled {
                 Ok(_) => {}
-                // The refusal fires AFTER the deferred rows drained: for the
-                // EXPLICIT settle RPC the client must resync (it keeps
-                // editing), but a CLOSE is final — the session ends, so the
+                // The refusal fires after the deferred rows drained: for the
+                // explicit settle RPC the client must resync (it keeps
+                // editing), but a close is final — the session ends, so the
                 // converged doc (local + drained remote) IS the artifact.
                 // Retry once; the drain has emptied the queue, so the second
                 // settle projects the merged state. Without this, a routine
@@ -8708,19 +9124,19 @@ impl EngineService {
             }
         }
         let (open, session) = self.ydoc_session(handle, &params.session_id)?;
-        // The close command carries a FRESH token: once the settle above has
+        // The close command carries a fresh token: once the settle above has
         // materialized, honoring a caller cancel here would leave the
         // session/lease held, and the retried close would re-settle over the
         // already-settled content (the fingerprint's previous-moment input
         // changed) — duplicate moments for one close.
         //
-        // The session entry (and with it the lease guard) is TAKEN before
+        // The session entry (and with it the lease guard) is taken before
         // the await: if a deadline drops this future while the actor still
         // compacts/prunes, dropping the entry releases the lease — the doc
-        // can't stay ydoc-session-busy forever. A close REFUSAL (e.g.
+        // can't stay ydoc-session-busy forever. A close refusal (e.g.
         // UnsettledClose on a dirty prune-close) reinserts the entry.
         //
-        // The take→close→reinsert sequence runs in a SPAWNED task, not this
+        // The take→close→reinsert sequence runs in a spawned task, not this
         // RPC future: the protocol supervisor can drop this future on a
         // caller cancel/deadline, and a drop between the take and the
         // actor's refusal would skip the reinsert — the session and lease
@@ -8734,9 +9150,9 @@ impl EngineService {
         let session_key = session.key.clone();
         let close_root = open.root.clone();
         let close_self_writes = Arc::new(self.self_writes.scoped(&open.root));
-        // The TAKE happens synchronously BEFORE the spawn: if this future is
+        // The take happens synchronously before the spawn: if this future is
         // dropped right after spawning, `session_ops` releases while the task
-        // has not yet run — a concurrent recordUpdate/settle must NOT be able
+        // has not yet run — a concurrent recordUpdate/settle must not be able
         // to find the session and race edits against the in-flight close.
         let taken = lock(&self.sessions).remove(&params.session_id);
         let close_events = self.events.clone();
@@ -8754,17 +9170,17 @@ impl EngineService {
                 .await;
             // Post-commit, inside the spawned task — it runs to completion
             // even when the RPC future is dropped, and the close's drain
-            // committed these history rows (#1002).
+            // committed these history rows.
             if let Ok(closed) = &close_result {
                 for facts in &closed.record_facts {
                     emit_record_events(&close_events, &close_workspace_id, facts);
                 }
             }
-            // Reinsert ONLY on a genuine close refusal (UnsettledClose and
+            // Reinsert only on a genuine close refusal (UnsettledClose and
             // friends) — an ActorUnavailable/WorkerPanicked error means the
             // workspace was torn down while this task ran, and resurrecting
             // the entry would keep its embedded lease alive past the
-            // eviction, leaving the doc ydoc-session-busy for the NEXT
+            // eviction, leaving the doc ydoc-session-busy for the next
             // workspace open.
             if matches!(
                 close_result,
@@ -8791,7 +9207,7 @@ impl EngineService {
     /// does to every session, and it is the only exit for a session that can
     /// neither settle (nothing may write this artifact) nor prune (the guard
     /// refuses while no artifact holds the CRDT's bytes). Nothing is discarded,
-    /// so the next open resurrects the lineage with its edits (#665).
+    /// so the next open resurrects the lineage with its edits.
     async fn ydoc_evict(
         &self,
         ctx: &RequestContext,
@@ -8810,7 +9226,7 @@ impl EngineService {
         };
         // Refuse an unknown id for the same reason `ydoc.close` does: a caller
         // holding a session the daemon does not have must learn that, not read
-        // a success. The removal below is the WHOLE operation — no await, no
+        // a success. The removal below is the whole operation — no await, no
         // actor round trip — so no cancellation can land between the two.
         self.ydoc_session(handle.as_ref(), &params.session_id)?;
         lock(&self.sessions).remove(&params.session_id);
@@ -8939,16 +9355,16 @@ impl EngineService {
         let candidates = conflicts.len().min(CONFLICTS_RESPONSE_ROW_LIMIT);
         let mut rows: Vec<Value> = conflicts[..candidates].iter().map(conflict_json).collect();
         // A row past the hard cap can never ship in band, and refusing it
-        // would refuse its healthy neighbors AND dead-end the cursor: an
+        // would refuse its healthy neighbors and dead-end the cursor: an
         // over-cap row that is not first ends the page, the cursor advances
-        // to it, and the next request makes it the leading row. Degrade THAT
+        // to it, and the next request makes it the leading row. Degrade that
         // row instead: withhold each over-cap side body, so the `blobSha256`
         // and `inbandLimitBytes` beside it route the caller to
         // `versionedText.readBlob` — the hydration `versionedText.read`
         // already uses.
         for row in &mut rows {
             if serde_json::to_string(row).map_or(0, |s| s.len()) > CONFLICT_ROW_HARD_CAP_BYTES {
-                // EVERY body, not just the over-cap ones: the row crossed on
+                // Every body, not just the over-cap ones: the row crossed on
                 // the sum of its parts, so withholding only the parts that
                 // individually cross can leave it over the cap.
                 withhold_all_conflict_side_texts(row);
@@ -8961,7 +9377,7 @@ impl EngineService {
         );
         if included == 0 && !conflicts.is_empty() {
             // The last line of defense, not dead code: withholding nulls only
-            // the side BODIES, so this fires for a row still over the cap on
+            // the side bodies, so this fires for a row still over the cap on
             // what remains — which is why every string that survives
             // withholding is bounded before persistence, at the shared path
             // both open routes funnel through
@@ -8992,7 +9408,7 @@ impl EngineService {
             "nextAfterConflictId": next_after_conflict_id,
         });
         // The cap above bounds a ROW; the frame carries the PAGE. The
-        // continuation is appended AFTER the cut — a second copy of one row's
+        // continuation is appended after the cut — a second copy of one row's
         // id — and a body admitted in band can leave no room for it, so a row
         // and a cursor that are each admissible still cross together. Measure
         // the encoded response, and past the frame withhold every body on
@@ -9001,7 +9417,7 @@ impl EngineService {
         // The withheld page fits. A fully withheld row costs its non-withheld
         // strings plus scaffolding — `CONFLICT_METADATA_BUDGET_BYTES` plus
         // `CONFLICT_ROW_STRUCTURAL_HEADROOM_BYTES`, both bounded before
-        // persistence — and that budget counts the conflict id TWICE, which is
+        // persistence — and that budget counts the conflict id twice, which is
         // precisely the continuation's copy. A page of several rows is bounded
         // instead by `CONFLICTS_PAGE_BYTE_BUDGET`, which admits a row after the
         // first only while the running total stays inside it, and its
@@ -9049,7 +9465,7 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
-            if matches!(&result, ApplyOutcome::Applied(_)) {
+            if matches!(&result.primary, ApplyDisposition::Applied(_)) {
                 open.request_collection_reconcile();
             }
             return Ok(replicated_conflict_json(result));
@@ -9101,7 +9517,7 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
-            if matches!(&result, ApplyOutcome::Applied(_)) {
+            if matches!(&result.primary, ApplyDisposition::Applied(_)) {
                 open.request_collection_reconcile();
             }
             return Ok(replicated_conflict_json(result));
@@ -9116,12 +9532,12 @@ impl EngineService {
             local.metadata_summary.as_deref(),
             local.metadata_correlation_id.as_deref(),
         )?;
-        let metadata_origin = validated_origin(Some(&local.metadata_origin), None)?;
-        // THE ANSWER IS BUILT AFTER THE MUTATION COMMITS. Withholding (below)
+        let metadata_origin = validated_origin(Some(&local.metadata_origin))?;
+        // The answer is built after the mutation commits. Withholding (below)
         // takes out every body, never the strings beside them, so an answer
         // whose withheld form still passes the frame cannot be sent at all —
         // and by then the resolution has happened, which turns a transport
-        // limit into a lost acknowledgement. So the answer is bounded BEFORE
+        // limit into a lost acknowledgement. So the answer is bounded before
         // anything is written: reserve what this request's own fields will
         // spend, and the resolve transaction refuses inside itself, without
         // writing, if the conflict cannot fit in what remains.
@@ -9135,12 +9551,12 @@ impl EngineService {
         //   3. scaffolding, fixed-width fields, and the removed head's
         //      metadata pair — `RESOLVE_ANSWER_STRUCTURAL_BYTES`.
         // Nothing else can appear. The write and delete blocks describe the
-        // LIVE head, and `live_state_matches_conflict_current` admits a
+        // live head, and `live_state_matches_conflict_current` admits a
         // resolution only when that head matches the recorded current side on
         // path, object and latest moment — so those identifiers are the
         // conflict row's, already counted in (1).
         //
-        // Healthy work cannot reach it, MEASURED rather than assumed. Three
+        // Healthy work cannot reach it, measured rather than assumed. Three
         // UUID identifiers served twelve times cost under 600 bytes, and the
         // sibling write paths cap a metadata field at
         // `MAX_METADATA_FIELD_BYTES`. `a_worst_legitimate_resolve_is_admitted`
@@ -9231,8 +9647,8 @@ impl EngineService {
                 "moment": moment_json(&delete.moment),
             })),
         });
-        // ONE frame carries the whole ANSWER, and this one reports a mutation
-        // that ALREADY COMMITTED: an over-frame answer loses the caller's
+        // One frame carries the whole answer, and this one reports a mutation
+        // that already committed: an over-frame answer loses the caller's
         // acknowledgement for work the workspace kept. Each body is withheld
         // past the in-band cap above; nothing bounds their sum beside a
         // conflict whose own metadata may reach
@@ -9245,55 +9661,13 @@ impl EngineService {
         // reserved above and enforced inside the resolve transaction, which
         // refuses — without writing — an answer whose withheld form cannot
         // fit. What this pass adds is the shrinking that keeps a fitting
-        // answer inside the frame once the bodies are counted. Refusing HERE
+        // answer inside the frame once the bodies are counted. Refusing here
         // is not an option: the resolution has committed, and a refusal would
         // report a mutation that happened as one that did not.
         if response_encoded_bytes(id, &answer) > RESPONSE_FRAME_BYTES {
             withhold_all_resolve_answer_texts(&mut answer);
         }
         Ok(answer)
-    }
-
-    async fn search_query(
-        &self,
-        ctx: &RequestContext,
-        handle: Option<WorkspaceHandle>,
-        params: Value,
-    ) -> Result<Value, WireError> {
-        let params: SearchParams = parse(params)?;
-        let open = self.open(handle.as_ref())?;
-        let cancellation = OperationCancellation::new(ctx);
-        let results = open
-            .actor
-            .search(
-                open.root,
-                open.workspace_id,
-                params.version_id,
-                params.query,
-                params.limit,
-                params.now_ms.unwrap_or(now_ms()?),
-                cancellation.token(),
-            )
-            .await
-            .map_err(map_runtime)?;
-        Ok(Value::Array(
-            results
-                .into_iter()
-                .map(|result| {
-                    json!({
-                        "surface": match result.surface { SearchSurface::File => "file", SearchSurface::Chat => "chat" },
-                        "path": result.path,
-                        "title": result.title,
-                        "line": result.line,
-                        "preview": result.preview,
-                        "matchStart": result.match_start,
-                        "matchEnd": result.match_end,
-                        "threadId": result.thread_id,
-                        "objectId": result.object_id
-                    })
-                })
-                .collect(),
-        ))
     }
 
     async fn search_query_page(
@@ -9660,7 +10034,7 @@ async fn close_ydoc_session_for_version_fence(
         lock(sessions).insert(session_id.to_owned(), entry);
     }
     let closed = close.map_err(map_runtime)?;
-    // Post-commit: the close's drain committed these history rows (#1002).
+    // Post-commit: the close's drain committed these history rows.
     for facts in &closed.record_facts {
         emit_record_events(events, &open.workspace_id, facts);
     }
@@ -9719,7 +10093,7 @@ async fn settle_ydoc_session_for_version_fence(
     let settled = match settled {
         dohc_engine_runtime::YdocSettleOutcome::Settled(settlement) => *settlement,
         dohc_engine_runtime::YdocSettleOutcome::RemoteUpdatesPending { record_facts } => {
-            // Post-commit (#1002); the fence's caller retries the settle.
+            // Post-commit; the fence's caller retries the settle.
             for facts in &record_facts {
                 emit_record_events(events, &open.workspace_id, facts);
             }
@@ -9812,7 +10186,7 @@ impl ProtocolEngineService for EngineService {
 
 struct OperationCancellation {
     token: CancellationToken,
-    /// Whether the DEADLINE (not a client cancel) is what fired the token —
+    /// Whether the deadline (not a client cancel) is what fired the token —
     /// the two report different wire codes with different retryability.
     deadline_hit: Arc<std::sync::atomic::AtomicBool>,
     bridge: tokio::task::JoinHandle<()>,
@@ -9831,7 +10205,7 @@ impl OperationCancellation {
         let child = token.clone();
         let bridge = tokio::spawn(async move {
             // The supervisor enforces deadlines non-cooperatively for wire
-            // requests; EMBEDDED callers (InProcessTransport, future
+            // requests; embedded callers (InProcessTransport, future
             // mobile/WASM hosts) have no supervisor, so the deadline arms
             // the same token here.
             match deadline {
@@ -9855,7 +10229,7 @@ impl OperationCancellation {
     }
 
     /// The wire error for an interrupted wait: DEADLINE_EXCEEDED when the
-    /// deadline fired, CANCELLED for a client cancel — retryability differs.
+    /// deadline fired, cancelled for a client cancel — retryability differs.
     fn interruption(&self, what: &str) -> WireError {
         if self.deadline_hit.load(std::sync::atomic::Ordering::Relaxed) {
             WireError::new(
@@ -9898,7 +10272,7 @@ impl Drop for OpenGuard {
             return;
         };
         // Detached + blocking: never run the actor join on a runtime worker
-        // (the #201 cancellation-safety contract). begin_close installed the
+        // (the cancellation-safety contract). begin_close installed the
         // Closing marker synchronously, so an immediate reopen waits here.
         tokio::task::spawn_blocking(move || {
             let _ = closing.finish();
@@ -10019,7 +10393,7 @@ struct ShareViewParams {
     workspace_id: String,
     share_id: String,
     /// The selector the relay stated for this share, pinned by the caller on
-    /// first read. REQUIRED, and required as an object: absent and explicit
+    /// first read. Required, and required as an object: absent and explicit
     /// `null` both parse as "no scope", which is the one pull nothing checks.
     /// Serde refuses either — a caller with no selector must resolve one
     /// before it pulls.
@@ -10030,7 +10404,7 @@ struct ShareViewParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ShareViewEnrollParams {
     workspace_id: String,
-    /// REQUIRED, for the level it carries. Recording is a level decision, and
+    /// Required, for the level it carries. Recording is a level decision, and
     /// a caller that cannot state the level must not record one.
     granted_selector: GrantedSelectorParams,
 }
@@ -10045,7 +10419,7 @@ struct ShareProposalSubmitParams {
     /// wrote, and the level inside it is what the client refuses below `edit`
     /// on.
     granted_selector: GrantedSelectorParams,
-    /// The idempotency key for ONE submit. No default: a generated-per-attempt
+    /// The idempotency key for one submit. No default: a generated-per-attempt
     /// id would open a second proposal on every retry of the same intent.
     submit_id: String,
 }
@@ -10056,7 +10430,7 @@ struct GrantedSelectorParams {
     paths: Vec<String>,
     #[serde(default)]
     version_id: Option<String>,
-    // REQUIRED (#646 PR1): the level the caller pinned from the relay's own
+    // Required (#646 PR1): the level the caller pinned from the relay's own
     // selector. No default here — a grant whose level cannot be read is not
     // a narrower grant, it is an unreadable one, and `share_view_pull` below
     // refuses it rather than substituting a default.
@@ -10078,15 +10452,11 @@ struct VersionedTextWriteParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
@@ -10109,15 +10479,11 @@ struct VersionedBinaryWriteParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     moment_id: Option<String>,
     #[serde(default)]
@@ -10141,15 +10507,11 @@ struct VersionedBinaryWriteBlobParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     moment_id: Option<String>,
     #[serde(default)]
@@ -10169,15 +10531,11 @@ struct VersionedTextRenameParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
@@ -10194,15 +10552,11 @@ struct VersionedTextDeleteParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
@@ -10220,15 +10574,9 @@ struct VersionedTextRollbackParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     author: Option<Value>,
     #[serde(default)]
-    author_json: Option<String>,
-    #[serde(default)]
     request_id: Option<String>,
-    #[serde(default)]
-    legacy_before_text: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -10252,15 +10600,11 @@ struct VersionedTextMergeParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
@@ -10488,6 +10832,55 @@ struct MomentsGetParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OwnerYDocOutboxLimitsParams {
+    max_pending_bytes: i64,
+    max_pending_age_ms: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OwnerYDocOutboxAppendParams {
+    binding: dohc_engine_collab::LiveObjectBinding,
+    base_update_base64: String,
+    append_key: String,
+    update_base64: String,
+    limits: OwnerYDocOutboxLimitsParams,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OwnerYDocOutboxIdParams {
+    outbox_id: String,
+    cursor: Option<dohc_engine_collab::OwnerOutboxReadCursor>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OwnerYDocDeliveryReceiptParams {
+    delivery_id: String,
+    update_digest: String,
+    journal_cursor: i64,
+    accepting_host_epoch: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OwnerYDocOutboxAcknowledgeParams {
+    outbox_id: String,
+    receipts: Vec<OwnerYDocDeliveryReceiptParams>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OwnerYDocOutboxQuarantineParams {
+    outbox_id: String,
+    reason: String,
+    #[serde(default)]
+    observed_binding: Option<dohc_engine_collab::LiveObjectBinding>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct YdocOpenParams {
     version_id: String,
     path: String,
@@ -10549,7 +10942,7 @@ struct YdocRecordUpdateParams {
     attribution: Option<dohc_engine_domain::ChangeAttribution>,
     /// The client declares this update as the SEED: a faithful import of the
     /// `seedContent` the open returned, built before any user input could
-    /// reach the session (#815). Only the adapter's seed path sends it; a
+    /// reach the session. Only the adapter's seed path sends it; a
     /// crash-replay of prior state must not. The engine accepts it only for
     /// the first update of a lineage-absent session, and records the open
     /// head as the lineage's seed source.
@@ -10593,29 +10986,10 @@ struct YdocSettleResult {
     content: Option<String>,
     sha256: String,
     /// `false` when the settle committed but materialization was blocked by
-    /// containment: the file on disk is still the OLD artifact and the write
+    /// containment: the file on disk is still the old artifact and the write
     /// is pending a retry. Nothing may report the document as saved on this.
     materialized: bool,
     projection: YdocProjectionProvenance,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct YdocApplyExternalMarkdownEditParams {
-    session_id: String,
-    markdown: String,
-}
-
-#[allow(dead_code, reason = "C1 refuses this method before producing a result")]
-#[derive(Serialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-enum YdocApplyExternalMarkdownEditResult {
-    Merged { markdown: String },
-    Conflict { conflict_path: String },
 }
 
 #[derive(Deserialize)]
@@ -10700,15 +11074,6 @@ struct LocalResolveDto {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SearchParams {
-    version_id: String,
-    query: String,
-    limit: Option<i64>,
-    now_ms: Option<i64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SearchPageParams {
     query: String,
     limit: Option<i64>,
@@ -10731,8 +11096,13 @@ struct SearchEnsureIndexParams {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CollectionsListParams {}
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CollectionsListParams {
+    #[serde(default = "default_collection_query_limit")]
+    limit: usize,
+    #[serde(default)]
+    cursor: Option<String>,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -11371,7 +11741,7 @@ struct SnapshotDto {
 impl ConflictDto {
     fn into_domain(self) -> Result<TextConflict, WireError> {
         // No size gate here on purpose. Everything a conflict row carries
-        // that withholding cannot shrink is bounded ONCE, at the shared
+        // that withholding cannot shrink is bounded once, at the shared
         // pre-persistence path both conflict opens funnel through
         // (`insert_text_conflict_if_absent`) — this DTO is only the local
         // route, and a peer's replicated open never passes through it.
@@ -12204,17 +12574,17 @@ fn settled_snapshot_json(snapshot: &TextSnapshot) -> Value {
 /// The conflict a resolution closed, with every side's body withheld past the
 /// in-band cap.
 ///
-/// ONE rule bounds this whole answer, because no part of it may grow with a
+/// One rule bounds this whole answer, because no part of it may grow with a
 /// body. The answer carries five text bodies — three sides, the settled
 /// snapshot, and the moment's before and after — and one control frame has to
 /// hold all of them. Withholding each past 128 KiB caps the answer at five
 /// residuals plus metadata, about 640 KiB inside an 8 MiB frame. Withhold
 /// only some of them and a conflict whose row approaches
 /// `CONFLICT_ROW_HARD_CAP_BYTES` still overruns the frame — and the daemon's
-/// writer treats an oversized answer as a fatal transport error AFTER the
+/// writer treats an oversized answer as a fatal transport error after the
 /// resolution has committed.
 ///
-/// The conflict LISTING shares the withholding, not the trigger: it carries
+/// The conflict listing shares the withholding, not the trigger: it carries
 /// bodies in band up to `CONFLICT_ROW_HARD_CAP_BYTES` per row, and degrades
 /// only a row past that (`conflicts_list`).
 fn settled_conflict_json(conflict: &TextConflict) -> Value {
@@ -12236,10 +12606,10 @@ fn withhold_conflict_side_texts(value: &mut Value) {
     }
 }
 
-/// Withhold EVERY side body of one serialized conflict, whatever each body's
+/// Withhold every side body of one serialized conflict, whatever each body's
 /// own size.
 ///
-/// The per-body rule above cannot degrade an AGGREGATE overrun: three sides of
+/// The per-body rule above cannot degrade an aggregate overrun: three sides of
 /// 128 KiB each are individually in band, and beside metadata near
 /// `CONFLICT_METADATA_BUDGET_BYTES` their sum still carries the row past
 /// `CONFLICT_ROW_HARD_CAP_BYTES`. Withholding only the over-cap bodies would
@@ -12271,7 +12641,7 @@ fn withhold_moment_texts(moment: &mut Value) {
     }
 }
 
-/// Withhold EVERY body one resolve answer carries: the conflict's three sides,
+/// Withhold every body one resolve answer carries: the conflict's three sides,
 /// the settled snapshot, and both moments' payloads. The removed head is
 /// described by its moment, so `delete.before` carries no body to withhold.
 fn withhold_all_resolve_answer_texts(answer: &mut Value) {
@@ -12437,8 +12807,8 @@ fn conflict_state_json(state: &ConflictFileState) -> Value {
 }
 
 fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value {
-    match outcome {
-        ApplyOutcome::Applied(result) => {
+    let mut value = match outcome.primary {
+        ApplyDisposition::Applied(result) => {
             json!({
                 "replicated": true,
                 "status": "applied",
@@ -12447,7 +12817,7 @@ fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value
                 "matched": result.matched
             })
         }
-        ApplyOutcome::Refused(refusal) => json!({
+        ApplyDisposition::Refused(refusal) => json!({
             "replicated": true,
             "status": "refused",
             "workspaceId": refusal.workspace_id,
@@ -12457,49 +12827,43 @@ fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value
             "code": refusal.reason.code(),
             "reason": refusal.reason.message()
         }),
-        ApplyOutcome::Skipped => json!({ "replicated": true, "status": "skipped" }),
-        ApplyOutcome::Crashed { committed } => json!({
+        ApplyDisposition::Skipped => json!({ "replicated": true, "status": "skipped" }),
+        ApplyDisposition::Crashed { committed } => json!({
             "replicated": true,
             "status": "crashed",
             "committed": committed
         }),
-        ApplyOutcome::WithDiagnostics {
-            outcome,
-            refusals,
-            sharing_declined,
-        } => {
-            let mut value = replicated_conflict_json(*outcome);
-            if let Some(object) = value.as_object_mut() {
-                if !refusals.is_empty() {
-                    object.insert(
-                        "refusals".to_owned(),
-                        Value::Array(
-                            refusals
-                                .into_iter()
-                                .map(|refusal| {
-                                    json!({
-                                        "workspaceId": refusal.workspace_id,
-                                        "originId": refusal.origin_id,
-                                        "originSeq": refusal.origin_seq,
-                                        "opKind": refusal.op_kind,
-                                        "code": refusal.reason.code(),
-                                        "reason": refusal.reason.message()
-                                    })
-                                })
-                                .collect(),
-                        ),
-                    );
-                }
-                if !sharing_declined.is_empty() {
-                    object.insert(
-                        "sharingDeclined".to_owned(),
-                        Value::Array(sharing_declined_json(sharing_declined)),
-                    );
-                }
-            }
-            value
+    };
+    if let Some(object) = value.as_object_mut() {
+        if !outcome.refusals.is_empty() {
+            object.insert(
+                "refusals".to_owned(),
+                Value::Array(
+                    outcome
+                        .refusals
+                        .into_iter()
+                        .map(|refusal| {
+                            json!({
+                                "workspaceId": refusal.workspace_id,
+                                "originId": refusal.origin_id,
+                                "originSeq": refusal.origin_seq,
+                                "opKind": refusal.op_kind,
+                                "code": refusal.reason.code(),
+                                "reason": refusal.reason.message()
+                            })
+                        })
+                        .collect(),
+                ),
+            );
+        }
+        if !outcome.sharing_declined.is_empty() {
+            object.insert(
+                "sharingDeclined".to_owned(),
+                Value::Array(sharing_declined_json(outcome.sharing_declined)),
+            );
         }
     }
+    value
 }
 
 fn deserialize_optional_non_null_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -12850,8 +13214,8 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
 /// The selector the relay stated for this share, pinned by the caller on first
 /// read, read into the grant every share RPC enforces.
 ///
-/// Read BEFORE the relay round trip: a grant whose level this process cannot
-/// read must never pin (#646). The refusal names the accepted set, like the
+/// Read before the relay round trip: a grant whose level this process cannot
+/// read must never pin. The refusal names the accepted set, like the
 /// relay's own — the caller is an agent reading this error, and "unknown share
 /// access" told it nothing it could act on.
 fn share_grant(selector: GrantedSelectorParams) -> Result<dohc_engine_sync::ShareGrant, WireError> {
@@ -12889,37 +13253,18 @@ fn validate_metadata_fields(
     Ok(())
 }
 
-fn validated_origin(
-    origin: Option<&str>,
-    legacy_origin: Option<&str>,
-) -> Result<String, WireError> {
-    let value = origin
-        .or(legacy_origin)
-        .ok_or_else(|| wire(ErrorCode::InvalidParams, "invalid-metadata"))?;
-    match value {
-        "api" | "local-file" | "restore" | "sync" | "unknown" => Ok(value.to_owned()),
-        // Compatibility for pre-RPC-D callers. The new `origin` field remains
-        // the closed five-set; legacy `metadataOrigin: agent` represented an
-        // API write before author attribution became a separate field.
-        "agent" if origin.is_none() => Ok("api".to_owned()),
+fn validated_origin(origin: Option<&str>) -> Result<String, WireError> {
+    match origin {
+        Some(value @ ("api" | "local-file" | "restore" | "sync" | "unknown")) => {
+            Ok(value.to_owned())
+        }
         _ => Err(wire(ErrorCode::InvalidParams, "invalid-metadata")),
     }
 }
 
-fn validated_author(
-    author: Option<&Value>,
-    legacy_author_json: Option<&str>,
-) -> Result<Option<String>, WireError> {
-    if author.is_some() && legacy_author_json.is_some() {
-        return Err(wire(ErrorCode::InvalidParams, "invalid-metadata"));
-    }
-    let value = match author {
-        Some(value) => value.clone(),
-        None => match legacy_author_json {
-            Some(raw) => serde_json::from_str(raw)
-                .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-metadata"))?,
-            None => return Ok(None),
-        },
+fn validated_author(author: Option<&Value>) -> Result<Option<String>, WireError> {
+    let Some(value) = author else {
+        return Ok(None);
     };
     let object = value
         .as_object()
@@ -12947,6 +13292,68 @@ fn validated_author(
 
 fn parse<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, WireError> {
     serde_json::from_value(value).map_err(|_| wire(ErrorCode::InvalidParams, "invalid parameters"))
+}
+
+fn validate_owner_outbox_wire_binding(
+    binding: &dohc_engine_collab::LiveObjectBinding,
+) -> Result<(), WireError> {
+    if binding.restore_fence_generation < 0
+        || binding.restore_fence_generation > dohc_engine_protocol::MAX_WIRE_INTEGER as i64
+    {
+        return Err(wire(
+            ErrorCode::InvalidParams,
+            "invalid-owner-outbox-binding",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_owner_outbox_limit(value: i64) -> Result<(), WireError> {
+    if value <= 0 || value > dohc_engine_protocol::MAX_WIRE_INTEGER as i64 {
+        return Err(wire(ErrorCode::InvalidParams, "invalid-owner-outbox-limit"));
+    }
+    Ok(())
+}
+
+fn decode_owner_outbox_base64(value: &str) -> Result<Vec<u8>, WireError> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-owner-outbox-base64"))?;
+    if base64::engine::general_purpose::STANDARD.encode(&bytes) != value {
+        return Err(wire(
+            ErrorCode::InvalidParams,
+            "invalid-owner-outbox-base64",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn map_owner_outbox(error: OwnerOutboxError) -> WireError {
+    match error {
+        OwnerOutboxError::InvalidInput(_) => {
+            wire(ErrorCode::InvalidParams, "invalid-owner-outbox-input")
+        }
+        OwnerOutboxError::WorkspaceMismatch => {
+            wire(ErrorCode::InvalidParams, "owner-outbox-workspace-mismatch")
+        }
+        OwnerOutboxError::MainVersionMismatch => wire(
+            ErrorCode::InvalidParams,
+            "owner-outbox-main-version-mismatch",
+        ),
+        OwnerOutboxError::ParentMismatch => {
+            wire(ErrorCode::InvalidParams, "owner-outbox-parent-mismatch")
+        }
+        OwnerOutboxError::AppendKeyMismatch => {
+            wire(ErrorCode::InvalidParams, "owner-outbox-append-key-mismatch")
+        }
+        OwnerOutboxError::Frozen => wire(ErrorCode::InvalidParams, "owner-outbox-frozen"),
+        OwnerOutboxError::NotFound => wire(ErrorCode::InvalidParams, "owner-outbox-not-found"),
+        OwnerOutboxError::ReceiptMismatch => {
+            wire(ErrorCode::InvalidParams, "owner-outbox-receipt-mismatch")
+        }
+        OwnerOutboxError::Corrupt => wire(ErrorCode::Internal, "owner-outbox-state-corrupt"),
+        OwnerOutboxError::Storage(error) => map_runtime(RuntimeError::Storage(error)),
+    }
 }
 
 fn parse_ydoc_content_kind(raw: &str) -> Result<ContentKind, WireError> {
@@ -13001,12 +13408,12 @@ fn now_ms() -> Result<i64, WireError> {
 /// different things to the same caller, which is the defect this recognizer
 /// exists to remove.
 ///
-/// Matched on the VARIANT for the reason the artifact lock above is: `code()`
+/// Matched on the variant for the reason the artifact lock above is: `code()`
 /// delegates through each wrapper, so "file-locked" alone cannot tell a busy
 /// database apart from a busy file.
 fn store_busy(error: &RuntimeError) -> bool {
     use dohc_engine_storage::StorageError;
-    // The search index keeps the RAW rusqlite failure instead of wrapping it
+    // The search index keeps the raw rusqlite failure instead of wrapping it
     // in the storage taxonomy, so it carries no `FileLocked` to match on and
     // has to be asked directly.
     if let RuntimeError::Search(SearchError::Storage(sqlite)) = error {
@@ -13022,7 +13429,7 @@ fn store_busy(error: &RuntimeError) -> bool {
             | RuntimeError::Collab(CollabError::Storage(StorageError::FileLocked))
             | RuntimeError::Sync(SyncError::Storage(StorageError::FileLocked))
             | RuntimeError::Search(SearchError::Store(StorageError::FileLocked))
-            // The relay route carries it under its OWN type rather than a
+            // The relay route carries it under its own type rather than a
             // storage error, because `RelayError` is where a relay operation's
             // local failures land. Same condition, same answer.
             | RuntimeError::Relay(RelayError::StoreBusy)
@@ -13032,12 +13439,12 @@ fn store_busy(error: &RuntimeError) -> bool {
 fn map_runtime(error: RuntimeError) -> WireError {
     // A materialization that exhausted its replace retries against a lock an
     // external program holds on the ARTIFACT. The settle committed and the
-    // write job is durably pending, so the ONLY missing piece is a later
+    // write job is durably pending, so the only missing piece is a later
     // attempt — which is exactly `Overloaded`'s retry contract
     // (afterBackoff). Flattening it to Internal (retry: no) is what left a
-    // locked file's save landing only on the next unrelated settle (#554).
+    // locked file's save landing only on the next unrelated settle.
     //
-    // Matched on the VARIANT, never on `code()`: the code delegates through
+    // Matched on the variant, never on `code()`: the code delegates through
     // `MaterializeError::Storage`, so a busy SQLite handle answers
     // "file-locked" too — and the desktop would then tell the user another
     // program has their DOCUMENT open while it retried a database contention.
@@ -13047,13 +13454,13 @@ fn map_runtime(error: RuntimeError) -> WireError {
     ) {
         return wire(ErrorCode::Overloaded, "file-locked");
     }
-    // The OTHER busy thing, and the same answer. `StorageError::FileLocked` is
+    // The other busy thing, and the same answer. `StorageError::FileLocked` is
     // the store reporting itself intact and the operation retryable: writers
     // met inside SQLite and the bounded retry budget ran out. Waiting fixes it.
     //
     // The Internal tail below called it "workspace operation failed", whose
     // retry contract is `no`, so every caller stood down on a condition that
-    // clears by itself (#658). It carries its own message because the desktop
+    // clears by itself. It carries its own message because the desktop
     // must not read it as the user's file being held: nothing outside dohc is
     // involved, and there is nothing for a person to do.
     if store_busy(&error) {
@@ -13106,7 +13513,7 @@ fn map_runtime(error: RuntimeError) -> WireError {
     // and a size refusal that drops its limit and usage is the one an agent
     // cannot act on (AGENTS.md: show agents the limits they hit). Each of these
     // names a constraint, a limit, a unit and an observed size (the identifier
-    // one also names the field, #654). One code for all of them —
+    // one also names the field). One code for all of them —
     // `PayloadTooLarge` means "what you sent is past a size limit", whichever
     // part of it was.
     match &error {
@@ -13170,8 +13577,7 @@ fn map_runtime(error: RuntimeError) -> WireError {
                     | dohc_engine_crypto::CryptoError::InvalidBase64 => ErrorCode::InvalidParams,
                     dohc_engine_crypto::CryptoError::DecryptFailed
                     | dohc_engine_crypto::CryptoError::InvalidKeyLength
-                    | dohc_engine_crypto::CryptoError::KeyFileMalformed
-                    | dohc_engine_crypto::CryptoError::EnvelopeUnwrapFailed => ErrorCode::Internal,
+                    | dohc_engine_crypto::CryptoError::KeyFileMalformed => ErrorCode::Internal,
                 },
                 _ => ErrorCode::InvalidParams,
             };
@@ -13179,9 +13585,7 @@ fn map_runtime(error: RuntimeError) -> WireError {
         }
     }
     let code = match error {
-        RuntimeError::Overloaded => ErrorCode::Overloaded,
         RuntimeError::Cancelled => ErrorCode::Cancelled,
-        RuntimeError::DeadlineExceeded => ErrorCode::DeadlineExceeded,
         RuntimeError::ActorUnavailable | RuntimeError::WorkerPanicked => {
             ErrorCode::WorkspaceUnavailable
         }
@@ -13272,8 +13676,7 @@ fn map_domain_code(error: DomainError) -> ErrorCode {
             | dohc_engine_crypto::CryptoError::InvalidBase64 => ErrorCode::InvalidParams,
             dohc_engine_crypto::CryptoError::DecryptFailed
             | dohc_engine_crypto::CryptoError::InvalidKeyLength
-            | dohc_engine_crypto::CryptoError::KeyFileMalformed
-            | dohc_engine_crypto::CryptoError::EnvelopeUnwrapFailed => ErrorCode::Internal,
+            | dohc_engine_crypto::CryptoError::KeyFileMalformed => ErrorCode::Internal,
         },
         DomainError::PayloadTooLarge { .. } => ErrorCode::PayloadTooLarge,
         DomainError::WorkspaceNotFound
@@ -13325,7 +13728,6 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::SuccessorProjectionMismatch { .. }
         | CollabError::SuccessorResultMismatch { .. }
         | CollabError::LineageEpochChanged { .. }
-        | CollabError::LineageClaimUnresolved { .. }
         | CollabError::LineagePredecessorMismatch { .. }
         | CollabError::LineageStateVectorMismatch { .. }
         | CollabError::InvalidSuccessorBase { .. }
@@ -13373,8 +13775,8 @@ fn map_search_code(error: SearchError) -> ErrorCode {
     }
 }
 
-fn map_shadow_fence(_error: shadow_fence::ShadowFenceError) -> WireError {
-    wire(ErrorCode::InvalidParams, "shadow workspace refused")
+fn map_root_binding(error: root_binding::RootBindingError) -> WireError {
+    WireError::new(ErrorCode::InvalidParams, error.to_string())
 }
 
 fn method_requires_initial_capture_ready(method: &str) -> bool {
@@ -13439,10 +13841,7 @@ fn sync_identifier(prefix: &'static str) -> Result<String, WireError> {
 fn sync_identifier_from_entropy(prefix: &str, mut entropy: [u8; 16]) -> String {
     entropy[6] = (entropy[6] & 0x0f) | 0x40;
     entropy[8] = (entropy[8] & 0x3f) | 0x80;
-    let hex = entropy
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let hex = dohc_engine_storage::hex(&entropy);
     format!(
         "{prefix}_{}-{}-{}-{}-{}",
         &hex[0..8],
@@ -13476,12 +13875,150 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dohc_engine_runtime::{CompoundWrite, FaultInjector, FaultPoint, LifecycleState};
+    use dohc_engine_runtime::{FaultPoint, LifecycleState};
     use dohc_engine_sync::ObservedBytes;
-    use dohc_engine_testkit::{GateFaults, ScratchDir};
+    use dohc_engine_testkit::{GateFaults, ScratchDir, ScriptedFaults};
     use std::time::Duration;
 
-    const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const BINDING_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn owner_outbox_append_params(workspace_id: &str, append_key: &str) -> Value {
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../../../packages/live-session-contract/src/liveObjectBinding.vectors.json"
+        ))
+        .expect("shared LiveObjectBinding vectors");
+        let mut binding = vectors["accepted"]
+            .as_array()
+            .expect("accepted binding vectors")
+            .iter()
+            .find(|row| row["name"] == "canonical-binding")
+            .expect("canonical binding vector")["input"]
+            .clone();
+        binding["workspaceId"] = json!(workspace_id);
+        json!({
+            "binding": binding,
+            "baseUpdateBase64": base64::engine::general_purpose::STANDARD.encode(b"base"),
+            "appendKey": append_key,
+            "updateBase64": base64::engine::general_purpose::STANDARD.encode(b"update"),
+            "limits": {
+                "maxPendingBytes": 1_000,
+                "maxPendingAgeMs": 1_000
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn owner_receipt_wire_bounds_precede_workspace_lookup() {
+        async fn refusal(service: &EngineService, epoch: Value, cursor: Value) -> WireError {
+            service
+                .owner_ydoc_outbox_acknowledge(
+                    &RequestContext::unbounded(),
+                    None,
+                    json!({
+                        "outboxId": "missing-outbox",
+                        "receipts": [{
+                            "deliveryId": "delivery-1",
+                            "updateDigest": "0".repeat(64),
+                            "journalCursor": cursor,
+                            "acceptingHostEpoch": epoch
+                        }]
+                    }),
+                )
+                .await
+                .expect_err("missing workspace must refuse")
+        }
+
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+
+        for (epoch, cursor) in [
+            (json!("1"), json!(1)),
+            (json!(1), json!("1")),
+            (json!(1.5), json!(1)),
+            (json!(1), json!(1.5)),
+        ] {
+            let error = refusal(&service, epoch, cursor).await;
+            assert_eq!(error.code, ErrorCode::InvalidParams);
+            assert_eq!(error.message, "invalid parameters");
+        }
+
+        for value in [1_i64, 9_007_199_254_740_991_i64] {
+            let error = refusal(&service, json!(value), json!(value)).await;
+            assert_eq!(error.code, ErrorCode::WorkspaceUnavailable, "{value}");
+            assert_eq!(error.message, "workspace handle is unavailable", "{value}");
+        }
+
+        for value in [0_i64, -1_i64, 9_007_199_254_740_992_i64] {
+            let epoch_error = refusal(&service, json!(value), json!(1)).await;
+            assert_eq!(epoch_error.code, ErrorCode::InvalidParams, "epoch {value}");
+            assert_eq!(
+                epoch_error.message, "invalid-owner-outbox-receipt",
+                "epoch {value}"
+            );
+
+            let cursor_error = refusal(&service, json!(1), json!(value)).await;
+            assert_eq!(
+                cursor_error.code,
+                ErrorCode::InvalidParams,
+                "cursor {value}"
+            );
+            assert_eq!(
+                cursor_error.message, "invalid-owner-outbox-receipt",
+                "cursor {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn owner_outbox_main_version_mismatch_has_a_distinct_wire_refusal() {
+        let mapped = map_owner_outbox(OwnerOutboxError::MainVersionMismatch);
+        assert_eq!(mapped.code, ErrorCode::InvalidParams);
+        assert_eq!(mapped.message, "owner-outbox-main-version-mismatch");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owner_outbox_main_version_mismatch_is_refused_over_the_wire() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let workspace_id = "owner-outbox-main-version-wire";
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                    "captureMode": "none"
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        service
+            .versions_ensure_main(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({ "workspaceId": workspace_id }),
+            )
+            .await
+            .expect("ensure durable main version");
+        let mut params = owner_outbox_append_params(workspace_id, "main-version-mismatch");
+        params["binding"]["mainVersionId"] = json!("other-main");
+
+        let error = service
+            .owner_ydoc_outbox_append(&RequestContext::unbounded(), Some(handle.clone()), params)
+            .await
+            .expect_err("mismatched main version");
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(error.message, "owner-outbox-main-version-mismatch");
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+    }
 
     #[test]
     fn collection_number_marker_shaped_user_objects_use_depth_neutral_key_escaping() {
@@ -13785,11 +14322,11 @@ mod tests {
         ));
     }
 
-    /// #595 round 8: the artifact lock and a busy engine database are two
+    /// The artifact lock and a busy engine database are two
     /// different contentions, and only the first may be reported as
     /// `file-locked` — the desktop turns that message into "another program
     /// has this file open" and retries the ARTIFACT write against it. The
-    /// code() of MaterializeError::Storage DELEGATES to the storage error, so
+    /// code() of MaterializeError::Storage delegates to the storage error, so
     /// matching on the code alone reported a busy SQLite handle as an
     /// artifact lock. Matching the variant is what keeps them apart.
     ///
@@ -13797,12 +14334,10 @@ mod tests {
     /// retry it would have advertised. #658 built the collector — the Y.Doc
     /// provider's settle ladder retries `engine-store-busy` — so the busy
     /// store now carries the retry contract that has always been true of it,
-    /// under its OWN message. Two messages, because the two contentions need
+    /// under its own message. Two messages, because the two contentions need
     /// different words: one names a program outside dohc holding the user's
     /// file, and the other is dohc's own writers meeting inside SQLite.
     ///
-    /// MUTATION: match on `materialize.code() == "file-locked"` again -> the
-    /// storage case below reports "file-locked".
     #[test]
     fn a_busy_engine_store_is_not_reported_as_a_locked_artifact() {
         let artifact = map_runtime(RuntimeError::Materialize(
@@ -13826,12 +14361,9 @@ mod tests {
     /// of which layer noticed it first.
     ///
     /// The paired assertion is what keeps the recognizer narrow: a store error
-    /// that is NOT the transient lock keeps its terminal answer, so this does
+    /// that is not the transient lock keeps its terminal answer, so this does
     /// not turn every storage failure into a retry.
     ///
-    /// MUTATION: drop any arm from `store_busy` -> that wrapper reports
-    /// `Internal`. Widen an arm to `StorageError::_` -> the corrupt case
-    /// below reports `Overloaded`.
     #[test]
     fn a_busy_store_is_retryable_under_every_wrapper_that_carries_it() {
         use dohc_engine_storage::StorageError;
@@ -13844,7 +14376,7 @@ mod tests {
             RuntimeError::Collab(CollabError::Storage(StorageError::FileLocked)),
             RuntimeError::Sync(SyncError::Storage(StorageError::FileLocked)),
             RuntimeError::Search(SearchError::Store(StorageError::FileLocked)),
-            // The search index's OTHER carrier: a raw rusqlite failure that
+            // The search index's other carrier: a raw rusqlite failure that
             // never passed through this taxonomy, so it has no variant to
             // match and is asked about its result code directly.
             RuntimeError::Search(SearchError::Storage(rusqlite::Error::SqliteFailure(
@@ -13890,17 +14422,13 @@ mod tests {
 
     /// #874 repro shape: a July-era `engine.db` — user tables, `user_version`
     /// still 0 — sitting in a real workspace root. `workspace.open` must
-    /// surface the REAL fence's classification (`foreign-database`) on the
+    /// surface the real fence's classification (`foreign-database`) on the
     /// wire, driven through the storage layer rather than a fabricated error
     /// value, so the desktop's recovery surface has a code to match.
     ///
-    /// MUTATION: remove the refused-database arm from `map_runtime` -> this
-    /// open reports "workspace operation failed".
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn opening_a_workspace_over_a_foreign_engine_db_names_the_refusal() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let engine_dir = scratch.path().join(".dohc").join("engine");
         std::fs::create_dir_all(&engine_dir).expect("engine dir");
         {
@@ -13931,11 +14459,9 @@ mod tests {
         // The merged-resolution budget is spent in ENCODED bytes, so this
         // count must be the encoder's count, not an approximation of it. Every
         // escape class serde_json has: the two-byte shorthands, the six-byte
-        // \u form for the other control bytes, DEL (which it does NOT escape),
+        // \u form for the other control bytes, DEL (which it does not escape),
         // and multi-byte UTF-8 (which it passes through).
         //
-        // MUTATION: change any width in the fold -> this fails on the class
-        // that moved.
         let samples = [
             "plain ascii".to_owned(),
             "\"\\\n\r\t\u{08}\u{0c}".to_owned(),
@@ -13956,9 +14482,9 @@ mod tests {
 
     #[tokio::test]
     async fn engine_events_shed_instead_of_growing_when_the_subscriber_stalls() {
-        // codex P2: an unbounded notice queue under a stalled transport
+        // An unbounded notice queue under a stalled transport
         // grows the daemon without bound. The channel is bounded and emit
-        // NEVER blocks: overflow is shed (the queued backlog already
+        // never blocks: overflow is shed (the queued backlog already
         // guarantees a repaint on drain).
         let events = EngineEvents::default();
         let mut rx = events.subscribe();
@@ -13977,9 +14503,6 @@ mod tests {
 
     #[tokio::test]
     async fn engine_ping_answers_without_a_workspace_handle() {
-        // MUTATION: drop the "engine.ping" dispatch arm and the call falls
-        // through to MethodNotFound; require a workspace and it errors on a
-        // probe that must work before any workspace is open.
         let service = EngineService::new();
         let answer = service
             .call(
@@ -13999,36 +14522,194 @@ mod tests {
         assert_eq!(answer.response.result, json!({ "ok": true }));
     }
 
+    /// Every listed method is registered, and the three retired ones
+    /// (`share.view.push`, `ydoc.apply`, `chats.dispatch.reclaimRunning`) are
+    /// not. A new arm added without a row here is not caught; that needs the
+    /// dispatch table as data.
+    ///
+    /// Without a workspace handle a registered method fails on the missing
+    /// handle or on its params; an unregistered one fails `MethodNotFound`.
+    /// That difference is what makes the list checkable from outside.
     #[tokio::test]
-    async fn share_view_push_is_not_a_registered_method() {
+    async fn listed_methods_are_registered_and_retired_methods_are_rejected() {
+        const METHODS: &[&str] = &[
+            "automations.claimNext",
+            "automations.failures",
+            "automations.settle",
+            "automations.subscribe",
+            "automations.unsubscribe",
+            "capture.flush",
+            "capture.reconcile",
+            "capture.setAuthor",
+            "chats.agentReadState.listUnreadThreads",
+            "chats.agentReadState.markThreadRead",
+            "chats.attachments.listFileMentions",
+            "chats.attachments.listForThread",
+            "chats.bookmarks.archive",
+            "chats.bookmarks.find",
+            "chats.bookmarks.list",
+            "chats.bookmarks.listPending",
+            "chats.bookmarks.markFailed",
+            "chats.bookmarks.markPending",
+            "chats.bookmarks.markReady",
+            "chats.bookmarks.markStale",
+            "chats.bookmarks.save",
+            "chats.channels.create",
+            "chats.channels.ensureAgent",
+            "chats.channels.ensureGeneral",
+            "chats.channels.findBySlug",
+            "chats.channels.getWireId",
+            "chats.channels.list",
+            "chats.decisions.listForThread",
+            "chats.decisions.resolve",
+            "chats.dispatch.claimNextPending",
+            "chats.dispatch.complete",
+            "chats.dispatch.enqueue",
+            "chats.dispatch.fail",
+            "chats.dispatch.failPendingForThread",
+            "chats.dispatch.getRunRecord",
+            "chats.dispatch.getThreadPauseState",
+            "chats.dispatch.isThreadPaused",
+            "chats.dispatch.listAppQuitRecoveries",
+            "chats.dispatch.listPending",
+            "chats.dispatch.listRunMessages",
+            "chats.dispatch.markFailureNotePosted",
+            "chats.dispatch.openRuns",
+            "chats.dispatch.recentCount",
+            "chats.dispatch.recordEligibleTriggers",
+            "chats.dispatch.recordRunMessage",
+            "chats.dispatch.requeueFailedTrigger",
+            "chats.dispatch.runIdForMessage",
+            "chats.dispatch.runRecordsForThread",
+            "chats.dispatch.setThreadPaused",
+            "chats.feed.listPersonal",
+            "chats.feed.markSeen",
+            "chats.follows.ensureDefaults",
+            "chats.follows.list",
+            "chats.follows.set",
+            "chats.mentions.listForHandle",
+            "chats.messages.list",
+            "chats.messages.send",
+            "chats.reactions.list",
+            "chats.reactions.set",
+            "chats.readState.get",
+            "chats.readState.listUnreadFileThreads",
+            "chats.readState.markThreadRead",
+            "chats.threads.create",
+            "chats.threads.findChannelId",
+            "chats.threads.getProjection",
+            "chats.threads.list",
+            "chats.threads.listForChannel",
+            "chats.threads.listForFile",
+            "chats.threads.revision",
+            "chats.threads.start",
+            "collections.get",
+            "collections.getRecord",
+            "collections.list",
+            "collections.listPendingAdoptions",
+            "collections.query",
+            "conflicts.list",
+            "conflicts.open",
+            "conflicts.resolve",
+            "engine.ping",
+            "history.page",
+            "keys.download",
+            "keys.upload",
+            "moments.get",
+            "moments.list",
+            "search.ensureIndex",
+            "search.queryChatMessagesGranular",
+            "search.queryPage",
+            "secrets.apply",
+            "secrets.compare",
+            "secrets.delete",
+            "secrets.fork",
+            "secrets.list",
+            "secrets.materialize",
+            "secrets.moments.get",
+            "secrets.moments.list",
+            "secrets.restore",
+            "secrets.stateExists",
+            "secrets.write",
+            "share.channel.pull",
+            "share.channel.push",
+            "share.proposal.submit",
+            "share.view.pull",
+            "share.view.recordIdentity",
+            "sync.adoptJoinIdentity",
+            "sync.claim",
+            "sync.commitCursor",
+            "sync.probe",
+            "sync.pull",
+            "sync.push",
+            "sync.recoverOrigin",
+            "versionedBinary.read",
+            "versionedBinary.readBlob",
+            "versionedBinary.write",
+            "versionedBinary.writeBlob",
+            "versionedText.compare",
+            "versionedText.delete",
+            "versionedText.list",
+            "versionedText.merge",
+            "versionedText.read",
+            "versionedText.readBlob",
+            "versionedText.rename",
+            "versionedText.rollback",
+            "versionedText.write",
+            "versions.active",
+            "versions.compareFiles",
+            "versions.createNamed",
+            "versions.ensureMain",
+            "versions.list",
+            "versions.setActive",
+            "watcher.status",
+            "workspace.close",
+            "workspace.open",
+            "ydoc.close",
+            "ydoc.evict",
+            "ydoc.open",
+            "ydoc.recordUpdate",
+            "ydoc.resync",
+            "ydoc.settle",
+        ];
+        async fn registered(service: &EngineService, method: &str) -> bool {
+            service
+                .call(
+                    RequestContext::unbounded(),
+                    Request {
+                        id: 1,
+                        method: method.to_owned(),
+                        workspace: None,
+                        deadline_ms: None,
+                        idempotency_key: None,
+                        params: json!({}),
+                    },
+                )
+                .await
+                .err()
+                .is_none_or(|error| error.code != ErrorCode::MethodNotFound)
+        }
         let service = EngineService::new();
-        let error = service
-            .call(
-                RequestContext::unbounded(),
-                Request {
-                    id: 2,
-                    method: "share.view.push".to_owned(),
-                    workspace: None,
-                    deadline_ms: None,
-                    idempotency_key: None,
-                    params: json!({
-                        "workspaceId": "workspace",
-                        "shareId": "share",
-                        "grantedSelector": {
-                            "paths": ["shared.md"],
-                            "versionId": null,
-                            "access": "comment",
-                        },
-                    }),
-                },
-            )
-            .await
-            .expect_err("share.view.push must be removed from the daemon API");
-        assert_eq!(
-            error.code,
-            ErrorCode::MethodNotFound,
-            "MUTATION: restoring a dispatch arm makes the obsolete push API callable",
+        let mut missing = Vec::new();
+        for method in METHODS {
+            if !registered(&service, method).await {
+                missing.push(*method);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "listed methods absent from dispatch: {missing:?}"
         );
+        for retired in [
+            "share.view.push",
+            "ydoc.apply",
+            "chats.dispatch.reclaimRunning",
+        ] {
+            assert!(
+                !registered(&service, retired).await,
+                "{retired} was retired and must stay out of dispatch"
+            );
+        }
     }
 
     #[test]
@@ -14071,8 +14752,6 @@ mod tests {
     /// hit. `wire` only takes static strings, so the generic tail replaces
     /// every message with "workspace operation failed".
     ///
-    /// MUTATION: drop the explicit `BlobTooLarge` arm in `map_runtime` and the
-    /// numbers vanish from the surfaced error.
     #[test]
     fn an_oversized_blob_refusal_reaches_the_caller_naming_its_limit() {
         let surfaced = map_runtime(RuntimeError::Relay(RelayError::BlobTooLarge {
@@ -14120,12 +14799,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn workspace_rebind_preserves_a_runner_owned_by_the_desktop() {
-        // MUTATION: ignore recoverRunningDispatches=false on the second open ->
-        // the claim is reclaimed and requeued before the surviving runner can
-        // complete it.
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let first_service = EngineService::with_supervisor(supervisor);
@@ -14225,46 +14899,103 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn automation_recovery_follows_full_workspace_lifetime_without_requiring_capture() {
+        let scratch = ScratchDir::new().expect("scratch");
+        root_binding::write_root_binding(scratch.path(), BINDING_TOKEN).expect("root binding");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+        let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
+        store
+            .bind_root_token(BINDING_TOKEN, &NoFaults)
+            .expect("bind root token");
+        drop(store);
+        for (capture_enabled, read_only, seed_claim) in [
+            (false, false, true),
+            (false, true, true),
+            (true, false, true),
+            (false, false, false),
+        ] {
+            let conn = rusqlite::Connection::open(&db_path).expect("seed connection");
+            conn.execute("DELETE FROM automation_claims", [])
+                .expect("reset claims");
+            if seed_claim {
+                conn.execute(
+                    "INSERT INTO automation_claims \
+                     (workspace_id,claim_id,automation_id,trigger_history_id,record_id,collection_path, \
+                      depth,state,attempts,created_at_ms,updated_at_ms) \
+                     VALUES ('automation-recovery-lifetime','interrupted','automation',1,'record','tasks', \
+                             0,'running',2,?1,?1)",
+                    [now_ms().expect("current time")],
+                ).expect("seed interrupted claim");
+            }
+            drop(conn);
+            let mut params = json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": "automation-recovery-lifetime",
+                "recoverRunningDispatches": false,
+                "skipStartupMaintenance": read_only,
+            });
+            if !capture_enabled {
+                params["captureMode"] = json!("none");
+            }
+            let opened = service
+                .workspace_open(&RequestContext::unbounded(), params)
+                .await
+                .expect("open workspace");
+            let handle: WorkspaceHandle =
+                serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+            let open = service.open(Some(&handle)).expect("open state");
+            assert_eq!(lock(&open.capture).is_some(), capture_enabled);
+            assert_eq!(
+                lock(&open.automation_recovery).is_some(),
+                seed_claim && !read_only
+            );
+
+            // The synchronous cleanup fallback has no Tokio runtime. Taking
+            // both tasks must cancel them there without spawning a join task.
+            let tasks = std::thread::spawn(move || open.begin_capture_shutdown())
+                .join()
+                .expect("background cancellation needs no runtime");
+            assert_eq!(
+                tasks.iter().flatten().count(),
+                usize::from(capture_enabled) + usize::from(seed_claim && !read_only),
+            );
+            for task in tasks.into_iter().flatten() {
+                task.await
+                    .expect("background task joins after cancellation");
+            }
+            let open = service.open(Some(&handle)).expect("binding still open");
+            assert!(lock(&open.capture).is_none());
+            assert!(lock(&open.automation_recovery).is_none());
+            service
+                .workspace_close(Some(handle))
+                .await
+                .expect("close workspace after drain");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn maintenance_free_open_does_not_apply_pending_migrations() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
+        root_binding::write_root_binding(scratch.path(), BINDING_TOKEN).expect("root binding");
         let db_path = scratch.path().join(".dohc/engine/engine.db");
         std::fs::create_dir_all(db_path.parent().expect("engine parent"))
             .expect("engine directory");
         let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
         assert!(
             store
-                .bind_shadow_clone_token(SHADOW_TOKEN)
-                .expect("bind shadow token")
+                .bind_root_token(BINDING_TOKEN, &NoFaults)
+                .expect("bind root token")
         );
         drop(store);
 
+        // A store whose ledger lacks the baseline row needs the migration
+        // runner. A maintenance-free open must refuse it, not repair it.
         let conn = rusqlite::Connection::open(&db_path).expect("fixture connection");
-        let removed_migration: String = conn
-            .query_row(
-                "SELECT id FROM engine_migrations ORDER BY ordinal DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .expect("latest migration");
-        conn.execute(
-            "DELETE FROM engine_migrations WHERE id = ?1",
-            [&removed_migration],
-        )
-        .expect("remove latest migration ledger row");
-        for column in [
-            "before_object_id",
-            "before_version_id",
-            "before_path",
-            "before_updated_at_ms",
-            "before_metadata_origin",
-            "before_metadata_summary",
-            "before_metadata_correlation_id",
-        ] {
-            conn.execute(&format!("ALTER TABLE moments DROP COLUMN {column}"), [])
-                .expect("restore the pre-migration moments shape");
-        }
+        conn.execute("DELETE FROM engine_migrations", [])
+            .expect("remove the baseline ledger row");
         drop(conn);
 
         let supervisor: &'static WorkspaceSupervisor =
@@ -14280,14 +15011,11 @@ mod tests {
                     "skipStartupMaintenance": true,
                 }),
             )
-            .await
-            .expect("maintenance-free open");
-        let handle: WorkspaceHandle =
-            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
-        service
-            .workspace_close(Some(handle))
-            .await
-            .expect("workspace close");
+            .await;
+        assert!(
+            opened.is_err(),
+            "a maintenance-free open must refuse a store that needs migration"
+        );
 
         let conn = rusqlite::Connection::open_with_flags(
             &db_path,
@@ -14295,14 +15023,10 @@ mod tests {
         )
         .expect("read migration ledger");
         let present: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM engine_migrations WHERE id = ?1",
-                [&removed_migration],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM engine_migrations", [], |row| {
+                row.get(0)
+            })
             .expect("migration count");
-        // MUTATION: routing this mode through supervisor.open applies the
-        // missing ledger entry before workspace.open returns.
         assert_eq!(
             present, 0,
             "a maintenance-free read must not apply a pending migration"
@@ -14312,16 +15036,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn maintenance_free_handle_is_not_reused_for_full_open() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
+        root_binding::write_root_binding(scratch.path(), BINDING_TOKEN).expect("root binding");
         let db_path = scratch.path().join(".dohc/engine/engine.db");
         std::fs::create_dir_all(db_path.parent().expect("engine parent"))
             .expect("engine directory");
         let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
         assert!(
             store
-                .bind_shadow_clone_token(SHADOW_TOKEN)
-                .expect("bind shadow token")
+                .bind_root_token(BINDING_TOKEN, &NoFaults)
+                .expect("bind root token")
         );
         drop(store);
 
@@ -14349,8 +15072,6 @@ mod tests {
         let incompatible = service
             .workspace_open(&RequestContext::unbounded(), params.clone())
             .await;
-        // MUTATION: omitting the mode comparison returns the maintenance-free
-        // handle as a successful full open and silently leaves capture absent.
         assert!(
             matches!(
                 incompatible,
@@ -14387,8 +15108,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn capture_mode_none_preserves_disk_drift_while_full_open_reconciles_it() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = EngineService::with_supervisor(supervisor);
@@ -14494,8 +15213,6 @@ mod tests {
 
     #[tokio::test]
     async fn blob_egress_budget_blocks_when_aggregate_bytes_are_exhausted() {
-        // MUTATION: remove the exact-byte reservation before blob hydration ->
-        // the second over-budget egress proceeds while the first is retained.
         let budget = BlobEgressBudget::new(8);
         let first_ctx = RequestContext::unbounded();
         let first_cancellation = OperationCancellation::new(&first_ctx);
@@ -14503,7 +15220,11 @@ mod tests {
             .reserve(5, &first_cancellation, "test.first")
             .await
             .expect("reserve first five bytes");
-        assert_eq!(budget.permits.available_permits(), 3);
+        assert_eq!(
+            budget.permits.available_permits(),
+            3,
+            "remove the exact-byte reservation before blob hydration -> the second over-budget egress proceeds while the first is retained."
+        );
 
         let waiting_budget = budget.clone();
         let mut waiting = tokio::spawn(async move {
@@ -14669,7 +15390,7 @@ mod tests {
 
     #[test]
     fn replicated_conflict_json_surfaces_an_acked_refusal() {
-        let value = replicated_conflict_json(ApplyOutcome::Refused(
+        let value = replicated_conflict_json(ApplyOutcome::new(ApplyDisposition::Refused(
             dohc_engine_sync::ReplicationRefusal {
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
@@ -14679,7 +15400,7 @@ mod tests {
                     reason: "conflict.open must describe an unresolved conflict".to_owned(),
                 },
             },
-        ));
+        )));
 
         assert_eq!(
             value,
@@ -14737,7 +15458,7 @@ mod tests {
         assert_eq!(value["status"], "complete");
         assert_eq!(
             value["hasMore"], true,
-            "MUTATION: omitting hasMore makes a bounded prefix indistinguishable from a drained relay"
+            "omitting hasMore makes a bounded prefix indistinguishable from a drained relay"
         );
         assert_eq!(
             value["sharingDeclined"],
@@ -15010,7 +15731,7 @@ mod tests {
             assert_eq!(
                 map_relay_code(relay),
                 expected,
-                "MUTATION: collapsing a relay condition prevents generated clients from recovering"
+                "collapsing a relay condition prevents generated clients from recovering"
             );
         }
         assert_eq!(
@@ -15030,7 +15751,7 @@ mod tests {
         assert_eq!(
             permanent_limit.retry,
             dohc_engine_protocol::Retryability::No,
-            "MUTATION: a permanent discussion limit must not ask the client to retry"
+            "a permanent discussion limit must not ask the client to retry"
         );
     }
 
@@ -15061,12 +15782,12 @@ mod tests {
         .expect("serialize share view outcome");
         assert_eq!(
             value["hasMore"], true,
-            "MUTATION: omitting hasMore hides that the pending cursor is only a bounded prefix"
+            "omitting hasMore hides that the pending cursor is only a bounded prefix"
         );
         assert_eq!(
             value["refusals"][0]["detail"],
             "the share granted version main, the relay offered version other",
-            "MUTATION: serializing a bare count leaves the client nothing to tell the user"
+            "serializing a bare count leaves the client nothing to tell the user"
         );
         assert_eq!(value["refusals"][0]["originSeq"], 4);
         assert_eq!(value["refusals"][0]["code"], "share-boundary-violation");
@@ -15093,12 +15814,12 @@ mod tests {
         assert_eq!(nothing["submitted"], 0);
         assert!(
             nothing["proposalId"].is_null(),
-            "MUTATION: an omitted proposalId reads as a missing field, and the client \
+            "an omitted proposalId reads as a missing field, and the client \
              cannot tell 'nothing was offered' from 'the engine did not answer'"
         );
     }
 
-    /// A submit that dropped work, or left work behind, has to SAY so. Both
+    /// A submit that dropped work, or left work behind, has to say so. Both
     /// facts are silent otherwise, and a recipient reading only `submitted`
     /// believes the whole edit reached the granter.
     #[test]
@@ -15114,11 +15835,11 @@ mod tests {
         .expect("serialize share proposal outcome");
         assert_eq!(
             value["skippedOutsideShare"], 3,
-            "MUTATION: a change dropped for landing outside the share must be counted to the caller"
+            "a change dropped for landing outside the share must be counted to the caller"
         );
         assert_eq!(
             value["morePending"], true,
-            "MUTATION: without this the recipient cannot know a further submit has more to offer"
+            "without this the recipient cannot know a further submit has more to offer"
         );
 
         let complete = relay_outcome_json(RelayOperationOutcome::ShareProposalSubmitted(
@@ -15146,7 +15867,7 @@ mod tests {
         }));
         assert!(
             no_submit_id.is_err(),
-            "MUTATION: defaulting the submit id opens a second proposal per retry"
+            "defaulting the submit id opens a second proposal per retry"
         );
 
         let no_access: Result<ShareProposalSubmitParams, _> = serde_json::from_value(json!({
@@ -15157,7 +15878,7 @@ mod tests {
         }));
         assert!(
             no_access.is_err(),
-            "MUTATION: defaulting the level submits through a grant nobody read"
+            "defaulting the level submits through a grant nobody read"
         );
     }
 
@@ -15167,24 +15888,20 @@ mod tests {
         assert_eq!(origin.code, ErrorCode::InvalidParams);
         assert_eq!(
             origin.message, "relay-origin-diverged",
-            "MUTATION: a generic INVALID_PARAMS would re-baseline on protocol errors"
+            "a generic INVALID_PARAMS would re-baseline on protocol errors"
         );
 
         let read_only = map_runtime(RuntimeError::Relay(RelayError::ShareReadOnly));
         assert_eq!(read_only.code, ErrorCode::InvalidParams);
         assert_eq!(
             read_only.message, "share-read-only",
-            "MUTATION: a generic INVALID_PARAMS would permanently downgrade writable shares"
+            "a generic INVALID_PARAMS would permanently downgrade writable shares"
         );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn binary_write_records_suppression_in_the_root_scoped_registry() {
-        // MUTATION: pass the process-global suppression registry to the actor
-        // instead of the root-scoped view -> the scoped lookup is empty.
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let service = EngineService::new();
         let workspace_id = "binary-root-scoped-suppression";
         let opened = service
@@ -15282,17 +15999,61 @@ mod tests {
         drop(held);
     }
 
+    /// A fresh store whose root-binding stamp fails is deleted with the
+    /// refusal, so the next open mints again instead of finding an engine.db
+    /// that never recorded the marker and refusing it as a mismatch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fresh_store_whose_stamp_fails_is_deleted_and_the_next_open_binds() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let mut service = EngineService::with_supervisor(supervisor);
+        // One-shot: the first stamp's transaction rolls back as a
+        // `PersistFailed`; the second open's stamp commits.
+        service.bind_root_faults = Some(ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist));
+        let params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "stamp-fails",
+            "captureMode": "none"
+        });
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+
+        let refused = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await
+            .expect_err("a stamp that fails refuses the open");
+        assert_eq!(refused.code, ErrorCode::InvalidParams);
+        assert_eq!(
+            refused.message,
+            "engine database could not record its root binding"
+        );
+        assert!(!db_path.exists(), "the unstamped store is deleted");
+        assert!(
+            root_binding::read_root_binding(scratch.path())
+                .expect("read")
+                .is_some(),
+            "the marker the open minted stays"
+        );
+
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .expect("the next open binds the fresh store to the marker");
+        let _handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        assert!(db_path.exists());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_workspace_open_releases_actor_before_immediate_reopen() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
+        root_binding::write_root_binding(scratch.path(), BINDING_TOKEN).expect("root binding");
         let db_path = scratch.path().join(".dohc/engine/engine.db");
         let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
         assert!(
             store
-                .bind_shadow_clone_token(SHADOW_TOKEN)
-                .expect("bind shadow token")
+                .bind_root_token(BINDING_TOKEN, &NoFaults)
+                .expect("bind root token")
         );
         drop(store);
         let supervisor: &'static WorkspaceSupervisor =
@@ -15363,11 +16124,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mutation_write_waits_for_session_ops_before_lease_check_and_commit() {
-        // MUTATION: remove the versionedText.write session_ops acquisition ->
-        // the write completes while this test still holds the ydoc ordering guard.
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = Arc::new(EngineService::with_supervisor(supervisor));
@@ -15427,11 +16184,369 @@ mod tests {
             .expect("workspace close");
     }
 
+    #[tokio::test]
+    async fn owner_outbox_read_pages_fit_negotiated_frames_for_large_blobs_and_queues() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let workspace_id = "owner-outbox-paged-wire";
+        let opened = service.workspace_open(&RequestContext::unbounded(), json!({
+            "rootDir": scratch.path().to_string_lossy(), "workspaceId": workspace_id, "captureMode": "none",
+        })).await.expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("handle");
+        let result = async {
+            service
+                .versions_ensure_main(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    json!({ "workspaceId": workspace_id }),
+                )
+                .await?;
+            let mut id = Value::Null;
+            for index in 0..3 {
+                let mut params = owner_outbox_append_params(workspace_id, &format!("page-{index}"));
+                params["baseUpdateBase64"] =
+                    json!(base64::engine::general_purpose::STANDARD.encode(vec![17; 1_200_000]));
+                params["updateBase64"] = json!(
+                    base64::engine::general_purpose::STANDARD.encode(vec![23 + index; 1_200_000])
+                );
+                params["limits"]["maxPendingBytes"] = json!(10_000_000);
+                id = service
+                    .owner_ydoc_outbox_append(
+                        &RequestContext::unbounded(),
+                        Some(handle.clone()),
+                        params,
+                    )
+                    .await?["outboxId"]
+                    .clone();
+            }
+            let ctx = RequestContext::unbounded().with_max_frame_bytes(1_048_576);
+            let mut cursor = Value::Null;
+            let mut pages = Vec::new();
+            // Fixture-derived ceiling: four 1.2 MB blobs and four headers
+            // need fewer than 32 pages at this negotiated frame size.
+            for _ in 0..32 {
+                let page = service
+                    .owner_ydoc_outbox_read_pending(
+                        &ctx,
+                        Some(handle.clone()),
+                        json!({ "outboxId": id, "cursor": cursor }),
+                        dohc_engine_protocol::limits::MAX_WIRE_INTEGER,
+                    )
+                    .await?;
+                cursor = page
+                    .get("nextCursor")
+                    .cloned()
+                    .ok_or_else(|| wire(ErrorCode::Internal, "missing-page-cursor"))?;
+                pages.push(page);
+                if cursor.is_null() {
+                    return Ok::<_, WireError>(pages);
+                }
+            }
+            Err(wire(ErrorCode::Internal, "page-read-did-not-complete"))
+        }
+        .await;
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+        let pages = result.expect("complete paged read");
+        let mut total_wire_bytes = 0;
+        let mut base_pages = 0;
+        let mut update_pages = 0;
+        for page in pages {
+            if page["part"] == "base" {
+                base_pages += 1;
+            }
+            if page["part"] == "update" {
+                update_pages += 1;
+            }
+            let envelope = dohc_engine_protocol::wire::Envelope::Response(Response {
+                id: dohc_engine_protocol::limits::MAX_WIRE_INTEGER,
+                result: page,
+            });
+            let bytes = serde_json::to_vec(&envelope).expect("wire response");
+            assert!(
+                bytes.len() <= 1_048_576,
+                "actual response envelope exceeds negotiated frame"
+            );
+            total_wire_bytes += bytes.len();
+        }
+        assert!(total_wire_bytes > 1_048_576);
+        assert!(base_pages >= 2, "one base must span pages");
+        assert!(update_pages >= 6, "each update must span pages");
+    }
+
+    #[tokio::test]
+    async fn owner_outbox_queued_mutations_honor_embedded_cancellation_and_deadlines() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let workspace_id = "owner-outbox-cancelled-queue";
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                    "captureMode": "none"
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        service
+            .versions_ensure_main(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({ "workspaceId": workspace_id }),
+            )
+            .await
+            .expect("ensure durable main version");
+        let open = service.open(Some(&handle)).expect("open workspace");
+        let held = Arc::clone(&open.session_ops).lock_owned().await;
+        let mut outcomes = Vec::new();
+        for deadline in [false, true] {
+            for method in ["append", "acknowledge", "quarantine"] {
+                let mut ctx = RequestContext::unbounded();
+                if deadline {
+                    ctx.deadline = Some(std::time::Instant::now());
+                }
+                let pending = async {
+                    match method {
+                        "append" => {
+                            service
+                                .owner_ydoc_outbox_append(
+                                    &ctx,
+                                    Some(handle.clone()),
+                                    owner_outbox_append_params(workspace_id, "cancelled-append"),
+                                )
+                                .await
+                        }
+                        "acknowledge" => {
+                            service
+                                .owner_ydoc_outbox_acknowledge(
+                                    &ctx,
+                                    Some(handle.clone()),
+                                    json!({ "outboxId": "not-enqueued", "receipts": [{
+                                        "deliveryId": "delivery-1", "updateDigest": "0".repeat(64),
+                                        "journalCursor": 1, "acceptingHostEpoch": 1
+                                    }] }),
+                                )
+                                .await
+                        }
+                        _ => {
+                            service
+                                .owner_ydoc_outbox_quarantine(
+                                    &ctx,
+                                    Some(handle.clone()),
+                                    json!({ "outboxId": "not-enqueued", "reason": "test" }),
+                                )
+                                .await
+                        }
+                    }
+                };
+                tokio::pin!(pending);
+                let was_pending = std::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(
+                        std::future::Future::poll(pending.as_mut(), cx).is_pending(),
+                    )
+                })
+                .await;
+                if !deadline {
+                    ctx.cancel.cancel();
+                }
+                let outcome = if was_pending {
+                    Some(tokio::time::timeout(Duration::from_secs(10), pending).await)
+                } else {
+                    None
+                };
+                outcomes.push((method, deadline, outcome));
+            }
+        }
+        let read_ctx = RequestContext::unbounded();
+        read_ctx.cancel.cancel();
+        let cancelled_read = service
+            .owner_ydoc_outbox_read_pending(
+                &read_ctx,
+                Some(handle.clone()),
+                json!({ "outboxId": "not-enqueued" }),
+                1,
+            )
+            .await;
+        drop(held);
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+        for (method, deadline, outcome) in outcomes {
+            let error = outcome
+                .expect("mutation must first wait behind the held session barrier")
+                .expect("interruption must release the wait while the barrier remains held")
+                .expect_err("queued mutation must not commit");
+            assert_eq!(
+                error.code,
+                if deadline {
+                    ErrorCode::DeadlineExceeded
+                } else {
+                    ErrorCode::Cancelled
+                },
+                "{method}, deadline={deadline}"
+            );
+        }
+        assert_eq!(
+            cancelled_read
+                .expect_err("cancelled read must not start")
+                .code,
+            ErrorCode::Cancelled
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owner_outbox_append_waits_for_the_workspace_session_barrier() {
+        // MUTATION: remove the owner outbox session_ops acquisition -> the
+        // append commits while this test still holds the lifecycle guard.
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = Arc::new(EngineService::with_supervisor(supervisor));
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "owner-outbox-session-barrier",
+                    "captureMode": "none"
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        service
+            .versions_ensure_main(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({ "workspaceId": "owner-outbox-session-barrier" }),
+            )
+            .await
+            .expect("ensure durable main version");
+        let open = service.open(Some(&handle)).expect("open workspace");
+        let held = Arc::clone(&open.session_ops).lock_owned().await;
+
+        let appending_service = Arc::clone(&service);
+        let appending_handle = handle.clone();
+        let mut appending = tokio::spawn(async move {
+            appending_service
+                .owner_ydoc_outbox_append(
+                    &RequestContext::unbounded(),
+                    Some(appending_handle),
+                    owner_outbox_append_params("owner-outbox-session-barrier", "serialized-append"),
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut appending)
+                .await
+                .is_err(),
+            "owner outbox append must wait behind session_ops"
+        );
+
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(10), appending)
+            .await
+            .expect("append completed after barrier release")
+            .expect("append task")
+            .expect("owner outbox append");
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owner_outbox_append_cannot_commit_after_close_wins_the_session_barrier() {
+        // MUTATION: bypass the actor with EngineStore::open after the session_ops
+        // barrier -> the paused append reopens engine.db and commits after close.
+        let scratch = ScratchDir::new().expect("scratch");
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut service = EngineService::with_supervisor(supervisor);
+        service.owner_outbox_append_probe = Some((
+            Arc::clone(&reached),
+            Arc::clone(&release),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ));
+        let service = Arc::new(service);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "owner-outbox-close-race",
+                    "captureMode": "none"
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        service
+            .versions_ensure_main(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({ "workspaceId": "owner-outbox-close-race" }),
+            )
+            .await
+            .expect("ensure durable main version");
+
+        let appending_service = Arc::clone(&service);
+        let appending_handle = handle.clone();
+        let appending = tokio::spawn(async move {
+            appending_service
+                .owner_ydoc_outbox_append(
+                    &RequestContext::unbounded(),
+                    Some(appending_handle),
+                    owner_outbox_append_params("owner-outbox-close-race", "append-after-close"),
+                )
+                .await
+        });
+        reached.notified().await;
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+        release.notify_one();
+
+        let error = appending
+            .await
+            .expect("append task")
+            .expect_err("a stale append must not survive workspace close");
+        assert_eq!(error.code, ErrorCode::WorkspaceUnavailable);
+        let store = dohc_engine_storage::EngineStore::open_read_only(&db_path)
+            .expect("read closed workspace store");
+        let entries = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM owner_ydoc_outbox_entries",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .expect("outbox entry count");
+        assert_eq!(entries, 0, "close must leave no post-teardown mutation");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_workspace_close_keeps_reopen_serialized_until_actor_is_closed() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = Arc::new(EngineService::with_supervisor(supervisor));
@@ -15457,15 +16572,23 @@ mod tests {
         let gate_faults: Arc<dyn FaultInjector> = gate.clone();
         let held_write = tokio::spawn(async move {
             actor
-                .write_async(
-                    CompoundWrite {
-                        request_id: "hold-close".to_owned(),
-                        doc_id: "held".to_owned(),
-                        body: "held".to_owned(),
-                        op_kind: "text.write".to_owned(),
+                .versioned_text_write(
+                    WriteText {
+                        workspace_id: "cancelled-close".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: "object-held".to_owned(),
+                        path: "held.md".to_owned(),
+                        text: "held".to_owned(),
+                        moment_id: "moment-held".to_owned(),
+                        metadata_origin: "user".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
                         now_ms: 1,
+                        request_id: None,
                     },
                     gate_faults,
+                    dohc_engine_runtime::CancellationToken::new(),
                 )
                 .await
         });
@@ -15538,8 +16661,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn aborted_workspace_close_cannot_retain_a_cancelled_capture_driver() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         std::fs::write(scratch.path().join("seed.md"), "captured before close").expect("seed file");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
@@ -15632,8 +16753,6 @@ mod tests {
     #[tokio::test]
     async fn two_services_share_close_reopen_serialization_for_one_root() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service_a = Arc::new(EngineService::with_supervisor(supervisor));
@@ -15697,8 +16816,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn capture_driver_status_tracks_the_workspace_lifecycle() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = Arc::new(EngineService::with_supervisor(supervisor));
@@ -15744,8 +16861,6 @@ mod tests {
     #[tokio::test]
     async fn interleaved_workspace_reopens_return_live_actors_without_leaks() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         // Isolated supervisor so the actor-count baseline can't race other tests
         // sharing the process-global one.
         let supervisor: &'static WorkspaceSupervisor =
@@ -15813,7 +16928,7 @@ mod tests {
         assert_eq!(service.supervisor.actor_count(), baseline);
     }
 
-    /// A workspace whose actor died is EVICTED and rebound by the next open,
+    /// A workspace whose actor died is evicted and rebound by the next open,
     /// never closed. That path dropped the handle and the sessions but left
     /// the handle's pending cursors in the map, where nothing could ever
     /// remove them: `consume_pending_cursor` matches on the handle, and every
@@ -15823,8 +16938,6 @@ mod tests {
     #[tokio::test]
     async fn evicting_a_dead_binding_drops_its_pending_cursors() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = Arc::new(EngineService::with_supervisor(supervisor));

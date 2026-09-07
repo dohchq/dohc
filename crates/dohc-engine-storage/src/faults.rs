@@ -1,5 +1,5 @@
 //! Named fault points for the in-process crash-injection tier (`TEST_ORACLE.md`
-//! §3, tier 1). CAL-1 implements the two highest-leverage storage-lane points;
+//! §3, tier 1). The storage crate implements the two highest-leverage storage-lane points;
 //! the registry grows one row per point as capability shards land.
 //!
 //! The trait seam lives here (not in the testkit) so `dohc-engine-storage`
@@ -46,7 +46,7 @@ pub enum FaultPoint {
     // ---- materialization pipeline (TEST_ORACLE §3.3 points 12-16) ---------
     // These positions live on the filesystem side (`dohc-engine-files`) but the
     // fault registry is shared and owned here, the core crate the testkit
-    // depends on, so there is exactly ONE `FaultPoint` enum across the engine.
+    // depends on, so there is exactly one `FaultPoint` enum across the engine.
     /// Job row durable, nothing on disk yet. A crash here ⇒ restart replays the
     /// job to completion. `materialize.after-job-commit`.
     MaterializeAfterJobCommit,
@@ -60,7 +60,7 @@ pub enum FaultPoint {
     MaterializeAfterFlushBeforeRename,
     /// Immediately before the atomic replace, after the preimage would be
     /// revalidated. A trace mutating the target here proves the engine observes
-    /// newer external content and does NOT overwrite (capture + preserve-both).
+    /// newer external content and does not overwrite (capture + preserve-both).
     /// `materialize.before-preimage-revalidate`.
     MaterializeBeforePreimageRevalidate,
     /// File replaced, job not yet marked complete. A crash here ⇒ restart replay
@@ -79,22 +79,22 @@ pub enum FaultPoint {
     // ---- capture apply/ack (TEST_ORACLE §3.8 point 36) -------------------
     // This position lives on the filesystem/capture side
     // (`dohc-engine-files`) but the registry is shared here so the engine and
-    // testkit still have exactly ONE `FaultPoint` enum.
+    // testkit still have exactly one `FaultPoint` enum.
     /// One capture op reached its idempotent domain sink, but the reconcile
     /// manifest has not acknowledged that path. Restart retries safely.
     /// `capture.after-op-apply-before-ack`.
     CaptureAfterOpApplyBeforeAck,
 
-    // ---- search index rebuild (R12) ---------------------------------------
-    /// Inside `ensure_search_index_for_version`'s SAVEPOINT, after the chat FTS
-    /// wipe and before the rebuild inserts complete. A crash here MUST roll the
+    // ---- search index rebuild ---------------------------------------
+    /// Inside `ensure_search_index_for_version`'s savepoint, after the chat FTS
+    /// wipe and before the rebuild inserts complete. A crash here must roll the
     /// whole rebuild back (no torn/partial FTS generation, no state row), even
     /// when the caller ran the ensure on an autocommit (read-only-borrow)
     /// connection — the savepoint is what makes that hold. `search.mid-rebuild`.
     SearchIndexMidRebuild,
 
     // ---- replication (TEST_ORACLE §3.5 points 22-26) --------------------
-    /// Inside the compound domain-mutation + replication-journal transaction.
+    /// Inside the compound domain-mutation transaction.
     /// A crash leaves neither half visible. `sync.during-journal-txn`.
     SyncDuringJournalTxn,
     /// Imported state, applied-op record, and peer ack are staged but not yet

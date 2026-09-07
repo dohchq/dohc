@@ -7,7 +7,7 @@ import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 // pattern as AgentIntegration's agent-runs.json. It lives under .dohc by
 // design: the watcher/tree/history ignore .dohc at any depth, so workbench
 // state never lands in the timeline and never syncs as user content — and the
-// renderer CANNOT write here through writeWorkspaceText (reserved path), so
+// renderer cannot write here through writeWorkspaceText (reserved path), so
 // this narrow main-owned pair is the only writer. The metadata dir resolves
 // through resolveWorkspaceMetadataDir, so a symlinked .dohc in a malicious
 // attached workspace can never route these writes outside the workspace.
@@ -16,19 +16,19 @@ const UI_STATE_FILE = "ui-state.json";
 const writeQueues = new Map<string, Promise<void>>();
 const WINDOWS_RENAME_RETRY_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
 
-// The known WorkspaceUiState fields bound a LEGITIMATE file to a few KB; this
+// The known WorkspaceUiState fields bound a legitimate file to a few KB; this
 // cap (with margin) only exists so a foreign multi-hundred-MB ui-state.json
 // can't be read + JSON.parsed wholesale in main before zod ever runs.
 export const MAX_UI_STATE_FILE_BYTES = 256 * 1024;
 
 // Tolerant read: a missing, corrupt, oversized, or escape-y file is "no saved
 // state", never an error. Returns the raw parsed JSON — the IPC handler
-// validates the SHAPE with the WorkspaceUiState zod contract before it
+// validates the shape with the WorkspaceUiState zod contract before it
 // reaches the renderer.
 export async function readUiStateFile(rootPath: string): Promise<unknown> {
   try {
     const path = join(await resolveWorkspaceMetadataDir(rootPath), UI_STATE_FILE);
-    // lstat-cap BEFORE reading: zod can only bound what already sits in memory.
+    // lstat-cap before reading: zod can only bound what already sits in memory.
     const fileStats = await lstat(path);
     if (fileStats.isSymbolicLink() || !fileStats.isFile()) return null;
     if (fileStats.size > MAX_UI_STATE_FILE_BYTES) return null;

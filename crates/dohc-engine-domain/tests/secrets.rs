@@ -1,4 +1,4 @@
-//! Secret-file domain traces (R08): encrypted round-trip, the
+//! Secret-file domain traces: encrypted round-trip, the
 //! plaintext-never-leaks scan, R04-pipeline materialization intent,
 //! crash-injection at the secret-write boundary, tamper fail-closed, fork, and a
 //! TS-written-ciphertext-decrypts-in-Rust cross-engine check.
@@ -7,12 +7,15 @@ use dohc_engine_crypto::{SecretDataKey, aead};
 use dohc_engine_domain::{
     ApplySecretFileFromVersion, NoFaults, SecretDelete, SecretDiskIntent, SecretFileStore,
     SecretOp, SecretWrite, VersionFileChangeStatus, VersionedTextStore,
-    apply_secret_file_from_version, compare_secret_files_page_keyless, delete_secret_file_keyless,
-    fork_version_keyless, restore_secret_file_verbatim,
+    apply_secret_file_from_version_with, compare_secret_files_page_keyless,
+    delete_secret_file_keyless_with, fork_version_keyless_with, list_secret_files_keyless,
+    restore_secret_file_verbatim_with_metadata_and_after,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint};
 use dohc_engine_testkit::harness::open_readonly_keeper;
-use dohc_engine_testkit::{EngineDbScan, ScratchDir, ScriptedFaults, bytes_contain};
+use dohc_engine_testkit::{
+    EngineDbScan, ScratchDir, ScriptedFaults, bytes_contain, decode_hex, engine_db_path,
+};
 use rusqlite::params;
 use std::path::Path;
 
@@ -105,7 +108,7 @@ fn create_feature(store: &mut EngineStore) {
 #[test]
 fn secret_write_and_delete_refuse_non_secret_paths() {
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
     let mut store = EngineStore::open(&db, 2).unwrap();
@@ -150,10 +153,8 @@ fn secret_write_and_delete_refuse_non_secret_paths() {
 
 #[test]
 fn secret_slash_spellings_share_one_canonical_row() {
-    // MUTATION: return the validated input spelling instead of the normalized
-    // classifier key -> these writes split into two rows and the read misses.
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
     let mut store = EngineStore::open(&db, 2).unwrap();
@@ -202,18 +203,17 @@ fn secret_slash_spellings_share_one_canonical_row() {
 
 #[test]
 fn slash_disguised_secret_path_stays_secret_after_normalization() {
-    // MUTATION: classify the verbatim spelling or discard the normalized
-    // classification -> the slash-disguised .env can bypass secret routing.
     let (classification, normalized) =
         dohc_engine_files::classify_engine_file_path_normalized("config//.env");
     assert_eq!(
         classification,
-        dohc_engine_files::PathClassification::Secret
+        dohc_engine_files::PathClassification::Secret,
+        "classify the verbatim spelling or discard the normalized classification -> the slash-disguised .env can bypass secret routing.",
     );
     assert_eq!(normalized.as_deref(), Some("config/.env"));
 
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
     let mut store = EngineStore::open(&db, 2).unwrap();
@@ -225,9 +225,7 @@ fn slash_disguised_secret_path_stays_secret_after_normalization() {
         "slash-disguised-secret",
         10,
     );
-    let paths = SecretFileStore::new(&mut store, &key)
-        .list_secret_files(WS, "main")
-        .unwrap();
+    let paths = list_secret_files_keyless(&store, WS, "main").unwrap();
     assert_eq!(paths[0].path, "config/.env");
 }
 
@@ -260,7 +258,7 @@ fn secret_write_debug_redacts_cleartext() {
 #[test]
 fn round_trips_through_the_single_materialization_accessor() {
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
 
@@ -286,7 +284,7 @@ fn round_trips_through_the_single_materialization_accessor() {
 #[test]
 fn committed_write_retry_with_same_moment_id_is_idempotent_not_duplicate() {
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
     let mut store = EngineStore::open(&db, 2).unwrap();
@@ -296,7 +294,7 @@ fn committed_write_retry_with_same_moment_id_is_idempotent_not_duplicate() {
     assert!(first.changed);
 
     // Exactly-once retry: same moment_id + same text (a committed-but-not-acked
-    // write re-driven). Desired-state-first makes this an idempotent no-op, NOT
+    // write re-driven). Desired-state-first makes this an idempotent no-op, not
     // a DuplicateMomentId error.
     let mut secrets = SecretFileStore::new(&mut store, &key);
     let retry = secrets
@@ -318,7 +316,7 @@ fn committed_write_retry_with_same_moment_id_is_idempotent_not_duplicate() {
         .expect("retry");
     assert!(!retry.changed, "committed retry is an idempotent no-op");
 
-    // A genuine duplicate-id conflict (same id, DIFFERENT content) still fails.
+    // A genuine duplicate-id conflict (same id, different content) still fails.
     let conflict = secrets.write_secret_file(
         &SecretWrite {
             workspace_id: WS.to_owned(),
@@ -340,7 +338,7 @@ fn committed_write_retry_with_same_moment_id_is_idempotent_not_duplicate() {
 #[test]
 fn plaintext_never_leaks_into_engine_db_or_wal() {
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
 
@@ -352,10 +350,10 @@ fn plaintext_never_leaks_into_engine_db_or_wal() {
         let mut store = EngineStore::open(&db, 2).unwrap();
         write(&mut store, &key, ".env", &text, "sm1", 10);
         // Also list files + moments to exercise the metadata-only surfaces.
-        let secrets = SecretFileStore::new(&mut store, &key);
-        let stats = secrets.list_secret_files(WS, "main").unwrap();
+        let stats = list_secret_files_keyless(&store, WS, "main").unwrap();
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].byte_length, text.len() as i64);
+        let secrets = SecretFileStore::new(&mut store, &key);
         let moments = secrets.list_secret_moments(WS, Some("main"), None).unwrap();
         assert_eq!(moments.len(), 1);
         // Snapshotted while the store is still open and held past the scan below:
@@ -370,7 +368,7 @@ fn plaintext_never_leaks_into_engine_db_or_wal() {
 
     let scan = EngineDbScan::read(&db);
     scan.assert_absent_in_every_form("plaintext marker", marker);
-    // The whole plaintext, in BOTH forms: raw bytes, and the base64 that
+    // The whole plaintext, in both forms: raw bytes, and the base64 that
     // ciphertext is stored as. A write site that base64-encoded the plaintext
     // on the way in would slip past the raw-marker scan alone.
     scan.assert_secret_plaintext_absent(&text);
@@ -400,13 +398,11 @@ fn plaintext_never_leaks_into_engine_db_or_wal() {
 fn every_secret_write_seals_under_a_fresh_iv() {
     // The store-level half of the nonce-freshness proof (the primitive half is
     // `aead::tests::seal_draws_a_fresh_iv_for_identical_plaintext`). Three real
-    // content changes, where the FIRST and THIRD carry the same plaintext: a
+    // content changes, where the first and third carry the same plaintext: a
     // constant or plaintext-derived IV makes rows 1 and 3 identical.
     //
-    // MUTATION: replace the `getrandom` draw in `aead::seal` with a constant IV,
-    // or derive the IV from the plaintext -> both assert_ne! below fail.
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
     let mut store = EngineStore::open(&db, 2).unwrap();
@@ -474,7 +470,7 @@ fn every_secret_write_seals_under_a_fresh_iv() {
 #[test]
 fn materialization_job_is_enqueued_atomically_and_references_ciphertext() {
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
 
@@ -489,7 +485,7 @@ fn materialization_job_is_enqueued_atomically_and_references_ciphertext() {
     assert_eq!(job.target_path, ".env");
 
     // The job references the CIPHERTEXT blob — decrypting it under the key
-    // yields the plaintext, and the blob bytes themselves are NOT plaintext.
+    // yields the plaintext, and the blob bytes themselves are not plaintext.
     let blob = store
         .get_binary_blob(&job.content_sha256)
         .unwrap()
@@ -516,7 +512,7 @@ fn materialization_job_is_enqueued_atomically_and_references_ciphertext() {
 #[test]
 fn crash_before_persist_rolls_back_secret_write() {
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
 
@@ -543,7 +539,7 @@ fn crash_before_persist_rolls_back_secret_write() {
         assert!(faults.fired());
     }
 
-    // Reopen: the rolled-back write left NOTHING — no tip, no moment, no job.
+    // Reopen: the rolled-back write left nothing — no tip, no moment, no job.
     let store = EngineStore::open(&db, 3).unwrap();
     assert_eq!(store.table_row_count("secret_files").unwrap(), 0);
     assert_eq!(store.table_row_count("secret_moments").unwrap(), 0);
@@ -553,7 +549,7 @@ fn crash_before_persist_rolls_back_secret_write() {
 #[test]
 fn crash_after_commit_is_durable() {
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
 
@@ -594,7 +590,7 @@ fn crash_after_commit_is_durable() {
 #[test]
 fn tampered_ciphertext_fails_closed_on_materialize() {
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
 
@@ -648,16 +644,12 @@ fn tampered_ciphertext_fails_closed_on_materialize() {
 #[test]
 fn ciphertext_spliced_from_another_secret_path_fails_closed() {
     // The AAD is `dohc-secret-v1\0<workspace>\0<path>`, so a sealed row belongs to
-    // ONE path and must not open under another. `aead::tests::aad_is_byte_exact`
+    // one path and must not open under another. `aead::tests::aad_is_byte_exact`
     // proves the AAD bytes; nothing proved that the STORE threads the requested
     // path into it on both the seal and the open side. This does.
     //
-    // MUTATION: hardcode ".env" in place of `&path` at the seal site
-    // (`src/secrets.rs` `write_secret_file`) and at the `aead::open` sites in
-    // `materialize_secret_file`/`materialize_secret_file_inband` -> the spliced
-    // row opens and the `decrypt-failed` assertion fails.
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
 
@@ -735,7 +727,7 @@ fn ciphertext_spliced_from_another_secret_path_fails_closed() {
 #[test]
 fn fork_copies_secret_tips_verbatim() {
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
 
@@ -758,12 +750,8 @@ fn fork_copies_secret_tips_verbatim() {
         )
         .expect("named version");
     }
-    {
-        let mut secrets = SecretFileStore::new(&mut store, &key);
-        secrets
-            .fork_version(WS, "main", "feat", 21, &NO_FAULTS)
-            .expect("fork secrets");
-    }
+    fork_version_keyless_with(&mut store, WS, "main", "feat", &NO_FAULTS, |_| Ok(()))
+        .expect("fork secrets");
 
     // The forked version decrypts to the same plaintext (AAD is path-, not
     // version-bound, so ciphertext copies verbatim).
@@ -780,13 +768,11 @@ fn fork_copies_secret_tips_verbatim() {
         "fork base copy seeded"
     );
 
-    // VERBATIM, not merely equivalent. Decrypting to the same plaintext would
+    // Verbatim, not merely equivalent. Decrypting to the same plaintext would
     // also be satisfied by a fork that re-sealed under a fresh nonce, which is a
     // different (and more expensive, key-requiring) contract than the one the
     // fork advertises. Same shape as the apply assertion below.
     //
-    // MUTATION: re-seal in the fork path instead of copying the sealed fields ->
-    // the plaintext assertion above stays green and only this fails.
     let (source_iv, forked_iv): (String, String) = store
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
@@ -823,7 +809,7 @@ fn fork_copies_secret_tips_verbatim() {
 #[test]
 fn delete_removes_the_tip() {
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
 
@@ -878,10 +864,11 @@ fn ts_written_ciphertext_decrypts_in_the_rust_store() {
     let tag_b64 = entry["authTagBase64"].as_str().unwrap();
     let ct_b64 = entry["ciphertextBase64"].as_str().unwrap();
     let byte_length = entry["byteLength"].as_u64().unwrap() as i64;
-    let key = SecretDataKey::from_bytes(&hex(entry["dataKeyHex"].as_str().unwrap())).unwrap();
+    let key =
+        SecretDataKey::from_bytes(&decode_hex(entry["dataKeyHex"].as_str().unwrap())).unwrap();
 
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, ts_ws);
 
     // Insert the TS-produced sealed row directly (bypassing Rust encryption).
@@ -926,9 +913,8 @@ fn apply_input(moment_id: &str, now_ms: i64) -> ApplySecretFileFromVersion {
 
 #[test]
 fn secret_apply_verbatim_copy_is_content_equality_no_op() {
-    // MUTATION: re-encrypt on apply or mint on equal ciphertext -> IV/moment assertions fail.
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
     let mut store = EngineStore::open(&db, 2).unwrap();
@@ -939,12 +925,20 @@ fn secret_apply_verbatim_copy_is_content_equality_no_op() {
     provenance_input.metadata_origin = "api".to_owned();
     provenance_input.metadata_summary = Some("Merged .env from main".to_owned());
     provenance_input.metadata_correlation_id = Some("corr-apply-1".to_owned());
-    let first =
-        apply_secret_file_from_version(&mut store, &key, &provenance_input, &NO_FAULTS).unwrap();
+    let first = apply_secret_file_from_version_with(
+        &mut store,
+        &key,
+        &provenance_input,
+        &NO_FAULTS,
+        |_, _| Ok(()),
+    )
+    .unwrap();
     assert!(first.changed);
-    // MUTATION: hardcode sync/none provenance -> the caller metadata vanishes.
     let moment = first.moment.as_ref().expect("apply moment");
-    assert_eq!(moment.metadata_origin, "api");
+    assert_eq!(
+        moment.metadata_origin, "api",
+        "hardcode sync/none provenance -> the caller metadata vanishes."
+    );
     assert_eq!(
         moment.metadata_summary.as_deref(),
         Some("Merged .env from main")
@@ -954,9 +948,14 @@ fn secret_apply_verbatim_copy_is_content_equality_no_op() {
         Some("corr-apply-1")
     );
     let moments_after_first = store.table_row_count("secret_moments").unwrap();
-    let second =
-        apply_secret_file_from_version(&mut store, &key, &apply_input("apply-2", 21), &NO_FAULTS)
-            .unwrap();
+    let second = apply_secret_file_from_version_with(
+        &mut store,
+        &key,
+        &apply_input("apply-2", 21),
+        &NO_FAULTS,
+        |_, _| Ok(()),
+    )
+    .unwrap();
     assert!(!second.changed);
     assert_eq!(
         store.table_row_count("secret_moments").unwrap(),
@@ -975,9 +974,8 @@ fn secret_apply_verbatim_copy_is_content_equality_no_op() {
 
 #[test]
 fn secret_apply_target_newer_than_unchanged_source_is_no_op() {
-    // MUTATION: remove the source-vs-fork-base comparison -> target is overwritten.
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
     let mut store = EngineStore::open(&db, 2).unwrap();
@@ -993,7 +991,7 @@ fn secret_apply_target_newer_than_unchanged_source_is_no_op() {
         11,
     );
 
-    let result = apply_secret_file_from_version(
+    let result = apply_secret_file_from_version_with(
         &mut store,
         &key,
         &ApplySecretFileFromVersion {
@@ -1008,6 +1006,7 @@ fn secret_apply_target_newer_than_unchanged_source_is_no_op() {
             now_ms: 20,
         },
         &NO_FAULTS,
+        |_, _| Ok(()),
     )
     .unwrap();
     assert!(!result.changed);
@@ -1022,15 +1021,14 @@ fn secret_apply_target_newer_than_unchanged_source_is_no_op() {
 
 #[test]
 fn secret_apply_propagates_source_delete() {
-    // MUTATION: restore the absent-source no-op arm -> target survives and no delete moment exists.
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
     let mut store = EngineStore::open(&db, 2).unwrap();
     write_version(&mut store, &key, "main", ".env", "base", "delete-base", 10);
     create_feature(&mut store);
-    delete_secret_file_keyless(
+    delete_secret_file_keyless_with(
         &mut store,
         &SecretDelete {
             workspace_id: WS.to_owned(),
@@ -1043,6 +1041,7 @@ fn secret_apply_propagates_source_delete() {
             now_ms: 11,
         },
         &NO_FAULTS,
+        |_, _| Ok(()),
     )
     .unwrap();
     let input = ApplySecretFileFromVersion {
@@ -1056,12 +1055,16 @@ fn secret_apply_propagates_source_delete() {
         metadata_correlation_id: Some("corr-apply-delete".to_owned()),
         now_ms: 20,
     };
-    let result = apply_secret_file_from_version(&mut store, &key, &input, &NO_FAULTS).unwrap();
+    let result =
+        apply_secret_file_from_version_with(&mut store, &key, &input, &NO_FAULTS, |_, _| Ok(()))
+            .unwrap();
     assert!(result.changed);
     let moment = result.moment.unwrap();
     assert_eq!(moment.operation, SecretOp::Delete);
-    // MUTATION: hardcode sync/none provenance on the delete arm -> vanishes.
-    assert_eq!(moment.metadata_origin, "api");
+    assert_eq!(
+        moment.metadata_origin, "api",
+        "hardcode sync/none provenance on the delete arm -> vanishes."
+    );
     assert_eq!(
         moment.metadata_summary.as_deref(),
         Some("Removed .env in feature")
@@ -1090,9 +1093,8 @@ fn secret_apply_propagates_source_delete() {
 
 #[test]
 fn secret_apply_reencrypted_plaintext_equal_is_no_op() {
-    // MUTATION: compare only ciphertext triples -> equal plaintext appends a false change.
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
     let mut store = EngineStore::open(&db, 2).unwrap();
@@ -1100,11 +1102,12 @@ fn secret_apply_reencrypted_plaintext_equal_is_no_op() {
     write_version(&mut store, &key, "main", ".env", "same", "same-main", 10);
     write_version(&mut store, &key, "feat", ".env", "same", "same-feat", 11);
     let before = store.table_row_count("secret_moments").unwrap();
-    let result = apply_secret_file_from_version(
+    let result = apply_secret_file_from_version_with(
         &mut store,
         &key,
         &apply_input("equal-plaintext", 20),
         &NO_FAULTS,
+        |_, _| Ok(()),
     )
     .unwrap();
     assert!(!result.changed);
@@ -1140,12 +1143,8 @@ fn diverge_for_merge(
 
 #[test]
 fn plaintext_never_leaks_when_a_secret_merges_across_versions() {
-    // MUTATION: at the apply site, store the source PLAINTEXT rather than its
-    // ciphertext — `put_binary_blob(tx, source_text…as_bytes())` instead of
-    // `put_binary_blob(tx, source.ciphertext())` — and the scan finds the
-    // marker. Same for replacing `seal` with the plaintext in the write path.
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
 
@@ -1160,7 +1159,14 @@ fn plaintext_never_leaks_when_a_secret_merges_across_versions() {
     let keeper = {
         let mut store = EngineStore::open(&db, 2).unwrap();
         let input = diverge_for_merge(&mut store, &key, &base_text, &source_text, &target_text);
-        let merged = apply_secret_file_from_version(&mut store, &key, &input, &NO_FAULTS).unwrap();
+        let merged = apply_secret_file_from_version_with(
+            &mut store,
+            &key,
+            &input,
+            &NO_FAULTS,
+            |_, _| Ok(()),
+        )
+        .unwrap();
         assert!(merged.changed, "a divergent merge must move the target tip");
 
         // Materialization is the one place the plaintext is allowed to exist,
@@ -1206,11 +1212,8 @@ fn a_divergent_secret_merge_records_no_conflict() {
     // TEXT in `blobs`, so an opened conflict would put the plaintext in the
     // database. The merge is last-write-wins instead.
     //
-    // MUTATION: call `insert_text_conflict_if_absent` on the divergent branch of
-    // `apply_secret_file_from_version` and both the conflict count and the
-    // plaintext scan below fail.
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
 
@@ -1225,14 +1228,16 @@ fn a_divergent_secret_merge_records_no_conflict() {
         source_text,
         target_text,
     );
-    let merged = apply_secret_file_from_version(&mut store, &key, &input, &NO_FAULTS).unwrap();
+    let merged =
+        apply_secret_file_from_version_with(&mut store, &key, &input, &NO_FAULTS, |_, _| Ok(()))
+            .unwrap();
     assert!(
         merged.changed,
         "both sides moved, so the merge must take the source"
     );
 
     let open = VersionedTextStore::new(&mut store)
-        .list_text_conflicts(WS, Some("open"))
+        .list_text_conflicts_page(WS, Some("open"), None)
         .unwrap();
     assert!(
         open.is_empty(),
@@ -1265,9 +1270,8 @@ fn a_divergent_secret_merge_records_no_conflict() {
 
 #[test]
 fn secret_restore_verbatim_copy_is_content_equality_no_op() {
-    // MUTATION: re-seal the historical state or append on equality -> IV/moment assertions fail.
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
     let mut store = EngineStore::open(&db, 2).unwrap();
@@ -1277,26 +1281,34 @@ fn secret_restore_verbatim_copy_is_content_equality_no_op() {
         .unwrap();
     write(&mut store, &key, ".env", "TOKEN=two", "sm-two", 11);
 
-    let restored = restore_secret_file_verbatim(
+    let restored = restore_secret_file_verbatim_with_metadata_and_after(
         &mut store,
         WS,
         ".env",
         "sm-two",
         "restore-1",
+        "restore",
+        None,
+        None,
         20,
         &NO_FAULTS,
+        |_, _| Ok(()),
     )
     .unwrap();
     assert_eq!(restored.restored, "text");
     let count = store.table_row_count("secret_moments").unwrap();
-    let again = restore_secret_file_verbatim(
+    let again = restore_secret_file_verbatim_with_metadata_and_after(
         &mut store,
         WS,
         ".env",
         "sm-two",
         "restore-2",
+        "restore",
+        None,
+        None,
         21,
         &NO_FAULTS,
+        |_, _| Ok(()),
     )
     .unwrap();
     assert_eq!(again.restored_moment_id, "sm-two");
@@ -1312,10 +1324,8 @@ fn secret_restore_verbatim_copy_is_content_equality_no_op() {
 
 #[test]
 fn secret_restore_to_absent_enqueues_a_pending_delete() {
-    // MUTATION: restore record_completed_job for the absent target -> status
-    // and operation regress to complete/write instead of pending/delete.
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
     let mut store = EngineStore::open(&db, 2).unwrap();
@@ -1346,14 +1356,18 @@ fn secret_restore_to_absent_enqueues_a_pending_delete() {
         })
         .unwrap();
 
-    let restored = restore_secret_file_verbatim(
+    let restored = restore_secret_file_verbatim_with_metadata_and_after(
         &mut store,
         WS,
         ".env",
         "restore-absent-one",
         "restore-to-absent",
+        "restore",
+        None,
+        None,
         20,
         &NO_FAULTS,
+        |_, _| Ok(()),
     )
     .unwrap();
     assert_eq!(restored.restored, "deleted");
@@ -1394,9 +1408,8 @@ fn secret_restore_to_absent_enqueues_a_pending_delete() {
 
 #[test]
 fn secret_compare_is_whole_version_no_path_param() {
-    // MUTATION: add a single-path filter -> one of the two classifications disappears.
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
     let mut store = EngineStore::open(&db, 2).unwrap();
@@ -1431,15 +1444,14 @@ fn secret_compare_is_whole_version_no_path_param() {
 
 #[test]
 fn secret_compare_ciphertext_identical_is_not_modified() {
-    // MUTATION: classify distinct version rows as modified without checking the sealed triple -> fails.
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
     let mut store = EngineStore::open(&db, 2).unwrap();
     write(&mut store, &key, ".env", "same", "main-same", 10);
     create_feature(&mut store);
-    fork_version_keyless(&mut store, WS, "main", "feat", 11, &NO_FAULTS).unwrap();
+    fork_version_keyless_with(&mut store, WS, "main", "feat", &NO_FAULTS, |_| Ok(())).unwrap();
     let entries = compare_secret_files_page_keyless(&store, None, WS, "feat", "main", None, 100)
         .unwrap()
         .entries;
@@ -1448,9 +1460,8 @@ fn secret_compare_ciphertext_identical_is_not_modified() {
 
 #[test]
 fn secret_compare_reencrypted_same_content_is_unmodified() {
-    // MUTATION: skip decrypt fallback when ciphertext differs -> this becomes a false modified.
     let scratch = ScratchDir::new().unwrap();
-    let db = scratch.engine_db_path().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
     let key = key();
     let mut store = EngineStore::open(&db, 2).unwrap();
@@ -1466,19 +1477,12 @@ fn secret_compare_reencrypted_same_content_is_unmodified() {
 
 // --- helpers ----------------------------------------------------------------
 
-fn hex(s: &str) -> Vec<u8> {
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-        .collect()
-}
-
 #[test]
 fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
-    use dohc_engine_domain::{CaptureSecret, CaptureSecretRetire, capture_secret_retire};
+    use dohc_engine_domain::{CaptureSecret, CaptureSecretRetire, capture_secret_retire_with};
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_version(&db, WS);
     let mut store = EngineStore::open(&db, 1).expect("open");
     let key = key();
@@ -1507,7 +1511,7 @@ fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
         "TS-parity capture summary"
     );
 
-    // Capture records a COMPLETED marker, never a runnable job.
+    // Capture records a completed marker, never a runnable job.
     let (pending, complete): (i64, i64) = store
         .read_with(|conn| {
             let pending = conn.query_row(
@@ -1545,7 +1549,7 @@ fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
     assert!(!deduped.changed);
 
     // KEYLESS retire with a derived id removes the tip.
-    let retired = capture_secret_retire(
+    let retired = capture_secret_retire_with(
         &mut store,
         &CaptureSecretRetire {
             workspace_id: WS.to_owned(),
@@ -1557,6 +1561,7 @@ fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
             only_if_own_origin: false,
         },
         &NO_FAULTS,
+        |_, _| Ok(()),
     )
     .expect("keyless retire");
     let retire_moment = retired.expect("retire recorded a moment");
@@ -1564,7 +1569,7 @@ fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
     assert_ne!(retire_moment.moment_id, moment.moment_id);
 
     // Idempotent: an absent tip is a clean no-op.
-    let absent = capture_secret_retire(
+    let absent = capture_secret_retire_with(
         &mut store,
         &CaptureSecretRetire {
             workspace_id: WS.to_owned(),
@@ -1576,6 +1581,7 @@ fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
             only_if_own_origin: false,
         },
         &NO_FAULTS,
+        |_, _| Ok(()),
     )
     .expect("no-op retire");
     assert!(absent.is_none());
@@ -1583,15 +1589,15 @@ fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
 
 #[test]
 fn capture_retire_supersedes_a_stale_pending_secret_job() {
-    use dohc_engine_domain::{CaptureSecretRetire, capture_secret_retire};
+    use dohc_engine_domain::{CaptureSecretRetire, capture_secret_retire_with};
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_version(&db, WS);
     let mut store = EngineStore::open(&db, 1).expect("open");
     let key = key();
 
-    // A Materialize-intent write leaves a PENDING secret job.
+    // A Materialize-intent write leaves a pending secret job.
     write(&mut store, &key, ".env", "TOKEN=alpha", "sm-1", 10);
     let pending_before: i64 = store
         .read_with(|conn| {
@@ -1607,7 +1613,7 @@ fn capture_retire_supersedes_a_stale_pending_secret_job() {
     // Capture retire (plaintext gone from disk) must record a completed
     // marker at the delete's generation so the stale pending job can never
     // later re-write the retired plaintext.
-    capture_secret_retire(
+    capture_secret_retire_with(
         &mut store,
         &CaptureSecretRetire {
             workspace_id: WS.to_owned(),
@@ -1619,6 +1625,7 @@ fn capture_retire_supersedes_a_stale_pending_secret_job() {
             only_if_own_origin: false,
         },
         &NO_FAULTS,
+        |_, _| Ok(()),
     )
     .expect("capture retire")
     .expect("tip existed");
@@ -1650,15 +1657,15 @@ fn capture_retire_supersedes_a_stale_pending_secret_job() {
 
 #[test]
 fn capture_secret_ownership_is_enforced_in_both_directions() {
-    use dohc_engine_domain::{CaptureSecret, CaptureSecretRetire, capture_secret_retire};
+    use dohc_engine_domain::{CaptureSecret, CaptureSecretRetire, capture_secret_retire_with};
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_version(&db, WS);
     let mut store = EngineStore::open(&db, 1).expect("open");
     let key = key();
 
-    // A FOREIGN writer (api) establishes the tip.
+    // A foreign writer (api) establishes the tip.
     write(&mut store, &key, ".env", "TOKEN=from-api", "sm-api", 10);
     store
         .write_with(&NO_FAULTS, |tx| {
@@ -1671,7 +1678,7 @@ fn capture_secret_ownership_is_enforced_in_both_directions() {
         })
         .expect("mark the tip foreign");
 
-    // FIRST SIGHT (claim_foreign_head = false): capture must refuse.
+    // First sight (claim_foreign_head = false): capture must refuse.
     let refused = SecretFileStore::new(&mut store, &key).capture_secret(
         &CaptureSecret {
             workspace_id: WS.to_owned(),
@@ -1693,8 +1700,8 @@ fn capture_secret_ownership_is_enforced_in_both_directions() {
         "first sight must not claim a foreign secret tip"
     );
 
-    // RETIRE must refuse too — the plaintext may never have been on disk.
-    let retired = capture_secret_retire(
+    // Retire must refuse too — the plaintext may never have been on disk.
+    let retired = capture_secret_retire_with(
         &mut store,
         &CaptureSecretRetire {
             workspace_id: WS.to_owned(),
@@ -1706,6 +1713,7 @@ fn capture_secret_ownership_is_enforced_in_both_directions() {
             only_if_own_origin: true,
         },
         &NO_FAULTS,
+        |_, _| Ok(()),
     )
     .expect("keyless retire");
     assert!(
@@ -1720,7 +1728,7 @@ fn capture_secret_ownership_is_enforced_in_both_directions() {
         .expect("tip present");
     assert_eq!(plaintext.into_utf8().expect("utf8"), "TOKEN=from-api");
 
-    // An OBSERVED transition (claim_foreign_head = true) may claim it.
+    // An observed transition (claim_foreign_head = true) may claim it.
     let claimed = SecretFileStore::new(&mut store, &key)
         .capture_secret(
             &CaptureSecret {
@@ -1744,7 +1752,7 @@ fn capture_secret_ownership_is_enforced_in_both_directions() {
     assert_eq!(plaintext.into_utf8().expect("utf8"), "TOKEN=user-edited");
 
     // Now capture-owned: the disk-driven retire works.
-    let retired = capture_secret_retire(
+    let retired = capture_secret_retire_with(
         &mut store,
         &CaptureSecretRetire {
             workspace_id: WS.to_owned(),
@@ -1756,23 +1764,24 @@ fn capture_secret_ownership_is_enforced_in_both_directions() {
             only_if_own_origin: true,
         },
         &NO_FAULTS,
+        |_, _| Ok(()),
     )
     .expect("keyless retire");
     assert!(retired.is_some(), "capture retires the tip it owns");
 }
 #[test]
 fn a_claimed_secret_dedupe_transfers_disk_ownership() {
-    // A dedupe on an OBSERVED transition means capture just verified this
+    // A dedupe on an observed transition means capture just verified this
     // exact plaintext in the workspace file, so the tip's plaintext IS on
     // disk and a later disk delete must retire it. This used to be a
     // deliberate NON-transfer, only because ownership rode the moment's
     // origin string and transferring would have meant rewriting history;
     // ownership is now an engine-stamped column, so recording the verified
     // materialization transfers it without touching history.
-    use dohc_engine_domain::{CaptureSecret, CaptureSecretRetire, capture_secret_retire};
+    use dohc_engine_domain::{CaptureSecret, CaptureSecretRetire, capture_secret_retire_with};
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_version(&db, WS);
     let mut store = EngineStore::open(&db, 1).expect("open");
     let key = key();
@@ -1789,7 +1798,7 @@ fn a_claimed_secret_dedupe_transfers_disk_ownership() {
         })
         .expect("mark the tip foreign");
 
-    // An OBSERVED transition whose bytes already match the foreign tip: the
+    // An observed transition whose bytes already match the foreign tip: the
     // claim is permitted, but there is nothing to write.
     let deduped = SecretFileStore::new(&mut store, &key)
         .capture_secret(
@@ -1813,7 +1822,7 @@ fn a_claimed_secret_dedupe_transfers_disk_ownership() {
 
     // The verified dedupe conferred disk ownership: the disk-driven retire
     // now removes the tip whose plaintext the user deleted.
-    let retired = capture_secret_retire(
+    let retired = capture_secret_retire_with(
         &mut store,
         &CaptureSecretRetire {
             workspace_id: WS.to_owned(),
@@ -1825,6 +1834,7 @@ fn a_claimed_secret_dedupe_transfers_disk_ownership() {
             only_if_own_origin: true,
         },
         &NO_FAULTS,
+        |_, _| Ok(()),
     )
     .expect("keyless retire");
     assert!(
@@ -1841,7 +1851,7 @@ fn a_claimed_secret_dedupe_transfers_disk_ownership() {
         "sm-api-2",
         40,
     );
-    let untouched = capture_secret_retire(
+    let untouched = capture_secret_retire_with(
         &mut store,
         &CaptureSecretRetire {
             workspace_id: WS.to_owned(),
@@ -1853,6 +1863,7 @@ fn a_claimed_secret_dedupe_transfers_disk_ownership() {
             only_if_own_origin: true,
         },
         &NO_FAULTS,
+        |_, _| Ok(()),
     )
     .expect("keyless retire");
     assert!(untouched.is_none(), "an unverified tip is never retired");
@@ -1869,13 +1880,13 @@ fn a_claimed_secret_dedupe_transfers_disk_ownership() {
 /// could claim disk ownership it never had. Ownership now rides the
 /// engine-stamped `capture_owned` column, and the `write()` helper here writes
 /// exactly the spoof shape: origin `local-file` with
-/// `SecretDiskIntent::Materialize` (plaintext NOT observed on disk).
+/// `SecretDiskIntent::Materialize` (plaintext not observed on disk).
 #[test]
 fn capture_ownership_does_not_follow_from_the_caller_supplied_origin() {
-    use dohc_engine_domain::{CaptureSecret, CaptureSecretRetire, capture_secret_retire};
+    use dohc_engine_domain::{CaptureSecret, CaptureSecretRetire, capture_secret_retire_with};
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_version(&db, WS);
     let mut store = EngineStore::open(&db, 1).expect("open");
     let key = key();
@@ -1903,7 +1914,7 @@ fn capture_ownership_does_not_follow_from_the_caller_supplied_origin() {
         "a matching origin string must not make an API-written tip capture-owned"
     );
 
-    let retired = capture_secret_retire(
+    let retired = capture_secret_retire_with(
         &mut store,
         &CaptureSecretRetire {
             workspace_id: WS.to_owned(),
@@ -1915,6 +1926,7 @@ fn capture_ownership_does_not_follow_from_the_caller_supplied_origin() {
             only_if_own_origin: true,
         },
         &NO_FAULTS,
+        |_, _| Ok(()),
     )
     .expect("keyless retire");
     assert!(
@@ -1972,7 +1984,7 @@ fn capture_manifest_seed_only_carries_secrets_capture_put_on_disk() {
     use dohc_engine_domain::{CaptureSecret, SECRET_SEED_SENTINEL_SHA, capture_manifest_seed};
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_version(&db, WS);
     let mut store = EngineStore::open(&db, 1).expect("open");
     let key = key();
@@ -2008,15 +2020,15 @@ fn capture_manifest_seed_only_carries_secrets_capture_put_on_disk() {
 }
 
 /// The materializer writing a secret's plaintext to disk is the engine
-/// projecting API state outward, NOT capture observing the user's file. It must
+/// projecting API state outward, not capture observing the user's file. It must
 /// not confer capture ownership: otherwise deleting the projected file would
 /// retire an API-written secret. Pins the narrow scope of the ownership marker.
 #[test]
 fn materializing_an_api_secret_does_not_confer_capture_ownership() {
-    use dohc_engine_domain::{CaptureSecretRetire, capture_secret_retire};
+    use dohc_engine_domain::{CaptureSecretRetire, capture_secret_retire_with};
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_version(&db, WS);
     let mut store = EngineStore::open(&db, 1).expect("open");
     let key = key();
@@ -2026,7 +2038,7 @@ fn materializing_an_api_secret_does_not_confer_capture_ownership() {
         .mark_materialization_complete("secret-mat_sm-api", 20)
         .expect("the materializer wrote the plaintext to disk");
 
-    let retired = capture_secret_retire(
+    let retired = capture_secret_retire_with(
         &mut store,
         &CaptureSecretRetire {
             workspace_id: WS.to_owned(),
@@ -2038,6 +2050,7 @@ fn materializing_an_api_secret_does_not_confer_capture_ownership() {
             only_if_own_origin: true,
         },
         &NO_FAULTS,
+        |_, _| Ok(()),
     )
     .expect("keyless retire");
     assert!(
@@ -2052,7 +2065,7 @@ fn materializing_an_api_secret_does_not_confer_capture_ownership() {
 }
 
 /// Cross-version apply and verbatim restore both MATERIALIZE — their plaintext
-/// has never been observed on disk — so neither may EVER be seeded or claimed
+/// has never been observed on disk — so neither may ever be seeded or claimed
 /// on the strength of that materialization. Draining the job runs through
 /// `mark_complete`, which deliberately does not stamp ownership. Pins the two
 /// `capture_owned = false` decisions the write path makes.
@@ -2061,15 +2074,21 @@ fn applied_and_restored_secrets_are_not_capture_owned_on_insert() {
     use dohc_engine_domain::capture_manifest_seed;
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_version(&db, WS);
     let key = key();
     let mut store = EngineStore::open(&db, 2).expect("open");
     create_feature(&mut store);
     write_version(&mut store, &key, "main", ".env", "TOKEN=one", "main-1", 10);
 
-    apply_secret_file_from_version(&mut store, &key, &apply_input("sm-applied", 20), &NO_FAULTS)
-        .expect("apply across versions");
+    apply_secret_file_from_version_with(
+        &mut store,
+        &key,
+        &apply_input("sm-applied", 20),
+        &NO_FAULTS,
+        |_, _| Ok(()),
+    )
+    .expect("apply across versions");
 
     let owned = |store: &EngineStore, moment_id: &str| -> i64 {
         let id = moment_id.to_owned();
@@ -2094,14 +2113,18 @@ fn applied_and_restored_secrets_are_not_capture_owned_on_insert() {
         "an applied secret must not be seeded: capture never observed it"
     );
 
-    restore_secret_file_verbatim(
+    restore_secret_file_verbatim_with_metadata_and_after(
         &mut store,
         WS,
         ".env",
         "sm-applied",
         "sm-restored",
+        "restore",
+        None,
+        None,
         30,
         &NO_FAULTS,
+        |_, _| Ok(()),
     )
     .expect("restore verbatim");
     assert_eq!(owned(&store, "sm-restored"), 0, "restore must not own disk");
@@ -2121,13 +2144,13 @@ fn capture_ownership_never_crosses_a_workspace_boundary() {
     const COLLIDE: &str = "shared-moment-id";
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_version(&db, WS);
     seed_version(&db, OTHER_WS);
     let mut store = EngineStore::open(&db, 1).expect("open");
     let key = key();
 
-    // THIS workspace's tip, written over RPC and materialized by the engine.
+    // This workspace's tip, written over RPC and materialized by the engine.
     SecretFileStore::new(&mut store, &key)
         .write_secret_file(
             &SecretWrite {
@@ -2146,7 +2169,7 @@ fn capture_ownership_never_crosses_a_workspace_boundary() {
         )
         .expect("own workspace write");
 
-    // A REPLICATED tip in another workspace carrying the same moment id: no
+    // A replicated tip in another workspace carrying the same moment id: no
     // materialization job, because its plaintext never reaches local disk.
     store
         .write_with(&NO_FAULTS, |tx| {
@@ -2171,7 +2194,7 @@ fn capture_ownership_never_crosses_a_workspace_boundary() {
         })
         .expect("seed the replicated tip");
 
-    // A capture dedupe here stamps ownership — on THIS workspace's tip only.
+    // A capture dedupe here stamps ownership — on this workspace's tip only.
     SecretFileStore::new(&mut store, &key)
         .capture_secret(
             &CaptureSecret {

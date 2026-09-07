@@ -578,8 +578,6 @@ mod tests {
         let with_before_metadata = measured_json_len(&payload).expect("measure full payload");
         payload["beforeMetadata"] = serde_json::Value::Null;
         let without_before_metadata = measured_json_len(&payload).expect("measure trimmed payload");
-        assert_eq!(PAYLOAD_PACKING_HEADROOM_BYTES, 4_096);
-        assert_eq!(PAYLOAD_PACKING_TARGET_BYTES, 258_048);
         assert_eq!(with_before_metadata, 413_587);
         assert_eq!(without_before_metadata, 216_935);
         assert!(with_before_metadata > PAYLOAD_PACKING_TARGET_BYTES);

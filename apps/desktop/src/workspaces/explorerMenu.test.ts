@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { explorerMenuEntries, type ExplorerMenuScope } from "./explorerMenu";
 
-// WHAT THE MENU OFFERS, driven rather than read (#802).
+// WHAT THE MENU OFFERS, driven rather than read.
 //
 // This menu is a security surface: main owns it so a renderer cannot add an
 // item back, and it has to mirror the write gates behind it. Until this suite
@@ -26,7 +26,6 @@ function scope(overrides: Partial<ExplorerMenuScope> = {}): ExplorerMenuScope {
     isMountPath: false,
     hasMountRecord: false,
     canShare: false,
-    engineEnabled: true,
     shareView: null,
     ...overrides,
   };
@@ -69,15 +68,6 @@ describe("an ordinary workspace", () => {
     ]);
   });
 
-  it("offers no collection creation when the workspace engine is disabled", () => {
-    expect(commands({ kind: "root", engineEnabled: false })).not.toContain(
-      "new-collection",
-    );
-    expect(commands({ kind: "folder", engineEnabled: false })).not.toContain(
-      "new-collection",
-    );
-  });
-
   it("offers Share… only where the workspace can grant one", () => {
     expect(commands({ kind: "file", canShare: true })).toContain("share");
     expect(commands({ kind: "file", canShare: false })).not.toContain("share");
@@ -107,7 +97,7 @@ describe("a share view", () => {
     ]);
     expect(
       commands({ kind: "folder", shareView: shareView("edit") }),
-      "MUTATION: a share view offering New folder promises a change no moment can state",
+      "a share view offering New folder promises a change no moment can state",
     ).not.toContain("new-folder");
   });
 
@@ -123,7 +113,7 @@ describe("a share view", () => {
         for (const write of WRITES) {
           expect(
             offered,
-            `MUTATION: a menu that ignores the level offers ${write} at ${label}, which the handler behind it refuses`,
+            `a menu that ignores the level offers ${write} at ${label}, which the handler behind it refuses`,
           ).not.toContain(write);
         }
       }
@@ -139,12 +129,12 @@ describe("a share view", () => {
   it("never offers Share…, even when told it could", () => {
     // Someone else's files are not this account's to grant. main computes
     // `canShare` from the same fact, but a defense that only exists in main is
-    // not one the menu performs — so this asks with canShare TRUE, which is
+    // not one the menu performs — so this asks with canShare true, which is
     // the only way the assertion can fail when the guard is absent.
     for (const access of ["edit", "comment", "view"] as const) {
       expect(
         commands({ kind: "file", shareView: shareView(access), canShare: true }),
-        "MUTATION: a share view offers Share… for files this account cannot grant",
+        "a share view offers Share… for files this account cannot grant",
       ).not.toContain("share");
     }
     // And an ordinary workspace still gets it, so the guard above is not
@@ -170,7 +160,7 @@ describe("a share mount inside an ordinary workspace", () => {
     for (const write of WRITES) {
       expect(
         atRoot,
-        `MUTATION: a mount offering ${write} writes a projection of someone else's files`,
+        `a mount offering ${write} writes a projection of someone else's files`,
       ).not.toContain(write);
     }
     expect(commands({ kind: "file", isMountPath: true, hasMountRecord: false })).toEqual([

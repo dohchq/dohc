@@ -1,15 +1,12 @@
+import type { MinimalDaemonClient } from "../live/daemonLiveAdapter";
 import { randomBytes, randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, win32 } from "node:path";
 import { performance } from "node:perf_hooks";
-import type { CompletedDaemonBlob } from "../live/daemonLiveAdapter";
-import type { Event } from "../ydoc/generated/Event";
-import type { Request } from "../ydoc/generated/Request";
-import type { Response } from "../ydoc/generated/Response";
-import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
+
+import type { Event, JsonValue, Request, Response, WorkspaceHandle } from "../protocol";
 import {
   createEngineClient,
   type EngineClientSpawnOptions,
@@ -34,7 +31,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 //
 // `engine.ping` takes no workspace, reads no store, and touches no disk, and a
 // live daemon answers it even while saturated: the request supervisor resolves
-// a queued request's own deadline BEFORE the request competes for an execution
+// a queued request's own deadline before the request competes for an execution
 // slot, and admission overflow refuses immediately. So only silence is
 // evidence of a wedge — never a slow answer, and never a refusal.
 const DEFAULT_PING_INTERVAL_MS = 30_000;
@@ -45,7 +42,7 @@ const DEFAULT_PING_INTERVAL_MS = 30_000;
 // arms a client-side timer for any request that has one, and that timer turns
 // the very silence this looks for into a rejection, which reads as life.
 //
-// The 30s does NOT bound when the reply arrives, and no constant here could.
+// The 30s does not bound when the reply arrives, and no constant here could.
 // A reply is queued on the daemon's single output channel, and `write_output`
 // writes one whole item before it reads the next. The supervisor's deadline
 // covers `run_job` only; the wait on that channel is untimed. The queue holds
@@ -63,7 +60,7 @@ const DEFAULT_PING_INTERVAL_MS = 30_000;
 // is turning; a wedged daemon sends nothing to anyone. The expiry then measures
 // what it can honestly measure — total silence.
 //
-// That traffic counts whenever it arrived SINCE THE LAST VERDICT, not only
+// That traffic counts whenever it arrived since the last verdict, not only
 // while a probe was racing. The next probe starts an interval after the
 // previous one resolved, so probes do not tile the timeline: at production
 // values a probe expires at 45s and its successor begins at 75s. A reply
@@ -73,7 +70,7 @@ const DEFAULT_PING_INTERVAL_MS = 30_000;
 // Scope: events count as traffic too. `event_forwarder` is a separate task
 // pushing onto the same queue, so it can emit while no request is in flight.
 // It is file-change driven, so an idle wedge still goes silent and is still
-// caught; a workspace being edited only DEFERS the verdict, never loses it.
+// caught; a workspace being edited only defers the verdict, never loses it.
 const DEFAULT_PING_EXPIRY_MS = 45_000;
 // Three silent probes in a row. They are one interval apart and each waits out
 // its own expiry, so a wedge verdict needs at least 2 intervals + 3 expiries —
@@ -89,10 +86,10 @@ const DEFAULT_MAX_PING_EXPIRIES = 3;
 // and a daemon that wedges after every launch would restart forever — the
 // exact failure this file exists to end.
 //
-// The deeper reason the shared contract does not fit: a crash is a SAMPLE and
+// The deeper reason the shared contract does not fit: a crash is a sample and
 // a wedge is already a VERDICT. Ten crashes are evidence because one crash
 // might be a bad input. One wedge kill already cost three silent probes and
-// about three and a half minutes of proven silence. When a FRESH process
+// about three and a half minutes of proven silence. When a fresh process
 // repeats that from a clean start, with no probe answered in between,
 // restarting a third time is not a recovery plan — it is a loop. Two strikes
 // is about 7.5 minutes of a workspace that has answered nothing.
@@ -105,17 +102,11 @@ const DEFAULT_MAX_PING_EXPIRIES = 3;
 // clear the streak either — a process that exits answered nothing.
 const DEFAULT_MAX_CONSECUTIVE_WEDGES = 2;
 
-export interface EngineDaemonClient {
-  sendRequest(request: Request): Promise<Response>;
-  readonly helloAck?: {
-    readonly capabilities: readonly string[];
-  };
+export interface EngineDaemonClient extends MinimalDaemonClient {
   cancelRequest?(requestId: number): Promise<void>;
-  onBlob?(handler: (blob: CompletedDaemonBlob) => void): () => void;
   onEvent?(handler: (event: Event) => void): () => void;
-  close(): void;
   // Kill a daemon that stopped answering. `close` reports a deliberate
-  // shutdown, which retry-enabled callers must NOT retry through; a wedge kill
+  // shutdown, which retry-enabled callers must not retry through; a wedge kill
   // is a replacement, which they must. A client that cannot tell the two apart
   // falls back to `close`.
   closeUnresponsive?(): void;
@@ -145,7 +136,10 @@ export interface EngineDaemonLifecycleOptions {
   maxPingExpiries?: number;
   maxConsecutiveWedges?: number;
   onFailure?: (error: Error, terminal: boolean) => void;
-  // Fires once per launched daemon generation (the first launch AND every
+  // Retire work owned by the previous daemon before callers can open workspaces
+  // on its replacement. This barrier must not request the unpublished client.
+  beforePublish?: () => void | Promise<void>;
+  // Fires once per launched daemon generation (the first launch and every
   // restart). The first generation is only handshaked when this fires — its
   // startup smoke still runs behind it; restart generations have passed the
   // blocking smoke. A capture event committed by a previous generation
@@ -283,7 +277,7 @@ export class EngineDaemonLifecycle {
   private pingExpiries = 0;
   // Inbound frames counted at the last probe verdict. It spans the gaps between
   // probes on purpose: the next probe does not start until `pingIntervalMs`
-  // AFTER the previous one resolved, so a per-window baseline would discard
+  // after the previous one resolved, so a per-window baseline would discard
   // every frame that arrived in between — including a probe's own reply
   // delivered just after its expiry, which is the likeliest late frame there is.
   private activityBaseline: number | undefined;
@@ -631,7 +625,7 @@ export class EngineDaemonLifecycle {
       );
     }
     this.launchingClients.add(client);
-    // Attach the fan-out BEFORE the smoke: a capture event from a workspace
+    // Attach the fan-out before the smoke: a capture event from a workspace
     // reopened early in the daemon's life must not be lost to subscription
     // ordering. The subscription dies with the client if this launch fails.
     client.onEvent?.((event) => {
@@ -654,6 +648,24 @@ export class EngineDaemonLifecycle {
             "Rust engine exited during its startup health check.",
           );
         }
+      }
+      let onAbort!: () => void;
+      const cancelled = new Promise<void>((resolve) => { onAbort = resolve; });
+      signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        if (signal.aborted) onAbort();
+        // Shutdown stops waiting; the race still observes a later retirement
+        // rejection, and the publication check below rejects a cancelled launch.
+        await Promise.race([this.options.beforePublish?.(), cancelled]);
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+      }
+      if (this.stopping || signal.aborted || this.exitedGenerations.has(generation)) {
+        await this.closeClient(client);
+        if (this.stopping || signal.aborted) return;
+        throw new EngineDaemonUnavailableError(
+          "Rust engine exited while retiring the previous generation's work.",
+        );
       }
       this.client = client;
       this.running = true;
@@ -784,7 +796,7 @@ export class EngineDaemonLifecycle {
     const maxPerWindow =
       this.options.maxRestartsPerWindow ?? DEFAULT_MAX_RESTARTS_PER_WINDOW;
     // Neither clock survives both failure modes alone, so an entry expires
-    // when EITHER says it is older than the window. A backwards wall step
+    // when either says it is older than the window. A backwards wall step
     // (NTP, VM adjust) under-ages entries the monotonic side still expires; a
     // host suspend stops the monotonic clock, and the wall side expires the
     // entries that slept through the window.
@@ -855,7 +867,7 @@ export class EngineDaemonLifecycle {
     this.pingTimer = null;
   }
 
-  // A probe counts only against the generation that is CURRENT, running, and
+  // A probe counts only against the generation that is current, running, and
   // still owns the client it was scheduled for. While a restart is in flight
   // `running` is false, so a daemon that is merely being replaced is never
   // probed and can never be called wedged.
@@ -880,7 +892,7 @@ export class EngineDaemonLifecycle {
     const answered = await this.sendPing(client);
     // Re-check: the daemon can exit, or be replaced, while a probe is pending.
     if (!this.probedGenerationIsLive(generation, client)) return;
-    // Traffic is life. The daemon serializes ONE output queue, so a probe waits
+    // Traffic is life. The daemon serializes one output queue, so a probe waits
     // behind whatever is already queued and cannot overtake it — its own reply
     // is a measure of queue depth, not of health. Frames for ANYBODY prove the
     // daemon is turning, and they count whenever they arrived since the last
@@ -997,13 +1009,6 @@ async function runEngineDaemonSmoke(
 ): Promise<JsonValue> {
   const rootDir = await mkdtemp(join(tmpdir(), "dohc-rust-engine-smoke-"));
   try {
-    const markerDirectory = join(rootDir, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(
-      join(markerDirectory, "SHADOW_CLONE"),
-      randomBytes(32).toString("hex"),
-      { encoding: "utf8", flag: "wx", mode: 0o600 },
-    );
     // Unique per invocation: the background startup smoke can overlap an
     // explicit smoke (tests, restarts) in the same process, and two live
     // opens must never share one workspaceId.

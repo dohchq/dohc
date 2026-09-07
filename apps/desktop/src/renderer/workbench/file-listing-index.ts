@@ -1,7 +1,8 @@
+import { basenameOf } from "../path";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import type { WikilinkFile } from "../editor/wikilinkPlugin";
 
-export type FileListingIndex = {
+type FileListingIndex = {
   markdownWikilinkFiles: WikilinkFile[];
   conflictSummaries: string[];
   presentPaths: ReadonlySet<string>;
@@ -29,7 +30,7 @@ export function indexFileListing(
         const pathNoExt = file.path.replace(/\.(md|markdown)$/i, "");
         markdownWikilinkFiles.push({
           path: file.path,
-          title: pathNoExt.split("/").pop() ?? file.path,
+          title: basenameOf(pathNoExt),
           fileId: null,
         });
       }

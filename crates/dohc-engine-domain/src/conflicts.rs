@@ -5,11 +5,10 @@ use crate::records::{
     DeleteResult, DeleteTextFile, RenameResult, TextSnapshot, WriteResult, WriteText,
 };
 use crate::store::{
-    VersionedTextStore, delete_text_in_tx_without_diagnostic_journal, hash_author_fields,
-    hash_fields, hash_optional_text_fields, lookup_request, moment_exists, next_moment_order,
-    record_request, validate_delete_input, validate_identifier, validate_moment_id,
-    validate_moment_metadata, validate_path, validate_write_input, version_is_active,
-    write_text_in_tx_without_diagnostic_journal,
+    VersionedTextStore, delete_text_in_tx, hash_author_fields, hash_fields,
+    hash_optional_text_fields, lookup_request, moment_exists, next_moment_order, record_request,
+    validate_delete_input, validate_identifier, validate_moment_id, validate_moment_metadata,
+    validate_path, validate_write_input, version_is_active, write_text_in_tx,
 };
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
@@ -24,7 +23,7 @@ pub const TEXT_CONFLICT_QUERY_LIMIT: i64 = 17;
 /// The name a refusal reports, so an agent can grep the constant whose value
 /// the refusal quotes. Deliberately the budget's own name and not the
 /// `CONFLICT_ROW_HARD_CAP_BYTES` it derives from: naming the cap would send a
-/// reader to a constant holding a DIFFERENT number than the limit reported
+/// reader to a constant holding a different number than the limit reported
 /// beside it.
 pub const CONFLICT_ROW_CONSTRAINT: &str = "CONFLICT_METADATA_BUDGET_BYTES";
 
@@ -38,7 +37,7 @@ pub const CONFLICT_ROW_CONSTRAINT: &str = "CONFLICT_METADATA_BUDGET_BYTES";
 /// than one row can carry dead-ends the listing for every open conflict in
 /// the workspace, and only the peer that wrote it could ever repair that.
 ///
-/// DERIVED from the wire contract, not chosen. This is a transport bound, so
+/// Derived from the wire contract, not chosen. This is a transport bound, so
 /// AGENTS.md's measurement rule does not govern it — it governs limits chosen
 /// to reject otherwise-valid work, and every byte past this one is work the
 /// listing provably cannot carry. The derivation, in full:
@@ -71,7 +70,7 @@ pub const CONFLICT_ROW_CONSTRAINT: &str = "CONFLICT_METADATA_BUDGET_BYTES";
 ///
 /// This is the shared pre-persistence path, so it covers all three routes
 /// that mint a conflict: the local RPC, a peer's replicated open, and the
-/// merge that raises one. A peer is in fact bounded EARLIER and far tighter —
+/// merge that raises one. A peer is in fact bounded earlier and far tighter —
 /// `ReplicationEnvelope::validate` caps a payload at `MAX_PAYLOAD_JSON_BYTES`
 /// (256 KiB) before any apply runs, thirty times inside this budget — so the
 /// replicated route cannot reach this bound today. It lives here anyway
@@ -108,9 +107,9 @@ fn non_withheld_encoded_bytes(conflict: &TextConflict) -> usize {
     fn optional(value: &Option<String>) -> usize {
         value.as_deref().map_or(0, json_encoded_len)
     }
-    // COUNTED TWICE, for the same reason the side metadata below is: the
+    // Counted twice, for the same reason the side metadata below is: the
     // response serves it twice. `conflicts.list` emits the id inside its row
-    // AND again as `nextAfterConflictId`, the continuation the cursor hands
+    // and again as `nextAfterConflictId`, the continuation the cursor hands
     // back. Counting one copy would let a ~4.2 MiB id pass here and then put
     // the page over the frame, which the daemon's writer treats as fatal.
     let mut total = 2 * json_encoded_len(&conflict.conflict_id)
@@ -126,10 +125,10 @@ fn non_withheld_encoded_bytes(conflict: &TextConflict) -> usize {
             + optional(&side.binary_sha256)
             + optional(&side.binary_object_id)
             + optional(&side.binary_latest_moment_id)
-            // COUNTED TWICE, because the row carries them twice. A side's
+            // Counted twice, because the row carries them twice. A side's
             // metadata pair is stored in one column pair
             // (`conflict_side_columns`), and the load reads that same pair
-            // into BOTH the side and its snapshot — so one stored string is
+            // into both the side and its snapshot — so one stored string is
             // serialized into two places in every listing row. Counting it
             // once here would make this an under-estimate of the row, which
             // is the one direction a pre-persistence bound must never err in.
@@ -204,7 +203,7 @@ impl ConflictMetadata {
 /// binary as it is for text (a text side keeps identity inside its
 /// `TextSnapshot`). Without it, any later binary head sharing the same bytes at
 /// the same path would spuriously match the recorded current head and let a
-/// mirrored resolve clobber a NEWER head.
+/// mirrored resolve clobber a newer head.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConflictFileState {
     pub path: String,
@@ -411,7 +410,7 @@ pub struct WriteBinaryFile {
     pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     /// `Some(preimage)`: enqueue a materialization job sharing the moment's
-    /// generation (mirrored resolve — the bytes must REACH disk). `None`: no
+    /// generation (mirrored resolve — the bytes must reach disk). `None`: no
     /// job (capture — the bytes CAME FROM disk; matching the TS oracle, which
     /// never writes disk on capture).
     pub materialize: Option<Preimage>,
@@ -441,7 +440,7 @@ pub struct ResolveTextConflict {
     pub now_ms: i64,
     pub request_id: Option<String>,
     /// How many encoded bytes this conflict's non-withheld strings may occupy
-    /// in the ANSWER the caller will send, measured before anything is
+    /// in the answer the caller will send, measured before anything is
     /// written. The caller owns the arithmetic — it is the one that knows the
     /// answer's shape and the frame that has to carry it — and passes what is
     /// left after reserving its own fields. `usize::MAX` for a caller whose
@@ -455,7 +454,7 @@ pub struct ResolveTextConflictResult {
     pub conflict: TextConflict,
     pub write: Option<WriteResult>,
     pub delete: Option<DeleteResult>,
-    /// The BINARY head an `apply-incoming` resolution wrote. Bytes never ride
+    /// The binary head an `apply-incoming` resolution wrote. Bytes never ride
     /// in a result record, so this reports the write itself: `write` stays
     /// `None` for bytes, and a caller that cannot tell the two apart would
     /// read a byte-for-byte replacement as "nothing happened".
@@ -510,8 +509,8 @@ pub fn live_state_matches_conflict_current(
                 recorded.binary_updated_at_ms,
             ) {
                 // The recorded side carries head identity (the M2 no-clobber
-                // path). As strict as text: require the SAME object + latest
-                // moment, so a same-bytes-but-recreated binary head does NOT
+                // path). As strict as text: require the same object + latest
+                // moment, so a same-bytes-but-recreated binary head does not
                 // match and cannot be clobbered by a mirrored resolve.
                 (Some(_), Some(_), Some(_)) => {
                     live.binary_object_id == recorded.binary_object_id
@@ -522,7 +521,7 @@ pub fn live_state_matches_conflict_current(
                 // v9-era binary conflict row) has no identity to compare. Fall
                 // back to the pre-M2 path+sha match (already satisfied above)
                 // rather than mismatching Some(..) != None and deferring the
-                // resolve FOREVER as StaleHead.
+                // resolve forever as StaleHead.
                 (None, None, None) => true,
                 // Partially-populated identity can only come from corruption —
                 // a real binary head carries object + latest moment + update
@@ -540,7 +539,7 @@ pub fn insert_text_conflict_if_absent(
     tx: &Transaction<'_>,
     conflict: &TextConflict,
 ) -> Result<bool, DomainError> {
-    // The shared pre-persistence gate. BOTH conflict opens funnel here — the
+    // The shared pre-persistence gate. Both conflict opens funnel here — the
     // local RPC through `conflict_open`, and a peer's through
     // `conflict_apply::apply_open` — so the bound has one home and neither
     // route can persist a conflict the listing could not then carry.
@@ -555,15 +554,15 @@ pub fn insert_text_conflict_if_absent(
             observed_bytes,
         });
     }
-    // NOT ALSO `MAX_IDENTIFIER_BYTES` (#654). A conflict row's identifiers are
+    // Not also `MAX_IDENTIFIER_BYTES`. A conflict row's identifiers are
     // already bounded here, by a rule derived from what the listing can serve
     // rather than from what a caller mints: the budget above counts the
-    // conflict id at BOTH copies the page emits, so an id the page could not
+    // conflict id at both copies the page emits, so an id the page could not
     // carry twice is refused. Adding the write path's tighter bound on top
     // would refuse rows this one measured as serveable, and the identifier a
     // resolution actually spends is the request's, not the row's.
     //
-    // Validate sides BEFORE the duplicate-id shortcut: an invalid or
+    // Validate sides before the duplicate-id shortcut: an invalid or
     // unhydrated binary side must fail closed even when it reuses an existing
     // conflict id, or a replicated open would be acked without ever passing
     // this gate. Honest duplicates are valid, pass, and still no-op below.
@@ -725,20 +724,6 @@ pub fn update_text_conflict_row(
 }
 
 impl VersionedTextStore<'_> {
-    pub fn list_text_conflicts(
-        &self,
-        workspace_id: &str,
-        status: Option<&str>,
-    ) -> Result<Vec<TextConflict>, DomainError> {
-        if !matches!(status, None | Some("open") | Some("resolved")) {
-            return Err(DomainError::InvalidInput {
-                reason: "conflict status is invalid",
-            });
-        }
-        self.store
-            .read_with(|conn| list_conflicts(conn, workspace_id, status, None, None))
-    }
-
     /// Return one bounded keyset page. The continuation id is resolved without
     /// the status filter so a conflict resolved between `status = open` page
     /// requests still advances from its original stable ordering key.
@@ -764,14 +749,6 @@ impl VersionedTextStore<'_> {
         })
     }
 
-    pub fn resolve_text_conflict(
-        &mut self,
-        input: &ResolveTextConflict,
-        faults: &dyn FaultInjector,
-    ) -> Result<ResolveTextConflictResult, DomainError> {
-        self.resolve_text_conflict_with(input, faults, |_, _, _| Ok(()), |_, _, ()| Ok(()))
-    }
-
     /// Resolve a conflict with caller-supplied same-transaction checks and
     /// side effects.
     pub fn resolve_text_conflict_with<T, B, A>(
@@ -791,7 +768,7 @@ impl VersionedTextStore<'_> {
         // to carry the answer; the write and delete branches that actually
         // spend `object_id` and the moment ids run them through
         // `validate_write_input` / `validate_delete_input`, which is where the
-        // engine-wide identifier bound lives (#654).
+        // engine-wide identifier bound lives.
         validate_path_like_id(&input.workspace_id, "workspace_id")?;
         validate_path_like_id(&input.conflict_id, "conflict_id")?;
         let (resolution_kind, merged_text) = match &input.resolution {
@@ -844,9 +821,9 @@ impl VersionedTextStore<'_> {
                     reason: "conflict is not open",
                 });
             }
-            // BEFORE any write. The caller's answer carries this conflict, one
+            // Before any write. The caller's answer carries this conflict, one
             // control frame has to hold that answer, and withholding removes
-            // only BODIES — so a conflict whose remaining strings cannot fit
+            // only bodies — so a conflict whose remaining strings cannot fit
             // beside the rest of the answer can only be refused here. Refusing
             // after the commit would report a mutation that happened as one
             // that did not, and sending an oversized answer would lose the
@@ -861,16 +838,16 @@ impl VersionedTextStore<'_> {
                     observed_bytes: answer_bytes,
                 });
             }
-            // Only the two LIVE sides decide what a resolution can do. The BASE
+            // Only the two live sides decide what a resolution can do. The BASE
             // is history: bytes at the fork point neither block combining two
             // texts nor moving one, and treating them as if they did would
             // refuse work the review panel correctly offers.
             let live_sides_binary = [&conflict.current, &conflict.incoming]
                 .iter()
                 .any(|side| side.content_kind == ConflictContentKind::Binary);
-            // Combined text has no meaning for bytes: a binary CURRENT would be
-            // clobbered by text, and a binary INCOMING has no text to combine.
-            // Refuse before measuring the live head, so the caller hears WHY
+            // Combined text has no meaning for bytes: a binary current would be
+            // clobbered by text, and a binary incoming has no text to combine.
+            // Refuse before measuring the live head, so the caller hears why
             // instead of a stale-target answer that would send it back to retry.
             if live_sides_binary
                 && matches!(input.resolution, ResolveConflictKind::ApplyMerged { .. })
@@ -881,7 +858,7 @@ impl VersionedTextStore<'_> {
             }
             // Binary-head-aware live read: a binary head that appeared at the
             // path after a (text) conflict was opened must fail the exact-head
-            // gate (content-kind mismatch), NOT be invisibly treated as absent
+            // gate (content-kind mismatch), not be invisibly treated as absent
             // and clobbered by the incoming text.
             let live = select_snapshot_by_path_in_tx(
                 tx,
@@ -935,10 +912,7 @@ impl VersionedTextStore<'_> {
                                     &conflict.path,
                                 );
                                 validate_delete_input(&delete_input)?;
-                                let result = delete_text_in_tx_without_diagnostic_journal(
-                                    tx,
-                                    &delete_input,
-                                )?;
+                                let result = delete_text_in_tx(tx, &delete_input)?;
                                 enqueue_delete(tx, &result, "resolve")?;
                                 deletion = Some(result);
                             }
@@ -958,7 +932,7 @@ impl VersionedTextStore<'_> {
                                 materialize: Some(conflict_state_preimage(&conflict.current)),
                                 now_ms: input.now_ms,
                             };
-                            write_binary_file_in_tx_without_diagnostic_journal(tx, &binary_input)?;
+                            write_binary_file_in_tx(tx, &binary_input)?;
                             binary_write = Some(BinaryResolveWrite {
                                 path: destination,
                                 binary_sha256,
@@ -973,8 +947,7 @@ impl VersionedTextStore<'_> {
                                 &input.write_moment_id,
                             );
                             validate_write_input(&write_input)?;
-                            let result =
-                                write_text_in_tx_without_diagnostic_journal(tx, &write_input)?;
+                            let result = write_text_in_tx(tx, &write_input)?;
                             let preimage = if destination == conflict.path {
                                 conflict_state_preimage(&conflict.current)
                             } else {
@@ -987,8 +960,7 @@ impl VersionedTextStore<'_> {
                         let delete_input =
                             delete_input(input, &conflict.target_version_id, &conflict.path);
                         validate_delete_input(&delete_input)?;
-                        let result =
-                            delete_text_in_tx_without_diagnostic_journal(tx, &delete_input)?;
+                        let result = delete_text_in_tx(tx, &delete_input)?;
                         // A binary head's removal carries its own preimage and
                         // job id; the text enqueue would hash an empty body.
                         if !enqueue_binary_delete(tx, &result)? {
@@ -1010,7 +982,7 @@ impl VersionedTextStore<'_> {
                         &input.write_moment_id,
                     );
                     validate_write_input(&write_input)?;
-                    let result = write_text_in_tx_without_diagnostic_journal(tx, &write_input)?;
+                    let result = write_text_in_tx(tx, &write_input)?;
                     let preimage = conflict
                         .current
                         .snapshot
@@ -1214,23 +1186,6 @@ pub fn write_binary_file_in_tx(
     tx: &Transaction<'_>,
     input: &WriteBinaryFile,
 ) -> Result<(), DomainError> {
-    write_binary_file_in_tx_with_journal(tx, input, true)
-}
-
-/// Apply a binary write inside a caller-owned compound replication
-/// transaction without appending the legacy payload-free journal row.
-fn write_binary_file_in_tx_without_diagnostic_journal(
-    tx: &Transaction<'_>,
-    input: &WriteBinaryFile,
-) -> Result<(), DomainError> {
-    write_binary_file_in_tx_with_journal(tx, input, false)
-}
-
-fn write_binary_file_in_tx_with_journal(
-    tx: &Transaction<'_>,
-    input: &WriteBinaryFile,
-    journal: bool,
-) -> Result<(), DomainError> {
     validate_moment_metadata(
         input.metadata_origin.as_str(),
         input.metadata_summary.as_deref(),
@@ -1267,10 +1222,10 @@ fn write_binary_file_in_tx_with_journal(
     if version_exists.is_none() {
         return Err(DomainError::VersionNotFound);
     }
-    // The moment id must be unique. Precheck and return a VALIDATION
+    // The moment id must be unique. Precheck and return a validation
     // error (`DuplicateMomentId`) rather than letting the `INSERT INTO moments`
     // hit the UNIQUE constraint and surface as `Storage(PersistFailed)`. On the
-    // mirrored-resolve path a Storage error is treated as FATAL by
+    // mirrored-resolve path a Storage error is treated as fatal by
     // `apply_within_savepoint` (retries forever), whereas a validation rejection
     // acks-and-defers — mirroring `write_text_in_tx`, which prechecks the same
     // way so a colliding id never poison-pills replication.
@@ -1322,9 +1277,9 @@ fn write_binary_file_in_tx_with_journal(
         }
         (existing, Some(before))
     } else {
-        // Object identity is GLOBALLY unique: `file_objects` declares
+        // Object identity is globally unique: `file_objects` declares
         // `UNIQUE (object_id)` (matching the canonical engine schema), so the
-        // pre-check is deliberately NOT scoped to `workspace_id`. Scoping it
+        // pre-check is deliberately not scoped to `workspace_id`. Scoping it
         // would let a cross-workspace collision slip past this clean fail-closed
         // domain error and fail with a raw SQLite UNIQUE violation instead.
         let object_exists: Option<i64> = tx
@@ -1360,7 +1315,7 @@ fn write_binary_file_in_tx_with_journal(
         (input.object_id.clone(), None)
     };
 
-    let moment_order = persist_binary_head_in_tx_with_journal(
+    let moment_order = persist_binary_head_in_tx(
         tx,
         &PersistBinaryHead {
             workspace_id: &input.workspace_id,
@@ -1376,7 +1331,6 @@ fn write_binary_file_in_tx_with_journal(
             now_ms: input.now_ms,
         },
         before,
-        journal,
     )?;
     if let Some(preimage) = &input.materialize
         && version_is_active(tx, &input.workspace_id, &input.version_id)?
@@ -1398,10 +1352,10 @@ fn write_binary_file_in_tx_with_journal(
     Ok(())
 }
 
-/// The durable-head triple every verified binary write appends: one moment,
-/// one current snapshot (upsert), one replication-journal record. Shared by
+/// The durable-head pair every verified binary write appends: one moment and
+/// one current snapshot (upsert). Shared by
 /// the mirrored-resolve writer ([`write_binary_file_in_tx`], which follows it
-/// with a materialization job) and the capture-ingest path (which must NOT
+/// with a materialization job) and the capture-ingest path (which must not
 /// materialize — its bytes came FROM disk). Returns the committed moment
 /// order so callers can pin reserved-order invariants.
 pub struct PersistBinaryHead<'a> {
@@ -1423,15 +1377,6 @@ pub fn persist_binary_head_in_tx(
     tx: &Transaction<'_>,
     head: &PersistBinaryHead<'_>,
     before: Option<(String, Option<String>, Option<String>, String)>,
-) -> Result<i64, DomainError> {
-    persist_binary_head_in_tx_with_journal(tx, head, before, true)
-}
-
-fn persist_binary_head_in_tx_with_journal(
-    tx: &Transaction<'_>,
-    head: &PersistBinaryHead<'_>,
-    before: Option<(String, Option<String>, Option<String>, String)>,
-    journal: bool,
 ) -> Result<i64, DomainError> {
     let moment_order = next_moment_order(tx)?;
     let (
@@ -1519,14 +1464,6 @@ fn persist_binary_head_in_tx_with_journal(
         ],
     )
     .map_err(DomainError::sql_persist)?;
-    if journal {
-        tx.execute(
-            "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-             VALUES (?1, 'moment.append', ?2)",
-            params![head.object_id, head.now_ms],
-        )
-        .map_err(DomainError::sql_persist)?;
-    }
     Ok(moment_order)
 }
 
@@ -1603,7 +1540,7 @@ fn side_bindings(side: &ConflictFileState) -> SideBindings<'_> {
     SideBindings {
         exists: i64::from(side.snapshot.is_some() || side.binary_sha256.is_some()),
         path: &side.path,
-        // Object id + latest moment carry head identity for BOTH kinds: text
+        // Object id + latest moment carry head identity for both kinds: text
         // takes them from its snapshot, binary from its head-identity fields.
         object_id: side
             .snapshot
@@ -1927,11 +1864,11 @@ pub fn conflict_state_preimage(state: &ConflictFileState) -> Preimage {
 
 #[doc(hidden)]
 /// Read the live head at `path` as a content-aware [`ConflictFileState`] — a
-/// text head, a binary head (WITH its object + latest-moment identity), or an
+/// text head, a binary head (with its object + latest-moment identity), or an
 /// absent side. Unlike a text-only read that inner-`JOIN`s `blobs` (and is blind
 /// to a binary head, whose `blob_sha256` is NULL), this is authoritative for
-/// BOTH kinds, so a stale-target / occupied-destination gate never misses a
-/// binary head sitting at the path. Use THIS in every gate/comparison; a
+/// both kinds, so a stale-target / occupied-destination gate never misses a
+/// binary head sitting at the path. Use this in every gate/comparison; a
 /// text-only head read must never decide a clobber.
 pub fn select_snapshot_by_path_in_tx(
     conn: &Connection,
@@ -2065,7 +2002,7 @@ mod tests {
 
     fn open_store() -> (ScratchDir, EngineStore) {
         let scratch = ScratchDir::new().expect("scratch directory");
-        let path = scratch.engine_db_path().expect("database path");
+        let path = dohc_engine_testkit::engine_db_path(&scratch).expect("database path");
         let mut store = EngineStore::open(&path, 1).expect("open engine store");
         store
             .write_with(&NoFaults, |tx| {
@@ -2172,16 +2109,6 @@ mod tests {
             request_id: None,
             conflict_answer_budget_bytes: usize::MAX,
         }
-    }
-
-    fn diagnostic_journal_count(store: &EngineStore) -> i64 {
-        store
-            .read_with(|conn| {
-                conn.query_row("SELECT COUNT(*) FROM replication_journal", [], |row| {
-                    row.get(0)
-                })
-            })
-            .expect("count diagnostic journal")
     }
 
     #[test]
@@ -2316,10 +2243,10 @@ mod tests {
         assert_eq!(count, 0);
     }
 
-    /// Object identity is GLOBALLY unique (`file_objects` declares
+    /// Object identity is globally unique (`file_objects` declares
     /// `UNIQUE (object_id)`, matching the canonical engine schema), so a binary
-    /// write reusing an object id already bound in ANOTHER workspace must fail
-    /// CLOSED with the clean `object_id is already bound` domain error — not a
+    /// write reusing an object id already bound in another workspace must fail
+    /// closed with the clean `object_id is already bound` domain error — not a
     /// raw SQLite UNIQUE violation. This documents why the CodeRabbit "scope the
     /// check to the workspace" suggestion was declined: scoping the pre-check
     /// would bypass this clean error, and a truly workspace-scoped identity
@@ -2579,12 +2506,6 @@ mod tests {
                                 ))
                             },
                         )?,
-                        conn.query_row(
-                            "SELECT COUNT(*) FROM replication_journal \
-                             WHERE doc_id='conflict-replay-gate' AND op_kind='conflict.resolve'",
-                            [],
-                            |row| row.get::<_, i64>(0),
-                        )?,
                         conn.query_row("SELECT COUNT(*) FROM engine_requests", [], |row| {
                             row.get::<_, i64>(0)
                         })?,
@@ -2702,94 +2623,6 @@ mod tests {
     }
 
     #[test]
-    fn compound_resolution_effects_leave_no_payload_free_journal_rows() {
-        let mut deltas = Vec::new();
-
-        for (conflict_id, incoming, resolution) in [
-            (
-                "same-path-text",
-                ConflictFileState::text("doc.md", Some(text_snapshot("doc.md", "incoming"))),
-                ResolveConflictKind::ApplyIncoming,
-            ),
-            (
-                "same-path-delete",
-                ConflictFileState::text("doc.md", None),
-                ResolveConflictKind::ApplyIncoming,
-            ),
-            (
-                "moved-text",
-                ConflictFileState::text(
-                    "moved.md",
-                    Some(text_snapshot("moved.md", "incoming move")),
-                ),
-                ResolveConflictKind::ApplyIncoming,
-            ),
-        ] {
-            let (_scratch, mut store) = open_store();
-            let current = seed_main_and_current(&mut store, "doc.md");
-            let open = conflict(
-                conflict_id,
-                ConflictFileState::text("doc.md", None),
-                ConflictFileState::text("doc.md", Some(current)),
-                incoming,
-            );
-            store
-                .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &open))
-                .expect("insert conflict");
-            let before = diagnostic_journal_count(&store);
-            VersionedTextStore::new(&mut store)
-                .resolve_text_conflict(&resolve_input(conflict_id, resolution), &NoFaults)
-                .expect("resolve conflict");
-            deltas.push((conflict_id, diagnostic_journal_count(&store) - before));
-        }
-
-        let (_scratch, mut store) = open_store();
-        let current = seed_main_and_current(&mut store, "asset.bin");
-        let incoming_bytes = b"incoming binary";
-        let incoming_sha = store
-            .put_binary_blob(incoming_bytes)
-            .expect("store incoming binary");
-        let open = conflict(
-            "same-path-binary",
-            ConflictFileState::text("asset.bin", None),
-            ConflictFileState::text("asset.bin", Some(current)),
-            ConflictFileState::binary_head(
-                "asset.bin",
-                incoming_sha,
-                incoming_bytes.len() as i64,
-                "incoming-binary-object",
-                "incoming-binary-moment",
-                19,
-            ),
-        );
-        store
-            .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &open))
-            .expect("insert binary conflict");
-        let before = diagnostic_journal_count(&store);
-        VersionedTextStore::new(&mut store)
-            .resolve_text_conflict(
-                &resolve_input("same-path-binary", ResolveConflictKind::ApplyIncoming),
-                &NoFaults,
-            )
-            .expect("resolve binary conflict");
-        deltas.push((
-            "same-path-binary",
-            diagnostic_journal_count(&store) - before,
-        ));
-
-        assert_eq!(
-            deltas,
-            [
-                ("same-path-text", 0),
-                ("same-path-delete", 0),
-                ("moved-text", 0),
-                ("same-path-binary", 0),
-            ],
-            "the compound carrier owns every resolution effect; the payload-free journal owns none"
-        );
-    }
-
-    #[test]
     fn compound_after_hook_failure_rolls_back_the_resolution() {
         let (_scratch, mut store) = open_store();
         let current = seed_main_and_current(&mut store, "doc.md");
@@ -2836,11 +2669,6 @@ mod tests {
                                     row.get::<_, i64>(3)?,
                                 ))
                             },
-                        )?,
-                        conn.query_row(
-                            "SELECT COUNT(*) FROM replication_journal",
-                            [],
-                            |row| row.get::<_, i64>(0),
                         )?,
                         conn.query_row("SELECT COUNT(*) FROM engine_requests", [], |row| {
                             row.get::<_, i64>(0)

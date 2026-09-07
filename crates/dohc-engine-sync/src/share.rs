@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::apply::apply_envelope_with;
 use crate::cursor::advance_shared_peer_tx;
 use crate::{
-    ApplyOutcome, PathClass, ReplicationEnvelope, SyncError, classify_share_path,
+    ApplyDisposition, ApplyOutcome, PathClass, ReplicationEnvelope, SyncError, classify_share_path,
     read_shared_peer_position,
 };
 
@@ -22,7 +22,7 @@ pub const MAX_SHARE_VERSION_ID_CHARS: usize = 128;
 /// (`packages/security-contract/src/shareSelector.ts`): whether `value` is a
 /// version id the relay could have issued.
 ///
-/// The selector's version dimension is ONE rule. The relay applies it when it
+/// The selector's version dimension is one rule. The relay applies it when it
 /// creates a selector, every surface that reads a selector back applies it,
 /// and this surface applies it to the version a served moment claims — a
 /// version id the relay would never have issued must not be read as one here
@@ -63,7 +63,7 @@ pub enum ShareSurface {
     ShareView,
 }
 
-/// The file-share access level (issue #646, S7). The Rust twin of the
+/// The file-share access level. The Rust twin of the
 /// TypeScript rule in `packages/security-contract/src/shareSelector.ts` —
 /// the one place the relay and the desktop both read it from — held to it
 /// vector by vector in `crates/dohc-engine-sync/tests/security_contract.rs`.
@@ -128,15 +128,15 @@ pub struct ShareBoundary {
 /// (`services/sync-relay/src/shareFilter.ts`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareGrant {
-    /// Granted paths. Each selects itself and everything beneath it. EMPTY
-    /// selects every tracked path, but ONLY together with a `version_id` —
+    /// Granted paths. Each selects itself and everything beneath it. Empty
+    /// selects every tracked path, but only together with a `version_id` —
     /// see `path_within_grant`.
     pub paths: Vec<String>,
     /// The granted version. `None` is a live-follow share of the workspace's
     /// main version, which is never entitled to a `version.create`; `Some(id)`
     /// is a version share, entitled to exactly that version's create.
     pub version_id: Option<String>,
-    /// The pinned level (#646). Parsed from the relay's own selector at pin
+    /// The pinned level. Parsed from the relay's own selector at pin
     /// time (`ShareAccess::parse`) and refused, not defaulted, when
     /// unreadable. Neither this type nor `ShareAccess` derives `Default`, so
     /// every construction states a level.
@@ -147,7 +147,7 @@ pub struct ShareGrant {
 /// the receiving grant. This surface never captures a new local outbound op.
 ///
 /// Enforcement is fail-closed. ShareView is validated before the transaction
-/// (it needs no store state). SharedChannel is validated INSIDE the write
+/// (it needs no store state). SharedChannel is validated inside the write
 /// transaction, because message/reaction/decision/attachment ops carry no
 /// channel field and must be scoped by resolving `thread_id ->
 /// chat_threads.channel_id -> chat_channel_wire_ids.wire_id` against the
@@ -159,7 +159,7 @@ pub fn apply_shared_envelope(
     faults: &dyn FaultInjector,
 ) -> Result<ApplyOutcome<i64>, SyncError> {
     crate::model::bounded(&boundary.share_id, "share_id must be non-empty and bounded")?;
-    // #646 PR2: a file share carries chat about the files it shares, and chat
+    // A file share carries chat about the files it shares, and chat
     // needs the store. `chat.message.append` carries no path, only a threadId,
     // so the file it belongs to is a fact the store holds — the same situation
     // the SharedChannel path already solves by validating inside the write
@@ -169,7 +169,9 @@ pub fn apply_shared_envelope(
         boundary.surface == ShareSurface::ShareView && is_share_view_chat_kind(&envelope.op_kind);
     if boundary.surface == ShareSurface::ShareView && !share_view_chat {
         enforce_share_view_boundary(boundary, envelope)?;
-        return Ok(ApplyOutcome::Applied(envelope.origin_seq));
+        return Ok(ApplyOutcome::new(ApplyDisposition::Applied(
+            envelope.origin_seq,
+        )));
     }
     if share_view_chat {
         enforce_share_view_thread_create(boundary, envelope)?;
@@ -184,7 +186,7 @@ pub fn apply_shared_envelope(
         &source_origin_id,
     )?;
     if source_origin_seq <= position.applied_origin_seq {
-        return Ok(ApplyOutcome::Skipped);
+        return Ok(ApplyOutcome::new(ApplyDisposition::Skipped));
     }
     let dense_seq = position
         .dense_seq
@@ -195,7 +197,7 @@ pub fn apply_shared_envelope(
     dense.origin_seq = dense_seq;
 
     let mut replay_refusals = Vec::new();
-    let outcome = apply_envelope_with(store, &dense, faults, |tx, op| {
+    let mut outcome = apply_envelope_with(store, &dense, faults, |tx, op| {
         if share_view_chat {
             enforce_share_view_chat_boundary(tx, boundary, op)?;
         } else {
@@ -210,10 +212,9 @@ pub fn apply_shared_envelope(
             source_origin_seq,
         )
     })?;
-    let advance_source = match &outcome {
-        ApplyOutcome::Applied(_) | ApplyOutcome::Crashed { .. } => false,
-        ApplyOutcome::Refused(_) | ApplyOutcome::Skipped => true,
-        ApplyOutcome::WithDiagnostics { .. } => unreachable!("diagnostics are attached below"),
+    let advance_source = match &outcome.primary {
+        ApplyDisposition::Applied(_) | ApplyDisposition::Crashed { .. } => false,
+        ApplyDisposition::Refused(_) | ApplyDisposition::Skipped => true,
     };
     if advance_source {
         match store.write_with(faults, |tx| {
@@ -230,7 +231,8 @@ pub fn apply_shared_envelope(
             TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
         }
     }
-    Ok(outcome.with_refusals(replay_refusals))
+    outcome.refusals.extend(replay_refusals);
+    Ok(outcome)
 }
 
 /// Fail-closed SharedChannel scoping. Every admitted op must positively bind to
@@ -248,7 +250,7 @@ fn enforce_shared_channel_boundary(
         .ok_or(SyncError::ShareBoundaryViolation)?;
     match op.op_kind.as_str() {
         // The create ops carry the channel selector on the wire; require it
-        // present AND equal to the grant (absent -> deny).
+        // present and equal to the grant (absent -> deny).
         "chat.channel.create" => {
             let wire = op
                 .payload
@@ -292,12 +294,12 @@ fn enforce_shared_channel_boundary(
     Ok(())
 }
 
-/// The EXACTLY five chat kinds a file share carries (#646 PR2), mirroring the
+/// The exactly five chat kinds a file share carries, mirroring the
 /// relay's own allowlist (`services/sync-relay/src/shareFilter.ts`,
 /// `filterFileChatOpForPathShare`).
 ///
 /// `chat.follow.set` and `chat.feed.read.set` are absent on purpose: they are
-/// the reader's OWN state, for the same reason written above for the channel
+/// the reader's own state, for the same reason written above for the channel
 /// branch's terminal deny. `chat.channel.create` is a channel's bootstrap and
 /// a file share has no channel. Everything not named here reaches
 /// `enforce_share_view_boundary` and is refused as a kind a share does not
@@ -325,7 +327,7 @@ pub(crate) const MOMENT_PATH_FIELDS: [&str; 4] = [
     "beforePath",
 ];
 
-/// Whether `path` is one a share may place at all AND inside the pinned grant.
+/// Whether `path` is one a share may place at all and inside the pinned grant.
 ///
 /// The containment rule, in one place, so the inbound boundary and the
 /// outbound scan cannot drift apart. `PathClass::Tracked` is the floor: a
@@ -335,7 +337,7 @@ pub(crate) fn tracked_path_within_grant(path: &str, granted: &ShareGrant) -> boo
     classify_share_path(path) == PathClass::Tracked && path_within_grant(path, granted)
 }
 
-/// Whether `path` is inside a grant that SELECTS PATHS (#646 PR2, PR3a).
+/// Whether `path` is inside a grant that selects PATHS.
 ///
 /// Chat and proposed changes both follow PATHS, and only paths. A grant with
 /// no paths is a VERSION share, and `path_within_grant` reads an empty path
@@ -358,7 +360,7 @@ pub(crate) fn selected_path_within_grant(path: &str, granted: &ShareGrant) -> bo
 /// deliberately drops the granter's `objectId`
 /// (`services/sync-relay/src/shareFilter.ts`), so this store minted its own
 /// and a granter object id would name nothing here. `linkedObjectId` and
-/// `linkedPathHint` are therefore shapes a share NEVER carries, and a relay
+/// `linkedPathHint` are therefore shapes a share never carries, and a relay
 /// offering one is offering something this boundary must not place — which is
 /// a malformed payload, not a scope decision, because no grant admits it and
 /// widening the share changes nothing.
@@ -432,7 +434,7 @@ fn enforce_share_view_chat_boundary(
     }
 }
 
-/// Where the file a thread is about sits RIGHT NOW, locally. The file sibling
+/// Where the file a thread is about sits right now, locally. The file sibling
 /// of `thread_bound_to_wire`: `thread_id -> chat_threads.linked_object_id ->
 /// path_aliases` in the workspace's main version. `None` at any hop.
 /// The file a thread is about, as this replica records it.
@@ -451,7 +453,7 @@ pub(crate) fn thread_linked_object(
     .map_err(SyncError::corrupt)
 }
 
-/// Where an object sits in this workspace's main version RIGHT NOW.
+/// Where an object sits in this workspace's main version right NOW.
 pub(crate) fn object_main_path(
     conn: &rusqlite::Connection,
     workspace_id: &str,
@@ -511,7 +513,7 @@ fn thread_bound_to_wire(
     Ok(bound)
 }
 
-/// Fail-closed ShareView scoping. EVERY referenced path (`path`,
+/// Fail-closed ShareView scoping. Every referenced path (`path`,
 /// `payloadBeforePath`, `payloadAfterPath`, `beforePath`) must classify
 /// `Tracked` and sit within the pinned grant, and at least one must be
 /// present — mirroring `services/sync-relay/src/shareFilter.ts` moment.append
@@ -521,7 +523,7 @@ fn enforce_share_view_boundary(
     boundary: &ShareBoundary,
     op: &ReplicationEnvelope,
 ) -> Result<(), SyncError> {
-    // Every refusal below is classified by ONE question, because the reader's
+    // Every refusal below is classified by one question, because the reader's
     // copy reads the answer: is this a SCOPE decision — the share does not
     // cover this op, which its granter could change — or a payload this
     // boundary cannot place, which nobody but the relay can fix?
@@ -540,7 +542,7 @@ fn enforce_share_view_boundary(
         .as_ref()
         .ok_or(SyncError::ShareBoundaryViolation)?;
     if !matches!(op.op_kind.as_str(), "moment.append" | "version.create") {
-        // A KNOWN kind a share does not carry is a scope decision — a secret
+        // A known kind a share does not carry is a scope decision — a secret
         // op, or a chat kind outside the five in `SHARE_VIEW_CHAT_KINDS`
         // (which never reach here), is outside what any file share covers.
         // That is where `chat.follow.set` and `chat.feed.read.set` land: the
@@ -555,15 +557,15 @@ fn enforce_share_view_boundary(
         });
     }
     // The version dimension, mirroring the relay's `targetVersionId`: a served
-    // op names EXACTLY the version this share granted. A `version.create` is
+    // op names exactly the version this share granted. A `version.create` is
     // entitled only to a VERSION share, and only to the version it granted.
     //
-    // The two failures are NOT the same class, and the reader's copy reads
+    // The two failures are not the same class, and the reader's copy reads
     // them apart: a create this share does not cover is a scope decision, and
     // a create that names no readable version is a payload this boundary
     // cannot place — the grant may well cover it.
     if op.op_kind == "version.create" {
-        // Validity BEFORE the comparison. An unusable version id is not a
+        // Validity before the comparison. An unusable version id is not a
         // version this share failed to grant — it is one the relay could
         // never have issued, and comparing it first would report the malformed
         // field as a scope decision and throw its measurements away.
@@ -574,7 +576,7 @@ fn enforce_share_view_boundary(
         match granted.version_id.as_deref() {
             Some(entitled) if entitled == claimed => {}
             // Both versions named, like the moment path: the reader has to see
-            // WHICH lineage was offered against the one the share granted.
+            // which lineage was offered against the one the share granted.
             Some(entitled) => {
                 return Err(SyncError::ShareVersionMismatch {
                     op_kind: op.op_kind.clone(),
@@ -651,7 +653,7 @@ fn enforce_share_view_boundary(
 /// refuses to create a selector with neither dimension at all
 /// (`validateShareSelector`, `empty_selector`). Reading no paths as "the whole
 /// workspace" regardless of version is exactly the divergence that would let a
-/// grant the relay serves NOTHING through admit everything here.
+/// grant the relay serves nothing through admit everything here.
 pub(crate) fn path_within_grant(path: &str, grant: &ShareGrant) -> bool {
     if grant.paths.is_empty() {
         return grant.version_id.is_some();
@@ -664,7 +666,7 @@ pub(crate) fn path_within_grant(path: &str, grant: &ShareGrant) -> bool {
     })
 }
 
-/// The version a served op names, or a MEASURED refusal saying why it is not
+/// The version a served op names, or a measured refusal saying why it is not
 /// one the relay could have issued. Both share-view op kinds read their
 /// version through this, so neither can compare a value it should have
 /// refused, and both report the same limit, unit and observed usage.
@@ -684,7 +686,7 @@ fn usable_version_id<'a>(claimed: Option<&'a str>, op_kind: &str) -> Result<&'a 
 
 /// The version rule, stated identically on the serving side by
 /// `services/sync-relay/src/shareFilter.ts` (`filterOpForShare` +
-/// `targetVersionId`): a served `moment.append` names EXACTLY the version this
+/// `targetVersionId`): a served `moment.append` names exactly the version this
 /// share granted — the pinned selector's `versionId`, or `main` when the
 /// selector names none. No descendant and no fork is admitted, because the
 /// relay serves exactly one version per share, ever.
@@ -692,10 +694,10 @@ fn usable_version_id<'a>(claimed: Option<&'a str>, op_kind: &str) -> Result<&'a 
 /// What this catches, stated honestly: a relay whose selection diverges from
 /// the selector the recipient pinned — a later widened or swapped selector, or
 /// a bug in the relay's own filter — cannot land another lineage's moments in
-/// the shared view. What it does NOT do is prove authorship. The served
+/// the shared view. What it does not do is prove authorship. The served
 /// payload is constructed by the relay and carries no signature, so a relay
 /// that means to lie can restate this field as easily as any other. Pinning
-/// plus this check bounds what a diverging relay can DELIVER; it is not
+/// plus this check bounds what a diverging relay can deliver; it is not
 /// forgery resistance, and #506 records the same limit for the path dimension.
 ///
 /// Fail closed on shape as well as value: a moment whose `versionId` is not
@@ -712,7 +714,7 @@ fn enforce_granted_version(
         &op.op_kind,
     )?;
     // A grant with no version follows the workspace's main version, which is
-    // the version the relay serves moments from for that share — NOT "compare
+    // the version the relay serves moments from for that share — not "compare
     // nothing". `version.create` above reads the same field raw, because only
     // a version share is entitled to one at all.
     let entitled = granted.version_id.as_deref().unwrap_or(MAIN_VERSION_ID);

@@ -19,7 +19,7 @@ const ABORTED_ERROR_CODE = "DOHC_ABORTED";
 /**
  * The authority an automation run's collection writes carry, derived
  * main-side from the claim the executor is running on this exact spawn —
- * never from the plugin's request. `depth` is the depth the WRITES carry:
+ * never from the plugin's request. `depth` is the depth the writes carry:
  * one greater than the claim's own (the trigger's) depth.
  */
 export interface PluginAutomationRunAuthority {
@@ -204,7 +204,7 @@ function pluginCapabilities(input: {
     // invokeChildProcess is absent for panel-driven SDK calls, which get a
     // real "unavailable for this request path" error from every
     // childProcesses.* method below regardless of what capabilities()
-    // claims (#779 round 3 finding 7).
+    // claims.
     childProcesses: {
       spawn: childProcesses,
       output: childProcesses,
@@ -368,7 +368,7 @@ export async function invokePluginSdkHost(
         invokeWorkspaceSdkHost(hostContext, method, params),
       );
     }
-    // A plugin opens one of its OWN web apps, naming the instance it wants.
+    // A plugin opens one of its own web apps, naming the instance it wants.
     // This is the only caller that can: the plugin's page in dohc knows the
     // manifest ids and nothing about what an instance is. The plugin id comes
     // from the panel grant this request arrived under, never from the request,

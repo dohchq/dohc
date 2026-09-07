@@ -3,7 +3,7 @@
 # Before this, PRs had NO automated checks at all: "Desktop Release" is
 # state=disabled_manually (turned off 2026-07-01 after three failures),
 # "Engine tests (native matrix)" is registered but its workflow file no longer
-# exists on main, and the macOS evidence run is workflow_dispatch only. Every
+# exists on main. Every
 # open PR showed CodeRabbit as its only check -- with ten PRs queued behind the
 # Rust-engine cutover.
 #
@@ -31,7 +31,7 @@
 #      the JavaScript job.
 # Windows and macOS legs stay out of PR CI for the same budget reason: macOS
 # burns 20x, Windows 2x on slower runs. The canonical Windows gate runs
-# locally; macOS evidence stays workflow_dispatch.
+# locally.
 # ------------------------------------------------------------------------
 # DISABLED ON PURPOSE (2026-07-28) -- dispatch-only, this is NOT an accident.
 #
@@ -48,7 +48,7 @@
 #     workflow_dispatch:
 #
 # and reverting the "deliberately disabled" test in
-# scripts/pr-checks-workflow.test.mjs to its trigger-coverage version
+# scripts/ci-verdict-provenance.test.mjs to its trigger-coverage version
 # (see the comment there). Until then: agents run the canonical gate and
 # the JS typecheck/tests locally before merging.
 # ------------------------------------------------------------------------
@@ -97,6 +97,7 @@ jobs:
             # its log into the repo root.
             rust:
               - 'crates/**'
+              - 'vendor/**'
               - 'fuzz/**'
               - 'fixtures/**'
               - '.cargo/**'
@@ -106,6 +107,16 @@ jobs:
               - 'deny.toml'
               - 'tools/rust-engine-program/**'
               - 'packages/ydoc-projection/**'
+              # The live fixture oracles and dependency setup are Rust inputs.
+              - 'packages/security-contract/**'
+              - 'packages/workspace-contracts/**'
+              - 'packages/workspace-core/**'
+              - '**/package.json'
+              - '**/tsconfig*.json'
+              - 'pnpm-workspace.yaml'
+              - '.npmrc'
+              - '.pnpmfile.cjs'
+              - '.pnpmfile.mjs'
               - 'pnpm-lock.yaml'
               - '.gitignore'
               - '.github/workflows/pr-checks.yml'
@@ -117,10 +128,16 @@ jobs:
             # sees the probe file that test writes into the repo root, so an
             # ignore rule can disable that regression test silently.
             js:
+              # The desktop daemon prebuild reads Cargo configuration.
+              - '.cargo/**'
+              - '.npmrc'
+              - '.pnpmfile.cjs'
+              - '.pnpmfile.mjs'
               - 'apps/**'
               - 'packages/**'
               - 'services/**'
               - 'crates/**'
+              - 'vendor/**'
               - 'fuzz/**'
               - 'fixtures/**'
               - 'scripts/**'
@@ -232,6 +249,12 @@ jobs:
       - name: Test
         run: pnpm run test
 
+      - name: Desktop system dependencies
+        run: pnpm exec playwright install-deps chromium
+
+      - name: Desktop boot and persistence
+        run: xvfb-run -a pnpm qa:smoke
+
   rust:
     name: engine gate
     needs: changes
@@ -269,8 +292,8 @@ jobs:
         with:
           shared-key: engine-gate
 
-      # Prebuilt binaries, pinned to the same versions the macOS evidence
-      # workflow uses so "cargo-deny=PASS" means the same thing in both places.
+      # Prebuilt binaries, pinned so "cargo-deny=PASS" means the same thing
+      # on every run.
       # The previous incarnation ran `cargo install` for both -- compiling the
       # two tools from source cost more minutes than the rest of the gate
       # combined. The verification steps below are what make the pin a checked

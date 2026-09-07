@@ -1,29 +1,19 @@
 //! Desktop workspace-search RPC: active-version scoping and bounded paging
 //! through the real in-process daemon transport.
 
+mod common;
+
+use common::*;
 use dohc_engine_domain::VersionedTextStore;
 use dohc_engine_protocol::{
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
-use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
-use serde_json::{Value, json};
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
+use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
+use serde_json::json;
 use std::sync::Arc;
-
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
 
 async fn open_workspace(
     transport: &InProcessTransport<EngineService>,
@@ -31,7 +21,7 @@ async fn open_workspace(
     id: u64,
     workspace_id: &str,
 ) -> WorkspaceHandle {
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -48,23 +38,6 @@ async fn open_workspace(
         .await
         .expect("open");
     serde_json::from_value(opened.result["workspace"].clone()).expect("handle")
-}
-
-async fn call(
-    transport: &InProcessTransport<EngineService>,
-    handle: &WorkspaceHandle,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> Value {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method}: {error:?}"))
-        .result
 }
 
 async fn write(
@@ -92,14 +65,14 @@ async fn write(
 }
 
 fn seed_short_query_scan_rows(scratch: &ScratchDir, workspace_id: &str, nonmatching_rows: usize) {
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
-    let db = scratch.engine_db_path().expect("engine db path");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let db = engine_db_path(scratch).expect("engine db path");
     let faults = NoFaults;
     let mut store = EngineStore::open(&db, 1).expect("seed store");
     assert!(
         store
-            .bind_shadow_clone_token(TOKEN)
-            .expect("bind shadow token")
+            .bind_root_token(TOKEN, &NoFaults)
+            .expect("bind root token")
     );
     VersionedTextStore::new(&mut store)
         .ensure_main_version(workspace_id, "main", 1, &faults)
@@ -269,8 +242,6 @@ async fn query_page_returns_ranked_snippets_from_the_active_version() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_resolves_every_search_through_its_opaque_workspace_handle() {
-    // MUTATION: resolve the wrong open workspace instead of the request handle
-    // and one side returns the other workspace's path.
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
     let scratch_a = ScratchDir::new().expect("scratch a");
@@ -332,8 +303,6 @@ async fn query_page_resolves_every_search_through_its_opaque_workspace_handle() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_byte_budget_pages_an_oversized_result_set() {
-    // MUTATION: remove byte_budget_cut_serialized from search.queryPage and the
-    // first page contains all 1,000 hits with no continuation.
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "workspace-search-paging").await;
@@ -385,8 +354,6 @@ async fn query_page_byte_budget_pages_an_oversized_result_set() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_short_query_finds_seeded_content() {
-    // MUTATION: return an empty page for the trigram TooShort sentinel and this
-    // loses the legacy daemon-side fallback.
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "workspace-search-short").await;
@@ -414,8 +381,6 @@ async fn query_page_short_query_finds_seeded_content() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_resumes_an_empty_bounded_scan_page() {
-    // MUTATION: reject line-zero or consumed-zero cursors and the second page
-    // fails with invalid-cursor instead of reaching the row after the scan cap.
     let scratch = ScratchDir::new().expect("scratch");
     let workspace_id = "workspace-search-empty-page";
     seed_short_query_scan_rows(&scratch, workspace_id, 1_024);
@@ -457,8 +422,6 @@ async fn query_page_resumes_an_empty_bounded_scan_page() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_cursor_signals_restart_after_index_mutation() {
-    // MUTATION: omit the generation comparison and the second request applies
-    // its keyset to a different index generation without an explicit restart.
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "workspace-search-generation").await;
@@ -510,8 +473,6 @@ async fn query_page_cursor_signals_restart_after_index_mutation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_cursor_signals_restart_after_active_version_switch() {
-    // MUTATION: bind cursor decoding to the newly active version and this valid
-    // continuation is rejected as invalid-cursor before restart can be returned.
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let workspace_id = "workspace-search-version-restart";
@@ -577,8 +538,6 @@ async fn query_page_cursor_signals_restart_after_active_version_switch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_astral_preview_fits_renderer_utf16_contract() {
-    // MUTATION: window by Unicode scalar count and the emoji-heavy preview is
-    // 360 UTF-16 units, so main-to-renderer validation rejects the result.
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "workspace-search-astral").await;
@@ -603,8 +562,6 @@ async fn query_page_astral_preview_fits_renderer_utf16_contract() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_reads_a_write_committed_through_rpc_immediately() {
-    // MUTATION: omit the in-transaction FTS maintenance or index certification
-    // and the second query remains empty.
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "workspace-search-rwyw").await;

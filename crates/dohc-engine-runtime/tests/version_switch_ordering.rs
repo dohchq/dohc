@@ -5,25 +5,18 @@ use dohc_engine_domain::{
 };
 use dohc_engine_runtime::{
     ActiveVersionSwitch, CancellationToken, CaptureIngestBinary, NoFaults, RuntimeError,
-    SelfWriteRecorder, WorkspaceSupervisor,
+    WorkspaceSupervisor,
 };
 use dohc_engine_storage::{
     EngineStore, FaultAction, FaultInjector, FaultPoint, StorageError, TxnOutcome,
 };
-use dohc_engine_testkit::{EngineDbScan, ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{EngineDbScan, ScratchDir, ScriptedFaults, engine_db_path};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const WORKSPACE: &str = "ws-switch-ordering";
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 fn write(version_id: &str, text: &str, moment_id: &str, now_ms: i64) -> WriteText {
     write_for(WORKSPACE, version_id, "ordered.md", text, moment_id, now_ms)
@@ -58,7 +51,7 @@ async fn binary_head_retires_its_ydoc_lineage_before_the_unsettled_scan() {
     const WS: &str = "ws-binary-unsettled";
     const PATH: &str = "notes/binary.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let database = scratch.engine_db_path().expect("database");
+    let database = engine_db_path(&scratch).expect("database");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&database, 1).expect("actor").actor;
     actor
@@ -152,7 +145,7 @@ async fn pathless_settled_scene_is_not_reported_as_unsettled() {
     const PATH: &str = "drawings/settled.excalidraw";
     const OBJECT: &str = "pathless-scene-object";
     let scratch = ScratchDir::new().expect("scratch");
-    let database = scratch.engine_db_path().expect("database");
+    let database = engine_db_path(&scratch).expect("database");
     let imported = dohc_engine_collab::import_portable_scene(
         r#"{"type":"excalidraw","version":2,"source":"https://excalidraw.com","elements":[],"appState":{},"files":{}}"#,
     )
@@ -259,10 +252,8 @@ impl FaultInjector for RewriteAtJobStart {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn destination_is_active_when_switch_materialization_fails() {
-    // MUTATION: materialize before updating active_versions, or restore the
-    // database-only switch, and the error/active-version assertions fail.
     let scratch = ScratchDir::new().expect("scratch");
-    let database = scratch.engine_db_path().expect("database");
+    let database = engine_db_path(&scratch).expect("database");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&database, 1).expect("actor").actor;
     actor
@@ -314,7 +305,7 @@ async fn destination_is_active_when_switch_materialization_fails() {
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "feature".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 5,
             },
             faults.clone(),
@@ -346,7 +337,7 @@ async fn destination_is_active_when_switch_materialization_fails() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_switch_write_preserves_an_edit_between_planning_and_phase_two() {
     let scratch = ScratchDir::new().expect("scratch");
-    let database = scratch.engine_db_path().expect("database");
+    let database = engine_db_path(&scratch).expect("database");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&database, 1).expect("actor").actor;
     actor
@@ -429,7 +420,7 @@ async fn secret_switch_write_preserves_an_edit_between_planning_and_phase_two() 
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "feature".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 5,
             },
             faults.clone(),
@@ -453,7 +444,7 @@ async fn secret_switch_write_preserves_an_edit_between_planning_and_phase_two() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_switch_delete_preserves_an_edit_between_planning_and_phase_two() {
     let scratch = ScratchDir::new().expect("scratch");
-    let database = scratch.engine_db_path().expect("database");
+    let database = engine_db_path(&scratch).expect("database");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&database, 1).expect("actor").actor;
     actor
@@ -530,7 +521,7 @@ async fn secret_switch_delete_preserves_an_edit_between_planning_and_phase_two()
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "feature".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 5,
             },
             faults.clone(),
@@ -558,7 +549,7 @@ async fn switch_jobs_are_distinct_and_match_their_active_workspace() {
 
     let first_root = ScratchDir::new().expect("first root");
     let second_root = ScratchDir::new().expect("second root");
-    let database = first_root.engine_db_path().expect("database");
+    let database = engine_db_path(&first_root).expect("database");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&database, 1).expect("actor").actor;
     for workspace_id in [FIRST, SECOND] {
@@ -627,7 +618,7 @@ async fn switch_jobs_are_distinct_and_match_their_active_workspace() {
                     workspace_id: workspace_id.to_owned(),
                     version_id: "feature".to_owned(),
                     root_dir: root.to_path_buf(),
-                    self_writes: Arc::new(NoRecorder),
+                    self_writes: Arc::new(()),
                     now_ms: 1_700_000_000_000,
                 },
                 Arc::new(NoFaults),
@@ -664,7 +655,7 @@ async fn switch_jobs_are_distinct_and_match_their_active_workspace() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn switch_projection_generation_does_not_advance_moment_order() {
     let scratch = ScratchDir::new().expect("scratch");
-    let database = scratch.engine_db_path().expect("database");
+    let database = engine_db_path(&scratch).expect("database");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&database, 1).expect("actor").actor;
     actor
@@ -719,7 +710,7 @@ async fn switch_projection_generation_does_not_advance_moment_order() {
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "watermark-feature".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 4,
             },
             Arc::new(NoFaults),
@@ -806,16 +797,12 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
     // CIPHERTEXT, so the plaintext lives only in memory and on the projected
     // file — never in the database.
     //
-    // MUTATION: in `plan_secret_switch`, leave the decrypted plaintext behind as
-    // a stray blob — `store.write_with(…, |tx| put_binary_blob(tx, &leaked))`
-    // beside the existing `drop(plaintext)`. Nothing reads that blob, so every
-    // other assertion here still passes and only the scan fails.
     //
     // Planning the projection with the plaintext INLINE also fails this test,
     // but for the wrong reason: the secret executor then cannot decrypt what it
     // was handed, so the switch itself errors before the scan runs.
     let scratch = ScratchDir::new().expect("scratch");
-    let database = scratch.engine_db_path().expect("database");
+    let database = engine_db_path(&scratch).expect("database");
     let env_path = scratch.path().join(".env");
 
     // One distinctive marker per version, so a leak names the side it came from.
@@ -886,7 +873,7 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
                     workspace_id: WORKSPACE.to_owned(),
                     version_id: version_id.to_owned(),
                     root_dir: scratch.path().to_path_buf(),
-                    self_writes: Arc::new(NoRecorder),
+                    self_writes: Arc::new(()),
                     now_ms,
                 },
                 Arc::new(NoFaults),
@@ -901,7 +888,7 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
         );
     }
 
-    // The WAL is part of the evidence, so the scan runs BEFORE the close: closing
+    // The WAL is part of the evidence, so the scan runs before the close: closing
     // the last connection checkpoints the WAL into the main file and normally
     // deletes it, and plaintext that reached a WAL page and was later overwritten
     // would be gone before this could look. `assert_scanned_wal` fails if that

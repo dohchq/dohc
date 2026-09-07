@@ -8,7 +8,8 @@
 //! predicate is factored into [`diff_core`] behind a seam so the seeded-bug
 //! proof (a flipped hash comparison) exercises the real machinery with only the
 //! predicate mutated — the differential harness must be able to catch exactly
-//! this class of bug (`EXECUTION_LOG.md` CAL-2 differential-tautology lesson).
+//! this class of bug; an earlier differential test passed against a flipped
+//! comparison because both sides shared the predicate.
 
 use crate::bounds::ScanBounds;
 use crate::error::FilesError;
@@ -29,7 +30,7 @@ pub struct ManifestEntry {
 }
 
 /// A prior scan generation as a path → (size, hash) manifest. `BTreeMap` keeps
-/// iteration deterministic (`PORTING.md` §11: no `HashMap` in ordered output).
+/// iteration deterministic (no `HashMap` in ordered output).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanManifest {
     entries: BTreeMap<String, ManifestEntry>,
@@ -84,19 +85,18 @@ impl ScanManifest {
 }
 
 /// The classified difference between a prior manifest and a current listing.
-/// Each vector is sorted by path (deterministic; `LANGUAGE_SEMANTICS_MATRIX.md`
-/// 3.3).
+/// Each vector is sorted by path (deterministic).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanDiff {
     pub added: Vec<FileEntry>,
     pub changed: Vec<FileEntry>,
     pub removed: Vec<String>,
-    /// Previously-tracked paths that are STILL on disk but now exceed the size
-    /// cap (present in the current listing's `skipped` set). These must NOT be
+    /// Previously-tracked paths that are still on disk but now exceed the size
+    /// cap (present in the current listing's `skipped` set). These must not be
     /// classified `removed` — the file exists; only its content is too large to
     /// re-hash. The reconcile keeps them tracked at their last-known-good
-    /// content (see `reconcile.rs` and `BEHAVIOR_DELTA.md` CAL-3). A file that
-    /// is truly gone from disk (absent from BOTH files and skipped) is the only
+    /// content (see `reconcile.rs`). A file that
+    /// is truly gone from disk (absent from both files and skipped) is the only
     /// thing that reaches `removed`.
     pub retained_over_cap: Vec<String>,
     /// Previously-tracked paths whose absence is not trustworthy because the
@@ -132,7 +132,7 @@ pub fn diff_scans(
     diff_core(prior, current, is_unchanged, bounds.max_diff_entries)
 }
 
-/// The real change predicate: a file is unchanged iff BOTH its size and its
+/// The real change predicate: a file is unchanged iff both its size and its
 /// content hash match the prior manifest. Comparing size too is a cheap guard,
 /// but the hash is the authority.
 fn is_unchanged(prior: &ManifestEntry, current: &FileEntry) -> bool {
@@ -171,7 +171,7 @@ where
         }
     }
 
-    // Presence is BOTH tracked files AND the skipped (over-cap-but-present)
+    // Presence is both tracked files and the skipped (over-cap-but-present)
     // set: a path present in either still exists on disk.
     let present: BTreeMap<&str, ()> = current
         .files
@@ -306,12 +306,12 @@ mod tests {
     }
 
     // SEEDED-BUG PROOF: the golden diff is what the real predicate produces; the
-    // flipped predicate produces a DIFFERENT diff, so an equality assertion
-    // against the golden would FAIL under the bug. This proves the differential
+    // flipped predicate produces a different diff, so an equality assertion
+    // against the golden would fail under the bug. This proves the differential
     // assertion is load-bearing, not tautological.
     #[test]
     fn seeded_bug_is_caught_by_the_golden() {
-        // changed.md is edited in place: SAME size (5), different content hash.
+        // changed.md is edited in place: same size (5), different content hash.
         let prior = manifest(&[("same.md", 5, "hSAME"), ("changed.md", 5, "hOLD")]);
         let current = ScanListing {
             files: vec![entry("same.md", 5, "hSAME"), entry("changed.md", 5, "hNEW")],

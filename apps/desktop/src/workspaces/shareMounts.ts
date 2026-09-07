@@ -27,7 +27,7 @@ import {
   withActiveShareViewFilesOwnerOperation,
 } from "./shareViewFilesOwner";
 
-// Share mounts: the receive side of a relay share materialized INSIDE a host
+// Share mounts: the receive side of a relay share materialized inside a host
 // workspace as shared-with-me/<label>/ — ordinary read-only files the user's
 // agent reads with normal tools — instead of (or alongside) the standalone
 // shared-view window. Each mount is its own pull target: the nested
@@ -53,7 +53,7 @@ const UNOWNED_SHARE_PROJECTION_PATH =
 // A mount label must be exactly one safe path segment. The registry file is
 // data, not a write path into the tree — labels are re-validated on every
 // use so an edited registry cannot smuggle traversal into materialization.
-export function validShareMountId(shareId: unknown): shareId is string {
+function validShareMountId(shareId: unknown): shareId is string {
   return (
     typeof shareId === "string" &&
     shareId.length > 0 &&
@@ -441,7 +441,7 @@ export async function overlayCanonicalShareMountFiles<
 // symlinked shared-with-me or label directory (at either component) before
 // any materialization. A refresh writes relay-controlled bytes, so a link
 // planted at either level must never redirect those writes outside the
-// workspace (gpt-5.6-sol P1). The workspace root itself is realpath'd first,
+// workspace. The workspace root itself is realpath'd first,
 // so ancestor system symlinks above the workspace stay legal.
 export async function assertRealMountRoot(
   hostRoot: string,
@@ -461,10 +461,10 @@ export async function assertRealMountRoot(
   }
 }
 
-// Creates the mount directory, guarding the container FIRST: a symlinked
+// Creates the mount directory, guarding the container first: a symlinked
 // shared-with-me must be refused before mkdir would follow it and create the
 // label outside the workspace (codex P2 — the refresh guard alone ran after
-// this write). The label directory itself is created EXCLUSIVELY: a mount
+// this write). The label directory itself is created exclusively: a mount
 // only ever owns a directory it created — a leftover or hand-made folder
 // must never be adopted (pulls would overwrite it; rollback/unmount would
 // delete it).
@@ -479,7 +479,7 @@ async function createMountDirectory(
   assertActive();
   await mkdir(container, { recursive: true });
   assertActive();
-  await mkdir(rootDir); // NOT recursive: EEXIST refuses adoption
+  await mkdir(rootDir); // Not recursive: EEXIST refuses adoption
 }
 
 // A mount needs file content to follow. A null selector is a different grant
@@ -501,9 +501,9 @@ export function assertMountableSelector(
 // The store-scoping workspace id inside the mount's own nested engine.db.
 // Purely local and deterministic; it never leaves the machine.
 //
-// It MUST include the host: daemon sessions and relay routes are keyed by
+// It must include the host: daemon sessions and relay routes are keyed by
 // workspace id alone, and `EngineWorkspaceSessions` hands back a cached
-// binding without comparing rootPath. Two host workspaces mounting the SAME
+// binding without comparing rootPath. Two host workspaces mounting the same
 // share would otherwise collide on one session and one route — the second
 // refresh reusing a connection bound to the first host's mount folder.
 //
@@ -525,7 +525,7 @@ export function mountStoreWorkspaceIdFor(
  * One refresh result row, built so the wire schema can always carry it.
  *
  * The loop used to push the registry's raw `shareId` and `label` and parse
- * the whole array at the end, so ONE record with a 65-character label threw
+ * the whole array at the end, so one record with a 65-character label threw
  * after every pull had already run — no row survived, and the user was told
  * "Couldn't refresh shares." while the healthy mounts had in fact refreshed.
  *
@@ -534,7 +534,7 @@ export function mountStoreWorkspaceIdFor(
  * take the whole report with it. Nothing is invented — a fabricated id or
  * label would be a lie the UI could act on.
  *
- * Validated against the ACTUAL wire schema rather than a restatement of its
+ * Validated against the actual wire schema rather than a restatement of its
  * bounds, because a restatement drifts and this function exists precisely to
  * stop a row the schema refuses from reaching it.
  */
@@ -560,11 +560,11 @@ export function shareMountResultRow(input: {
 }
 
 /**
- * What one mount's refresh failure does to the REST of the refresh.
+ * What one mount's refresh failure does to the rest of the refresh.
  *
  * Only a failure that makes every remaining pull pointless may abandon them.
  * An expired session is that: nothing else can succeed until the user signs
- * in. A damaged pin is not — it is permanent for ONE mount, and throwing it
+ * in. A damaged pin is not — it is permanent for one mount, and throwing it
  * stopped healthy shares from refreshing at all.
  *
  * It gets a status of its own rather than "unchanged", because "unchanged"

@@ -1,20 +1,26 @@
-import { readFileSync, writeSync } from "node:fs";
-import { createServer, type ServerResponse } from "node:http";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadShareWebConfig } from "./config";
-import { pipeResponseBody } from "./responseBody";
 import {
-  createShareWebHandler,
+  fatal,
+  installShutdown,
+  parseGracePeriodMs,
+  serveFetchHandler,
+} from "@dohc/service-http";
+import { loadShareWebConfig } from "./config";
+import {
+  createShareWebApplication,
   SHARE_WEB_SECURITY_HEADERS,
   shareWebRefusalBody,
 } from "./server";
 
-const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS = 10_000;
-const SHUTDOWN_GRACE_PERIOD_MS = shutdownGracePeriodMs();
-const responseErrorDuringPipeTestSeam =
-  process.env.NODE_ENV === "test" &&
-  process.env.DOHC_SHARE_WEB_TEST_RESPONSE_ERROR_DURING_PIPE === "1";
+const MAX_REQUEST_BODY_BYTES = 16 * 1024;
+const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
+  process.env.NODE_ENV === "test"
+    ? process.env.DOHC_SHARE_WEB_TEST_SHUTDOWN_GRACE_PERIOD_MS
+    : undefined,
+  10_000,
+);
 
 const config = loadConfig();
 const viewerAssetsDir = viewerAssetsDirectory();
@@ -27,93 +33,30 @@ try {
   );
 }
 
-const handler = createShareWebHandler({
+const { handle: handler } = createShareWebApplication({
   relayUrl: config.relayUrl,
   publicRelayUrl: config.publicRelayUrl,
   relayExchangeKey: config.relayExchangeKey,
   publicHosts: config.publicHosts,
   viewerAssetsDir,
+  accountAuth: config.accountAuth,
 });
 
-const server = createServer((incoming, outgoing) => {
-  const abortRelay = new AbortController();
-  const chunks: Buffer[] = [];
-  let received = 0;
-  let oversized = false;
-  outgoing.once("close", () => {
-    if (!outgoing.writableFinished) abortRelay.abort();
-  });
-  incoming.on("error", () => outgoing.destroy());
-  incoming.on("data", (chunk: Buffer) => {
-    if (oversized) return;
-    received += chunk.length;
-    if (received > 16 * 1024) {
-      oversized = true;
-      chunks.length = 0;
-      outgoing.shouldKeepAlive = false;
-      refuse(outgoing);
-      return;
-    }
-    chunks.push(Buffer.from(chunk));
-  });
-  incoming.on("end", () => {
-    if (oversized) return;
-    let request: Request;
-    try {
-      const url = new URL(
-        incoming.url ?? "/",
-        `http://${incoming.headers.host ?? "localhost"}`,
-      );
-      const headers = new Headers(incoming.headers as Record<string, string>);
-      headers.set(
-        "x-dohc-share-web-client-ip",
-        clientAddress(
-          incoming.socket.remoteAddress,
-          headers.get("x-forwarded-for"),
-          config.trustedProxies,
-        ),
-      );
-      const method = incoming.method ?? "GET";
-      request = new Request(url, {
-        method,
-        headers,
-        signal: abortRelay.signal,
-        body:
-          method === "GET" || method === "HEAD" || chunks.length === 0
-            ? undefined
-            : Buffer.concat(chunks),
-      });
-    } catch {
-      outgoing.destroy();
-      return;
-    }
-    void handler(request)
-      .then((webResponse) => {
-        if (outgoing.destroyed) {
-          void webResponse.body?.cancel();
-          return;
-        }
-        outgoing.statusCode = webResponse.status;
-        for (const [key, value] of webResponse.headers) {
-          if (key !== "set-cookie") outgoing.setHeader(key, value);
-        }
-        const setCookies = webResponse.headers.getSetCookie();
-        if (setCookies.length > 0) outgoing.setHeader("set-cookie", setCookies);
-        if (!webResponse.body) {
-          outgoing.end();
-          return;
-        }
-        void pipeResponseBody(
-          webResponse.body,
-          outgoing,
-          responseErrorDuringPipeTestSeam &&
-            incoming.headers["x-dohc-test-response-error"] === "1",
-        );
-      })
-      .catch(() => {
-        if (!outgoing.destroyed) refuse(outgoing);
-      });
-  });
+const server = serveFetchHandler({
+  handler,
+  maxBodyBytes: () => MAX_REQUEST_BODY_BYTES,
+  oversized: refusal,
+  failure: refusal,
+  prepareHeaders: (headers, incoming) => {
+    headers.set(
+      "x-dohc-share-web-client-ip",
+      clientAddress(
+        incoming.socket.remoteAddress,
+        headers.get("x-forwarded-for"),
+        config.trustedProxies,
+      ),
+    );
+  },
 });
 
 server.listen(config.port, config.bind, () => {
@@ -124,21 +67,10 @@ server.listen(config.port, config.bind, () => {
   if (config.devMode) console.log("[share-web] development mode enabled");
 });
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, shutdown);
-}
-
-function shutdown(): void {
-  let forceCloseTimer: ReturnType<typeof setTimeout> | undefined;
-  server.close(() => {
-    if (forceCloseTimer !== undefined) clearTimeout(forceCloseTimer);
-    process.exit(0);
-  });
-  forceCloseTimer = setTimeout(() => {
-    server.closeAllConnections();
-  }, SHUTDOWN_GRACE_PERIOD_MS);
-  forceCloseTimer.unref();
-}
+installShutdown(server, {
+  gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
+  onClosed: () => process.exit(0),
+});
 
 function loadConfig() {
   try {
@@ -146,11 +78,6 @@ function loadConfig() {
   } catch (error) {
     fatal(`FATAL: ${error instanceof Error ? error.message : "invalid share-web configuration"}`);
   }
-}
-
-function fatal(message: string): never {
-  writeSync(2, `${message}\n`);
-  process.exit(1);
 }
 
 function viewerAssetsDirectory(): string {
@@ -161,23 +88,11 @@ function viewerAssetsDirectory(): string {
   return fileURLToPath(new URL("../viewer/dist", import.meta.url));
 }
 
-function shutdownGracePeriodMs(): number {
-  if (process.env.NODE_ENV !== "test") return DEFAULT_SHUTDOWN_GRACE_PERIOD_MS;
-  const configured = process.env.DOHC_SHARE_WEB_TEST_SHUTDOWN_GRACE_PERIOD_MS;
-  if (configured === undefined) return DEFAULT_SHUTDOWN_GRACE_PERIOD_MS;
-  const parsed = Number(configured);
-  return Number.isSafeInteger(parsed) && parsed >= 0
-    ? parsed
-    : DEFAULT_SHUTDOWN_GRACE_PERIOD_MS;
-}
-
-function refuse(outgoing: ServerResponse): void {
-  outgoing.statusCode = 404;
-  outgoing.setHeader("content-type", "application/json");
-  for (const [key, value] of Object.entries(SHARE_WEB_SECURITY_HEADERS)) {
-    outgoing.setHeader(key, value);
-  }
-  outgoing.end(shareWebRefusalBody);
+function refusal(): Response {
+  return new Response(shareWebRefusalBody, {
+    status: 404,
+    headers: { "content-type": "application/json", ...SHARE_WEB_SECURITY_HEADERS },
+  });
 }
 
 function clientAddress(

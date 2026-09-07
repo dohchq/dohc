@@ -1,7 +1,7 @@
 //! Streaming SHA-256 content hashing behind a **fixed-size** worker pool.
 //!
-//! Two bounds live here (`plan §Rust policy`; `PORTING.md` §14):
-//! - **Bounded read buffer.** Each worker owns ONE reusable buffer of
+//! Two bounds live here:
+//! - **Bounded read buffer.** Each worker owns one reusable buffer of
 //!   `read_buffer_bytes`; a file is streamed through it, never slurped whole.
 //!   Total hashing memory is `read_buffer_bytes * workers`.
 //! - **Bounded concurrency.** The pool has a fixed number of worker threads
@@ -11,10 +11,10 @@
 //!   [`PoolGauge`] records the observed peak concurrency so a test can *assert*
 //!   the cap, not merely trust it.
 //!
-//! Cancellation is cooperative and lands BETWEEN bounded units: the batch loop
+//! Cancellation is cooperative and lands between bounded units: the batch loop
 //! checks the token before each batch, and a single large file's stream loop
-//! checks it between buffer reads (`PORTING.md` §12 — never mid-durable-step;
-//! a content hash has no durable step to tear).
+//! checks it between buffer reads (never mid-durable-step; a content hash has
+//! no durable step to tear).
 
 use crate::error::FilesError;
 use sha2::{Digest, Sha256};
@@ -132,7 +132,7 @@ struct Job {
 }
 
 /// Immutable per-worker config: the streaming read buffer size and the file-size
-/// cap enforced WHILE streaming (a second defense against a file that grows past
+/// cap enforced while streaming (a second defense against a file that grows past
 /// the cap between enumeration and hashing).
 #[derive(Clone, Copy)]
 struct WorkerConfig {
@@ -256,7 +256,7 @@ impl HashPool {
         let mut slots: Vec<Option<HashOutcome>> = (0..inputs.len()).map(|_| None).collect();
 
         for batch in inputs.chunks(self.workers) {
-            // Cancellation point: BETWEEN batches (a bounded unit), before any
+            // Cancellation point: between batches (a bounded unit), before any
             // of this batch's jobs are submitted.
             if token.is_cancelled() {
                 return Ok(HashRun::Cancelled);
@@ -409,7 +409,7 @@ fn hash_one(job: &Job, buffer: &mut [u8], max_file_bytes: u64) -> HashOutcome {
             Err(err) => return HashOutcome::Io { kind: err.kind() },
         };
         bytes = bytes.saturating_add(read as u64);
-        // Enforce the size cap WHILE streaming: a file that grew past the cap
+        // Enforce the size cap while streaming: a file that grew past the cap
         // after enumeration is abandoned at the boundary, never read unbounded.
         if bytes > max_file_bytes {
             return HashOutcome::OverCap;
@@ -437,7 +437,7 @@ fn hash_one(job: &Job, buffer: &mut [u8], max_file_bytes: u64) -> HashOutcome {
         }
     };
     HashOutcome::Hashed {
-        sha256: to_hex(&hasher.finalize()),
+        sha256: dohc_engine_storage::hex(&hasher.finalize()),
         bytes,
         stable_mtime_ms,
     }
@@ -491,17 +491,6 @@ pub(crate) fn mtime_ms(metadata: &std::fs::Metadata) -> i64 {
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
-}
-
-/// Lowercase-hex encode a digest without allocating twice or risking a panic
-/// (writing to a `String` is infallible).
-fn to_hex(digest: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
 }
 
 #[cfg(test)]

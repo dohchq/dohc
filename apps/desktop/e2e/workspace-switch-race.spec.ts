@@ -12,7 +12,6 @@ import {
   revealExplorerPath,
   seedWorkspaceManifest,
   seedWorkspaceRegistry,
-  seedWorkspaceSettings,
   waitForWorkspaceReady,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -51,9 +50,6 @@ test("switching A->B while panels load never shows A's history or chats in B", a
   try {
     // --- Seed workspace A: 1,000 engine moments + one 200-message chat ---
     await seedWorkspaceManifest(temp, WORKSPACE_A_ID);
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     // Seeded through the engine daemon over RPC — post-cutover the retired
     // TS in-process store produces stores the daemon refuses.
     const diskWrites: Array<{ path: string; contents: string }> = [];
@@ -106,9 +102,6 @@ test("switching A->B while panels load never shows A's history or chats in B", a
 
     // --- Seed workspace B: one file, one moment ---
     await seedWorkspaceManifest(workspaceB, WORKSPACE_B_ID);
-    await seedWorkspaceSettings(workspaceB, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await seedThroughDaemon(
       { workspaceId: WORKSPACE_B_ID, rootPath: workspaceB.rootPath },
       async ({ files }) => {
@@ -195,7 +188,7 @@ test("switching A->B while panels load never shows A's history or chats in B", a
         '[data-testid="engine-moment-open"][data-moment-path="b-note.md"]',
       ),
     ).toBeVisible();
-    // ...and NEVER any of A's moments or chats.
+    // ...and never any of A's moments or chats.
     await expect(
       page.locator('[data-testid="engine-moment-open"][data-moment-path^="files/doc-"]'),
     ).toHaveCount(0);

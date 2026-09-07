@@ -5,7 +5,6 @@ use dohc_engine_files::{
 use dohc_engine_storage::{EngineStore, FaultInjector, get_binary_blob, hex_sha256};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 
 use crate::file_search::{
@@ -228,8 +227,8 @@ pub fn apply_moment_envelope_detailed(
     envelope.validate()?;
     let search_policy = search_policy_for_store(store);
     apply_envelope_with(store, envelope, faults, |tx, envelope| {
-        let payload: MomentAppendPayload = serde_json::from_value(envelope.payload.clone())
-            .map_err(|_| SyncError::InvalidInput {
+        let payload: MomentAppendPayload =
+            Deserialize::deserialize(&envelope.payload).map_err(|_| SyncError::InvalidInput {
                 reason: "moment.append payload is malformed",
             })?;
         validate_payload_bounds(&payload)?;
@@ -380,7 +379,7 @@ pub(crate) fn redelivered_conflicts_opened(
         return Ok(0);
     }
     let payload: MomentAppendPayload =
-        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
+        Deserialize::deserialize(&envelope.payload).map_err(|_| SyncError::InvalidInput {
             reason: "moment.append payload is malformed",
         })?;
     store.read_with(|conn| {
@@ -657,8 +656,11 @@ fn apply_moment_append(
                         dohc_engine_domain::collections::markdown_frontmatter_json(&snapshot.text)
                     })
                     .unwrap_or_else(empty);
-                let frontmatter = dohc_engine_domain::collections::markdown_frontmatter_json(text)
-                    .unwrap_or_else(empty);
+                let (frontmatter, provenance) =
+                    dohc_engine_domain::collections::markdown_frontmatter_json_with_provenance(
+                        text,
+                    )
+                    .unwrap_or_else(|| (empty(), Default::default()));
                 record_facts = dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
                     tx,
                     &envelope.workspace_id,
@@ -668,6 +670,7 @@ fn apply_moment_append(
                     &frontmatter,
                     &before_frontmatter,
                     &frontmatter,
+                    Some(&provenance),
                     Some(&envelope.origin_id),
                     None,
                     Some((&envelope.origin_id, envelope.origin_seq)),
@@ -931,7 +934,7 @@ fn parse_tagged_shadow(
     missing_owner_reason: &'static str,
 ) -> Result<(MomentAppendPayload, ConflictEffectOwner), SyncError> {
     let payload: MomentAppendPayload =
-        serde_json::from_value(value.clone()).map_err(|_| SyncError::InvalidInput {
+        Deserialize::deserialize(value).map_err(|_| SyncError::InvalidInput {
             reason: malformed_reason,
         })?;
     validate_payload_bounds(&payload)?;
@@ -1698,13 +1701,8 @@ pub(crate) fn sync_conflict_id(
         input.push('\0');
         input.push_str(high);
     }
-    let digest = Sha256::digest(input.as_bytes());
-    let mut hex = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    format!("conflict_sync_{}", &hex[..32])
+    let digest = hex_sha256(input.as_bytes());
+    format!("conflict_sync_{}", &digest[..32])
 }
 
 fn js_string_cmp(left: &str, right: &str) -> Ordering {

@@ -1,6 +1,6 @@
 //! Versioning-domain error taxonomy. One `thiserror` enum with a stable
-//! kebab-case `code()` — the compatibility surface ported tests assert
-//! (`PORTING.md` §4). Storage failures are wrapped so the underlying
+//! kebab-case `code()`, the compatibility surface ported tests assert.
+//! Storage failures are wrapped so the underlying
 //! `state-corrupt`/fingerprint code stays reachable.
 
 use dohc_engine_crypto::CryptoError;
@@ -58,7 +58,7 @@ pub enum DomainError {
     #[error("text file not found")]
     FileNotFound,
 
-    /// The path resolves to a live BINARY head, so a text-only read surface
+    /// The path resolves to a live binary head, so a text-only read surface
     /// must not serve it. Fails closed rather than projecting the binary head as
     /// an empty text document (which would invite a silent overwrite). Distinct
     /// from `FileNotFound` — the head exists, it just is not text.
@@ -152,7 +152,7 @@ pub enum DomainError {
         observed_bytes: usize,
     },
 
-    /// A resolution's ANSWER would not fit one control frame even with every
+    /// A resolution's answer would not fit one control frame even with every
     /// body withheld. Raised inside the resolve transaction, before anything
     /// is written, because after the commit an unsendable answer costs the
     /// caller the acknowledgement for work the workspace kept.
@@ -237,7 +237,7 @@ impl DomainError {
             DomainError::IdempotencyKeyReuseMismatch => "idempotency-key-reuse-mismatch",
             DomainError::StateCorrupt { .. } => "state-corrupt",
             // Delegates to the crypto taxonomy: `decrypt-failed`, `key-corrupt`,
-            // `invalid-text`, `invalid-input`, `unwrap-failed`.
+            // `invalid-text`, `invalid-input`.
             DomainError::Crypto(err) => err.code(),
             DomainError::SecretMomentNotFound => "moment-not-found",
             DomainError::Chat { code, .. } => code,

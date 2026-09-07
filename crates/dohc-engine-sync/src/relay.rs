@@ -16,8 +16,9 @@ use crate::cursor::{
 use crate::error::GENERIC_REPLAY_REFUSAL_CODE;
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
 use crate::{
-    ApplyOutcome, BlobContent, BlobHydration, BlobKind, ObservedBytes, RelayError,
-    ReplicationEnvelope, ShareDisposition, SyncError, blob_ceiling, hydrate_blob_content,
+    ApplyDisposition, ApplyOutcome, BlobContent, BlobHydration, BlobKind, ObservedBytes,
+    RelayError, ReplicationEnvelope, ShareDisposition, SyncError, blob_ceiling,
+    hydrate_blob_content,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,7 +236,7 @@ pub struct ShareBlobRequest {
 }
 
 /// One blob a proposed change names, uploaded to the GRANTER's workspace
-/// before the submit that references it (#646 PR3a). The relay refuses a batch
+/// before the submit that references it. The relay refuses a batch
 /// naming a blob it does not hold, at submit and again at accept, so content
 /// travels first and the ops travel second — the same ordering the owner's own
 /// drain uses.
@@ -246,11 +247,11 @@ pub struct ShareBlobUploadRequest {
     pub bytes: Vec<u8>,
 }
 
-/// ONE net change to ONE file: "the file you have at `based_on_path` with
+/// One net change to one file: "the file you have at `based_on_path` with
 /// content `based_on_blob_sha256` should now be at `after_path` with content
 /// `after_blob_sha256`" — or, for a delete, should be gone.
 ///
-/// Deliberately NOT a replayed moment. The served moment drops `momentId`,
+/// Deliberately not a replayed moment. The served moment drops `momentId`,
 /// `objectId` and every `before*` field, so a recipient never learns a granter
 /// moment id and could not state a lineage the granter recognizes. The base
 /// pair is the one identifier both sides genuinely share, and the relay
@@ -369,13 +370,13 @@ const BOOTSTRAP_OP_KIND: &str = "workspace.init";
 /// A refusal that breaks them is worse than no refusal at all. The client
 /// decodes strictly, so an empty op kind throws and wedges the pull on every
 /// retry; an oversized one is persisted and the next workspace listing fails
-/// to parse. The relay picks these values, so they are normalized HERE, where
+/// to parse. The relay picks these values, so they are normalized here, where
 /// the refusal is built — a diagnostic must be well formed whatever it is
 /// diagnosing.
 const MAX_REFUSAL_OP_KIND_UNITS: usize = 128;
 pub(crate) const MAX_REFUSAL_DETAIL_UNITS: usize = 2048;
 
-/// The path budget inside ONE refusal listed in a detail, in UTF-16 units.
+/// The path budget inside one refusal listed in a detail, in UTF-16 units.
 ///
 /// This rejects no work. The path is stored whole and nothing is refused for
 /// being long; this is a share of the detail budget, and it exists because a
@@ -395,7 +396,7 @@ const MAX_REFUSAL_PATH_UNITS: usize = 200;
 /// `detail`, and the coordinate stays exactly as served.
 const INVALID_OP_KIND: &str = "invalid-op-kind";
 
-/// A path cut to `budget`, with the cut MARKED and BOTH ends kept.
+/// A path cut to `budget`, with the cut marked and both ends kept.
 ///
 /// A head-only cut was silent and lossy in the same stroke: two refused files
 /// that differ past the budget recorded identically, and the record is all the
@@ -405,7 +406,7 @@ const INVALID_OP_KIND: &str = "invalid-op-kind";
 ///
 /// So the tail is taken first — the file name is the identifying part, and the
 /// stated recovery is to go ask the granter about a named file — and the
-/// marker carries how many units went, so two paths that share a head AND a
+/// marker carries how many units went, so two paths that share a head and a
 /// tail still read apart.
 fn elided_path(path: &str, budget: usize) -> String {
     let units = path.encode_utf16().count();
@@ -423,7 +424,7 @@ fn elided_path(path: &str, budget: usize) -> String {
     format!("{head}…+{omitted}…{tail}")
 }
 
-/// The LAST `limit` UTF-16 units of `value`, whole characters only.
+/// The last `limit` UTF-16 units of `value`, whole characters only.
 fn trailing_units(value: &str, limit: usize) -> String {
     let mut reversed = String::new();
     let mut units = 0;
@@ -515,7 +516,7 @@ pub struct ShareViewPullOutcome {
     /// so it is counted in `skipped` without a refusal.
     pub refusals: Vec<ShareViewRefusal>,
     pub changed_paths: Vec<ShareViewChangedPath>,
-    /// How far the share has been READ, not how much of it applied. It
+    /// How far the share has been read, not how much of it applied. It
     /// advances past every op the page carried, including the skipped ones —
     /// those are two different facts, and `applied`, `skipped` and `refusals`
     /// carry the other one. A cursor that stalled on a refusal would re-fetch
@@ -555,9 +556,9 @@ pub trait RelayTransport {
         &self,
         req: SharedChannelRequest,
     ) -> Result<SharedChannelResponse, RelayError>;
-    /// POST to a share's log. ONE surface for both share kinds: the route is
+    /// POST to a share's log. One surface for both share kinds: the route is
     /// per-share and the relay scopes the batch by the share's own selector,
-    /// so the pusher names no channel and no path (#646 PR2).
+    /// so the pusher names no channel and no path.
     fn share_log_push(&self, req: ShareLogPushRequest) -> Result<PushResponse, RelayError>;
     fn share_view_pull(&self, req: ShareViewRequest) -> Result<ShareViewResponse, RelayError>;
     fn share_blob(&self, req: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError>;
@@ -1133,32 +1134,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     pub fn pull_chat_workspace(
         &self,
         store: &mut EngineStore,
-        workspace_id: &str,
-        faults: &dyn FaultInjector,
-        leases: &dyn crate::LeaseProbe,
-        now_ms: i64,
-    ) -> Result<SyncPassOutcome, RelayError> {
-        self.pull_chat_workspace_inner(store, None, workspace_id, faults, leases, now_ms)
-    }
-
-    /// Actor pull path carrying the single-writer document cache to routed
-    /// PR3 consumers.
-    pub fn pull_chat_workspace_with_cache(
-        &self,
-        store: &mut EngineStore,
         cache: &mut dohc_engine_collab::WriterDocCache,
-        workspace_id: &str,
-        faults: &dyn FaultInjector,
-        leases: &dyn crate::LeaseProbe,
-        now_ms: i64,
-    ) -> Result<SyncPassOutcome, RelayError> {
-        self.pull_chat_workspace_inner(store, Some(cache), workspace_id, faults, leases, now_ms)
-    }
-
-    fn pull_chat_workspace_inner(
-        &self,
-        store: &mut EngineStore,
-        mut cache: Option<&mut dohc_engine_collab::WriterDocCache>,
         workspace_id: &str,
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
@@ -1225,11 +1201,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut retryable = Vec::new();
         let mut deferred_origins = BTreeSet::new();
         for op in &ordered {
-            let routed = if let Some(cache) = cache.as_deref_mut() {
-                crate::apply_replication_envelope_with_cache(store, cache, op, faults, leases)
-            } else {
-                crate::apply_replication_envelope(store, op, faults, leases)
-            };
+            let routed = crate::apply_replication_envelope(store, cache, op, faults, leases);
             match routed {
                 Err(SyncError::RetryableState { .. }) => {
                     deferred_origins.insert(op.origin_id.clone());
@@ -1259,11 +1231,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             let mut still_deferred_origins = BTreeSet::new();
             let mut made_progress = false;
             for op in retryable {
-                let routed = if let Some(cache) = cache.as_deref_mut() {
-                    crate::apply_replication_envelope_with_cache(store, cache, op, faults, leases)
-                } else {
-                    crate::apply_replication_envelope(store, op, faults, leases)
-                };
+                let routed = crate::apply_replication_envelope(store, cache, op, faults, leases);
                 match routed {
                     Err(SyncError::RetryableState { .. }) => {
                         still_deferred_origins.insert(op.origin_id.clone());
@@ -1721,23 +1689,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             };
             match crate::apply_shared_envelope(store, &boundary, &envelope, faults) {
                 Ok(outcome) => {
-                    let (primary, nested_refusals, sharing_declined) =
-                        outcome.into_primary_and_diagnostics();
+                    let ApplyOutcome {
+                        primary,
+                        refusals: nested_refusals,
+                        sharing_declined,
+                    } = outcome;
                     debug_assert!(sharing_declined.is_empty());
                     for refusal in nested_refusals {
                         push_shared_channel_rejection(&mut refused, &mut rejections, refusal)?;
                     }
                     match primary {
-                        ApplyOutcome::Applied(_) => applied += 1,
-                        ApplyOutcome::Refused(refusal) => {
+                        ApplyDisposition::Applied(_) => applied += 1,
+                        ApplyDisposition::Refused(refusal) => {
                             push_shared_channel_rejection(&mut refused, &mut rejections, refusal)?;
                         }
-                        ApplyOutcome::Skipped => skipped += 1,
-                        ApplyOutcome::Crashed { .. } => {
+                        ApplyDisposition::Skipped => skipped += 1,
+                        ApplyDisposition::Crashed { .. } => {
                             return Err(RelayError::Local("injected-crash".to_owned()));
-                        }
-                        ApplyOutcome::WithDiagnostics { .. } => {
-                            unreachable!("diagnostics were flattened")
                         }
                     }
                 }
@@ -1906,12 +1874,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         Ok(SharedChannelPushOutcome { pushed })
     }
 
-    /// Offer this replica's own edits to a RECEIVED file share back to the
-    /// granter, as ONE proposal the granter reads and then accepts or declines
-    /// (#646 PR3a).
+    /// Offer this replica's own edits to a received file share back to the
+    /// granter, as one proposal the granter reads and then accepts or declines.
     ///
     /// The scan is bounded at the submit moment: the journal's high-water mark
-    /// for this origin is read ONCE, before the first page, and edits made
+    /// for this origin is read once, before the first page, and edits made
     /// after it wait for the next submit. That integer is what makes one
     /// submit one coherent unit rather than a debounce tick.
     ///
@@ -1919,7 +1886,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// a failed submit re-offers the same changes rather than losing them.
     ///
     /// One submit carries at most `MAX_SHARE_PROPOSAL_OPS` changes. The scan
-    /// STOPS at that bound instead of failing after it, and records the
+    /// stops at that bound instead of failing after it, and records the
     /// journal position it stopped at, so the rest travels in the next submit.
     /// `more_pending` on the outcome says a further submit has more to offer.
     pub fn submit_share_proposal(
@@ -1993,7 +1960,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })
     }
 
-    /// Upload the after-blob of every change that names one, BEFORE the submit
+    /// Upload the after-blob of every change that names one, before the submit
     /// that references it. `appendLogBatch` refuses a batch naming a blob the
     /// relay does not hold, and the submit route runs the same check, so
     /// content travels first — the ordering the owner's own drain uses.
@@ -2069,7 +2036,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         validate_share_page(&page.ops, page.next_cursor, page.has_more, cursor)?;
         let fetched = page.ops.len();
         let ops = page.ops;
-        // The cursor this page was FETCHED at, kept for the ops that carry no
+        // The cursor this page was fetched at, kept for the ops that carry no
         // usable coordinate of their own. See `page_position_origin`.
         let page_cursor = cursor;
         cursor = page.next_cursor;
@@ -2085,7 +2052,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut changed = BTreeMap::<String, ShareViewChangedPath>::new();
         let mut blob_refusals = BTreeMap::<(String, &'static str), RelayError>::new();
         for (index, op) in ops.into_iter().enumerate() {
-            // The coordinate BEFORE the envelope is built: a malformed op the
+            // The coordinate before the envelope is built: a malformed op the
             // engine will not apply still commits the cursor past itself, and
             // when its origin coordinate is usable there is an identity to
             // attach the reason to. Only an op with no usable coordinate is a
@@ -2115,7 +2082,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             // The relay serves `workspace.init` to a path/version share as its
             // bootstrap op (`services/sync-relay/src/shareFilter.ts`), and this
             // recipient needs nothing from it: `replay_share_view_op` ensures
-            // the local main version itself. So it is skipped as EXPECTED, not
+            // the local main version itself. So it is skipped as expected, not
             // refused — the boundary still admits only `moment.append` and
             // `version.create`, and reporting this healthy skip as a refusal
             // would make the first pull of every share look damaged.
@@ -2125,12 +2092,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
             match crate::apply_shared_envelope(store, &boundary, &envelope, faults) {
                 Ok(outcome) => {
-                    let (primary, nested_refusals, sharing_declined) =
-                        outcome.into_primary_and_diagnostics();
-                    // #646 PR2: a share-view CHAT op does mutate chat
+                    let ApplyOutcome {
+                        primary,
+                        refusals: nested_refusals,
+                        sharing_declined,
+                    } = outcome;
+                    // A share-view CHAT op does mutate chat
                     // dependencies — that is what applying it means, and the
                     // replay it unparks can refuse ops of its own. Those
-                    // refusals are RECORDED below rather than asserted about:
+                    // refusals are recorded below rather than asserted about:
                     // every coordinate `chat_pending_replication` can hold is
                     // a chat kind by construction, so an assertion that they
                     // are chat kinds proves nothing and is absent in release
@@ -2146,16 +2116,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     }
                     debug_assert!(sharing_declined.is_empty());
                     match primary {
-                        ApplyOutcome::Applied(_) => {}
-                        ApplyOutcome::Refused(_) | ApplyOutcome::Skipped => {
+                        ApplyDisposition::Applied(_) => {}
+                        ApplyDisposition::Refused(_) | ApplyDisposition::Skipped => {
                             skipped += 1;
                             continue;
                         }
-                        ApplyOutcome::Crashed { .. } => {
+                        ApplyDisposition::Crashed { .. } => {
                             return Err(RelayError::Local("injected-crash".to_owned()));
-                        }
-                        ApplyOutcome::WithDiagnostics { .. } => {
-                            unreachable!("diagnostics were flattened")
                         }
                     }
                 }
@@ -2182,7 +2149,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     ShareDisposition::Abort => return Err(local(error)),
                 },
             }
-            // #646 PR2: a chat op is fully applied by the boundary above —
+            // A chat op is fully applied by the boundary above —
             // it has no file to materialize, no blob to fetch, and no path to
             // report as changed. `replay_share_view_op` is the FILE replay,
             // and running it for a chat op would ensure a version and then
@@ -2203,7 +2170,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 changed: &mut changed,
                 blob_refusals: &mut blob_refusals,
             };
-            // Replay refusals are recorded INSIDE, one per refused blob, by
+            // Replay refusals are recorded inside, one per refused blob, by
             // `refuse_replay_unit`. What reaches here is only what must abort.
             replay_share_view_op(&mut replay, &envelope)?;
         }
@@ -2481,9 +2448,9 @@ fn collect_blob_refs(
                 }
             }
             "ydoc.update" => {
-                // Its OWN kind, not `Binary`: a Y.Doc delta or full-state base
+                // Its own kind, not `Binary`: a Y.Doc delta or full-state base
                 // rides the collab layer's measured payload cap, never the
-                // captured-file cap (#549).
+                // captured-file cap.
                 insert_optional_ref(
                     &mut refs,
                     op.payload.get("updateBlobSha256"),
@@ -2588,11 +2555,10 @@ pub(crate) fn local_blob_bytes(
                 let Some((byte_length, bytes)) = row else {
                     return Ok(None);
                 };
-                // The ceiling comes from the REFERENCED kind, never a literal.
+                // The ceiling comes from the referenced kind, never a literal.
                 // A restated number here read a Y.Doc base against the
                 // captured-file cap and called a valid oversized blob
-                // `BlobInvalid` — the wrong constraint and the wrong error
-                // (#549).
+                // `BlobInvalid` — the wrong constraint and the wrong error.
                 if usize::try_from(byte_length).ok() != Some(bytes.len())
                     || bytes.len() > blob_ceiling(kind).1
                     || hex_sha256(&bytes) != sha256
@@ -2625,7 +2591,7 @@ pub(crate) fn take_local_blob_bytes_call_count() -> usize {
     })
 }
 
-/// Is this digest already hydrated AND valid for the kind being asked for?
+/// Is this digest already hydrated and valid for the kind being asked for?
 ///
 /// Both questions, because they stopped being the same one. `Binary` and
 /// `Ydoc` share `binary_blobs` and no longer share a ceiling, so bare table
@@ -2636,7 +2602,7 @@ pub(crate) fn take_local_blob_bytes_call_count() -> usize {
 /// `hydrate_blob_content`, the only place `MAX_CAPTURE_BINARY_FILE_BYTES` is
 /// enforced — and materialize as an oversized captured file.
 ///
-/// So stored bytes over the REQUESTED kind's ceiling are refused here, by
+/// So stored bytes over the requested kind's ceiling are refused here, by
 /// name, rather than reported present. Refused rather than re-fetched: the
 /// length is already known, and downloading identical bytes to reject them
 /// would only make the observed size less exact.
@@ -3254,7 +3220,7 @@ fn share_envelope(
 /// The refusal message, with the numbers where the check has them.
 ///
 /// `ReplicationEnvelope::validate` answers with a static reason, so the
-/// oversized-payload case is MEASURED here for the report — the same
+/// oversized-payload case is measured here for the report — the same
 /// measurement, taken again to say how far over the op was rather than only
 /// that it was over. A caller that cannot see the size cannot tell a payload
 /// one byte past the limit from one ten times it.
@@ -3263,11 +3229,11 @@ fn describe_envelope_refusal(envelope: &ReplicationEnvelope, error: SyncError) -
     // In the order `ReplicationEnvelope::validate` checks them, so the branch
     // taken here is the one that actually refused.
     //
-    // The origin id first, and it matters MOST: an op whose origin id is
+    // The origin id first, and it matters most: an op whose origin id is
     // unusable is filed under its page position, so the reader never sees the
     // value at all and cannot tell an empty one from a small overrun or from
     // a hundred kilobytes.
-    // The CLAUSE that fired, from the validator itself. An id can break this
+    // The clause that fired, from the validator itself. An id can break this
     // rule three ways, and citing the length bound for one that satisfies it
     // names a constraint the op met.
     if let Some(clause) = crate::model::unbounded_clause(&envelope.origin_id) {
@@ -3389,7 +3355,7 @@ fn write_shared_push_state(
 }
 
 /// Where the last submit stopped reading this replica's own journal for this
-/// share (#646 PR3a). `-1` is "nothing read yet", the same floor every other
+/// share. `-1` is "nothing read yet", the same floor every other
 /// durable coordinate in this file uses.
 fn read_share_proposal_scan_position(
     store: &EngineStore,
@@ -3439,7 +3405,7 @@ fn write_share_proposal_scan_position(
     Ok(())
 }
 
-/// Whether EVERY path this moment names sits inside the pinned grant.
+/// Whether every path this moment names sits inside the pinned grant.
 ///
 /// The outbound twin of `enforce_share_view_boundary`'s containment loop,
 /// reading the same four fields through the same rule. A moment naming one
@@ -3463,7 +3429,7 @@ fn proposal_paths_within_grant(payload: &serde_json::Value, granted: &crate::Sha
 /// What one scan of this replica's journal found.
 struct ShareProposalScan {
     changes: Vec<ShareProposalChange>,
-    /// The journal position this scan read THROUGH, and the position the
+    /// The journal position this scan read through, and the position the
     /// submit records once the relay accepts it. Below `submit_through`
     /// exactly when the change bound stopped the scan early.
     scanned_through: i64,
@@ -3512,13 +3478,13 @@ fn proposed_change(op: &ReplicationEnvelope) -> ShareProposalChange {
 }
 
 /// This replica's local moments between `scanned_seq` and `submit_through`,
-/// consolidated into ONE net change per file.
+/// consolidated into one net change per file.
 ///
-/// One moment already states its object's COMPLETE post state rather than a
+/// One moment already states its object's complete post state rather than a
 /// delta — `store.rs` copies the before blob into `payloadAfterBlobSha256` for
 /// a rename, and `moment_apply.rs` materializes from the after side whatever
 /// the operation says. So a run of moments for one object collapses by taking
-/// the base from the FIRST and the destination from the LAST, and a write
+/// the base from the first and the destination from the last, and a write
 /// followed by a rename leaves as one change from the original path to the new
 /// one.
 ///
@@ -3558,7 +3524,7 @@ fn collect_share_proposal_changes(
                 && !outside_share.contains(&object_id)
             {
                 if !proposal_paths_within_grant(&op.payload, granted) {
-                    // ONE op outside the grant takes the whole file out of
+                    // One op outside the grant takes the whole file out of
                     // this share's reach. A rename out of the grant must not
                     // leave the file's pre-rename state proposed, so what the
                     // scan already collected for it is dropped too.
@@ -3573,7 +3539,7 @@ fn collect_share_proposal_changes(
                     }
                     let mut change = proposed_change(&op);
                     match by_object.get(&object_id) {
-                        // The base stays the FIRST moment's before side: what
+                        // The base stays the first moment's before side: what
                         // the recipient started from, which is what the
                         // granter has to resolve against its own log.
                         Some(held) => {
@@ -3627,7 +3593,7 @@ fn collect_share_proposal_changes(
         changes,
         scanned_through,
         more_pending,
-        // SATURATED at the batch bound, because that is what the contract this
+        // Saturated at the batch bound, because that is what the contract this
         // count crosses accepts. A larger number is parsed after the submit
         // already succeeded and the scan position already moved on, so it would
         // report a working submit as a failure whose retry offers nothing.
@@ -3754,12 +3720,12 @@ struct ShareViewReplayContext<'a, T> {
 /// kind ceiling, so one refresh could move gigabytes to reach the same
 /// refusal thousands of times.
 ///
-/// The decision belongs to the BYTES and to the kind the op claims for them:
+/// The decision belongs to the bytes and to the kind the op claims for them:
 /// the ceiling is per kind, and so is whether the bytes are text. Never to the
 /// path. So the key is the pair, and one row's answer serves every other row
 /// that names it.
 ///
-/// The lifetime is the PULL rather than the op, because ops repeat a blob too
+/// The lifetime is the pull rather than the op, because ops repeat a blob too
 /// — a granter who shared one oversized file into several versions sends one
 /// op per version. What makes that scope safe is what is stored: a decision,
 /// not a body. This map cannot grow with the size of the content it describes,
@@ -3770,7 +3736,7 @@ fn blob_refusal_key(sha256: &str, content_kind: &'static str) -> (String, &'stat
     (sha256.to_owned(), content_kind)
 }
 
-/// Record ONE refused replay unit, or abort the pull.
+/// Record one refused replay unit, or abort the pull.
 ///
 /// The skip unit is the refusal unit, and the unit is a blob. A
 /// `version.create` carries one blob per fork snapshot: refusing one of them
@@ -3781,7 +3747,7 @@ fn blob_refusal_key(sha256: &str, content_kind: &'static str) -> (String, &'stat
 ///
 /// So each unit is refused on its own and the caller keeps going. What that
 /// buys is a property worth stating: after a refused blob, the remaining
-/// blobs in the same op are ALL applied. Never a prefix.
+/// blobs in the same op are all applied. Never a prefix.
 fn refuse_replay_unit<T>(
     context: &mut ShareViewReplayContext<'_, T>,
     refused: &mut Vec<RefusedBlob>,
@@ -3801,21 +3767,21 @@ fn refuse_replay_unit<T>(
 }
 
 /// One blob an op named that this recipient will never apply, and why. The
-/// path is carried because the reason alone cannot say WHICH file went
+/// path is carried because the reason alone cannot say which file went
 /// missing, and an op can lose several.
 ///
-/// Reason and path are kept APART because they are bounded differently. A
+/// Reason and path are kept apart because they are bounded differently. A
 /// reason is bounded by construction: a constraint name, a limit, a unit and
 /// an observed count. A path is bounded by nothing — `classify_share_path`
 /// admits a tracked path of any length — so a served op would otherwise
-/// decide how much of the record every OTHER refusal in the op gets.
+/// decide how much of the record every other refusal in the op gets.
 struct RefusedBlob {
     code: &'static str,
     reason: String,
     path: String,
 }
 
-/// Turn an op's refused blobs into ONE durable record.
+/// Turn an op's refused blobs into one durable record.
 ///
 /// The recipient's record is keyed by origin coordinate and by nothing else
 /// (`mergeShareSkippedOps` in `apps/desktop/src/workspaces/registryStore.ts`),
@@ -3844,7 +3810,7 @@ fn record_refused_blobs<T>(
     ));
 }
 
-/// The ONE code that speaks for however many blobs an op refused.
+/// The one code that speaks for however many blobs an op refused.
 ///
 /// The recipient keeps one record per origin coordinate, so a mixed op has to
 /// choose, and it reports a class only when every refused blob is in that
@@ -3876,7 +3842,7 @@ fn refusal_code(refused: &[RefusedBlob]) -> &'static str {
 /// the rejection the per-entry order had removed.
 ///
 /// Two rules close it. A path gets a budget of its own, and entries are added
-/// only while the WHOLE detail still fits — so the record never holds a
+/// only while the whole detail still fits — so the record never holds a
 /// half-written entry, and it says how many entries it left out.
 fn refusal_detail(refused: &[RefusedBlob]) -> String {
     let entries: Vec<String> = refused
@@ -3976,7 +3942,7 @@ fn replay_share_view_op<T: RelayTransport>(
                         &mut *context.blob_refusals,
                     ) {
                         refuse_replay_unit(context, &mut refused, after, error)?;
-                        // The rename's delete does NOT run. Removing the old
+                        // The rename's delete does not run. Removing the old
                         // path when its replacement was refused would lose the
                         // file outright — the one outcome worse than not
                         // renaming it.
@@ -4090,8 +4056,8 @@ fn replay_share_write<T: RelayTransport>(
     // kind ceiling, once per row — to reach a refusal the path alone had
     // already decided.
     //
-    // The SAME door `write_text`/`write_binary` open with, not a restatement
-    // of its rules, so the two cannot drift — and this is the ONLY place the
+    // The same door `write_text`/`write_binary` open with, not a restatement
+    // of its rules, so the two cannot drift — and this is the only place the
     // path class has to be classified. Everything that reaches replay has
     // already passed `classify_share_path`, whose grammar admits no `%`, `\`,
     // `.` or `..` segment, so normalization is the identity on it and the
@@ -4122,7 +4088,7 @@ fn replay_share_write<T: RelayTransport>(
         );
         return Ok(());
     }
-    // AFTER the request record, because that one is about this path and this
+    // After the request record, because that one is about this path and this
     // one is about the blob. A row whose write already landed is not refused
     // by a later row's verdict on the same bytes.
     let refusal_key = blob_refusal_key(sha256, content_kind);
@@ -4204,7 +4170,7 @@ fn replay_share_write<T: RelayTransport>(
                 .map_err(domain)?
                 .deduped
         } else {
-            // These bytes already matched the sha the op named, so they ARE
+            // These bytes already matched the sha the op named, so they are
             // the content the granter shared. The op calling them text is the
             // defect, and no repair at the relay changes that.
             let text = String::from_utf8(bytes).map_err(|_| {
@@ -4358,7 +4324,7 @@ fn domain(error: DomainError) -> RelayError {
 /// store door's rules are pure over it, so asking again returns the same
 /// refusal forever. Under the generic `domain` mapping it became
 /// `Local("invalid-path")`, which aborts the pull — the cursor never commits
-/// and every op behind the bad path never arrives (#571's failure mode, on a
+/// and every op behind the bad path never arrives (the failure mode, on a
 /// class that cannot be repaired).
 ///
 /// Only a diverging relay produces one: the granter's own capture writes
@@ -4366,7 +4332,7 @@ fn domain(error: DomainError) -> RelayError {
 /// there either. Nobody can act on it, which is why it takes the generic
 /// refusal code rather than one that would send the reader to the granter.
 ///
-/// The verdict is NOT remembered in `blob_refusals`. That map is keyed by the
+/// The verdict is not remembered in `blob_refusals`. That map is keyed by the
 /// bytes and the kind claimed for them, and this refusal belongs to the PATH:
 /// the same blob at a storable path must still apply.
 ///
@@ -4394,7 +4360,11 @@ fn accumulate_pull_outcome(
     sharing_declined: &mut Vec<crate::SharingDeclined>,
     record_facts: &mut Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
 ) -> Result<(), RelayError> {
-    let (primary, drain_refusals, drain_declines) = outcome.into_primary_and_diagnostics();
+    let ApplyOutcome {
+        primary,
+        refusals: drain_refusals,
+        sharing_declined: drain_declines,
+    } = outcome;
     for refusal in drain_refusals {
         push_refusal_once(refusals, refusal);
     }
@@ -4402,7 +4372,7 @@ fn accumulate_pull_outcome(
         push_sharing_declined_once(sharing_declined, declined);
     }
     match primary {
-        ApplyOutcome::Applied(routed) => {
+        ApplyDisposition::Applied(routed) => {
             *conflicts_opened = conflicts_opened
                 .checked_add(routed.conflicts_opened)
                 .ok_or(RelayError::InvalidResponse)?;
@@ -4417,11 +4387,11 @@ fn accumulate_pull_outcome(
             }
             *applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?;
         }
-        ApplyOutcome::Refused(refusal) => {
+        ApplyDisposition::Refused(refusal) => {
             *refused = refused.checked_add(1).ok_or(RelayError::InvalidResponse)?;
             push_refusal_once(refusals, refusal);
         }
-        ApplyOutcome::Skipped => {
+        ApplyDisposition::Skipped => {
             *conflicts_opened = conflicts_opened
                 .checked_add(crate::router::redelivered_conflicts_opened(store, op).map_err(local)?)
                 .ok_or(RelayError::InvalidResponse)?;
@@ -4435,10 +4405,9 @@ fn accumulate_pull_outcome(
             }
             *skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?;
         }
-        ApplyOutcome::Crashed { .. } => {
+        ApplyDisposition::Crashed { .. } => {
             return Err(RelayError::Local("injected-crash".to_owned()));
         }
-        ApplyOutcome::WithDiagnostics { .. } => unreachable!("diagnostics were flattened"),
     }
     Ok(())
 }
@@ -4495,9 +4464,9 @@ fn validate_identity_request(workspace: &str, epoch: &str, stream: &str) -> Resu
     crate::model::bounded(stream, "stream_identity must be non-empty and bounded").map_err(local)
 }
 
-// The busy store keeps its TYPE across this boundary. Both funnels answer it
+// The busy store keeps its type across this boundary. Both funnels answer it
 // the same way, so a relay operation refused for contention reaches the wire
-// as the retryable class no matter which taxonomy it came through (#658).
+// as the retryable class no matter which taxonomy it came through.
 fn local(error: SyncError) -> RelayError {
     if matches!(error, SyncError::Storage(StorageError::FileLocked)) {
         return RelayError::StoreBusy;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { SearchResultsEvent, SearchResultsEventEntry } from "../../ipc/channels";
+import type { SearchResultsEvent, SearchResultsEventEntry } from "../../ipc/bridgeContract";
 import {
   applyBatch,
   beginSearch,
@@ -32,13 +32,13 @@ describe("applyBatch", () => {
     expect(model.status).toBe("complete");
   });
 
-  it("DROPS stale batches: a superseded search's stragglers never corrupt results", () => {
+  it("Drops stale batches: a superseded search's stragglers never corrupt results", () => {
     let model = beginSearch("s2");
     const stale = applyBatch(model, batch({ searchId: "s1", entries: [entry("old.md")] }));
     expect(stale).toBe(model); // same reference — identity says "ignored"
     model = applyBatch(model, batch({ searchId: "s2", entries: [entry("new.md")] }));
     expect(model.groups.map((g) => g.path)).toEqual(["new.md"]);
-    // A stale DONE batch must not complete the new search either.
+    // A stale done batch must not complete the new search either.
     expect(applyBatch(model, batch({ searchId: "s1", done: true })).status).toBe("searching");
   });
 
@@ -50,7 +50,7 @@ describe("applyBatch", () => {
     expect(applyBatch(model, batch({ entries: [entry("late.md")] }))).toBe(model);
   });
 
-  it("keeps UNTOUCHED group references stable across batches (memo contract)", () => {
+  it("keeps untouched group references stable across batches (memo contract)", () => {
     let model = beginSearch("s1");
     model = applyBatch(model, batch({ entries: [entry("a.md"), entry("b.md")] }));
     const [a1, b1] = model.groups;
@@ -141,8 +141,8 @@ describe("windowPreviewForRow (lead-trim so the match survives end-truncation)",
     expect(windowPreviewForRow(at).leadTrimmed).toBe(false);
   });
 
-  it("trims the lead of a deep-column match so the rendered window CONTAINS the match", () => {
-    // Regression (codex E5.0 review, P1): a match past the visible row width
+  it("trims the lead of a deep-column match so the rendered window contains the match", () => {
+    // Regression: a match past the visible row width
     // was clipped to invisibility by CSS end-truncation — e.g. the
     // 'jumptargettoken' E2E row rendered as 'line number 5 carries the …'.
     const preview = "line number 5 carries the jumptargettoken here";

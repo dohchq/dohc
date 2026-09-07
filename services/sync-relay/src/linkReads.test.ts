@@ -1,8 +1,4 @@
-import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { TokenBucketLimiter } from "@dohc/service-http";
 import {
   accumulatorFromCurrentFiles,
   filesFromAccumulator,
@@ -11,28 +7,20 @@ import {
   type RelayOp,
 } from "../../share-web/viewer/src/model";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DiscussionActivityHub } from "./discussionActivity";
 import {
   hashLinkBearer,
   LinkEgressRateLimiter,
-  LinkExchangeRateLimiter,
-  LinkReadRateLimiter,
   LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES,
-  LINK_GRANT_EGRESS_REFILL_BYTES_PER_SECOND,
-  LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
-  LINK_GRANT_READ_BUCKET_CAPACITY,
-  LINK_LOG_READ_BUCKET_CAPACITY,
-  LINK_READ_BUCKET_CAPACITY,
   LINK_SESSION_TTL_MS,
 } from "./linkSecurity";
-import { linkSecret } from "./linkTestHelpers";
 import {
   filterOpForShare,
   hasValidShareMomentShape,
   type ShareSelector,
 } from "./shareFilter";
 import {
-  createSyncRelayHandler,
-  LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET,
+  LINK_FRESHNESS_PAGE_BUDGET,
   MAX_BLOB_BYTES,
   MAX_RAW_ROWS_PER_LINK_PAGE,
   type SyncRelayHandler,
@@ -40,31 +28,33 @@ import {
 import {
   currentFileBlobByteLengthQuery,
   currentFileStateQuery,
-  openSyncRelayStorage,
   SHARED_BLOB_CANDIDATE_LIMIT,
   type SyncRelayStorage,
 } from "./storage";
-
-interface InspectionDatabase {
-  close(): void;
-  exec(sql: string): void;
-  prepare(sql: string): {
-    all(...params: unknown[]): Array<Record<string, unknown>>;
-    iterate(...params: unknown[]): IterableIterator<Record<string, unknown>>;
-    run(...params: unknown[]): unknown;
-  };
-}
-
-const { DatabaseSync: InspectionDatabaseSync } = createRequire(import.meta.url)(
-  "node:sqlite",
-) as {
-  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => InspectionDatabase;
-};
+import {
+  appendLog,
+  closeTestStorages,
+  denialBytes,
+  inspectDatabase,
+  interceptStorage,
+  json,
+  jsonBody,
+  LINK_KEY,
+  linkRequest,
+  linkSecret,
+  moment as buildMoment,
+  putBlob as upload,
+  request,
+  sha256,
+  storagePath,
+  testHandler,
+  testStorage as newStorage,
+  type HandlerOverrides,
+} from "./testing";
 
 const OWNER = "owner";
 const RECIPIENT = "recipient";
 const WORKSPACE = "workspace-link-reads";
-const LINK_KEY = "test-link-key-with-at-least-thirty-two-bytes";
 const UNKNOWN_CAPABILITY = "z".repeat(43);
 const LINK_REFUSAL_BODY = '{"ok":false,"error":"not found","code":"not_found"}';
 const EPOCH_1 = "epoch-1";
@@ -77,149 +67,23 @@ type TestWorkspaceIdentity = {
   streamIdentity: string;
 };
 
-const roots: string[] = [];
-const storages: SyncRelayStorage[] = [];
-const storagePaths = new WeakMap<SyncRelayStorage, string>();
+afterEach(closeTestStorages);
 
-afterEach(async () => {
-  for (const storage of storages.splice(0)) storage.close();
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-});
-
-async function newStorage(): Promise<SyncRelayStorage> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-link-reads-"));
-  roots.push(root);
-  const dbPath = join(root, "relay.sqlite");
-  const storage = openSyncRelayStorage(dbPath);
-  storagePaths.set(storage, dbPath);
-  storages.push(storage);
-  return storage;
+function handler(storage: SyncRelayStorage, options: HandlerOverrides = {}): SyncRelayHandler {
+  return testHandler(storage, { resolveUserIdByEmail: undefined, lookupUserEmail: undefined, ...options });
 }
 
-function handler(
-  storage: SyncRelayStorage,
-  options: {
-    nowMs?: () => number;
-    linkExchangeRateLimiter?: LinkExchangeRateLimiter;
-    linkReadRateLimiter?: LinkReadRateLimiter;
-    linkGrantReadRateLimiter?: LinkReadRateLimiter;
-    linkLogReadRateLimiter?: LinkReadRateLimiter;
-    linkGrantLogReadRateLimiter?: LinkReadRateLimiter;
-    linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
-    linkCapabilityReadFallbackPageSize?: number;
-    linkCurrentFileLimit?: number;
-    newLinkBearer?: () => string;
-  } = {},
-): SyncRelayHandler {
-  let id = 0;
-  const handlerOptions = {
-    storage,
-    resolveActor(request: Request, workspaceId: string) {
-      const match = /^Bearer user:([^ ]+)$/u.exec(request.headers.get("authorization") ?? "");
-      if (!match) throw Object.assign(new Error("unauthorized"), { statusCode: 401 });
-      return { userId: match[1]!, workspaceId };
-    },
-    nowMs: options.nowMs ?? (() => 2_000),
-    newShareId: () => `share-${id++}`,
-    newGrantId: () => `grant-${id++}`,
-    newId: () => `id-${id++}`,
-    linkKey: LINK_KEY,
-    shareWebOrigin: "https://share.example.test",
-    linkExchangeRateLimiter: options.linkExchangeRateLimiter,
-    linkReadRateLimiter: options.linkReadRateLimiter,
-    linkGrantReadRateLimiter: options.linkGrantReadRateLimiter,
-    linkLogReadRateLimiter: options.linkLogReadRateLimiter,
-    linkGrantLogReadRateLimiter: options.linkGrantLogReadRateLimiter,
-    linkGrantEgressRateLimiter: options.linkGrantEgressRateLimiter,
-    linkCapabilityReadFallbackPageSize:
-      options.linkCapabilityReadFallbackPageSize,
-    linkCurrentFileLimit: options.linkCurrentFileLimit,
-    newLinkBearer: options.newLinkBearer,
-  };
-  return createSyncRelayHandler(handlerOptions);
-}
-
-function request(userId: string | null, path: string, init: RequestInit = {}): Request {
-  const headers = new Headers(init.headers);
-  if (userId) headers.set("authorization", `Bearer user:${userId}`);
-  headers.set("x-dohc-relay-client-ip", "192.0.2.20");
-  return new Request(`http://relay.test${path}`, { ...init, headers });
-}
-
-function linkRequest(capability: string, path: string): Request {
-  return request(null, path, {
-    headers: { authorization: `LinkCapability ${capability}` },
-  });
-}
-
-function jsonBody(body: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  };
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
-}
-
-class KeyIgnoringLinkReadRateLimiter extends LinkReadRateLimiter {
+class KeyIgnoringLinkReadRateLimiter extends TokenBucketLimiter {
   override allow(_key: string, nowMs: number): boolean {
     return super.allow("shared-test-bucket", nowMs);
   }
 }
 
-describe("linkSecret", () => {
-  const secret = "a".repeat(43);
-
-  it("returns the fragment from a canonical minted URL", () => {
-    expect(linkSecret(`https://share.example.test/s/#${secret}`)).toBe(secret);
-  });
-
-  it.each([
-    ["a non-string", null],
-    ["a path without the trailing slash", `https://share.example.test/s#${secret}`],
-    ["a nested path", `https://share.example.test/s/more/#${secret}`],
-    ["an empty query marker", `https://share.example.test/s/?#${secret}`],
-    ["a query value", `https://share.example.test/s/?source=test#${secret}`],
-    ["a missing fragment", "https://share.example.test/s/"],
-    ["a short fragment", `https://share.example.test/s/#${"a".repeat(42)}`],
-    ["a long fragment", `https://share.example.test/s/#${"a".repeat(44)}`],
-    ["a non-base64url fragment", `https://share.example.test/s/#${"a".repeat(42)}+`],
-  ])("rejects %s", (_shape, value) => {
-    expect(() => linkSecret(value)).toThrow();
-  });
-});
-
-function sha256(content: string): string {
-  return createHash("sha256").update(content).digest("hex");
-}
-
 async function putBlob(h: SyncRelayHandler, content: string): Promise<string> {
-  const sha = sha256(content);
-  expect(
-    (
-      await h(
-        request(OWNER, `/sync/${WORKSPACE}/blobs/${sha}`, {
-          method: "PUT",
-          body: content,
-        }),
-      )
-    ).status,
-  ).toBe(200);
-  return sha;
+  return upload(h, OWNER, WORKSPACE, content);
 }
 
-type MomentOptions = {
-  versionId?: string;
-  objectId?: string | null;
-  operation?: "write" | "rename" | "delete";
-  beforePath?: string | null;
-  beforeContent?: string | null;
-  afterPath?: string | null;
-  afterContent?: string | null;
-};
+type MomentOptions = Omit<NonNullable<Parameters<typeof buildMoment>[2]>, "originSeq" | "recordedAtMs">;
 
 function moment(
   originSeq: number,
@@ -228,33 +92,7 @@ function moment(
   recordedAtMs: number,
   options: MomentOptions = {},
 ) {
-  const beforeContent = options.beforeContent ?? null;
-  const afterContent =
-    options.afterContent === undefined ? content : options.afterContent;
-  const beforePath = options.beforePath ?? null;
-  const afterPath = options.afterPath === undefined ? path : options.afterPath;
-  return {
-    originSeq,
-    opKind: "moment.append",
-    payload: {
-      momentId: `moment-${originSeq}`,
-      versionId: options.versionId ?? "main",
-      objectId:
-        options.objectId === undefined ? `object-${originSeq}` : options.objectId,
-      path,
-      recordedAtMs,
-      operation: options.operation ?? "write",
-      payloadBeforeBlobSha256:
-        beforeContent === null ? null : sha256(beforeContent),
-      payloadBeforePath: beforePath,
-      payloadAfterBlobSha256:
-        afterContent === null ? null : sha256(afterContent),
-      payloadAfterPath: afterPath,
-      metadata: { origin: "user" },
-      beforePresent: beforeContent === null ? "null" : "present",
-    },
-    recordedAtMs,
-  };
+  return buildMoment(path, content, { ...options, originSeq, recordedAtMs });
 }
 
 async function appendMoments(
@@ -265,21 +103,10 @@ async function appendMoments(
     identity?: TestWorkspaceIdentity;
   } = {},
 ): Promise<void> {
-  expect(
-    (
-      await h(
-        request(
-          OWNER,
-          `/sync/${WORKSPACE}/log`,
-          jsonBody({
-            originId: options.originId ?? "origin-a",
-            ops,
-            ...(options.identity ?? {}),
-          }),
-        ),
-      )
-    ).status,
-  ).toBe(200);
+  await appendLog(h, OWNER, WORKSPACE, ops, {
+    originId: options.originId ?? "origin-a",
+    ...(options.identity ?? {}),
+  });
 }
 
 function appendStoredMoments(
@@ -446,11 +273,6 @@ async function appendAfterRotation(h: SyncRelayHandler): Promise<string> {
   return sha;
 }
 
-async function denialBytes(response: Response): Promise<string> {
-  expect(response.status).toBe(404);
-  return `${response.status}:${await response.text()}`;
-}
-
 async function ownerLinkUsage(
   h: SyncRelayHandler,
   grantId: string,
@@ -532,6 +354,395 @@ describe("LinkEgressRateLimiter", () => {
 });
 
 describe("relay capability reads", () => {
+  it("parks a link log read until selected durable state advances", async () => {
+    const storage = await newStorage();
+    const activity = new DiscussionActivityHub();
+    const h = handler(storage, { discussionActivity: activity });
+    const seeded = await seed(h, "comment");
+    const initial = await json(
+      await h(
+        linkRequest(
+          seeded.capability,
+          "/sync/link/log?since=0&limit=500",
+        ),
+      ),
+    );
+    const initialCursor = Number(initial.nextCursor);
+
+    const held = h(
+      linkRequest(
+        seeded.capability,
+        `/sync/link/log?since=${String(initialCursor)}&limit=500&hold=30000`,
+      ),
+    );
+    expect(
+      await Promise.race([
+        held.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    expect(activity.stats()).toEqual({ shares: 1, waiters: 1 });
+
+    await appendMoments(h, [
+      moment(2, "private/hidden.md", "hidden\n", 1_200),
+    ]);
+    expect(
+      await Promise.race([
+        held.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    expect(activity.stats()).toEqual({ shares: 1, waiters: 1 });
+
+    await putBlob(h, "private update\n");
+    await appendMoments(h, [
+      moment(3, "private/held-noise.md", "private update\n", 1_300),
+    ]);
+    expect(
+      await Promise.race([
+        held.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    expect(activity.stats()).toEqual({ shares: 1, waiters: 1 });
+
+    const selectedBody = "# selected settlement\n";
+    await putBlob(h, selectedBody);
+    await appendMoments(h, [
+      moment(4, "docs/shared.md", selectedBody, 1_400, {
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+    ]);
+    const selected = await json(await held);
+    expect(selected).toMatchObject({
+      ok: true,
+      hasMore: false,
+      ops: [
+        {
+          relaySeq: initialCursor + 2,
+          originSeq: 4,
+          opKind: "moment.append",
+          payload: expect.objectContaining({
+            path: "docs/shared.md",
+            payloadAfterPath: "docs/shared.md",
+            payloadAfterBlobSha256: sha256(selectedBody),
+          }),
+          recordedAtMs: 1_400,
+        },
+      ],
+    });
+    expect(selected.ops).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ originId: expect.anything() })]),
+    );
+    expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
+
+    const raceBody = "# registered race\n";
+    await putBlob(h, raceBody);
+    const originalFetchLogPage = storage.fetchLogPage.bind(storage);
+    let raceFetches = 0;
+    let raceArmed = true;
+    const fetchSpy = vi.spyOn(storage, "fetchLogPage").mockImplementation((input) => {
+      raceFetches += 1;
+      if (raceArmed && raceFetches === 2) {
+        raceArmed = false;
+        const racedMoment = moment(0, "docs/shared.md", raceBody, 1_500, {
+          beforePath: "docs/shared.md",
+          beforeContent: selectedBody,
+        });
+        storage.appendLogBatch({
+          workspaceId: WORKSPACE,
+          originId: "origin-race",
+          ops: [{
+            ...racedMoment,
+            payloadJson: JSON.stringify(racedMoment.payload),
+          }],
+        });
+      }
+      return originalFetchLogPage(input);
+    });
+    const raced = await json(
+      await h(
+        linkRequest(
+          seeded.capability,
+          `/sync/link/log?since=${String(selected.nextCursor)}&limit=500&hold=30000`,
+        ),
+      ),
+    );
+    fetchSpy.mockRestore();
+    expect(raceArmed).toBe(false);
+    expect(raced).toMatchObject({
+      ops: [
+        expect.objectContaining({
+          originSeq: 0,
+          payload: expect.objectContaining({
+            payloadAfterBlobSha256: sha256(raceBody),
+          }),
+        }),
+      ],
+    });
+
+    const narrowedRead = h(
+      linkRequest(
+        seeded.capability,
+        `/sync/link/log?since=${String(raced.nextCursor)}&limit=500&hold=30000`,
+      ),
+    );
+    expect(
+      await Promise.race([
+        narrowedRead.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    const shareId = storage.getShareGrant(seeded.grantId)!.shareId;
+    const generationBeforeNarrowing = storage.getShareGrant(seeded.grantId)!.generation;
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/shares/${shareId}/links/${seeded.grantId}/retune`,
+            jsonBody({
+              workspaceId: WORKSPACE,
+              access: "view",
+              expectedDependentGrantIds: [],
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    expect(storage.getShareGrant(seeded.grantId)).toMatchObject({
+      access: "view",
+      generation: generationBeforeNarrowing,
+    });
+    expect(
+      await Promise.race([
+        narrowedRead.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    expect(activity.stats()).toEqual({ shares: 1, waiters: 1 });
+
+    const narrowedBody = "# selected after access narrowing\n";
+    await putBlob(h, narrowedBody);
+    await appendMoments(h, [
+      moment(5, "docs/shared.md", narrowedBody, 1_550, {
+        beforePath: "docs/shared.md",
+        beforeContent: raceBody,
+      }),
+    ]);
+    const narrowed = await json(await narrowedRead);
+    expect(narrowed).toMatchObject({
+      ops: [
+        expect.objectContaining({
+          originSeq: 5,
+          payload: expect.objectContaining({
+            payloadAfterBlobSha256: sha256(narrowedBody),
+          }),
+        }),
+      ],
+    });
+
+    const revokedRead = h(
+      linkRequest(
+        seeded.capability,
+        `/sync/link/log?since=${String(narrowed.nextCursor)}&limit=500&hold=30000`,
+      ),
+    );
+    expect(
+      await Promise.race([
+        revokedRead.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    const refusedBody = "# must not escape after revoke\n";
+    await putBlob(h, refusedBody);
+    const refusedMoment = moment(
+      0,
+      "docs/shared.md",
+      refusedBody,
+      1_600,
+      { beforePath: "docs/shared.md", beforeContent: narrowedBody },
+    );
+    storage.appendLogBatch({
+      workspaceId: WORKSPACE,
+      originId: "origin-before-revoke",
+      ops: [{
+        ...refusedMoment,
+        payloadJson: JSON.stringify({
+          ...refusedMoment.payload,
+          momentId: "moment-before-revoke",
+        }),
+      }],
+    });
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/shares/${String(storage.getShareGrant(seeded.grantId)!.shareId)}/revoke`,
+            jsonBody({
+              grantId: seeded.grantId,
+              workspaceId: WORKSPACE,
+              expectedDependentGrantIds: [],
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    const revoked = await revokedRead;
+    expect(`${String(revoked.status)}:${await revoked.text()}`).toBe(
+      `401:${LINK_REFUSAL_BODY}`,
+    );
+    expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
+
+    const serializationRace = await createLink(h, {
+      paths: ["docs"],
+      access: "view",
+    });
+    const beforeSerializationRace = await json(
+      await h(
+        linkRequest(
+          serializationRace.capability,
+          "/sync/link/log?since=0&limit=500",
+        ),
+      ),
+    );
+    const serializationRead = h(
+      linkRequest(
+        serializationRace.capability,
+        `/sync/link/log?since=${String(beforeSerializationRace.nextCursor)}&limit=500&hold=30000`,
+      ),
+    );
+    expect(
+      await Promise.race([
+        serializationRead.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    const fetchBeforeSerialization = storage.fetchLogPage.bind(storage);
+    let revokedDuringSerialization = false;
+    const serializationFetchSpy = vi
+      .spyOn(storage, "fetchLogPage")
+      .mockImplementation((input) => {
+        const rows = fetchBeforeSerialization(input);
+        if (!revokedDuringSerialization) {
+          const result = storage.revokeShareGrant({
+            shareId: serializationRace.shareId,
+            grantId: serializationRace.grantId,
+            revokedAtMs: 1_650,
+            expectedDependentGrantIds: [],
+          });
+          revokedDuringSerialization = result.ok;
+        }
+        return rows;
+      });
+    const serializationBody = "# authority changed before serialization\n";
+    await putBlob(h, serializationBody);
+    await appendMoments(h, [
+      moment(6, "docs/shared.md", serializationBody, 1_650, {
+        beforePath: "docs/shared.md",
+        beforeContent: refusedBody,
+      }),
+    ]);
+    const refusedSerialization = await serializationRead;
+    serializationFetchSpy.mockRestore();
+    expect(revokedDuringSerialization).toBe(true);
+    expect(
+      `${String(refusedSerialization.status)}:${await refusedSerialization.text()}`,
+    ).toBe(`401:${LINK_REFUSAL_BODY}`);
+
+    const fresh = await createLink(h, { paths: ["docs"], access: "view" });
+    const current = await json(
+      await h(linkRequest(fresh.capability, "/sync/link/log?since=0&limit=500")),
+    );
+    const abortController = new AbortController();
+    const abortRequest = request(
+      null,
+      `/sync/link/log?since=${String(current.nextCursor)}&limit=500&hold=30000`,
+      {
+        headers: { authorization: `LinkCapability ${fresh.capability}` },
+        signal: abortController.signal,
+      },
+    );
+    const abortedRead = h(abortRequest);
+    expect(
+      await Promise.race([
+        abortedRead.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    abortController.abort();
+    await abortedRead;
+    expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
+
+    const timedOut = await h(
+      linkRequest(
+        fresh.capability,
+        `/sync/link/log?since=${String(current.nextCursor)}&limit=500&hold=1`,
+      ),
+    );
+    expect(timedOut.status).toBe(200);
+    expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
+
+    const cappedActivity = new DiscussionActivityHub({ maxTotalWaiters: 1 });
+    const cappedHandler = handler(storage, { discussionActivity: cappedActivity });
+    const capAbort = new AbortController();
+    const filled = cappedHandler(
+      request(
+        null,
+        `/sync/link/log?since=${String(current.nextCursor)}&limit=500&hold=30000`,
+        {
+          headers: { authorization: `LinkCapability ${fresh.capability}` },
+          signal: capAbort.signal,
+        },
+      ),
+    );
+    expect(
+      await Promise.race([
+        filled.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    const limited = await cappedHandler(
+      linkRequest(
+        fresh.capability,
+        `/sync/link/log?since=${String(current.nextCursor)}&limit=500&hold=30000`,
+      ),
+    );
+    expect(limited.status).toBe(429);
+    expect(await json(limited)).toEqual({
+      ok: false,
+      error: "too many link reads",
+      code: "link_read_rate_limited",
+    });
+    expect(cappedActivity.stats()).toEqual({ shares: 1, waiters: 1 });
+    capAbort.abort();
+    await filled;
+    expect(cappedActivity.stats()).toEqual({ shares: 0, waiters: 0 });
+
+    for (const hold of [
+      "",
+      "-1",
+      "+1",
+      "1.5",
+      "1e3",
+      "0x10",
+      "%201",
+      "30001",
+      "9007199254740992",
+      "bad",
+    ]) {
+      const invalid = await h(
+        linkRequest(
+          fresh.capability,
+          `/sync/link/log?since=${String(current.nextCursor)}&limit=500&hold=${hold}`,
+        ),
+      );
+      expect(invalid.status, `hold=${hold}`).toBe(400);
+    }
+  });
+
   it("keeps simultaneous View and Comment grants bound to their own access", async () => {
     const storage = await newStorage();
     const h = handler(storage);
@@ -705,9 +916,7 @@ describe("relay capability reads", () => {
     foldLogOps(replayed, historical.ops as RelayOp[]);
     expect(filesFromAccumulator(replayed)).toEqual(current.files);
 
-    const dbPath = storagePaths.get(storage);
-    if (!dbPath) throw new Error("missing inspection path");
-    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    const inspection = inspectDatabase(storagePath(storage), { readOnly: true });
     try {
       const query = currentFileStateQuery(["docs"]);
       const plan = inspection.prepare(`EXPLAIN QUERY PLAN ${query.sql}`).all(
@@ -815,39 +1024,10 @@ describe("relay capability reads", () => {
     const forward = await json(
       await h(linkRequest(link.capability, "/sync/link/current")),
     );
-    const dbPath = storagePaths.get(storage);
-    if (!dbPath) throw new Error("missing inspection path");
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
-    const legacy = new InspectionDatabaseSync(dbPath);
-    legacy.exec("DROP TABLE sync_relay_current_files");
-    legacy.prepare(
-      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
-    ).run("current-files-seed-v1");
-    legacy.close();
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    storagePaths.set(reopened, dbPath);
-    const replayed = await json(
-      await handler(reopened)(linkRequest(link.capability, "/sync/link/current")),
-    );
-    const expectedFiles = [
-      {
-        path: "docs/first.md",
-        blobSha256: firstSnapshotSha,
-        contentKind: "text",
-      },
-      {
-        path: "docs/pending.md",
-        blobSha256: localWriteSha,
-        contentKind: "text",
-      },
-    ];
-
-    expect({ forward: forward.files, replayed: replayed.files }).toEqual({
-      forward: expectedFiles,
-      replayed: expectedFiles,
-    });
+    expect(forward.files).toEqual([
+      { path: "docs/first.md", blobSha256: firstSnapshotSha, contentKind: "text" },
+      { path: "docs/pending.md", blobSha256: localWriteSha, contentKind: "text" },
+    ]);
   });
 
   it("refuses contradictory path aliases from current state and startup replay", async () => {
@@ -936,21 +1116,6 @@ describe("relay capability reads", () => {
 
     await expectConsistentDenial(h);
 
-    const dbPath = storagePaths.get(storage);
-    if (!dbPath) throw new Error("missing inspection path");
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
-    const legacy = new InspectionDatabaseSync(dbPath);
-    legacy.exec("DROP TABLE sync_relay_current_files");
-    legacy.prepare(
-      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
-    ).run("current-files-seed-v1");
-    legacy.close();
-
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    storagePaths.set(reopened, dbPath);
-    await expectConsistentDenial(handler(reopened));
   });
 
   it.each(["path", "beforePath"] as const)(
@@ -1030,37 +1195,6 @@ describe("relay capability reads", () => {
       expect(sharedBlob.status).toBe(200);
       expect(await sharedBlob.text()).toBe("# shared\n");
 
-      const dbPath = storagePaths.get(storage);
-      if (!dbPath) throw new Error("missing inspection path");
-      storage.close();
-      storages.splice(storages.indexOf(storage), 1);
-      const legacy = new InspectionDatabaseSync(dbPath);
-      legacy.exec("DROP TABLE sync_relay_current_files");
-      legacy.prepare(
-        "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
-      ).run("current-files-seed-v1");
-      legacy.close();
-
-      const reopened = openSyncRelayStorage(dbPath);
-      storages.push(reopened);
-      storagePaths.set(reopened, dbPath);
-      const reopenedHandler = handler(reopened);
-      const restartedCurrent = await json(
-        await reopenedHandler(linkRequest(seeded.capability, "/sync/link/current")),
-      );
-      expect(restartedCurrent.files).toEqual(expectedFiles);
-      expect(
-        await denialBytes(
-          await reopenedHandler(
-            linkRequest(seeded.capability, `/sync/link/blobs/${forgedSha}`),
-          ),
-        ),
-      ).toBe(`404:${LINK_REFUSAL_BODY}`);
-      const restartedSharedBlob = await reopenedHandler(
-        linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
-      );
-      expect(restartedSharedBlob.status).toBe(200);
-      expect(await restartedSharedBlob.text()).toBe("# shared\n");
     },
   );
 
@@ -1139,21 +1273,6 @@ describe("relay capability reads", () => {
 
     await assertReadAgreement(h, forwardFiles);
 
-    const dbPath = storagePaths.get(storage);
-    if (!dbPath) throw new Error("missing inspection path");
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
-    const legacy = new InspectionDatabaseSync(dbPath);
-    legacy.exec("DROP TABLE sync_relay_current_files");
-    legacy.prepare(
-      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
-    ).run("current-files-seed-v1");
-    legacy.close();
-
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    storagePaths.set(reopened, dbPath);
-    await assertReadAgreement(handler(reopened));
   });
 
   it.each([
@@ -1389,21 +1508,6 @@ describe("relay capability reads", () => {
 
       await assertNoInventedFile(h);
 
-      const dbPath = storagePaths.get(storage);
-      if (!dbPath) throw new Error("missing inspection path");
-      storage.close();
-      storages.splice(storages.indexOf(storage), 1);
-      const legacy = new InspectionDatabaseSync(dbPath);
-      legacy.exec("DROP TABLE sync_relay_current_files");
-      legacy.prepare(
-        "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
-      ).run("current-files-seed-v1");
-      legacy.close();
-
-      const reopened = openSyncRelayStorage(dbPath);
-      storages.push(reopened);
-      storagePaths.set(reopened, dbPath);
-      await assertNoInventedFile(handler(reopened));
     },
   );
 
@@ -1508,21 +1612,6 @@ describe("relay capability reads", () => {
       expect(JSON.stringify(delta)).not.toContain(noncanonicalPath);
       await assertReadAgreement(h);
 
-      const dbPath = storagePaths.get(storage);
-      if (!dbPath) throw new Error("missing inspection path");
-      storage.close();
-      storages.splice(storages.indexOf(storage), 1);
-      const legacy = new InspectionDatabaseSync(dbPath);
-      legacy.exec("DROP TABLE sync_relay_current_files");
-      legacy.prepare(
-        "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
-      ).run("current-files-seed-v1");
-      legacy.close();
-
-      const reopened = openSyncRelayStorage(dbPath);
-      storages.push(reopened);
-      storagePaths.set(reopened, dbPath);
-      await assertReadAgreement(handler(reopened));
     },
   );
 
@@ -1593,24 +1682,18 @@ describe("relay capability reads", () => {
     const storage = await newStorage();
     let revokeOnRead = false;
     let grantId = "";
-    const storageWithRace = new Proxy(storage, {
-      get(target, property, receiver) {
-        if (property === "readCurrentFileState") {
-          return (input: Parameters<SyncRelayStorage["readCurrentFileState"]>[0]) => {
-            const snapshot = target.readCurrentFileState(input);
-            if (revokeOnRead) {
-              target.revokeShareGrant({
-                shareId: "share-0",
-                grantId,
-                revokedAtMs: 2_000,
-                expectedDependentGrantIds: [],
-              });
-            }
-            return snapshot;
-          };
+    const storageWithRace = interceptStorage(storage, {
+      readCurrentFileState: (target, input) => {
+        const snapshot = target.readCurrentFileState(input);
+        if (revokeOnRead) {
+          target.revokeShareGrant({
+            shareId: "share-0",
+            grantId,
+            revokedAtMs: 2_000,
+            expectedDependentGrantIds: [],
+          });
         }
-        const value = Reflect.get(target, property, receiver) as unknown;
-        return typeof value === "function" ? value.bind(target) : value;
+        return snapshot;
       },
     });
     const h = handler(storageWithRace);
@@ -1655,28 +1738,16 @@ describe("relay capability reads", () => {
           grant: { access: "view", generation: 1 },
         });
       };
-      const storageWithRace = new Proxy(storage, {
-        get(target, property, receiver) {
-          if (property === "fetchLogPageDescending") {
-            return (
-              input: Parameters<SyncRelayStorage["fetchLogPageDescending"]>[0],
-            ) => {
-              const rows = target.fetchLogPageDescending(input);
-              if (pauseAt === property) narrow();
-              return rows;
-            };
-          }
-          if (property === "readCurrentFileState") {
-            return (
-              input: Parameters<SyncRelayStorage["readCurrentFileState"]>[0],
-            ) => {
-              const snapshot = target.readCurrentFileState(input);
-              if (pauseAt === property) narrow();
-              return snapshot;
-            };
-          }
-          const value = Reflect.get(target, property, receiver) as unknown;
-          return typeof value === "function" ? value.bind(target) : value;
+      const storageWithRace = interceptStorage(storage, {
+        fetchLogPageDescending: (target, input) => {
+          const rows = target.fetchLogPageDescending(input);
+          if (pauseAt === "fetchLogPageDescending") narrow();
+          return rows;
+        },
+        readCurrentFileState: (target, input) => {
+          const snapshot = target.readCurrentFileState(input);
+          if (pauseAt === "readCurrentFileState") narrow();
+          return snapshot;
         },
       });
       const h = handler(storageWithRace);
@@ -1699,165 +1770,6 @@ describe("relay capability reads", () => {
       expect(narrowOnRead).toBe(false);
     },
   );
-
-  it("streams the accepted current fold once when reopening a pre-table database", async () => {
-    const originalStorage = await newStorage();
-    const originalHandler = handler(originalStorage);
-    const seeded = await seed(originalHandler);
-    const acceptedContent = "accepted before migration\n";
-    const staleContent = "stale before migration\n";
-    const acceptedSha = await putBlob(originalHandler, acceptedContent);
-    await putBlob(originalHandler, staleContent);
-    await appendMoments(originalHandler, [
-      moment(3, "docs/shared.md", acceptedContent, 1_300, {
-        objectId: "object-shared",
-        beforePath: "docs/shared.md",
-        beforeContent: "# shared\n",
-      }),
-      moment(4, "docs/shared.md", staleContent, 1_400, {
-        objectId: "object-shared",
-        beforePath: "docs/shared.md",
-        beforeContent: "# shared\n",
-      }),
-    ]);
-    const dbPath = storagePaths.get(originalStorage);
-    if (!dbPath) throw new Error("missing inspection path");
-    originalStorage.close();
-    storages.splice(storages.indexOf(originalStorage), 1);
-
-    const legacy = new InspectionDatabaseSync(dbPath);
-    legacy.exec("DROP TABLE sync_relay_current_files");
-    legacy.prepare(
-      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
-    ).run("current-files-seed-v1");
-    legacy.close();
-
-    const databasePrototype = InspectionDatabaseSync.prototype as InspectionDatabase;
-    const nativePrepare = databasePrototype.prepare;
-    const migrationAll = vi.fn(() => {
-      throw new Error("current-files migration materialized its full result set");
-    });
-    let migrationStatement: ReturnType<InspectionDatabase["prepare"]> | undefined;
-    const migrationIterate = vi.fn((...params: unknown[]) => {
-      if (!migrationStatement) throw new Error("migration iterator has no statement");
-      return migrationStatement.iterate(...params);
-    });
-    const prepareSpy = vi
-      .spyOn(databasePrototype, "prepare")
-      .mockImplementation(function (this: InspectionDatabase, sql: string) {
-        const statement = nativePrepare.call(this, sql);
-        if (
-          !sql.includes("FROM sync_relay_log log") ||
-          !sql.includes("ORDER BY log.relay_seq")
-        ) {
-          return statement;
-        }
-        migrationStatement = statement;
-        return new Proxy(statement, {
-          get(target, property) {
-            if (property === "all") return migrationAll;
-            if (property === "iterate") return migrationIterate;
-            const value = Reflect.get(target, property, target) as unknown;
-            return typeof value === "function" ? value.bind(target) : value;
-          },
-        });
-      });
-    let reopened: SyncRelayStorage;
-    try {
-      reopened = openSyncRelayStorage(dbPath);
-    } finally {
-      prepareSpy.mockRestore();
-    }
-    expect(migrationAll).not.toHaveBeenCalled();
-    expect(migrationIterate).toHaveBeenCalledOnce();
-    storages.push(reopened);
-    storagePaths.set(reopened, dbPath);
-    const reopenedHandler = handler(reopened);
-    const firstProjection = await json(
-      await reopenedHandler(
-        linkRequest(seeded.capability, "/sync/link/current"),
-      ),
-    );
-    expect(firstProjection.files).toEqual([{
-      path: "docs/shared.md",
-      blobSha256: acceptedSha,
-      contentKind: "text",
-    }]);
-    reopened.close();
-    storages.splice(storages.indexOf(reopened), 1);
-
-    const openedAgain = openSyncRelayStorage(dbPath);
-    storages.push(openedAgain);
-    storagePaths.set(openedAgain, dbPath);
-    const secondProjection = await json(
-      await handler(openedAgain)(
-        linkRequest(seeded.capability, "/sync/link/current"),
-      ),
-    );
-    expect(secondProjection.files).toEqual(firstProjection.files);
-    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
-    try {
-      expect(inspection.prepare(
-        `SELECT migration_id FROM sync_relay_migrations
-         WHERE migration_id = 'current-files-seed-v1'`,
-      ).all()).toHaveLength(1);
-    } finally {
-      inspection.close();
-    }
-  });
-
-  it("backfills only rows above a preexisting epoch floor", async () => {
-    const originalStorage = await newStorage();
-    const originalHandler = handler(originalStorage);
-    const seeded = await seedThenRotate(originalHandler);
-    const recreatedContent = "recreated before migration\n";
-    const recreatedSha = await putBlob(originalHandler, recreatedContent);
-    await appendMoments(
-      originalHandler,
-      [
-        moment(0, "docs/shared.md", recreatedContent, 1_300, {
-          objectId: "object-recreated-before-migration",
-        }),
-      ],
-      {
-        originId: "origin-b",
-        identity: { replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 },
-      },
-    );
-    const dbPath = storagePaths.get(originalStorage);
-    if (!dbPath) throw new Error("missing inspection path");
-    originalStorage.close();
-    storages.splice(storages.indexOf(originalStorage), 1);
-
-    const legacy = new InspectionDatabaseSync(dbPath);
-    legacy.exec("DROP TABLE sync_relay_current_files");
-    legacy.prepare(
-      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
-    ).run("current-files-seed-v1");
-    legacy.close();
-
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    storagePaths.set(reopened, dbPath);
-    const projection = await json(
-      await handler(reopened)(
-        linkRequest(seeded.capability, "/sync/link/current"),
-      ),
-    );
-    expect(projection.files).toEqual([{
-      path: "docs/shared.md",
-      blobSha256: recreatedSha,
-      contentKind: "text",
-    }]);
-    expect(JSON.stringify(projection)).not.toContain(seeded.sharedSha);
-  });
-
-  it("gives each grant four capability buckets of read capacity", () => {
-    expect(LINK_GRANT_READ_BUCKET_CAPACITY).toBe(LINK_READ_BUCKET_CAPACITY * 4);
-    expect(LINK_GRANT_LOG_READ_BUCKET_CAPACITY).toBe(
-      LINK_LOG_READ_BUCKET_CAPACITY * 4,
-    );
-  });
 
   it("does not update durable link usage on metadata, log, or blob reads", async () => {
     const storage = await newStorage();
@@ -1971,13 +1883,8 @@ describe("relay capability reads", () => {
       const rotatedSecret = "r".repeat(43);
       let failTargetLoad = false;
       let grantId = "";
-      const racedStorage = new Proxy(storage, {
-        get(target, property, receiver) {
-          const value = Reflect.get(target, property, receiver) as unknown;
-          if (property !== "getBlob" || typeof value !== "function") {
-            return typeof value === "function" ? value.bind(target) : value;
-          }
-          return (workspaceId: string, blobSha256: string) => {
+      const racedStorage = interceptStorage(storage, {
+        getBlob: (target, workspaceId, blobSha256) => {
             if (!failTargetLoad || blobSha256 !== targetSha) {
               return target.getBlob(workspaceId, blobSha256);
             }
@@ -2001,7 +1908,6 @@ describe("relay capability reads", () => {
             });
             expect(rotation.ok).toBe(true);
             return blob;
-          };
         },
       });
       const h = handler(racedStorage, {
@@ -2077,9 +1983,7 @@ describe("relay capability reads", () => {
       const storage = await newStorage();
       const h = handler(storage);
       const seeded = await seed(h);
-      const dbPath = storagePaths.get(storage);
-      if (!dbPath) throw new Error("missing inspection path");
-      const inspection = new InspectionDatabaseSync(dbPath);
+      const inspection = inspectDatabase(storagePath(storage));
       try {
         inspection.prepare(
           `UPDATE sync_relay_blobs SET byte_length = ?
@@ -2668,45 +2572,22 @@ describe("relay capability reads", () => {
     async (operation) => {
       const storage = await newStorage();
       let ownershipAnswers: boolean[] | null = null;
-      const ownershipStorage = new Proxy(storage, {
-        get(target, property, receiver) {
-          if (property === "workspaceIsOwnedBy") {
-            return (workspaceId: string, ownerUserId: string) =>
-              ownershipAnswers === null
-                ? target.workspaceIsOwnedBy(workspaceId, ownerUserId)
-                : (ownershipAnswers.shift() ?? false);
-          }
-          const value = Reflect.get(target, property, receiver) as unknown;
-          return typeof value === "function" ? value.bind(target) : value;
-        },
+      const ownershipStorage = interceptStorage(storage, {
+        workspaceIsOwnedBy: (target, workspaceId, ownerUserId) =>
+          ownershipAnswers === null
+            ? target.workspaceIsOwnedBy(workspaceId, ownerUserId)
+            : (ownershipAnswers.shift() ?? false),
       });
       let bearerByte = 1;
       const newLinkBearer = vi.fn(() =>
         Buffer.alloc(32, bearerByte++).toString("base64url"),
       );
-      const h = createSyncRelayHandler({
-        storage: ownershipStorage,
-        resolveActor(request: Request, workspaceId: string) {
-          const match = /^Bearer user:([^ ]+)$/u.exec(
-            request.headers.get("authorization") ?? "",
-          );
-          if (!match) {
-            throw Object.assign(new Error("unauthorized"), { statusCode: 401 });
-          }
-          return { userId: match[1]!, workspaceId };
-        },
-        nowMs: () => 2_000,
+      let grantSeq = 0;
+      let idSeq = 0;
+      const h = handler(ownershipStorage, {
         newShareId: () => "share-owner-race",
-        newGrantId: (() => {
-          let id = 0;
-          return () => `grant-owner-race-${id++}`;
-        })(),
-        newId: (() => {
-          let id = 0;
-          return () => `id-owner-race-${id++}`;
-        })(),
-        linkKey: LINK_KEY,
-        shareWebOrigin: "https://share.example.test",
+        newGrantId: () => `grant-owner-race-${grantSeq++}`,
+        newId: () => `id-owner-race-${idSeq++}`,
         newLinkBearer,
       });
       const content = `${"a".repeat(64 * 1024)}${"b".repeat(64 * 1024)}${"c".repeat(64 * 1024)}`;
@@ -4325,25 +4206,23 @@ describe("relay capability reads", () => {
       const target = await newStorage();
       let grantId = "";
       let armed = false;
-      const raced = new Proxy(target, {
-        get(storage, property, receiver) {
-          const value = Reflect.get(storage, property, receiver) as unknown;
-          if (property !== racedMethod || typeof value !== "function") {
-            return typeof value === "function" ? value.bind(storage) : value;
+      const revokeAfter =
+        <M extends "fetchLogPage" | "getBlob">(method: M) =>
+        (storage: SyncRelayStorage, ...args: Parameters<SyncRelayStorage[M]>) => {
+          const real = storage[method] as (
+            this: SyncRelayStorage,
+            ...input: Parameters<SyncRelayStorage[M]>
+          ) => ReturnType<SyncRelayStorage[M]>;
+          const result = real.call(storage, ...args);
+          if (armed) {
+            armed = false;
+            storage.revokeShareGrant({ shareId: "share-0", grantId, revokedAtMs: 2_001 });
           }
-          return (...args: unknown[]) => {
-            const result = (value as (...callArgs: unknown[]) => unknown).apply(storage, args);
-            if (armed) {
-              armed = false;
-              storage.revokeShareGrant({
-                shareId: "share-0",
-                grantId,
-                revokedAtMs: 2_001,
-              });
-            }
-            return result;
-          };
-        },
+          return result;
+        };
+      const raced = interceptStorage(target, {
+        fetchLogPage: racedMethod === "fetchLogPage" ? revokeAfter("fetchLogPage") : undefined,
+        getBlob: racedMethod === "getBlob" ? revokeAfter("getBlob") : undefined,
       });
       const h = handler(raced);
       const seeded = await seed(h);
@@ -4357,15 +4236,15 @@ describe("relay capability reads", () => {
     }
   });
 
-  it("reports unknown freshness when the first shared row is beyond the fallback page budget", async () => {
+  it("reports unknown freshness when the first shared row is beyond the freshness page budget", async () => {
     const pageSize = 2;
     const storage = await newStorage();
     const h = handler(storage, {
-      linkCapabilityReadFallbackPageSize: pageSize,
+      linkFreshnessPageSize: pageSize,
     });
     const seeded = await seed(h);
     const rowsPerBudget =
-      LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET * pageSize;
+      LINK_FRESHNESS_PAGE_BUDGET * pageSize;
     await appendMoments(
       h,
       Array.from({ length: rowsPerBudget - 1 }, (_, index) =>
@@ -4390,11 +4269,11 @@ describe("relay capability reads", () => {
     const pageSize = 2;
     const storage = await newStorage();
     const h = handler(storage, {
-      linkCapabilityReadFallbackPageSize: pageSize,
+      linkFreshnessPageSize: pageSize,
     });
     const seeded = await seed(h);
     const rowsPerBudget =
-      LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET * pageSize;
+      LINK_FRESHNESS_PAGE_BUDGET * pageSize;
     await appendMoments(
       h,
       Array.from({ length: rowsPerBudget }, (_, index) =>
@@ -4417,7 +4296,7 @@ describe("relay capability reads", () => {
   it("keeps freshness and materialized blobs unchanged when the log fits the page budget", async () => {
     const storage = await newStorage();
     const h = handler(storage, {
-      linkCapabilityReadFallbackPageSize: 2,
+      linkFreshnessPageSize: 2,
     });
     const seeded = await seed(h);
 
@@ -4621,7 +4500,7 @@ describe("relay capability reads", () => {
 
   it("rate-limits only after capability authentication", async () => {
     const storage = await newStorage();
-    const limiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const limiter = new TokenBucketLimiter(1, 0.000_001, 10);
     const h = handler(storage, { linkReadRateLimiter: limiter });
     const seeded = await seed(h);
     expect((await h(linkRequest(UNKNOWN_CAPABILITY, "/sync/link/share"))).status).toBe(401);
@@ -4634,8 +4513,8 @@ describe("relay capability reads", () => {
   it("shares a grant read budget across capabilities minted by re-exchange", async () => {
     const storage = await newStorage();
     const h = handler(storage, {
-      linkReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
-      linkGrantReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+      linkReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
+      linkGrantReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
     });
     const seeded = await seed(h);
     expect((await h(linkRequest(seeded.capability, "/sync/link/share"))).status).toBe(200);
@@ -4659,8 +4538,8 @@ describe("relay capability reads", () => {
   it("keeps grant read budgets independent for different grants", async () => {
     const storage = await newStorage();
     const h = handler(storage, {
-      linkReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
-      linkGrantReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+      linkReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
+      linkGrantReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
     });
     const first = await seed(h);
     const second = await createLink(h, { paths: ["docs"], access: "view" });
@@ -4673,10 +4552,10 @@ describe("relay capability reads", () => {
   it("uses a separate read bucket for link log pages", async () => {
     const storage = await newStorage();
     const h = handler(storage, {
-      linkReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
-      linkGrantReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
-      linkLogReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
-      linkGrantLogReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+      linkReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
+      linkGrantReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
+      linkLogReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
+      linkGrantLogReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
     });
     const seeded = await seed(h);
 
@@ -4702,10 +4581,6 @@ describe("relay capability reads", () => {
   });
 
   it("keeps total blob egress on the grant across rotation and refills it", async () => {
-    expect(LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES).toBe(5 * MAX_BLOB_BYTES);
-    expect(LINK_GRANT_EGRESS_REFILL_BYTES_PER_SECOND).toBe(
-      LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES / (24 * 60 * 60),
-    );
     let now = 2_000;
     const storage = await newStorage();
     const getBlob = vi.spyOn(storage, "getBlob");
@@ -4785,11 +4660,11 @@ describe("relay capability reads", () => {
   });
 
   it("keeps exhausted public link controls off the owner sync path", async () => {
-    const exchangeLimiter = new LinkExchangeRateLimiter(1, 0.000_001, 10);
-    const readLimiter = new LinkReadRateLimiter(1, 0.000_001, 10);
-    const grantReadLimiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const exchangeLimiter = new TokenBucketLimiter(1, 0.000_001, 10);
+    const readLimiter = new TokenBucketLimiter(1, 0.000_001, 10);
+    const grantReadLimiter = new TokenBucketLimiter(1, 0.000_001, 10);
     const logLimiter = new KeyIgnoringLinkReadRateLimiter(1, 0.000_001, 10);
-    const grantLogLimiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const grantLogLimiter = new TokenBucketLimiter(1, 0.000_001, 10);
     const egressLimiter = new LinkEgressRateLimiter(9, 0.000_001, 10);
     const limiterCalls = [
       vi.spyOn(exchangeLimiter, "allow"),

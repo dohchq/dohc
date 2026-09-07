@@ -1,3 +1,5 @@
+import { useRequestSequence } from "./useRequestSequence";
+import { ipcErrorMessage } from "./ipcError";
 import { ArrowLeft, FolderOpen } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
@@ -10,13 +12,6 @@ import { IconButton, PrimaryButton } from "./ui/controls";
 // workspace, pick an empty folder, and the workspace arrives — files,
 // history, and chats. Joining needs a signed-in dohc Cloud session, so the
 // panel gates on that first and embeds the normal sign-in when absent.
-
-// Electron wraps handler rejections as "Error invoking remote method ...".
-function joinErrorMessage(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  const message = raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "").trim();
-  return message.length > 0 ? message : "Couldn't join the workspace.";
-}
 
 type Gate =
   | { kind: "checking" }
@@ -36,20 +31,19 @@ export function JoinSyncedWorkspace(props: {
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const joinedRef = useRef<Workspace | null>(null);
-  const sessionRef = useRef(0);
+  const sessionRef = useRequestSequence();
   // Guards the async join against unmount (0P-C gate fix): if the parent
   // swaps this view away while cloudJoinWorkspace is in flight, the resolved
   // promise must not navigate the app into the joined workspace the user
   // just backed out of (nor call setState on an unmounted component).
-  const cancelledRef = useRef(false);
+  const actionRequests = useRequestSequence();
 
   function checkSession() {
-    const session = sessionRef.current + 1;
-    sessionRef.current = session;
+    const session = sessionRef.next();
     void bridge()
       .cloudStatus({})
       .then((status) => {
-        if (session !== sessionRef.current) return;
+        if (!sessionRef.isCurrent(session)) return;
         setGate(
           status.connected
             ? { kind: "signed-in", email: status.email ?? "" }
@@ -57,16 +51,14 @@ export function JoinSyncedWorkspace(props: {
         );
       })
       .catch(() => {
-        if (session === sessionRef.current) setGate({ kind: "signed-out" });
+        if (sessionRef.isCurrent(session)) setGate({ kind: "signed-out" });
       });
   }
 
   useEffect(() => {
-    cancelledRef.current = false;
     checkSession();
     return () => {
-      sessionRef.current += 1;
-      cancelledRef.current = true;
+      sessionRef.next();
     };
     // Session check runs once on mount; CloudLogin's onConnected re-runs it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -79,6 +71,7 @@ export function JoinSyncedWorkspace(props: {
 
   async function join() {
     if (!folder || joining || code.trim().length === 0) return;
+    const actionRequest = actionRequests.next();
     setJoining(true);
     setError(null);
     try {
@@ -89,7 +82,7 @@ export function JoinSyncedWorkspace(props: {
       });
       // Unmounted mid-join: ignore the handler's result gracefully — the
       // user backed out, so never navigate them into the workspace.
-      if (cancelledRef.current) return;
+      if (!actionRequests.isCurrent(actionRequest)) return;
       if (result.warning) {
         // The workspace was added but its first sync didn't finish. Say so
         // and let the user open it deliberately instead of vanishing the
@@ -100,8 +93,8 @@ export function JoinSyncedWorkspace(props: {
       }
       props.onWorkspaceReady(result.workspace);
     } catch (cause) {
-      if (cancelledRef.current) return;
-      const message = joinErrorMessage(cause);
+      if (!actionRequests.isCurrent(actionRequest)) return;
+      const message = (ipcErrorMessage(cause).trim() || "Couldn't join the workspace.");
       if (/passphrase required to unlock synced secrets/i.test(message)) {
         setNeedsPassphrase(true);
         setError(
@@ -111,7 +104,7 @@ export function JoinSyncedWorkspace(props: {
         setError(message);
       }
     } finally {
-      if (!cancelledRef.current) setJoining(false);
+      if (actionRequests.isCurrent(actionRequest)) setJoining(false);
     }
   }
 
@@ -130,7 +123,7 @@ export function JoinSyncedWorkspace(props: {
       <div className="flex items-center gap-2">
         {warning === null ? (
           // Gated while a join is in flight (the request cannot be
-          // cancelled) and GONE once the workspace exists (warning state):
+          // cancelled) and gone once the workspace exists (warning state):
           // the workspace was durably created, so "back as if nothing
           // happened" would strand an invisible registration — the only
           // honest affordance left is "Open workspace" below.

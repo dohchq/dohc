@@ -132,7 +132,7 @@ async fn native_watcher_stop_joins_and_no_notification_arrives_after_return() {
     // `stop()` publishes any pending burst before the thread exits, so `dirty`
     // may legitimately be set the moment it returns. Draining that first is
     // what makes the assertion below mean what the test name says: the only
-    // thing that could set `dirty` again is a notification arriving AFTER the
+    // thing that could set `dirty` again is a notification arriving after the
     // join, which is exactly what must not happen. Without the drain this
     // test is hollow -- it fails wherever a startup burst happens to still be
     // pending (every Linux run), and passes vacuously wherever one is not.
@@ -221,7 +221,7 @@ async fn continuous_event_stream_still_flushes_at_the_hard_deadline() {
 
 /// R14 robustness, end-to-end against the real backend: deleting the watched
 /// root out from under the watcher. Empirically (this repo's Windows
-/// evidence machine), the `notify` backend does NOT surface an error
+/// evidence machine), the `notify` backend does not surface an error
 /// callback when the watched root itself disappears -- no error, no event,
 /// ever, again. Backend-error re-attach alone cannot catch this; the
 /// watcher's independent periodic root-health check is what must.
@@ -268,7 +268,7 @@ async fn native_watcher_marks_unavailable_after_the_watched_root_is_deleted() {
 /// R14 F1 regression: delete-then-recreate the watched root inside the health
 /// poll window. The recreated directory exists (so an existence-only check
 /// would see a healthy directory and do nothing), but the OS watch is still
-/// bound to the DELETED object -- so a file created in the NEW root would be
+/// bound to the DELETED object -- so a file created in the new root would be
 /// silently missed forever. The identity-based health check must catch the
 /// swap, reattach to the new directory, and surface the change (either as a
 /// dirty generation, or as `is_unavailable` if reattach cannot recover).
@@ -287,7 +287,7 @@ async fn probe_root_delete_recreate_race_is_not_silently_missed() {
     apply_and_ack(&handle, ready.initial_reconcile).await;
     assert!(!handle.stats().await.expect("stats").dirty);
 
-    // Delete then IMMEDIATELY recreate the root as a NEW directory object --
+    // Delete then immediately recreate the root as a new directory object --
     // the race the reviewer identified (403us on Windows, always winnable).
     std::fs::remove_dir_all(&root).expect("delete root");
     std::fs::create_dir(&root).expect("recreate root");
@@ -297,7 +297,7 @@ async fn probe_root_delete_recreate_race_is_not_silently_missed() {
     // dirty generation rather than a permanently-dead watch.
     wait_dirty(&handle).await;
 
-    // Prove the reattached watch is LIVE on the new directory (not the dead
+    // Prove the reattached watch is live on the new directory (not the dead
     // object): after clearing dirty, a fresh write into the recreated root
     // must produce new dirty evidence.
     let run = handle

@@ -6,7 +6,7 @@ import { mergeShareSkippedOps, type ShareSkippedOps } from "./registryStore";
  *
  * A pull hands each page's refusals here before it commits that page's
  * cursor, so the evidence survives a later page failing. What this
- * deliberately does NOT do is tell the renderer: every broadcast starts file
+ * deliberately does not do is tell the renderer: every broadcast starts file
  * scans, history reads and relay listings, and their tokens keep stale
  * results from landing without cancelling the work — so a relay refusing on
  * every page of a long backlog would fan one pull into an unbounded number of

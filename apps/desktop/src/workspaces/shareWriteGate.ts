@@ -1,7 +1,7 @@
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { shareViewGranterEmail, shareViewIsPresent } from "./shareViewMarker";
 
-// The LOCAL-WRITE gate for a share view (#646 PR3), as one rule in one place.
+// The LOCAL-WRITE gate for a share view, as one rule in one place.
 //
 // Several surfaces ask it and they must agree, because they fail in opposite
 // directions when they do not:
@@ -16,9 +16,9 @@ import { shareViewGranterEmail, shareViewIsPresent } from "./shareViewMarker";
 //   `requireShareViewProposalScope` decides whether the recipient may send
 //   what it wrote.
 //
-// It lives here rather than inside main's IPC closure for the reason
-// `shareChatGate.ts` states: a hand-copied re-implementation in a test proves
-// only that the copy behaves.
+// It lives here rather than inside main's IPC closure so tests drive the real
+// rule: a hand-copied re-implementation in a test proves only that the copy
+// behaves.
 export interface ShareViewWriteScope {
   // The level the PINNED grant names, or null when the grant cannot be read.
   access: ShareAccess | null;
@@ -37,9 +37,9 @@ export const SHARE_VIEW_EMPTY_FOLDER_REFUSAL =
  * damaged grant names none at all — reading either as writable is the one
  * direction this must never fail.
  *
- * An ENDED share is a frozen local copy: the submit route is gone, so a write
+ * An ended share is a frozen local copy: the submit route is gone, so a write
  * admitted here would land durably and never reach the granter. That is the
- * same rule `assertShareChatWritable` applies to the same state.
+ * same rule main's chat write gate applies to the same state.
  */
 export function shareViewTakesLocalWrites(scope: ShareViewWriteScope): boolean {
   if (scope.ended) return false;
@@ -50,7 +50,7 @@ export function shareViewTakesLocalWrites(scope: ShareViewWriteScope): boolean {
  * Why an ordinary workspace write handler must refuse, or null when it may
  * run. `main`'s `assertWritableWorkspace` is one line over this.
  *
- * PRESENCE, at EVERY level. The handlers this guards write workspace state
+ * PRESENCE, at every level. The handlers this guards write workspace state
  * outside the received-share file owner — assets, database edits, plugin
  * state, settings, and similar disk-backed surfaces. A raw-disk write into a
  * shared view would leave the projection describing content no moment states,
@@ -60,7 +60,7 @@ export function shareViewTakesLocalWrites(scope: ShareViewWriteScope): boolean {
  * File changes admitted by an edit grant do not come through here. They route
  * to the engine through `ShareViewFiles.change`, which asks
  * `shareViewTakesLocalWrites` at the seam that would otherwise write.
- * Widening THIS rule to the same level would open every guarded handler with
+ * Widening this rule to the same level would open every guarded handler with
  * it.
  *
  * The input is the registry marker, and it is read for presence alone. The
@@ -71,7 +71,7 @@ export function workspaceWriteRefusal(shareView: unknown): string | null {
   // PRESENCE, not truthiness. A stored `shareView: null` is a share view
   // whose marker lost its value, not a workspace that never had one, and
   // `?? null` read the two as the same thing — which made someone else's
-  // files writable here (#646). Only an ABSENT field is an ordinary
+  // files writable here. Only an absent field is an ordinary
   // workspace; anything else stays refused, readable marker or not.
   if (!shareViewIsPresent(shareView)) return null;
   const granter = shareViewGranterEmail(shareView) ?? "the person who shared it";

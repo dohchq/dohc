@@ -58,12 +58,12 @@ export interface WorkspaceSearchApi {
   clear: () => void;
 }
 
-export type WorkspaceSearchErrorReporter = (
+type WorkspaceSearchErrorReporter = (
   error: unknown,
   retry: () => void,
 ) => void;
 
-// Owns the streamed-search lifecycle for ONE workspace: mints search ids,
+// Owns the streamed-search lifecycle for one workspace: mints search ids,
 // folds validated batches into the pure model, and drops stale batches by
 // identity (applyBatch returns the same reference for a superseded search).
 // Lives in the SHELL (not the Search view) so results — and the activity-bar

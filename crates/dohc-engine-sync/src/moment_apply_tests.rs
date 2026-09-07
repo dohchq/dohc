@@ -4,18 +4,19 @@ use dohc_engine_domain::{
     WriteText,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256, put_binary_blob};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::{
-    ApplyOutcome, NoLiveLeases, RefusalReason, ReplicationEnvelope, ReplicationRefusal, SyncError,
-    apply_replication_envelope, apply_ydoc_envelope, read_replication_acked_seq,
+    ApplyDisposition, ApplyOutcome, NoLiveLeases, RefusalReason, ReplicationEnvelope,
+    ReplicationRefusal, SyncError, apply_replication_envelope, apply_ydoc_envelope,
+    read_replication_acked_seq,
 };
 
 fn test_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let path = scratch.engine_db_path().expect("db path");
+    let path = engine_db_path(&scratch).expect("db path");
     let mut store = EngineStore::open(&path, 1_000).expect("store");
     VersionedTextStore::new(&mut store)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -293,7 +294,14 @@ fn moment_after_equivalent_ydoc_projection_fast_forwards() {
         recorded_at_ms: 1_500,
         relay_seq: Some(0),
     };
-    apply_ydoc_envelope(&mut peer, &base, &NoFaults, &NoLiveLeases).expect("peer Y.Doc projection");
+    apply_ydoc_envelope(
+        &mut peer,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("peer Y.Doc projection");
     let peer_head: String = peer
         .read_with(|conn| {
             conn.query_row(
@@ -331,8 +339,14 @@ fn moment_after_equivalent_ydoc_projection_fast_forwards() {
             recorded_at_ms: 1_600 + index as i64,
             relay_seq: Some(index as i64 + 1),
         };
-        apply_ydoc_envelope(&mut peer, &delta, &NoFaults, &NoLiveLeases)
-            .expect("peer Y.Doc rewrite");
+        apply_ydoc_envelope(
+            &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &delta,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("peer Y.Doc rewrite");
     }
 
     hydrate_texts(&mut peer, &["next edit"]);
@@ -353,7 +367,7 @@ fn moment_after_equivalent_ydoc_projection_fast_forwards() {
     );
     assert_eq!(
         apply_moment_envelope(&mut peer, &next, &NoFaults).expect("next moment"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     let (latest_moment_id, conflicts): (String, i64) = peer
         .read_with(|conn| {
@@ -475,6 +489,7 @@ fn moment_delete_retires_the_receiver_ydoc_lineage() {
         .expect("Y.Doc base blob");
     apply_ydoc_envelope(
         &mut peer,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &ReplicationEnvelope {
             workspace_id: "ws".to_owned(),
             origin_id: "ydoc-origin".to_owned(),
@@ -514,7 +529,7 @@ fn moment_delete_retires_the_receiver_ydoc_lineage() {
     );
     assert_eq!(
         apply_moment_envelope(&mut peer, &delete, &NoFaults).expect("apply delete"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     let (snapshots, markers): (i64, i64) = peer
         .read_with(|conn| {
@@ -557,17 +572,22 @@ fn moment_delete_with_unsettled_lineage_stays_unacked() {
     let key = DocKey::new("ws", "main", "unsettled-delete-object").expect("Y.Doc key");
     let doc = Ydoc::wire();
     let update = doc.plaintext_insert(0, "only durable draft");
-    dohc_engine_collab::record_local_update_creating_marker(
+    dohc_engine_collab::record_local_update(
         &mut store,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
-        Some("notes/unsettled.md"),
-        YdocContentKind::Plaintext,
-        Regime::LocalOnly,
         &update,
-        None,
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some("notes/unsettled.md"),
+                content_kind: YdocContentKind::Plaintext,
+                regime: Regime::LocalOnly,
+            }),
+            ..Default::default()
+        },
         &NoFaults,
         1_500,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("seed unsettled lineage");
     hydrate_texts(&mut store, &["remote head", ""]);
@@ -587,7 +607,13 @@ fn moment_delete_with_unsettled_lineage_stays_unacked() {
         ),
     );
 
-    let outcome = apply_replication_envelope(&mut store, &delete, &NoFaults, &NoLiveLeases);
+    let outcome = apply_replication_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &delete,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     assert!(
         matches!(
             outcome,
@@ -677,17 +703,22 @@ fn moment_delete_with_orphan_scene_lineage_stays_unacked() {
         .to_string(),
     )
     .expect("import scene");
-    dohc_engine_collab::record_local_update_creating_marker(
+    dohc_engine_collab::record_local_update(
         &mut store,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
-        Some("drawings/orphan.excalidraw"),
-        YdocContentKind::Scene,
-        Regime::LocalOnly,
         &imported.initial_update,
-        None,
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some("drawings/orphan.excalidraw"),
+                content_kind: YdocContentKind::Scene,
+                regime: Regime::LocalOnly,
+            }),
+            ..Default::default()
+        },
         &NoFaults,
         1_500,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("seed orphan scene lineage");
     hydrate_texts(&mut store, &["remote scene", ""]);
@@ -708,7 +739,13 @@ fn moment_delete_with_orphan_scene_lineage_stays_unacked() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut store, &delete, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &delete,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc-lineage-unsettled"
         })
@@ -760,17 +797,22 @@ fn moment_delete_from_absent_sender_head_preserves_unsettled_lineage() {
     let key = DocKey::new("ws", "main", "absent-delete-object").expect("Y.Doc key");
     let doc = Ydoc::wire();
     let update = doc.plaintext_insert(0, "only durable draft");
-    dohc_engine_collab::record_local_update_creating_marker(
+    dohc_engine_collab::record_local_update(
         &mut store,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
-        Some("notes/absent.md"),
-        YdocContentKind::Plaintext,
-        Regime::LocalOnly,
         &update,
-        None,
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some("notes/absent.md"),
+                content_kind: YdocContentKind::Plaintext,
+                regime: Regime::LocalOnly,
+            }),
+            ..Default::default()
+        },
         &NoFaults,
         1_500,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("seed unsettled lineage");
     hydrate_texts(&mut store, &[""]);
@@ -784,7 +826,13 @@ fn moment_delete_from_absent_sender_head_preserves_unsettled_lineage() {
     let delete = envelope("absent-delete-peer", 0, "ws", payload);
 
     assert!(matches!(
-        apply_replication_envelope(&mut store, &delete, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &delete,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc-lineage-unsettled"
         })
@@ -826,9 +874,15 @@ fn malformed_moment_append_is_refused_and_acked_before_the_origin_continues() {
     let malformed = envelope("malformed-moment-peer", 0, "ws", json!({}));
 
     assert_eq!(
-        apply_replication_envelope(&mut store, &malformed, &NoFaults, &crate::NoLiveLeases)
-            .expect("malformed per-operation payload is a disposition"),
-        ApplyOutcome::Refused(ReplicationRefusal {
+        apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &malformed,
+            &NoFaults,
+            &crate::NoLiveLeases
+        )
+        .expect("malformed per-operation payload is a disposition"),
+        ApplyOutcome::new(ApplyDisposition::Refused(ReplicationRefusal {
             workspace_id: "ws".to_owned(),
             origin_id: "malformed-moment-peer".to_owned(),
             origin_seq: 0,
@@ -836,8 +890,8 @@ fn malformed_moment_append_is_refused_and_acked_before_the_origin_continues() {
             reason: RefusalReason::InvalidInput {
                 reason: "moment.append payload is malformed".to_owned(),
             },
-        }),
-        "MUTATION: parsing before apply_envelope_with returns a hard error and leaves seq 0 unacked"
+        })),
+        "parsing before apply_envelope_with returns a hard error and leaves seq 0 unacked"
     );
     assert_eq!(
         read_replication_acked_seq(&store, "ws", "malformed-moment-peer").expect("refusal ack"),
@@ -860,8 +914,18 @@ fn malformed_moment_append_is_refused_and_acked_before_the_origin_continues() {
         relay_seq: Some(1),
     };
     assert!(matches!(
-        apply_replication_envelope(&mut store, &next, &NoFaults, &crate::NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &next,
+            &NoFaults,
+            &crate::NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let channel_rows: i64 = store
         .read_with(|conn| {
@@ -892,7 +956,7 @@ fn moment_append_head_fast_forward_write_delete_and_rename_updates_alias_snapsho
     );
     assert_eq!(
         apply_moment_envelope(&mut write_store, &write, &NoFaults).expect("write"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(
         snapshot(&write_store, "object-write"),
@@ -946,7 +1010,7 @@ fn moment_append_head_fast_forward_write_delete_and_rename_updates_alias_snapsho
     );
     assert_eq!(
         apply_moment_envelope(&mut delete_store, &delete, &NoFaults).expect("delete"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(snapshot(&delete_store, "object-delete"), None);
     assert!(aliases(&delete_store, "object-delete").is_empty());
@@ -989,11 +1053,13 @@ fn moment_append_head_fast_forward_write_delete_and_rename_updates_alias_snapsho
     );
     assert_eq!(
         apply_moment_envelope(&mut rename_store, &rename, &NoFaults).expect("rename"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
-    // MUTATION: deleting the payloadBeforePath alias instead of the matched
-    // local head path leaves old.md behind beside the new live alias.
-    assert_eq!(aliases(&rename_store, "object-rename"), ["new.md"]);
+    assert_eq!(
+        aliases(&rename_store, "object-rename"),
+        ["new.md"],
+        "deleting the payloadBeforePath alias instead of the matched local head path leaves old.md behind beside the new live alias."
+    );
     assert_eq!(
         snapshot(&rename_store, "object-rename").unwrap().0,
         "new.md"
@@ -1028,17 +1094,22 @@ fn moment_append_live_lease_blocks_all_mutations_and_write_waits_for_ydoc_rewrit
         let key = DocKey::new("ws", "main", &object_id).expect("Y.Doc key");
         let doc = Ydoc::wire();
         let update = doc.plaintext_insert(0, "before");
-        dohc_engine_collab::record_local_update_creating_marker(
+        dohc_engine_collab::record_local_update(
             &mut store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
-            Some("head.md"),
-            YdocContentKind::Plaintext,
-            Regime::LocalOnly,
             &update,
-            None,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some("head.md"),
+                    content_kind: YdocContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                ..Default::default()
+            },
             &NoFaults,
             1_500,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("seed live lineage");
         let op = envelope(
@@ -1093,7 +1164,13 @@ fn moment_append_live_lease_blocks_all_mutations_and_write_waits_for_ydoc_rewrit
         let held = leases.acquire(&key).expect("hold document live");
 
         assert!(matches!(
-            apply_replication_envelope(&mut store, &op, &NoFaults, &leases),
+            apply_replication_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &leases
+            ),
             Err(SyncError::RetryableState {
                 reason: "ydoc-session-live"
             })
@@ -1139,7 +1216,13 @@ fn moment_append_live_lease_blocks_all_mutations_and_write_waits_for_ydoc_rewrit
         assert_eq!(after_live, before, "live {operation} mutated durable state");
 
         drop(held);
-        let closed = apply_replication_envelope(&mut store, &op, &NoFaults, &leases);
+        let closed = apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &leases,
+        );
         if operation == "write" {
             assert!(matches!(
                 closed,
@@ -1159,7 +1242,14 @@ fn moment_append_live_lease_blocks_all_mutations_and_write_waits_for_ydoc_rewrit
             );
             continue;
         }
-        assert!(matches!(closed, Ok(ApplyOutcome::Applied(_))));
+        assert!(matches!(
+            closed,
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ));
         match operation {
             "delete" => assert_eq!(snapshot(&store, &object_id), None),
             "rename" => assert_eq!(snapshot(&store, &object_id).unwrap().0, "renamed.md"),
@@ -1198,7 +1288,7 @@ fn moment_append_content_fast_forward_converges_text_at_the_same_path() {
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("converge"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(snapshot(&store, "object").unwrap().3, "remote-head");
     assert!(conflict_ids(&store).is_empty());
@@ -1239,7 +1329,7 @@ fn moment_append_content_fast_forward_converges_binary_at_the_same_path() {
     let op = envelope("peer", 0, "ws", payload);
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("binary converge"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     let head = snapshot(&store, "binary-object").unwrap();
     assert_eq!(head.0, "same.bin");
@@ -1279,7 +1369,7 @@ fn moment_append_same_bytes_at_a_different_path_conflicts_instead_of_converging(
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("diverge"),
-        ApplyOutcome::Applied(1)
+        ApplyOutcome::new(ApplyDisposition::Applied(1))
     );
     assert_eq!(snapshot(&store, "object").unwrap().0, "local.md");
     assert_eq!(conflict_ids(&store).len(), 1);
@@ -1316,7 +1406,7 @@ fn moment_append_content_convergent_adoption_localizes_rollback_but_keeps_wire_p
     let wire = op.payload_json().expect("wire json");
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("adopt"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     store
         .read_with(|conn| {
@@ -1372,7 +1462,7 @@ fn moment_append_both_sides_deleted_is_record_only_and_touches_no_search_state()
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("both deleted"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(snapshot(&store, "deleted-object"), None);
     assert_eq!(
@@ -1424,7 +1514,7 @@ fn moment_append_divergence_opens_one_duplicate_envelope_skips_and_next_head_coa
     let first = envelope("peer", 0, "ws", first_payload);
     assert_eq!(
         apply_moment_envelope(&mut store, &first, &NoFaults).expect("first"),
-        ApplyOutcome::Applied(1)
+        ApplyOutcome::new(ApplyDisposition::Applied(1))
     );
     store
         .read_with(|conn| {
@@ -1458,7 +1548,7 @@ fn moment_append_divergence_opens_one_duplicate_envelope_skips_and_next_head_coa
         .expect("wire before conflict base");
     assert_eq!(
         apply_moment_envelope(&mut store, &first, &NoFaults).expect("duplicate envelope"),
-        ApplyOutcome::Skipped
+        ApplyOutcome::new(ApplyDisposition::Skipped)
     );
     let second = envelope(
         "peer",
@@ -1477,7 +1567,7 @@ fn moment_append_divergence_opens_one_duplicate_envelope_skips_and_next_head_coa
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &second, &NoFaults).expect("coalesce"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(conflict_ids(&store).len(), 1);
     let incoming: String = store
@@ -1548,11 +1638,11 @@ fn moment_append_deterministic_conflict_id_is_identical_when_branch_roots_are_sw
     );
     assert_eq!(
         apply_moment_envelope(&mut left, &right_into_left, &NoFaults).expect("left"),
-        ApplyOutcome::Applied(1)
+        ApplyOutcome::new(ApplyDisposition::Applied(1))
     );
     assert_eq!(
         apply_moment_envelope(&mut right, &left_into_right, &NoFaults).expect("right"),
-        ApplyOutcome::Applied(1)
+        ApplyOutcome::new(ApplyDisposition::Applied(1))
     );
     assert_eq!(conflict_ids(&left), conflict_ids(&right));
     assert_eq!(conflict_ids(&left).len(), 1);
@@ -1597,7 +1687,7 @@ fn moment_append_occupancy_divergence_returns_two_distinct_conflicts() {
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("occupancy"),
-        ApplyOutcome::Applied(2)
+        ApplyOutcome::new(ApplyDisposition::Applied(2))
     );
     let ids = conflict_ids(&store);
     assert_eq!(ids.len(), 2);
@@ -1636,7 +1726,7 @@ fn moment_append_record_only_divergence_is_not_a_head_and_cannot_be_rolled_back(
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("diverge"),
-        ApplyOutcome::Applied(1)
+        ApplyOutcome::new(ApplyDisposition::Applied(1))
     );
     assert_eq!(snapshot(&store, "object").unwrap().3, "local-root");
     let record_only: i64 = store
@@ -1658,7 +1748,6 @@ fn moment_append_record_only_divergence_is_not_a_head_and_cannot_be_rolled_back(
                 path: "doc.md".to_owned(),
                 mutation_moment_id: "remote-record-only".to_owned(),
                 request_id: None,
-                legacy_before_text: None,
                 metadata_origin: "restore".to_owned(),
                 author_json: None,
             },
@@ -1702,8 +1791,14 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
         recorded_at_ms: 1_500,
         relay_seq: Some(0),
     };
-    apply_replication_envelope(&mut store, &version, &NoFaults, &crate::NoLiveLeases)
-        .expect("materialize shipped fork");
+    apply_replication_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &version,
+        &NoFaults,
+        &crate::NoLiveLeases,
+    )
+    .expect("materialize shipped fork");
 
     let mut payload = present_text_payload(
         "remote-after-shipped",
@@ -1726,7 +1821,7 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
     let append = envelope("moment-peer", 0, "ws", payload);
     assert_eq!(
         apply_moment_envelope(&mut store, &append, &NoFaults).expect("append after shipped head"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     type StoredPreimage = (
         Option<String>,
@@ -1760,8 +1855,6 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
             )
         })
         .expect("stored rollback preimage");
-    // MUTATION: omit any identity/metadata binding from insert_moment and the
-    // durable preimage tuple no longer matches the shipped snapshot.
     assert_eq!(
         stored_preimage,
         (
@@ -1772,10 +1865,11 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
             Some("sync".to_owned()),
             Some("shipped summary".to_owned()),
             Some("shipped correlation".to_owned()),
-        )
+        ),
+        "omit any identity/metadata binding from insert_moment and the durable preimage tuple no longer matches the shipped snapshot.",
     );
 
-    let database_path = scratch.engine_db_path().expect("database path");
+    let database_path = engine_db_path(&scratch).expect("database path");
     drop(store);
     let mut reopened = EngineStore::open(&database_path, 3_000).expect("reopen");
     VersionedTextStore::new(&mut reopened)
@@ -1786,7 +1880,6 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
                 path: "shipped.md".to_owned(),
                 mutation_moment_id: "remote-after-shipped".to_owned(),
                 request_id: None,
-                legacy_before_text: None,
                 metadata_origin: "restore".to_owned(),
                 author_json: None,
             },
@@ -1827,11 +1920,11 @@ fn moment_append_first_delivery_refuses_and_acks_plaintext_id_collision_but_rede
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &first, &NoFaults).expect("first"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &first, &NoFaults).expect("redelivery"),
-        ApplyOutcome::Skipped
+        ApplyOutcome::new(ApplyDisposition::Skipped)
     );
     let duplicate_id = envelope(
         "second-peer",
@@ -1844,16 +1937,16 @@ fn moment_append_first_delivery_refuses_and_acks_plaintext_id_collision_but_rede
             "missing blob is never hydrated",
         ),
     );
-    // MUTATION: treating a same-table ID hit as idempotence lets this unrelated
-    // first-delivery coordinate claim another moment; true replay was already
-    // skipped above before entering the moment applier.
-    assert!(matches!(
-        apply_moment_envelope(&mut store, &duplicate_id, &NoFaults),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
-            reason: RefusalReason::InvalidInput { ref reason },
-            ..
-        })) if reason == "replicated plaintext moment id collides with existing history"
-    ));
+    assert!(
+        matches!(
+            apply_moment_envelope(&mut store, &duplicate_id, &NoFaults),
+            Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
+                reason: RefusalReason::InvalidInput { ref reason },
+                ..
+            }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "replicated plaintext moment id collides with existing history")
+        ),
+        "treating a same-table ID hit as idempotence lets this unrelated first-delivery coordinate claim another moment; true replay was already skipped above before entering the moment applier."
+    );
     assert_eq!(
         read_replication_acked_seq(&store, "ws", "second-peer").expect("ack"),
         0
@@ -1899,11 +1992,17 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
             "incoming",
         ),
     );
-    let first = apply_replication_envelope(&mut store, &incoming, &NoFaults, &crate::NoLiveLeases)
-        .expect("apply active moment");
+    let first = apply_replication_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &incoming,
+        &NoFaults,
+        &crate::NoLiveLeases,
+    )
+    .expect("apply active moment");
     assert_eq!(
         first,
-        ApplyOutcome::Applied(crate::RoutedApply {
+        ApplyOutcome::new(ApplyDisposition::Applied(crate::RoutedApply {
             conflict: None,
             conflicts_opened: 0,
             materialization_changes: vec![crate::MomentMaterializationChange {
@@ -1913,7 +2012,7 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
                 content_kind: "text",
             }],
             record_facts: Vec::new(),
-        })
+        }))
     );
     store
         .read_with(|conn| {
@@ -1934,7 +2033,7 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
             operation: "write",
             content_kind: "text",
         }],
-        "MUTATION: re-deriving from the live active version loses the apply-time disk change"
+        "re-deriving from the live active version loses the apply-time disk change"
     );
 }
 
@@ -1960,15 +2059,16 @@ fn moment_append_refuses_and_acks_id_collision_with_secret_history() {
         absent_text_payload("protected-id", "plaintext-object", "doc.md", "incoming"),
     );
 
-    // MUTATION: removing the secret_moments arm lets two unrelated histories
-    // claim the same workspace-wide moment identity.
-    assert!(matches!(
-        apply_moment_envelope(&mut store, &op, &NoFaults),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
-            reason: RefusalReason::InvalidInput { ref reason },
-            ..
-        })) if reason == "replicated plaintext moment id collides with existing history"
-    ));
+    assert!(
+        matches!(
+            apply_moment_envelope(&mut store, &op, &NoFaults),
+            Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
+                reason: RefusalReason::InvalidInput { ref reason },
+                ..
+            }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "replicated plaintext moment id collides with existing history")
+        ),
+        "removing the secret_moments arm lets two unrelated histories claim the same workspace-wide moment identity."
+    );
     let rows: (i64, i64) = store
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
@@ -2013,7 +2113,7 @@ fn moment_append_accepts_only_oracle_metadata_origins_and_acks_refusals() {
         assert_eq!(
             apply_moment_envelope(&mut accepted_store, &op, &NoFaults)
                 .expect("oracle origin must apply"),
-            ApplyOutcome::Applied(0),
+            ApplyOutcome::new(ApplyDisposition::Applied(0)),
             "{origin}"
         );
     }
@@ -2040,15 +2140,16 @@ fn moment_append_accepts_only_oracle_metadata_origins_and_acks_refusals() {
         let peer = format!("{field}-{reserved}-peer");
         let op = envelope(&peer, 0, "ws", payload);
 
-        // MUTATION: an empty-only check accepts capture/ydoc ownership markers
-        // and can make the local capture reconciler claim replicated content.
-        assert!(matches!(
-            apply_moment_envelope(&mut store, &op, &NoFaults),
-            Ok(ApplyOutcome::Refused(ReplicationRefusal {
-                reason: RefusalReason::InvalidInput { ref reason },
-                ..
-            })) if reason == "moment.append payload is invalid"
-        ));
+        assert!(
+            matches!(
+                apply_moment_envelope(&mut store, &op, &NoFaults),
+                Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
+                    reason: RefusalReason::InvalidInput { ref reason },
+                    ..
+                }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "moment.append payload is invalid")
+            ),
+            "an empty-only check accepts capture/ydoc ownership markers and can make the local capture reconciler claim replicated content."
+        );
         let persisted: (i64, i64) = store
             .read_with(|conn| {
                 Ok::<_, rusqlite::Error>((
@@ -2084,7 +2185,13 @@ fn moment_append_requires_version_create_ordering_and_never_acks_a_missing_targe
     payload["versionId"] = json!("missing");
     let op = envelope("peer", 0, "ws", payload);
     assert!(matches!(
-        apply_replication_envelope(&mut store, &op, &NoFaults, &crate::NoLiveLeases),
+        apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &crate::NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "moment.append target version is missing"
         })
@@ -2105,7 +2212,7 @@ fn moment_append_requires_version_create_ordering_and_never_acks_a_missing_targe
         .expect("missing-version journal count");
     assert_eq!(
         journaled, 0,
-        "MUTATION: journaling the retryable failure permanently consumes the missing-version coordinate"
+        "journaling the retryable failure permanently consumes the missing-version coordinate"
     );
 
     let version = ReplicationEnvelope {
@@ -2126,12 +2233,32 @@ fn moment_append_requires_version_create_ordering_and_never_acks_a_missing_targe
         relay_seq: Some(0),
     };
     assert!(matches!(
-        apply_replication_envelope(&mut store, &version, &NoFaults, &crate::NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &version,
+            &NoFaults,
+            &crate::NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
-        apply_replication_envelope(&mut store, &op, &NoFaults, &crate::NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &crate::NoLiveLeases
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&store, "ws", "peer").expect("retry ack"),
@@ -2236,10 +2363,14 @@ fn moment_append_refuses_non_tracked_or_noncanonical_paths_without_rows_and_acks
         assert!(
             matches!(
                 apply_moment_envelope(&mut store, &op, &NoFaults),
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
-                    reason: RefusalReason::InvalidInput { .. },
-                    ..
-                }))
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Refused(ReplicationRefusal {
+                        reason: RefusalReason::InvalidInput { .. },
+                        ..
+                    }),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ),
             "{case} must be refused"
         );
@@ -2287,7 +2418,7 @@ fn moment_append_refuses_non_tracked_or_noncanonical_paths_without_rows_and_acks
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &canonical, &NoFaults).expect("canonical tracked path"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(
         snapshot(&store, "canonical-object").unwrap().0,
@@ -2316,7 +2447,7 @@ fn moment_append_refuses_non_tracked_or_noncanonical_paths_without_rows_and_acks
     assert_eq!(
         apply_moment_envelope(&mut store, &canonical_before, &NoFaults)
             .expect("canonical tracked beforePath"),
-        ApplyOutcome::Applied(1)
+        ApplyOutcome::new(ApplyDisposition::Applied(1))
     );
 }
 
@@ -2372,7 +2503,7 @@ fn moment_append_persists_full_wire_payload_provenance() {
     let op = envelope("peer", 0, "ws", payload);
     assert_eq!(
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("content-convergent adoption"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
 
     let provenance = store
@@ -2442,9 +2573,11 @@ fn moment_append_persists_full_wire_payload_provenance() {
         Some("adopted from peer".to_owned()),
         Some("correlation-remote-adopted".to_owned()),
     );
-    // MUTATION: dropping either optional field from the moment or snapshot
-    // insert makes one side of this round trip differ.
-    assert_eq!(metadata, (expected.clone(), expected));
+    assert_eq!(
+        metadata,
+        (expected.clone(), expected),
+        "dropping either optional field from the moment or snapshot insert makes one side of this round trip differ."
+    );
 
     let versioned = VersionedTextStore::new(&mut store);
     let page = versioned
@@ -2549,9 +2682,11 @@ fn local_overwrite_clears_imported_snapshot_metadata() {
             )
         })
         .expect("local snapshot metadata");
-    // MUTATION: omitting either optional metadata assignment from the local
-    // upsert leaves the imported value attached to the newer local head.
-    assert_eq!(metadata, ("api".to_owned(), None, None));
+    assert_eq!(
+        metadata,
+        ("api".to_owned(), None, None),
+        "omitting either optional metadata assignment from the local upsert leaves the imported value attached to the newer local head."
+    );
 }
 
 #[test]
@@ -2603,13 +2738,14 @@ fn moment_append_search_index_respects_files_and_visibility_policy() {
         );
         assert_eq!(
             apply_moment_envelope(&mut store, &op, &NoFaults).expect("policy-aware apply"),
-            ApplyOutcome::Applied(0)
+            ApplyOutcome::new(ApplyDisposition::Applied(0))
         );
     }
 
-    // MUTATION: removing or inverting either policy predicate indexes one of
-    // the excluded rows; skipping the healthy insert loses the public row.
-    assert!(indexed(&store, "private-object").is_empty());
+    assert!(
+        indexed(&store, "private-object").is_empty(),
+        "removing or inverting either policy predicate indexes one of the excluded rows; skipping the healthy insert loses the public row."
+    );
     assert!(indexed(&store, "hidden-object").is_empty());
     assert_eq!(
         indexed(&store, "public-object"),
@@ -2639,7 +2775,7 @@ fn moment_append_search_index_respects_files_and_visibility_policy() {
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &degraded, &NoFaults).expect("degraded-policy apply"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     // A degraded policy freezes FILE indexing: the prior row remains until a
     // healthy policy can safely decide whether to replace or remove it.
@@ -2665,10 +2801,14 @@ fn moment_append_refuses_each_incomplete_payload_before_tuple_without_rows_and_a
         assert!(
             matches!(
                 apply_moment_envelope(&mut store, &op, &NoFaults),
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
-                    reason: RefusalReason::InvalidInput { .. },
-                    ..
-                }))
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Refused(ReplicationRefusal {
+                        reason: RefusalReason::InvalidInput { .. },
+                        ..
+                    }),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ),
             "{case} must be refused"
         );
@@ -2721,7 +2861,7 @@ fn replicated_delete_after_path_divergent_rename_removes_the_live_alias() {
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &rename, &NoFaults).expect("rename"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(
         aliases(&store, "rename-delete-object"),
@@ -2745,10 +2885,12 @@ fn replicated_delete_after_path_divergent_rename_removes_the_live_alias() {
     );
     assert_eq!(
         apply_moment_envelope(&mut store, &delete, &NoFaults).expect("delete"),
-        ApplyOutcome::Applied(0)
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
-    // MUTATION: deleting by the remote payload path leaves `new.md` behind.
-    assert!(aliases(&store, "rename-delete-object").is_empty());
+    assert!(
+        aliases(&store, "rename-delete-object").is_empty(),
+        "deleting by the remote payload path leaves `new.md` behind."
+    );
     assert_eq!(snapshot(&store, "rename-delete-object"), None);
 }
 
@@ -2765,10 +2907,14 @@ fn moment_append_refuses_overlong_moment_and_object_ids_with_ack() {
         assert!(
             matches!(
                 apply_moment_envelope(&mut store, &op, &NoFaults),
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
-                    reason: RefusalReason::InvalidInput { .. },
-                    ..
-                }))
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Refused(ReplicationRefusal {
+                        reason: RefusalReason::InvalidInput { .. },
+                        ..
+                    }),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ),
             "overlong {case} must be refused"
         );

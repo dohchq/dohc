@@ -1,10 +1,10 @@
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 
-// The durable half of the set-aside recovery store (#600). `orphanedDrafts.ts`
+// The durable half of the set-aside recovery store. `orphanedDrafts.ts`
 // holds the copy this app run reads; this holds the copy that survives a quit,
 // a crash, and a forced restart.
 //
-// Renderer-owned storage, not a main-owned file: the capture runs DURING a
+// Renderer-owned storage, not a main-owned file: the capture runs during a
 // render and the close guard decides inside `beforeunload`, and both need a
 // synchronous answer to "is this text already durable?". An IPC round trip
 // gives neither one in time, so the guard would have to warn about text that
@@ -26,7 +26,7 @@ import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-pa
 // It is PLAINTEXT, which is why the secret floor below decides what may enter
 // it at all.
 
-// Exported so tests can read the RAW stored bytes. Asserting through the
+// Exported so tests can read the raw stored bytes. Asserting through the
 // store's own API would pass a floor that leaked: the question "did this text
 // reach plaintext storage?" can only be answered by looking at storage.
 export const ORPHANED_DRAFT_STORAGE_KEY = "dohc-set-aside-drafts";
@@ -47,14 +47,14 @@ type StoredOrphanedDraft = {
   capturedAtMs: number;
 };
 
-// THE floor (#446): a draft over a secret-classified path never reaches
+// The floor: a draft over a secret-classified path never reaches
 // plaintext storage. Only a `tracked` path is eligible — `ignored` is a path
 // the engine floor could not normalize, and a store that cannot classify a
 // path does not get to guess it is safe. Unpersistable drafts keep their
 // in-memory copy, and the close warning is the last line for them.
 //
 // It decides once, when the draft is captured, and the decision only ever
-// tightens. A later rename can take a row OUT of storage, because re-keying it
+// tightens. A later rename can take a row out of storage, because re-keying it
 // would write a row under a secret path (`remapStoredDraftPaths`). It never
 // puts one in: writing text the floor already refused would be a new decision,
 // made on a path that was not the path when the text was captured, about bytes
@@ -83,7 +83,7 @@ function isUsableDraftId(id: number): boolean {
 // The repair is the reading clock, which restarts the window. It over-retains
 // a foreign row by up to 30 days, and that is the direction to be wrong in:
 // expiry here is housekeeping, and the row stays listed and dismissable the
-// whole time. A time in the FUTURE is left alone — it is readable, it survives
+// whole time. A time in the future is left alone — it is readable, it survives
 // a round trip, and rewriting it on every launch under a skewed clock would
 // churn storage for nothing.
 function isUsableCaptureTime(capturedAtMs: number): boolean {
@@ -105,7 +105,7 @@ function isStoredDraft(value: unknown): value is StoredOrphanedDraft {
 // Unreadable storage and unreadable content both answer "no stored
 // recoveries" — a throw here would take down the render that is trying to set
 // a draft aside. They differ in the one way that matters to the caller:
-// unreadable CONTENT still occupies the key, so the read reports that it threw
+// unreadable content still occupies the key, so the read reports that it threw
 // bytes away and the load path writes over them. Missing storage discards
 // nothing and must not provoke a write, or every launch would create this key
 // for a user who never set an edit aside.
@@ -138,7 +138,7 @@ function readRows(): ReadResult {
 // unpersisted rather than claiming a durability it does not have.
 //
 // No rows means no key, not an empty array. One rule, and it is what keeps a
-// write that DROPS rows from ever asking for space: it either removes the key
+// write that drops rows from ever asking for space: it either removes the key
 // or replaces it with a subset of what that key already holds.
 function writeRows(rows: readonly StoredOrphanedDraft[]): boolean {
   try {
@@ -155,16 +155,16 @@ function writeRows(rows: readonly StoredOrphanedDraft[]): boolean {
 
 // Every recovery still worth restoring, oldest first. Expired rows go, so does
 // any row this build's floor refuses, and so does anything the read could not
-// parse — dropped here AND written out of storage. localStorage is plaintext
+// parse — dropped here and written out of storage. localStorage is plaintext
 // an older build or another tool can write, so what comes out of it is
 // classified again rather than trusted, and the rewrite triggers on whatever
-// ANY stage threw away: a value that is not a list of drafts has no path to
+// any stage threw away: a value that is not a list of drafts has no path to
 // classify, no capture time to expire, and no notice row to dismiss, so
 // nothing else would ever remove it. A key that was not there discarded
 // nothing and is left alone. Only this pass needs the check — it runs before
 // the root renders, and so before any capture, dismissal, or rename.
 //
-// The floor reads a PATH, not a file. A rename dohc PERFORMS re-keys the row
+// The floor reads a PATH, not a file. A rename dohc performs re-keys the row
 // and drops it when the new path is secret (`remapStoredDraftPaths`). A rename
 // dohc did not perform — done outside the app, or between two runs — leaves
 // the row on the path it was captured on: nothing in the renderer can tell
@@ -247,7 +247,7 @@ export function forgetStoredDraft(id: number): void {
 }
 
 // A rename re-keys the recovery on disk too, or the notice comes back on a
-// path that no longer exists. Returns the ids that LOST their stored copy —
+// path that no longer exists. Returns the ids that lost their stored copy —
 // a rename onto a secret-classified path takes the text out of plaintext
 // storage at once, and the caller stops calling those drafts durable.
 export function remapStoredDraftPaths(

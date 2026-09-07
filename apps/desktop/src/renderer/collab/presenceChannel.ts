@@ -8,7 +8,7 @@
 // degrades silently (presence goes dark, chat/editing keep working — the
 // design's "awareness-channel-down still allows chat/edit" contract).
 //
-// GATING: a channel is only ever CONSTRUCTED under collaboration
+// Gating: a channel is only ever constructed under collaboration
 // (signedIn && relayConnected). A solo/offline surface passes a null transport
 // and builds none of this — mirroring how the engine co-editing doc stays
 // dormant for solo.
@@ -44,7 +44,7 @@ export interface PresenceTransport {
   poll(input: { topic: string; since: number; signal: AbortSignal }): Promise<PresenceSnapshot>;
 }
 
-export interface RelayPresenceTransport {
+interface RelayPresenceTransport {
   publish(input: {
     topic: string;
     clientId: string;
@@ -58,7 +58,7 @@ export interface RelayPresenceTransport {
   }): Promise<PresenceSnapshot>;
 }
 
-// The ONE guard between a peer's untrusted display payload and every UI
+// The one guard between a peer's untrusted display payload and every UI
 // surface: only a real, non-empty string may become a display name. Keep any
 // future sanitization/length caps here so all callers stay in sync.
 export function resolvePeerDisplayName(peer: PresencePeer): string {
@@ -71,7 +71,7 @@ export type PresenceScope =
   | { kind: "workspace"; workspaceId: string }
   | { kind: "share"; shareId: string };
 
-export interface RelayPresenceConfig {
+interface RelayPresenceConfig {
   baseUrl: string;
   token: string;
   scope: PresenceScope;
@@ -132,12 +132,12 @@ export function createRelayPresenceTransport(
   };
 }
 
-export interface PresenceChannelOptions {
+interface PresenceChannelOptions {
   transport: PresenceTransport;
   topic: string;
   clientId: string;
   initialState: unknown;
-  // Called with the FULL peer set (including this client, echoed by the relay)
+  // Called with the full peer set (including this client, echoed by the relay)
   // whenever it changes. Never called after stop().
   onPeers: (peers: PresencePeer[]) => void;
   // Re-publish this often so the relay TTL never lapses. Must be < the relay
@@ -154,10 +154,10 @@ export interface PresenceChannel {
   // Stop heartbeating + polling, abort any in-flight poll, wait out any
   // publish already in flight, and best-effort leave — in that order (#742
   // P2, round 5: sending leave before an earlier publish settles lets that
-  // publish reach the transport AFTER leave does, reviving presence the
+  // publish reach the transport after leave does, reviving presence the
   // instant after it left). Idempotent. After this, onPeers never fires
   // again. Resolves once the internal poll loop has fully exited (including
-  // a pending retry sleep) AND the leave call has settled (#742 P2, round 3:
+  // a pending retry sleep) and the leave call has settled (#742 P2, round 3:
   // a caller about to do something that will make this scope reject further
   // presence calls — e.g. ending the DM's share — must be able to await the
   // leave actually reaching the transport, not just being launched) — so
@@ -185,11 +185,11 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
   let retryResolve: (() => void) | null = null;
   let pollController: AbortController | null = null;
   let loopDone: Promise<void> | null = null;
-  // The TAIL of the publish chain, so stop() can wait every outstanding
-  // publish out before sending leave (#742 P2, round 5): awaiting
+  // The tail of the publish chain, so stop() can wait every outstanding
+  // publish out before sending leave: awaiting
   // transport.leave alone does not order it after a publish already in
   // flight when stop() is called — a late-arriving publish can reach the
-  // transport AFTER leave does, reviving presence the instant after it left
+  // transport after leave does, reviving presence the instant after it left
   // (ghost until TTL). Publishes never overlap: rapid pointer updates used
   // to start concurrent requests, and an older one finishing last could
   // outlive the newest — the same ghost — or repaint an older cursor. An
@@ -296,11 +296,11 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
         // returns; clearing the timer alone would strand it forever.
         retryResolve?.();
         pollController?.abort();
-        // Wait out any publish already in flight BEFORE sending leave (#742
+        // Wait out any publish already in flight before sending leave (#742
         // P2, round 5) — see inFlightPublish's own comment.
         await inFlightPublish;
         // Best-effort explicit leave so peers see the departure before the
-        // TTL — AWAITED (#742 P2, round 3), not fire-and-forget: a caller can
+        // TTL — awaited, not fire-and-forget: a caller can
         // rely on this having actually reached the transport once stop()'s
         // own promise settles. Guarded: this channel accepts any transport,
         // and a rejecting leave must never surface as an unhandled rejection

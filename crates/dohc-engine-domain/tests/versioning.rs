@@ -3,13 +3,14 @@
 //! ordering with keyset pagination at limit-1/limit/limit+1, restore preserving
 //! both sides, and close/reopen/mutate durability.
 
+use dohc_engine_domain::normalize;
 use dohc_engine_domain::{
     CreateNamedVersion, DeleteTextFile, ListMomentsQuery, MergeTextFileFromVersion,
-    MergeTextFileResult, MomentOp, NoFaults, RenameTextFile, RollbackTextFileMutation,
-    SnapshotContent, VersionKind, VersionedTextStore, WriteText,
+    MergeTextFileResult, MomentOp, NoFaults, RenameTextFile, RollbackTextFileMutation, VersionKind,
+    VersionedTextStore, WriteText,
 };
-use dohc_engine_storage::{CompoundWrite, EngineStore, WriteOutcome};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_storage::{EngineStore, StorageError, hex_sha256};
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 const NO_FAULTS: NoFaults = NoFaults;
 const WS: &str = "ws-1";
@@ -75,7 +76,6 @@ fn rollback(version: &str, path: &str, moment: &str) -> RollbackTextFileMutation
         path: path.to_owned(),
         mutation_moment_id: moment.to_owned(),
         request_id: None,
-        legacy_before_text: None,
         metadata_origin: "restore".to_owned(),
         author_json: None,
     }
@@ -84,7 +84,7 @@ fn rollback(version: &str, path: &str, moment: &str) -> RollbackTextFileMutation
 #[test]
 fn write_text_directly_at_a_secret_path_is_refused_by_the_secret_floor() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let err = VersionedTextStore::new(&mut store)
@@ -99,7 +99,7 @@ fn write_text_directly_at_a_secret_path_is_refused_by_the_secret_floor() {
 #[test]
 fn rename_onto_secret_path_is_refused_by_the_secret_floor() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut versions = VersionedTextStore::new(&mut store);
@@ -124,7 +124,7 @@ fn rename_onto_secret_path_is_refused_by_the_secret_floor() {
 #[test]
 fn plaintext_store_door_rejects_reserved_ignored_and_traversal_paths() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut versions = VersionedTextStore::new(&mut store);
@@ -200,7 +200,7 @@ fn plaintext_store_door_rejects_reserved_ignored_and_traversal_paths() {
 #[test]
 fn write_then_read_round_trip_survives_reopen() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     {
         let mut store = EngineStore::open(&db, 1).expect("open");
@@ -249,7 +249,7 @@ fn write_then_read_round_trip_survives_reopen() {
 #[test]
 fn update_in_place_reuses_object_and_records_before() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -282,7 +282,7 @@ fn update_in_place_reuses_object_and_records_before() {
 #[test]
 fn duplicate_moment_id_is_rejected() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -294,12 +294,12 @@ fn duplicate_moment_id_is_rejected() {
     assert_eq!(err.code(), "duplicate-moment-id");
 }
 
-// oracle: writing a NEW path with an object id already bound to another object
+// oracle: writing a new path with an object id already bound to another object
 // fails closed (never silently reuses/clobbers the other file's snapshot).
 #[test]
 fn reused_object_id_for_new_path_is_rejected() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -323,7 +323,7 @@ fn reused_object_id_for_new_path_is_rejected() {
 #[test]
 fn read_text_unknown_version_fails_closed() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let vt = VersionedTextStore::new(&mut store);
@@ -335,12 +335,12 @@ fn read_text_unknown_version_fails_closed() {
     );
 }
 
-// oracle (exactly-once): a deduped write replay returns the ORIGINAL recorded
+// oracle (exactly-once): a deduped write replay returns the original recorded
 // result, never a later write's text/moment on the same path.
 #[test]
 fn deduped_write_returns_original_not_later_state() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -353,7 +353,7 @@ fn deduped_write_returns_original_not_later_state() {
     vt.write_text(&write("main", "a.md", "second", "m2", "o1", 20), &NO_FAULTS)
         .expect("second");
 
-    // Replay the original request: must return the ORIGINAL result.
+    // Replay the original request: must return the original result.
     let replay = vt.write_text(&first, &NO_FAULTS).expect("replay");
     assert!(replay.deduped);
     assert_eq!(replay.snapshot.text, "first");
@@ -376,7 +376,7 @@ fn deduped_write_returns_original_not_later_state() {
 #[test]
 fn rollback_clears_idempotency_ledger_so_stale_retry_does_not_replay() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
 
@@ -416,12 +416,9 @@ fn rollback_clears_idempotency_ledger_so_stale_retry_does_not_replay() {
 }
 
 #[test]
-fn rollback_purges_versioned_and_merge_requests_but_preserves_compound_rows() {
-    // MUTATION: drop the kind predicate -> the compound collision is deleted.
-    // MUTATION: drop `merge` from the IN list -> the merge retry reconstructs a
-    // deleted moment instead of re-executing.
+fn rollback_purges_versioned_and_merge_requests_but_preserves_other_kinds() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
 
@@ -429,25 +426,20 @@ fn rollback_purges_versioned_and_merge_requests_but_preserves_compound_rows() {
         .write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
         .expect("first versioned write");
 
-    // The first versioned write consumed replication seq 1. This compound
-    // write therefore records result_seq 2, which intentionally collides with
+    // A chat-domain ledger row whose result_seq intentionally collides with
     // the next versioned moment_order.
-    let compound = CompoundWrite {
-        request_id: "compound-collision".to_owned(),
-        doc_id: "compound-document".to_owned(),
-        body: "durable body".to_owned(),
-        op_kind: "compound-write".to_owned(),
-        now_ms: 15,
-    };
-    assert_eq!(
-        store
-            .commit_compound(&compound, &NO_FAULTS)
-            .expect("compound write"),
-        WriteOutcome::Acked {
-            seq: 2,
-            deduped: false,
-        }
-    );
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "INSERT INTO engine_requests \
+                 (request_id, payload_hash, result_seq, committed_at, kind) \
+                 VALUES ('chat-collision', 'hash', 2, 15, 'chat')",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("chat ledger row");
 
     let mut second = write("main", "a.md", "two", "m2", "o1", 20);
     second.request_id = Some("versioned-collision".to_owned());
@@ -465,13 +457,13 @@ fn rollback_purges_versioned_and_merge_requests_but_preserves_compound_rows() {
     let surviving_kind: Option<String> = store
         .read_with(|conn| {
             conn.query_row(
-                "SELECT kind FROM engine_requests WHERE request_id = 'compound-collision'",
+                "SELECT kind FROM engine_requests WHERE request_id = 'chat-collision'",
                 [],
                 |row| row.get(0),
             )
         })
-        .expect("compound ledger survives");
-    assert_eq!(surviving_kind.as_deref(), Some("compound"));
+        .expect("chat ledger survives");
+    assert_eq!(surviving_kind.as_deref(), Some("chat"));
 
     let merge = MergeTextFileFromVersion {
         workspace_id: WS.to_owned(),
@@ -514,7 +506,7 @@ fn rollback_purges_versioned_and_merge_requests_but_preserves_compound_rows() {
             .expect("make merge target inactive");
         assert!(matches!(
             versions
-                .merge_text_file_from_version(&merge, &NO_FAULTS)
+                .merge_text_file_from_version_with(&merge, &NO_FAULTS, |_, _| Ok(()))
                 .expect("first merge"),
             MergeTextFileResult::Write { .. }
         ));
@@ -536,7 +528,7 @@ fn rollback_purges_versioned_and_merge_requests_but_preserves_compound_rows() {
         .expect("merge ledger count");
     assert_eq!(merge_ledger_count, 0);
     let merge_retry = VersionedTextStore::new(&mut store)
-        .merge_text_file_from_version(&merge, &NO_FAULTS)
+        .merge_text_file_from_version_with(&merge, &NO_FAULTS, |_, _| Ok(()))
         .expect("merge retry re-executes");
     assert!(matches!(
         merge_retry,
@@ -547,30 +539,20 @@ fn rollback_purges_versioned_and_merge_requests_but_preserves_compound_rows() {
     let surviving_kind_after_merge: Option<String> = store
         .read_with(|conn| {
             conn.query_row(
-                "SELECT kind FROM engine_requests WHERE request_id = 'compound-collision'",
+                "SELECT kind FROM engine_requests WHERE request_id = 'chat-collision'",
                 [],
                 |row| row.get(0),
             )
         })
-        .expect("compound ledger still survives merge rollback");
-    assert_eq!(surviving_kind_after_merge.as_deref(), Some("compound"));
-
-    assert_eq!(
-        store
-            .commit_compound(&compound, &NO_FAULTS)
-            .expect("compound replay"),
-        WriteOutcome::Acked {
-            seq: 2,
-            deduped: true,
-        }
-    );
+        .expect("chat ledger still survives merge rollback");
+    assert_eq!(surviving_kind_after_merge.as_deref(), Some("chat"));
 }
 
 // oracle: a reserved / absolute / traversal path is rejected.
 #[test]
 fn unsafe_paths_are_rejected() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -600,7 +582,7 @@ fn unsafe_paths_are_rejected() {
 #[test]
 fn create_named_version_forks_and_isolates() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -674,11 +656,10 @@ fn create_named_version_forks_and_isolates() {
         Some("imported summary".to_owned()),
         Some("imported correlation".to_owned()),
     );
-    // MUTATION: omitting either ordinal-18 column from either INSERT...SELECT
-    // loses provenance from the live fork or its frozen comparison base.
     assert_eq!(
         copied_metadata,
-        (expected_metadata.clone(), expected_metadata)
+        (expected_metadata.clone(), expected_metadata),
+        "omitting either ordinal-18 column from either INSERT...SELECT loses provenance from the live fork or its frozen comparison base.",
     );
     let mut vt = VersionedTextStore::new(&mut store);
 
@@ -717,7 +698,7 @@ fn create_named_version_forks_and_isolates() {
 #[test]
 fn cross_version_fork_records_source_version_latest_moment() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -765,13 +746,15 @@ fn cross_version_fork_records_source_version_latest_moment() {
         vt.read_text(WS, "feat2", "a.md").unwrap().unwrap().text,
         "v1"
     );
-    let base = vt.list_fork_base_snapshots(WS, "feat2").expect("fork base");
+    let fork_bases = normalize::capture(&vt, WS).expect("fork base").fork_bases;
+    let base: Vec<_> = fork_bases
+        .iter()
+        .filter(|row| row.version_id == "feat2")
+        .collect();
     assert_eq!(base.len(), 1);
     assert_eq!(
-        base[0].content,
-        SnapshotContent::Text {
-            text: "v1".to_owned()
-        }
+        base[0].blob_sha256.as_deref(),
+        Some(hex_sha256(b"v1").as_str())
     );
 }
 
@@ -779,7 +762,7 @@ fn cross_version_fork_records_source_version_latest_moment() {
 #[test]
 fn list_versions_is_ordered() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store); // main @ created_at 1
     let mut vt = VersionedTextStore::new(&mut store);
@@ -808,7 +791,7 @@ fn list_versions_is_ordered() {
 #[test]
 fn list_moments_keyset_pagination_edges() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -881,12 +864,12 @@ fn list_moments_keyset_pagination_edges() {
     );
 }
 
-// oracle: restore (set-active-version) preserves BOTH sides — the restored
+// oracle: restore (set-active-version) preserves both sides — the restored
 // version becomes active while the previously-active one keeps its content.
 #[test]
 fn restore_preserves_both_sides() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -915,7 +898,10 @@ fn restore_preserves_both_sides() {
     vt.set_active_version(WS, "feat", &NO_FAULTS)
         .expect("activate feat");
     assert_eq!(
-        vt.read_text_active(WS, "a.md").unwrap().unwrap().text,
+        vt.read_text(WS, &vt.get_active_version(WS).unwrap().version_id, "a.md")
+            .unwrap()
+            .unwrap()
+            .text,
         "feat-v"
     );
 
@@ -924,7 +910,10 @@ fn restore_preserves_both_sides() {
     assert_eq!(vt.get_active_version(WS).unwrap().version_id, "main");
     // Both sides survive the restore.
     assert_eq!(
-        vt.read_text_active(WS, "a.md").unwrap().unwrap().text,
+        vt.read_text(WS, &vt.get_active_version(WS).unwrap().version_id, "a.md")
+            .unwrap()
+            .unwrap()
+            .text,
         "main-v"
     );
     assert_eq!(
@@ -949,7 +938,7 @@ fn restore_preserves_both_sides() {
 #[test]
 fn ensure_main_version_is_idempotent() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     let mut vt = VersionedTextStore::new(&mut store);
     let a = vt
@@ -967,7 +956,7 @@ fn ensure_main_version_is_idempotent() {
 #[test]
 fn get_main_version_returns_none_then_the_ensured_main() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     let mut vt = VersionedTextStore::new(&mut store);
     assert_eq!(vt.get_main_version(WS).expect("get before"), None);
@@ -982,7 +971,7 @@ fn get_main_version_returns_none_then_the_ensured_main() {
 #[test]
 fn delete_text_file_records_moment_and_removes_current_snapshot() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -1013,7 +1002,7 @@ fn delete_text_file_records_moment_and_removes_current_snapshot() {
 #[test]
 fn delete_text_file_rejects_duplicate_moment_id() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -1033,7 +1022,7 @@ fn delete_text_file_rejects_duplicate_moment_id() {
 #[test]
 fn delete_text_file_reports_file_not_found() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -1050,7 +1039,7 @@ fn delete_text_file_reports_file_not_found() {
 #[test]
 fn delete_text_file_does_not_affect_sibling_fork() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -1081,7 +1070,7 @@ fn delete_text_file_does_not_affect_sibling_fork() {
 #[test]
 fn rename_text_file_moves_alias_and_preserves_identity() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -1110,7 +1099,7 @@ fn rename_text_file_moves_alias_and_preserves_identity() {
 #[test]
 fn rename_text_file_rejects_same_path() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -1128,7 +1117,7 @@ fn rename_text_file_rejects_same_path() {
 #[test]
 fn rename_text_file_reports_missing_source() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -1144,7 +1133,7 @@ fn rename_text_file_reports_missing_source() {
 #[test]
 fn rename_text_file_rejects_occupied_destination() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -1165,7 +1154,7 @@ fn rename_text_file_rejects_occupied_destination() {
 #[test]
 fn rollback_first_write_removes_file_and_garbage_collects_object() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     {
@@ -1204,7 +1193,7 @@ fn rollback_first_write_removes_file_and_garbage_collects_object() {
 #[test]
 fn rollback_overwrite_restores_prior_text() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -1229,7 +1218,7 @@ fn rollback_overwrite_restores_prior_text() {
 #[test]
 fn rollback_rename_restores_original_path() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -1250,7 +1239,7 @@ fn rollback_rename_restores_original_path() {
 #[test]
 fn rollback_delete_restores_deleted_content() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -1270,7 +1259,7 @@ fn rollback_delete_restores_deleted_content() {
 #[test]
 fn rollback_rejects_non_latest_mutation() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -1291,7 +1280,7 @@ fn rollback_rejects_non_latest_mutation() {
 #[test]
 fn rollback_rejects_moment_used_as_fork_point_preimage() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -1323,7 +1312,7 @@ fn rollback_rejects_moment_used_as_fork_point_preimage() {
 #[test]
 fn rollback_rejects_moment_referenced_by_child_preimage_pointer() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -1361,7 +1350,7 @@ fn rollback_rejects_moment_referenced_by_child_preimage_pointer() {
 #[test]
 fn rollback_rejects_migrated_null_link_dependent() {
     let fidelity = ScratchDir::new().expect("fidelity scratch");
-    let fidelity_db = fidelity.engine_db_path().expect("fidelity db");
+    let fidelity_db = engine_db_path(&fidelity).expect("fidelity db");
     let mut fidelity_store = EngineStore::open(&fidelity_db, 1).expect("fidelity open");
     bootstrap(&mut fidelity_store);
     {
@@ -1400,7 +1389,7 @@ fn rollback_rejects_migrated_null_link_dependent() {
     }
 
     let reject = ScratchDir::new().expect("reject scratch");
-    let reject_db = reject.engine_db_path().expect("reject db");
+    let reject_db = engine_db_path(&reject).expect("reject db");
     let mut reject_store = EngineStore::open(&reject_db, 1).expect("reject open");
     bootstrap(&mut reject_store);
     {
@@ -1445,7 +1434,7 @@ fn rollback_rejects_migrated_null_link_dependent() {
 #[test]
 fn rollback_rejects_sync_record_only_moment() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let blob = {
@@ -1481,7 +1470,7 @@ fn rollback_rejects_sync_record_only_moment() {
 #[test]
 fn rollback_rejects_occupied_restore_path() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
@@ -1499,84 +1488,10 @@ fn rollback_rejects_occupied_restore_path() {
     );
 }
 
-// oracle: versions-rollback-text-file-mutation reconstructs a legacy missing
-// preimage from the earlier moment plus caller-supplied legacy text.
-#[test]
-fn rollback_legacy_moment_uses_supplied_before_text() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
-    let mut store = EngineStore::open(&db, 1).expect("open");
-    bootstrap(&mut store);
-    {
-        let mut vt = VersionedTextStore::new(&mut store);
-        vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
-            .expect("first");
-        vt.write_text(&write("main", "a.md", "two", "m2", "o1", 20), &NO_FAULTS)
-            .expect("second");
-    }
-    store
-        .read_with(|conn| {
-            conn.execute(
-                "UPDATE moments SET before_present = 0, before_blob_sha256 = NULL, \
-                 before_latest_moment_id = NULL WHERE workspace_id = ?1 AND moment_id = 'm2'",
-                [WS],
-            )
-        })
-        .expect("legacy update");
-    let mut input = rollback("main", "a.md", "m2");
-    input.legacy_before_text = Some("one".to_owned());
-    let mut vt = VersionedTextStore::new(&mut store);
-    vt.rollback_text_file_mutation(&input, &NO_FAULTS)
-        .expect("legacy rollback");
-    let restored = vt.read_text(WS, "main", "a.md").unwrap().unwrap();
-    assert_eq!(restored.text, "one");
-    assert!(restored.latest_moment_id.starts_with("rollback-"));
-    assert_eq!(
-        vt.get_moment(WS, &restored.latest_moment_id)
-            .unwrap()
-            .expect("compensating write")
-            .before_latest_moment_id
-            .as_deref(),
-        Some("m2")
-    );
-}
-
-// oracle: versions-rollback-text-file-mutation fails closed for a legacy-unset
-// first mutation because no prior snapshot or caller text can reconstruct it.
-#[test]
-fn rollback_legacy_moment_without_preimage_or_text_is_rejected() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
-    let mut store = EngineStore::open(&db, 1).expect("open");
-    bootstrap(&mut store);
-    {
-        let mut vt = VersionedTextStore::new(&mut store);
-        vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
-            .expect("write");
-    }
-    store
-        .read_with(|conn| {
-            conn.execute(
-                "UPDATE moments SET before_present = 0 WHERE workspace_id = ?1 AND moment_id = 'm1'",
-                [WS],
-            )
-        })
-        .expect("legacy update");
-    let mut vt = VersionedTextStore::new(&mut store);
-    assert_eq!(
-        vt.rollback_text_file_mutation(&rollback("main", "a.md", "m1"), &NO_FAULTS)
-            .expect_err("missing legacy preimage")
-            .code(),
-        "invalid-input"
-    );
-}
-
 #[test]
 fn binary_write_rejects_the_reserved_capture_origin_at_the_domain_door() {
-    // MUTATION: drop the binary-door reservation -> an internal caller can
-    // mark DB-only bytes capture-owned and the next disk pass retires them.
     let scratch = ScratchDir::new().unwrap();
-    let mut store = EngineStore::open(&scratch.engine_db_path().unwrap(), 1).unwrap();
+    let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 1).unwrap();
     bootstrap(&mut store);
     let error = VersionedTextStore::new(&mut store)
         .write_binary(
@@ -1622,13 +1537,13 @@ fn binary_write_rejects_the_reserved_capture_origin_at_the_domain_door() {
 
 /// Moment PAYLOAD provenance is what the OPERATION carried; the `before_*`
 /// columns are what this store can roll back to. They coincide for every
-/// locally authored operation EXCEPT rename, where the payload moved from one
+/// locally authored operation except rename, where the payload moved from one
 /// path to another — so a writer that just mirrors the row's own path silently
 /// loses the source. Pins what each writer stores.
 #[test]
 fn every_moment_writer_records_payload_provenance() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
     {
@@ -1677,14 +1592,14 @@ fn every_moment_writer_records_payload_provenance() {
             .expect("read after digest")
     };
 
-    // A FIRST write carries no before payload.
+    // A first write carries no before payload.
     let first = provenance("m1");
     assert_eq!(first.0, None, "a first write has no payload-before path");
     assert_eq!(first.1, None, "a first write has no payload-before kind");
     assert_eq!(first.2, None, "a first write has no payload-before digest");
     assert_eq!(first.3, "a.md", "payload-after path is where it landed");
 
-    // An OVERWRITE carries the replaced content, at the same path.
+    // An overwrite carries the replaced content, at the same path.
     let overwrite = provenance("m2");
     assert_eq!(overwrite.0.as_deref(), Some("a.md"));
     assert_eq!(overwrite.1.as_deref(), Some("text"));
@@ -1712,7 +1627,7 @@ fn every_moment_writer_records_payload_provenance() {
         "a rename carries unchanged content"
     );
 
-    // A DELETE carries the removed content on BOTH sides (oracle parity).
+    // A DELETE carries the removed content on both sides (oracle parity).
     let deleted = provenance("m4");
     assert_eq!(deleted.0.as_deref(), Some("b.md"));
     assert_eq!(deleted.3, "b.md");
@@ -1724,8 +1639,8 @@ fn every_moment_writer_records_payload_provenance() {
 }
 
 /// The binary head writer (`persist_binary_head_in_tx`) is the fourth moment
-/// writer and the only one that can record a BINARY payload-before, so it is
-/// the only coverage for a BINARY payload-before digest. Without this, deleting
+/// writer and the only one that can record a binary payload-before, so it is
+/// the only coverage for a binary payload-before digest. Without this, deleting
 /// the payload columns from that INSERT — or swapping the text and binary
 /// digest parameters — leaves the whole suite green.
 #[test]
@@ -1733,7 +1648,7 @@ fn the_binary_head_writer_records_payload_provenance() {
     use dohc_engine_domain::WriteBinary;
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     bootstrap(&mut store);
 
@@ -1754,7 +1669,7 @@ fn the_binary_head_writer_records_payload_provenance() {
     {
         let mut vt = VersionedTextStore::new(&mut store);
         // A TEXT head first, so the second write has a text payload-before and
-        // the third has a BINARY one.
+        // the third has a binary one.
         vt.write_text(
             &write("main", "img.bin", "placeholder", "b1", "obj-bin", 10),
             &NO_FAULTS,
@@ -1812,7 +1727,7 @@ fn the_binary_head_writer_records_payload_provenance() {
     );
     assert_eq!(over_text.3, "img.bin");
 
-    // Binary over BINARY: the payload-before digest goes in the SAME shared
+    // Binary over binary: the payload-before digest goes in the same shared
     // column, tagged by kind — not a separate binary column.
     let over_binary = row("b3");
     assert_eq!(over_binary.0.as_deref(), Some("img.bin"));
@@ -1824,7 +1739,7 @@ fn the_binary_head_writer_records_payload_provenance() {
     );
     assert_eq!(over_binary.3, "img.bin");
 
-    // The payload-AFTER pair carries ONE digest, selected by kind — the oracle's
+    // The payload-AFTER pair carries one digest, selected by kind — the oracle's
     // single-column shape that the shared contract and the TS readers expect.
     let after = |moment_id: &str| -> (Option<String>, Option<String>) {
         let id = moment_id.to_owned();
@@ -1851,5 +1766,35 @@ fn the_binary_head_writer_records_payload_provenance() {
         after("b3"),
         (Some("binary".to_owned()), digests("b3").1),
         "a binary moment's payload-after digest is its BINARY digest"
+    );
+}
+
+#[test]
+fn rollback_of_unrecorded_moment_is_rejected() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    {
+        let mut vt = VersionedTextStore::new(&mut store);
+        vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+            .expect("write");
+    }
+    // `before_present = 0` is what a moment applied from a peer records when
+    // the peer sent no preimage; nothing can be rolled back to.
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE moments SET before_present = 0 WHERE workspace_id = ?1 AND moment_id = 'm1'",
+                [WS],
+            )
+        })
+        .expect("mark unrecorded");
+    let mut vt = VersionedTextStore::new(&mut store);
+    assert_eq!(
+        vt.rollback_text_file_mutation(&rollback("main", "a.md", "m1"), &NO_FAULTS)
+            .expect_err("an unrecorded before state has no preimage to restore")
+            .code(),
+        "invalid-input"
     );
 }

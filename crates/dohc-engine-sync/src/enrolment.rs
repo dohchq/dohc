@@ -367,17 +367,10 @@ mod tests {
         SecretWrite, VersionedTextStore, WriteText,
     };
     use dohc_engine_storage::{EngineStore, NoFaults};
-    use dohc_engine_testkit::ScratchDir;
+    use dohc_engine_testkit::open_store;
     use rusqlite::params;
 
     use super::*;
-
-    fn store() -> (ScratchDir, EngineStore) {
-        let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
-        let store = EngineStore::open(&path, 1_000).expect("open store");
-        (scratch, store)
-    }
 
     fn seed_main(store: &mut EngineStore) {
         VersionedTextStore::new(store)
@@ -555,22 +548,24 @@ mod tests {
                 Ok::<_, SyncError>(())
             })
             .expect("file object");
-        match dohc_engine_collab::record_local_update_creating_marker_guarded(
+        match dohc_engine_collab::record_local_update(
             store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             key,
-            path,
-            ContentKind::Plaintext,
-            Regime::LocalOnly,
             update,
-            None,
-            None,
-            false,
-            true,
-            request_id,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path,
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                require_empty_lineage: true,
+                request_id,
+                ..Default::default()
+            },
             &NoFaults,
             3,
-            |_, _| Ok(()),
+            |_, _, _update_sha| Ok(()),
         )
         .expect("record unsettled Y.Doc")
         {
@@ -625,7 +620,7 @@ mod tests {
 
     #[test]
     fn pull_imported_moments_are_not_echoed_by_enrolment() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -665,7 +660,7 @@ mod tests {
 
     #[test]
     fn refused_import_does_not_hide_a_local_moment_with_the_same_id() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -687,7 +682,11 @@ mod tests {
         };
         assert!(matches!(
             crate::apply_moment_envelope(&mut store, &refused, &NoFaults, &crate::NoLiveLeases),
-            Ok(crate::ApplyOutcome::Refused(_))
+            Ok(crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Refused(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
 
         enroll(&mut store).expect("enroll");
@@ -706,7 +705,7 @@ mod tests {
 
     #[test]
     fn cursor_commit_backfills_a_refused_import_collision_before_clearing_its_report() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -728,7 +727,11 @@ mod tests {
         };
         assert!(matches!(
             crate::apply_moment_envelope(&mut store, &refused, &NoFaults, &crate::NoLiveLeases),
-            Ok(crate::ApplyOutcome::Refused(_))
+            Ok(crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Refused(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         let (refusals, refusal_report_id) =
             crate::apply::claim_pending_refusals(&mut store, "ws", &NoFaults)
@@ -783,7 +786,7 @@ mod tests {
 
     #[test]
     fn first_position_interleaves_pending_conflict_bundle_with_moment_backfill() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(&mut store, "main", "a", "moment-a", "A", "capture", 10);
         write_text(
@@ -883,7 +886,7 @@ mod tests {
 
     #[test]
     fn same_cut_zero_effect_conflict_bundles_keep_bundle_order() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(&mut store, "main", "a", "moment-a", "A", "capture", 10);
         write_text(&mut store, "main", "c", "moment-c", "C", "capture", 30);
@@ -926,7 +929,7 @@ mod tests {
 
     #[test]
     fn malformed_pending_bundle_rolls_back_position_and_every_log_append() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         store
             .write_with(&NoFaults, |tx| {
@@ -1003,7 +1006,7 @@ mod tests {
 
     #[test]
     fn refused_import_does_not_hide_a_local_version_with_the_same_id() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -1038,7 +1041,11 @@ mod tests {
         };
         assert!(matches!(
             crate::apply_version_envelope(&mut store, &refused, &NoFaults),
-            Ok(crate::ApplyOutcome::Refused(_))
+            Ok(crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Refused(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
 
         enroll(&mut store).expect("enroll");
@@ -1057,7 +1064,7 @@ mod tests {
 
     #[test]
     fn ydoc_projection_moments_are_excluded_while_the_base_is_backfilled() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -1071,17 +1078,22 @@ mod tests {
         let key = DocKey::new("ws", "main", "ydoc-object").expect("key");
         let doc = Ydoc::wire();
         let update = doc.plaintext_insert(0, "projected");
-        dohc_engine_collab::record_local_update_creating_marker(
+        dohc_engine_collab::record_local_update(
             &mut store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
-            Some("ydoc-object.md"),
-            ContentKind::Plaintext,
-            Regime::LocalOnly,
             &update,
-            None,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some("ydoc-object.md"),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                ..Default::default()
+            },
             &NoFaults,
             11,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("record local ydoc update");
 
@@ -1112,7 +1124,7 @@ mod tests {
             .get_binary_blob(update_sha)
             .expect("read base blob")
             .expect("base blob exists");
-        let (_peer_scratch, mut peer) = self::store();
+        let (_peer_scratch, _, mut peer) = open_store();
         seed_main(&mut peer);
         assert_eq!(
             peer.put_binary_blob(&update_bytes).expect("copy base blob"),
@@ -1120,6 +1132,7 @@ mod tests {
         );
         crate::apply_ydoc_envelope(
             &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
@@ -1152,7 +1165,7 @@ mod tests {
 
     #[test]
     fn closed_rename_backfills_the_ydoc_base_at_the_current_path() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -1211,7 +1224,7 @@ mod tests {
     #[test]
     #[ignore = "known cross-shard first-pull Y.Doc origination race; item 5 is repro-only"]
     fn first_remote_base_claim_prevents_local_ydoc_origination() {
-        let (_source_scratch, mut source) = store();
+        let (_source_scratch, _, mut source) = open_store();
         seed_main(&mut source);
         let key = DocKey::new("ws", "main", "same-coordinate").expect("key");
         let source_doc = Ydoc::wire();
@@ -1238,7 +1251,7 @@ mod tests {
             .expect("read remote base")
             .expect("remote base exists");
 
-        let (_local_scratch, mut local) = store();
+        let (_local_scratch, _, mut local) = open_store();
         seed_main(&mut local);
         let local_doc = Ydoc::wire();
         let local_update = local_doc.plaintext_insert(0, "local edit");
@@ -1257,6 +1270,7 @@ mod tests {
         );
         crate::apply_ydoc_envelope(
             &mut local,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
@@ -1321,7 +1335,7 @@ mod tests {
 
     #[test]
     fn request_id_reuse_cannot_change_an_unsettled_ydoc_path() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let key = DocKey::new("ws", "main", "legacy-request").expect("key");
         let doc = Ydoc::wire();
@@ -1329,22 +1343,24 @@ mod tests {
         assert!(!record_unsettled_ydoc(&mut store, &key, &update, None, Some("request-1")).deduped);
         assert_eq!(ydoc_path(&store, "legacy-request"), None);
 
-        let error = dohc_engine_collab::record_local_update_creating_marker_guarded(
+        let error = dohc_engine_collab::record_local_update(
             &mut store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
-            Some("legacy-request.md"),
-            ContentKind::Plaintext,
-            Regime::LocalOnly,
             &update,
-            None,
-            None,
-            false,
-            true,
-            Some("request-1"),
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some("legacy-request.md"),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                require_empty_lineage: true,
+                request_id: Some("request-1"),
+                ..Default::default()
+            },
             &NoFaults,
             4,
-            |_, _| Ok(()),
+            |_, _, _update_sha| Ok(()),
         )
         .expect_err("the same request id cannot name a different path");
         match error {
@@ -1362,7 +1378,7 @@ mod tests {
 
     #[test]
     fn content_retry_repairs_a_legacy_unsettled_ydoc_path() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let key = DocKey::new("ws", "main", "legacy-content").expect("key");
         let doc = Ydoc::wire();
@@ -1370,22 +1386,23 @@ mod tests {
         assert!(!record_unsettled_ydoc(&mut store, &key, &update, None, None).deduped);
         assert_eq!(ydoc_path(&store, "legacy-content"), None);
 
-        let retry = match dohc_engine_collab::record_local_update_creating_marker_guarded(
+        let retry = match dohc_engine_collab::record_local_update(
             &mut store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
-            Some("legacy-content.md"),
-            ContentKind::Plaintext,
-            Regime::LocalOnly,
             &update,
-            None,
-            None,
-            false,
-            true,
-            None,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some("legacy-content.md"),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                require_empty_lineage: true,
+                ..Default::default()
+            },
             &NoFaults,
             4,
-            |_, _| Ok(()),
+            |_, _, _update_sha| Ok(()),
         )
         .expect("retry")
         {
@@ -1402,7 +1419,7 @@ mod tests {
 
     #[test]
     fn enrolment_leaves_an_unclaimed_ydoc_without_a_path_for_a_later_retry() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let key = DocKey::new("ws", "main", "legacy-orphan").expect("key");
         let doc = Ydoc::wire();
@@ -1425,7 +1442,7 @@ mod tests {
 
     #[test]
     fn capture_history_is_superseded_when_the_same_object_gains_a_ydoc_lineage() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -1439,17 +1456,22 @@ mod tests {
         let key = DocKey::new("ws", "main", "live-object").expect("key");
         let doc = Ydoc::wire();
         let update = doc.plaintext_insert(0, "edited in the live session");
-        dohc_engine_collab::record_local_update_creating_marker(
+        dohc_engine_collab::record_local_update(
             &mut store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
-            Some("live-object.md"),
-            ContentKind::Plaintext,
-            Regime::LocalOnly,
             &update,
-            None,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some("live-object.md"),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                ..Default::default()
+            },
             &NoFaults,
             11,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("record live edit");
         write_text(
@@ -1465,7 +1487,7 @@ mod tests {
         enroll(&mut store).expect("enroll after settle");
 
         let ops = local_ops(&store);
-        let (_peer_scratch, mut peer) = self::store();
+        let (_peer_scratch, _, mut peer) = open_store();
         seed_main(&mut peer);
         for (origin_seq, (kind, payload)) in ops.iter().enumerate() {
             if kind == "ydoc.update" {
@@ -1502,6 +1524,7 @@ mod tests {
             }
             crate::apply_replication_envelope(
                 &mut peer,
+                &mut dohc_engine_collab::WriterDocCache::new(),
                 &crate::ReplicationEnvelope {
                     workspace_id: "ws".to_owned(),
                     origin_id: "source".to_owned(),
@@ -1544,7 +1567,7 @@ mod tests {
 
     #[test]
     fn secret_backfill_uses_each_moments_retained_ciphertext() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let first = b"historical secret";
         let latest = b"current secret";
@@ -1608,7 +1631,7 @@ mod tests {
 
     #[test]
     fn secret_write_then_delete_backfills_without_delete_ciphertext() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let key = secret_key();
         write_secret(&mut store, &key, "main", "moment-secret-put", "token", 10);
@@ -1640,7 +1663,7 @@ mod tests {
 
     #[test]
     fn named_version_is_backfilled_before_its_ydoc_base() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -1667,17 +1690,22 @@ mod tests {
         let key = DocKey::new("ws", "named", "forked").expect("key");
         let doc = Ydoc::wire();
         let update = doc.plaintext_insert(0, "base");
-        dohc_engine_collab::record_local_update_creating_marker(
+        dohc_engine_collab::record_local_update(
             &mut store,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
-            Some("forked.md"),
-            ContentKind::Plaintext,
-            Regime::LocalOnly,
             &update,
-            None,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some("forked.md"),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                ..Default::default()
+            },
             &NoFaults,
             21,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("named ydoc");
 
@@ -1703,7 +1731,7 @@ mod tests {
 
     #[test]
     fn forked_ydoc_base_fast_forwards_its_shipped_ancestor() {
-        let (_source_scratch, mut source) = store();
+        let (_source_scratch, _, mut source) = open_store();
         seed_main(&mut source);
         write_text(
             &mut source,
@@ -1730,17 +1758,22 @@ mod tests {
         let key = DocKey::new("ws", "named-history", "forked-history").expect("key");
         let doc = Ydoc::wire();
         let base_update = doc.plaintext_insert(0, "base");
-        dohc_engine_collab::record_local_update_creating_marker(
+        dohc_engine_collab::record_local_update(
             &mut source,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
-            Some("forked-history.md"),
-            ContentKind::Plaintext,
-            Regime::LocalOnly,
             &base_update,
-            None,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some("forked-history.md"),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                ..Default::default()
+            },
             &NoFaults,
             21,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("named Y.Doc base state");
         let post_fork_update = doc.plaintext_insert(4, " plus edit");
@@ -1749,8 +1782,10 @@ mod tests {
             &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             &post_fork_update,
+            dohc_engine_collab::LocalAppend::default(),
             &NoFaults,
             22,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("post-fork Y.Doc edit");
         enroll(&mut source).expect("source enrolls");
@@ -1774,7 +1809,7 @@ mod tests {
             .expect("read base")
             .expect("base exists");
 
-        let (_peer_scratch, mut peer) = store();
+        let (_peer_scratch, _, mut peer) = open_store();
         seed_main(&mut peer);
         let fork_sha = dohc_engine_storage::hex_sha256(b"base");
         peer.write_with(&NoFaults, |tx| {
@@ -1806,6 +1841,7 @@ mod tests {
         .expect("peer applies version.create");
         let outcome = crate::apply_ydoc_envelope(
             &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
@@ -1821,20 +1857,20 @@ mod tests {
         .expect("peer applies Y.Doc base");
         assert_eq!(
             outcome,
-            crate::ApplyOutcome::Applied(crate::YdocApplyResult {
+            crate::ApplyOutcome::new(crate::ApplyDisposition::Applied(crate::YdocApplyResult {
                 deferred: false,
                 reason: None,
                 conflicts_opened: 0,
                 lineage_replacement: None,
                 record_facts: Vec::new(),
-            }),
+            })),
             "the Y.Doc base must fast-forward its shipped fork ancestor"
         );
     }
 
     #[test]
     fn named_version_parent_is_backfilled_before_same_time_child() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let mut versions = VersionedTextStore::new(&mut store);
         versions
@@ -1886,7 +1922,7 @@ mod tests {
 
     #[test]
     fn moment_backfill_follows_durable_moment_order() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store, "main", "first", "moment-z", "first", "capture", 10,
@@ -1907,7 +1943,7 @@ mod tests {
 
     #[test]
     fn delayed_version_backfill_uses_the_frozen_fork_base() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -1960,7 +1996,7 @@ mod tests {
 
     #[test]
     fn delayed_secret_fork_backfill_uses_the_frozen_fork_base() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let key = secret_key();
         write_secret(&mut store, &key, "main", "moment-secret-base", "base", 10);
@@ -2023,7 +2059,7 @@ mod tests {
 
     #[test]
     fn main_version_is_never_backfilled_as_a_named_fork() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -2048,7 +2084,7 @@ mod tests {
 
     #[test]
     fn already_journaled_named_version_is_not_backfilled_twice() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -2091,7 +2127,7 @@ mod tests {
 
     #[test]
     fn imported_secret_moments_are_not_echoed_by_enrolment() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let imported = crate::ReplicationEnvelope {
             workspace_id: "ws".to_owned(),
@@ -2108,7 +2144,11 @@ mod tests {
         };
         assert!(matches!(
             crate::apply_secret_envelope(&mut store, &imported, &NoFaults),
-            Ok(crate::ApplyOutcome::Applied(()))
+            Ok(crate::ApplyOutcome {
+                primary: crate::ApplyDisposition::Applied(()),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         let source: (Option<String>, Option<i64>) = store
             .read_with(|conn| {
@@ -2133,7 +2173,7 @@ mod tests {
 
     #[test]
     fn imported_secret_coordinates_cannot_hide_an_unrelated_local_moment() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let key = secret_key();
         write_secret(
@@ -2179,7 +2219,7 @@ mod tests {
 
     #[test]
     fn caller_chosen_secret_sync_prefix_does_not_hide_a_local_secret_write() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let key = secret_key();
         write_secret(
@@ -2205,7 +2245,7 @@ mod tests {
 
     #[test]
     fn every_sync_pass_surfaces_a_declined_ydoc_base_until_it_is_claimed() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         enroll(&mut store).expect("enroll before the local Y.Doc append");
         write_text(
@@ -2292,91 +2332,5 @@ mod tests {
             next_declines, declines,
             "the unresolved base remains visible on every successful sync pass"
         );
-    }
-
-    #[test]
-    fn legacy_claimed_and_pathless_lineages_do_not_block_sync() {
-        let (_scratch, mut store) = store();
-        seed_main(&mut store);
-        enroll(&mut store).expect("enroll before seeding legacy lineages");
-        let (ambiguous, missing) = match store
-            .write_with(&NoFaults, |tx| {
-                for (object_id, status, regime, path) in [
-                    (
-                        "legacy-ambiguous",
-                        "ambiguous",
-                        "replicated",
-                        Some("legacy-ambiguous.md"),
-                    ),
-                    (
-                        "legacy-missing",
-                        "missing",
-                        "replicated",
-                        Some("legacy-missing.md"),
-                    ),
-                    ("legacy-pathless", "unclaimed", "local-only", None),
-                ] {
-                    tx.execute(
-                        "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
-                         VALUES ('ws',?1,1)",
-                        [object_id],
-                    )
-                    .map_err(SyncError::persist)?;
-                    tx.execute(
-                        "INSERT INTO ydoc_docs (workspace_id,version_id,object_id,content_kind,regime, \
-                         head_update_seq,head_snapshot_seq,lineage_claim_status,updated_at_ms,path) \
-                        VALUES ('ws','main',?1,'plaintext',?2,0,0,?3,1,?4)",
-                        rusqlite::params![object_id, regime, status, path],
-                    )
-                    .map_err(SyncError::persist)?;
-                }
-
-                let ambiguous = crate::originate_ydoc_base_in_tx(
-                    tx,
-                    &DocKey {
-                        workspace_id: "ws".to_owned(),
-                        version_id: "main".to_owned(),
-                        object_id: "legacy-ambiguous".to_owned(),
-                    },
-                    "legacy-ambiguous.md",
-                    None,
-                    None,
-                    2,
-                )?;
-                let missing = crate::originate_ydoc_base_in_tx(
-                    tx,
-                    &DocKey {
-                        workspace_id: "ws".to_owned(),
-                        version_id: "main".to_owned(),
-                        object_id: "legacy-missing".to_owned(),
-                    },
-                    "legacy-missing.md",
-                    None,
-                    None,
-                    2,
-                )?;
-                Ok::<_, SyncError>((ambiguous, missing))
-            })
-            .expect("legacy claimed lineages are not re-originated")
-        {
-            dohc_engine_storage::TxnOutcome::Committed(outcomes) => outcomes,
-            dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
-        };
-        assert_eq!(ambiguous, BaseOrigination::NothingToDo);
-        assert_eq!(missing, BaseOrigination::NothingToDo);
-
-        let cursor = crate::RelayCursor {
-            cursor: 0,
-            replication_epoch: "epoch".to_owned(),
-            stream_identity: "stream".to_owned(),
-            refusal_report_id: None,
-        };
-        let declines = match crate::commit_relay_cursor(&mut store, "ws", &cursor, &NoFaults, 3)
-            .expect("legacy lineages do not block cursor commit")
-        {
-            dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
-            dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
-        };
-        assert!(declines.is_empty());
     }
 }

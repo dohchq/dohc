@@ -1,15 +1,13 @@
+import { ProtocolShapeError } from "../wireSchema";
 import { describe, expect, it } from "vitest";
 import { EngineRequestError } from "../daemon/engineClient";
-import type { Request } from "../ydoc/generated/Request";
-import type { Response } from "../ydoc/generated/Response";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
+import type { JsonValue, Request, Response } from "../protocol";
 import {
   DaemonRefusalError,
   type MinimalDaemonClient,
 } from "../live/daemonLiveAdapter";
 import {
   CHATS_METHOD,
-  ChatsProtocolShapeError,
   decodeChatsResult,
   type ChatsMethod,
   type ChatsMethodParamsMap,
@@ -18,7 +16,7 @@ import {
   ChatsAdapterCapabilityError,
   ChatsLiveAdapter,
 } from "./chatsLiveAdapter";
-import { ChatsLoopbackEngine } from "./chatsLoopbackEngine";
+import { ChatsLoopbackEngine } from "../testing/chatsLoopbackEngine";
 
 const WORKSPACE = "ws-handle";
 const SENTINEL = new Error("captured");
@@ -476,7 +474,7 @@ describe("ChatsLiveAdapter", () => {
       expect(() => decodeChatsResult(method as never, valid)).not.toThrow();
       expect(() =>
         decodeChatsResult(method as never, { unexpected: true }),
-      ).toThrow(ChatsProtocolShapeError);
+      ).toThrow(ProtocolShapeError);
     },
   );
 
@@ -485,10 +483,10 @@ describe("ChatsLiveAdapter", () => {
     ({ method, wrongFieldName, wrongEnumSpelling }) => {
       expect(() =>
         decodeChatsResult(method as never, wrongFieldName),
-      ).toThrow(ChatsProtocolShapeError);
+      ).toThrow(ProtocolShapeError);
       expect(() =>
         decodeChatsResult(method as never, wrongEnumSpelling),
-      ).toThrow(ChatsProtocolShapeError);
+      ).toThrow(ProtocolShapeError);
     },
   );
 

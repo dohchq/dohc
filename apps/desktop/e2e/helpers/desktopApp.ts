@@ -1,14 +1,17 @@
-import { type Page } from "@playwright/test";
+import { test, type Page } from "@playwright/test";
 import {
   _electron as electron,
   type ElectronApplication,
 } from "playwright";
 import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { appendFileSync, existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { assertPrepared } from "../../../../scripts/verification/build.mjs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { electronLaunchArgs } from "../../src/testing/electronLaunchArgs";
+import { closeElectronApplication } from "../../../../scripts/verification/close-electron.mjs";
 import type { TempWorkspace } from "./workspace";
 
 export interface DesktopLogEntry {
@@ -33,12 +36,14 @@ const mainEntry = join(desktopRoot, "dist/main/main.js");
 const rendererEntry = join(desktopRoot, "dist/renderer/index.html");
 const electronExecutable = require("electron") as string;
 
-function requireBuiltDesktopApp(): void {
+function requireBuiltDesktopApp() {
+  const build = assertPrepared();
   if (!existsSync(mainEntry) || !existsSync(rendererEntry)) {
     throw new Error(
       "Desktop E2E needs a built Electron app. Run `pnpm --filter @dohc/desktop build` first.",
     );
   }
+  return build;
 }
 
 // Each run gets its own Electron profile inside the temp workspace sandbox. A
@@ -49,7 +54,7 @@ function requireBuiltDesktopApp(): void {
 // its teardown already survives Windows' refusal to unlink an open file:
 // removeTestScratch retries EBUSY/EPERM, and cleanupDesktopWorkspace logs a
 // failure rather than failing the spec. A leaked profile under the scratch run
-// root costs disk until the sweep; a shared one costs the run (#530).
+// root costs disk until the sweep; a shared one costs the run.
 async function createUserDataDir(
   workspace: Pick<TempWorkspace, "baseDir">,
 ): Promise<string> {
@@ -85,15 +90,25 @@ export async function launchDesktopApp(input: {
   workspace: Pick<TempWorkspace, "baseDir" | "homeDir" | "rootPath">;
   env?: NodeJS.ProcessEnv;
 }): Promise<LaunchedDesktopApp> {
-  requireBuiltDesktopApp();
+  const build = requireBuiltDesktopApp();
   const userDataDir = await createUserDataDir(input.workspace);
+  const artifacts = test.info().outputPath(`electron-${randomUUID()}`);
+  await mkdir(artifacts, { recursive: true });
 
   const logs: DesktopLogEntry[] = [];
-  const onStdoutData = (chunk: Buffer) => {
-    logs.push({ source: "main", level: "stdout", text: chunk.toString() });
+  const logPath = join(artifacts, "desktop.jsonl");
+  await writeFile(logPath, "");
+  let logFailure: unknown;
+  const record = (entry: DesktopLogEntry) => {
+    logs.push(entry);
+    try { appendFileSync(logPath, JSON.stringify(entry) + "\n"); }
+    catch (error) { logFailure ??= error; }
   };
-  const onStderrData = (chunk: Buffer) => {
-    logs.push({ source: "main", level: "stderr", text: chunk.toString() });
+  const onStdoutData = (chunk: string) => {
+    record({ source: "main", level: "stdout", text: chunk });
+  };
+  const onStderrData = (chunk: string) => {
+    record({ source: "main", level: "stderr", text: chunk });
   };
 
   let app: ElectronApplication | null = null;
@@ -104,22 +119,23 @@ export async function launchDesktopApp(input: {
       args: electronLaunchArgs({ mainEntry, userDataDir }),
       cwd: desktopRoot,
       env: launchEnv(input),
+      artifactsDir: artifacts,
     });
 
     processHandle = app.process();
-    processHandle.stdout?.on("data", onStdoutData);
-    processHandle.stderr?.on("data", onStderrData);
+    processHandle.stdout?.setEncoding("utf8").on("data", onStdoutData);
+    processHandle.stderr?.setEncoding("utf8").on("data", onStderrData);
 
     const page = await app.firstWindow({ timeout: 10_000 });
     page.on("console", (message) => {
-      logs.push({
+      record({
         source: "renderer",
         level: message.type(),
         text: message.text(),
       });
     });
     page.on("pageerror", (error) => {
-      logs.push({
+      record({
         source: "renderer",
         level: "pageerror",
         text: error.message,
@@ -128,88 +144,45 @@ export async function launchDesktopApp(input: {
 
     const launchedApp = app;
     const launchedProcess = processHandle;
+    await writeFile(join(artifacts, "instance.json"), JSON.stringify({
+      launcherPid: launchedProcess.pid, electronPid: await launchedApp.evaluate(() => process.pid),
+      root: desktopRoot, userDataDir,
+      workspace: input.workspace.rootPath, build,
+    }, null, 2));
     return {
       app: launchedApp,
       page,
       logs,
       close: async () => {
-        const abort = new AbortController();
         try {
-          await Promise.race([
-            (async () => {
-              if (launchedApp.windows().length > 0) {
-                await launchedApp.close();
-              }
-            })().finally(() => abort.abort()),
-            forceCloseAfterTimeout(launchedProcess, abort.signal),
-          ]);
+          if (!page.isClosed()) {
+            await page.screenshot({ path: join(artifacts, "last-screen.png"), timeout: 5000 }).catch(() => undefined);
+          }
         } finally {
-          abort.abort();
-          launchedProcess.stdout?.off("data", onStdoutData);
-          launchedProcess.stderr?.off("data", onStderrData);
+          try {
+            await closeElectronApplication(launchedApp, launchedProcess);
+          } finally {
+            launchedProcess.stdout?.off("data", onStdoutData);
+            launchedProcess.stderr?.off("data", onStderrData);
+            await test.info().attach("desktop logs", { path: logPath, contentType: "application/x-ndjson" });
+            if (logFailure) throw new Error("Desktop log recording failed.", { cause: logFailure });
+          }
         }
       },
     };
   } catch (error) {
-    processHandle?.stdout?.off("data", onStdoutData);
-    processHandle?.stderr?.off("data", onStderrData);
-    if (app) {
-      await app.close().catch(() => undefined);
+    try {
+      await writeFile(join(artifacts, "launch-error.txt"), String(error)).catch(() => undefined);
+    } finally {
+      try {
+        if (app && processHandle) await closeElectronApplication(app, processHandle);
+      } catch (cleanupError) {
+        console.error("Failed-launch cleanup:", cleanupError);
+      } finally {
+        processHandle?.stdout?.off("data", onStdoutData);
+        processHandle?.stderr?.off("data", onStderrData);
+      }
     }
     throw error;
-  }
-}
-
-function processIsRunning(processHandle: ElectronProcess): boolean {
-  return processHandle.exitCode === null && processHandle.signalCode === null;
-}
-
-async function waitForProcessExit(
-  processHandle: ElectronProcess,
-  timeoutMs: number,
-): Promise<boolean> {
-  if (!processIsRunning(processHandle)) return true;
-  return await new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      processHandle.off("exit", onExit);
-      resolve(false);
-    }, timeoutMs);
-    function onExit() {
-      clearTimeout(timer);
-      resolve(true);
-    }
-    processHandle.once("exit", onExit);
-    if (processHandle.exitCode !== null || processHandle.signalCode !== null) {
-      processHandle.off("exit", onExit);
-      onExit();
-    }
-  });
-}
-
-async function forceCloseAfterTimeout(
-  processHandle: ElectronProcess,
-  signal: AbortSignal,
-): Promise<void> {
-  await new Promise<void>((resolve) => {
-    if (signal.aborted) {
-      resolve();
-      return;
-    }
-    const timer = setTimeout(resolve, 5_000);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
-  });
-  if (signal.aborted) return;
-  if (!processIsRunning(processHandle)) return;
-  processHandle.kill("SIGTERM");
-  if (!(await waitForProcessExit(processHandle, 1_000))) {
-    processHandle.kill("SIGKILL");
-    await waitForProcessExit(processHandle, 1_000);
   }
 }

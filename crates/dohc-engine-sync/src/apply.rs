@@ -1,4 +1,4 @@
-use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome};
+use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome, hex};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
@@ -25,117 +25,46 @@ use crate::{ReplicationEnvelope, SyncError};
 const DIRECT_RPC_REFUSAL_REPORT_ID: &str = "direct-rpc";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApplyOutcome<T> {
+pub struct ApplyOutcome<T> {
+    pub primary: ApplyDisposition<T>,
+    pub refusals: Vec<ReplicationRefusal>,
+    pub sharing_declined: Vec<crate::SharingDeclined>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyDisposition<T> {
     Applied(T),
     Refused(ReplicationRefusal),
     Skipped,
-    Crashed {
-        committed: bool,
-    },
-    /// The envelope has the nested primary disposition plus diagnostics
-    /// surfaced while draining older durable work.
-    WithDiagnostics {
-        outcome: Box<ApplyOutcome<T>>,
-        refusals: Vec<ReplicationRefusal>,
-        sharing_declined: Vec<crate::SharingDeclined>,
-    },
+    Crashed { committed: bool },
 }
 
 impl<T> ApplyOutcome<T> {
+    pub fn new(primary: ApplyDisposition<T>) -> Self {
+        Self {
+            primary,
+            refusals: Vec::new(),
+            sharing_declined: Vec::new(),
+        }
+    }
+
     pub(crate) fn map<U>(self, map: impl FnOnce(T) -> U) -> ApplyOutcome<U> {
-        match self {
-            Self::Applied(value) => ApplyOutcome::Applied(map(value)),
-            Self::Refused(refusal) => ApplyOutcome::Refused(refusal),
-            Self::Skipped => ApplyOutcome::Skipped,
-            Self::Crashed { committed } => ApplyOutcome::Crashed { committed },
-            Self::WithDiagnostics {
-                outcome,
-                refusals,
-                sharing_declined,
-            } => ApplyOutcome::WithDiagnostics {
-                outcome: Box::new(outcome.map(map)),
-                refusals,
-                sharing_declined,
+        ApplyOutcome {
+            primary: match self.primary {
+                ApplyDisposition::Applied(value) => ApplyDisposition::Applied(map(value)),
+                ApplyDisposition::Refused(refusal) => ApplyDisposition::Refused(refusal),
+                ApplyDisposition::Skipped => ApplyDisposition::Skipped,
+                ApplyDisposition::Crashed { committed } => ApplyDisposition::Crashed { committed },
             },
-        }
-    }
-
-    pub(crate) fn with_refusals(self, refusals: Vec<ReplicationRefusal>) -> Self {
-        if refusals.is_empty() {
-            return self;
-        }
-        match self {
-            Self::WithDiagnostics {
-                outcome,
-                refusals: mut existing,
-                sharing_declined,
-            } => {
-                existing.extend(refusals);
-                Self::WithDiagnostics {
-                    outcome,
-                    refusals: existing,
-                    sharing_declined,
-                }
-            }
-            outcome => Self::WithDiagnostics {
-                outcome: Box::new(outcome),
-                refusals,
-                sharing_declined: Vec::new(),
-            },
-        }
-    }
-
-    pub(crate) fn with_sharing_declined(
-        self,
-        sharing_declined: Vec<crate::SharingDeclined>,
-    ) -> Self {
-        if sharing_declined.is_empty() {
-            return self;
-        }
-        match self {
-            Self::WithDiagnostics {
-                outcome,
-                refusals,
-                sharing_declined: mut existing,
-            } => {
-                existing.extend(sharing_declined);
-                Self::WithDiagnostics {
-                    outcome,
-                    refusals,
-                    sharing_declined: existing,
-                }
-            }
-            outcome => Self::WithDiagnostics {
-                outcome: Box::new(outcome),
-                refusals: Vec::new(),
-                sharing_declined,
-            },
-        }
-    }
-
-    pub(crate) fn into_primary_and_diagnostics(
-        self,
-    ) -> (Self, Vec<ReplicationRefusal>, Vec<crate::SharingDeclined>) {
-        match self {
-            Self::WithDiagnostics {
-                outcome,
-                refusals,
-                sharing_declined,
-            } => {
-                let (primary, mut nested_refusals, mut nested_declines) =
-                    outcome.into_primary_and_diagnostics();
-                nested_refusals.extend(refusals);
-                nested_declines.extend(sharing_declined);
-                (primary, nested_refusals, nested_declines)
-            }
-            primary => (primary, Vec::new(), Vec::new()),
+            refusals: self.refusals,
+            sharing_declined: self.sharing_declined,
         }
     }
 }
 
 #[cfg(test)]
 mod diagnostic_tests {
-    use super::{ApplyOutcome, RefusalReason, ReplicationRefusal};
+    use super::{ApplyDisposition, ApplyOutcome, RefusalReason, ReplicationRefusal};
 
     #[test]
     fn sharing_decline_survives_a_skipped_primary_outcome() {
@@ -145,17 +74,20 @@ mod diagnostic_tests {
             limit_bytes: 20,
             observed_bytes: 21,
         };
-        let (primary, refusals, declines) = ApplyOutcome::<()>::Skipped
-            .with_sharing_declined(vec![declined.clone()])
-            .into_primary_and_diagnostics();
+        let outcome = ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: Vec::new(),
+            sharing_declined: vec![declined.clone()],
+        }
+        .map::<()>(|()| panic!("a skipped outcome has no applied payload"));
 
-        assert!(matches!(primary, ApplyOutcome::Skipped));
-        assert!(refusals.is_empty());
-        assert_eq!(declines, [declined]);
+        assert!(matches!(outcome.primary, ApplyDisposition::Skipped));
+        assert!(outcome.refusals.is_empty());
+        assert_eq!(outcome.sharing_declined, [declined]);
     }
 
     #[test]
-    fn map_preserves_nested_refusal_and_sharing_decline_through_unwrapping() {
+    fn map_preserves_refusal_and_sharing_decline_order() {
         let refusal = ReplicationRefusal {
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
@@ -165,22 +97,51 @@ mod diagnostic_tests {
                 reason: "invalid update".to_owned(),
             },
         };
+        let refusals = vec![
+            refusal.clone(),
+            ReplicationRefusal {
+                origin_seq: 4,
+                ..refusal.clone()
+            },
+        ];
         let declined = crate::SharingDeclined {
-            path: "notes/nested.md".to_owned(),
+            path: "notes/first.md".to_owned(),
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limit_bytes: 20,
             observed_bytes: 21,
         };
+        let declines = vec![
+            declined.clone(),
+            crate::SharingDeclined {
+                path: "notes/second.md".to_owned(),
+                ..declined
+            },
+        ];
+        let mapped = ApplyOutcome {
+            primary: ApplyDisposition::Applied("mapped value"),
+            refusals: refusals.clone(),
+            sharing_declined: declines.clone(),
+        }
+        .map(str::len);
 
-        let (primary, refusals, declines) = ApplyOutcome::Applied("mapped value")
-            .with_refusals(vec![refusal.clone()])
-            .with_sharing_declined(vec![declined.clone()])
-            .map(str::len)
-            .into_primary_and_diagnostics();
-
-        assert!(matches!(primary, ApplyOutcome::Applied(12)));
-        assert_eq!(refusals, [refusal]);
-        assert_eq!(declines, [declined]);
+        assert_eq!(mapped.primary, ApplyDisposition::Applied(12));
+        assert_eq!(mapped.refusals, refusals);
+        assert_eq!(mapped.sharing_declined, declines);
+        for primary in [
+            ApplyDisposition::<()>::Refused(refusal),
+            ApplyDisposition::Skipped,
+            ApplyDisposition::Crashed { committed: false },
+            ApplyDisposition::Crashed { committed: true },
+        ] {
+            let outcome = ApplyOutcome {
+                primary,
+                refusals: refusals.clone(),
+                sharing_declined: declines.clone(),
+            };
+            let expected = outcome.clone();
+            let mapped = outcome.map(|()| panic!("only an applied payload can be mapped"));
+            assert_eq!(mapped, expected);
+        }
     }
 }
 
@@ -363,16 +324,17 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         }
         Ok(admission)
     });
-    match result {
-        Ok(TxnOutcome::Committed(Admission::Applied(value))) => Ok(ApplyOutcome::Applied(value)),
+    let primary = match result {
+        Ok(TxnOutcome::Committed(Admission::Applied(value))) => ApplyDisposition::Applied(value),
         Ok(TxnOutcome::Committed(Admission::Refused(refusal))) => {
-            Ok(ApplyOutcome::Refused(refusal))
+            ApplyDisposition::Refused(refusal)
         }
-        Ok(TxnOutcome::Committed(Admission::Skipped)) => Ok(ApplyOutcome::Skipped),
-        Ok(TxnOutcome::Crashed { committed }) => Ok(ApplyOutcome::Crashed { committed }),
-        Err(SyncError::FaultCrash) => Ok(ApplyOutcome::Crashed { committed: false }),
-        Err(err) => Err(err),
-    }
+        Ok(TxnOutcome::Committed(Admission::Skipped)) => ApplyDisposition::Skipped,
+        Ok(TxnOutcome::Crashed { committed }) => ApplyDisposition::Crashed { committed },
+        Err(SyncError::FaultCrash) => ApplyDisposition::Crashed { committed: false },
+        Err(err) => return Err(err),
+    };
+    Ok(ApplyOutcome::new(primary))
 }
 
 fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
@@ -569,15 +531,16 @@ pub fn apply_chat_envelope(
     }
     apply_envelope_with(store, envelope, faults, apply_chat_tx).map(|outcome| {
         let mut replay_refusals = Vec::new();
-        let outcome = outcome.map(|refusals| {
+        let mut outcome = outcome.map(|refusals| {
             replay_refusals = refusals;
         });
-        outcome.with_refusals(replay_refusals)
+        outcome.refusals.extend(replay_refusals);
+        outcome
     })
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(value: &serde_json::Value) -> Result<T, SyncError> {
-    serde_json::from_value(value.clone()).map_err(|_| SyncError::InvalidInput {
+    Deserialize::deserialize(value).map_err(|_| SyncError::InvalidInput {
         reason: "chat replication payload is malformed",
     })
 }
@@ -642,7 +605,7 @@ struct ThreadCreate {
     title: String,
     created_at_ms: i64,
     linked_object_id: Option<String>,
-    /// The file this thread is about, named by PATH (#646 PR2). This is the
+    /// The file this thread is about, named by PATH. This is the
     /// shape a thread's link takes across a SHARE boundary in both
     /// directions: object ids are minted per replica, so neither end can read
     /// the other's. Whoever applies it resolves the path to its own local
@@ -975,11 +938,7 @@ fn channel_collision_slug(requested: &str, allocation_identity: &str, attempt: u
         hasher.update([0]);
         hasher.update(attempt.to_be_bytes());
     }
-    let suffix = hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let suffix = hex(&hasher.finalize());
     const MAX_COLLISION_BASE_UTF16_UNITS: usize = 200 - 1 - 64;
     let bounded_requested = truncate_slug_base(requested, MAX_COLLISION_BASE_UTF16_UNITS);
     let slug = format!("{bounded_requested}-{suffix}");
@@ -1019,9 +978,9 @@ fn channel_allocation_base(name: &str) -> String {
 /// beside it.
 ///
 /// An op naming its file by object id is a replica's own op and its id is
-/// already local. An op naming it by PATH crossed a share boundary (#646 PR2)
+/// already local. An op naming it by PATH crossed a share boundary
 /// — in either direction, a recipient replaying the granter's thread or a
-/// granter applying the recipient's — and the path is resolved HERE, against
+/// granter applying the recipient's — and the path is resolved here, against
 /// this store's main version, because that is the only place the two replicas
 /// agree.
 ///
@@ -1043,7 +1002,7 @@ fn linked_object_for_apply(
     // The SECRET floor, applied where this op is applied. A `linkedPath` op
     // reaches a granter over the ordinary owner lane, with no share and no
     // grant in scope, so the relay's filter is the authority on what a share
-    // COVERS and remains so. This is the one rule this surface can state on
+    // covers and remains so. This is the one rule this surface can state on
     // its own: a secret path is never a file a thread may bind to, whoever
     // asked. `validate_addressable_plaintext_path` refuses `Ignored` and
     // accepts `Secret`, so it does not cover this.
@@ -1101,8 +1060,8 @@ fn apply_thread(
         });
     }
     let channel_shape = payload.channel_slug.is_some() || payload.channel_wire_id.is_some();
-    // A file-linked thread names its file ONE way: by object id (a replica's
-    // own op) or by path (an op that crossed a share boundary, #646 PR2).
+    // A file-linked thread names its file one way: by object id (a replica's
+    // own op) or by path (an op that crossed a share boundary).
     // Carrying both is malformed — reading either half would let one op bind
     // one thread to two files.
     if payload.linked_object_id.is_some() && payload.linked_path.is_some() {
@@ -1128,8 +1087,8 @@ fn apply_thread(
             reason: "chat thread linked path is invalid",
         });
     }
-    // A file-linked thread MUST carry its linkedAtMs. The oracle accepts this
-    // op (storing linked_at_ms NULL) but then its OWN reader throws corruptStore
+    // A file-linked thread must carry its linkedAtMs. The oracle accepts this
+    // op (storing linked_at_ms NULL) but then its own reader throws corruptStore
     // (threadFromRow numberValue(null)) — a latent oracle bug that bricks the
     // read surface on both engines. We reject the malformed op at apply
     // (fail-closed), which is deliberately stricter than the oracle; honest

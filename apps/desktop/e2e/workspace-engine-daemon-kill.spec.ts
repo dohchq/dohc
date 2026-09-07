@@ -13,7 +13,6 @@ import {
   explorerRow,
   openWorkspaceFromFirstRun,
   revealExplorerPath,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -21,16 +20,16 @@ import {
 // AUDIT-KILLREC. The dogfood journey hard-killed the engine daemon
 // (`taskkill /F`) three times while the user was typing. Two things broke:
 //
-//  (a) the FIRST kill surfaced an Electron "A JavaScript error occurred in the
+//  (a) the first kill surfaced an Electron "A JavaScript error occurred in the
 //      main process" dialog (uncaught EPIPE from the capture's console.error
 //      failure logger) and the editor went dead afterwards, and
-//  (b) text typed just BEFORE a kill was ultimately lost from BOTH the app and
+//  (b) text typed just before a kill was ultimately lost from both the app and
 //      the .md on disk.
 //
 // These specs own (b) end to end, and the "editor went dead" half of (a). The
 // EPIPE half is not reproducible here (see the note in killDaemonMidTyping).
 //
-// The daemon dying is an EXPECTED, recoverable event — EngineDaemonLifecycle
+// The daemon dying is an expected, recoverable event — EngineDaemonLifecycle
 // exists precisely to restart it. These specs drive the real app against a real
 // daemon and hard-kill the real process, because that is the layer that broke;
 // a mocked lifecycle cannot observe a torn transport mid-write.
@@ -144,7 +143,7 @@ async function killDaemonMidTyping(
   return { desktop, editor };
 }
 
-// THE journey's scenario. Its user stopped typing before the app went away, so
+// The journey's scenario. Its user stopped typing before the app went away, so
 // recovery that only runs on the next keystroke never runs at all: nothing is
 // typed here between the daemon's return and the quit.
 test("a hard daemon kill keeps the outage text when the user never types again", async () => {
@@ -155,9 +154,6 @@ test("a hard daemon kill keeps the outage text when the user never types again",
   const docPath = "abuse/kill.md";
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await writeWorkspaceFiles(temp, [
       { path: docPath, contents: "# Kill\n\nAnchor paragraph.\n" },
     ]);
@@ -202,9 +198,6 @@ test("a hard daemon kill leaves the editor writable and lands the outage text", 
   const docPath = "abuse/kill.md";
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await writeWorkspaceFiles(temp, [
       { path: docPath, contents: "# Kill\n\nAnchor paragraph.\n" },
     ]);
@@ -254,9 +247,6 @@ test("an outage longer than the retry window still persists the text at quit", a
   const restartBackoffMs = 4_000;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await writeWorkspaceFiles(temp, [
       { path: docPath, contents: "# Kill\n\nAnchor paragraph.\n" },
     ]);

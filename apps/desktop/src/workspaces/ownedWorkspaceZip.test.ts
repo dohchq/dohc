@@ -1,6 +1,6 @@
-import { mkdir, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { mkdir, symlink, truncate, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "./testTemp";
 import {
   collectOwnedWorkspaceZipEntries,
@@ -9,17 +9,8 @@ import {
 } from "./ownedWorkspaceZip";
 import { MAX_ZIP_TOTAL_BYTES } from "./workspaceFiles";
 
-const roots: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
-
 async function workspaceRoot(): Promise<string> {
   const root = await createTestScratch("dohc-owned-zip-");
-  roots.push(root);
   await mkdir(join(root, "notes"), { recursive: true });
   await writeFile(join(root, "notes", "local.md"), "local");
   await mkdir(join(root, "shared-with-me", "owner"), { recursive: true });

@@ -2,8 +2,6 @@ use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
 use dohc_engine_collab::{
     CollabError, CompactOutcome, ContentKind, DocKey, RemoteAppendProbe, RemoteUpdate,
     ReplicationApplyOutcome, WriterDocCache, apply_remote_update,
-    apply_remote_update_for_deferred_drain,
-    apply_remote_update_in_transaction_cached_with_projection,
     apply_remote_update_in_transaction_with_projection, maybe_compact,
 };
 use dohc_engine_domain::{
@@ -22,7 +20,7 @@ use dohc_engine_files::{
 
 use crate::error::local_corruption;
 use crate::file_search::{search_policy_for_store, upsert_file_search_index};
-use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
+use crate::{ApplyDisposition, ApplyOutcome, ReplicationEnvelope, SyncError};
 
 fn projection_too_large_reason(
     content_kind: dohc_engine_collab::ContentKind,
@@ -115,6 +113,17 @@ pub struct NoLiveLeases;
 impl LeaseProbe for NoLiveLeases {
     fn is_live(&self, _key: &DocKey) -> bool {
         false
+    }
+}
+
+/// Probe that reports every document live, so a pull defers instead of
+/// applying. Tests use it to reach the deferred-drain path directly.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AlwaysLive;
+
+impl LeaseProbe for AlwaysLive {
+    fn is_live(&self, _key: &DocKey) -> bool {
+        true
     }
 }
 
@@ -227,7 +236,7 @@ pub(crate) fn redelivered_conflicts_opened(
     if envelope.op_kind != "ydoc.update" {
         return Ok(0);
     }
-    // NEVER reparse the payload here. A malformed `ydoc.update` is refused
+    // Never reparse the payload here. A malformed `ydoc.update` is refused
     // and ACKED; if the process then crashes before the relay cursor
     // commits, the next pull replays that coordinate as `Skipped` and asks
     // this helper to recount. Decoding the payload again returns
@@ -362,9 +371,9 @@ fn apply_deferred_base(
                 params![key.workspace_id, key.version_id, key.object_id],
             )
             .map_err(SyncError::persist)?;
-            // `seed_source_sha256` clears WITH the rows it described: the
+            // `seed_source_sha256` clears with the rows it described: the
             // winning base holds content the file does not, and the seed-only
-            // settle skip (#815) must never survive a lineage replacement on
+            // settle skip must never survive a lineage replacement on
             // the base claim's snapshot insert alone.
             tx.execute(
                 "UPDATE ydoc_docs SET head_update_seq=0,head_snapshot_seq=0, \
@@ -494,70 +503,60 @@ fn apply_deferred_base(
 /// are returned as well as persisted so the triggering caller can report them.
 pub fn drain_deferred_ydoc_for_key(
     store: &mut EngineStore,
-    key: &DocKey,
-    faults: &dyn FaultInjector,
-) -> Result<YdocDrainResult, SyncError> {
-    let (drained, cleanup) =
-        drain_deferred_ydoc(store, None, key, DeferredDrainMode::All, false, faults)?;
-    debug_assert!(cleanup.is_none(), "immediate mode owes no cleanup");
-    Ok(drained)
-}
-
-/// Cache-backed actor form of [`drain_deferred_ydoc_for_key`].
-pub fn drain_deferred_ydoc_for_key_cached(
-    store: &mut EngineStore,
     cache: &mut WriterDocCache,
     key: &DocKey,
     faults: &dyn FaultInjector,
 ) -> Result<YdocDrainResult, SyncError> {
-    let (drained, cleanup) = drain_deferred_ydoc(
-        store,
-        Some(cache),
-        key,
-        DeferredDrainMode::All,
-        false,
-        faults,
-    )?;
-    debug_assert!(cleanup.is_none(), "immediate mode owes no cleanup");
-    Ok(drained)
+    let (drained, cleanup) =
+        drain_deferred_ydoc(store, cache, key, DeferredDrainMode::All, faults)?;
+    complete_drain(store, drained, cleanup, faults)
 }
 
-/// [`drain_deferred_ydoc_for_key_cached`], holding the final queue-row
-/// cleanup for the caller. The drained coordinates — and the record facts
-/// persisted on them — stay queued until the caller runs the returned
-/// [`YdocDrainCleanup`] through [`complete_deferred_ydoc_drain_cleanup`].
-/// A caller that fails between the drain and the cleanup leaves the rows in
-/// place, exactly like a crash before the cleanup transaction: the retry
-/// re-drains content-deduped and reads the facts back (#1009).
+/// [`drain_deferred_ydoc_for_key`], holding the final queue-row cleanup for
+/// the caller. The drained coordinates — and the record facts persisted on
+/// them — stay queued until the caller runs the returned [`YdocDrainCleanup`]
+/// through [`complete_deferred_ydoc_drain_cleanup`]. A caller that fails
+/// between the drain and the cleanup leaves the rows in place, exactly like a
+/// crash before the cleanup transaction: the retry re-drains content-deduped
+/// and reads the facts back.
 ///
 /// The pending projection refusal, if any, travels in the cleanup rather
 /// than in the result's `refusals`: it is persisted when the cleanup runs,
 /// so a caller reading `refusals` here sees one fewer refusal than the
 /// immediate drain would report.
-pub fn drain_deferred_ydoc_for_key_cached_holding_cleanup(
+pub fn drain_deferred_ydoc_for_key_holding_cleanup(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
     key: &DocKey,
     faults: &dyn FaultInjector,
-) -> Result<(YdocDrainResult, Option<YdocDrainCleanup>), SyncError> {
-    drain_deferred_ydoc(
-        store,
-        Some(cache),
-        key,
-        DeferredDrainMode::All,
-        true,
-        faults,
-    )
+) -> Result<(YdocDrainResult, YdocDrainCleanup), SyncError> {
+    drain_deferred_ydoc(store, cache, key, DeferredDrainMode::All, faults)
+}
+
+/// Run the cleanup an immediate drain owes and surface its projection refusal
+/// with the drain's own refusals.
+fn complete_drain(
+    store: &mut EngineStore,
+    mut drained: YdocDrainResult,
+    cleanup: YdocDrainCleanup,
+    faults: &dyn FaultInjector,
+) -> Result<YdocDrainResult, SyncError> {
+    let projection_refusal = complete_deferred_ydoc_drain_cleanup(store, cleanup, faults)?;
+    drained.refusals.extend(projection_refusal);
+    Ok(drained)
 }
 
 /// The final queue-row cleanup a held-cleanup drain still owes: persist the
 /// pending projection refusal, then delete the drained rows. Runs the same
-/// transaction the immediate drain would have run last.
+/// transaction the immediate drain would have run last. Returns the persisted refusal.
 pub fn complete_deferred_ydoc_drain_cleanup(
     store: &mut EngineStore,
     cleanup: YdocDrainCleanup,
     faults: &dyn FaultInjector,
-) -> Result<(), SyncError> {
+) -> Result<Option<crate::ReplicationRefusal>, SyncError> {
+    if cleanup.coordinates.is_empty() && cleanup.projection_refusal.is_none() {
+        return Ok(None);
+    }
     let cleared = store.write_with(faults, |tx| {
         if let Some(refusal) = cleanup.projection_refusal.as_ref() {
             crate::apply::persist_refusal(tx, refusal)?;
@@ -575,7 +574,7 @@ pub fn complete_deferred_ydoc_drain_cleanup(
     if matches!(cleared, TxnOutcome::Crashed { .. }) {
         return Err(SyncError::FaultCrash);
     }
-    Ok(())
+    Ok(cleanup.projection_refusal)
 }
 
 /// Drain only deferred coordinates that belong to the lineage an open editor
@@ -584,33 +583,6 @@ pub fn complete_deferred_ydoc_drain_cleanup(
 /// ordinary full drain can replace the lineage. This prevents settle/resync
 /// from changing the durable generation underneath a still-live editor.
 pub fn drain_deferred_ydoc_for_live_session(
-    store: &mut EngineStore,
-    key: &DocKey,
-    expected_lineage_claim_id: Option<&str>,
-    faults: &dyn FaultInjector,
-) -> Result<YdocDrainResult, SyncError> {
-    let observed = dohc_engine_collab::read_marker(store, key)
-        .map_err(map_collab_hard_error)?
-        .and_then(|marker| marker.lineage_claim_id);
-    if observed.as_deref() != expected_lineage_claim_id {
-        return Err(SyncError::RetryableState {
-            reason: "live Y.Doc session lineage changed before deferred drain",
-        });
-    }
-    let (drained, cleanup) = drain_deferred_ydoc(
-        store,
-        None,
-        key,
-        DeferredDrainMode::Live(expected_lineage_claim_id),
-        false,
-        faults,
-    )?;
-    debug_assert!(cleanup.is_none(), "immediate mode owes no cleanup");
-    Ok(drained)
-}
-
-/// Cache-backed actor form of [`drain_deferred_ydoc_for_live_session`].
-pub fn drain_deferred_ydoc_for_live_session_cached(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
     key: &DocKey,
@@ -627,14 +599,12 @@ pub fn drain_deferred_ydoc_for_live_session_cached(
     }
     let (drained, cleanup) = drain_deferred_ydoc(
         store,
-        Some(cache),
+        cache,
         key,
         DeferredDrainMode::Live(expected_lineage_claim_id),
-        false,
         faults,
     )?;
-    debug_assert!(cleanup.is_none(), "immediate mode owes no cleanup");
-    Ok(drained)
+    complete_drain(store, drained, cleanup, faults)
 }
 
 #[derive(Clone, Copy)]
@@ -643,8 +613,8 @@ enum DeferredDrainMode<'a> {
     Live(Option<&'a str>),
 }
 
-/// The queue-row cleanup a held-cleanup drain still owes. See
-/// [`drain_deferred_ydoc_for_key_cached_holding_cleanup`].
+/// The queue-row cleanup a drain still owes. See
+/// [`drain_deferred_ydoc_for_key_holding_cleanup`].
 #[derive(Debug)]
 pub struct YdocDrainCleanup {
     workspace_id: String,
@@ -654,12 +624,11 @@ pub struct YdocDrainCleanup {
 
 fn drain_deferred_ydoc(
     store: &mut EngineStore,
-    mut cache: Option<&mut WriterDocCache>,
+    cache: &mut WriterDocCache,
     key: &DocKey,
     mode: DeferredDrainMode<'_>,
-    hold_cleanup: bool,
     faults: &dyn FaultInjector,
-) -> Result<(YdocDrainResult, Option<YdocDrainCleanup>), SyncError> {
+) -> Result<(YdocDrainResult, YdocDrainCleanup), SyncError> {
     let pending: Vec<(String, i64, i64, i64, String, YdocUpdatePayload)> =
         store.read_with(|conn| {
             let mut stmt = conn
@@ -724,7 +693,14 @@ fn drain_deferred_ydoc(
             Ok::<_, SyncError>(pending)
         })?;
     if pending.is_empty() {
-        return Ok((YdocDrainResult::default(), None));
+        return Ok((
+            YdocDrainResult::default(),
+            YdocDrainCleanup {
+                workspace_id: key.workspace_id.clone(),
+                coordinates: Vec::new(),
+                projection_refusal: None,
+            },
+        ));
     }
     let search_policy = search_policy_for_store(store);
     let mut applied = 0usize;
@@ -753,9 +729,7 @@ fn drain_deferred_ydoc(
             // A base can replace the lineage while reusing durable coordinates.
             // Evict before the transaction so a committed crash cannot leave an
             // ABA-valid entry behind.
-            if let Some(cache) = cache.as_deref_mut() {
-                cache.remove(key);
-            }
+            cache.remove(key);
             if lineage_claim_id != payload.update_blob_sha256 {
                 return Err(local_corruption(
                     "parked Y.Doc base claim does not match its full-state digest",
@@ -819,28 +793,16 @@ fn drain_deferred_ydoc(
             origin_seq,
             bytes,
         };
-        let apply_result = if let Some(cache) = cache.as_deref_mut() {
-            apply_remote_update_for_deferred_drain(
-                store,
-                cache,
-                key,
-                &remote,
-                payload.actor_origin_id.as_deref(),
-                payload.attribution.as_ref(),
-                faults,
-                recorded_at_ms,
-            )
-        } else {
-            apply_remote_update(
-                store,
-                key,
-                &remote,
-                payload.actor_origin_id.as_deref(),
-                payload.attribution.as_ref(),
-                faults,
-                recorded_at_ms,
-            )
-        };
+        let apply_result = apply_remote_update(
+            store,
+            cache,
+            key,
+            &remote,
+            payload.actor_origin_id.as_deref(),
+            payload.attribution.as_ref(),
+            faults,
+            recorded_at_ms,
+        );
         let (outcome, applied_facts) = match apply_result {
             Ok(applied) => (applied.outcome, applied.record_facts),
             Err(error) => {
@@ -868,8 +830,7 @@ fn drain_deferred_ydoc(
             // history rows dedupe by coordinate), but an earlier failed
             // drain may have dropped facts it never surfaced. The decision
             // persisted on the deferred row carries them to this retry; the
-            // queue cleanup below consumes it, so they surface exactly once
-            // (#1004).
+            // queue cleanup below consumes it, so they surface exactly once.
             None => {
                 record_facts.extend(read_parked_record_facts(
                     store, key, &origin_id, origin_seq,
@@ -897,7 +858,7 @@ fn drain_deferred_ydoc(
         last_coordinate = Some((origin_id.clone(), origin_seq));
         drained_coordinates.push((origin_id, origin_seq));
     }
-    // Drained content must reach the VISIBLE head here, not only the CRDT
+    // Drained content must reach the visible head here, not only the CRDT
     // log: the drain runs outside `apply_envelope_with`, so a redelivery of
     // an already-acked coordinate skips its mutation closure — if the drain
     // did not project, the snapshot/materialization would stay stale until
@@ -910,7 +871,7 @@ fn drain_deferred_ydoc(
     if let Some(payload) = last_payload
         && let Some((projected, projected_kind)) = project_final_drained_doc(
             store,
-            cache.as_deref(),
+            cache,
             key,
             &payload,
             drain_origin,
@@ -958,42 +919,14 @@ fn drain_deferred_ydoc(
             Err(other) => return Err(other),
         }
     }
-    // The durable markers clear LAST — after the projection committed or a
+    // The durable markers clear last — after the projection committed or a
     // terminal disposition was persisted. A crash anywhere above leaves the
-    // rows in place, and the retry re-runs apply (content-deduped) AND the
+    // rows in place, and the retry re-runs apply (content-deduped) and the
     // projection; deleting first opened a window where the CRDT held the edit
     // but nothing would ever project it. A held cleanup extends the same
     // contract past the drain: the caller clears the rows only after its own
-    // fallible follow-up (close-time materialization) succeeded (#1009).
-    let mut held_cleanup = None;
-    if hold_cleanup {
-        held_cleanup = Some(YdocDrainCleanup {
-            workspace_id: key.workspace_id.clone(),
-            coordinates: drained_coordinates.clone(),
-            projection_refusal,
-        });
-    } else {
-        let cleared = store.write_with(faults, |tx| {
-            if let Some(refusal) = projection_refusal.as_ref() {
-                crate::apply::persist_refusal(tx, refusal)?;
-            }
-            for (origin_id, origin_seq) in &drained_coordinates {
-                tx.execute(
-                    "DELETE FROM ydoc_deferred_updates \
-                     WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
-                    params![key.workspace_id, origin_id, origin_seq],
-                )
-                .map_err(SyncError::persist)?;
-            }
-            Ok::<_, SyncError>(())
-        })?;
-        if matches!(cleared, TxnOutcome::Crashed { .. }) {
-            return Err(SyncError::FaultCrash);
-        }
-        if let Some(refusal) = projection_refusal {
-            refusals.push(refusal);
-        }
-    }
+    // fallible follow-up (close-time materialization) succeeded.
+    //
     // The count is DRAINED COORDINATES, not newly-applied rows: a marker
     // surviving an earlier failed drain redelivers its row as a dedupe, and
     // callers (the settle's remote-updates-pending refusal) must still see
@@ -1007,12 +940,16 @@ fn drain_deferred_ydoc(
             lineage_replacements,
             record_facts,
         },
-        held_cleanup,
+        YdocDrainCleanup {
+            workspace_id: key.workspace_id.clone(),
+            coordinates: drained_coordinates,
+            projection_refusal,
+        },
     ))
 }
 
 /// The record-event decision an earlier drain committed with this parked
-/// coordinate's apply (#1004). `None` for a coordinate that never derived
+/// coordinate's apply. `None` for a coordinate that never derived
 /// facts — or one no longer parked, which cannot happen mid-drain.
 fn read_parked_record_facts(
     store: &EngineStore,
@@ -1044,7 +981,7 @@ type FinalDrainProjection = Result<TxnOutcome<crate::BaseOrigination>, SyncError
 #[allow(clippy::too_many_arguments)]
 fn project_final_drained_doc(
     store: &mut EngineStore,
-    cache: Option<&WriterDocCache>,
+    cache: &WriterDocCache,
     key: &DocKey,
     payload: &YdocUpdatePayload,
     drain_origin: &str,
@@ -1053,10 +990,9 @@ fn project_final_drained_doc(
     search_policy: Option<&SearchPolicySnapshot>,
     faults: &dyn FaultInjector,
 ) -> Result<Option<(FinalDrainProjection, ContentKind)>, SyncError> {
-    if let Some(cache) = cache
-        && let Some(doc) = store
-            .read_with(|conn| cache.doc_for_consumer(conn, key))
-            .map_err(map_collab_hard_error)?
+    if let Some(doc) = store
+        .read_with(|conn| cache.doc_for_consumer(conn, key))
+        .map_err(map_collab_hard_error)?
     {
         let marker = dohc_engine_collab::read_marker(store, key)
             .map_err(map_collab_hard_error)?
@@ -1123,7 +1059,7 @@ fn write_final_drained_projection(
             &payload.path,
             doc,
             content_kind,
-            // The REAL last drained coordinate keys the moment id: a synthetic
+            // The real last drained coordinate keys the moment id: a synthetic
             // pair can collide when two batches land in one millisecond.
             drain_origin,
             drain_seq,
@@ -1545,7 +1481,7 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
                     project_ydoc_with_store(tx, &complete.key, doc, marker.content_kind)?;
                 if projection.content != text {
                     if marker.content_kind == ContentKind::Scene {
-                        // The origin of an external scene edit RETIRES its
+                        // The origin of an external scene edit retires its
                         // lineage instead of emitting a Markdown rewrite (a
                         // scene has no fold), so the rewrite this pending
                         // state would wait for is never coming. Converge the
@@ -1567,13 +1503,13 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
 /// Fold a conflict resolution's chosen text into the object's canonical
 /// Y.Doc, inside the resolution's own transaction.
 ///
-/// The invariant, stated once: an OPEN sync conflict on a Y.Doc object
+/// The invariant, stated once: an open sync conflict on a Y.Doc object
 /// freezes the visible head (`project_and_write_in_tx` coalesces the
 /// conflict's incoming side instead of writing) and the settle (the daemon
-/// refuses with `ydoc-conflict-open`, the same shape as #338's refusal of
-/// the clobbering settle). RESOLUTION lifts the freeze by making the choice
+/// refuses with `ydoc-conflict-open`, the same shape as the refusal of
+/// the clobbering settle). Resolution lifts the freeze by making the choice
 /// durable here — one update that rewrites the lineage's projection to the
-/// chosen bytes, journaled when the workspace replicates — in the SAME
+/// chosen bytes, journaled when the workspace replicates — in the same
 /// transaction that closes the row, so the next inbound delta merges with
 /// the choice instead of silently reversing it.
 ///
@@ -1594,7 +1530,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
             reason: "conflict resolution coordinates are invalid",
         })?;
     // Acked-but-parked remote updates for this object were never part of
-    // EITHER reviewed side, and the drain that lands them runs after the
+    // either reviewed side, and the drain that lands them runs after the
     // review gate would have closed. Refuse the resolution while they are
     // queued: a resync or session close drains them, the open conflict
     // coalesces to the freshest incoming state, and the user resolves what
@@ -1684,7 +1620,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
         // rewrite is asserted to be the projector's inverse, and nothing
         // makes that true: a construct it does not model round-trips through
         // the projector's escaping (a deep `>` chain returns as `&gt;`), and
-        // the fold would then commit a lineage whose projection is NOT the
+        // the fold would then commit a lineage whose projection is not the
         // chosen text while stamping last_settled_sha with the chosen text's
         // hash in the same statement — the head file saying one thing, the
         // CRDT another, and the marker asserting they agree. That is the
@@ -1693,8 +1629,8 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
         // doc and the transaction are already in hand, so the check is one
         // projection, and it covers every construct the parser will ever
         // fail to model rather than the ones known today.
-        // SIZE FIRST (#660): check length before the projection below — an
-        // oversized doc trips a bare, limit-less `InvalidInput` there (#643).
+        // SIZE FIRST: check length before the projection below — an
+        // oversized doc trips a bare, limit-less `InvalidInput` there.
         if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
             return Err(SyncError::BlobTooLarge {
                 constraint: "MAX_YDOC_UPDATE_BYTES (conflict resolution fold)",
@@ -2011,7 +1947,7 @@ fn map_projection_error(
 /// Oracle parity for applied `ydoc.update` ops (`projectYDocUpdate` →
 /// `writeTextFileInDb` → CRDT rows): every NON-DEFERRED apply materializes
 /// its projection — moment, snapshot, and durable materialization job — in
-/// the SAME admission transaction, so `versionedText.read`, search, and the
+/// the same admission transaction, so `versionedText.read`, search, and the
 /// disk pipeline advance with the relay cursor instead of trailing it until
 /// someone manually opens and settles the doc.
 #[allow(clippy::too_many_arguments)]
@@ -2151,7 +2087,7 @@ pub fn project_and_write_in_tx(
     enqueue_write(tx, &result, preimage, "ydoc").map_err(map_domain_hard_error)?;
     // The pulled projection IS the settled artifact (its job materializes
     // it): advance the marker exactly like a local settle would. Leaving the
-    // OLD locally-settled sha behind would make the next session's settle
+    // old locally-settled sha behind would make the next session's settle
     // expectation trail the remote head — permanent ConflictStaleTarget.
     tx.execute(
         "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
@@ -2170,29 +2106,7 @@ pub fn project_and_write_in_tx(
 
 pub fn apply_ydoc_envelope(
     store: &mut EngineStore,
-    envelope: &ReplicationEnvelope,
-    faults: &dyn FaultInjector,
-    leases: &dyn LeaseProbe,
-) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
-    apply_ydoc_envelope_inner(store, None, envelope, faults, leases)
-}
-
-/// Actor pull path with access to the single-writer document cache. Only the
-/// PR3 defer-validation and drain consumers use it; ordinary remote admission
-/// and its scratch projection remain cold.
-pub fn apply_ydoc_envelope_cached(
-    store: &mut EngineStore,
     cache: &mut WriterDocCache,
-    envelope: &ReplicationEnvelope,
-    faults: &dyn FaultInjector,
-    leases: &dyn LeaseProbe,
-) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
-    apply_ydoc_envelope_inner(store, Some(cache), envelope, faults, leases)
-}
-
-fn apply_ydoc_envelope_inner(
-    store: &mut EngineStore,
-    mut cache: Option<&mut WriterDocCache>,
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
@@ -2200,7 +2114,7 @@ fn apply_ydoc_envelope_inner(
     if envelope.op_kind != "ydoc.update" {
         return Err(SyncError::UnsupportedOperation);
     }
-    let payload: YdocUpdatePayload = match serde_json::from_value(envelope.payload.clone()) {
+    let payload: YdocUpdatePayload = match Deserialize::deserialize(&envelope.payload) {
         Ok(payload) => payload,
         Err(_) => {
             return refuse_ydoc(store, envelope, faults, "ydoc.update payload is malformed");
@@ -2233,7 +2147,7 @@ fn apply_ydoc_envelope_inner(
         );
     }
     let search_policy = search_policy_for_store(store);
-    // Gate on the SAME floor the projection sink applies
+    // Gate on the same floor the projection sink applies
     // (`validate_plaintext_storable_path`) rather than R10's narrow
     // share-boundary classifier, which misses reserved 8.3 aliases (`dohc~1`
     // aliases `.dohc`) and dots-and-spaces segments. The path is persisted as a
@@ -2265,14 +2179,12 @@ fn apply_ydoc_envelope_inner(
             );
         }
     };
-    if payload.is_base_state
-        && let Some(cache) = cache.as_deref_mut()
-    {
+    if payload.is_base_state {
         // Claim/arbitration can replace a lineage with ABA-equal coordinates.
         // Invalidate before any transaction so a committed crash stays safe.
         cache.remove(&key);
     }
-    // The blob is validated BEFORE any ack path — including the live-lease
+    // The blob is validated before any ack path — including the live-lease
     // defer. A defer acks the coordinate with the imported log as the durable
     // queue; if the referenced blob were missing or tampered, the peer cursor
     // would already be past a row the drain can never apply, and the bad
@@ -2305,8 +2217,8 @@ fn apply_ydoc_envelope_inner(
         });
     };
     if leases.is_live(&key) {
-        // FULL durable validation BEFORE admission: byte caps, abort-safe
-        // prevalidation, AND the replay-parity gate — replayed on top of the
+        // Full durable validation before admission: byte caps, abort-safe
+        // prevalidation, and the replay-parity gate — replayed on top of the
         // ALREADY-QUEUED deferred predecessors, because a later update can
         // only become invalid after they apply, and the drain will apply
         // them first. Anything the drain would reject becomes a refusal, not a
@@ -2361,15 +2273,7 @@ fn apply_ydoc_envelope_inner(
             .map_err(map_collab_hard_error)?
             .and_then(|marker| marker.lineage_claim_id);
         let validation = if active_claim.as_deref() == Some(payload.lineage_claim_id.as_str()) {
-            if let Some(cache) = cache.as_deref() {
-                dohc_engine_collab::validate_remote_update_with_pending_cached(
-                    store, cache, &key, &queued, &bytes,
-                )
-            } else {
-                dohc_engine_collab::validate_remote_update_with_pending(
-                    store, &key, &queued, &bytes,
-                )
-            }
+            dohc_engine_collab::validate_remote_update(store, cache, &key, &queued, &bytes)
         } else {
             // A foreign queued lineage is validated only against its own
             // relay-ordered prefix. Replaying it on the active winner even in
@@ -2401,7 +2305,7 @@ fn apply_ydoc_envelope_inner(
             };
         }
         // A deferred coordinate is ACKED — it must be drainable later, which
-        // the close/open drains only do for REPLICATED markers. A live lease
+        // the close/open drains only do for replicated markers. A live lease
         // over a local-only lineage is a transient local-state race. It stays
         // hard and unacked so the peer coordinate can be retried after the
         // session settles or closes.
@@ -2413,7 +2317,7 @@ fn apply_ydoc_envelope_inner(
         }
         let deferred_key = key.clone();
         return crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
-            // Record WHICH coordinate is pending in the same transaction as
+            // Record which coordinate is pending in the same transaction as
             // the ack: drains replay exactly these rows, never the whole
             // imported history (which after compaction would re-append
             // non-dedupable updates and cost O(history) per open).
@@ -2443,13 +2347,13 @@ fn apply_ydoc_envelope_inner(
             })
         });
     }
-    // Base bootstrap: a fresh replica's FIRST op for a replicated doc is the
+    // Base bootstrap: a fresh replica's first op for a replicated doc is the
     // base full-state — apply_remote_update requires an existing marker, so
     // without this branch the pull wedges on NoMarker before the ack. The
     // claim is idempotent (an existing claimed base resumes), so a crash
     // between claim and ack replays safely; the coordinate then acks below.
     if payload.is_base_state {
-        // The claim runs INSIDE the admission transaction: a standalone claim
+        // The claim runs inside the admission transaction: a standalone claim
         // before apply_envelope_with would persist the marker/base for an
         // envelope the sequence/divergence checks then reject (out-of-order
         // or divergent redelivery), leaving state for an unacked coordinate.
@@ -2591,9 +2495,9 @@ fn apply_ydoc_envelope_inner(
                     ],
                 )
                 .map_err(SyncError::persist)?;
-                // `seed_source_sha256` clears WITH the rows it described:
+                // `seed_source_sha256` clears with the rows it described:
                 // the winning base holds content the file does not, and the
-                // seed-only settle skip (#815) must never survive a lineage
+                // seed-only settle skip must never survive a lineage
                 // replacement on the base claim's snapshot insert alone.
                 tx.execute(
                     "UPDATE ydoc_docs SET head_update_seq=0,head_snapshot_seq=0,
@@ -2705,16 +2609,16 @@ fn apply_ydoc_envelope_inner(
                 ],
             )
             .map_err(SyncError::persist)?;
-            // The FIRST base is not a CRDT merge: a local head that no shared
+            // The first base is not a CRDT merge: a local head that no shared
             // lineage ever merged (capture or an external editor wrote it, and
             // the receiver holds no durable Y.Doc rows to union with) must not
             // be silently replaced by the sender's projection. Keep the head,
             // land the lineage, and open the same reviewable sync conflict the
             // moment lane opens for a diverged file — one resolution settles
             // both machines. A head that already equals the base's projection
-            // needs no conflict, and a lineage WITH durable rows takes the
+            // needs no conflict, and a lineage with durable rows takes the
             // union path below (the projection carries the local content).
-            // Whether the head is REPRESENTED in this union, not whether the
+            // Whether the head is represented in this union, not whether the
             // lineage happens to hold rows. `lineage_has_state` was a proxy
             // for "the head was merged" and the two come apart exactly where
             // it matters: a local-only session that crashed leaves durable
@@ -2820,7 +2724,7 @@ fn apply_ydoc_envelope_inner(
                             recorded_at_ms: op.recorded_at_ms,
                         },
                     )?;
-                    // Immutable per-envelope record of what THIS coordinate
+                    // Immutable per-envelope record of what this coordinate
                     // opened: a later delta coalesces the conflict and
                     // rewrites its incoming anchor, so a crash-redelivery
                     // recount must not depend on the mutable conflict row.
@@ -2879,38 +2783,33 @@ fn apply_ydoc_envelope_inner(
             }
             Err(hard) => return Err(hard),
         };
-        if matches!(outcome, ApplyOutcome::Applied(_) | ApplyOutcome::Skipped)
-            && dohc_engine_collab::read_marker(store, &key)
-                .map_err(map_collab_hard_error)?
-                .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
+        if matches!(
+            outcome.primary,
+            ApplyDisposition::Applied(_) | ApplyDisposition::Skipped
+        ) && dohc_engine_collab::read_marker(store, &key)
+            .map_err(map_collab_hard_error)?
+            .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
         {
-            let drain = if let Some(cache) = cache.as_deref_mut() {
-                drain_deferred_ydoc_for_key_cached(store, cache, &key, faults)?
-            } else {
-                drain_deferred_ydoc_for_key(store, &key, faults)?
-            };
-            return Ok(merge_drained(
+            let drain = drain_deferred_ydoc_for_key(store, cache, &key, faults)?;
+            let mut outcome = merge_drained(
                 merge_lineage_replacements(outcome, drain.lineage_replacements),
                 drain.record_facts,
-            )
-            .with_sharing_declined(drain.sharing_declined)
-            .with_refusals(drain.refusals));
+            );
+            outcome.sharing_declined.extend(drain.sharing_declined);
+            outcome.refusals.extend(drain.refusals);
+            return Ok(outcome);
         }
         return Ok(outcome);
     }
-    // The lease is NOT live: any coordinates parked by an earlier live
-    // phase drain FIRST, so the projection below reconstructs the COMPLETE
+    // The lease is not live: any coordinates parked by an earlier live
+    // phase drain first, so the projection below reconstructs the complete
     // applied lineage (a partial projection would materialize a file missing
     // parked content).
     let drain = if dohc_engine_collab::read_marker(store, &key)
         .map_err(map_collab_hard_error)?
         .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
     {
-        if let Some(cache) = cache.as_deref_mut() {
-            drain_deferred_ydoc_for_key_cached(store, cache, &key, faults)?
-        } else {
-            drain_deferred_ydoc_for_key(store, &key, faults)?
-        }
+        drain_deferred_ydoc_for_key(store, cache, &key, faults)?
     } else {
         YdocDrainResult::default()
     };
@@ -3007,12 +2906,13 @@ fn apply_ydoc_envelope_inner(
                 })
             })?;
             // The drain above ran before this apply, so its facts lead.
-            return Ok(merge_drained_first(
+            let mut outcome = merge_drained_first(
                 merge_lineage_replacements(outcome, drain.lineage_replacements),
                 drain.record_facts,
-            )
-            .with_sharing_declined(drain.sharing_declined)
-            .with_refusals(drain.refusals));
+            );
+            outcome.sharing_declined.extend(drain.sharing_declined);
+            outcome.refusals.extend(drain.refusals);
+            return Ok(outcome);
         }
     }
     let update_path = payload.path.clone();
@@ -3024,35 +2924,25 @@ fn apply_ydoc_envelope_inner(
     let mut sharing_declined = None;
     let mut record_facts = None;
     let mut cache_probe = RemoteAppendProbe::default();
+    let gate_cache: &WriterDocCache = cache;
     let outcome_result =
         crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
-            let projected = if let Some(cache) = cache.as_deref() {
-                apply_remote_update_in_transaction_cached_with_projection(
-                    tx,
-                    cache,
-                    &mut cache_probe,
-                    &key,
-                    &remote,
-                    payload.actor_origin_id.as_deref(),
-                    payload.attribution.as_ref(),
-                    op.recorded_at_ms,
-                )
-            } else {
-                apply_remote_update_in_transaction_with_projection(
-                    tx,
-                    &key,
-                    &remote,
-                    payload.actor_origin_id.as_deref(),
-                    payload.attribution.as_ref(),
-                    op.recorded_at_ms,
-                )
-            }
+            let projected = apply_remote_update_in_transaction_with_projection(
+                tx,
+                gate_cache,
+                &mut cache_probe,
+                &key,
+                &remote,
+                payload.actor_origin_id.as_deref(),
+                payload.attribution.as_ref(),
+                op.recorded_at_ms,
+            )
             .map_err(|error| map_collab_payload_error(error, "ydoc.update could not be applied"))?;
             let applied = projected.outcome;
             let update_kind = projected.content_kind;
             record_facts = projected.record_facts;
             // An out-of-order cross-origin update parks durably with missing
-            // dependencies; a projection taken NOW would omit the pending remote
+            // dependencies; a projection taken now would omit the pending remote
             // content and materialize an incomplete view. Skip — the envelope
             // that completes the dependency projects the full doc.
             let mutation = if projected.doc.has_pending_dependencies() {
@@ -3126,27 +3016,23 @@ fn apply_ydoc_envelope_inner(
     let outcome = match outcome_result {
         Ok(outcome) => outcome,
         Err(error) => {
-            if let Some(cache) = cache.as_deref_mut() {
-                cache.finish_remote_gate_error(&key, &cache_probe);
-            }
+            cache.finish_remote_gate_error(&key, &cache_probe);
             return Err(error);
         }
     };
-    if let Some(cache) = cache.as_deref_mut() {
-        match &outcome {
-            ApplyOutcome::Applied(_) | ApplyOutcome::Refused(_) => {
-                cache.finish_remote_append(&key, &remote.bytes, cache_probe);
-            }
-            ApplyOutcome::Crashed { committed: true } => cache.remove(&key),
-            ApplyOutcome::Crashed { committed: false } => {
-                cache.finish_remote_gate_error(&key, &cache_probe);
-            }
-            ApplyOutcome::Skipped | ApplyOutcome::WithDiagnostics { .. } => {}
+    match &outcome.primary {
+        ApplyDisposition::Applied(_) | ApplyDisposition::Refused(_) => {
+            cache.finish_remote_append(&key, &remote.bytes, cache_probe);
         }
+        ApplyDisposition::Crashed { committed: true } => cache.remove(&key),
+        ApplyDisposition::Crashed { committed: false } => {
+            cache.finish_remote_gate_error(&key, &cache_probe);
+        }
+        ApplyDisposition::Skipped => {}
     }
     if matches!(
-        outcome,
-        ApplyOutcome::Applied(ReplicationApplyOutcome::Applied { .. })
+        outcome.primary,
+        ApplyDisposition::Applied(ReplicationApplyOutcome::Applied { .. })
     ) {
         let compacted = maybe_compact(
             store,
@@ -3158,29 +3044,28 @@ fn apply_ydoc_envelope_inner(
         .map_err(|_| SyncError::InvalidInput {
             reason: "ydoc.update compaction failed",
         })?;
-        if let Some(cache) = cache {
-            match compacted {
-                TxnOutcome::Committed(CompactOutcome::Compacted {
-                    up_to_seq,
-                    snapshot_sha,
-                    ..
-                }) => cache.note_compacted(store, &key, up_to_seq, &snapshot_sha),
-                TxnOutcome::Committed(CompactOutcome::Skipped { .. }) => {}
-                TxnOutcome::Crashed { .. } => cache.remove(&key),
-            }
+        match compacted {
+            TxnOutcome::Committed(CompactOutcome::Compacted {
+                up_to_seq,
+                snapshot_sha,
+                ..
+            }) => cache.note_compacted(store, &key, up_to_seq, &snapshot_sha),
+            TxnOutcome::Committed(CompactOutcome::Skipped { .. }) => {}
+            TxnOutcome::Crashed { .. } => cache.remove(&key),
         }
     }
-    // This path drained BEFORE the primary apply, so the drained facts
+    // This path drained before the primary apply, so the drained facts
     // committed first and lead the emission order.
-    Ok(merge_drained_first(
+    let mut outcome = merge_drained_first(
         merge_lineage_replacements(
             map_applied_ydoc_outcome(outcome, sharing_declined, record_facts),
             drain.lineage_replacements,
         ),
         drain.record_facts,
-    )
-    .with_sharing_declined(drain.sharing_declined)
-    .with_refusals(drain.refusals))
+    );
+    outcome.sharing_declined.extend(drain.sharing_declined);
+    outcome.refusals.extend(drain.refusals);
+    Ok(outcome)
 }
 
 fn collapse_lineage_replacements(
@@ -3203,7 +3088,7 @@ fn collapse_lineage_replacements(
 /// commit order, so the pull pass emits every record event this apply
 /// caused. A skipped primary still carries the drain's facts: those rows
 /// are committed whatever the primary did. Use this where the drain ran
-/// AFTER the primary apply.
+/// after the primary apply.
 fn merge_drained(
     outcome: ApplyOutcome<YdocApplyResult>,
     drained: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
@@ -3211,7 +3096,7 @@ fn merge_drained(
     merge_drained_ordered(outcome, drained, false)
 }
 
-/// The same merge where the drain ran BEFORE the primary apply: the drained
+/// The same merge where the drain ran before the primary apply: the drained
 /// facts committed first, so they lead.
 fn merge_drained_first(
     outcome: ApplyOutcome<YdocApplyResult>,
@@ -3221,15 +3106,15 @@ fn merge_drained_first(
 }
 
 fn merge_drained_ordered(
-    outcome: ApplyOutcome<YdocApplyResult>,
+    mut outcome: ApplyOutcome<YdocApplyResult>,
     drained: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
     drained_first: bool,
 ) -> ApplyOutcome<YdocApplyResult> {
     if drained.is_empty() {
         return outcome;
     }
-    match outcome {
-        ApplyOutcome::Applied(mut result) => {
+    outcome.primary = match outcome.primary {
+        ApplyDisposition::Applied(mut result) => {
             if drained_first {
                 let own = std::mem::take(&mut result.record_facts);
                 result.record_facts = drained;
@@ -3237,42 +3122,30 @@ fn merge_drained_ordered(
             } else {
                 result.record_facts.extend(drained);
             }
-            ApplyOutcome::Applied(result)
+            ApplyDisposition::Applied(result)
         }
-        ApplyOutcome::Skipped => ApplyOutcome::Applied(YdocApplyResult {
+        ApplyDisposition::Skipped => ApplyDisposition::Applied(YdocApplyResult {
             deferred: false,
             reason: Some("ydoc-deferred-drained"),
             conflicts_opened: 0,
             lineage_replacement: None,
             record_facts: drained,
         }),
-        // The drain committed before the primary was refused, so its facts
-        // are real; the refusal rides along as a diagnostic, the same way a
-        // drain's own refusals do.
-        ApplyOutcome::Refused(refusal) => ApplyOutcome::WithDiagnostics {
-            outcome: Box::new(ApplyOutcome::Applied(YdocApplyResult {
+        // The primary refusal precedes diagnostics from other drained work.
+        ApplyDisposition::Refused(refusal) => {
+            outcome.refusals.insert(0, refusal);
+            ApplyDisposition::Applied(YdocApplyResult {
                 deferred: false,
                 reason: Some("ydoc-deferred-drained"),
                 conflicts_opened: 0,
                 lineage_replacement: None,
                 record_facts: drained,
-            })),
-            refusals: vec![refusal],
-            sharing_declined: Vec::new(),
-        },
-        ApplyOutcome::WithDiagnostics {
-            outcome,
-            refusals,
-            sharing_declined,
-        } => ApplyOutcome::WithDiagnostics {
-            outcome: Box::new(merge_drained_ordered(*outcome, drained, drained_first)),
-            refusals,
-            sharing_declined,
-        },
-        // A crash ends the pull pass before anything post-commit runs, so
-        // there is no emission to preserve facts for; the pass is retried.
-        crashed @ ApplyOutcome::Crashed { .. } => crashed,
-    }
+            })
+        }
+        // A crash ends the pull pass before post-commit emission; retry recovers the facts.
+        crashed @ ApplyDisposition::Crashed { .. } => crashed,
+    };
+    outcome
 }
 
 #[cfg(test)]
@@ -3293,18 +3166,21 @@ mod merge_drained_tests {
     }
 
     fn applied(record_id: &str) -> ApplyOutcome<YdocApplyResult> {
-        ApplyOutcome::Applied(YdocApplyResult {
+        ApplyOutcome::new(ApplyDisposition::Applied(YdocApplyResult {
             deferred: false,
             reason: None,
             conflicts_opened: 0,
             lineage_replacement: None,
             record_facts: vec![facts(record_id)],
-        })
+        }))
     }
 
     fn ids(outcome: ApplyOutcome<YdocApplyResult>) -> Vec<String> {
         match outcome {
-            ApplyOutcome::Applied(result) => result
+            ApplyOutcome {
+                primary: ApplyDisposition::Applied(result),
+                ..
+            } => result
                 .record_facts
                 .into_iter()
                 .map(|facts| facts.record_id)
@@ -3316,29 +3192,23 @@ mod merge_drained_tests {
     #[test]
     fn drained_facts_keep_commit_order_on_both_paths() {
         // Drain after the primary: the primary's facts committed first.
-        assert_eq!(
-            ids(merge_drained(
-                applied("rec_primary"),
-                vec![facts("rec_parked")]
-            )),
-            vec!["rec_primary", "rec_parked"]
-        );
+        let outcome = merge_drained(applied("rec_primary"), vec![facts("rec_parked")]);
+        assert!(outcome.refusals.is_empty());
+        assert!(outcome.sharing_declined.is_empty());
+        assert_eq!(ids(outcome), vec!["rec_primary", "rec_parked"]);
         // Drain before the primary: the parked update's facts committed first.
-        assert_eq!(
-            ids(merge_drained_first(
-                applied("rec_primary"),
-                vec![facts("rec_parked")]
-            )),
-            vec!["rec_parked", "rec_primary"]
-        );
+        let outcome = merge_drained_first(applied("rec_primary"), vec![facts("rec_parked")]);
+        assert!(outcome.refusals.is_empty());
+        assert!(outcome.sharing_declined.is_empty());
+        assert_eq!(ids(outcome), vec!["rec_parked", "rec_primary"]);
         // A skipped primary still carries the drain's facts.
-        assert_eq!(
-            ids(merge_drained(
-                ApplyOutcome::Skipped,
-                vec![facts("rec_parked")]
-            )),
-            vec!["rec_parked"]
+        let outcome = merge_drained(
+            ApplyOutcome::new(ApplyDisposition::Skipped),
+            vec![facts("rec_parked")],
         );
+        assert!(outcome.refusals.is_empty());
+        assert!(outcome.sharing_declined.is_empty());
+        assert_eq!(ids(outcome), vec!["rec_parked"]);
         // A refused primary carries them too, with the refusal as a
         // diagnostic the pass still reports.
         let refusal = crate::ReplicationRefusal {
@@ -3351,24 +3221,97 @@ mod merge_drained_tests {
             },
         };
         let merged = merge_drained(
-            ApplyOutcome::Refused(refusal.clone()),
+            ApplyOutcome::new(ApplyDisposition::Refused(refusal.clone())),
             vec![facts("rec_parked")],
         );
-        let (primary, refusals, _) = merged.into_primary_and_diagnostics();
-        assert_eq!(refusals, vec![refusal]);
-        assert_eq!(ids(primary), vec!["rec_parked"]);
+        assert_eq!(merged.refusals, vec![refusal]);
+        assert_eq!(ids(merged), vec!["rec_parked"]);
+    }
+
+    #[test]
+    fn primary_changes_keep_diagnostics_in_reporting_order() {
+        let refusal = crate::ReplicationRefusal {
+            workspace_id: "ws".to_owned(),
+            origin_id: "peer".to_owned(),
+            origin_seq: 1,
+            op_kind: "ydoc.update".to_owned(),
+            reason: crate::RefusalReason::InvalidInput {
+                reason: "bad primary".to_owned(),
+            },
+        };
+        let older = crate::ReplicationRefusal {
+            origin_seq: 2,
+            ..refusal.clone()
+        };
+        let declined = crate::SharingDeclined {
+            path: "notes/drained.md".to_owned(),
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limit_bytes: 20,
+            observed_bytes: 21,
+        };
+        let outcome = ApplyOutcome {
+            primary: ApplyDisposition::Refused(refusal.clone()),
+            refusals: vec![older.clone(), refusal.clone()],
+            sharing_declined: vec![declined.clone()],
+        };
+        let merged = merge_drained_first(outcome, vec![facts("committed")]);
+        // Keep duplicates here: relay accumulation owns coordinate deduplication.
+        assert_eq!(
+            merged.refusals,
+            [refusal.clone(), older.clone(), refusal.clone()]
+        );
+        assert_eq!(merged.sharing_declined, std::slice::from_ref(&declined));
+        assert_eq!(ids(merged), ["committed"]);
+
+        let own_decline = crate::SharingDeclined {
+            path: "notes/primary.md".to_owned(),
+            ..declined.clone()
+        };
+        let mapped = map_applied_ydoc_outcome(
+            ApplyOutcome {
+                primary: ApplyDisposition::Applied(ReplicationApplyOutcome::Deduped { seq: 1 }),
+                refusals: vec![older],
+                sharing_declined: vec![declined.clone()],
+            },
+            Some(own_decline.clone()),
+            Some(facts("primary")),
+        );
+        assert_eq!(mapped.sharing_declined, [own_decline, declined.clone()]);
+        assert_eq!(mapped.refusals.len(), 1);
+        assert_eq!(mapped.refusals[0].origin_seq, 2);
+        assert_eq!(ids(mapped), ["primary"]);
+
+        for primary in [
+            ApplyDisposition::Skipped,
+            ApplyDisposition::Crashed { committed: true },
+        ] {
+            let outcome = ApplyOutcome {
+                primary,
+                refusals: vec![refusal.clone()],
+                sharing_declined: vec![declined.clone()],
+            };
+            let expected = outcome
+                .clone()
+                .map(|_: ReplicationApplyOutcome| unreachable!());
+            let mapped = map_applied_ydoc_outcome(
+                outcome,
+                Some(declined.clone()),
+                Some(facts("not-applied")),
+            );
+            assert_eq!(mapped, expected);
+        }
     }
 }
 
 fn merge_lineage_replacements(
-    outcome: ApplyOutcome<YdocApplyResult>,
+    mut outcome: ApplyOutcome<YdocApplyResult>,
     replacements: Vec<YdocLineageReplacement>,
 ) -> ApplyOutcome<YdocApplyResult> {
     let Some(replacement) = collapse_lineage_replacements(replacements) else {
         return outcome;
     };
-    match outcome {
-        ApplyOutcome::Applied(mut result) => {
+    outcome.primary = match outcome.primary {
+        ApplyDisposition::Applied(mut result) => {
             result.lineage_replacement = collapse_lineage_replacements(
                 result
                     .lineage_replacement
@@ -3376,26 +3319,18 @@ fn merge_lineage_replacements(
                     .chain([replacement])
                     .collect(),
             );
-            ApplyOutcome::Applied(result)
+            ApplyDisposition::Applied(result)
         }
-        ApplyOutcome::Skipped => ApplyOutcome::Applied(YdocApplyResult {
+        ApplyDisposition::Skipped => ApplyDisposition::Applied(YdocApplyResult {
             deferred: false,
             reason: Some("ydoc-deferred-lineage-replaced"),
             conflicts_opened: 0,
             lineage_replacement: Some(replacement),
             record_facts: Vec::new(),
         }),
-        ApplyOutcome::WithDiagnostics {
-            outcome,
-            refusals,
-            sharing_declined,
-        } => ApplyOutcome::WithDiagnostics {
-            outcome: Box::new(merge_lineage_replacements(*outcome, vec![replacement])),
-            refusals,
-            sharing_declined,
-        },
-        hard @ (ApplyOutcome::Refused(_) | ApplyOutcome::Crashed { .. }) => hard,
-    }
+        hard @ (ApplyDisposition::Refused(_) | ApplyDisposition::Crashed { .. }) => hard,
+    };
+    outcome
 }
 
 fn map_applied_ydoc_outcome(
@@ -3403,32 +3338,19 @@ fn map_applied_ydoc_outcome(
     sharing_declined: Option<crate::SharingDeclined>,
     record_facts: Option<dohc_engine_domain::CollectionRecordApplyFacts>,
 ) -> ApplyOutcome<YdocApplyResult> {
-    match outcome {
-        ApplyOutcome::Applied(_) => ApplyOutcome::Applied(YdocApplyResult {
-            deferred: false,
-            reason: None,
-            conflicts_opened: 0,
-            lineage_replacement: None,
-            record_facts: record_facts.into_iter().collect(),
-        })
-        .with_sharing_declined(sharing_declined.into_iter().collect()),
-        ApplyOutcome::Refused(refusal) => ApplyOutcome::Refused(refusal),
-        ApplyOutcome::Skipped => ApplyOutcome::Skipped,
-        ApplyOutcome::Crashed { committed } => ApplyOutcome::Crashed { committed },
-        ApplyOutcome::WithDiagnostics {
-            outcome,
-            refusals,
-            sharing_declined: nested,
-        } => ApplyOutcome::WithDiagnostics {
-            outcome: Box::new(map_applied_ydoc_outcome(
-                *outcome,
-                sharing_declined,
-                record_facts,
-            )),
-            refusals,
-            sharing_declined: nested,
-        },
+    let mut outcome = outcome.map(|_| YdocApplyResult {
+        deferred: false,
+        reason: None,
+        conflicts_opened: 0,
+        lineage_replacement: None,
+        record_facts: record_facts.into_iter().collect(),
+    });
+    if matches!(outcome.primary, ApplyDisposition::Applied(_))
+        && let Some(declined) = sharing_declined
+    {
+        outcome.sharing_declined.insert(0, declined);
     }
+    outcome
 }
 
 fn refuse_ydoc(
@@ -3477,7 +3399,7 @@ fn validate_ydoc_identity(
 ) -> Result<ConflictFileState, SyncError> {
     let current = select_snapshot_by_path_in_tx(conn, &key.workspace_id, &key.version_id, path)
         .map_err(map_domain_hard_error)?;
-    // Identity pins (the oracle's fix-2): NEVER write through a path occupied
+    // Identity pins (the oracle's fix-2): never write through a path occupied
     // by a different object, and never project an object into a path it does
     // not own — a hostile op would otherwise mutate the wrong plaintext file.
     if current.binary_sha256.is_some() {
@@ -3530,7 +3452,7 @@ fn map_collab_hard_error(error: CollabError) -> SyncError {
 
 fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncError {
     match error {
-        // The one HARD exception living inside `InvalidInput`: an object-alias
+        // The one hard exception living inside `InvalidInput`: an object-alias
         // collision names corrupt state, not a caller mistake, so it must be
         // checked before the variant-wide arm below would catch it.
         hard @ DomainError::InvalidInput {
@@ -3545,9 +3467,9 @@ fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncErr
             actual_bytes: observed_bytes,
             limit_bytes,
         },
-        // The acknowledged caller-mistake union (#656). A size refusal joins
+        // The acknowledged caller-mistake union. A size refusal joins
         // it for the same reason `InvalidText`/`InvalidPath` are here: only
-        // `InvalidInput` is ACKNOWLEDGED — the apply path answers it with
+        // `InvalidInput` is acknowledged — the apply path answers it with
         // `RefusedRetainingMutation` and `share_disposition` skips it. A
         // measured variant would instead abort the transaction, and the
         // relay would redeliver the same coordinate forever with every later
@@ -3662,7 +3584,7 @@ mod tests {
             .expect("seed remote");
         // The reserved metadata rides the replicated doc, so a client-authored
         // update can write it directly: planted source bytes, their matching
-        // digest, and the CURRENT canonical projection's digest. Both digest
+        // digest, and the current canonical projection's digest. Both digest
         // checks pass; only equivalence is missing.
         remote
             .frontmatter_set_preserving_markdown_source("id", RECORD_ID, PLANTED)

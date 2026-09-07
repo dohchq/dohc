@@ -21,9 +21,9 @@ import { isAtOrBelow, sdkWorkspacePath } from "../workspaces/workspaceSdkHost";
  */
 export const MAX_PLUGIN_WORKSPACE_SUBSCRIPTIONS_PER_OWNER = 16;
 
-export const PLUGIN_FILE_WATCH_METHOD = "files.watch";
+const PLUGIN_FILE_WATCH_METHOD = "files.watch";
 
-export const PLUGIN_RECORD_WATCH_METHOD = "collections.watch";
+const PLUGIN_RECORD_WATCH_METHOD = "collections.watch";
 
 /** The one event name a file subscription emits. */
 const FILE_WATCH_EVENT = "change";
@@ -49,8 +49,8 @@ export interface PluginFileWatchEvent {
  * history past its last seen id. The shapes are the panel IPC schemas: one
  * contract, validated once at the daemon bridge.
  */
-export type PluginRecordChangedEventData = z.infer<typeof PluginPanelRecordChangedData>;
-export type PluginRecordFieldChangedEventData = z.infer<
+type PluginRecordChangedEventData = z.infer<typeof PluginPanelRecordChangedData>;
+type PluginRecordFieldChangedEventData = z.infer<
   typeof PluginPanelRecordFieldChangedData
 >;
 
@@ -71,7 +71,7 @@ export type PluginWorkspaceEventsOwner =
       surfaceId: number;
     };
 
-export interface PluginWorkspaceEventsContext {
+interface PluginWorkspaceEventsContext {
   owner: PluginWorkspaceEventsOwner;
   emitEvent: (subscriptionId: string, event: string, data: unknown) => void;
 }

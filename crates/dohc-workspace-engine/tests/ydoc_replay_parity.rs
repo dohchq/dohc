@@ -7,20 +7,22 @@
 //! durable yrs reconstruction → `ydoc.resync` path and compares the resulting
 //! typed-root state against the yjs oracle.
 
+mod common;
+
+use common::*;
 use dohc_engine_collab::{CacheStats, Ydoc};
 use dohc_engine_protocol::{
     transport::{
         EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
     },
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_workspace_engine::EngineService;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const FIXTURES: &str = include_str!("../../../tools/rust-engine-program/ydoc-replay-fixtures.json");
 const GOLDENS: &str = include_str!("../../../tools/rust-engine-program/ydoc-replay-goldens.json");
 
@@ -52,17 +54,6 @@ struct AuthoredUpdate {
 #[derive(Debug, Deserialize)]
 struct GoldenCorpus {
     scenarios: BTreeMap<String, Value>,
-}
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
 }
 
 async fn open_workspace(
@@ -166,7 +157,6 @@ async fn replay_through_engine(scenario: &Scenario, ordinal: usize, force_cold: 
     );
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
     let service = Arc::new(EngineService::with_session_epoch_for_harness(format!(
         "replay-parity-{ordinal}"
     )));

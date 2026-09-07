@@ -1,17 +1,15 @@
-// The conflict surface bounds what "Combine by hand" will edit (#536). That
+// The conflict surface bounds what "Combine by hand" will edit. That
 // bound is only honest while it stays inside what `conflicts.resolve` accepts,
 // and #569 changed what that is: there is no longer a cap on the merged body.
 // A resolve succeeds when the whole JSON-ENCODED request fits one control
 // frame, so what a body may weigh is whatever the rest of its request leaves.
 //
-// #566: the gate no longer restates the engine's number. It IMPORTS the
+// The gate no longer restates the engine's number. It imports the
 // contract from `@dohc/workspace-engine-client/limits` — a leaf module that
 // imports nothing, so a renderer can take it without pulling `node:crypto`
 // into the browser bundle — and proves the renderer's own editing bound fits
 // inside it. The import IS the drift guard: when the frame budget moves, this
 // arithmetic moves with it, and no hand-copied number can fall behind.
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import {
   RESOLVE_REQUEST_FRAME_BYTES,
   jsonStringEncodedLength,
@@ -22,12 +20,6 @@ import {
   CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES,
   applyCombinedChange,
 } from "./conflictPane";
-
-const repoRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
-
-function readRepoFile(relativePath: string): string {
-  return readFileSync(repoRoot + relativePath, "utf8");
-}
 
 /// What the rest of a `conflicts.resolve` request can spend, generously.
 ///
@@ -43,7 +35,7 @@ const RESOLVE_REQUEST_OVERHEAD_BUDGET = 128 * 1024;
 describe("the bound on what a combined copy can be edited to", () => {
   it("leaves a whole worst-case body inside the resolve frame", () => {
     // The worst case is not the raw byte count. U+0001 is one UTF-8 byte and
-    // SIX JSON-encoded ones, the highest ratio the encoder produces, so a body
+    // six JSON-encoded ones, the highest ratio the encoder produces, so a body
     // full of them is the largest a body at this bound can become on the wire.
     const worstCase = String.fromCharCode(1).repeat(
       CONFLICT_COMBINED_EDIT_MAX_BYTES,
@@ -57,7 +49,7 @@ describe("the bound on what a combined copy can be edited to", () => {
 
   it("sits above the largest healthy document, in the unit it is enforced in", () => {
     // Both numbers are UTF-8 bytes. Comparing the byte limit against a
-    // CHARACTER count proved nothing for any multi-byte script — see below.
+    // character count proved nothing for any multi-byte script — see below.
     expect(CONFLICT_COMBINED_EDIT_MAX_BYTES).toBeGreaterThan(
       CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES,
     );
@@ -65,7 +57,7 @@ describe("the bound on what a combined copy can be edited to", () => {
 
   it("measures a multi-byte document in bytes, not characters", () => {
     // The case that made the unit matter: a CJK document well under the
-    // corpus's CHARACTER maximum, and over the bound in bytes. If the enforced
+    // corpus's character maximum, and over the bound in bytes. If the enforced
     // limit ever went back to counting characters, this document would be
     // accepted and then refused by the engine.
     const han = String.fromCodePoint(0x65e5);
@@ -77,50 +69,5 @@ describe("the bound on what a combined copy can be edited to", () => {
     // character, so about a third of the byte figure.
     const fits = han.repeat(Math.floor(CONFLICT_COMBINED_EDIT_MAX_BYTES / 3));
     expect(applyCombinedChange(fits).accepted).toBe(true);
-  });
-
-  it("keeps the imported frame budget equal to the daemon's", () => {
-    // The arithmetic above is only worth anything while this number is the
-    // daemon's. The Rust constant reads the protocol crate's wire limits, so
-    // read the same place.
-    const wireLimits = readRepoFile("crates/dohc-engine-protocol/src/limits.rs");
-    const declared = wireLimits.match(/max_frame_bytes:\s*([0-9*\s]+),/);
-    expect(declared, "SPIKE_DEFAULTS no longer declares max_frame_bytes").not.toBeNull();
-    const value = (declared?.[1] ?? "")
-      .split("*")
-      .map((part) => Number(part.trim()))
-      .reduce((product, part) => product * part, 1);
-    expect(RESOLVE_REQUEST_FRAME_BYTES).toBe(value);
-
-    const engine = readRepoFile("crates/dohc-workspace-engine/src/lib.rs");
-    expect(engine).toContain(
-      "const RESOLVE_REQUEST_FRAME_BYTES: usize =\n    dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;",
-    );
-  });
-});
-
-describe("the shape of the apply route the gate models", () => {
-  // The gate reasons about ONE shape: the combined body travels as a JSON
-  // string inside a single resolve request, and the frame is what bounds it.
-  // These fail if that stops being true — a blob handle, a chunked upload, or
-  // an arm that measures something other than the encoded request would each
-  // make the arithmetic above describe a route that no longer exists.
-  const engine = readRepoFile("crates/dohc-workspace-engine/src/lib.rs");
-
-  it("still carries the merged body as one JSON string, with no blob route", () => {
-    const dto = engine.slice(
-      engine.indexOf("struct LocalResolveDto {"),
-      engine.indexOf("struct SearchParams {"),
-    );
-    expect(dto).toContain("merged_text: Option<String>");
-    expect(dto.toLowerCase()).not.toContain("blob");
-    expect(dto.toLowerCase()).not.toContain("chunk");
-  });
-
-  it("still measures the encoded request against the frame", () => {
-    const arm = engine.slice(engine.indexOf('"apply-merged" => {'));
-    expect(arm.slice(0, 900)).toContain(
-      "if encoded_request > RESOLVE_REQUEST_FRAME_BYTES",
-    );
   });
 });

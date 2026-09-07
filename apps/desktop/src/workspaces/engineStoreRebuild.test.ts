@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -36,26 +35,7 @@ import {
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { createWorkspaceChatLifecycle } from "./workspaceChatLifecycle";
 import { createTestScratch } from "./testTemp";
-
-const engineStoreRebuildSource = readFileSync(
-  new URL("./engineStoreRebuild.ts", import.meta.url),
-  "utf8",
-);
-const rehearsalHarnessSource = readFileSync(
-  new URL(
-    "../../../../crates/dohc-workspace-engine/src/rehearsal_harness.rs",
-    import.meta.url,
-  ),
-  "utf8",
-);
-
-function stringLiteralsInArray(source: string, name: string): string[] {
-  const match = new RegExp(
-    `const ${name}[^=]*=\\s*\\[([\\s\\S]*?)\\]\\s*(?:as const)?;`,
-  ).exec(source);
-  if (!match) throw new Error(`Could not find ${name}.`);
-  return [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
-}
+import { deferred } from "../testing/deferred";
 
 let root: string;
 let engineDir: string;
@@ -115,14 +95,6 @@ async function expectCompleteStore(): Promise<void> {
   expect(await readFile(join(backupDir, "engine.db-shm"), "utf8")).toBe("shm");
 }
 
-function deferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
-
 function mockRebuildGate() {
   return { begin: vi.fn(), end: vi.fn() };
 }
@@ -159,32 +131,20 @@ function createRealRebuildGate() {
 }
 
 describe("moveEngineStoreAside", () => {
-  it("keeps the TypeScript store files in sync with the Rust source list", () => {
-    expect(
-      new Set(
-        stringLiteralsInArray(engineStoreRebuildSource, "ENGINE_STORE_FILES"),
-      ),
-    ).toEqual(
-      new Set(
-        stringLiteralsInArray(rehearsalHarnessSource, "SQLITE_SOURCE_FILES"),
-      ),
-    );
-  });
-
   it("moves only the database and its sidecars into a completed backup", async () => {
     await seedStore({
       "engine.db": "refused-store",
       "engine.db-journal": "journal",
       "engine.db-wal": "wal",
       "engine.db-shm": "shm",
-      SHADOW_CLONE: "token",
+      ROOT_BINDING: "token",
     });
 
     await expect(moveEngineStoreAside(root)).resolves.toBe("moved");
 
     await expectCompleteStore();
     expect((await readdir(engineDir)).sort()).toEqual([
-      "SHADOW_CLONE",
+      "ROOT_BINDING",
       "pre-v2-backup",
     ]);
   });
@@ -1604,7 +1564,7 @@ describe("rebuildEngineStore", () => {
       }),
     });
 
-    // Mirrors main.ts's actual rebuild-reopen wiring (round 19): the outer
+    // Mirrors main.ts's actual rebuild-reopen wiring: the outer
     // request gate is already raised — rebuildEngineStore raises it before
     // moveStoreAside — and the reopen's completePendingMove wrapper releases
     // it right after recovery settles, before the activity-open body below

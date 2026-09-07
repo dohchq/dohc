@@ -8,11 +8,11 @@ import type {
 } from "@dohc/workspace-contracts/relay";
 import {
   VERSIONED_METHOD,
-  VersionedLoopbackEngine,
   type JsonValue,
   type Request as EngineRequest,
   type Response as EngineResponse,
 } from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import {
   EngineRequestError,
   EngineWorkspaceSessions,
@@ -43,22 +43,22 @@ import {
 // `src/testing/` is already the desktop home for cross-suite test helpers.
 //
 // What is real here and what is not:
-//  - REAL: the versioned file state. Ops replay through VersionedLoopbackEngine
+//  - Real: the versioned file state. Ops replay through VersionedLoopbackEngine
 //    as ordinary `versionedText.write` / `versionedText.delete` calls, and
 //    `versionedText.list` answers with true sha256 and contentKind. That is
 //    what shared-view reconciliation compares disk against, so the repair
 //    tests exercise real state rather than a canned answer.
-//  - REAL: the relay HTTP conversation. The log is paged, blobs are fetched by
+//  - Real: the relay HTTP conversation. The log is paged, blobs are fetched by
 //    sha256 and hash-verified, and the bearer token comes from what
 //    `workspace.open` was told — so a wrong token or a revoked share reaches
 //    the same 401 / 404 translation the daemon produces.
-//  - NOT REAL: the grant. This double serves whatever the relay double put in
+//  - Not real: the grant. This double serves whatever the relay double put in
 //    the log; it does not re-check `grantedSelector`. Containment is the Rust
 //    share boundary's job (`crates/dohc-engine-sync/src/share.rs`) and is
 //    tested there. Do not read a passing test here as proof a scope holds.
 //    For the same reason its pull answers with NO refusals: it refuses
 //    nothing, because it checks nothing.
-//  - NOT REAL: durability. Cursors and file state live in this object, so they
+//  - Not real: durability. Cursors and file state live in this object, so they
 //    survive a `workspace.close` (as the daemon's SQLite would) but not the
 //    process. Anything that must be proven ON DISK needs a real daemon.
 
@@ -431,7 +431,7 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
       hasMore: page.hasMore,
       nextCursor: page.nextCursor,
       changedPaths: [...changed.values()],
-      // Opaque to the caller, and the ONLY way the cursor above advances.
+      // Opaque to the caller, and the only way the cursor above advances.
       pendingCursor: { kind: "shareView", token: String(page.nextCursor) },
     };
   }
@@ -497,7 +497,7 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
     if (response.status === 401) {
       throw this.refuse(request, "AUTH_FAILED", "relay rejected the token");
     }
-    // The relay answers EVERY recipient denial — revoked, not yours, never
+    // The relay answers every recipient denial — revoked, not yours, never
     // existed — with one generic 404, and the daemon reports them all as an
     // unavailable share.
     if (response.status === 404) {

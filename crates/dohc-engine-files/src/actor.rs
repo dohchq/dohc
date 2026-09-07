@@ -3,12 +3,12 @@
 //! command loop — the same actor model CAL-2 established for the storage writer
 //! (`crates/dohc-engine-runtime/src/actor.rs`).
 //!
-//! The scan/hash/reconcile work is blocking; it stays on ONE dedicated thread
-//! (`std::thread`), never on the async runtime (`PORTING.md` §14). Commands flow
+//! The scan/hash/reconcile work is blocking; it stays on one dedicated thread
+//! (`std::thread`), never on the async runtime. Commands flow
 //! over a bounded [`tokio::sync::mpsc`] channel; the worker consumes them with
 //! [`blocking_recv`](tokio::sync::mpsc::Receiver::blocking_recv). Replies come
 //! back on [`tokio::sync::oneshot`] channels. Cancellation
-//! ([`CancellationToken`]) is checked BETWEEN bounded units inside the scan,
+//! ([`CancellationToken`]) is checked between bounded units inside the scan,
 //! never mid-file. Lifecycle is explicit — `opening → ready → draining →
 //! closed` — and `Drop` joins the worker (no detached thread, deterministic
 //! release), tearing the hash pool down with it.
@@ -77,7 +77,7 @@ pub struct FilesStats {
     /// Paths parked by the degraded-rescan quarantine. NON-EMPTY means the
     /// controller has stopped self-forcing scans for persistently failing
     /// paths — `reconcile_if_dirty` can return `Converged` while capture has
-    /// NOT recovered, so a health consumer must not read converged-with-
+    /// not recovered, so a health consumer must not read converged-with-
     /// quarantine as clean.
     pub quarantined: usize,
 }
@@ -113,7 +113,7 @@ pub struct FilesActor {
     close_permit: Option<OwnedPermit<Command>>,
     state: Arc<AtomicU8>,
     /// A sticky watcher-overflow flag, set by [`FilesHandle::notify_overflow`]
-    /// INDEPENDENT of the command channel so a dirty mark can NEVER be lost to
+    /// independent of the command channel so a dirty mark can never be lost to
     /// backpressure. The worker folds it into the controller at the top of each
     /// command, before any dirty-clearing capture acknowledgement runs.
     pending_overflow: Arc<AtomicBool>,
@@ -125,7 +125,7 @@ impl FilesActor {
     /// bounded hash pool). Blocks until startup completes so a pool-spawn or
     /// bad-root failure propagates synchronously.
     ///
-    /// **Must be called OFF the async runtime** (it blocks on a startup
+    /// **Must be called off the async runtime** (it blocks on a startup
     /// handshake). From within a tokio runtime use [`FilesActor::spawn_async`],
     /// which offloads the blocking startup to a dedicated thread. A debug
     /// assertion catches on-runtime misuse (CAL-2 parity with the runtime
@@ -142,7 +142,7 @@ impl FilesActor {
     /// [`ReconcileController::rehydrated`] for why this still forces a full
     /// reconcile before anything is trusted.
     ///
-    /// **Must be called OFF the async runtime** — see [`FilesActor::spawn`].
+    /// **Must be called off the async runtime** — see [`FilesActor::spawn`].
     pub fn spawn_with_manifest(
         root: PathBuf,
         bounds: ScanBounds,
@@ -195,7 +195,7 @@ impl FilesActor {
         }
     }
 
-    /// Spawn from WITHIN a tokio runtime: the blocking startup handshake runs on
+    /// Spawn from within a tokio runtime: the blocking startup handshake runs on
     /// a dedicated OS thread (off the runtime) and the result is awaited, so no
     /// runtime worker is blocked and [`FilesActor::spawn`]'s off-runtime guard
     /// is respected.
@@ -315,8 +315,8 @@ impl FilesHandle {
     }
 
     /// Notify the actor of a watcher overflow — the injected event source hook.
-    /// Sets a sticky dirty flag INDEPENDENT of the command channel, so the mark
-    /// can NEVER be lost to backpressure (unlike a `try_send`, which drops on a
+    /// Sets a sticky dirty flag independent of the command channel, so the mark
+    /// can never be lost to backpressure (unlike a `try_send`, which drops on a
     /// full queue). The worker folds the flag into the controller at the top of
     /// each command, before any dirty-clearing capture acknowledgement, so the forced full
     /// rescan is guaranteed. Infallible and non-blocking.
@@ -412,7 +412,7 @@ fn worker_main(
     pending_overflow: Arc<AtomicBool>,
     startup_tx: std::sync::mpsc::SyncSender<Result<(), FilesError>>,
 ) {
-    // Publish Closed on ANY exit (declared before the scanner so the scanner —
+    // Publish Closed on any exit (declared before the scanner so the scanner —
     // and its hash pool — drops first, then this guard publishes Closed).
     struct ClosedGuard(Arc<AtomicU8>);
     impl Drop for ClosedGuard {
@@ -442,11 +442,11 @@ fn worker_main(
     drop(startup_tx);
 
     while let Some(cmd) = rx.blocking_recv() {
-        // Fold any sticky watcher-overflow signal into the controller BEFORE
+        // Fold any sticky watcher-overflow signal into the controller before
         // handling this command, so a dirty mark set during the previous
         // (possibly long) command is never lost — and, critically, is applied
-        // before any dirty-clearing capture acknowledgement in THIS command runs. An overflow
-        // that arrives DURING a reconcile's scan re-sets the flag and is folded
+        // before any dirty-clearing capture acknowledgement in this command runs. An overflow
+        // that arrives during a reconcile's scan re-sets the flag and is folded
         // at the next command, so a change is never dropped.
         if pending_overflow.swap(false, Ordering::AcqRel) {
             controller.mark_dirty();

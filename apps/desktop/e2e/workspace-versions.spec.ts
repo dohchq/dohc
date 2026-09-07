@@ -7,11 +7,10 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   openWorkspaceFromFirstRun,
-  seedWorkspaceSettings,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// PR 0M-4 — THE WEDGE DEMO AS A TEST. A user creates a named version, edits
+// THE WEDGE DEMO AS A TEST. A user creates a named version, edits
 // in it, switches between versions (disk content swaps), compares, and merges
 // back into Main — all through the product UI, zero git vocabulary. Engine
 // assertions read the persisted engine.db directly (WAL mode makes a
@@ -85,7 +84,7 @@ function engineSnapshotBytes(
         // A binary head keeps its content address in binary_sha256, and
         // blob_sha256 is NULL for it, so the join has to use that column. The
         // previous query also selected `bb.content`, which binary_blobs does
-        // not have: every call THREW, so this spec was red, not weak.
+        // not have: every call threw, so this spec was red, not weak.
         `SELECT bb.bytes AS bytes
          FROM snapshots s JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256
          WHERE s.version_id = ? AND s.path = ?`,
@@ -146,16 +145,13 @@ test("the wedge: create a version, edit in it, switch, and merge back to Main", 
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await writeWorkspaceFiles(temp, [{ path: "plan.md", contents: "v1 text\n" }]);
 
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // The selector shows Main by default for a flagged workspace.
+    // The selector shows Main by default.
     await expectActiveVersion(page, "Main");
 
     // 1. Create "Draft" through the UI — it becomes the working version.
@@ -225,9 +221,6 @@ test("conflicting edits surface a calm conflict panel and keep-this-side resolve
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await writeWorkspaceFiles(temp, [
       { path: "notes.md", contents: "base line\n" },
     ]);
@@ -259,7 +252,7 @@ test("conflicting edits surface a calm conflict panel and keep-this-side resolve
       )
       .toBe("feature side\n");
 
-    // ...then change the SAME file differently on Main.
+    // ...then change the same file differently on Main.
     await switchVersionViaMenu(page, "Main");
     await writeWorkspaceFiles(temp, [
       { path: "notes.md", contents: "main side\n" },
@@ -314,9 +307,6 @@ test("binary assets switch byte-exactly and binary conflicts resolve by side", a
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     const mainBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
     const draftBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0x02]);
     const mainConflictBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xaa]);
@@ -387,7 +377,7 @@ test("binary assets switch byte-exactly and binary conflicts resolve by side", a
       .poll(() => readWorkspaceBytes(temp.rootPath, "logo.png"), { timeout: 20_000 })
       .toEqual(draftConflictBytes);
 
-    // Second round resolves the OTHER way — "keep mine" must keep Main's
+    // Second round resolves the other way — "keep mine" must keep Main's
     // bytes, guarding against both buttons being wired to the same side.
     const mainKeepBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xcc, 0x01]);
     const draftKeepBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xdd, 0x02]);
@@ -426,63 +416,6 @@ test("binary assets switch byte-exactly and binary conflicts resolve by side", a
     await expect
       .poll(() => readWorkspaceBytes(temp.rootPath, "logo.png"), { timeout: 20_000 })
       .toEqual(mainKeepBytes);
-  } finally {
-    await cleanupDesktopWorkspace(desktop, temp);
-  }
-});
-
-// WS-H1 flag flip: versions are on by default; only an explicit opt-out
-// hides the surface (and gates the IPC in main).
-test("an explicitly opted-out workspace never shows the versions surface", async () => {
-  const temp = await createTempWorkspace();
-  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
-
-  try {
-    await writeWorkspaceFiles(temp, [{ path: "plain.md", contents: "hello\n" }]);
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: false },
-    });
-    desktop = await launchDesktopApp({ workspace: temp });
-    const page = desktop.page;
-    const workspace = await openWorkspaceFromFirstRun(page, temp);
-
-    await expect(page.getByTestId("workspace-shell")).toBeVisible();
-    await expect(page.getByTestId("version-menu-button")).toHaveCount(0);
-
-    // The IPC surface is gated in main, not just hidden in the renderer.
-    const rejection = await page.evaluate(async (workspaceId) => {
-      const api = (window as unknown as {
-        dohcDesktop: {
-          listWorkspaceVersions(payload: { workspaceId: string }): Promise<unknown>;
-        };
-      }).dohcDesktop;
-      try {
-        await api.listWorkspaceVersions({ workspaceId });
-        return null;
-      } catch (error) {
-        return error instanceof Error ? error.message : String(error);
-      }
-    }, workspace.workspaceId);
-    expect(rejection).toContain("Versions are not enabled");
-
-    // PR 0N-2: the try-in-version gesture is gated by the same flag.
-    const tryRejection = await page.evaluate(async (workspaceId) => {
-      const api = (window as unknown as {
-        dohcDesktop: {
-          tryInWorkspaceVersion(payload: {
-            workspaceId: string;
-            task: string;
-          }): Promise<unknown>;
-        };
-      }).dohcDesktop;
-      try {
-        await api.tryInWorkspaceVersion({ workspaceId, task: "tidy notes" });
-        return null;
-      } catch (error) {
-        return error instanceof Error ? error.message : String(error);
-      }
-    }, workspace.workspaceId);
-    expect(tryRejection).toContain("Versions are not enabled");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

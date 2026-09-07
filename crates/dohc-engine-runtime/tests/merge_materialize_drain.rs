@@ -1,20 +1,13 @@
 use dohc_engine_domain::{CreateNamedVersion, MergeTextFileFromVersion, WriteBinary, WriteText};
 use dohc_engine_runtime::{
     CancellationToken, MergeTextFileResult, NoFaults, PostCommitMaterializeOutcome,
-    SelfWriteRecorder, WorkspaceSupervisor,
+    WorkspaceSupervisor,
 };
 use dohc_engine_storage::FaultPoint;
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::sync::Arc;
 
 const WORKSPACE: &str = "ws-merge-materialize-drain";
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 fn write(version_id: &str, text: &str, moment_id: &str, object_id: &str) -> WriteText {
     WriteText {
@@ -33,16 +26,14 @@ fn write(version_id: &str, text: &str, moment_id: &str, object_id: &str) -> Writ
     }
 }
 
-/// A fast-forwarded BINARY head must reach the folder in the same call. Its
+/// A fast-forwarded binary head must reach the folder in the same call. Its
 /// materialization job shares the moment's id (the generation-sharing contract
 /// for a binary write), where the text seams prefix theirs.
 ///
-/// MUTATION: look the job up under the text seam's `merge-mat_` prefix -> the
-/// merge reports `Error`, materializes nothing, and logo.png never lands.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_binary_fast_forward_drains_its_materialization_before_rpc_return() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor
@@ -95,7 +86,7 @@ async fn a_binary_fast_forward_drains_its_materialization_before_rpc_return() {
                 request_id: None,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -120,7 +111,7 @@ async fn a_binary_fast_forward_drains_its_materialization_before_rpc_return() {
                 now_ms: 30,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -146,10 +137,8 @@ async fn a_binary_fast_forward_drains_its_materialization_before_rpc_return() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn active_merge_drains_materialization_before_rpc_return_even_when_completion_faults() {
-    // MUTATION: return the committed merge without draining merge-mat_ -> the
-    // injected materializer fault never fires and active.md remains "base".
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor
@@ -219,7 +208,7 @@ async fn active_merge_drains_materialization_before_rpc_return_even_when_complet
         .versioned_text_merge(
             merge.clone(),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
         )
@@ -246,7 +235,7 @@ async fn active_merge_drains_materialization_before_rpc_return_even_when_complet
         .versioned_text_merge(
             merge,
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )

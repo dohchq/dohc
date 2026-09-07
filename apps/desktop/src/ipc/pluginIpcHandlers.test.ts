@@ -4,6 +4,7 @@ import { registerPluginIpcHandlers } from "./pluginIpcHandlers";
 import type { PluginPipeline } from "../plugins/PluginPipeline";
 import type { RegisteredPlugin } from "../plugins/pluginPanelRegistration";
 
+import { deferred } from "../testing/deferred";
 const directOperations = vi.hoisted(() => ({
   addOffer: vi.fn(),
   listOffers: vi.fn(),
@@ -166,7 +167,7 @@ const validPayloads: Record<string, unknown> = {
   [CHANNELS.listOfferedPlugins]: { workspaceId: "workspace-1" },
   [CHANNELS.addOfferedPlugin]: {
     workspaceId: "workspace-1",
-    directoryName: "codex",
+    directoryName: "agent-chat",
   },
   [CHANNELS.installPlugin]: baseActionPayload,
   [CHANNELS.disablePlugin]: baseActionPayload,
@@ -196,14 +197,6 @@ const validPayloads: Record<string, unknown> = {
     confirmationToken: "00000000-0000-4000-8000-000000000000",
   },
 };
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
 
 function createHarness(options: { afterWorkspaceWork?: () => void } = {}) {
   const log: string[] = [];
@@ -530,7 +523,7 @@ beforeEach(() => {
   });
   directOperations.listOffers.mockReset().mockResolvedValue([]);
   directOperations.readBuiltinOfferManifest.mockReset().mockImplementation(
-    async (directoryName: "codex" | "claude-code") => ({
+    async (directoryName: "agent-chat") => ({
       directoryName,
       pluginId: directoryName,
       displayName: directoryName,
@@ -552,9 +545,9 @@ describe("plugin IPC handlers", () => {
         _builtinRoot: string,
         _workspaceRoot: string,
         _existingPluginIds: ReadonlySet<string>,
-        readBuiltinManifest: (directoryName: "codex") => Promise<unknown>,
+        readBuiltinManifest: (directoryName: "agent-chat") => Promise<unknown>,
       ) => {
-        await readBuiltinManifest("codex");
+        await readBuiltinManifest("agent-chat");
         return [];
       },
     );

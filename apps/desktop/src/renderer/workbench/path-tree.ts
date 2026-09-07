@@ -9,7 +9,7 @@ import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 
 export type FileRow = WorkspaceFileEntry;
 
-// Explicit folder paths keep EMPTY folders visible in the tree — exactly why
+// Explicit folder paths keep empty folders visible in the tree — exactly why
 // listWorkspaceFiles returns a folders array beside files.
 export type FolderInput = string;
 
@@ -30,11 +30,6 @@ type BuilderTreeNode = {
 // The last path segment — the name a tree row displays. Lives beside the tree
 // model (rather than inline in the explorer) so row-render tests can spy it as
 // their render-count probe (the chatFileMentions precedent).
-export function leafOf(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash < 0 ? path : path.slice(slash + 1);
-}
-
 // Build a tree from files + explicit folder rows. Obsidian-style: folders are
 // first-class containers (can sit empty), files are leaves at their full path.
 export function buildTree(
@@ -80,7 +75,7 @@ function ensurePathNode(root: BuilderTreeNode, path: string): BuilderTreeNode {
 
 // Sort order: folders before leaves (Obsidian/VS Code convention), ties
 // broken alphabetically (locale-aware). A folder is `file === null` — an
-// EMPTY listed folder still sorts as a folder, never as a leaf.
+// empty listed folder still sorts as a folder, never as a leaf.
 function materializeTree(node: BuilderTreeNode): TreeNode {
   const children = [...node.childrenBySegment.values()].map(materializeTree);
   children.sort((a, b) => {

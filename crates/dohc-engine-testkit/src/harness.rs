@@ -1,40 +1,14 @@
-//! The in-process crash/restart harness.
-//!
-//! A "crash" is simulated by arming a single-shot fault at a named storage
-//! point, driving one compound write, and then **dropping the store** — the
-//! Rust equivalent of the writer process dying with its connection closed.
-//! "Restart" is a fresh [`EngineStore::open`] on the same path. Durability and
-//! atomicity are proven by what the reopened store contains, never by trusting
-//! the in-process outcome flag.
+//! Adversarial database builders and WAL helpers for the crash tier. A crash
+//! is simulated by arming a single-shot fault at a named storage point and then
+//! dropping the store; "restart" is a fresh `EngineStore::open` on the same
+//! path. Durability is proven by what the reopened store contains.
 
-use crate::faults::ScriptedFaults;
-use dohc_engine_storage::{CompoundWrite, EngineStore, FaultPoint, StorageError, WriteOutcome};
 use rusqlite::Connection;
 use std::path::Path;
 
 /// Error type for the adversarial-fixture builders (they mix filesystem and
 /// raw-SQLite failures; neither is a storage-domain error).
 pub type FixtureResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
-
-/// Open a store, arm a one-shot crash at `point`, run one compound `write`,
-/// then drop the store (the simulated crash). Returns the observed outcome so
-/// the caller can assert whether the crash landed before or after commit.
-///
-/// The store handle is released before this returns, so a subsequent
-/// [`EngineStore::open`] on the same path is a clean restart.
-pub fn crash_during_write(
-    db_path: &Path,
-    now_ms: i64,
-    point: FaultPoint,
-    write: &CompoundWrite,
-) -> Result<WriteOutcome, StorageError> {
-    let mut store = EngineStore::open(db_path, now_ms)?;
-    let faults = ScriptedFaults::crash_at(point);
-    let outcome = store.commit_compound(write, faults.as_ref())?;
-    // Simulate process death: the writer connection is closed here.
-    drop(store);
-    Ok(outcome)
-}
 
 /// Materialize an adversarial database stamped with a foreign schema version
 /// (default: the v1 TS fingerprint) and one table, so the fingerprint fence
@@ -66,16 +40,15 @@ pub fn write_foreign_unversioned_db(db_path: &Path) -> FixtureResult {
 }
 
 /// Open a read-only connection that keeps the WAL alive: while it is held, a
-/// writer's close is NOT the last connection, so SQLite does not checkpoint on
+/// writer's close is not the last connection, so SQLite does not checkpoint on
 /// that close. This lets a test read the WAL itself, or prove data is
 /// recoverable *from* it, before a checkpoint folds it into the main file.
 ///
 /// Opening alone is not enough — a connection that has never queried holds no
 /// lock, and the close checkpoints anyway. So this also opens a read
-/// transaction and takes a snapshot. That was originally left to each caller
-/// and one caller got it wrong, scanning a WAL that had already been deleted.
+/// transaction and takes a snapshot.
 ///
-/// Call this AFTER the writer has committed: a read-only connection cannot
+/// Call this after the writer has committed: a read-only connection cannot
 /// create the `-shm` file a WAL database needs, so it must find one already
 /// there. Then drop the writer while this is held.
 pub fn open_readonly_keeper(db_path: &Path) -> rusqlite::Result<Connection> {
@@ -101,15 +74,4 @@ fn sidecar(db_path: &Path, suffix: &str) -> std::path::PathBuf {
     let mut os = db_path.as_os_str().to_owned();
     os.push(suffix);
     std::path::PathBuf::from(os)
-}
-
-/// Convenience: build a compound write with distinct request/doc identifiers.
-pub fn sample_write(request_id: &str, doc_id: &str, body: &str, now_ms: i64) -> CompoundWrite {
-    CompoundWrite {
-        request_id: request_id.to_owned(),
-        doc_id: doc_id.to_owned(),
-        body: body.to_owned(),
-        op_kind: "text.write".to_owned(),
-        now_ms,
-    }
 }

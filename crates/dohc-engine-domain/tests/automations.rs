@@ -12,13 +12,13 @@ use dohc_engine_domain::{
     subscribe_automation, unsubscribe_automation,
 };
 use dohc_engine_storage::EngineStore;
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 const WS: &str = "ws-automations";
 const NO_FAULTS: NoFaults = NoFaults;
 
 fn open_store(scratch: &ScratchDir) -> EngineStore {
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(scratch).expect("engine db path");
     EngineStore::open(&db, 1).expect("open store")
 }
 
@@ -487,7 +487,7 @@ fn the_reaper_requeues_with_attempts_left_and_exhausts_without() {
         })
         .expect("exhaust the second claim's attempts");
 
-    let reclaimed = reclaim_running_automations(&mut store, WS, 2, 30, 100, &NO_FAULTS)
+    let reclaimed = reclaim_running_automations(&mut store, WS, None, 2, 30, 100, &NO_FAULTS)
         .expect("reclaim running");
     assert_eq!(reclaimed.len(), 2, "only stale running claims transition");
     let requeued = reclaimed
@@ -513,7 +513,7 @@ fn the_reaper_requeues_with_attempts_left_and_exhausts_without() {
         .expect("claim next")
         .expect("requeued or untouched pending");
     assert!(
-        reclaim_running_automations(&mut store, WS, 2, 150, 210, &NO_FAULTS)
+        reclaim_running_automations(&mut store, WS, None, 2, 150, 210, &NO_FAULTS)
             .expect("reclaim again")
             .is_empty(),
         "a claim running since t=200 is younger than the bound and is left alone: {fresh:?}"

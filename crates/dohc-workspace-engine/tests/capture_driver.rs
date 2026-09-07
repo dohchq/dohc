@@ -1,39 +1,30 @@
-//! Files-into-daemon composition acceptance: once a shadow-bound workspace is
+//! Files-into-daemon composition acceptance: once a root-bound workspace is
 //! open, the watcher + reconcile driver notice EXTERNAL disk changes and
 //! record them autonomously — no RPC involved — across text, binary, and
 //! secret content; policy flips re-offer; teardown is clean and ordered.
 
+mod common;
+
+use common::*;
 use dohc_engine_protocol::{
     ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
-use dohc_engine_storage::EngineStore;
+use dohc_engine_storage::{EngineStore, NoFaults};
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{
     CAPTURE_MOMENT_RECORDED_EVENT, CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES,
-    EngineEventNotice, EngineService, shadow_fence::write_shadow_marker_for_harness,
+    EngineEventNotice, EngineService, root_binding::write_root_binding,
 };
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const WORKSPACE_ID: &str = "ws-capture-driver";
 /// Generous: watcher settle + the 500ms drive interval + scan/hash time.
 const WAIT: Duration = Duration::from_secs(20);
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
 
 async fn open_workspace(
     transport: &InProcessTransport<EngineService>,
@@ -102,7 +93,7 @@ async fn read_text(
             ),
         )
         .await;
-    // Before the FIRST capture lands, the main version does not exist yet and
+    // Before the first capture lands, the main version does not exist yet and
     // the read errors — that is simply "not captured yet" for the poll.
     let Ok(response) = response else {
         return None;
@@ -138,25 +129,17 @@ async fn wait_for_text(
     }
 }
 
-fn write_file(root: &Path, path: &str, bytes: &[u8]) {
-    let absolute = root.join(path);
-    if let Some(parent) = absolute.parent() {
-        std::fs::create_dir_all(parent).expect("create parent");
-    }
-    std::fs::write(absolute, bytes).expect("write file");
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workspace_open_without_startup_maintenance_does_not_capture_disk() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db_path = scratch.path().join(".dohc/engine/engine.db");
     std::fs::create_dir_all(db_path.parent().expect("engine parent")).expect("engine directory");
     let mut store = EngineStore::open(&db_path, 1).expect("fixture store");
     assert!(
         store
-            .bind_shadow_clone_token(TOKEN)
-            .expect("bind shadow token")
+            .bind_root_token(TOKEN, &NoFaults)
+            .expect("bind root token")
     );
     drop(store);
     write_file(scratch.path(), "must-stay-on-disk.md", b"typescript-owned");
@@ -209,7 +192,7 @@ async fn workspace_open_without_startup_maintenance_does_not_capture_disk() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn autonomous_capture_notices_external_disk_changes() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     // Pre-existing content: the startup baseline scan must capture it.
     write_file(scratch.path(), "pre-existing.md", b"before open");
 
@@ -218,7 +201,7 @@ async fn autonomous_capture_notices_external_disk_changes() {
 
     wait_for_text(&transport, &handle, "pre-existing.md", Some("before open")).await;
 
-    // A file created AFTER open, with no RPC: the watcher must drive it in.
+    // A file created after open, with no RPC: the watcher must drive it in.
     write_file(scratch.path(), "notes/external.md", b"external edit");
     wait_for_text(
         &transport,
@@ -246,7 +229,7 @@ async fn autonomous_capture_notices_external_disk_changes() {
 }
 
 /// Drain `capture.momentRecorded` events until one carries `path`, panicking
-/// past the shared WAIT deadline.
+/// past the shared wait deadline.
 async fn wait_for_moment_event(
     events: &mut tokio::sync::mpsc::Receiver<EngineEventNotice>,
     path: &str,
@@ -270,7 +253,7 @@ async fn wait_for_moment_event(
 }
 
 /// (metadataSummary, metadataCorrelationId) of the latest moment for `path`,
-/// read AFTER workspace close through a fresh store connection.
+/// read after workspace close through a fresh store connection.
 fn moment_metadata(db: &Path, path: &str) -> (Option<String>, Option<String>) {
     let store = EngineStore::open(db, 100).expect("reopen store");
     store
@@ -287,12 +270,9 @@ fn moment_metadata(db: &Path, path: &str) -> (Option<String>, Option<String>) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_startup_baseline_stamps_reconcile_provenance_and_emits_one_event() {
-    // The D1/D2 acceptance pair. MUTATION: reverting the sink provenance
-    // plumb-through leaves both summaries NULL; reverting start_layer's
-    // shared provenance splits the correlation ids; deleting the apply-path
-    // emit leaves the event wait to time out.
+    // The D1/D2 acceptance pair.
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "offline-a.md", b"edited while closed a");
     write_file(scratch.path(), "offline-b.md", b"edited while closed b");
 
@@ -315,7 +295,7 @@ async fn the_startup_baseline_stamps_reconcile_provenance_and_emits_one_event() 
     )
     .await;
 
-    // ONE batched event per settled reconcile pass covers both files.
+    // One batched event per settled reconcile pass covers both files.
     let notice = wait_for_moment_event(&mut events, "offline-a.md").await;
     let paths = notice.payload["paths"].as_array().expect("paths").clone();
     if !paths.iter().any(|entry| entry == "offline-b.md") {
@@ -342,9 +322,9 @@ async fn the_startup_baseline_stamps_reconcile_provenance_and_emits_one_event() 
         "one reconcile pass = ONE correlation id across its per-file moments"
     );
 
-    // Second offline window: an EDIT and a DELETE reconcile in the same pass
-    // and must stay ONE contiguous history group — history groups only
-    // CONSECUTIVE same-correlation moments, so the delete carrying NULL
+    // Second offline window: an edit and a DELETE reconcile in the same pass
+    // and must stay one contiguous history group — history groups only
+    // consecutive same-correlation moments, so the delete carrying NULL
     // provenance would split it.
     write_file(scratch.path(), "offline-a.md", b"edited offline again");
     std::fs::remove_file(scratch.path().join("offline-b.md")).expect("offline delete");
@@ -385,12 +365,12 @@ async fn the_startup_baseline_stamps_reconcile_provenance_and_emits_one_event() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_live_capture_emits_an_event_and_keeps_ts_live_labels() {
     // D2 for the watcher path: with no TS write in the loop, this event is
-    // the ONLY signal that tells the renderer a moment landed. D1 (TS
+    // the only signal that tells the renderer a moment landed. D1 (TS
     // parity): a live TEXT capture carries NO summary — the renderer's copy
-    // for null is "Edited <basename>" — while a live BINARY capture carries
+    // for null is "Edited <basename>" — while a live binary capture carries
     // "Updated <basename>". Neither mints a correlation id.
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
 
     let service = Arc::new(EngineService::new());
     let mut events = service.events().subscribe();
@@ -425,7 +405,7 @@ async fn a_live_capture_emits_an_event_and_keeps_ts_live_labels() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn open_capture_author_stamps_the_startup_baseline() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "during-restart.md", b"closed-period edit");
     let author = json!({
         "kind": "agent",
@@ -480,22 +460,24 @@ async fn open_capture_author_stamps_the_startup_baseline() {
     )
     .expect("valid author json");
 
-    // MUTATION: initializing CaptureDriver with None makes this actor-neutral.
-    assert_eq!(captured_author, author);
+    assert_eq!(
+        captured_author, author,
+        "initializing CaptureDriver with None makes this actor-neutral."
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn policy_flip_on_unchanged_files_retires_and_rewidens() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "private/journal.md", b"personal");
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1).await;
     wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
 
-    // Narrow WITHOUT touching the file: the policy fingerprint must trigger a
-    // full re-offer and the unchanged path retires (the #205 obligation).
+    // Narrow without touching the file: the policy fingerprint must trigger a
+    // full re-offer and the unchanged path retires (the obligation).
     write_file(
         scratch.path(),
         ".dohc/files.toml",
@@ -518,14 +500,12 @@ async fn policy_flip_on_unchanged_files_retires_and_rewidens() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_policy_retire_pass_emits_a_moment_event() {
-    // codex round-1 P2: a policy narrow retires an existing head through an
-    // ingest that settles NotOwned — the "Stopped tracking by policy" delete
-    // moment is real, but gating the event on applied_paths alone left the
-    // renderer permanently stale for exactly those moments. MUTATION:
-    // reverting the emit gate to applied_paths-only makes the event wait
-    // below time out.
+    // A policy narrow retires an existing head through an ingest that settles
+    // NotOwned. The "Stopped tracking by policy" delete moment is real, so
+    // gating the event on applied_paths alone would leave the renderer stale
+    // for exactly those moments.
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "private/journal.md", b"personal");
 
     let service = Arc::new(EngineService::new());
@@ -537,7 +517,7 @@ async fn a_policy_retire_pass_emits_a_moment_event() {
     // only be satisfied by the policy pass.
     while events.try_recv().is_ok() {}
 
-    // Narrow WITHOUT touching the file: the policy rebuild re-offers the
+    // Narrow without touching the file: the policy rebuild re-offers the
     // unchanged path and the sink retires it as NotOwned.
     write_file(
         scratch.path(),
@@ -563,20 +543,17 @@ async fn a_policy_retire_pass_emits_a_moment_event() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_over_cap_policy_retire_keeps_the_pass_provenance_and_emits() {
-    // codex re-review P2s: the retained-over-cap retire runs through its OWN
+    // codex re-review P2s: the retained-over-cap retire runs through its own
     // sink and reports via not_owned_paths. With default provenance its
     // delete moment carried a NULL correlation id (splitting the reconcile
     // pass's history group), and gating the event on applied_paths
     // suppressed the announce entirely. Narrow-while-closed makes the
-    // sequencing deterministic: the reopen BASELINE (which carries the
+    // sequencing deterministic: the reopen baseline (which carries the
     // reconcile pass provenance) is the first pass to see the narrow, and
     // the over-cap path never emits a diff op, so the retained loop is the
-    // only route that can retire it. MUTATION: reverting the retained-loop
-    // sink to CaptureProvenance::default() fails the correlation assertion;
-    // reverting the event gate to applied_paths-only times out the event
-    // wait (the baseline's only work is this not-owned retire).
+    // only route that can retire it.
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "big.md", b"small enough to capture");
 
     let service = Arc::new(EngineService::new());
@@ -597,7 +574,7 @@ async fn an_over_cap_policy_retire_keeps_the_pass_provenance_and_emits() {
         .await
         .expect("close before offline window");
 
-    // Offline: the file grows PAST the 64 MiB scan cap AND the policy
+    // Offline: the file grows past the 64 MiB scan cap and the policy
     // narrows it out of ownership.
     write_file(scratch.path(), "big.md", &vec![0_u8; 65 * 1024 * 1024]);
     write_file(
@@ -639,7 +616,7 @@ tracked = false
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn binary_and_secret_content_capture_autonomously() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "photo.png", &[0x89, 0x50, 0x4e, 0x47]);
     write_file(scratch.path(), ".env", b"TOKEN=alpha");
     write_file(scratch.path(), "witness.md", b"same scan");
@@ -696,7 +673,7 @@ async fn binary_and_secret_content_capture_autonomously() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn immediate_close_after_write_drains_cleanly_and_reopen_converges() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1).await;
@@ -728,7 +705,7 @@ async fn immediate_close_after_write_drains_cleanly_and_reopen_converges() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn files_deleted_while_closed_retire_on_reopen() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(
         scratch.path(),
         "doomed.md",
@@ -753,7 +730,7 @@ async fn files_deleted_while_closed_retire_on_reopen() {
         .await
         .expect("close");
 
-    // Deleted while the daemon is DOWN: only the rehydrated manifest can
+    // Deleted while the daemon is down: only the rehydrated manifest can
     // know this path was captured — an empty baseline would leave the stale
     // head readable forever.
     std::fs::remove_file(scratch.path().join("doomed.md")).expect("offline delete");
@@ -773,7 +750,7 @@ async fn files_deleted_while_closed_retire_on_reopen() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn policy_narrowed_while_closed_retires_on_reopen() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "private/journal.md", b"personal");
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -787,7 +764,7 @@ async fn policy_narrowed_while_closed_retires_on_reopen() {
         .await
         .expect("close");
 
-    // files.toml narrowed while the daemon was DOWN: the policy-aware seed
+    // files.toml narrowed while the daemon was down: the policy-aware seed
     // must re-offer the unchanged path so the sink retires it on reopen.
     write_file(
         scratch.path(),
@@ -809,7 +786,7 @@ async fn policy_narrowed_while_closed_retires_on_reopen() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rpc_written_content_without_a_disk_file_is_never_retired_by_capture() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     // A real captured file anchors the version and proves capture is live.
     write_file(scratch.path(), "on-disk.md", b"captured from disk");
 
@@ -824,7 +801,7 @@ async fn rpc_written_content_without_a_disk_file_is_never_retired_by_capture() {
     .await;
 
     // DB-only content: written by RPC, never materialized to disk. Capture
-    // must NOT claim it — the manifest states what CAPTURE believes is on
+    // must not claim it — the manifest states what CAPTURE believes is on
     // disk, so a path it never captured can never be diffed as removed.
     transport
         .call(
@@ -839,14 +816,14 @@ async fn rpc_written_content_without_a_disk_file_is_never_retired_by_capture() {
                     "path": "rpc-only.md",
                     "text": "written by RPC",
                     "momentId": "moment-rpc",
-                    "metadataOrigin": "api",
+                    "origin": "api",
                 }),
             ),
         )
         .await
         .expect("rpc write");
 
-    // PROVE capture is live rather than merely sleeping: mutate the on-disk
+    // Prove capture is live rather than merely sleeping: mutate the on-disk
     // sentinel and wait for the driver to record it. Only then is "rpc-only.md
     // survived" evidence about capture's behavior.
     write_file(scratch.path(), "on-disk.md", b"second capture cycle");
@@ -897,7 +874,7 @@ async fn rpc_written_content_without_a_disk_file_is_never_retired_by_capture() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn offline_delete_and_narrow_in_the_same_window_still_retires() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "private/journal.md", b"personal");
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -911,7 +888,7 @@ async fn offline_delete_and_narrow_in_the_same_window_still_retires() {
         .await
         .expect("close");
 
-    // BOTH in the closed window: the file is deleted AND policy narrows it.
+    // Both in the closed window: the file is deleted and policy narrows it.
     // A seed that dropped narrowed entries would leave this head orphaned —
     // the path appears in neither the scan listing (deleted) nor the
     // manifest (dropped), so nothing could ever emit its Retire.
@@ -941,11 +918,11 @@ async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
     };
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "witness.md", b"anchor");
 
-    // Establish the workspace first (the shadow fence binds the store on
-    // open), then inject the foreign tip — the realistic sequence for an
+    // Establish the workspace first (open binds the store to the root),
+    // then inject the foreign tip — the realistic sequence for an
     // API/replication write into a live workspace.
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1).await;
@@ -958,7 +935,7 @@ async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
         .await
         .expect("close before seeding");
 
-    // A genuinely FOREIGN secret tip (origin "api") whose plaintext
+    // A genuinely foreign secret tip (origin "api") whose plaintext
     // deliberately differs from what will be on disk — capture must neither
     // overwrite nor retire it.
     let db_path = scratch.path().join(".dohc/engine/engine.db");
@@ -986,7 +963,7 @@ async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
             )
             .expect("foreign secret write");
     }
-    // Disk carries DIFFERENT bytes: a claim would show up as a changed tip.
+    // Disk carries different bytes: a claim would show up as a changed tip.
     write_file(scratch.path(), ".env", b"TOKEN=from-disk");
 
     let handle = open_workspace(&transport, &scratch, 3).await;
@@ -995,7 +972,7 @@ async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
     wait_for_text(&transport, &handle, "witness.md", Some("second cycle")).await;
 
     // And the destructive direction: delete the plaintext from disk, which
-    // WOULD drive a retire for a capture-owned tip.
+    // would drive a retire for a capture-owned tip.
     std::fs::remove_file(scratch.path().join(".env")).expect("delete .env");
     write_file(scratch.path(), "witness.md", b"third cycle");
     wait_for_text(&transport, &handle, "witness.md", Some("third cycle")).await;
@@ -1039,7 +1016,7 @@ async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn watcher_status_reports_a_live_driver_and_flush_settles() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "seed.md", b"seeded before open");
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -1091,7 +1068,7 @@ async fn watcher_status_reports_a_live_driver_and_flush_settles() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_small_fresh_workspace_waits_for_its_complete_baseline() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "seed.md", b"small baseline");
 
     let probe = CaptureApplyProbe::default();
@@ -1152,7 +1129,7 @@ async fn a_small_fresh_workspace_waits_for_its_complete_baseline() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_heads() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "same.md", b"same bytes");
     write_file(scratch.path(), "different.md", b"disk bytes");
     write_file(scratch.path(), ".env", b"TOKEN=baseline");
@@ -1208,7 +1185,7 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
 
     for (id, method) in [
         (5, "history.page"),
-        (6, "search.query"),
+        (6, "search.queryPage"),
         (7, "versions.list"),
         (50, "collections.list"),
         (51, "collections.get"),
@@ -1353,7 +1330,7 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
                         "path": path,
                         "text": text,
                         "momentId": moment,
-                        "metadataOrigin": "api"
+                        "origin": "api"
                     }),
                 ),
             )
@@ -1466,7 +1443,7 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stalled_fresh_import_retry_exits_importing_without_detaching_settle() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     for index in 0..EARLY_IMPORT_MIN_ADDED_FILES {
         write_file(
             scratch.path(),
@@ -1589,7 +1566,7 @@ async fn stalled_fresh_import_retry_exits_importing_without_detaching_settle() {
 async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
     for unreadable_policy in [false, true] {
         let scratch = ScratchDir::new().expect("scratch");
-        write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+        write_root_binding(scratch.path(), TOKEN).expect("root binding");
         let probe = CaptureApplyProbe::default();
         let service = Arc::new(EngineService::with_capture_apply_probe_for_harness(
             probe.clone(),
@@ -1760,7 +1737,7 @@ async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn close_cancels_a_paused_fresh_import_and_reopen_converges() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "seed.md", b"survives restart");
     for index in 1..EARLY_IMPORT_MIN_ADDED_FILES {
         write_file(scratch.path(), &format!("bulk/seed-{index:04}.md"), b"seed");
@@ -1798,7 +1775,7 @@ async fn close_cancels_a_paused_fresh_import_and_reopen_converges() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_reconcile_forces_a_full_manifest_rebuild() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "seed.md", b"seeded before open");
 
     let probe = CaptureApplyProbe::default();
@@ -1870,13 +1847,13 @@ async fn capture_reconcile_forces_a_full_manifest_rebuild() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_flush_turns_external_writes_into_read_your_writes() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1).await;
 
     // An external write with no RPC involved. The only nondeterminism left
-    // is the watcher noticing the write (the OS debounce); once it has, ONE
+    // is the watcher noticing the write (the OS debounce); once it has, one
     // settled flush is sufficient — the loop below never needs to sleep for
     // capture itself, which is exactly what the differential harness relies
     // on.
@@ -1921,37 +1898,11 @@ async fn capture_flush_turns_external_writes_into_read_your_writes() {
         .expect("close");
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn e_rpcs_on_a_closed_handle_fail_cleanly_and_unmarked_roots_never_reach_them() {
-    // SHADOW-SCOPE ACCEPTANCE for the E surface. Two properties:
-    //
-    // 1. An UNMARKED root cannot reach watcher.status/capture.flush at all —
-    //    workspace.open refuses at the shadow fence, so no handle ever
-    //    exists and no watcher can have spawned.
+async fn e_rpcs_on_a_closed_handle_fail_cleanly() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let refused = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await;
-    assert!(refused.is_err(), "an unmarked root must not open");
-    assert!(
-        !scratch.path().join(".dohc/engine/engine.db").exists(),
-        "the refused open must leave no engine state behind"
-    );
-
-    // 2. On a CLOSED handle both RPCs fail cleanly (no hang, no panic, no
-    //    stale driver reached).
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    // On a CLOSED handle both RPCs fail cleanly (no hang, no panic, no
+    // stale driver reached).
     let handle = open_workspace(&transport, &scratch, 2).await;
     transport
         .call(
@@ -1980,7 +1931,7 @@ async fn e_rpcs_on_a_closed_handle_fail_cleanly_and_unmarked_roots_never_reach_t
 /// passes the controller stops self-forcing rescans, so "nothing dirty"
 /// coexists with "capture has not recovered" — and reading that as settled
 /// would launder live failures into a clean differential baseline. This
-/// drives the REAL daemon path end to end; the unreadable file is a
+/// drives the real daemon path end to end; the unreadable file is a
 /// genuinely share-locked handle (there is deliberately no fault-injection
 /// seam at the daemon level), which is why the test is Windows-only.
 #[cfg(windows)]
@@ -1990,13 +1941,13 @@ async fn a_quarantined_path_keeps_capture_flush_unsettled() {
     use std::os::windows::fs::OpenOptionsExt as _;
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "healthy.md", b"captured fine");
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1).await;
 
-    // The baseline must settle first, so the locked file below is the ONLY
+    // The baseline must settle first, so the locked file below is the only
     // unclean thing in the workspace when the assertions run.
     let deadline = std::time::Instant::now() + WAIT;
     let mut id = 2_u64;
@@ -2060,7 +2011,7 @@ async fn a_quarantined_path_keeps_capture_flush_unsettled() {
     // quarantine parks the path after DEGRADED_RESCAN_BACKOFF identical
     // degraded passes — so by these flushes the controller has stopped
     // self-forcing rescans and the workspace is "converged" over a live
-    // failure. WITHOUT the converged-with-quarantine guard these would
+    // failure. Without the converged-with-quarantine guard these would
     // flip to settled:true.
     for _ in 0..3 {
         let flush = transport

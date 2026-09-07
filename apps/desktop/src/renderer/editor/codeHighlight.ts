@@ -1,3 +1,4 @@
+import { isCodeBlockNode, normalizeLanguage } from "./pmHelpers";
 // Syntax highlighting inside WYSIWYG code blocks — a ProseMirror decoration
 // plugin, deliberately not a schema/nodeView change. The `codeBlock` schema
 // is contract-locked across the desktop and workspace-api packages (see
@@ -70,7 +71,7 @@ type HastNode = {
   children?: HastNode[]
 }
 
-export type HighlightSpan = { start: number; end: number; className: string }
+type HighlightSpan = { start: number; end: number; className: string }
 
 function classNameOf(node: HastNode): string | null {
   const className = node.properties?.className
@@ -98,7 +99,7 @@ function collectSpans(nodes: HastNode[], offset: number, spans: HighlightSpan[])
   return pos
 }
 
-/** PURE: tokenize `text` as `language` and return highlight spans relative
+/** Pure: tokenize `text` as `language` and return highlight spans relative
  *  to the start of `text`. Returns `[]` for unregistered languages or if
  *  hljs itself throws (malformed input should never crash the editor). */
 export function highlightSpans(language: string, text: string): HighlightSpan[] {
@@ -124,17 +125,9 @@ export type PMDocLike = {
   descendants: (cb: (node: PMNodeLike, pos: number) => boolean | void) => void
 }
 
-function isCodeBlockNode(node: { type: { name: string } }): boolean {
-  return node.type.name === 'code_block' || node.type.name === 'codeBlock'
-}
+type CodeHighlightRange = { from: number; to: number; className: string }
 
-function normalizeLanguage(value: unknown): string {
-  return typeof value === 'string' ? value.trim().toLowerCase() : ''
-}
-
-export type CodeHighlightRange = { from: number; to: number; className: string }
-
-/** PURE: walk the doc, resolve each codeBlock's spans (via `cache` when the
+/** Pure: walk the doc, resolve each codeBlock's spans (via `cache` when the
  *  node object is unchanged — ProseMirror nodes are immutable, so a cache
  *  hit means both identity and content are unchanged) and return absolute
  *  doc-coordinate ranges. */

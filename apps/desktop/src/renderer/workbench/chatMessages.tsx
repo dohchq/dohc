@@ -1,3 +1,6 @@
+import { formatChatTime } from "../time";
+import { basenameOf } from "../path";
+import { ipcErrorMessage } from "../ipcError";
 import { FileText, SmilePlus, Send } from "lucide-react";
 import {
   memo,
@@ -25,7 +28,7 @@ import { extractChatFileReferenceTokens } from "./chatFileMentions";
 import type { ChatFileReferenceToken } from "./chatFileMentions";
 
 // Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
-// the workspace Chats view render messages and composers through these SAME
+// the workspace Chats view render messages and composers through these same
 // pieces so authorship display and send affordances can never drift. Test
 // ids are prefixed per surface ("linked-chat-*" vs "chats-*") because both
 // panels can be mounted at once.
@@ -36,27 +39,17 @@ export function chatAuthorLabel(
   author: Pick<ChatMessageRecord, "authorKind" | "authorDisplayName">,
 ): string {
   if (author.authorKind !== "agent") return author.authorDisplayName;
-  // Backward compatibility for rows written before agent authors stored the
-  // raw owner name; never turn "Ice's agent" into "Ice's agent's agent".
-  return /['’]s agent$/i.test(author.authorDisplayName)
-    ? author.authorDisplayName
-    : `${author.authorDisplayName}'s agent`;
+  return `${author.authorDisplayName}'s agent`;
 }
 
-export function ipcErrorMessage(error: unknown, fallback: string): string {
-  const raw = error instanceof Error ? error.message : "";
-  const message = raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
-  return message.trim().length > 0 ? message.trim() : fallback;
-}
-
-// Reaction toggle (WS-MU-C2), shared by BOTH chat surfaces (the file-rail
+// Reaction toggle (WS-MU-C2), shared by both chat surfaces (the file-rail
 // LinkedChats panel and the Chats view) so their optimistic behavior can never
 // drift. Optimistically flips the viewer's own reaction on the target cell,
 // then reconciles to the canonical server list. Two guarantees the naive
 // version lacked:
 //   1. ROLLBACK — a failed setChatReaction reverts the optimistic cell, so the
 //      UI never keeps a reaction the server rejected.
-//   2. PER-CELL ORDERING — overlapping toggles on the SAME (message, emoji) can
+//   2. PER-CELL ORDERING — overlapping toggles on the same (message, emoji) can
 //      resolve out of order; a per-cell sequence guard drops every response but
 //      the latest toggle's, so two rapid clicks converge to the correct final
 //      state instead of racing to whichever server round-trip lands last.
@@ -87,7 +80,7 @@ export function runReactionToggle(
   const seq = (ctx.reactionSeq.current.get(cellKey) ?? 0) + 1;
   ctx.reactionSeq.current.set(cellKey, seq);
 
-  // Apply the viewer's OWN presence on this one cell, leaving every other
+  // Apply the viewer's own presence on this one cell, leaving every other
   // reaction (and every other reactor) untouched.
   const setCell = (current: ChatReactionRecord[], present: boolean): ChatReactionRecord[] => {
     const without = current.filter(
@@ -116,8 +109,8 @@ export function runReactionToggle(
   const present = input.nextState === "added";
   ctx.setReactions((current) => setCell(current, present));
 
-  // A response may touch UI state only if the thread is still live AND this is
-  // still the latest toggle for THIS cell (a newer toggle supersedes it).
+  // A response may touch UI state only if the thread is still live and this is
+  // still the latest toggle for this cell (a newer toggle supersedes it).
   const isCurrent = (): boolean =>
     token === ctx.liveToken.current && ctx.reactionSeq.current.get(cellKey) === seq;
 
@@ -144,26 +137,6 @@ export function runReactionToggle(
         ctx.onError(ipcErrorMessage(error, "Could not update that reaction."));
       }
     });
-}
-
-// One formatter for the one options shape this function uses.
-// `toLocaleString(undefined, options)` is specified as
-// `new Intl.DateTimeFormat(undefined, options).format(date)`, but constructing
-// the formatter costs far more than formatting — and message lists call this
-// per message per render.
-const chatTimeFormat = new Intl.DateTimeFormat(undefined, {
-  month: "short",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-});
-
-export function formatChatTime(createdAtMs: number): { label: string; iso: string } {
-  const createdAt = new Date(createdAtMs);
-  return {
-    label: chatTimeFormat.format(createdAt),
-    iso: createdAt.toISOString(),
-  };
 }
 
 interface FileMentionNavigationTarget {
@@ -193,7 +166,7 @@ function sameHeading(
 // win, followed only by the explicit edge-space compatibility form. Never
 // bind by heading/order alone: CLI callers can attach an independent file that
 // happens to share a heading with a literal token in the message body.
-export function resolveFileMentionNavigationTargets(
+function resolveFileMentionNavigationTargets(
   tokens: readonly ChatFileReferenceToken[],
   attachments: readonly ChatAttachmentRecord[],
 ): Map<string, FileMentionNavigationTarget> {
@@ -287,7 +260,7 @@ export function MentionText(props: {
       const chipContent = (
         <>
           <FileText size={11} aria-hidden />
-          {fileToken.path.split("/").at(-1)}
+          {basenameOf(fileToken.path)}
           {fileToken.headingAnchor ? `#${fileToken.headingAnchor}` : ""}
         </>
       );
@@ -348,10 +321,10 @@ export function MentionText(props: {
 // Reactions (WS-MU-C2). A small, calm quick-pick — obvious, not a full emoji
 // keyboard. Reacting to an agent's message is a first-class move, so this set
 // leans toward acknowledging work.
-export const DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🎉", "🙌", "😄", "👀", "✅", "🚀"] as const;
+const DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🎉", "🙌", "😄", "👀", "✅", "🚀"] as const;
 
 export interface ChatReactionControls {
-  // Every ACTIVE reaction in the open thread (all messages).
+  // Every active reaction in the open thread (all messages).
   reactions: ChatReactionRecord[];
   // The viewer's own reactor id, so pills can highlight "yours" and toggle.
   viewerAuthorId: string;
@@ -487,7 +460,7 @@ export function MessageReactions(props: {
         </button>
       ) : null}
       {pickerOpen && !props.controls.readOnly ? (
-        // A lightweight quick-pick, NOT an APG menu: role="group" with plain
+        // A lightweight quick-pick, not an APG menu: role="group" with plain
         // toggle <button>s (each Tab-stoppable, aria-pressed reflecting the
         // viewer's state). We deliberately don't claim role="menu"/menuitem*,
         // which would promise arrow-key roving semantics we don't implement.
@@ -672,7 +645,7 @@ export function ChatComposer(props: {
             props.onEscape();
           }
         }}
-        className="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+        className="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
       />
       <button
         type="submit"

@@ -7,6 +7,7 @@
 //! requeues or terminally fails claims a dead process left running.
 
 use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::HashSet;
 
 use crate::chats::base32_lowercase_no_padding;
 use crate::collections::CollectionRecordApplyFacts;
@@ -91,6 +92,39 @@ pub struct AutomationClaim {
     pub error: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+}
+
+/// One running attempt observed before a workspace handle is published.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AutomationClaimAttempt {
+    pub claim_id: String,
+    pub attempts: i64,
+    pub started_at_ms: i64,
+}
+
+pub fn list_running_automation_attempts(
+    store: &EngineStore,
+    workspace_id: &str,
+) -> Result<Vec<AutomationClaimAttempt>, DomainError> {
+    store.read_with(|conn| {
+        let mut statement = conn
+            .prepare(
+                "SELECT claim_id, attempts, updated_at_ms FROM automation_claims \
+                 WHERE workspace_id = ?1 AND state = 'running' ORDER BY claim_id",
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        statement
+            .query_map([workspace_id], |row| {
+                Ok(AutomationClaimAttempt {
+                    claim_id: row.get(0)?,
+                    attempts: row.get(1)?,
+                    started_at_ms: row.get(2)?,
+                })
+            })
+            .map_err(DomainError::sql_corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DomainError::sql_corrupt)
+    })
 }
 
 /// How `automations.settle` closes a running claim.
@@ -237,7 +271,7 @@ pub fn subscribe_automation_in_tx(
 }
 
 /// Remove one registered interest. Returns whether a row existed.
-pub fn unsubscribe_automation_in_tx(
+pub(crate) fn unsubscribe_automation_in_tx(
     conn: &Connection,
     workspace_id: &str,
     automation_id: &str,
@@ -266,7 +300,7 @@ pub fn unsubscribe_automation_in_tx(
 /// this call inserted.
 ///
 /// A change already at the chain depth cap runs nothing: instead of a
-/// pending claim, each would-have-triggered automation records a FAILED
+/// pending claim, each would-have-triggered automation records a failed
 /// claim with [`AUTOMATION_CHAIN_STOPPED`], so the stop reaches the owner
 /// through the same failure surface a throwing handler uses. The remote
 /// apply path never calls this — ADR 0008's origin-device rule is
@@ -397,7 +431,7 @@ pub struct AutomationFailure {
 
 /// Every automation with at least one failed claim in this workspace,
 /// ordered by automation id.
-pub fn list_automation_failures_in_tx(
+pub(crate) fn list_automation_failures_in_tx(
     conn: &Connection,
     workspace_id: &str,
 ) -> Result<Vec<AutomationFailure>, DomainError> {
@@ -436,7 +470,7 @@ pub fn list_automation_failures_in_tx(
 
 /// Flip the oldest pending claim to running with `attempts + 1` and return
 /// it; `None` when nothing is pending.
-pub fn claim_next_pending_automation_in_tx(
+pub(crate) fn claim_next_pending_automation_in_tx(
     conn: &Connection,
     workspace_id: &str,
     now_ms: i64,
@@ -477,7 +511,7 @@ pub fn claim_next_pending_automation_in_tx(
 /// Close a running claim: done, or failed with the handler's error text.
 /// Refuses a claim that is not running — a settle is not idempotent, matching
 /// the chat ledger's exactly-one-transition rule.
-pub fn settle_automation_claim_in_tx(
+pub(crate) fn settle_automation_claim_in_tx(
     conn: &Connection,
     workspace_id: &str,
     claim_id: &str,
@@ -529,10 +563,12 @@ pub fn settle_automation_claim_in_tx(
 /// remain, else terminally failed with [`AUTOMATION_RECLAIM_EXHAUSTED`], the
 /// chat ledger's rule. The age bound protects a claim a still-alive desktop
 /// process is running across a daemon rebind. Returns every transitioned
-/// claim.
-pub fn reclaim_running_automations_in_tx(
+/// claim. Deferred startup recovery supplies its observed attempts; a later
+/// attempt with the same claim ID must remain with its current executor.
+pub(crate) fn reclaim_running_automations_in_tx(
     conn: &Connection,
     workspace_id: &str,
+    attempts: Option<&[AutomationClaimAttempt]>,
     max_attempts: i64,
     stale_before_ms: i64,
     now_ms: i64,
@@ -551,8 +587,25 @@ pub fn reclaim_running_automations_in_tx(
         .map_err(DomainError::sql_corrupt)?
         .into_iter()
         .collect::<Result<_, _>>()?;
+    let attempts: Option<HashSet<(&str, i64, i64)>> = attempts.map(|attempts| {
+        attempts
+            .iter()
+            .map(|attempt| {
+                (
+                    attempt.claim_id.as_str(),
+                    attempt.attempts,
+                    attempt.started_at_ms,
+                )
+            })
+            .collect()
+    });
     let mut reclaimed = Vec::with_capacity(stale.len());
     for claim in stale {
+        if attempts.as_ref().is_some_and(|attempts| {
+            !attempts.contains(&(claim.claim_id.as_str(), claim.attempts, claim.updated_at_ms))
+        }) {
+            continue;
+        }
         let exhausted = claim.attempts >= max_attempts;
         let rows = conn
             .execute(
@@ -647,12 +700,20 @@ pub fn list_automation_failures(
 pub fn reclaim_running_automations(
     store: &mut EngineStore,
     workspace_id: &str,
+    attempts: Option<&[AutomationClaimAttempt]>,
     max_attempts: i64,
     stale_before_ms: i64,
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<Vec<AutomationClaim>, DomainError> {
     committed(store.write_with(faults, |tx| {
-        reclaim_running_automations_in_tx(tx, workspace_id, max_attempts, stale_before_ms, now_ms)
+        reclaim_running_automations_in_tx(
+            tx,
+            workspace_id,
+            attempts,
+            max_attempts,
+            stale_before_ms,
+            now_ms,
+        )
     })?)
 }

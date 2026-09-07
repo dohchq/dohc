@@ -1,5 +1,5 @@
 // PR 0N-2 "Try it in a version" — the agent-loop gesture. One main-side
-// orchestration that COMPOSES existing operations, never re-implements them:
+// orchestration that composes existing operations, never re-implements them:
 //
 //   1. name the fork after the task ("Try: <short snippet>", suffixed on
 //      collision),
@@ -17,7 +17,7 @@
 // the versions themselves are durable engine state either way — nothing a
 // lost card could silently discard.
 
-export interface TryVersionRecordLike {
+interface TryVersionRecordLike {
   id: string;
   name: string;
   kind: "main" | "named";
@@ -35,7 +35,7 @@ export interface TryVersionOperations {
   listVersions(): Promise<TryVersionSnapshotLike>;
   createVersion(name: string): Promise<TryVersionSnapshotLike>;
   // The review card needs the count only; counting reads the engine's
-  // metadata listing and hydrates no text (#562).
+  // metadata listing and hydrates no text.
   compareVersionsChangedCount(sourceVersionId: string): Promise<number>;
 }
 
@@ -64,7 +64,7 @@ export type TryInVersionRunState =
       mergeAvailable: boolean;
     };
 
-export interface TryInVersionSessionsOptions {
+interface TryInVersionSessionsOptions {
   // Resolves the workspace's version operations; throws when versions are not
   // enabled for the workspace (the same gate the version IPC handlers apply).
   operationsFor(workspaceId: string): Promise<TryVersionOperations>;
@@ -81,7 +81,7 @@ export interface TryInVersionSessionsOptions {
   now?: () => number;
 }
 
-export const TRY_VERSION_NAME_PREFIX = "Try: ";
+const TRY_VERSION_NAME_PREFIX = "Try: ";
 const TASK_SNIPPET_MAX_CHARS = 40;
 // Remember the last few ended runs per workspace so an end signal that races
 // start() (a driver session can fail and finalize before its run id is
@@ -268,5 +268,3 @@ export function createTryInVersionSessions(options: TryInVersionSessionsOptions)
 
   return { start, handleRunEnded, snapshot, dismiss, settled };
 }
-
-export type TryInVersionSessions = ReturnType<typeof createTryInVersionSessions>;

@@ -1,4 +1,4 @@
-// Pure workbench model (Phase E2): activity-bar view, side-panel visibility
+// Pure workbench model: activity-bar view, side-panel visibility
 // and width, open editor tabs, and the right-hand Chats panel. Pure like
 // window/windowState.ts so every transition and the persistence round-trip
 // are unit-tested without Electron. `dirty` is runtime-only (derived from the
@@ -53,7 +53,7 @@ export function isViewId(value: unknown): value is ViewId {
   return typeof value === "string" && (VIEW_IDS as readonly string[]).includes(value);
 }
 
-export function isActivityViewId(value: unknown): value is ActivityViewId {
+function isActivityViewId(value: unknown): value is ActivityViewId {
   if (typeof value !== "string") return false;
   return isViewId(value) || parsePluginViewId(value) !== null;
 }
@@ -75,23 +75,22 @@ export const GRAPH_TAB_PATH = "dohc://graph";
 export const HISTORY_TAB_PATH = "dohc://history";
 // Chats expanded to a full editor tab (singleton, graph/history precedent).
 export const CHATS_TAB_PATH = "dohc://chats";
-export const HISTORY_DIFF_TAB_PREFIX = "dohc://history-diff/";
-export const SITE_TAB_PREFIX = "dohc://site/";
-export const PLUGIN_PANEL_TAB_PREFIX = "dohc://plugin-panel/";
-export const PLUGIN_WEB_APP_TAB_PREFIX = "dohc://plugin-web/";
+const APP_TAB_PREFIX = "dohc://app/";
+const PLUGIN_PANEL_TAB_PREFIX = "dohc://plugin-panel/";
+const PLUGIN_WEB_APP_TAB_PREFIX = "dohc://plugin-web/";
 // One details page per plugin, keyed by the plugin id (version-compare
-// precedent). Deliberately NOT a singleton: singletons own a process and
+// precedent). Deliberately not a singleton: singletons own a process and
 // refuse to split, and this page only reads.
-export const PLUGIN_DETAILS_TAB_PREFIX = "dohc://plugin-details/";
-export const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
-// Engine moment diff (PR 0M-5): flagged workspaces open history diffs by
-// MOMENT id, not legacy change-set id. The id alone is the tab identity: it
+const PLUGIN_DETAILS_TAB_PREFIX = "dohc://plugin-details/";
+const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
+// Engine moment diff (PR 0M-5): history diffs open by MOMENT id, not
+// legacy change-set id. The id alone is the tab identity: it
 // is contract-bounded, while a percent-encoded valid workspace path can
 // exceed the UI-state path bound. The moment record supplies its display path.
-export const MOMENT_DIFF_TAB_PREFIX = "dohc://moment-diff/";
+const MOMENT_DIFF_TAB_PREFIX = "dohc://moment-diff/";
 // A collection folder opened as its views (Phase 2 collections). Keyed by
 // the folder path, so reopening re-activates instead of duplicating.
-export const COLLECTION_TAB_PREFIX = "dohc://collection/";
+const COLLECTION_TAB_PREFIX = "dohc://collection/";
 
 export function collectionTabPath(collectionPath: string): string {
   return `${COLLECTION_TAB_PREFIX}${encodeURIComponent(collectionPath)}`;
@@ -131,14 +130,8 @@ export function parseMomentDiffTabPath(path: string | null): string | null {
   }
 }
 
-export function historyDiffTabPath(changeSetId: string, filePath: string): string {
-  return `${HISTORY_DIFF_TAB_PREFIX}${encodeURIComponent(
-    changeSetId,
-  )}?file=${encodeURIComponent(filePath)}`;
-}
-
 export function siteTabPath(siteRoot: string): string {
-  return `${SITE_TAB_PREFIX}${encodeURIComponent(siteRoot)}`;
+  return `${APP_TAB_PREFIX}${encodeURIComponent(siteRoot)}`;
 }
 
 export function pluginPanelTabPath(pluginId: string, panelId: string): string {
@@ -165,7 +158,7 @@ export function pluginWebAppTabPath(
  * Both id and directory, the same shape pluginPanelTabPath already carries:
  * a row's own id is not unique on its own — a discovered, never-installed
  * row's id is only ever a broken manifest's directory-derived fallback,
- * which can coincide with some OTHER, unrelated plugin's real id. Keying
+ * which can coincide with some other, unrelated plugin's real id. Keying
  * the tab by id alone collapsed two different rows into one tab and made
  * the second-sorting one unreachable — its own click always reopened the
  * first one's tab instead.
@@ -207,12 +200,8 @@ export function isChatsTabPath(path: string | null): boolean {
   return path === CHATS_TAB_PATH;
 }
 
-export function isHistoryDiffTabPath(path: string | null): boolean {
-  return typeof path === "string" && path.startsWith(HISTORY_DIFF_TAB_PREFIX);
-}
-
 export function isSiteTabPath(path: string | null): boolean {
-  return typeof path === "string" && path.startsWith(SITE_TAB_PREFIX);
+  return typeof path === "string" && path.startsWith(APP_TAB_PREFIX);
 }
 
 export function isPluginPanelTabPath(path: string | null): boolean {
@@ -247,7 +236,7 @@ export function canonicalSingletonEditorTabPath(path: string | null): string | n
 export function parseSiteTabPath(path: string | null): string | null {
   if (typeof path !== "string" || !isSiteTabPath(path)) return null;
   try {
-    const siteRoot = decodeURIComponent(path.slice(SITE_TAB_PREFIX.length));
+    const siteRoot = decodeURIComponent(path.slice(APP_TAB_PREFIX.length));
     return siteRoot.length > 0 ? siteRoot : null;
   } catch {
     return null;
@@ -299,26 +288,6 @@ export function parsePluginWebAppTabPath(
   }
 }
 
-export function parseHistoryDiffTabPath(
-  path: string | null,
-): { changeSetId: string; filePath: string } | null {
-  if (typeof path !== "string" || !path.startsWith(HISTORY_DIFF_TAB_PREFIX)) {
-    return null;
-  }
-  const suffix = path.slice(HISTORY_DIFF_TAB_PREFIX.length);
-  const separator = suffix.indexOf("?file=");
-  if (separator <= 0) return null;
-  try {
-    const changeSetId = decodeURIComponent(suffix.slice(0, separator));
-    const filePath = decodeURIComponent(suffix.slice(separator + "?file=".length));
-    return changeSetId.length > 0 && filePath.length > 0
-      ? { changeSetId, filePath }
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 // Versions compare page (PR 0M-4): one tab per compared version, keyed by
 // the version id so re-comparing re-activates instead of duplicating.
 export function versionCompareTabPath(versionId: string): string {
@@ -359,7 +328,6 @@ export function isVirtualTabPath(path: string | null): boolean {
     isGraphTabPath(path) ||
     isHistoryTabPath(path) ||
     isChatsTabPath(path) ||
-    isHistoryDiffTabPath(path) ||
     isMomentDiffTabPath(path) ||
     isCollectionTabPath(path) ||
     isVersionCompareTabPath(path) ||
@@ -391,21 +359,24 @@ export interface WorkbenchState {
   editorGroups: EditorGroup[];
   activeEditorGroup: string;
   // The right-hand Chats panel (VS Code's secondary sidebar: toggleable,
-  // resizable, hidden by default). Independent of the left panel entirely,
-  // and only rendered for workspace-engine-flagged workspaces.
+  // resizable, hidden by default). Independent of the left panel entirely.
   chatsVisible: boolean;
   chatsWidth: number;
   // Max height of the explorer's Open Editors list (VS Code-style resizable
   // section): the list caps here and scrolls internally; shorter lists shrink
   // to fit.
   openEditorsHeight: number;
-  // Explorer state (Phase E3), persisted with the rest: which folders are
+  // Explorer state, persisted with the rest: which folders are
   // expanded and which paths are pinned to the favorites section.
   expandedFolders: string[];
   pinned: string[];
-  // Recently opened files (Phase E5.0), most recent FIRST, capped — boosts
+  // Recently opened files, most recent first, capped — boosts
   // quick-open ranking. Persisted with the rest of the ui-state.
   recentFiles: string[];
+  // Which view each collection tab shows, keyed by the collection's folder
+  // path (Phase 2 collections). Per-user local state: closing the tab or
+  // restarting the app must not reset the open view.
+  collectionViews: Record<string, string>;
 }
 
 type EditorTransitionActivation = "target" | "preserve";
@@ -432,8 +403,11 @@ export const DEFAULT_EDITOR_GROUP_ID = "primary";
 // Bounds the persisted explorer state the same way (oldest entries give way).
 export const MAX_EXPANDED_FOLDERS = 500;
 export const MAX_PINNED_PATHS = 100;
-// Recent-files list for quick-open ranking (Phase E5.0).
+// Recent-files list for quick-open ranking.
 export const MAX_RECENT_FILES = 20;
+// Bounds the persisted collection-view map (pinned precedent: a payload
+// bound, not a UX target — at the bound the oldest entry gives way).
+export const MAX_COLLECTION_VIEWS = 100;
 
 export function defaultWorkbenchState(): WorkbenchState {
   return {
@@ -450,6 +424,7 @@ export function defaultWorkbenchState(): WorkbenchState {
     expandedFolders: [],
     pinned: [],
     recentFiles: [],
+    collectionViews: {},
   };
 }
 
@@ -899,7 +874,7 @@ export function closeEditorGroup(
 }
 
 // Selecting the already-active view toggles the panel (the old explicit
-// collapse button); any other view switches AND reveals the panel.
+// collapse button); any other view switches and reveals the panel.
 export function setView(
   state: WorkbenchState,
   view: ActivityViewId,
@@ -938,7 +913,7 @@ export function setOpenEditorsHeight(
     : { ...state, openEditorsHeight: clamped };
 }
 
-// Capped append: at the bound the OLDEST entry gives way (openTab precedent)
+// Capped append: at the bound the oldest entry gives way (openTab precedent)
 // — never a refusal the user would have to understand.
 function appendCapped(list: string[], path: string, cap: number): string[] {
   const next = [...list, path];
@@ -967,7 +942,7 @@ export function toggleFolderExpanded(
   return setFolderExpanded(state, path, !state.expandedFolders.includes(path));
 }
 
-// Records a file open for quick-open recency ranking: most recent FIRST,
+// Records a file open for quick-open recency ranking: most recent first,
 // deduped, capped at MAX_RECENT_FILES (oldest gives way). Re-opening the
 // already-most-recent file is a no-op (same reference).
 export function recordRecentFile(state: WorkbenchState, path: string): WorkbenchState {
@@ -977,6 +952,32 @@ export function recordRecentFile(state: WorkbenchState, path: string): Workbench
     ...state.recentFiles.filter((recent) => recent !== path),
   ].slice(0, MAX_RECENT_FILES);
   return { ...state, recentFiles };
+}
+
+// Remembers which view a collection tab shows, per collection path. null
+// clears the entry (the view was deleted); the next open falls back to the
+// schema's first view. At the bound the map's oldest entry gives way
+// (appendCapped precedent; string-key insertion order is exact enough for a
+// payload bound).
+export function setCollectionActiveView(
+  state: WorkbenchState,
+  collectionPath: string,
+  viewName: string | null,
+): WorkbenchState {
+  if (viewName === null) {
+    if (!Object.hasOwn(state.collectionViews, collectionPath)) return state;
+    const collectionViews = { ...state.collectionViews };
+    delete collectionViews[collectionPath];
+    return { ...state, collectionViews };
+  }
+  if (state.collectionViews[collectionPath] === viewName) return state;
+  const collectionViews = {
+    ...state.collectionViews,
+    [collectionPath]: viewName,
+  };
+  const paths = Object.keys(collectionViews);
+  if (paths.length > MAX_COLLECTION_VIEWS) delete collectionViews[paths[0]];
+  return { ...state, collectionViews };
 }
 
 export function togglePinned(state: WorkbenchState, path: string): WorkbenchState {
@@ -990,16 +991,28 @@ export function togglePinned(state: WorkbenchState, path: string): WorkbenchStat
 
 // Rename/move/delete remap: every path-keyed slice re-projects through one
 // projection. Tab collisions are removed within each group.
+//
+// The projection speaks filesystem paths. A collection tab encodes its folder
+// path behind dohc://collection/, so the tab projects the DECODED folder and
+// re-encodes the result — projecting the tab path itself matches no rename,
+// and the tab would keep naming the folder the move vacated.
 export function remapWorkbenchPaths(
   state: WorkbenchState,
   project: (path: string) => string | null,
 ): WorkbenchState {
+  const projectTab = (path: string): string | null => {
+    const collectionPath = parseCollectionTabPath(path);
+    if (collectionPath === null) return project(path);
+    const next = project(collectionPath);
+    if (next === null) return null;
+    return next === collectionPath ? path : collectionTabPath(next);
+  };
   const projected = new Map<string, string | null>();
   const editorGroups = state.editorGroups.map((group) => {
     const seen = new Set<string>();
     const tabs: WorkbenchTab[] = [];
     for (const tab of group.tabs) {
-      const next = project(tab.path);
+      const next = projectTab(tab.path);
       projected.set(tab.path, next);
       if (next === null || seen.has(next)) continue;
       seen.add(next);
@@ -1021,12 +1034,20 @@ export function remapWorkbenchPaths(
     }
     return out;
   };
+  const collectionViews: Record<string, string> = {};
+  for (const [path, view] of Object.entries(state.collectionViews)) {
+    const next = project(path);
+    if (next !== null && !Object.hasOwn(collectionViews, next)) {
+      collectionViews[next] = view;
+    }
+  }
   return {
     ...state,
     editorGroups,
     expandedFolders: remapList(state.expandedFolders),
     pinned: remapList(state.pinned),
     recentFiles: remapList(state.recentFiles),
+    collectionViews,
   };
 }
 
@@ -1037,12 +1058,12 @@ export function remapWorkbenchPaths(
 //
 // Scoped to `restoredPaths` — the tabs that came from stored ui-state. Their
 // files all existed when the app started, so any listing that omits one is
-// reporting a real deletion, and the check can safely re-run on EVERY listing
+// reporting a real deletion, and the check can safely re-run on every listing
 // (a shared workspace lists twice on open: once at mount, once after the pull
 // lands). A tab opened this session is never in the set, so a listing that
 // raced its create can never close it.
 //
-// Tabs only: pinned paths, expanded folders and recent files include FOLDERS,
+// Tabs only: pinned paths, expanded folders and recent files include folders,
 // which no file listing carries. Virtual tabs (dohc://graph, chats, a moment
 // diff) have no file and always survive.
 export function pruneMissingRestoredTabs(
@@ -1070,7 +1091,7 @@ export function pruneMissingRestoredTabs(
 }
 
 // Persistence (.dohc/ui-state.json via the narrow get/set IPC pair).
-// serialize produces the zod-validated wire shape; parse is TOLERANT — a
+// serialize produces the zod-validated wire shape; parse is tolerant — a
 // missing, corrupt, or foreign-shaped value yields defaults, field by field,
 // never an error (windowState precedent).
 export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
@@ -1093,6 +1114,7 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
     expandedFolders: state.expandedFolders,
     pinned: state.pinned,
     recentFiles: state.recentFiles,
+    collectionViews: state.collectionViews,
   };
 }
 
@@ -1100,8 +1122,8 @@ export function parseUiState(raw: unknown): WorkbenchState {
   const defaults = defaultWorkbenchState();
   if (typeof raw !== "object" || raw === null) return defaults;
   const value = raw as Record<string, unknown>;
-  // Adversarial boundary: read only OWN fields (a polluted prototype must not
-  // inject state) and collect tab paths with a loop that STOPS once the cap
+  // Adversarial boundary: read only own fields (a polluted prototype must not
+  // inject state) and collect tab paths with a loop that stops once the cap
   // is reached — never materialize/filter a huge foreign array first.
   const own = (key: string): unknown =>
     Object.hasOwn(value, key) ? value[key] : undefined;
@@ -1264,5 +1286,29 @@ export function parseUiState(raw: unknown): WorkbenchState {
     expandedFolders: collectPaths(own("expandedFolders"), MAX_EXPANDED_FOLDERS),
     pinned: collectPaths(own("pinned"), MAX_PINNED_PATHS),
     recentFiles: collectPaths(own("recentFiles"), MAX_RECENT_FILES),
+    collectionViews: collectCollectionViews(own("collectionViews")),
   };
+}
+
+// Bounded map collector for parseUiState, the collectPaths posture applied to
+// a record: own string entries only, both sides bounded, stop at the cap.
+function collectCollectionViews(raw: unknown): Record<string, string> {
+  // Prototype-free: a collection folder named "__proto__" is an own key in
+  // the file, and assigning it into a plain object would not keep it.
+  const out: Record<string, string> = Object.create(null);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return out;
+  const record = raw as Record<string, unknown>;
+  let collected = 0;
+  for (const path in record) {
+    if (collected >= MAX_COLLECTION_VIEWS) break;
+    if (!Object.hasOwn(record, path)) continue;
+    const view = record[path];
+    if (path.length === 0 || path.length > 4096) continue;
+    if (typeof view !== "string" || view.length === 0 || view.length > 4096) {
+      continue;
+    }
+    out[path] = view;
+    collected += 1;
+  }
+  return out;
 }

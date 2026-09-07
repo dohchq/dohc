@@ -22,17 +22,10 @@ const PDF_PRINT_OPTIONS: PrintToPDFOptions = {
 
 let exportInFlight = false;
 
-// Exposed for the IPC handler to give an honest "try again" error instead of
-// silently queuing — two concurrent PDF renders would otherwise raced two
-// hidden BrowserWindows against the same in-flight flag.
-export function isDocumentPdfExportInFlight(): boolean {
-  return exportInFlight;
-}
-
 // Renders `html` to a PDF buffer in a hidden, sandboxed, preload-less
 // BrowserWindow — the content is document markdown (a user's or an agent's
 // own text), never trusted with Node or IPC access. The window (and its
-// backing temp file) is ALWAYS cleaned up, even if load/print throws.
+// backing temp file) is always cleaned up, even if load/print throws.
 export async function renderHtmlToPdf(html: string): Promise<Buffer> {
   if (exportInFlight) {
     throw new Error("An export is already in progress.");

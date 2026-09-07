@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 
-// The editor module NEVER resolves here, so `LazyMarkdownEditor` stays
+// The editor module never resolves here, so `LazyMarkdownEditor` stays
 // suspended for the whole file and `wysiwygRef.current` is null while the
 // engine document is live and bound. That is the state this file is about,
 // and it is a real one: the Suspense window on open, an editor chunk that
@@ -93,8 +93,8 @@ afterEach(async () => {
 // codex r14. The empty-cache guard was one instance of the rule, not the rule.
 // A live engine document is CANONICAL (AGENTS.md product invariant) and
 // `props.body` is the markdown cache beside it — it lags every edit the Y.Doc
-// has taken since the read, and it is empty on the failed-read recovery path
-// (#564). Exporting it while the only serializer of the canonical doc is
+// has taken since the read, and it is empty on the failed-read recovery path.
+// Exporting it while the only serializer of the canonical doc is
 // unmounted writes a file that is not the user's document, and says it saved.
 describe("engine-mode export with no mounted serializer", () => {
   it("refuses the export while the engine document has no serializer", async () => {
@@ -112,9 +112,7 @@ describe("engine-mode export with no mounted serializer", () => {
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
 
-    // MUTATION: gate the refusal on an EMPTY cache -> the stale read body is
-    // exported as if it were the live document.
-    expect(await screen.findByText("Document not open")).toBeTruthy();
+    expect(await screen.findByText("Document not open"), "gate the refusal on an empty cache -> the stale read body is exported as if it were the live document.").toBeTruthy();
     expect(bridge.exportDocumentFile).not.toHaveBeenCalled();
   });
 
@@ -136,9 +134,7 @@ describe("engine-mode export with no mounted serializer", () => {
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
 
-    // MUTATION: serialize the disk cache during `engineMayHoldDocument` -> a .md file
-    // that is missing whatever the held session already took.
-    expect(await screen.findByText("Document not open")).toBeTruthy();
+    expect(await screen.findByText("Document not open"), "serialize the disk cache during `engineMayHoldDocument` -> a .md file that is missing whatever the held session already took.").toBeTruthy();
     expect(bridge.exportDocumentFile).not.toHaveBeenCalled();
   });
 
@@ -174,7 +170,7 @@ describe("engine-mode export with no mounted serializer", () => {
     );
   });
 
-  // codex r21: the same rule for the WAIT, not just for the wait giving up.
+  // codex r21: the same rule for the wait, not just for the wait giving up.
   // While the open is unresolved the disk may not be the document — a session
   // that binds a moment later can hold replicated updates the file has never
   // seen — and that window is long now that a refused release can hold it.
@@ -194,9 +190,7 @@ describe("engine-mode export with no mounted serializer", () => {
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
 
-    // MUTATION: refuse only `engineMayHoldDocument` -> the disk body exports while the
-    // engine is still deciding what this document is.
-    expect(await screen.findByText("Document not open")).toBeTruthy();
+    expect(await screen.findByText("Document not open"), "refuse only `engineMayHoldDocument` -> the disk body exports while the engine is still deciding what this document is.").toBeTruthy();
     expect(bridge.exportDocumentFile).not.toHaveBeenCalled();
   });
 

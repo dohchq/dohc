@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
-import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import {
   EngineRequestDeadlineError,
   EngineRequestError,
@@ -14,23 +15,12 @@ import {
   WorkspaceDaemonRequester,
   type DaemonRequesterClient,
 } from "../live/daemonLiveAdapter";
-import type { Event } from "./generated/Event";
-import type { Request } from "./generated/Request";
-import type { Response } from "./generated/Response";
-import type { WorkspaceHandle } from "./generated/WorkspaceHandle";
+import type { Event, Request, Response, WorkspaceHandle } from "../protocol";
 import {
   YDOC_EVENT,
   YDOC_METHOD,
-  decodeYdocCloseResult,
-  decodeYdocEvictResult,
-  decodeYdocExternalEditResult,
-  decodeYdocOpenResult,
-  decodeYdocRecordUpdateResult,
   decodeYdocRemoteUpdatePayload,
-  decodeYdocResyncResult,
-  decodeYdocSettleResult,
-  type YdocApplyExternalMarkdownEditParams,
-  type YdocApplyExternalMarkdownEditResult,
+  decodeYdocResult,
   type ChangeAttributionWire,
   type YdocCloseParams,
   type YdocContentKind,
@@ -43,7 +33,7 @@ import {
   type YdocSettleResult,
 } from "./ydocWireContract";
 
-export const LOCAL_EDITOR_ORIGIN: unique symbol = Symbol(
+const LOCAL_EDITOR_ORIGIN: unique symbol = Symbol(
   "dohc.workspaceEngineClient.localEditorOrigin",
 );
 
@@ -75,13 +65,13 @@ export class YdocAdapterError extends Error {
   }
 }
 
-// #616: how long ONE in-flight `ydoc.open` may go unanswered. Its sibling
+// How long one in-flight `ydoc.open` may go unanswered. Its sibling
 // `workspace.open` has carried a 2 s bound since it was written; this request
-// carried none, so a daemon that ACCEPTED an open and then said nothing held
+// carried none, so a daemon that accepted an open and then said nothing held
 // the capture chain for as long as the silence lasted — the wedge watchdog's
 // ~225 s at best, and longer behind other traffic.
 //
-// MEASURED, because the only work this limit can reject is a healthy open
+// Measured, because the only work this limit can reject is a healthy open
 // (AGENTS.md, "measure limits that reject work"). Every case below is the real
 // daemon — dohc-workspace-engine, debug build of de3fb9d5 — driven through this
 // adapter and the real transport on a Ryzen 9 7950X / Windows 11 / 64 GB. The
@@ -92,13 +82,13 @@ export class YdocAdapterError extends Error {
 //     the daemon refuses a seed past INBAND_CONTENT_CAP_BYTES)      2.3 ms
 //   warm store, same document                                      2.1 ms
 //   open while the daemon captures 40 x 32 KiB files               0.9 ms
-//   reopen after 7,500 SETTLED appends (42 KiB of typed text)       2.0 ms
+//   reopen after 7,500 settled appends (42 KiB of typed text) 2.0 ms
 //   resurrect a lineage nothing settled, 500 real appends          13.7 ms
 //   resurrect a lineage nothing settled, 3,000 real appends        67.4 ms
 //   resurrect a lineage nothing settled, 10,000 real appends      120.9 ms
 //
 // What the shape of that says: a settled document reopens flat, because its
-// close compacted the lineage. The cost is in a lineage NOTHING settled — a
+// close compacted the lineage. The cost is in a lineage nothing settled — a
 // draft a dead daemon left behind — where the open replays every journalled
 // update, and it grows with how many there are. 10,000 of them is already past
 // ordinary: the settle debounce is 800 ms, so a lineage that deep means the
@@ -115,7 +105,7 @@ export class YdocAdapterError extends Error {
 // longer on a daemon that has already stopped answering. If a healthy open ever
 // does reach this limit, measure again rather than widening it here.
 //
-// ONE number for both sides: the daemon's supervisor adopts a request's own
+// One number for both sides: the daemon's supervisor adopts a request's own
 // `deadline_ms` as its deadline (dohc-engine-protocol/src/supervisor.rs, capped
 // at `max_deadline`), so it cancels the handler at the same instant this client
 // stops waiting, instead of the 30 s default it applies to a request that names
@@ -129,9 +119,9 @@ export const YDOC_OPEN_DEADLINE_MS = 5_000;
  * daemon accepted the request, so re-issuing it costs another full deadline
  * against a daemon that is already not answering. The surface answers the same
  * read-only "the engine may still hold this document" state it answers for a
- * spent retry budget, with the user's own retry (#564, #657).
+ * spent retry budget, with the user's own retry.
  *
- * The open may have COMPLETED daemon-side, with only its reply queued behind
+ * The open may have completed daemon-side, with only its reply queued behind
  * other output — so this refusal can discard the only copy of a live session
  * id. Nothing here can release that session: `ydoc.close` needs the id, and no
  * RPC addresses a session by path. What keeps that safe is the daemon's own
@@ -161,7 +151,7 @@ export class YdocOpenTimedOutError extends Error {
   }
 }
 
-// The bound has TWO clocks, because both sides honour the same number: this
+// The bound has two clocks, because both sides honour the same number: this
 // client's timer, and the daemon's supervisor answering DEADLINE_EXCEEDED for
 // the deadline the request carried. Whichever reports first, the open did not
 // land inside the bound and the document is in the same state — so the caller
@@ -433,7 +423,7 @@ function snapshotDocUtf16(doc: Y.Doc): DocUtf16Snapshot {
   return snapshot;
 }
 
-// Minimal view of Yjs' internal item list, used ONLY to count U+FFFD that this
+// Minimal view of Yjs' internal item list, used only to count U+FFFD that this
 // transaction DELETED. Yjs sanitizes a split surrogate pair to U+FFFD in every
 // public read (toString/toDelta) and even in item storage, so a masked split
 // (delete N pre-existing U+FFFD while a mid-pair split adds N) nets to zero in
@@ -511,11 +501,9 @@ function assertDocUtf16IsSafe(
   // newFFFD = after − before + deleted. Reject any root with newFFFD > 0. This
   // catches the masked split (cross_engine.rs:264) without over-rejecting a
   // clean delete of pre-existing U+FFFD (a net decrease → newFFFD ≤ 0).
-  // R11a/R13 OBLIGATION (REQUIRED, not optional): the engine-side yjs↔yrs
-  // replay-parity gate must catch the general opaque split that no live
-  // TypeScript scan can reconstruct — see crates/dohc-engine-collab and the
-  // bypass1 probe. Ydoc::apply (crates/dohc-engine-collab/src/ydoc.rs) has no
-  // such gate today; R13 must add it before any encoded editor path journals.
+  // The general opaque split that no live TypeScript scan can reconstruct is
+  // caught engine-side by the replay-parity gate
+  // (crates/dohc-engine-collab/src/replay_parity.rs).
   const deleted = computeDeleted();
   for (const [root, current] of after) {
     const newReplacement =
@@ -591,7 +579,7 @@ export class YdocAdapterSession {
   // Set by openSession; read by the open consumer, which owns the
   // create-or-refuse decision.
   head: "present" | "absent" = "present";
-  // Whether the daemon resumed durable CRDT state for this object. Read WITH
+  // Whether the daemon resumed durable CRDT state for this object. Read with
   // `head`, never instead of it: a crash-orphaned draft the daemon resurrects
   // is lineage-existing and head-absent, and its CRDT rows are the only copy
   // of those edits — refusing it would strand them and wedge the lease on an
@@ -760,7 +748,7 @@ export class YdocAdapterSession {
           if (isDaemonReconnectError(refusal)) throw refusal;
           // Same reason as the reconnect passthrough above, for the other
           // class a caller must be able to recognize: the classifier reads
-          // the THROWN value, and a transient refusal buried in a diagnostic
+          // the thrown value, and a transient refusal buried in a diagnostic
           // wrapper reads as terminal. Recovery met the same busy engine the
           // write did; report that, not a story about recovery.
           if (isTransientEngineRefusal(recoveryFailure)) throw recoveryFailure;
@@ -787,10 +775,10 @@ export class YdocAdapterSession {
    *
    * Quarantine is for a session whose canonical state is no longer knowable —
    * a partially applied update, a response that went missing. A busy engine
-   * refused the write CLEANLY and changed nothing, and recovery has already
+   * refused the write cleanly and changed nothing, and recovery has already
    * pulled this doc back to durable state, so the session is exactly as good
    * as it was. Killing it for a condition that clears in milliseconds would
-   * turn a pause into a dead document (#658).
+   * turn a pause into a dead document.
    *
    * The chain is then neutralized either way, so one refusal cannot reject
    * every operation queued behind it, and the rejection is claimed once here
@@ -799,7 +787,7 @@ export class YdocAdapterSession {
   private trackRecordOperation<T>(
     operation: Promise<T>,
     // Only a resend can clear the debt. An ordinary record carries the delta
-    // ONE transaction observed, so its success says nothing about an earlier
+    // one transaction observed, so its success says nothing about an earlier
     // update the engine still has not seen.
     levelsTheEngine = false,
   ): Promise<T> {
@@ -809,8 +797,8 @@ export class YdocAdapterSession {
         return value;
       },
       (error: unknown) => {
-        // The engine refused this write cleanly, so it does NOT hold what
-        // this doc holds. Recorded HERE because this is the one place that
+        // The engine refused this write cleanly, so it does not hold what
+        // this doc holds. Recorded here because this is the one place that
         // sees both halves — the refusal and the resend that repairs it — and
         // a caller tracking it separately can only ever be a stale copy.
         if (isTransientEngineRefusal(error)) this.engineMissingLocalState = true;
@@ -832,7 +820,7 @@ export class YdocAdapterSession {
    * does not.
    *
    * The resend for a journal write a transient refusal turned away. Replaying
-   * the refused update's BYTES cannot do it: `applyLocalUpdate` records what a
+   * the refused update's bytes cannot do it: `applyLocalUpdate` records what a
    * Yjs transaction observes, and applying an update the doc already holds
    * observes nothing — the engine would receive an empty delta and the settle
    * behind it would commit a projection missing the user's text and report it
@@ -897,17 +885,18 @@ export class YdocAdapterSession {
         ? { actorOriginId: options.actorOriginId }
         : {}),
       ...(options?.attribution ? { attribution: options.attribution } : {}),
-      // Declared ONLY for the update `applySeedUpdate` constructs from the
+      // Declared only for the update `applySeedUpdate` constructs from the
       // open's seedContent, before any consumer sees the session. Recovery
       // resends and every other record stay undeclared, so the engine's
-      // no-edit settle skip (#815) can never mistake replayed prior state
+      // no-edit settle skip can never mistake replayed prior state
       // for a seed — an undeclared seed costs one redundant write, a false
       // declaration would cost the user's edits.
       ...(seedUpdate ? { seed: true } : {}),
     };
     const idempotencyKey =
       options?.idempotencyKey ?? `${this.sessionId}:${this.nextLocalUpdateSeq++}`;
-    const result = decodeYdocRecordUpdateResult(
+    const result = decodeYdocResult(
+      YDOC_METHOD.recordUpdate,
       await this.adapter.request(
         this.workspace,
         YDOC_METHOD.recordUpdate,
@@ -963,16 +952,16 @@ export class YdocAdapterSession {
       sessionId: this.sessionId,
       ...(options?.summary ? { summary: options.summary } : {}),
     };
-    let raw: unknown;
+    let raw: Response["result"];
     try {
       raw = await this.adapter.request(this.workspace, YDOC_METHOD.settle, params);
     } catch (error) {
       // Remote edits were drained under this session's lease: this doc is
-      // BEHIND the durable lineage. Resync (which returns the full drained
+      // behind the durable lineage. Resync (which returns the full drained
       // state) and settle exactly once more — the daemon refuses rather
       // than materializing content this editor never saw.
       //
-      // ONE retry, never a loop: a second refusal means peers are still
+      // One retry, never a loop: a second refusal means peers are still
       // outrunning this session, and that wants a backoff rather than a tight
       // retry. It reaches the caller unchanged, and the caller's ladder owns
       // it — as TRANSIENT, which only the typed discriminator says, because
@@ -984,35 +973,9 @@ export class YdocAdapterSession {
         throw error;
       }
     }
-    const result = decodeYdocSettleResult(raw as Parameters<typeof decodeYdocSettleResult>[0]);
+    const result = decodeYdocResult(YDOC_METHOD.settle, raw);
     this.lastSettledSha = result.sha256;
     return result;
-  }
-
-  async applyExternalMarkdownEdit(
-    markdown: string,
-  ): Promise<YdocApplyExternalMarkdownEditResult> {
-    this.assertOpen();
-    // Guard the JSON/Rust boundary with the same well-formedness check local
-    // edits get: a lone surrogate cannot cross cleanly and would fail the
-    // transport instead of rejecting locally (bot #3601684258).
-    if (!isWellFormedUtf16(markdown)) throw new IllFormedUtf16EditError();
-    // Flush pending local journals first so the engine merges the external
-    // edit against the fully-recorded state, never a stale doc that a later
-    // in-flight recordUpdate then reorders behind it (bot #3601684273).
-    await this.recordChain;
-    this.assertOpen();
-    const params: YdocApplyExternalMarkdownEditParams = {
-      sessionId: this.sessionId,
-      markdown,
-    };
-    return decodeYdocExternalEditResult(
-      await this.adapter.request(
-        this.workspace,
-        YDOC_METHOD.applyExternalMarkdownEdit,
-        params,
-      ),
-    );
   }
 
   isSelfMaterializedSha(sha256: string): boolean {
@@ -1113,7 +1076,7 @@ export class YdocAdapterSession {
     } else {
       Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
     }
-    // The event baseline is PRESERVED across resync: transport event seqs
+    // The event baseline is preserved across resync: transport event seqs
     // stay monotone within a session generation, and clearing the position
     // would let the first post-resync gap pass undetected (the next event
     // would be accepted as a fresh baseline). Positions recorded during the
@@ -1144,7 +1107,7 @@ export class YdocAdapterSession {
       YDOC_METHOD.resync,
       { sessionId: this.sessionId },
     );
-    const result = decodeYdocResyncResult(delivery.result);
+    const result = decodeYdocResult(YDOC_METHOD.resync, delivery.result);
     return {
       update: delivery.bytes,
       lineageClaimId: result.lineageClaimId,
@@ -1162,7 +1125,8 @@ export class YdocAdapterSession {
       ...(options?.summary ? { summary: options.summary } : {}),
     };
     try {
-      decodeYdocCloseResult(
+      decodeYdocResult(
+        YDOC_METHOD.close,
         await this.adapter.request(this.workspace, YDOC_METHOD.close, params),
       );
     } catch (error) {
@@ -1183,7 +1147,8 @@ export class YdocAdapterSession {
     await this.recordChain.catch(() => undefined);
     const params: YdocEvictParams = { sessionId: this.sessionId };
     try {
-      decodeYdocEvictResult(
+      decodeYdocResult(
+        YDOC_METHOD.evict,
         await this.adapter.request(this.workspace, YDOC_METHOD.evict, params),
       );
     } catch (error) {
@@ -1343,7 +1308,7 @@ export class YdocLiveAdapter {
         error instanceof DaemonRefusalError ? error.cause : error,
       );
     }
-    const result = decodeYdocOpenResult(delivery.result);
+    const result = decodeYdocResult(YDOC_METHOD.open, delivery.result);
     const session = new YdocAdapterSession(this, input.workspace, result.sessionId, {
       objectId: result.objectId,
       path: result.path,
@@ -1355,9 +1320,9 @@ export class YdocLiveAdapter {
     this.sessions.set(result.sessionId, session);
     session.head = result.head;
     session.lineage = result.lineage;
-    // `lineage` (durable CRDT state) is NOT `head` (a snapshot in this
+    // `lineage` (durable CRDT state) is not `head` (a snapshot in this
     // version). An ordinary first open of a captured file is lineage-absent
-    // AND head-present, and that is exactly the seed case below.
+    // and head-present, and that is exactly the seed case below.
     const lineageAbsent = result.lineage === "absent";
     if (
       lineageAbsent &&
@@ -1378,16 +1343,43 @@ export class YdocLiveAdapter {
           result.contentKind === "plaintext"
             ? createPlaintextSeedDoc(result.seedContent)
             : markdownToYDoc(result.seedContent);
-        await session.applySeedUpdate(Y.encodeStateAsUpdate(seedDoc));
-        // The exposed initial state must INCLUDE the seed: consumers (the
-        // desktop bridge) forward session.initialUpdate to the renderer,
-        // and the pre-seed encoding would render an empty document and
-        // baseline subsequent edits wrongly.
-        session.initialUpdate = Y.encodeStateAsUpdate(session.doc);
+        try {
+          if (result.contentKind === "richdoc") {
+            let projection: string | undefined;
+            try {
+              projection = yDocToMarkdown(seedDoc);
+            } catch {
+              // The serializer rejects some accepted imports. They can still
+              // open, but cannot carry an exact-source witness yet.
+            }
+            if (projection !== undefined && projection !== result.seedContent) {
+              // The first replicated base must still match the captured file.
+              // The engine validates this source against the projection witness.
+              const meta = seedDoc.getMap("meta");
+              meta.set("dohcMarkdownSource", result.seedContent);
+              meta.set(
+                "dohcMarkdownSourceSha256",
+                createHash("sha256").update(result.seedContent).digest("hex"),
+              );
+              meta.set(
+                "dohcMarkdownSourceProjectionSha256",
+                createHash("sha256").update(projection).digest("hex"),
+              );
+            }
+          }
+          await session.applySeedUpdate(Y.encodeStateAsUpdate(seedDoc));
+          // The exposed initial state must include the seed: consumers (the
+          // desktop bridge) forward session.initialUpdate to the renderer,
+          // and the pre-seed encoding would render an empty document and
+          // baseline subsequent edits wrongly.
+          session.initialUpdate = Y.encodeStateAsUpdate(session.doc);
+        } finally {
+          seedDoc.destroy();
+        }
       } catch (error) {
         // A failed seed must not leak the registered session (and with it
         // the daemon lease). settle:false is refused precisely when the
-        // seed COMMITTED before the failure surfaced (dirty lineage — e.g.
+        // seed committed before the failure surfaced (dirty lineage — e.g.
         // a request timeout on an applied update): fall back to a settling
         // close so the committed seed becomes the artifact and the daemon
         // entry actually releases instead of wedging until workspace close.
@@ -1459,7 +1451,6 @@ export class YdocLiveAdapter {
     this.sessions.delete(sessionId);
     this.eventPositions.delete(sessionId);
   }
-
 
   dispose(): void {
     this.unsubscribeEvents();

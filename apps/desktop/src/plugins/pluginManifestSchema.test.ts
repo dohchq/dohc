@@ -672,7 +672,7 @@ describe("DohcPluginManifest", () => {
     // parses anything, so a manifest this large is refused by size with the
     // cap named. Measured here so the note above the schema states the real
     // relationship instead of an arithmetic sum that drifts every time a
-    // field is added. Do NOT "fix" this by raising the reader's cap.
+    // field is added. Do not "fix" this by raising the reader's cap.
     const fill = (length: number) => "a".repeat(length);
     const largest = {
       version: 1,
@@ -959,7 +959,7 @@ describe("DohcPluginManifest", () => {
       ["an escaping collection path", { ...automation, collection: "../tasks" }],
       ["an absolute collection path", { ...automation, collection: "/tasks" }],
       ["an empty collection path", { ...automation, collection: "" }],
-      ["a NUL byte in the collection", { ...automation, collection: "ta sks" }],
+      ["a NUL byte in the collection", { ...automation, collection: "ta\0sks" }],
       ["a slash in the handler", { ...automation, handler: "a/b" }],
       ["a missing handler", { id: "triage", collection: "tasks" }],
     ])("refuses %s", (_case, declared) => {

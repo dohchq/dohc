@@ -1,0 +1,2311 @@
+import { cpSync, mkdtempSync } from "node:fs";
+import { request as httpRequest } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import type {
+  PluginAgentDriver,
+  PluginAgentEvent,
+  PluginAgentProbe,
+  PluginAgentSession,
+  PluginAgentSessionStartInput,
+  PluginPermissionDecision,
+} from "@dohc/sdk/node";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createChatWebApp, type ChatWebApp } from "./chatWebApp.ts";
+import { deferred } from "../../../src/testing/deferred";
+
+// The plugin's real ui/ folder. Once installed, the built plugin root serves
+// this same content from pluginRoot/snapshot/ui (main.ts computes that join;
+// see 0ab34172) -- this constant is the unbundled source it copies from.
+const PLUGIN_UI_ROOT = fileURLToPath(new URL("../ui/", import.meta.url));
+/** A scratch directory carrying the real index.html and chat.css but not
+ * chat.js -- lets a test reach a real token (GET / still works) and still
+ * exercise a genuinely missing asset. */
+function uiRootMissingScript(): string {
+  const dir = mkdtempSync(join(tmpdir(), "agent-chat-ui-"));
+  cpSync(join(PLUGIN_UI_ROOT, "index.html"), join(dir, "index.html"));
+  cpSync(join(PLUGIN_UI_ROOT, "chat.css"), join(dir, "chat.css"));
+  return dir;
+}
+
+/** Races a promise against a bounded wait, for proving a negative -- "this
+ * never arrives" -- that a plain await can't express without hanging
+ * forever. */
+async function raceTimeout<T>(promise: Promise<T>, ms: number): Promise<T | "timeout"> {
+  return Promise.race([
+    promise,
+    new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), ms)),
+  ]);
+}
+
+interface FakeSession extends PluginAgentSession {
+  promptCalls: string[];
+  cancelCalls: number;
+  permissionCalls: Array<{ requestId: string; decision: PluginPermissionDecision }>;
+  /** Same idea, for dispose(). */
+  disposeError: Error | null;
+  /** Same idea, for prompt() -- a driver that rejects a submitted turn. */
+  promptError: Error | null;
+  /** Same idea, for answerPermission() -- a driver call that fails because
+   * the session it belonged to is already gone underneath it. */
+  answerPermissionError: Error | null;
+  /** Set by a test right before triggering /stop, to make this session's
+   * own cancel() reject exactly once (a transport failure while
+   * interrupting the turn). */
+  cancelError: Error | null;
+}
+
+interface FakeDriverOptions {
+  /** Runs the instant driver.probe() is entered, before anything else. */
+  onProbeEntered?: () => void;
+  /** Awaited inside driver.probe() before it returns, so a test can hold
+   * the probe open on demand -- mirrors startGate for driver.startSession(). */
+  probeGate?: () => Promise<void>;
+  /** Runs the instant driver.startSession is entered, before anything else
+   * -- lets a test know the server-side call has actually begun without
+   * guessing at timing. */
+  onStartSessionEntered?: () => void;
+  /** Awaited inside driver.startSession before it does anything else, so a
+   * test can hold a session "starting" open on demand. */
+  startGate?: () => Promise<void>;
+  /** Same pair, for session.prompt() -- lets a test inject driver events
+   * (through onEvent) while a prompt call is still pending, before it
+   * resolves. */
+  onPromptEntered?: () => void;
+  promptGate?: () => Promise<void>;
+  /** Same pair, for session.answerPermission() -- lets a test force a
+   * second concurrent POST to arrive while the first is still inside the
+   * driver call, deterministically, instead of hoping two real HTTP
+   * requests happen to interleave at the right instant. */
+  onAnswerPermissionEntered?: () => void;
+  answerPermissionGate?: () => Promise<void>;
+  /** Same pair, for session.cancel() -- /stop's own driver call now that
+   * Stop interrupts the turn instead of ending the session. */
+  onCancelEntered?: () => void;
+  cancelGate?: () => Promise<void>;
+  /** If set, every session this driver creates rejects its first prompt()
+   * with this error, then clears (a retry through a fresh session
+   * succeeds normally). */
+  promptError?: Error;
+  /** If set, driver.startSession() itself rejects with this error (a spawn
+   * or handshake failure) instead of ever returning a session. */
+  startSessionError?: Error;
+}
+
+interface FakeDriver {
+  driver: PluginAgentDriver;
+  probeCalls(): number;
+  startInputs: PluginAgentSessionStartInput[];
+  sessions: FakeSession[];
+  /** Every sessionId dispose() was called for, in call order, regardless of
+   * whether that call went on to reject. */
+  disposed: string[];
+}
+
+const installedProbe: PluginAgentProbe = {
+  installed: true,
+  auth: { status: "authenticated" },
+  models: [],
+};
+
+function fakeDriver(
+  probe: () => PluginAgentProbe = () => installedProbe,
+  options: FakeDriverOptions = {},
+): FakeDriver {
+  const startInputs: PluginAgentSessionStartInput[] = [];
+  const sessions: FakeSession[] = [];
+  const disposed: string[] = [];
+  let probes = 0;
+
+  const driver: PluginAgentDriver = {
+    async probe() {
+      probes += 1;
+      options.onProbeEntered?.();
+      if (options.probeGate) await options.probeGate();
+      return probe();
+    },
+    async startSession(input) {
+      options.onStartSessionEntered?.();
+      if (options.startGate) await options.startGate();
+      if (options.startSessionError) {
+        // Mirrors both real drivers: a bare "closed" (no reason) reported
+        // through onEvent right before the call itself rejects.
+        input.onEvent({ kind: "session-state", state: "closed" });
+        throw options.startSessionError;
+      }
+      startInputs.push(input);
+      const promptCalls: string[] = [];
+      const permissionCalls: Array<{
+        requestId: string;
+        decision: PluginPermissionDecision;
+      }> = [];
+      let cancelCalls = 0;
+      const sessionId = `session-${sessions.length + 1}`;
+      const session: FakeSession = {
+        sessionId,
+        promptCalls,
+        permissionCalls,
+        disposeError: null,
+        promptError: options.promptError ?? null,
+        answerPermissionError: null,
+        cancelError: null,
+        get cancelCalls() {
+          return cancelCalls;
+        },
+        async prompt(message) {
+          options.onPromptEntered?.();
+          if (options.promptGate) await options.promptGate();
+          if (session.promptError) {
+            const error = session.promptError;
+            session.promptError = null;
+            throw error;
+          }
+          promptCalls.push(message.text);
+          return { turnId: `turn-${promptCalls.length}` };
+        },
+        async cancel() {
+          cancelCalls += 1;
+          options.onCancelEntered?.();
+          if (options.cancelGate) await options.cancelGate();
+          if (session.cancelError) {
+            const error = session.cancelError;
+            session.cancelError = null;
+            throw error;
+          }
+        },
+        async answerPermission(requestId, decision) {
+          options.onAnswerPermissionEntered?.();
+          if (options.answerPermissionGate) await options.answerPermissionGate();
+          if (session.answerPermissionError) {
+            const error = session.answerPermissionError;
+            session.answerPermissionError = null;
+            throw error;
+          }
+          permissionCalls.push({ requestId, decision });
+        },
+        // Not exercised by chatWebApp.ts (it calls cancel() directly, never
+        // this) -- kept only to satisfy the SDK interface, mirroring both
+        // real drivers' own stop() = cancel() + dispose().
+        async stop() {
+          await session.cancel();
+          await session.dispose();
+        },
+        async dispose() {
+          disposed.push(sessionId);
+          if (session.disposeError) {
+            const error = session.disposeError;
+            session.disposeError = null;
+            throw error;
+          }
+        },
+      };
+      sessions.push(session);
+      return session;
+    },
+  };
+
+  return { driver, probeCalls: () => probes, startInputs, sessions, disposed };
+}
+
+interface EventStream {
+  /** The event with its wire metadata stripped -- `at` (publish time),
+   * `snapshot` (the initial connection-state frame's own marker), `replay`
+   * (a frame rebuilt from the log rather than happening now), `controls`,
+   * and `seq` (the current control fact) -- for every assertion that only
+   * cares about semantic content. */
+  next(): Promise<PluginAgentEvent | { kind: "user-message"; text: string; clientId: string }>;
+  /** The exact wire object, `at`/`snapshot` included -- for the tests that
+   * specifically pin those two fields. */
+  nextRaw(): Promise<Record<string, unknown>>;
+  close(): Promise<void>;
+}
+
+async function eventStream(url: string, token: string): Promise<EventStream> {
+  const controller = new AbortController();
+  const response = await fetch(new URL("events?token=" + encodeURIComponent(token), url), {
+    signal: controller.signal,
+  });
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("text/event-stream");
+  if (!response.body) throw new Error("The event response has no body.");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = "";
+
+  async function nextRaw(): Promise<Record<string, unknown>> {
+    for (;;) {
+      const boundary = buffered.indexOf("\n\n");
+      if (boundary >= 0) {
+        const frame = buffered.slice(0, boundary);
+        buffered = buffered.slice(boundary + 2);
+        const data = frame
+          .split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
+        if (data) return JSON.parse(data);
+        continue;
+      }
+      const chunk = await reader.read();
+      if (chunk.done) throw new Error("The event stream ended before the next event.");
+      buffered += decoder.decode(chunk.value, { stream: true });
+    }
+  }
+
+  return {
+    async next() {
+      for (;;) {
+        const {
+          at: _at,
+          snapshot: _snapshot,
+          replay: _replay,
+          controls: _controls,
+          seq: _seq,
+          ...rest
+        } = await nextRaw();
+        if (rest.kind === "controls") continue;
+        return rest as PluginAgentEvent | { kind: "user-message"; text: string; clientId: string };
+      }
+    },
+    nextRaw,
+    async close() {
+      controller.abort();
+      await reader.cancel().catch(() => undefined);
+    },
+  };
+}
+
+async function nextRawEvent(stream: EventStream): Promise<Record<string, unknown>> {
+  for (;;) {
+    const event = await stream.nextRaw();
+    if (event.kind !== "controls") return event;
+  }
+}
+
+async function rawPost(url: string, path: string, init: RequestInit): Promise<Response> {
+  return fetch(new URL(path, url), { method: "POST", ...init });
+}
+
+async function post(url: string, path: string, body: unknown, token: string): Promise<Response> {
+  return rawPost(url, path, {
+    headers: { "content-type": "application/json", authorization: "Bearer " + token },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+/** The token startWebApp hands the guest travels only in the URL fragment
+ * it returns -- never in anything the server itself serves. */
+function tokenFromUrl(url: string): string {
+  const token = new URLSearchParams(new URL(url).hash.slice(1)).get("token");
+  if (!token) throw new Error("The chat page's URL did not carry a session token.");
+  return token;
+}
+
+/** Sends a GET with an arbitrary Host header -- fetch forbids overriding
+ * Host (a browser would too), so proving the anti-rebinding check needs
+ * Node's own low-level client instead. */
+async function fetchWithHost(url: string, host: string): Promise<{ status: number }> {
+  const target = new URL(url);
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      {
+        hostname: target.hostname,
+        port: target.port,
+        path: target.pathname + target.search,
+        method: "GET",
+        headers: { host },
+      },
+      (response) => {
+        response.resume();
+        response.on("end", () => resolve({ status: response.statusCode ?? 0 }));
+      },
+    );
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+const runningApps: ChatWebApp[] = [];
+
+async function start(
+  fake: FakeDriver,
+  uiRoot = PLUGIN_UI_ROOT,
+): Promise<{ app: ChatWebApp; url: string; token: string }> {
+  const app = createChatWebApp({
+    agent: "Claude Code",
+    driver: fake.driver,
+    workspaceRoot: "C:\\workspace",
+    uiRoot,
+  });
+  runningApps.push(app);
+  const started = await app.startWebApp();
+  return { app, url: started.url, token: tokenFromUrl(started.url) };
+}
+
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  await Promise.all(runningApps.splice(0).map((app) => app.deactivate().catch(() => undefined)));
+});
+
+describe("agent chat web app", () => {
+  it("starts one session and sends later messages through the same session", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+
+    expect(await post(url, "message", { text: "First message" }, token)).toMatchObject({
+      status: 202,
+    });
+    expect(fake.probeCalls()).toBe(1);
+    expect(fake.startInputs).toHaveLength(1);
+    expect(fake.startInputs[0]).toMatchObject({
+      workspaceRoot: "C:\\workspace",
+      mode: "approval-required",
+      mcp: {
+        command: process.env.DOHC_MCP_COMMAND?.trim() || "dohc-mcp",
+        args: ["--workspace", "C:\\workspace"],
+      },
+    });
+    expect(fake.startInputs[0]?.resumeCursor).toBeUndefined();
+    expect(fake.sessions[0]?.promptCalls).toEqual(["First message"]);
+
+    // The first turn has to settle before a second message is accepted --
+    // see the "overlapping turns" describe block for the 409 itself.
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+
+    expect(await post(url, "message", { text: "Second message" }, token)).toMatchObject({
+      status: 202,
+    });
+    expect(fake.probeCalls()).toBe(1);
+    expect(fake.startInputs).toHaveLength(1);
+    expect(fake.sessions[0]?.promptCalls).toEqual(["First message", "Second message"]);
+  });
+
+  it("streams driver events as parseable SSE frames in order", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    expect(await stream.next()).toEqual({ kind: "session-state", state: "closed" });
+    await post(url, "message", { text: "Begin", clientId: "c1" }, token);
+    expect(await stream.next()).toEqual({ kind: "user-message", text: "Begin", clientId: "c1" });
+
+    const events: PluginAgentEvent[] = [
+      { kind: "session-state", state: "ready" },
+      { kind: "text-delta", itemId: "answer", stream: "assistant", text: "Hel" },
+      { kind: "text-delta", itemId: "answer", stream: "assistant", text: "lo" },
+      { kind: "token-usage", used: 12, input: 8, output: 4 },
+    ];
+    for (const event of events) fake.startInputs[0]?.onEvent(event);
+
+    const received: unknown[] = [];
+    for (let index = 0; index < events.length; index += 1) {
+      received.push(await stream.next());
+    }
+    expect(received).toEqual(events);
+    await stream.close();
+  });
+
+  it("publishes current controls with increasing sequence numbers on every control channel", async () => {
+    const promptEntered = deferred();
+    const promptGate = deferred();
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => promptEntered.resolve(),
+      promptGate: () => promptGate.promise,
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    const seqs: number[] = [];
+    const observe = (value: Record<string, unknown>): void => {
+      expect(value.seq).toEqual(expect.any(Number));
+      expect(Number.isInteger(value.seq)).toBe(true);
+      seqs.push(value.seq as number);
+    };
+
+    const initialSnapshot = await stream.nextRaw();
+    expect(initialSnapshot).toMatchObject({
+      kind: "session-state",
+      state: "closed",
+      snapshot: true,
+      controls: { canSend: true, canStop: false, turnId: null },
+    });
+    observe(initialSnapshot);
+
+    const sendPromise = post(url, "message", { text: "Hello", clientId: "c1" }, token);
+    await promptEntered.promise;
+    const reservedControls = await stream.nextRaw();
+    expect(reservedControls).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: null },
+    });
+    observe(reservedControls);
+    const assignedTurn = await stream.nextRaw();
+    expect(assignedTurn).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    observe(assignedTurn);
+    fake.startInputs[0]?.onEvent({ kind: "session-state", state: "running" });
+
+    const running = await stream.nextRaw();
+    expect(running).toMatchObject({
+      kind: "session-state",
+      state: "running",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    observe(running);
+
+    fake.startInputs[0]?.onEvent({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: "Hel",
+    });
+    const firstDelta = await stream.nextRaw();
+    expect(firstDelta).toMatchObject({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: "Hel",
+    });
+    observe(firstDelta);
+
+    fake.startInputs[0]?.onEvent({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: "lo",
+    });
+    const secondDelta = await stream.nextRaw();
+    expect(secondDelta).toMatchObject({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: "lo",
+    });
+    observe(secondDelta);
+    expect(secondDelta.seq).toBeGreaterThan(firstDelta.seq as number);
+
+    promptGate.resolve();
+    const userMessage = await stream.nextRaw();
+    expect(userMessage).toMatchObject({
+      kind: "user-message",
+      text: "Hello",
+      clientId: "c1",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    observe(userMessage);
+
+    const accepted = await sendPromise;
+    expect(accepted.status).toBe(202);
+    const acceptedBody = (await accepted.json()) as Record<string, unknown>;
+    expect(acceptedBody).toMatchObject({
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    observe(acceptedBody);
+
+    const rejected = await post(url, "message", { text: "Too soon" }, token);
+    expect(rejected.status).toBe(409);
+    const rejectedBody = (await rejected.json()) as Record<string, unknown>;
+    expect(rejectedBody).toMatchObject({
+      message: "Wait for the current response to finish.",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    observe(rejectedBody);
+
+    const stopped = await post(url, "stop", undefined, token);
+    expect(stopped.status).toBe(200);
+    const stoppedBody = (await stopped.json()) as Record<string, unknown>;
+    expect(stoppedBody).toMatchObject({
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    observe(stoppedBody);
+
+    fake.startInputs[0]?.onEvent({
+      kind: "turn-completed",
+      turnId: "turn-1",
+      status: "cancelled",
+    });
+    const completed = await stream.nextRaw();
+    expect(completed).toMatchObject({
+      kind: "turn-completed",
+      status: "cancelled",
+      controls: { canSend: true, canStop: true, turnId: 1 },
+    });
+    observe(completed);
+
+    fake.startInputs[0]?.onEvent({ kind: "error", message: "Driver exited.", fatal: true });
+    const fatal = await stream.nextRaw();
+    expect(fatal).toMatchObject({
+      kind: "error",
+      message: "Driver exited.",
+      fatal: true,
+      controls: { canSend: true, canStop: false, turnId: 1 },
+    });
+    observe(fatal);
+    await stream.close();
+
+    fake.startInputs[0]?.onEvent({ kind: "token-usage", used: 1, input: 1, output: 0 });
+    const reattached = await eventStream(url, token);
+    const reconnectSnapshot = await reattached.nextRaw();
+    expect(reconnectSnapshot).toMatchObject({
+      kind: "session-state",
+      state: "error",
+      snapshot: true,
+      controls: { canSend: true, canStop: false, turnId: 1 },
+    });
+    observe(reconnectSnapshot);
+    const replayed: Record<string, unknown>[] = [];
+    for (let index = 0; index < 6; index += 1) replayed.push(await reattached.nextRaw());
+    expect(replayed.every((event) => event.kind !== "controls")).toBe(true);
+    const replayedDeltas = replayed.filter(
+      (event) => event.kind === "text-delta" && event.itemId === "answer",
+    );
+    expect(replayedDeltas).toHaveLength(1);
+    expect(replayedDeltas[0]).toMatchObject({
+      stream: "assistant",
+      text: "Hello",
+      seq: firstDelta.seq,
+      replay: true,
+    });
+    await reattached.close();
+
+    for (let index = 1; index < seqs.length; index += 1) {
+      expect(seqs[index]).toBeGreaterThan(seqs[index - 1] as number);
+    }
+  });
+
+  it("publishes Send again after a stopped prompt finishes cleanup behind turn-completed", async () => {
+    const secondPromptEntered = deferred();
+    const secondPromptGate = deferred();
+    const secondCancelEntered = deferred();
+    const secondCancelGate = deferred();
+    let promptCalls = 0;
+    let cancelCalls = 0;
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => {
+        promptCalls += 1;
+        if (promptCalls === 2) secondPromptEntered.resolve();
+      },
+      promptGate: () => (promptCalls === 2 ? secondPromptGate.promise : Promise.resolve()),
+      onCancelEntered: () => {
+        cancelCalls += 1;
+        if (cancelCalls === 2) secondCancelEntered.resolve();
+      },
+      cancelGate: () => (cancelCalls === 2 ? secondCancelGate.promise : Promise.resolve()),
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.nextRaw(); // initial snapshot
+
+    expect((await post(url, "message", { text: "First", clientId: "c1" }, token)).status).toBe(
+      202,
+    );
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: null },
+    });
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    expect(await stream.nextRaw()).toMatchObject({ kind: "user-message", text: "First" });
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: false, turnId: 1 },
+    });
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+    expect(await stream.nextRaw()).toMatchObject({ kind: "turn-completed" });
+
+    const messageResponse = post(url, "message", { text: "Second", clientId: "c2" }, token);
+    await secondPromptEntered.promise;
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: 2 },
+    });
+    expect((await post(url, "stop", undefined, token)).status).toBe(200);
+
+    secondPromptGate.resolve();
+    expect(await stream.nextRaw()).toMatchObject({ kind: "user-message", text: "Second" });
+    await secondCancelEntered.promise;
+    fake.startInputs[0]?.onEvent({
+      kind: "turn-completed",
+      turnId: "turn-2",
+      status: "cancelled",
+    });
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "turn-completed",
+      status: "cancelled",
+      controls: { canSend: false, canStop: true, turnId: 2 },
+    });
+
+    secondCancelGate.resolve();
+    expect((await messageResponse).status).toBe(202);
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: true, canStop: true, turnId: 2 },
+    });
+    await stream.close();
+  });
+
+  it("publishes Send again after a startup failure releases the prompt reservation", async () => {
+    const fake = fakeDriver(undefined, {
+      startSessionError: new Error("Claude Code failed to spawn."),
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.nextRaw(); // initial snapshot
+
+    const response = await post(url, "message", { text: "Hello" }, token);
+    expect(response.status).toBe(503);
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: null },
+    });
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "error",
+      message: "Claude Code failed to spawn.",
+      fatal: true,
+      controls: { canSend: false, canStop: true, turnId: null },
+    });
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: true, canStop: false, turnId: null },
+    });
+    await stream.close();
+  });
+
+  it("reservation of a prompt with no other frame emits a controls frame", async () => {
+    const probeEntered = deferred();
+    const probeGate = deferred();
+    const fake = fakeDriver(undefined, {
+      onProbeEntered: () => probeEntered.resolve(),
+      probeGate: () => probeGate.promise,
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.nextRaw(); // initial snapshot
+
+    const messageResponse = post(url, "message", { text: "Hello" }, token);
+    await probeEntered.promise;
+    const reservation = await stream.nextRaw();
+
+    probeGate.resolve();
+    expect((await messageResponse).status).toBe(202);
+    await stream.close();
+    expect(reservation).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: null },
+    });
+  });
+
+  it("publishes the turn id before prompt acceptance without waiting for a driver event", async () => {
+    const promptEntered = deferred();
+    const promptGate = deferred();
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => promptEntered.resolve(),
+      promptGate: () => promptGate.promise,
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.nextRaw(); // initial snapshot
+
+    const messageResponse = post(url, "message", { text: "Hello" }, token);
+    await promptEntered.promise;
+    const reservation = await stream.nextRaw();
+    const turnControls = await raceTimeout(stream.nextRaw(), 200);
+
+    promptGate.resolve();
+    expect((await messageResponse).status).toBe(202);
+    await stream.close();
+    expect(reservation).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: null },
+    });
+    expect(turnControls).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+  });
+
+  it("reconnect after a reservation reports a seq newer than what was already applied", async () => {
+    const secondPromptEntered = deferred();
+    const secondPromptGate = deferred();
+    let promptCalls = 0;
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => {
+        promptCalls += 1;
+        if (promptCalls === 2) secondPromptEntered.resolve();
+      },
+      promptGate: () => (promptCalls === 2 ? secondPromptGate.promise : Promise.resolve()),
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.nextRaw(); // initial snapshot
+
+    expect((await post(url, "message", { text: "First" }, token)).status).toBe(202);
+    await stream.nextRaw(); // reservation controls
+    await stream.nextRaw(); // assigned-turn controls
+    await stream.nextRaw(); // accepted user-message
+    await stream.nextRaw(); // released reservation controls
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+    await stream.nextRaw();
+
+    const secondMessage = post(url, "message", { text: "Second" }, token);
+    await secondPromptEntered.promise;
+    const reservation = await stream.nextRaw();
+    expect(reservation).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    const reattached = await eventStream(url, token);
+    const snapshot = await reattached.nextRaw();
+    expect(snapshot.snapshot).toBe(true);
+    expect(snapshot.seq).toBeGreaterThan(reservation.seq as number);
+
+    secondPromptGate.resolve();
+    expect((await secondMessage).status).toBe(202);
+    await reattached.close();
+    await stream.close();
+  });
+
+  it("caps replayed text while live clients receive each full delta", async () => {
+    const maxCoalescedTextChars = 256 * 1024;
+    const firstText = "y".repeat(300 * 1024);
+    const secondText = "z".repeat(300 * 1024);
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    const live = await eventStream(url, token);
+    await live.next(); // the initial state snapshot
+    await post(url, "message", { text: "Begin", clientId: "c1" }, token);
+    await live.next(); // the user-message echo
+
+    fake.startInputs[0]?.onEvent({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: firstText,
+    });
+    expect(await live.next()).toEqual({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: firstText,
+    });
+
+    fake.startInputs[0]?.onEvent({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: secondText,
+    });
+    expect(await live.next()).toEqual({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: secondText,
+    });
+    // A known event right after the truncated text: any stale delta the
+    // truncation missed would replay before this one, so asserting this is
+    // the very next replay event is a deterministic proof that nothing
+    // else landed -- no timeout needed, and no risk of a slow-but-real
+    // event racing past an arbitrary wait.
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+    expect(await live.next()).toEqual({
+      kind: "turn-completed",
+      turnId: "turn-1",
+      status: "completed",
+    });
+    await live.close();
+
+    const replay = await eventStream(url, token);
+    await replay.next(); // the initial state snapshot
+    await replay.next(); // the user-message echo
+    const textDelta = await replay.next();
+    expect(textDelta).toEqual({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: secondText.slice(-maxCoalescedTextChars),
+    });
+    if (textDelta.kind !== "text-delta") throw new Error("The replay omitted its text delta.");
+    expect(textDelta.text.length).toBeLessThanOrEqual(maxCoalescedTextChars);
+    expect(await replay.next()).toEqual({ kind: "history-trimmed" });
+    expect(await replay.next()).toEqual({
+      kind: "turn-completed",
+      turnId: "turn-1",
+      status: "completed",
+    });
+    await replay.close();
+  });
+
+  it("replays buffered events -- including the user's own message -- and reuses the HTTP server after a reload", async () => {
+    const fake = fakeDriver();
+    const { app, url, token } = await start(fake);
+    await post(url, "message", { text: "Begin", clientId: "c1" }, token);
+    const ready: PluginAgentEvent = { kind: "session-state", state: "ready" };
+    const text: PluginAgentEvent = {
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: "Buffered",
+    };
+    fake.startInputs[0]?.onEvent(ready);
+    fake.startInputs[0]?.onEvent(text);
+
+    const reattached = await eventStream(url, token);
+    // "ready" appears twice on purpose: once as the current-state snapshot
+    // every new connection gets first, and again from the buffered event
+    // log replayed right after it -- the same event reached the snapshot
+    // and the log, because publish() updates both.
+    expect(await reattached.next()).toEqual(ready);
+    expect(await reattached.next()).toEqual({ kind: "user-message", text: "Begin", clientId: "c1" });
+    expect(await reattached.next()).toEqual(ready);
+    expect(await reattached.next()).toEqual(text);
+
+    const restarted = await app.startWebApp();
+    expect(restarted.url).toBe(url);
+    expect(fake.startInputs).toHaveLength(1);
+    await reattached.close();
+  });
+
+  it("stamps every event with its real publish time, so a reconnect replays chronology instead of \"now\"", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    const before = Date.now();
+    await post(url, "message", { text: "Hello", clientId: "c1" }, token);
+    const after = Date.now();
+
+    const reattached = await eventStream(url, token);
+    await reattached.nextRaw(); // the initial snapshot
+    const replayed = await nextRawEvent(reattached);
+    expect(replayed.kind).toBe("user-message");
+    expect(typeof replayed.at).toBe("number");
+    expect(replayed.at as number).toBeGreaterThanOrEqual(before);
+    expect(replayed.at as number).toBeLessThanOrEqual(after);
+    await reattached.close();
+  });
+
+  it("marks the initial connection snapshot, so a reasoned terminal state renders exactly one card, not two", async () => {
+    // Stop only produces a reasoned "closed" event now while a session is
+    // still starting (there is no session or context yet to preserve, only
+    // an attempt to give up on) -- a live session's Stop cancels the turn
+    // instead and publishes nothing terminal, so that is the one remaining
+    // source of the transition this test needs.
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onStartSessionEntered: () => entered.resolve(),
+      startGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+    const messagePromise = post(url, "message", { text: "First" }, token);
+    await entered.promise;
+    await post(url, "stop", undefined, token);
+    gate.resolve();
+    await messagePromise.catch(() => undefined);
+
+    const reattached = await eventStream(url, token);
+    const snapshot = await reattached.nextRaw();
+    expect(snapshot).toMatchObject({
+      kind: "session-state",
+      state: "closed",
+      reason: "Stopped",
+      snapshot: true,
+    });
+
+    // The buffered replay carries the same transition again -- the client
+    // must be able to tell these apart, or it renders the "Stopped" card
+    // twice: once for the snapshot, once for the replayed event.
+    const closedReplay = await nextRawEvent(reattached);
+    expect(closedReplay).toMatchObject({
+      kind: "session-state",
+      state: "closed",
+      reason: "Stopped",
+    });
+    expect(closedReplay.snapshot).toBeUndefined();
+    await reattached.close();
+  });
+
+  it("keeps a reconnect's replay in turn order even when the driver publishes before its own prompt resolves", async () => {
+    // The driver can call onEvent synchronously (or on a fast tick) inside
+    // prompt() before that call ever resolves -- without reserving this
+    // turn's log position first, that early event would land in the log
+    // ahead of the user-message it was actually caused by, and a reconnect
+    // would replay the reply before the question.
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => entered.resolve(),
+      promptGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+    let timestamp = 1_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => timestamp++);
+    try {
+      const sendPromise = post(url, "message", { text: "Hello", clientId: "c1" }, token);
+      await entered.promise;
+      fake.startInputs[0]?.onEvent({ kind: "session-state", state: "running" });
+      gate.resolve();
+      expect((await sendPromise).status).toBe(202);
+
+      const reattached = await eventStream(url, token);
+      await reattached.nextRaw(); // the initial closed snapshot
+      const userMessage = await nextRawEvent(reattached);
+      expect(userMessage).toMatchObject({
+        kind: "user-message",
+        text: "Hello",
+        clientId: "c1",
+      });
+      const running = await nextRawEvent(reattached);
+      expect(running).toMatchObject({ kind: "session-state", state: "running" });
+      expect(userMessage.at as number).toBeLessThanOrEqual(running.at as number);
+      await reattached.close();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("replays no message for a reservation the driver hasn't accepted yet, but carries it in order once it has", async () => {
+    // A reconnect landing in the exact window between the reservation and
+    // the driver's accept would have no live fetch on that connection to
+    // ever mark the send failed -- it must see no message for it, not an
+    // unconfirmed message rendered as if it were sent.
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => entered.resolve(),
+      promptGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+
+    const sendPromise = post(url, "message", { text: "Hello", clientId: "c1" }, token);
+    await entered.promise;
+
+    const reattached = await eventStream(url, token);
+    expect((await reattached.nextRaw()).snapshot).toBe(true);
+    const raced = await raceTimeout(nextRawEvent(reattached), 200);
+    expect(raced).toBe("timeout");
+    await reattached.close();
+
+    gate.resolve();
+    expect((await sendPromise).status).toBe(202);
+
+    // Once accepted, a fresh connection carries it in order.
+    const after = await eventStream(url, token);
+    await after.next(); // snapshot
+    expect(await after.next()).toEqual({ kind: "user-message", text: "Hello", clientId: "c1" });
+    await after.close();
+  });
+
+  it("marks replayed frames, and only replayed frames, as replay", async () => {
+    // The page renders a replayed failure quietly (role="status") instead
+    // of re-alerting a screen reader to history it already heard -- this
+    // marker is how it tells the difference.
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    await post(url, "message", { text: "Hello", clientId: "c1" }, token);
+
+    const reattached = await eventStream(url, token);
+    expect((await reattached.nextRaw()).snapshot).toBe(true);
+    const replayed = await nextRawEvent(reattached);
+    expect(replayed.kind).toBe("user-message");
+    expect(replayed.replay).toBe(true);
+
+    fake.startInputs[0]?.onEvent({ kind: "error", message: "boom", fatal: false });
+    const live = await nextRawEvent(reattached);
+    expect(live.kind).toBe("error");
+    expect(live.replay).toBeUndefined();
+    await reattached.close();
+  });
+
+  it("marks the cut when one turn overflows the whole log, so a replay says history is missing", async () => {
+    // No user-message boundary exists ahead of the cut here, so the bare
+    // cap applies -- and the replay must open by saying earlier messages
+    // are gone rather than silently starting mid-turn.
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    await post(url, "message", { text: "Question" }, token);
+    for (let index = 0; index < 550; index += 1) {
+      fake.startInputs[0]?.onEvent({
+        kind: "item",
+        phase: "completed",
+        item: { id: `t-${index}`, type: "command", title: "Run", status: "completed" },
+      });
+    }
+
+    const reattached = await eventStream(url, token);
+    await reattached.next(); // the initial state snapshot
+    expect(await reattached.next()).toEqual({ kind: "history-trimmed" });
+    // What follows the notice is a whole card, never a fragment of one.
+    expect((await reattached.next()).kind).toBe("item");
+    await reattached.close();
+  });
+
+  it("carries a long streamed reply whole through a reload, never starting mid-delta", async () => {
+    // A single streamed reply can easily outnumber the log cap in deltas.
+    // The log coalesces them into one entry per item, so overflowing the
+    // log with a long streamed turn can never leave a replay that starts
+    // mid-sentence.
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    await post(url, "message", { text: "Question", clientId: "c1" }, token);
+
+    let full = "";
+    for (let index = 0; index < 600; index += 1) {
+      const text = "word" + index + " ";
+      full += text;
+      fake.startInputs[0]?.onEvent({ kind: "text-delta", itemId: "i1", stream: "assistant", text });
+    }
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+
+    const reattached = await eventStream(url, token);
+    await reattached.next(); // the initial state snapshot
+    expect(await reattached.next()).toEqual({
+      kind: "user-message",
+      text: "Question",
+      clientId: "c1",
+    });
+    expect(await reattached.next()).toEqual({
+      kind: "text-delta",
+      itemId: "i1",
+      stream: "assistant",
+      text: full,
+    });
+    expect(await reattached.next()).toEqual({
+      kind: "turn-completed",
+      turnId: "turn-1",
+      status: "completed",
+    });
+    await reattached.close();
+  });
+
+  it("evicts whole turns on overflow, so a replay starts at a turn boundary", async () => {
+    // Eviction used to drop oldest events one by one, which could keep a
+    // turn's reply while dropping the question that caused it. The cut now
+    // extends to the next user-message: what remains replays from a turn's
+    // own start.
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+
+    for (const [turn, text] of [
+      [1, "one"],
+      [2, "two"],
+    ] as const) {
+      await post(url, "message", { text }, token);
+      for (let index = 0; index < 300; index += 1) {
+        fake.startInputs[0]?.onEvent({
+          kind: "item",
+          phase: "completed",
+          item: { id: `t${turn}-${index}`, type: "command", title: "Run", status: "completed" },
+        });
+      }
+      fake.startInputs[0]?.onEvent({
+        kind: "turn-completed",
+        turnId: `turn-${turn}`,
+        status: "completed",
+      });
+    }
+
+    // 604 entries were published; the overflow cut extended through the
+    // whole first turn, so the replay opens with the second turn's own
+    // user-message -- never an orphaned mid-turn event.
+    const reattached = await eventStream(url, token);
+    await reattached.next(); // the initial state snapshot
+    expect(await reattached.next()).toMatchObject({ kind: "user-message", text: "two" });
+    await reattached.close();
+  });
+
+  it("a Stop before the turn is accepted cancels it the moment it is accepted", async () => {
+    // In the window between /message reaching the driver and the driver
+    // accepting the prompt, no turn id exists yet -- Stop's cancel() is a
+    // documented no-op there, so without the recorded intent the turn
+    // would run on after a successful-looking Stop.
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => entered.resolve(),
+      promptGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+
+    const sendPromise = post(url, "message", { text: "Hello" }, token);
+    await entered.promise;
+    // Stop lands while the prompt is still awaiting acceptance: the
+    // driver-level cancel it issues now has no turn to reach.
+    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 200 });
+    expect(fake.sessions[0]?.cancelCalls).toBe(1);
+
+    gate.resolve();
+    expect((await sendPromise).status).toBe(202);
+    // The acceptance honored the recorded stop: a second cancel reached
+    // the driver now that the turn exists to interrupt.
+    expect(fake.sessions[0]?.cancelCalls).toBe(2);
+    // Still the same live session -- a pre-acceptance Stop interrupts the
+    // turn, it never retires the session.
+    expect(fake.disposed).toEqual([]);
+  });
+
+  it("refuses a second message while a prompt is still awaiting acceptance", async () => {
+    // The pre-acceptance window holds the single active turn just as much
+    // as an accepted one: admitting a second prompt there would overlap
+    // the drivers' one tracked turn and steal a recorded stop's target.
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => entered.resolve(),
+      promptGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+
+    const sendPromise = post(url, "message", { text: "First" }, token);
+    await entered.promise;
+    expect(await post(url, "message", { text: "Second" }, token)).toMatchObject({ status: 409 });
+
+    gate.resolve();
+    expect((await sendPromise).status).toBe(202);
+    expect(fake.sessions[0]?.promptCalls).toEqual(["First"]);
+  });
+
+  it("claims the prompt slot before waiting for a live session", async () => {
+    const startEntered = deferred();
+    const startGate = deferred();
+    const fake = fakeDriver(undefined, {
+      onStartSessionEntered: () => startEntered.resolve(),
+      startGate: () => startGate.promise,
+    });
+    const { url, token } = await start(fake);
+
+    const accepted = post(url, "message", { text: "First" }, token);
+    await startEntered.promise;
+    const refusedResponse = await post(url, "message", { text: "Second" }, token);
+    expect(refusedResponse.status).toBe(409);
+
+    startGate.resolve();
+    const acceptedResponse = await accepted;
+    expect(acceptedResponse.status).toBe(202);
+    expect(fake.sessions[0]?.promptCalls).toEqual(["First"]);
+
+    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 200 });
+    expect(fake.sessions[0]?.cancelCalls).toBe(1);
+  });
+
+  it("a Stop with no prompt in flight never dooms the next message's turn", async () => {
+    // The stop intent is scoped to the one prompt that was in flight when
+    // Stop arrived -- an idle Stop must not linger and cancel a turn the
+    // user asks for afterward.
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    await post(url, "message", { text: "First" }, token);
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+
+    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 200 });
+    expect(fake.sessions[0]?.cancelCalls).toBe(1);
+
+    expect(await post(url, "message", { text: "Second" }, token)).toMatchObject({ status: 202 });
+    // Accepted cleanly: no cancel fired at this acceptance.
+    expect(fake.sessions[0]?.cancelCalls).toBe(1);
+  });
+
+  it("Stop cancels the current turn -- the session and its context stay alive, never a fresh one", async () => {
+    // Per the product invariant (a reversible action needs a reverse path,
+    // or the user has to be told before it runs): ending the whole session
+    // on Stop made the next message silently start context-free, with no
+    // warning. Stop now interrupts the turn and nothing else.
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    await post(url, "message", { text: "First session" }, token);
+
+    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 200 });
+    expect(fake.sessions[0]?.cancelCalls).toBe(1);
+    // Never disposed -- the session and its context are still there.
+    expect(fake.disposed).toEqual([]);
+
+    // Still refused: the driver hasn't reported the turn as actually
+    // settled yet (no turn-completed arrived), same as any other message
+    // racing an active turn.
+    expect(await post(url, "message", { text: "Too soon" }, token)).toMatchObject({
+      status: 409,
+    });
+
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "cancelled" });
+
+    expect(await post(url, "message", { text: "Second turn" }, token)).toMatchObject({
+      status: 202,
+    });
+    // The same session, not a fresh one: no second startSession call.
+    expect(fake.startInputs).toHaveLength(1);
+    expect(fake.sessions[0]?.promptCalls).toEqual(["First session", "Second turn"]);
+  });
+
+  it("Stop is a safe no-op when nothing is running -- cancel() still reaches the driver", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    await post(url, "message", { text: "First" }, token);
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+
+    // No turn active -- both concrete drivers document cancel() as a safe
+    // no-op here, so this still calls it (simplest, and harmless) rather
+    // than special-casing idle client-side.
+    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 200 });
+    expect(fake.sessions[0]?.cancelCalls).toBe(1);
+    expect(fake.disposed).toEqual([]);
+
+    // Immediately usable: no turn was active, so nothing gates the next
+    // message.
+    expect(await post(url, "message", { text: "Still here" }, token)).toMatchObject({
+      status: 202,
+    });
+    expect(fake.startInputs).toHaveLength(1);
+  });
+
+  it("a cancel that rejects doesn't end the session either", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.next(); // initial closed snapshot
+    await post(url, "message", { text: "First", clientId: "c1" }, token);
+    await stream.next(); // the user-message echo
+    const session = fake.sessions[0];
+    if (!session) throw new Error("The fake driver did not start a session.");
+    session.cancelError = new Error("Claude Code refused to interrupt.");
+
+    // Reported honestly rather than faked as a success, but never at the
+    // cost of the session: no session-state event, no dispose.
+    const stopResponse = await post(url, "stop", undefined, token);
+    expect(stopResponse.status).toBe(500);
+    expect(session.cancelCalls).toBe(1);
+    expect(fake.disposed).toEqual([]);
+
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "cancelled" });
+    expect(await stream.next()).toEqual({
+      kind: "turn-completed",
+      turnId: "turn-1",
+      status: "cancelled",
+    });
+
+    // The same session, not a fresh one.
+    const nextResponse = await post(url, "message", { text: "Second" }, token);
+    expect(nextResponse.status).toBe(202);
+    expect(fake.startInputs).toHaveLength(1);
+    await stream.close();
+  });
+
+  it("answers the pending permission request with the selected decision", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.next();
+    await post(url, "message", { text: "Needs permission", clientId: "c1" }, token);
+    await stream.next(); // the user-message echo
+    const request: PluginAgentEvent = {
+      kind: "permission-request",
+      requestId: "request/1",
+      requestType: "command",
+      title: "Run tests",
+      options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }],
+    };
+    fake.startInputs[0]?.onEvent(request);
+    expect(await stream.next()).toEqual(request);
+
+    expect(
+      await post(
+        url,
+        `permission/${encodeURIComponent("request/1")}`,
+        { decision: "allow_once" },
+        token,
+      ),
+    ).toMatchObject({ status: 204 });
+    expect(fake.sessions[0]?.permissionCalls).toEqual([
+      { requestId: "request/1", decision: "allow_once" },
+    ]);
+    await stream.close();
+  });
+
+  it("carries a permission request's affected locations through to the client", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.next();
+    await post(url, "message", { text: "Needs permission", clientId: "c1" }, token);
+    await stream.next();
+    const request: PluginAgentEvent = {
+      kind: "permission-request",
+      requestId: "request/1",
+      requestType: "file-change",
+      title: "Edit files",
+      locations: ["src/foo.ts", "src/bar.ts"],
+      options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }],
+    };
+    fake.startInputs[0]?.onEvent(request);
+    const received = await stream.next();
+    expect(received).toEqual(request);
+    expect((received as { locations?: string[] }).locations).toEqual(["src/foo.ts", "src/bar.ts"]);
+    await stream.close();
+  });
+
+  it("settles a pending permission when the session dies, so a late answer 404s instead of reaching a dead session", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.next(); // initial closed snapshot
+    await post(url, "message", { text: "Needs permission", clientId: "c1" }, token);
+    await stream.next(); // the user-message echo
+    const request: PluginAgentEvent = {
+      kind: "permission-request",
+      requestId: "request/1",
+      requestType: "command",
+      title: "Run tests",
+      options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }],
+    };
+    fake.startInputs[0]?.onEvent(request);
+    expect(await stream.next()).toEqual(request);
+
+    // The session dies with the permission still pending.
+    fake.startInputs[0]?.onEvent({ kind: "error", message: "Claude Code crashed.", fatal: true });
+    expect(await stream.next()).toEqual({
+      kind: "error",
+      message: "Claude Code crashed.",
+      fatal: true,
+    });
+    // Without the fix, this never arrives: the card stays "pending" forever
+    // with nothing to settle it, and a reconnect's replay recreates the
+    // same unusable card from the buffered permission-request event alone.
+    expect(await stream.next()).toEqual({
+      kind: "permission-resolved",
+      requestId: "request/1",
+      decision: "cancel",
+    });
+
+    // A late answer to the now-settled request 404s -- it is no longer
+    // pending, rather than reaching a session that no longer exists.
+    const lateAnswer = await post(
+      url,
+      `permission/${encodeURIComponent("request/1")}`,
+      { decision: "allow_once" },
+      token,
+    );
+    expect(lateAnswer.status).toBe(404);
+
+    // A reconnect's replay carries both the request and its resolution, in
+    // that order -- never just the request on its own. (Snapshot, then the
+    // buffered user-message, permission-request, error, and
+    // permission-resolved events, in publish order.)
+    const reattached = await eventStream(url, token);
+    const replayed: unknown[] = [];
+    for (let index = 0; index < 5; index += 1) replayed.push(await reattached.next());
+    expect(replayed).toContainEqual({
+      kind: "permission-resolved",
+      requestId: "request/1",
+      decision: "cancel",
+    });
+    await stream.close();
+    await reattached.close();
+  });
+
+  it("answers a permission request exactly once even when two POSTs race for it", async () => {
+    // Forces the race deterministically instead of hoping two real HTTP
+    // requests happen to interleave at the right instant: the first POST
+    // is held inside the driver's own answerPermission() call, and only
+    // then does the test fire the second.
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onAnswerPermissionEntered: () => entered.resolve(),
+      answerPermissionGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.next(); // initial closed snapshot
+    await post(url, "message", { text: "Needs permission", clientId: "c1" }, token);
+    await stream.next(); // the user-message echo
+    fake.startInputs[0]?.onEvent({
+      kind: "permission-request",
+      requestId: "request/1",
+      requestType: "command",
+      title: "Run tests",
+      options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }],
+    });
+    await stream.next(); // the permission-request itself
+
+    const first = post(
+      url,
+      `permission/${encodeURIComponent("request/1")}`,
+      { decision: "allow_once" },
+      token,
+    );
+    await entered.promise;
+    // The first POST is now gated deep inside the driver call, having
+    // already claimed the requestId (with the fix) or not yet (without
+    // it) -- the second must see whichever is true right now, not
+    // whatever becomes true once the first eventually finishes.
+    const second = await post(
+      url,
+      `permission/${encodeURIComponent("request/1")}`,
+      { decision: "reject_once" },
+      token,
+    );
+    gate.resolve();
+    const firstResponse = await first;
+
+    expect(firstResponse.status).toBe(204);
+    expect(second.status).toBe(404);
+    expect(fake.sessions[0]?.permissionCalls).toEqual([
+      { requestId: "request/1", decision: "allow_once" },
+    ]);
+    await stream.close();
+  });
+
+  it("settles a permission claimed just before Stop, instead of resurrecting it as an unkillable zombie", async () => {
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onAnswerPermissionEntered: () => entered.resolve(),
+      answerPermissionGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.next(); // initial closed snapshot
+    await post(url, "message", { text: "Needs permission", clientId: "c1" }, token);
+    await stream.next(); // the user-message echo
+    fake.startInputs[0]?.onEvent({
+      kind: "permission-request",
+      requestId: "request/1",
+      requestType: "command",
+      title: "Run tests",
+      options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }],
+    });
+    await stream.next(); // the permission-request itself
+
+    const answerPromise = post(
+      url,
+      `permission/${encodeURIComponent("request/1")}`,
+      { decision: "allow_once" },
+      token,
+    );
+    await entered.promise; // claimed, gated deep inside the driver call
+
+    // The claim already removed the id from pendingPermissions before Stop
+    // (now a cancel, not a teardown) got a chance to see it there -- the
+    // exact interleaving the bug depended on. The session itself stays
+    // alive throughout: Stop cancels the turn, not the session.
+    const fakeSession = fake.sessions[0];
+    if (!fakeSession) throw new Error("No session started.");
+    fakeSession.answerPermissionError = new Error("The driver refused to answer.");
+
+    const stopResponse = await post(url, "stop", undefined, token);
+    expect(stopResponse.status).toBe(200);
+    expect(fake.disposed).toEqual([]);
+
+    gate.resolve();
+    const answerResponse = await answerPromise;
+    expect(answerResponse.status).toBe(500);
+
+    // Stop's own settlePendingPermissions published the cancellation
+    // before the driver call even started rejecting -- there is nothing
+    // else for the session to publish, since it never ends here.
+    expect(await stream.next()).toEqual({
+      kind: "permission-resolved",
+      requestId: "request/1",
+      decision: "cancel",
+    });
+
+    // A retry 404s because the request is already resolved -- never
+    // because the claim wrongly resurrected the id as pending for a
+    // request that was never actually re-opened.
+    const retry = await post(
+      url,
+      `permission/${encodeURIComponent("request/1")}`,
+      { decision: "reject_once" },
+      token,
+    );
+    expect(retry.status).toBe(404);
+
+    // A second /stop still runs settlePendingPermissions unconditionally --
+    // if the catch above had ignored the claimedPermissions check and
+    // re-added the id anyway, this would publish a second, bogus
+    // cancellation for a request that was already fully settled.
+    const secondStop = await post(url, "stop", undefined, token);
+    expect(secondStop.status).toBe(200);
+    const racedSecondCancel = await raceTimeout(stream.next(), 200);
+    expect(racedSecondCancel).toBe("timeout");
+
+    // A reconnect's replay carries the cancellation, not a bare unanswered
+    // request that would recreate a clickable, dead-end card. Four frames
+    // total: the snapshot, then the user-message, permission-request, and
+    // permission-resolved replay entries -- Stop no longer adds a fifth
+    // (a session-state closed) now that the session survives it.
+    const reattached = await eventStream(url, token);
+    const replayed: unknown[] = [];
+    for (let index = 0; index < 4; index += 1) replayed.push(await reattached.next());
+    expect(replayed).toContainEqual({
+      kind: "permission-resolved",
+      requestId: "request/1",
+      decision: "cancel",
+    });
+    await stream.close();
+    await reattached.close();
+  });
+
+  it("renders the page for whichever agent it was created for", async () => {
+    const fake = fakeDriver();
+    const app = createChatWebApp({
+      agent: "Codex",
+      driver: fake.driver,
+      workspaceRoot: "C:\\workspace",
+      uiRoot: PLUGIN_UI_ROOT,
+    });
+    runningApps.push(app);
+
+    const { url } = await app.startWebApp();
+    const html = await (await fetch(new URL("/", url))).text();
+    expect(html).toContain('<html lang="en" data-agent="Codex">');
+    expect(html).toContain("<title>Codex Chat</title>");
+    expect(html).toContain("Send a message to start a Codex session.");
+    expect(html).not.toContain("{{agent}}");
+    expect(html).not.toContain("Claude");
+  });
+
+  it("serves its own static chat page, stylesheet, and script -- the page itself is token-free", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+
+    const page = await fetch(new URL("/", url));
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toContain("text/html");
+    const html = await page.text();
+    expect(html).toContain("<title>Claude Code Chat</title>");
+    // The token lives only in the fragment startWebApp returned -- anything
+    // "/" itself serves must never carry it, or any local process that
+    // merely fetches this route (or a rebound page reading its own
+    // same-origin response) would learn it too.
+    expect(html).not.toContain(token);
+    expect(html).not.toContain("chat-token");
+    // The transcript itself is not a live region: a streamed reply fires
+    // one text-delta per fragment, and announcing every one would drown
+    // out a permission request or failure. A separate, visually hidden
+    // region carries only settled announcements.
+    expect(html).not.toMatch(/id="transcript"[^>]*aria-live/);
+    expect(html).toMatch(/id="status"[^>]*aria-live="polite"/);
+
+    const css = await fetch(new URL("chat.css", url));
+    expect(css.status).toBe(200);
+    expect(css.headers.get("content-type")).toContain("text/css");
+
+    const script = await fetch(new URL("chat.js", url));
+    expect(script.status).toBe(200);
+    expect(script.headers.get("content-type")).toContain("javascript");
+  });
+
+  it("hands the token only in the URL fragment startWebApp returns", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    expect(url).toContain("#token=" + token);
+
+    // Reattaching (already-running server) hands back the same URL, token
+    // included -- the guest can navigate back to it and still authenticate.
+    const app = runningApps.at(-1);
+    if (!app) throw new Error("No running app to reattach to.");
+    const again = await app.startWebApp();
+    expect(again.url).toBe(url);
+  });
+
+  it("refuses a request whose Host header isn't this loopback server -- a DNS-rebound page can't just ask", async () => {
+    const fake = fakeDriver();
+    const { url } = await start(fake);
+    const target = new URL(url);
+
+    const rebound = await fetchWithHost(url, "attacker.example");
+    expect(rebound.status).toBe(403);
+
+    // The legitimate Host (what every other test's real fetch() sends)
+    // still works -- this isn't rejecting the server's own requests.
+    const legitimate = await fetchWithHost(url, target.host);
+    expect(legitimate.status).toBe(200);
+  });
+
+  it("500s a missing static asset without publishing a session error", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake, uiRootMissingScript());
+    const stream = await eventStream(url, token);
+    expect(await stream.next()).toEqual({ kind: "session-state", state: "closed" });
+
+    const missing = await fetch(new URL("chat.js", url));
+    expect(missing.status).toBe(500);
+
+    // A missing asset never touched the session: a normal message still
+    // starts one, and the next frame on the stream is that message's own
+    // user-message echo, not a stray fatal error from the 500'd asset.
+    await post(url, "message", { text: "Still works", clientId: "c1" }, token);
+    expect(fake.startInputs).toHaveLength(1);
+    expect(await stream.next()).toEqual({
+      kind: "user-message",
+      text: "Still works",
+      clientId: "c1",
+    });
+    await stream.close();
+  });
+
+  it("probes again on every attempt -- installing the CLI after a failed probe lets the next message through", async () => {
+    let installed = false;
+    const fake = fakeDriver(() =>
+      installed
+        ? installedProbe
+        : {
+            installed: false,
+            auth: { status: "unknown" },
+            models: [],
+            errorMessage: "Claude Code isn't here yet.",
+          },
+    );
+    const { url, token } = await start(fake);
+
+    expect(await post(url, "message", { text: "First try" }, token)).toMatchObject({
+      status: 503,
+    });
+    expect(fake.startInputs).toHaveLength(0);
+    expect(fake.probeCalls()).toBe(1);
+
+    installed = true;
+    expect(await post(url, "message", { text: "Second try" }, token)).toMatchObject({
+      status: 202,
+    });
+    expect(fake.startInputs).toHaveLength(1);
+    expect(fake.probeCalls()).toBe(2);
+  });
+
+  it("streams the friendly install guidance first when not installed, with the raw diagnostic riding along as detail", async () => {
+    // The probe's own diagnostic (a raw "spawn claude ENOENT" from the real
+    // driver) always exists for a not-installed probe, so it used to win
+    // over the friendly guidance every time -- the reader never saw the
+    // one actionable instruction, only a message meant for a bug report.
+    const fake = fakeDriver(() => ({
+      installed: false,
+      auth: { status: "unknown" },
+      models: [],
+      errorMessage: "spawn claude ENOENT",
+    }));
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.next();
+
+    expect(await post(url, "message", { text: "Hello", clientId: "c1" }, token)).toMatchObject({
+      status: 503,
+    });
+    expect(fake.startInputs).toHaveLength(0);
+    // No user-message echo: the probe failed before the driver ever
+    // accepted the prompt, so the message was never really sent.
+    expect(await stream.next()).toEqual({
+      kind: "error",
+      message:
+        "Claude Code isn't installed. Install the Claude Code CLI and add it to your PATH. (spawn claude ENOENT)",
+      fatal: true,
+    });
+    await stream.close();
+  });
+
+  it("publishes a terminal error when driver.startSession itself rejects", async () => {
+    // Unlike the probe failure above, the probe succeeds here -- the
+    // rejection comes from driver.startSession itself (a spawn or
+    // handshake failure), after the driver has already published
+    // "starting". Without a terminal event for this specific path, the
+    // pill sits on Starting forever with Stop still enabled and no session
+    // behind it.
+    const fake = fakeDriver(undefined, {
+      startSessionError: new Error("Claude Code failed to spawn."),
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    expect(await stream.next()).toEqual({ kind: "session-state", state: "closed" });
+
+    const response = await post(url, "message", { text: "Hello" }, token);
+    expect(response.status).toBe(503);
+    expect(await stream.next()).toEqual({
+      kind: "error",
+      message: "Claude Code failed to spawn.",
+      fatal: true,
+    });
+    await stream.close();
+
+    // The internal snapshot settled too: a reconnect sees the real state
+    // immediately, not a stale "closed" with no explanation.
+    const reattached = await eventStream(url, token);
+    expect(await reattached.next()).toEqual({
+      kind: "session-state",
+      state: "error",
+      reason: "Claude Code failed to spawn.",
+    });
+    await reattached.close();
+  });
+
+  it("publishes one fatal error when the MCP launcher is unavailable", async () => {
+    vi.stubEnv("DOHC_MCP_COMMAND_UNAVAILABLE", "1");
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    expect(await stream.next()).toEqual({ kind: "session-state", state: "closed" });
+
+    const firstResponse = await post(url, "message", { text: "Hello" }, token);
+    expect(firstResponse.status).toBe(503);
+    expect(await firstResponse.json()).toMatchObject({
+      message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
+      kind: "restartOnly",
+      controls: { canSend: true, canStop: false, turnId: null },
+      seq: expect.any(Number),
+    });
+    expect(await stream.next()).toEqual({
+      kind: "error",
+      message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
+      fatal: true,
+      restartOnly: true,
+    });
+    const secondResponse = await post(url, "message", { text: "Hello again" }, token);
+    expect(secondResponse.status).toBe(503);
+    expect(await secondResponse.json()).toMatchObject({
+      message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
+      kind: "restartOnly",
+      controls: { canSend: true, canStop: false, turnId: null },
+      seq: expect.any(Number),
+    });
+    expect(await stream.next()).toEqual({
+      kind: "error",
+      message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
+      fatal: true,
+      restartOnly: true,
+    });
+    expect(fake.startInputs).toHaveLength(0);
+    await stream.close();
+  });
+
+  it("renders exactly one boundary card for a startup failure, not the driver's own closed plus our fatal error", async () => {
+    // Both concrete drivers report their own cleanup with a bare "closed"
+    // (no reason) through onEvent right before a spawn or handshake
+    // failure rejects driver.startSession -- without deduping, a
+    // reconnect's replay would carry both that and the more informative
+    // fatal error this catch publishes, rendering two boundary cards for
+    // one failure.
+    const fake = fakeDriver(undefined, {
+      startSessionError: new Error("Claude Code failed to spawn."),
+    });
+    const { url, token } = await start(fake);
+
+    const response = await post(url, "message", { text: "Hello" }, token);
+    expect(response.status).toBe(503);
+
+    const reattached = await eventStream(url, token);
+    await reattached.next(); // the internal snapshot, already settled to error
+    const replayed: unknown[] = [];
+    for (;;) {
+      const raced = await raceTimeout(reattached.next(), 200);
+      if (raced === "timeout") break;
+      replayed.push(raced);
+    }
+    expect(replayed).toEqual([
+      { kind: "error", message: "Claude Code failed to spawn.", fatal: true },
+    ]);
+    await reattached.close();
+  });
+
+  it("does not log an accepted-message echo for a message the driver goes on to reject", async () => {
+    // The probe and session start both succeed; only prompt() rejects. The
+    // earlier code published user-message before this point, so a prompt
+    // failure left an accepted-looking echo in the log for a message that
+    // never sent.
+    const fake = fakeDriver(undefined, { promptError: new Error("Claude Code refused the turn.") });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    expect(await stream.next()).toEqual({ kind: "session-state", state: "closed" });
+
+    const response = await post(url, "message", { text: "Hello", clientId: "c1" }, token);
+    expect(response.status).toBe(500);
+
+    // Only the fatal error reaches the log -- no user-message frame ever
+    // arrives, before it or after it, for the rejected send.
+    expect(await stream.next()).toEqual({
+      kind: "error",
+      message: "Claude Code refused the turn.",
+      fatal: true,
+    });
+    await stream.close();
+  });
+
+  it("removes a session-state event the driver published before a rejected prompt, so replay has no orphan", async () => {
+    // The driver can report "running" via onEvent before its own prompt()
+    // call goes on to reject -- without also dropping that event, a
+    // reconnect's replay would show Running, then the failure, with no
+    // question anywhere near either of them.
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => entered.resolve(),
+      promptGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+
+    const sendPromise = post(url, "message", { text: "Hello", clientId: "c1" }, token);
+    await entered.promise;
+    fake.startInputs[0]?.onEvent({ kind: "session-state", state: "running" });
+    const session = fake.sessions[0];
+    if (!session) throw new Error("The fake driver did not start a session.");
+    session.promptError = new Error("Claude Code refused the turn.");
+    gate.resolve();
+
+    expect((await sendPromise).status).toBe(500);
+
+    // A fresh connection's replay: the initial snapshot, then the failure
+    // card directly -- no orphaned "running" transition sitting between
+    // them (that would have replayed here first, before the error, since
+    // it was published earlier).
+    const reattached = await eventStream(url, token);
+    await reattached.next(); // the initial state snapshot
+    expect(await reattached.next()).toEqual({
+      kind: "error",
+      message: "Claude Code refused the turn.",
+      fatal: true,
+    });
+    await reattached.close();
+  });
+
+  it("treats a late-resolving prompt as rejected when the session died while it was pending, leaving turnActive clear", async () => {
+    // A fatal error (a crashed driver process, say) can arrive through the
+    // session's own onEvent handler while prompt() is still awaiting the
+    // driver's accept -- that already clears processSession and publishes
+    // the real terminal card, independently of whether prompt() itself
+    // ever settles. Without treating a late "success" here as a rejection,
+    // turnActive would be stranded true with no live session left to ever
+    // emit turn-completed and clear it.
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => entered.resolve(),
+      promptGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+
+    const firstMessage = post(url, "message", { text: "First" }, token);
+    await entered.promise;
+    fake.startInputs[0]?.onEvent({ kind: "error", message: "Claude Code crashed.", fatal: true });
+    // prompt() itself still resolves -- its own promise is independent of
+    // the onEvent stream that just reported the session's death.
+    gate.resolve();
+
+    expect((await firstMessage).status).toBe(500);
+
+    // Replay after reconnect: the initial snapshot, then the failure card
+    // the driver's own onEvent handler published -- straight after it, no
+    // orphaned user-message reservation and no orphaned "running"/other
+    // turn noise sitting in between. The terminal card is the only place
+    // a reconnect ever learns why the session ended, so it must survive
+    // being dropped along with the rest of the orphaned turn.
+    const reattached = await eventStream(url, token);
+    await reattached.next(); // the initial state snapshot
+    expect(await reattached.next()).toEqual({
+      kind: "error",
+      message: "Claude Code crashed.",
+      fatal: true,
+    });
+    await reattached.close();
+
+    // No 409 left behind: the fresh message drives a whole new session,
+    // proving turnActive was never left stuck true.
+    const secondMessage = await post(url, "message", { text: "Second" }, token);
+    expect(secondMessage.status).toBe(202);
+    expect(fake.startInputs).toHaveLength(2);
+  });
+
+  describe("control server authentication", () => {
+    it("rejects a mutation with no token, and the session survives", async () => {
+      const fake = fakeDriver();
+      const { url, token } = await start(fake);
+      await post(url, "message", { text: "Live one" }, token);
+      expect(fake.sessions[0]?.cancelCalls).toBe(0);
+
+      const unauthenticated = await rawPost(url, "stop", {
+        headers: { "content-type": "application/json" },
+      });
+      expect(unauthenticated.status).toBe(401);
+      // The session is untouched: no stop reached the driver.
+      expect(fake.sessions[0]?.cancelCalls).toBe(0);
+
+      const authenticated = await post(url, "stop", undefined, token);
+      expect(authenticated.status).toBe(200);
+      expect(fake.sessions[0]?.cancelCalls).toBe(1);
+    });
+
+    it("rejects a mutation sent with a CORS-simple content type, even with the right token", async () => {
+      const fake = fakeDriver();
+      const { url, token } = await start(fake);
+
+      const simple = await rawPost(url, "stop", {
+        headers: { "content-type": "text/plain", authorization: "Bearer " + token },
+      });
+      expect(simple.status).toBe(401);
+    });
+
+    it("rejects a wrong token", async () => {
+      const fake = fakeDriver();
+      const { url, token } = await start(fake);
+
+      const wrong = await post(url, "message", { text: "Hi" }, token + "x");
+      expect(wrong.status).toBe(401);
+      expect(fake.startInputs).toHaveLength(0);
+    });
+
+    it("rejects /events with no token, and accepts it with the right one", async () => {
+      const fake = fakeDriver();
+      const { url, token } = await start(fake);
+
+      const unauthenticated = await fetch(new URL("events", url));
+      expect(unauthenticated.status).toBe(401);
+
+      const authenticated = await fetch(
+        new URL("events?token=" + encodeURIComponent(token), url),
+      );
+      expect(authenticated.status).toBe(200);
+      await authenticated.body?.cancel();
+    });
+
+    it("serves static assets without a token", async () => {
+      const fake = fakeDriver();
+      const { url } = await start(fake);
+      expect((await fetch(new URL("chat.css", url))).status).toBe(200);
+    });
+  });
+
+  describe("session lifecycle races", () => {
+    it("stop during the driver probe still cancels the prompt", async () => {
+      const probeEntered = deferred();
+      const probeGate = deferred();
+      const fake = fakeDriver(undefined, {
+        onProbeEntered: () => probeEntered.resolve(),
+        probeGate: () => probeGate.promise,
+      });
+      const { url, token } = await start(fake);
+
+      const messagePromise = post(url, "message", { text: "Hello" }, token);
+      await probeEntered.promise;
+
+      const stopResponse = await post(url, "stop", undefined, token);
+      expect(stopResponse.status).toBe(200);
+
+      probeGate.resolve();
+      const messageResponse = await messagePromise;
+      expect(messageResponse.status).toBe(503);
+      expect(fake.startInputs).toHaveLength(0);
+      expect(fake.sessions).toHaveLength(0);
+
+      const nextResponse = await post(url, "message", { text: "Fresh" }, token);
+      expect(nextResponse.status).toBe(202);
+    });
+
+    it("stop during a rejecting driver probe still cancels the prompt", async () => {
+      const probeEntered = deferred();
+      const probeGate = deferred();
+      const fake = fakeDriver(undefined, {
+        onProbeEntered: () => probeEntered.resolve(),
+        probeGate: () => probeGate.promise,
+      });
+      const { url, token } = await start(fake);
+
+      const messagePromise = post(url, "message", { text: "Hello" }, token);
+      await probeEntered.promise;
+
+      const stopResponse = await post(url, "stop", undefined, token);
+      expect(stopResponse.status).toBe(200);
+
+      probeGate.reject(new Error("probe crashed"));
+      const messageResponse = await messagePromise;
+      expect(messageResponse.status).toBe(503);
+      expect(await messageResponse.json()).toMatchObject({
+        message: "The Claude Code session was stopped while it started.",
+        controls: { canSend: true, canStop: false, turnId: null },
+        seq: expect.any(Number),
+      });
+      expect(fake.startInputs).toHaveLength(0);
+
+      const stream = await eventStream(url, token);
+      expect(await stream.next()).toEqual({ kind: "session-state", state: "closed" });
+      await stream.close();
+    });
+
+    it("stop during startup disposes the pending session instead of installing it", async () => {
+      const entered = deferred();
+      const gate = deferred();
+      const fake = fakeDriver(undefined, {
+        onStartSessionEntered: () => entered.resolve(),
+        startGate: () => gate.promise,
+      });
+      const { url, token } = await start(fake);
+
+      const messagePromise = post(url, "message", { text: "Hello" }, token);
+      await entered.promise;
+
+      const stopResponse = await post(url, "stop", undefined, token);
+      expect(stopResponse.status).toBe(200);
+
+      gate.resolve();
+      const messageResponse = await messagePromise;
+      expect(messageResponse.status).toBe(503);
+      expect(fake.disposed).toEqual(["session-1"]);
+
+      // The invalidated session was never installed: the next message
+      // starts an entirely new one.
+      const nextResponse = await post(url, "message", { text: "Fresh" }, token);
+      expect(nextResponse.status).toBe(202);
+      expect(fake.startInputs).toHaveLength(2);
+    });
+
+    it("deactivate closes the server and its clients even when session dispose rejects", async () => {
+      const fake = fakeDriver();
+      const { app, url, token } = await start(fake);
+      await post(url, "message", { text: "First" }, token);
+      const session = fake.sessions[0];
+      if (!session) throw new Error("The fake driver did not start a session.");
+      session.disposeError = new Error("dispose blew up");
+
+      const stream = await eventStream(url, token);
+      // Consume the frames events() already wrote on connect: the current
+      // state snapshot, and the buffered replay of the message sent above.
+      await stream.next();
+      await stream.next();
+      await app.deactivate();
+
+      expect(fake.disposed).toEqual(["session-1"]);
+      await expect(fetch(new URL("/", url))).rejects.toThrow();
+      await expect(stream.next()).rejects.toThrow();
+    });
+
+    it("a start pending through deactivate never becomes installable afterward", async () => {
+      const entered = deferred();
+      const gate = deferred();
+      const fake = fakeDriver(undefined, {
+        onStartSessionEntered: () => entered.resolve(),
+        startGate: () => gate.promise,
+      });
+      const { app, url, token } = await start(fake);
+
+      const messagePromise = post(url, "message", { text: "Hello" }, token);
+      await entered.promise;
+      await app.deactivate();
+      gate.resolve();
+
+      await messagePromise.catch(() => undefined);
+      expect(fake.disposed).toEqual(["session-1"]);
+    });
+
+    it("shutdown mid-startup releases the prompt slot so a restart's first message is accepted", async () => {
+      const entered = deferred();
+      const gate = deferred();
+      let starts = 0;
+      const fake = fakeDriver(undefined, {
+        onStartSessionEntered: () => entered.resolve(),
+        startGate: () => {
+          starts += 1;
+          return starts === 1 ? gate.promise : Promise.resolve();
+        },
+      });
+      const { app, url, token } = await start(fake);
+
+      // Caught right here, not awaited later: the underlying connection is
+      // force-closed inside deactivate(), well before this test gets
+      // around to awaiting it below -- attaching the handler immediately
+      // avoids an unhandled-rejection warning for the gap in between.
+      const abandonedMessage = post(url, "message", { text: "Hello" }, token).catch(
+        () => undefined,
+      );
+      await entered.promise;
+      // deactivate() (and stopWebApp, on the same shutdown()) reset
+      // sessionStart/turnActive but, without the fix, never touch the
+      // reservation this still-pending message() claimed -- a restart
+      // reusing the same plugin instance would 409 every message until
+      // the abandoned prompt() call above eventually settles on its own.
+      await app.deactivate();
+
+      const restarted = await app.startWebApp();
+      const restartedToken = tokenFromUrl(restarted.url);
+      const freshResponse = await post(
+        restarted.url,
+        "message",
+        { text: "Fresh" },
+        restartedToken,
+      );
+      expect(freshResponse.status).toBe(202);
+      // A second, real driver.startSession() attempt -- not just a status
+      // code that happened to be 202 for some other reason. (startInputs
+      // itself isn't checked here: the fake only pushes to it after its own
+      // gate resolves, and the abandoned first attempt's gate is still held
+      // open below.)
+      expect(starts).toBe(2);
+
+      gate.resolve();
+      await abandonedMessage;
+    });
+
+    it("stop during startup releases the prompt slot before the abandoned start settles", async () => {
+      const entered = deferred();
+      const gate = deferred();
+      let starts = 0;
+      const fake = fakeDriver(undefined, {
+        onStartSessionEntered: () => entered.resolve(),
+        startGate: () => {
+          starts += 1;
+          return starts === 1 ? gate.promise : Promise.resolve();
+        },
+      });
+      const { url, token } = await start(fake);
+      const stream = await eventStream(url, token);
+      expect(await stream.next()).toEqual({ kind: "session-state", state: "closed" });
+
+      const firstMessage = post(url, "message", { text: "Hello" }, token);
+      await entered.promise;
+
+      const stopResponse = await post(url, "stop", undefined, token);
+      expect(stopResponse.status).toBe(200);
+      // Without the fix, this never arrives: the pill would sit on
+      // Starting with no closed event to bring it back, since /stop
+      // returned 200 without publishing anything for a session that was
+      // still only pending.
+      expect(await stream.next()).toEqual({
+        kind: "session-state",
+        state: "closed",
+        reason: "Stopped",
+      });
+
+      // The fresh request must be accepted while the abandoned handshake
+      // is still blocked.
+      const secondResponse = await post(url, "message", { text: "Fresh" }, token);
+      gate.resolve();
+      expect(secondResponse.status).toBe(202);
+
+      const firstResponse = await firstMessage;
+      expect(firstResponse.status).toBe(503);
+      expect(fake.startInputs).toHaveLength(2);
+      expect(fake.disposed).toEqual(["session-2"]);
+      await stream.close();
+    });
+  });
+
+  describe("stopWebApp retires the pairing", () => {
+    it("tears down for real, so the next start is completely fresh", async () => {
+      const fake = fakeDriver();
+      const { app, url, token } = await start(fake);
+      await post(url, "message", { text: "First" }, token);
+      expect(fake.startInputs).toHaveLength(1);
+
+      // The host dispatches this on failed-guest-load recovery, not on an
+      // ordinary tab close -- see the comment on stopWebApp itself.
+      await app.stopWebApp();
+
+      // The old server is really gone: nothing to reattach to.
+      await expect(fetch(new URL("/", url))).rejects.toThrow();
+
+      const restarted = await app.startWebApp();
+      expect(restarted.url).not.toBe(url);
+      const freshToken = tokenFromUrl(restarted.url);
+      expect(freshToken).not.toBe(token);
+
+      // A fresh session, not the old one reused or reattached.
+      const response = await post(restarted.url, "message", { text: "Second" }, freshToken);
+      expect(response.status).toBe(202);
+      expect(fake.startInputs).toHaveLength(2);
+    });
+  });
+
+  describe("overlapping turns", () => {
+    it("refuses a second message while a turn is active, and never overwrites the single active turn", async () => {
+      const fake = fakeDriver();
+      const { url, token } = await start(fake);
+
+      const first = await post(url, "message", { text: "First" }, token);
+      expect(first.status).toBe(202);
+      expect(fake.sessions[0]?.promptCalls).toEqual(["First"]);
+
+      // No turn-completed yet: the turn is still active.
+      const second = await post(url, "message", { text: "Second" }, token);
+      expect(second.status).toBe(409);
+      // The driver never saw the second prompt at all -- one active turn,
+      // never overwritten.
+      expect(fake.sessions[0]?.promptCalls).toEqual(["First"]);
+      expect(fake.startInputs).toHaveLength(1);
+
+      fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+
+      const third = await post(url, "message", { text: "Third" }, token);
+      expect(third.status).toBe(202);
+      expect(fake.sessions[0]?.promptCalls).toEqual(["First", "Third"]);
+    });
+
+    it("a fatal error also releases the active-turn gate", async () => {
+      const fake = fakeDriver();
+      const { url, token } = await start(fake);
+      await post(url, "message", { text: "First" }, token);
+
+      fake.startInputs[0]?.onEvent({ kind: "error", message: "Claude Code crashed.", fatal: true });
+
+      const retry = await post(url, "message", { text: "Retry" }, token);
+      expect(retry.status).toBe(202);
+    });
+
+    it("a mid-turn close with no turn-completed also releases the active-turn gate", async () => {
+      // A harness that exits idle mid-turn reports the session ending, not
+      // a fatal error and not turn-completed -- without releasing the gate
+      // here too, every later message would 409 forever with no live
+      // session left to blame it on.
+      const fake = fakeDriver();
+      const { url, token } = await start(fake);
+      await post(url, "message", { text: "First" }, token);
+
+      fake.startInputs[0]?.onEvent({ kind: "session-state", state: "closed" });
+
+      const retry = await post(url, "message", { text: "Retry" }, token);
+      expect(retry.status).toBe(202);
+    });
+  });
+
+  it("a deactivate racing the server's own listen settles instead of hanging, and the next start is clean", async () => {
+    // The beforeListen test hook forces the exact race deterministically,
+    // rather than hoping a real timing window gets hit: deactivate the app
+    // before its server is ever told to listen, so listen()'s "close" guard
+    // is the only thing that can settle this startWebApp call.
+    const fake = fakeDriver();
+    const ref: { app?: ChatWebApp } = {};
+    let triggered = false;
+    const app = createChatWebApp({
+      agent: "Claude Code",
+        driver: fake.driver,
+      workspaceRoot: "C:\\workspace",
+      uiRoot: PLUGIN_UI_ROOT,
+      testHooks: {
+        beforeListen: async () => {
+          if (triggered) return;
+          triggered = true;
+          await ref.app?.deactivate();
+        },
+      },
+    });
+    ref.app = app;
+    runningApps.push(app);
+
+    const started = await app.startWebApp().then(
+      (result) => ({ ok: true as const, url: result.url }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+
+    if (started.ok) {
+      // A raced start that still resolves must hand back a URL that
+      // actually answers -- not a stale one for a server already closed
+      // underneath it.
+      const response = await fetch(new URL("/", started.url)).catch(() => null);
+      expect(response?.status).toBe(200);
+    }
+
+    // Either way, a fresh start afterward must produce a real, working
+    // server: the race must not leave the app permanently wedged.
+    const restarted = await app.startWebApp();
+    const page = await fetch(new URL("/", restarted.url));
+    expect(page.status).toBe(200);
+  }, 10_000);
+});

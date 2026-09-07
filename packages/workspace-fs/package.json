@@ -7,18 +7,15 @@
     "./testing": "./src/testing.ts"
   },
   "scripts": {
-    "sync": "tsx src/syncClient.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "chokidar": "^5.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
-    "tsx": "^4.23.11",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }

@@ -1,17 +1,16 @@
 //! FTS index maintenance: per-write upserts and the durable per-version
-//! rebuild. Ports `searchIndex.ts`'s `upsertFileSearchIndex` /
+//! rebuild. Ports the TS `upsertFileSearchIndex` /
 //! `deleteFileSearchIndex` / `upsertThreadHeaderSearchIndex` /
 //! `upsertChatMessageSearchIndex` / `ensureSearchIndexForVersion`.
 //!
 //! Every function here runs against the connection/transaction the caller hands
-//! it, so a search-index change commits in the SAME transaction as the mutation
+//! it, so a search-index change commits in the same transaction as the mutation
 //! it accompanies (read-your-writes; no index/content divergence on crash). The
 //! per-version rebuild is idempotent by an `engine_search_index_state` row — a
 //! crash mid-rebuild leaves that row unwritten, so reopen repairs.
 
 use crate::search::policy::{
-    PathFloor, SearchPolicySnapshot, classify_engine_file_path, path_is_search_indexed,
-    read_engine_search_policy,
+    SearchPolicySnapshot, path_is_search_indexed, read_engine_search_policy,
 };
 use crate::search::{SearchError, THREAD_HEADER_MESSAGE_ID};
 use dohc_engine_domain::chats::{
@@ -23,7 +22,7 @@ use rusqlite::{Connection, params};
 use std::path::Path;
 
 /// Consult the mid-rebuild crash point. Unlike the storage crate's per-op write
-/// lane (cfg-gated to be provably zero-cost), this is polled ONCE per index
+/// lane (cfg-gated to be provably zero-cost), this is polled once per index
 /// rebuild — an infrequent, heavy operation — so a single `NoFaults` poll (a
 /// trivial match returning `Continue`) is negligible and left ungated. Ungated
 /// also keeps the crash regression testable via a `ScriptedFaults` injector
@@ -46,7 +45,7 @@ const MAX_REBUILD_ROWS: usize = 5_000_000;
 const SEARCH_INDEX_CERTIFICATION: i64 = -2;
 
 /// Stored title (`""` = untitled) + first message body -> display title. Ports
-/// `threadDisplayTitle` (`chatThreadTitle.ts`).
+/// the TS `threadDisplayTitle`.
 fn thread_display_title(stored_title: &str, first_body: Option<&str>) -> String {
     chat_thread_display_title(stored_title, first_body)
 }
@@ -97,8 +96,8 @@ fn insert_file_index_row(
 }
 
 /// Upsert a single text file's FTS row, respecting the fail-closed FILE policy
-/// freeze. Ports `upsertFileSearchIndex` (`searchIndex.ts`). Reads the policy
-/// off `root_dir`; a broken policy FREEZES the file index — the FTS rows AND the
+/// freeze. Ports `upsertFileSearchIndex`. Reads the policy
+/// off `root_dir`; a broken policy freezes the file index — the FTS rows and the
 /// existing FTS rows are left untouched, so nothing is dropped while degraded.
 /// Any existing healthy `engine_search_index_state` row is marked degraded in
 /// the same transaction, so the later degraded→healthy transition rebuilds the
@@ -265,15 +264,15 @@ fn rebuild_file_index_for_version(
     workspace_id: &str,
     version_id: &str,
 ) -> Result<(), SearchError> {
-    // Snapshots (text) UNION the fork-base fallback for objects not re-owned in
+    // Snapshots (text) union the fork-base fallback for objects not re-owned in
     // this version, joined to the text blob, ORDER BY path — the exact TS
     // candidate set and order. Since BINHEAD, `snapshots`/`fork_base_snapshots`
-    // carry a `content_kind` column and CAN hold binary heads (text `blob_sha256`
-    // NULL, `binary_sha256` set); those must NOT enter the file FTS index — the TS
+    // carry a `content_kind` column and can hold binary heads (text `blob_sha256`
+    // NULL, `binary_sha256` set); those must not enter the file FTS index — the TS
     // oracle deletes a path's file-search row on a binary write. The exclusion is
-    // made EXPLICIT via `content_kind IS NOT 'binary'` in each candidate branch so
-    // a future refactor of the text-blob JOIN (e.g. INNER -> LEFT) cannot leak a
-    // binary path into the file index; the INNER `JOIN blobs` below also drops
+    // made explicit via `content_kind IS NOT 'binary'` in each candidate branch so
+    // a future refactor of the text-blob JOIN (e.g. Inner -> left) cannot leak a
+    // binary path into the file index; the inner `JOIN blobs` below also drops
     // NULL-blob binary rows, but that is now a belt-and-suspenders backstop, not
     // the sole guarantee. `IS NOT 'binary'` (not `= 'text'`) preserves today's
     // behavior for a defensively-NULL content_kind row that still carries a text
@@ -335,7 +334,7 @@ fn rebuild_chat_index_for_workspace(
     // whose ownership is malformed (both/neither owner) or whose channel owner
     // is gone (an orphan left by a channel delete — `chat_threads.channel_id`
     // has no FK/cascade, and a replicated store can be transiently inconsistent)
-    // is SKIPPED, never a hard error: one bad thread must at most omit its own
+    // is skipped, never a hard error: one bad thread must at most omit its own
     // header row, not disable search workspace-wide. (Diverges from the TS
     // `validatedThreadSearchRow` throw; recorded as a robustness delta — the
     // skip is strictly fail-safe: a skipped thread simply is not searchable by
@@ -424,10 +423,10 @@ fn rebuild_chat_index_for_workspace(
 }
 
 /// Ensure the FTS index for `version_id` is built, repairing durably. Ports
-/// `ensureSearchIndexForVersion` (`searchIndex.ts`) with two hardening deltas.
+/// `ensureSearchIndexForVersion` with two hardening deltas.
 ///
 /// **Atomic on any connection.** The whole rebuild (FTS wipes + inserts + the
-/// state row) runs inside its OWN `SAVEPOINT`, so it is atomic and crash-safe
+/// state row) runs inside its own `SAVEPOINT`, so it is atomic and crash-safe
 /// regardless of whether the caller is inside a transaction (`write_with`) or on
 /// an autocommit borrow (`read_with`). A crash mid-rebuild rolls the savepoint
 /// back — no reader ever observes a torn/partial generation, and no state row is
@@ -441,12 +440,12 @@ fn rebuild_chat_index_for_workspace(
 /// reserved [`SEARCH_INDEX_CERTIFICATION`] sentinel for the current index
 /// generation. Older rows force one rebuild after an index-format change.
 /// Work happens only when there is no current
-/// certification OR the degraded status CHANGED since the last build:
+/// certification OR the degraded status changed since the last build:
 /// - healthy build: wipe+rebuild the version's files, rebuild chat, mark `0`.
-/// - degraded build: FREEZE the file FTS (leave every row — nothing dropped),
+/// - degraded build: freeze the file FTS (leave every row — nothing dropped),
 ///   rebuild chat (chat is independent of the FILE policy), mark `1`.
 /// - a degraded→healthy transition rebuilds files (picking up degraded-window
-///   writes); a stable degraded window is a cheap early-return, so chat is NOT
+///   writes); a stable degraded window is a cheap early-return, so chat is not
 ///   re-wiped+rebuilt on every query (the TS per-query rebuild is avoided).
 ///
 /// Query-time `path_is_search_indexed` still fails FILE search closed while
@@ -535,7 +534,7 @@ fn rebuild_within_savepoint(
         )?;
         rebuild_file_index_for_version(conn, policy, workspace_id, version_id)?;
     }
-    // Degraded: FREEZE the file FTS (no wipe, no rebuild) — nothing is dropped.
+    // Degraded: freeze the file FTS (no wipe, no rebuild) — nothing is dropped.
 
     // Chat is independent of the FILE policy and is rebuilt on every (re)index.
     conn.execute(
@@ -565,13 +564,6 @@ fn rebuild_within_savepoint(
         ],
     )?;
     Ok(true)
-}
-
-/// Whether a path would be indexed as a file at all, ignoring policy rules —
-/// used by callers that need the bare floor (`classifyEngineFilePath` !=
-/// `secret`/`ignored`). Exposed for parity checks and diagnostics.
-pub fn floor_of(path: &str) -> PathFloor {
-    classify_engine_file_path(path)
 }
 
 /// The display title for an untitled-or-titled thread, derived exactly as the

@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 publish.workspace = true
-description = "R03 spike: wire types, error taxonomy, bounds, framed codec, and transport seams for the dohc Rust engine protocol. Dormant; not wired into the product."
+description = "Wire types, error taxonomy, bounds, framed codec, and transport seams for the workspace engine protocol."
 
 [features]
 default = ["supervisor"]
@@ -27,10 +27,6 @@ tokio = { version = "1", features = [
 ], optional = true }
 
 [dev-dependencies]
-# Codec candidates measured by examples/codec_bench.rs (spike-only).
-ciborium = "0.2"
-rmp-serde = "1"
-prost = "0.14"
 # test-util enables start_paused deterministic-time supervisor tests.
 tokio = { version = "1", features = [
   "rt",
@@ -47,9 +43,6 @@ required-features = ["bindings"]
 
 [[example]]
 name = "update_fixtures"
-
-[[example]]
-name = "codec_bench"
 
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
 [lints]

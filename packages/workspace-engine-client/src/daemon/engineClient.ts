@@ -1,17 +1,10 @@
-// R13b transport for the opt-in Rust workspace-engine sidecar. The shipping
-// desktop launches it only behind the temporary migration flag; real workspace
-// consumers remain on the TypeScript engine until the atomic cutover.
+// Framed stdio transport to the workspace engine daemon.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, type Hash } from "node:crypto";
 import { Duplex } from "node:stream";
 import { TextDecoder } from "node:util";
-import type { BlobStart } from "../ydoc/generated/BlobStart";
-import type { Envelope } from "../ydoc/generated/Envelope";
-import type { Event } from "../ydoc/generated/Event";
-import type { Request } from "../ydoc/generated/Request";
-import type { Response } from "../ydoc/generated/Response";
-import type { WireError } from "../ydoc/generated/WireError";
+import type { BlobStart, Envelope, Event, Request, Response, WireError } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 
 const FRAME_MAGIC = Buffer.from("DOP1", "ascii");
@@ -33,12 +26,16 @@ const MAX_BUFFERED_BLOB_CHUNKS = 8192;
 // chunks, so this leaves ample headroom for legitimate chunking.
 const MAX_BLOB_CHUNKS_PER_STREAM = 4096;
 // Blob streaming gates on this negotiated hello/helloAck capability, never on
-// frame sniffing (ENGINE_PROTOCOL.md row 13).
+// frame sniffing.
 const BLOB_CAPABILITY = "blobs";
 // Leaves headroom for handshake and small control envelopes.
 const MIN_NEGOTIABLE_MAX_FRAME_BYTES = 64 * 1024;
+// Mirrors MIN_NEGOTIABLE_FRAME_BYTES in crates/dohc-engine-protocol/src/limits.rs:
+// the engine clamps a requested limit up to this, so a client that configured
+// less would have its receive cap raised by the ack; refuse it at connect.
+const MIN_REQUESTABLE_MAX_FRAME_BYTES = 1024 * 1024;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
-export const ENGINE_AUTH_TOKEN_ENV = "DOHC_ENGINE_AUTH_TOKEN";
+const ENGINE_AUTH_TOKEN_ENV = "DOHC_ENGINE_AUTH_TOKEN";
 
 export const enum FrameType {
   Control = 1,
@@ -49,12 +46,12 @@ export type Frame =
   | { kind: "control"; payload: Buffer }
   | { kind: "blobChunk"; streamId: number; fin: boolean; payload: Buffer };
 
-export interface BlobChunkPayload {
+interface BlobChunkPayload {
   readonly streamId: number;
   readonly bytes: Buffer;
 }
 
-export type FrameCodecErrorCode =
+type FrameCodecErrorCode =
   | "bad-magic"
   | "blob-chunk-missing-stream-id"
   | "blob-chunk-too-large"
@@ -65,7 +62,7 @@ export type FrameCodecErrorCode =
   | "truncated-frame"
   | "unknown-frame-type";
 
-export class FrameCodecError extends Error {
+class FrameCodecError extends Error {
   readonly code: FrameCodecErrorCode;
 
   constructor(code: FrameCodecErrorCode, message: string) {
@@ -219,7 +216,7 @@ export class FrameDecoder {
 
   // onFrame lets the caller process each frame inline as it is decoded, so a
   // per-stream cap can halt a coalesced flood mid-buffer instead of letting the
-  // whole batch materialize first. It is invoked OUTSIDE the decode try/catch so
+  // whole batch materialize first. It is invoked outside the decode try/catch so
   // a consumer error propagates verbatim rather than being poisoned into a
   // generic codec error. Returning false aborts decoding of the remaining bytes
   // (used when the client closes mid-buffer; the tail is discarded).
@@ -410,7 +407,7 @@ export class FrameDecoder {
 
 export { FrameCodecError as EngineFrameError };
 
-export type EngineClientErrorCode =
+type EngineClientErrorCode =
   | "closed"
   | "connect-timeout"
   | "handshake-incomplete"
@@ -423,10 +420,10 @@ export type EngineClientErrorCode =
 /**
  * The envelope a caller’s request becomes on the wire.
  *
- * NORMALIZE BEFORE MEASURING. The client stamps its own wire id and fills
+ * Normalize before MEASURING. The client stamps its own wire id and fills
  * every nullable field explicitly — the canonical form the wire contract
  * requires (`wire.rs`) and the form the daemon re-encodes when it measures.
- * A caller-shaped request measured as it stands is a DIFFERENT envelope: no
+ * A caller-shaped request measured as it stands is a different envelope: no
  * `type`, no `deadlineMs: null`, no `idempotencyKey: null`, about sixty bytes
  * short. At the frame boundary that gap is the difference between accepting a
  * request and refusing it, so anything that models this bound builds the
@@ -503,7 +500,7 @@ export class EngineRequestDeadlineError extends EngineClientError {
   }
 }
 
-export type BlobStreamErrorCode =
+type BlobStreamErrorCode =
   | "blob-backpressure-exceeded"
   | "blob-digest-mismatch"
   | "blob-size-mismatch"
@@ -515,7 +512,7 @@ export type BlobStreamErrorCode =
   | "unknown-blob-request"
   | "unknown-blob-stream";
 
-export class BlobStreamError extends Error {
+class BlobStreamError extends Error {
   readonly code: BlobStreamErrorCode;
 
   constructor(code: BlobStreamErrorCode, message: string) {
@@ -605,7 +602,7 @@ export class EngineClient implements EngineTransport {
   private nextRequestId = 1;
   private readyState = false;
   private closed = false;
-  // WHY the client closed, kept for every request that arrives afterwards. A
+  // Why the client closed, kept for every request that arrives afterwards. A
   // client whose transport died is a relaunching daemon (retriable); a client
   // the caller closed is not. Reporting a bare "closed" for both made callers
   // abandon a recoverable restart.
@@ -628,6 +625,17 @@ export class EngineClient implements EngineTransport {
   ) {
     this.maxFrameBytes =
       connectOptions.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
+    if (
+      connectOptions.maxFrameBytes !== undefined &&
+      (!Number.isSafeInteger(connectOptions.maxFrameBytes) ||
+        connectOptions.maxFrameBytes < MIN_REQUESTABLE_MAX_FRAME_BYTES ||
+        connectOptions.maxFrameBytes > MAX_U32)
+    ) {
+      throw new FrameCodecError(
+        "frame-too-large",
+        `Maximum frame bytes must be between ${MIN_REQUESTABLE_MAX_FRAME_BYTES} and ${MAX_U32}; the engine cannot honor less.`,
+      );
+    }
     this.maxBlobChunkBytesCap =
       connectOptions.maxBlobChunkBytes ?? DEFAULT_MAX_BLOB_CHUNK_BYTES;
     if (
@@ -689,6 +697,9 @@ export class EngineClient implements EngineTransport {
       authToken: connectOptions.authToken,
       capabilities: [...connectOptions.capabilities],
       lastSessionGeneration: null,
+      // Tell the engine this client's receive limit; the engine clamps it
+      // into its negotiable range and echoes the effective value in the ack.
+      maxFrameBytes: connectOptions.maxFrameBytes ?? null,
     }).catch((cause: unknown) => {
       this.fail(
         new EngineClientError("transport-error", "Failed to send engine hello.", {
@@ -720,7 +731,7 @@ export class EngineClient implements EngineTransport {
 
     const wireId = this.nextRequestId++;
     const envelope = requestEnvelope(request, wireId);
-    // MEASURED BEFORE FRAMING. `encodeFrame` refuses an oversized payload with
+    // Measured before FRAMING. `encodeFrame` refuses an oversized payload with
     // a codec error, and every failure on the write path reads as
     // `transport-error` — which is a lie twice over: nothing was transported,
     // and the classification sends a healthy session into the reconnect
@@ -798,7 +809,7 @@ export class EngineClient implements EngineTransport {
   }
 
   // AUDIT-KILLREC again, for the supervisor's wedge kill. Killing a daemon that
-  // stopped answering is a REPLACEMENT, not a shutdown, and this cause is the
+  // stopped answering is a replacement, not a shutdown, and this cause is the
   // only one its in-flight callers will ever see: `notifyProcessExit` returns
   // early once the client is closed, so the process exit that follows cannot
   // re-cause these rejections. Reporting a bare `closed` here told every
@@ -806,7 +817,7 @@ export class EngineClient implements EngineTransport {
   // failed across a restart that was already under way.
   closeUnresponsive(): void {
     if (this.closed) return;
-    // `force` because a wedged daemon must die NOW, not on a timer. The
+    // `force` because a wedged daemon must die now, not on a timer. The
     // ordinary close ends stdin and schedules the kill 2s later, and the
     // supervisor's next act is to report a terminal failure — which the
     // desktop answers with a modal that blocks the event loop. A timer cannot
@@ -873,7 +884,7 @@ export class EngineClient implements EngineTransport {
   };
 
   // Every frame this client has decoded, of any kind. A liveness probe cannot
-  // read its own reply as the only proof of life: the daemon writes ONE output
+  // read its own reply as the only proof of life: the daemon writes one output
   // queue in order, so a probe can sit behind bulk egress it is not allowed to
   // overtake. Bytes arriving for anyone prove the daemon is turning.
   inboundActivity(): number {
@@ -1054,10 +1065,13 @@ export class EngineClient implements EngineTransport {
       );
       return;
     }
-    this.maxFrameBytes = Math.min(
-      this.maxFrameBytes,
-      envelope.limits.maxFrameBytes,
-    );
+    // The ack is the negotiated contract. A client that requested a lower
+    // receive limit adopts the engine's clamped answer (the engine sizes its
+    // responses to it); otherwise the engine's advertised bound caps ours.
+    this.maxFrameBytes =
+      this.connectOptions.maxFrameBytes !== undefined
+        ? envelope.limits.maxFrameBytes
+        : Math.min(this.maxFrameBytes, envelope.limits.maxFrameBytes);
     this.maxBlobChunkBytes = Math.min(
       this.maxBlobChunkBytesCap,
       envelope.limits.maxBlobChunkBytes,
@@ -1089,7 +1103,7 @@ export class EngineClient implements EngineTransport {
         "blobStart contains an invalid wire integer.",
       );
     }
-    // Stream ids are unique per session generation but NOT ordered — concurrent
+    // Stream ids are unique per session generation but not ordered — concurrent
     // handlers may announce them out of order. Reject only an id that is still
     // active (a live reassembly collision); a completed id is gone from the map
     // and a reuse simply starts a fresh stream bound to its own known request.
@@ -1170,7 +1184,7 @@ export class EngineClient implements EngineTransport {
 
   private assertBlobCapability(): void {
     // Capabilities are intersection-negotiated: blob streaming requires that the
-    // client requested it AND the engine acknowledged it.
+    // client requested it and the engine acknowledged it.
     if (
       !this.connectOptions.capabilities.includes(BLOB_CAPABILITY) ||
       !this.helloAck?.capabilities.includes(BLOB_CAPABILITY)
@@ -1421,18 +1435,6 @@ export class DuplexEngineClientConnection implements EngineClientConnection {
   close(): void {
     this.duplex.destroy();
   }
-}
-
-export async function connectEngineClient(
-  connection: Duplex,
-  options: EngineClientConnectOptions,
-): Promise<EngineClient> {
-  const client = new EngineClient(
-    new DuplexEngineClientConnection(connection),
-    options,
-  );
-  await client.ready();
-  return client;
 }
 
 export async function createEngineClient(

@@ -105,7 +105,7 @@ fn apply_version_create(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Resul
         });
     }
     let payload: VersionCreatePayload =
-        serde_json::from_value(op.payload.clone()).map_err(|_| SyncError::InvalidInput {
+        Deserialize::deserialize(&op.payload).map_err(|_| SyncError::InvalidInput {
             reason: "version.create payload is malformed",
         })?;
     validate_version_payload(&payload)?;
@@ -169,7 +169,7 @@ fn apply_version_create(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Resul
     Ok(())
 }
 
-/// Gate shipped fork snapshots through the SAME floor the local plaintext
+/// Gate shipped fork snapshots through the same floor the local plaintext
 /// write path uses (`validate_plaintext_storable_path`): tracked classification
 /// only — secret-classified paths never enter the ordinary blob/snapshot/alias
 /// surface — and the wire path must already BE its own canonical form, because

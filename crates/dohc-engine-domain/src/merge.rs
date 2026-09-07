@@ -39,7 +39,7 @@ pub enum ComparisonStatus {
 /// One present side of a version comparison.
 ///
 /// A binary head keeps the store's text-view convention (`snapshot_text_view`):
-/// empty text, with `blob_sha256` holding its BINARY content address. The byte
+/// empty text, with `blob_sha256` holding its binary content address. The byte
 /// length that view has no place for rides alongside, because the conflict a
 /// binary side opens must report it.
 ///
@@ -99,7 +99,7 @@ pub enum MergeUnchangedReason {
 /// The binary head a WS-G1 fast-forward left in the target version.
 ///
 /// `head` keeps the store's text-view convention, exactly as a comparison side
-/// does: empty text, with `blob_sha256` holding the BINARY content address and
+/// does: empty text, with `blob_sha256` holding the binary content address and
 /// the byte length beside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinaryMergeWrite {
@@ -300,14 +300,6 @@ impl VersionedTextStore<'_> {
             .read_with(|conn| compare_text_file_versions_in_db(conn, input))
     }
 
-    pub fn merge_text_file_from_version(
-        &mut self,
-        input: &MergeTextFileFromVersion,
-        faults: &dyn FaultInjector,
-    ) -> Result<MergeTextFileResult, DomainError> {
-        self.merge_text_file_from_version_with(input, faults, |_, _| Ok(()))
-    }
-
     /// Merge with a caller-supplied same-transaction side effect (used by the
     /// runtime to keep FTS synchronized with a merged write/delete).
     pub fn merge_text_file_from_version_with<F>(
@@ -340,7 +332,7 @@ impl VersionedTextStore<'_> {
             if let Some(request_id) = &input.request_id
                 && let Some(recorded) = lookup_request(tx, request_id)?
             {
-                // A request id recorded by a DIFFERENT operation kind stores a
+                // A request id recorded by a different operation kind stores a
                 // raw hash, not merge-ledger JSON: that is key reuse, not
                 // engine corruption.
                 let Ok(recorded) = decode_merge_ledger(&recorded.payload_hash) else {
@@ -378,7 +370,7 @@ impl VersionedTextStore<'_> {
             // decided by which side each branch READS.
             //
             // The fast-forward writes the incoming side through the TEXT write
-            // and delete seams, so it needs both LIVE sides to be text. The base
+            // and delete seams, so it needs both live sides to be text. The base
             // does not gate it: a binary base can never compare equal to a text
             // current anyway, because the kinds differ.
             let live_sides_binary = [&comparison.current, &comparison.incoming]
@@ -409,13 +401,13 @@ impl VersionedTextStore<'_> {
                 return finish_merge(tx, input, &payload_hash, result, &after);
             }
 
-            // The same fast-forward for BYTES, through the binary write seam.
-            // `comparison_sides_equal` proves current and base equal by CONTENT
+            // The same fast-forward for bytes, through the binary write seam.
+            // `comparison_sides_equal` proves current and base equal by content
             // ADDRESS, and a side that holds bytes never compares equal to one
             // that holds text — so an emptied text current over a binary base
             // stays a conflict here, as it must.
             //
-            // A REMOVED binary asset keeps its conflict: that seam is the text
+            // A removed binary asset keeps its conflict: that seam is the text
             // delete, whose merged record reports its preimage as text. So does
             // TEXT replacing an untouched binary head — this seam writes bytes,
             // and the text fast-forward above refuses a binary current.
@@ -435,7 +427,7 @@ impl VersionedTextStore<'_> {
                         workspace_id: input.workspace_id.clone(),
                         version_id: input.target_version_id.clone(),
                         // A path the target already holds keeps its object
-                        // identity; this id binds only a NEW target path.
+                        // identity; this id binds only a new target path.
                         object_id: input.object_id.clone(),
                         path: input.path.clone(),
                         binary_sha256: incoming.snapshot.blob_sha256.clone(),
@@ -458,8 +450,8 @@ impl VersionedTextStore<'_> {
                 return finish_merge(tx, input, &payload_hash, result, &after);
             }
 
-            // The line merge is the one branch that READS the base, so all three
-            // sides must be text. A binary head's text view is EMPTY, and an
+            // The line merge is the one branch that reads the base, so all three
+            // sides must be text. A binary head's text view is empty, and an
             // ancestor that reads as "" would let an emptied text head compare
             // equal to it and fast-forward the incoming text over content it
             // never shared a line with.
@@ -498,12 +490,6 @@ impl VersionedTextStore<'_> {
                     reason: "conflict_id already exists",
                 });
             }
-            tx.execute(
-                "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-                 VALUES (?1, 'conflict.open', ?2)",
-                params![conflict.conflict_id, conflict.created_at_ms],
-            )
-            .map_err(DomainError::sql_persist)?;
             let result = MergeTextFileResult::Conflict {
                 comparison,
                 conflict: Box::new(conflict),
@@ -986,8 +972,8 @@ fn compare_text_file_versions_in_db(
 }
 
 /// Read the head at `path` in `table` as a comparison side. Both joins are
-/// LEFT joins: an inner `JOIN blobs` drops a binary head (`blob_sha256 = NULL`)
-/// and would report an occupied path as ABSENT, which is what let a text merge
+/// left joins: an inner `JOIN blobs` drops a binary head (`blob_sha256 = NULL`)
+/// and would report an occupied path as absent, which is what let a text merge
 /// fast-forward over binary bytes.
 fn select_snapshot(
     conn: &Connection,

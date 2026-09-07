@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadShareWebConfig } from "./config";
 import {
-  createShareWebHandler as createRawShareWebHandler,
-  type CreateShareWebHandlerOptions,
+  createShareWebApplication,
+  type CreateShareWebApplicationOptions,
   EXCHANGE_BUCKET_CAPACITY,
   LINK_SESSION_RENEWAL_GRACE_MS,
   MAX_SESSIONS_PER_GRANT,
@@ -27,11 +27,11 @@ const HANDOFF_EXCHANGE_KEY = "share-web-to-relay-handoff-exchange-key";
 const PUBLIC_RELAY_URL = "https://relay.public.test";
 
 function createShareWebHandler(
-  options: Omit<CreateShareWebHandlerOptions, "publicRelayUrl"> & {
+  options: Omit<CreateShareWebApplicationOptions, "publicRelayUrl"> & {
     publicRelayUrl?: string;
   },
-): ReturnType<typeof createRawShareWebHandler> {
-  return createRawShareWebHandler({ publicRelayUrl: PUBLIC_RELAY_URL, ...options });
+): ReturnType<typeof createShareWebApplication>["handle"] {
+  return createShareWebApplication({ publicRelayUrl: PUBLIC_RELAY_URL, ...options }).handle;
 }
 
 function request(path: string, init: RequestInit = {}): Request {
@@ -687,6 +687,96 @@ describe("share-web sessions", () => {
 
     expect(responses.map((view) => view.status)).toEqual([200, 200]);
     expect(readCalls).toBe(2);
+  });
+
+  it("returns 409 when a held read completes under a replaced capability", async () => {
+    let now = 1_000;
+    let resolveHeldRead: ((response: Response) => void) | undefined;
+    let markHeldReadStarted: (() => void) | undefined;
+    const heldReadStarted = new Promise<void>((resolve) => {
+      markHeldReadStarted = resolve;
+    });
+    let staleBodyCancelled = false;
+    const readCapabilities: string[] = [];
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: "share-web-to-relay-refresh-exchange-key",
+      publicHosts: new Set([HOST]),
+      nowMs: () => now,
+      newSessionToken: () => Buffer.alloc(32, 29).toString("base64url"),
+      fetchRelay: async (relayRequest) => {
+        const pathname = new URL(relayRequest.url).pathname;
+        const authorization = relayRequest.headers.get("authorization") ?? "";
+        if (pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-held-refresh-race",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        if (pathname === "/sync/link-refresh") {
+          expect(authorization).toBe(`LinkCapability ${CAP_ALPHA_1}`);
+          return Response.json({
+            ok: true,
+            grantId: "grant-held-refresh-race",
+            capabilityToken: CAP_ALPHA_2,
+            capabilityExpiresAtMs: now + 900_000,
+          });
+        }
+        readCapabilities.push(authorization);
+        if (pathname === "/sync/link/log") {
+          expect(authorization).toBe(`LinkCapability ${CAP_ALPHA_1}`);
+          markHeldReadStarted?.();
+          return await new Promise<Response>((resolve) => {
+            resolveHeldRead = resolve;
+          });
+        }
+        expect(pathname).toBe("/sync/link/share");
+        expect(authorization).toBe(`LinkCapability ${CAP_ALPHA_2}`);
+        return Response.json({ ok: true, access: "view" });
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const body = (await exchanged.json()) as { session: string };
+    const sessionHeaders = {
+      cookie: cookiePair(exchanged),
+      "x-dohc-link-session": body.session,
+    };
+
+    const held = handler(
+      request("/api/view/log?since=7&limit=500&hold=30000", {
+        headers: sessionHeaders,
+      }),
+    );
+    await heldReadStarted;
+    now = 601_001;
+    const refreshed = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    expect(refreshed.status).toBe(200);
+
+    resolveHeldRead?.(new Response(new ReadableStream({
+      cancel: () => {
+        staleBodyCancelled = true;
+      },
+    }), { status: 401 }));
+    const stale = await held;
+    expect({ status: stale.status, body: await stale.text() }).toEqual({
+      status: 409,
+      body: shareWebRefusalBody,
+    });
+    expect(staleBodyCancelled).toBe(true);
+
+    const followUp = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    expect(followUp.status).toBe(200);
+    expect(readCapabilities).toEqual([
+      `LinkCapability ${CAP_ALPHA_1}`,
+      `LinkCapability ${CAP_ALPHA_2}`,
+      `LinkCapability ${CAP_ALPHA_2}`,
+    ]);
   });
 
   it("keeps a near-expiry session after a network refresh failure and retries renewal on the next request", async () => {
@@ -1437,6 +1527,12 @@ describe("share-web protected discussion proxy", () => {
     composerState: "available",
     profileName: null,
   };
+  const logPath = "/api/view/log?since=0&hold=30000&limit=100";
+  const publicLog = { ops: [], nextCursor: 0, hasMore: false };
+  const holdRoutes = [
+    { kind: "activity", path: activityPath, publicBody: publicActivity },
+    { kind: "log", path: logPath, publicBody: publicLog },
+  ];
 
   function sessionHeaders(discriminator: string, cookies: string): HeadersInit {
     return {
@@ -1617,7 +1713,56 @@ describe("share-web protected discussion proxy", () => {
     expect(cancellations).toBe(1);
   });
 
-  it("admits eight activity holds per session and rejects the ninth", async () => {
+  it("releases log hold capacity after a stalled relay deadline", async () => {
+    vi.useFakeTimers();
+    const browserAbort = new AbortController();
+    const relayed: Request[] = [];
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const page = { ok: true, ops: [], nextCursor: 0, hasMore: false, epochLogFloor: 0 };
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test", publicHosts: new Set([HOST]),
+      relayExchangeKey: "discussion-relay-key", nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, 74).toString("base64url"),
+      newProfileSecret: () => PROFILE_ALPHA,
+      fetchRelay: async (relayRequest) => {
+        if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+          return Response.json({ ok: true, grantId: "grant-log-deadline",
+            capabilityToken: CAP_ALPHA_1, capabilityExpiresAtMs: 901_000 });
+        }
+        relayed.push(relayRequest);
+        if (relayed.length > 8) return Response.json(page);
+        if (relayed.length === 8) markStarted();
+        return await new Promise<Response>((_resolve, reject) => {
+          relayRequest.signal.addEventListener("abort", () => reject(relayRequest.signal.reason), { once: true });
+        });
+      },
+    });
+    let pending: Promise<Response>[] = [];
+    try {
+      const state = await discussionSession(handler);
+      const init = { headers: sessionHeaders(state.session, state.cookies), signal: browserAbort.signal };
+      const path = "/api/view/log?since=0&hold=30000";
+      pending = Array.from({ length: 8 }, () => handler(request(path, init)));
+      await started;
+      expect((await handler(request(path, init))).status).toBe(429);
+      await vi.advanceTimersByTimeAsync(39_999);
+      expect(relayed.every((value) => !value.signal.aborted)).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(relayed.every((value) => value.signal.aborted)).toBe(true);
+      expect((await Promise.all(pending)).map((value) => value.status)).toEqual(Array(8).fill(503));
+      const retry = await handler(request(path, init));
+      expect(retry.status).toBe(200);
+      expect(await retry.json()).toEqual(page);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      browserAbort.abort();
+      await Promise.allSettled(pending);
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(holdRoutes)("admits eight $kind holds per session and rejects the ninth", async ({ path, publicBody }) => {
     let activityCalls = 0;
     let markEightStarted: (() => void) | undefined;
     const eightStarted = new Promise<void>((resolve) => {
@@ -1645,17 +1790,17 @@ describe("share-web protected discussion proxy", () => {
           if (activityCalls === 8) markEightStarted?.();
           return await new Promise<Response>((resolve) => heldResolvers.push(resolve));
         }
-        return Response.json(publicActivity);
+        return Response.json(publicBody);
       },
     });
     const state = await discussionSession(handler);
     const headers = sessionHeaders(state.session, state.cookies);
     const held = Array.from({ length: 8 }, () =>
-      handler(request(activityPath, { headers })),
+      handler(request(path, { headers })),
     );
     await eightStarted;
 
-    const ninth = await handler(request(activityPath, { headers }));
+    const ninth = await handler(request(path, { headers }));
 
     try {
       expect({ status: ninth.status, body: await ninth.text() }).toEqual({
@@ -1664,15 +1809,15 @@ describe("share-web protected discussion proxy", () => {
       });
       expect(activityCalls).toBe(8);
     } finally {
-      for (const resolve of heldResolvers) resolve(Response.json(publicActivity));
+      for (const resolve of heldResolvers) resolve(Response.json(publicBody));
       await Promise.all(held);
     }
 
-    const afterRelease = await handler(request(activityPath, { headers }));
+    const afterRelease = await handler(request(path, { headers }));
     expect(afterRelease.status).toBe(200);
   });
 
-  it("admits twenty-four activity holds per full grant and keeps another grant independent", async () => {
+  it.each(holdRoutes)("admits twenty-four $kind holds per full grant and keeps another grant independent", async ({ path, publicBody }) => {
     let tokenId = 80;
     let alphaActivityCalls = 0;
     let markTwentyFourStarted: (() => void) | undefined;
@@ -1701,32 +1846,34 @@ describe("share-web protected discussion proxy", () => {
         }
         const beta = relayRequest.headers.get("authorization") ===
           `LinkCapability ${CAP_BETA}`;
-        if (beta) return Response.json(publicActivity);
+        if (beta) return Response.json(publicBody);
         alphaActivityCalls += 1;
         if (alphaActivityCalls <= 24) {
           if (alphaActivityCalls === 24) markTwentyFourStarted?.();
           return await new Promise<Response>((resolve) => heldResolvers.push(resolve));
         }
-        return Response.json(publicActivity);
+        return Response.json(publicBody);
       },
     });
     const alphaSessions = await Promise.all(
-      Array.from({ length: 4 }, () => discussionSession(handler)),
+      Array.from({ length: 4 }, (_, index) => discussionSession(
+        handler, index % 2 === 0 ? SECRET_ALPHA : SECRET_ALPHA_ROTATED,
+      )),
     );
     const betaSession = await discussionSession(handler, SECRET_BETA);
     const held = alphaSessions.slice(0, 3).flatMap((state) =>
       Array.from({ length: 8 }, () =>
-        handler(request(activityPath, {
+        handler(request(path, {
           headers: sessionHeaders(state.session, state.cookies),
         })),
       ),
     );
     await twentyFourStarted;
 
-    const independent = await handler(request(activityPath, {
+    const independent = await handler(request(path, {
       headers: sessionHeaders(betaSession.session, betaSession.cookies),
     }));
-    const twentyFifth = await handler(request(activityPath, {
+    const twentyFifth = await handler(request(path, {
       headers: sessionHeaders(alphaSessions[3]!.session, alphaSessions[3]!.cookies),
     }));
 
@@ -1738,9 +1885,72 @@ describe("share-web protected discussion proxy", () => {
       });
       expect(alphaActivityCalls).toBe(24);
     } finally {
-      for (const resolve of heldResolvers) resolve(Response.json(publicActivity));
+      for (const resolve of heldResolvers) resolve(Response.json(publicBody));
       await Promise.all(held);
     }
+  });
+
+  it.each([
+    { scope: "session", sessionCount: 1, holdsPerSession: 8 },
+    { scope: "full grant", sessionCount: 4, holdsPerSession: 6 },
+  ])("shares the $scope activity budget between log and discussion holds", async ({ sessionCount, holdsPerSession }) => {
+    const limit = sessionCount * holdsPerSession;
+    let tokenId = 140;
+    let relayCalls = 0;
+    let markHeldStarted: (() => void) | undefined;
+    const heldStarted = new Promise<void>((resolve) => { markHeldStarted = resolve; });
+    const releases: Array<() => void> = [];
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: "discussion-relay-key",
+      publicHosts: new Set([HOST]),
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, tokenId++).toString("base64url"),
+      newProfileSecret: () => PROFILE_ALPHA,
+      fetchRelay: async (relayRequest) => {
+        const pathname = new URL(relayRequest.url).pathname;
+        if (pathname === "/sync/link-exchange") {
+          return Response.json({ ok: true, grantId: "grant-shared-holds",
+            capabilityToken: CAP_ALPHA_1, capabilityExpiresAtMs: 901_000 });
+        }
+        const body = pathname === "/sync/link/log" ? publicLog : publicActivity;
+        relayCalls += 1;
+        if (relayCalls <= limit) {
+          if (relayCalls === limit) markHeldStarted?.();
+          return await new Promise<Response>((resolve) => {
+            releases.push(() => resolve(Response.json(body)));
+          });
+        }
+        return Response.json(body);
+      },
+    });
+    const states = await Promise.all(Array.from({ length: sessionCount }, (_, index) => discussionSession(
+      handler, index % 2 === 0 ? SECRET_ALPHA : SECRET_ALPHA_ROTATED,
+    )));
+    const headers = sessionHeaders(states[0]!.session, states[0]!.cookies);
+    const held = states.flatMap(state => Array.from({ length: holdsPerSession }, (_, index) =>
+      handler(request(index % 2 === 0 ? logPath : activityPath, {
+        headers: sessionHeaders(state.session, state.cookies),
+      })),
+    ));
+    try {
+      const admission = await Promise.race([
+        heldStarted.then(() => "all-started"),
+        Promise.race(held.map(async response => `settled-${(await response).status}`)),
+      ]);
+      expect(admission).toBe("all-started");
+      for (const { path } of holdRoutes) {
+        const extra = await handler(request(path, { headers }));
+        expect({ status: extra.status, body: await extra.text() }).toEqual({
+          status: 429, body: shareWebRefusalBody,
+        });
+      }
+      expect(relayCalls).toBe(limit);
+    } finally {
+      for (const release of releases) release();
+      await Promise.allSettled(held);
+    }
+    for (const { path } of holdRoutes) expect((await handler(request(path, { headers }))).status).toBe(200);
   });
 
   it.each([
@@ -1831,13 +2041,21 @@ describe("share-web protected discussion proxy", () => {
   });
 
   it.each([
-    { name: "success", expectedStatus: 200 },
-    { name: "upstream refusal", expectedStatus: 404 },
-    { name: "abort", expectedStatus: 503 },
-    { name: "timeout", expectedStatus: 503 },
-    { name: "malformed response", expectedStatus: 503 },
-    { name: "thrown fetch", expectedStatus: 503 },
-  ])("releases activity capacity after $name", async ({ name, expectedStatus }) => {
+    ...[
+      { name: "success", expectedStatus: 200 },
+      { name: "upstream refusal", expectedStatus: 404 },
+      { name: "abort", expectedStatus: 503 },
+      { name: "timeout", expectedStatus: 503 },
+      { name: "malformed response", expectedStatus: 503 },
+      { name: "thrown fetch", expectedStatus: 503 },
+    ].map(terminal => ({ ...terminal, ...holdRoutes[0]! })),
+    ...[
+      { name: "success", expectedStatus: 200 },
+      { name: "upstream refusal", expectedStatus: 404 },
+      { name: "abort", expectedStatus: 503 },
+      { name: "thrown fetch", expectedStatus: 503 },
+    ].map(terminal => ({ ...terminal, ...holdRoutes[1]! })),
+  ])("releases $kind capacity after $name", async ({ name, expectedStatus, path, publicBody }) => {
     let phase: "terminal" | "hold" | "probe" = "terminal";
     let holdCalls = 0;
     let markTerminalStarted: (() => void) | undefined;
@@ -1865,16 +2083,16 @@ describe("share-web protected discussion proxy", () => {
             capabilityExpiresAtMs: 901_000,
           });
         }
-        if (phase === "probe") return Response.json(publicActivity);
+        if (phase === "probe") return Response.json(publicBody);
         if (phase === "hold") {
           holdCalls += 1;
           if (holdCalls <= 8) {
             if (holdCalls === 8) markEightHoldsStarted?.();
             return await new Promise<Response>((resolve) => holdResolvers.push(resolve));
           }
-          return Response.json(publicActivity);
+          return Response.json(publicBody);
         }
-        if (name === "success") return Response.json(publicActivity);
+        if (name === "success") return Response.json(publicBody);
         if (name === "upstream refusal") {
           return new Response("private refusal", { status: 403 });
         }
@@ -1896,7 +2114,7 @@ describe("share-web protected discussion proxy", () => {
     let terminal: Response;
     try {
       if (name === "timeout") vi.useFakeTimers();
-      const terminalPromise = handler(request(activityPath, {
+      const terminalPromise = handler(request(path, {
         headers,
         signal: browserAbort.signal,
       }));
@@ -1913,7 +2131,7 @@ describe("share-web protected discussion proxy", () => {
 
     phase = "hold";
     const held = Array.from({ length: 8 }, () =>
-      handler(request(activityPath, { headers })),
+      handler(request(path, { headers })),
     );
     try {
       const admission = await Promise.race([
@@ -1922,15 +2140,15 @@ describe("share-web protected discussion proxy", () => {
           `settled-${(await response).status}`)),
       ]);
       expect(admission).toBe("all-started");
-      const ninth = await handler(request(activityPath, { headers }));
+      const ninth = await handler(request(path, { headers }));
       expect(ninth.status).toBe(429);
     } finally {
-      for (const resolve of holdResolvers) resolve(Response.json(publicActivity));
+      for (const resolve of holdResolvers) resolve(Response.json(publicBody));
       await Promise.allSettled(held);
     }
 
     phase = "probe";
-    const probe = await handler(request(activityPath, { headers }));
+    const probe = await handler(request(path, { headers }));
     expect(probe.status).toBe(200);
   });
 
@@ -3372,6 +3590,16 @@ describe("share-web protected discussion proxy", () => {
           {
             ok: false,
             code: "link_discussion_blocked",
+            error: "link discussion writes are paused",
+            activityRevision: 11,
+          },
+          { status: 403 },
+        ),
+      () =>
+        Response.json(
+          {
+            ok: false,
+            code: "link_discussion_blocked",
             error: "link discussion writes are blocked",
           },
           { status: 403 },
@@ -3414,16 +3642,6 @@ describe("share-web protected discussion proxy", () => {
             error: "link discussion writes are blocked",
             activityRevision: 10,
             principal,
-          },
-          { status: 403 },
-        ),
-      () =>
-        Response.json(
-          {
-            ok: false,
-            code: "link_discussion_blocked",
-            error: "link discussion writes are paused",
-            activityRevision: 11,
           },
           { status: 403 },
         ),
@@ -3499,23 +3717,14 @@ describe("share-web protected discussion proxy", () => {
       status: 403,
       body: { ok: false, state: "paused", activityRevision: 9 },
     });
-    const genericStatuses = [
-      404,
-      404,
-      404,
-      404,
-      404,
-      404,
-      404,
-      404,
-      404,
-      404,
-      429,
-      404,
-      503,
-    ];
+    // The code is the contract; the relay message text is not.
+    expect({ status: responses[2]!.status, body: await responses[2]!.json() }).toEqual({
+      status: 403,
+      body: { ok: false, state: "blocked", activityRevision: 11 },
+    });
+    const genericStatuses = [404, 404, 404, 404, 404, 404, 404, 404, 404, 429, 404, 503];
     for (const [index, status] of genericStatuses.entries()) {
-      const response = responses[index + 2]!;
+      const response = responses[index + 3]!;
       expect({ status: response.status, body: await response.text() }).toEqual({
         status,
         body: shareWebRefusalBody,

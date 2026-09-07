@@ -1,8 +1,8 @@
 import {
   VERSIONED_METHOD,
-  VersionedLoopbackEngine,
   type Request,
 } from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -37,6 +37,7 @@ import {
   PLUGIN_HOST_METHODS,
   type PluginRuntimeStatus,
 } from "./pluginHostProtocol";
+import { deferred } from "../testing/deferred";
 
 const pluginHostProcessPath = fileURLToPath(
   new URL("./pluginHostProcess.ts", import.meta.url),
@@ -47,29 +48,30 @@ const helloPluginRoot = fileURLToPath(
 const tempRoots: string[] = [];
 const hosts: PluginHost[] = [];
 
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function waitFor(
   predicate: () => boolean | Promise<boolean>,
   message: string,
   timeoutMs = 5_000,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(message);
+  await vi.waitFor(
+    async () => {
+      if (!(await predicate())) throw new Error(message);
+    },
+    { timeout: timeoutMs, interval: 25 },
+  );
 }
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function deferredVoid(): { promise: Promise<void>; resolve: () => void } {
-  let resolve!: () => void;
-  const promise = new Promise<void>((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
 }
 
 async function workspaceRoot(): Promise<string> {
@@ -714,7 +716,7 @@ describe("PluginHost", () => {
     );
   });
 
-  it("answers a request only after activationOf settles, on a real spawn (#798)", async () => {
+  it("answers a request only after activationOf settles, on a real spawn", async () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness({
       modes: { "hello-plugin": "slow-hello" },
@@ -748,7 +750,7 @@ describe("PluginHost", () => {
     ).rejects.toThrow('Command "does-not-exist" is not registered.');
   });
 
-  it("rejects activationOf with the activation error a real spawn failed on (#798)", async () => {
+  it("rejects activationOf with the activation error a real spawn failed on", async () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness({
       modes: { "hello-plugin": "throws" },
@@ -767,7 +769,7 @@ describe("PluginHost", () => {
     );
   });
 
-  it("reports no activation for a plugin that has no spawn (#798)", async () => {
+  it("reports no activation for a plugin that has no spawn", async () => {
     const root = await workspaceRoot();
     const host = trackHost({
       stateDir: await stateDir(),
@@ -779,7 +781,7 @@ describe("PluginHost", () => {
     expect(host.activationOf("hello-plugin")).toBeUndefined();
   });
 
-  it("releases activationOf when the spawn stops before it activated (#798)", async () => {
+  it("releases activationOf when the spawn stops before it activated", async () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness({
       modes: { "hello-plugin": "never-resolves" },
@@ -1065,17 +1067,14 @@ describe("PluginHost", () => {
     process.on("unhandledRejection", onUnhandledRejection);
     try {
       await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
-      const reachedFailed = await waitFor(
+      await waitFor(
         () => statuses.includes("failed"),
         "Malformed activation result did not fail the plugin.",
-        500,
-      ).then(
-        () => true,
-        () => false,
       );
-      await delay(25);
+      // Node reports an unhandled rejection only after the turn that dropped
+      // it. Let that turn finish before reading the listener.
+      await new Promise((resolve) => setImmediate(resolve));
 
-      expect.soft(reachedFailed).toBe(true);
       expect(unhandledRejections).toEqual([]);
       expect(host.getStderrLog("hello-plugin")).toContain(
         'Activation failed: Plugin activation returned an invalid result: "commands" and "drivers" must be arrays of non-empty strings.',
@@ -1088,9 +1087,9 @@ describe("PluginHost", () => {
   it("waits for crash-loop state persistence before stopAll settles when shutdown rejects", async () => {
     const root = await workspaceRoot();
     const localStateDir = await stateDir();
-    const mutationStarted = deferredVoid();
-    const releaseMutation = deferredVoid();
-    const mutationFinished = deferredVoid();
+    const mutationStarted = deferred();
+    const releaseMutation = deferred();
+    const mutationFinished = deferred();
     const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
       request<T = unknown>(): Promise<T> {
         return Promise.resolve({} as T);
@@ -1575,14 +1574,13 @@ describe("PluginHost", () => {
       activationTimeoutMs: 1_000,
     });
     const startedAt = Date.now();
-
     await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
+    // The deadline covers start() itself, not only the wait after it.
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Healthy plugin missed the test activation deadline.",
+      Math.max(1, 1_000 - (Date.now() - startedAt)),
     );
-
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 
   it("fails and disposes an activation at its wall-clock deadline", async () => {
@@ -1640,7 +1638,6 @@ describe("PluginHost", () => {
     const localState = await readPluginLocalState(localStateDir, root);
     if (!localState.ok) throw new Error(localState.warning);
     expect(localState.state.plugins["hello-plugin"]?.disabled).toBe(true);
-    await delay(300);
     expect(harness.spawnedPluginIds).toHaveLength(3);
   }, 15_000);
 
@@ -1701,7 +1698,6 @@ describe("PluginHost", () => {
         host.getStatus("hello-plugin") === "ready",
       "Fresh code did not receive a new fast-failure window.",
     );
-    await delay(50);
 
     expect(host.getStatus("hello-plugin")).toBe("ready");
     expect(harness.spawnTransport).toHaveBeenCalledTimes(6);
@@ -1736,7 +1732,6 @@ describe("PluginHost", () => {
       () => host.getStatus("hello-plugin") === "disabled",
       "Preserved crash accounting did not disable the plugin.",
     );
-    await delay(50);
 
     expect(harness.spawnTransport).toHaveBeenCalledTimes(4);
     const localState = await readPluginLocalState(localStateDir, root);
@@ -1864,9 +1859,9 @@ describe("PluginHost", () => {
 
   it("aborts a queued panel write when the plugin crashes", async () => {
     const root = await workspaceRoot();
-    const entered = deferredVoid();
-    const release = deferredVoid();
-    const writeQueued = deferredVoid();
+    const entered = deferred();
+    const release = deferred();
+    const writeQueued = deferred();
     const loopbackTarget = new VersionedLoopbackEngine();
     let blocked = false;
     const loopback = new Proxy(loopbackTarget, {
@@ -1890,8 +1885,11 @@ describe("PluginHost", () => {
       attachmentId: Symbol("test-workspace-attachment"),
       rustEngineSessions: mockLiveSessions(loopback),
     });
-    await writeFile(join(root, "queue-blocker.txt"), "block\n", "utf8");
-    engine.captureBatch([{ path: "queue-blocker.txt", operation: "update" }]);
+    const blocker = engine.writeAuthoredTextFile(
+      join(root, "queue-blocker.txt"),
+      "block\n",
+      { kind: "agent", agentId: "plugin:test", onBehalfOf: "local", agentRunId: "spawn" },
+    );
     await entered.promise;
 
     const registry = createPluginPanelSdkAuthorityRegistry();
@@ -1968,6 +1966,7 @@ describe("PluginHost", () => {
     release.resolve();
 
     await expect(pending).rejects.toThrow("Plugin panel is no longer active.");
+    await blocker;
     expect(grant.signal.aborted).toBe(true);
     expect(existsSync(join(root, "cancelled.txt"))).toBe(false);
     await engine.stop();
@@ -1975,9 +1974,9 @@ describe("PluginHost", () => {
 
   it("aborts a queued panel write when onWillStop revokes its authority", async () => {
     const root = await workspaceRoot();
-    const entered = deferredVoid();
-    const release = deferredVoid();
-    const writeQueued = deferredVoid();
+    const entered = deferred();
+    const release = deferred();
+    const writeQueued = deferred();
     const loopbackTarget = new VersionedLoopbackEngine();
     let blocked = false;
     const loopback = new Proxy(loopbackTarget, {
@@ -2001,8 +2000,11 @@ describe("PluginHost", () => {
       attachmentId: Symbol("test-workspace-attachment"),
       rustEngineSessions: mockLiveSessions(loopback),
     });
-    await writeFile(join(root, "queue-blocker.txt"), "block\n", "utf8");
-    engine.captureBatch([{ path: "queue-blocker.txt", operation: "update" }]);
+    const blocker = engine.writeAuthoredTextFile(
+      join(root, "queue-blocker.txt"),
+      "block\n",
+      { kind: "agent", agentId: "plugin:test", onBehalfOf: "local", agentRunId: "spawn" },
+    );
     await entered.promise;
 
     const registry = createPluginPanelSdkAuthorityRegistry();
@@ -2089,6 +2091,7 @@ describe("PluginHost", () => {
     expect(stopOutcome).toMatchObject({ kind: "stopped" });
     expect(steps).toEqual(["revoke", "host-stop"]);
     await expect(pending).rejects.toThrow("Plugin panel is no longer active.");
+    await blocker;
     expect(grant.signal.aborted).toBe(true);
     expect(existsSync(join(root, "disabled.txt"))).toBe(false);
     await engine.stop();
@@ -2164,7 +2167,7 @@ describe("PluginHost", () => {
     // onStatusChange is always deferred (queueMicrotask), so a listener can
     // no longer preempt the crash-loop's own immediate-respawn decision —
     // that decision finishes synchronously before any listener even learns
-    // the plugin crashed. What a listener CAN still do is call stop()
+    // the plugin crashed. What a listener can still do is call stop()
     // afterward, and that must land cleanly on whatever is current then
     // (the respawned instance), not on stale state and not orphan anything.
     const root = await workspaceRoot();
@@ -2222,7 +2225,10 @@ describe("PluginHost", () => {
       () => spawnTransport.mock.calls.length >= 2,
       "The crash's own immediate respawn did not happen.",
     );
-    await delay(50);
+    await waitFor(
+      () => host.getStatus("hello-plugin") === undefined,
+      "The stop issued during the respawn did not finish.",
+    );
 
     expect(spawnTransport).toHaveBeenCalledTimes(2);
     expect(deactivateRequests).toEqual(["hello-plugin"]);
@@ -2250,18 +2256,18 @@ describe("PluginHost", () => {
       },
     });
     const startedAt = Date.now();
-
     await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
-    // disposedPluginIds only proves shutdown() STARTED disposing — the real
+    // disposedPluginIds only proves shutdown() started disposing — the real
     // process kill it awaits can still be in flight. Wait for the record to
-    // actually be gone, which only happens once shutdown() fully completes.
+    // actually be gone, which only happens once shutdown() fully completes,
+    // within the same 5 s the whole start-and-stop must fit.
     await waitFor(
       () => host.getStatus("hello-plugin") === undefined,
       "Plugin was not fully stopped after a listener stopped it on \"starting\".",
+      Math.max(1, 5_000 - (Date.now() - startedAt)),
     );
 
     expect(harness.disposedPluginIds).toContain("hello-plugin");
-    expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect(harness.spawnedPluginIds).toEqual(["hello-plugin"]);
     expect(host.getStatus("hello-plugin")).toBeUndefined();
   });
@@ -2333,7 +2339,6 @@ describe("PluginHost", () => {
       "Broken plugin did not finish its crash loop.",
       10_000,
     );
-    await delay(300);
 
     const healthyStatuses = statuses
       .filter(({ pluginId }) => pluginId === "healthy-plugin")
@@ -2442,7 +2447,6 @@ describe("PluginHost", () => {
       "Plugin crash did not reach failure accounting.",
     );
     await stopDuringAccounting;
-    await delay(100);
 
     expect(harness.spawnedPluginIds).toEqual(["hello-plugin"]);
     expect(host.getStatus("hello-plugin")).toBeUndefined();
@@ -2482,11 +2486,15 @@ describe("PluginHost", () => {
       "Heartbeat descendant did not keep writing.",
     );
 
+    const descendantPid = Number(await readFile(join(root, "grandchild-heartbeat.pid"), "utf8"));
+    expect(isProcessAlive(descendantPid)).toBe(true);
+
     await host.stop("hello-plugin");
-    await delay(500);
-    const settledSize = (await stat(heartbeatPath)).size;
-    await delay(500);
-    expect((await stat(heartbeatPath)).size).toBe(settledSize);
+    // The detached descendant dies with the tree, not merely goes quiet.
+    await waitFor(
+      () => !isProcessAlive(descendantPid),
+      "Heartbeat descendant survived the plugin stop.",
+    );
   }, 15_000);
 
   it("discards an activation result from an older host generation", async () => {
@@ -2590,7 +2598,7 @@ describe("PluginHost", () => {
     expect(host.getStatus("hello-plugin")).toBeUndefined();
   });
 
-  it("logs, instead of leaving unhandled, a spawn teardown rejection (CodeRabbit #779 R13)", async () => {
+  it("logs, instead of leaving unhandled, a spawn teardown rejection", async () => {
     // Calling bumpGeneration() immediately, ahead of the harness's own
     // async activation callback, exercises both of R13's discarded-promise
     // call sites in one pass: bumpGeneration's own endSpawn call, and
@@ -2617,7 +2625,10 @@ describe("PluginHost", () => {
       harness.getCallbacks();
 
       host.bumpGeneration();
-      await delay(20);
+      await waitFor(
+        () => consoleError.mock.calls.length > 0,
+        "The failed spawn teardown was not reported.",
+      );
 
       expect(consoleError).toHaveBeenCalledWith(
         expect.stringContaining("spawn teardown failed"),
@@ -2728,10 +2739,6 @@ describe("PluginHost web apps", () => {
 
     await host.stopWebApp("hello-plugin", "main-app", null);
 
-    // MUTATION (drop the protocol stop dispatch, or the host method): the
-    // plugin never learns the guest is gone, so this start returns the paired
-    // URL into a guest with no session — the workspace-started host's whole
-    // failure mode.
     await expect(host.startWebApp("hello-plugin", "main-app", null)).resolves.toEqual({
       url: "http://127.0.0.1:43210/pair#token=fixture-2",
     });
@@ -2801,8 +2808,8 @@ describe("PluginHost web apps", () => {
   });
 
   // Round 19 finding 1: readPluginSettings used to be handed the manifest's
-  // OWN declared id — but settings are stored and looked up per directory
-  // (round 18 finding 4), and a manifest's declared name can differ from
+  // own declared id — but settings are stored and looked up per directory,
+  // and a manifest's declared name can differ from
   // the folder it was actually found in. Handing it the id there threw
   // "Unknown plugin directory" for every such plugin, refusing it its own
   // settings at every activation.
@@ -2930,7 +2937,7 @@ describe("PluginHost web apps", () => {
   // Round 19 finding 2: settings are saved per directory (round 18 finding
   // 4), but pluginHost only ever runs one process under a given id at a
   // time — the id-share's own directory, not the one a save was actually
-  // for. Telling that running process about a save meant for a DIFFERENT
+  // for. Telling that running process about a save meant for a different
   // directory would hand it values it never asked for.
   it("does not push a settings change meant for a different directory than the one running", async () => {
     const root = await workspaceRoot();
@@ -2955,7 +2962,7 @@ describe("PluginHost web apps", () => {
       "Plugin did not become ready.",
     );
 
-    // Same id, but a save that was actually for some OTHER, unrelated
+    // Same id, but a save that was actually for some other, unrelated
     // directory this id happens to collide with.
     await host.notifySettingsChanged("hello-plugin", "unrelated-directory", {
       greeting: "Hello",
@@ -3010,8 +3017,6 @@ describe("PluginHost instanced web apps", () => {
     return host;
   }
 
-  // MUTATION (drop instanceKey from the start params): both instances would
-  // come back on one origin, and the two tabs would show the same app.
   it("serves a different origin for each instance of one web app", async () => {
     const host = await startInstancedHost();
     const first = await host.startWebApp("hello-plugin", "preview", "sites/a");
@@ -3035,8 +3040,6 @@ describe("PluginHost instanced web apps", () => {
     expect(started.title).toBe("Preview sites/a");
   });
 
-  // MUTATION (stop every instance, or ignore instanceKey in stopWebApp): one
-  // closed preview tab would take the plugin's other previews down with it.
   it("stops one instance and leaves the others running", async () => {
     const host = await startInstancedHost();
     await host.startWebApp("hello-plugin", "preview", "sites/a");

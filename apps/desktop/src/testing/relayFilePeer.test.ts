@@ -1,5 +1,4 @@
-import { randomBytes } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   EngineDaemonLifecycle,
@@ -106,7 +105,7 @@ describe("RelayFilePeer", () => {
     const operations = logOperations(relay.requests);
     expect(
       operations.map((operation) => operation.originSeq),
-      "MUTATION: a helper-owned origin must never skip or reuse a coordinate",
+      "a helper-owned origin must never skip or reuse a coordinate",
     ).toEqual([0, 1, 2]);
     expect(operations.map((operation) => operation.opKind)).toEqual([
       "workspace.init",
@@ -127,7 +126,7 @@ describe("RelayFilePeer", () => {
 
     expect(
       operations[2]!.payload,
-      "MUTATION: a rewrite must carry the complete prior head, not only its blob hash",
+      "a rewrite must carry the complete prior head, not only its blob hash",
     ).toMatchObject({
       objectId: first.objectId,
       objectCreatedAtMs: first.objectCreatedAtMs,
@@ -156,7 +155,7 @@ describe("RelayFilePeer", () => {
     });
     expect(
       [firstHave, firstPut, firstMomentAppend],
-      "MUTATION: the peer must inventory and upload content before it appends the referencing moment",
+      "the peer must inventory and upload content before it appends the referencing moment",
     ).toEqual([1, 2, 3]);
     const uploaded = relay.requests[firstPut]!;
     expect(uploaded.url).toContain(first.blobSha256);
@@ -298,12 +297,7 @@ describe("RelayFilePeer receiver contract", () => {
       let lifecycle: EngineDaemonLifecycle | null = null;
       let sessions: EngineWorkspaceSessions | null = null;
       try {
-        await mkdir(join(rootPath, ".dohc", "engine"), { recursive: true });
-        await writeFile(
-          join(rootPath, ".dohc", "engine", "SHADOW_CLONE"),
-          randomBytes(32).toString("hex"),
-          { encoding: "utf8", flag: "wx", mode: 0o600 },
-        );
+        await mkdir(rootPath, { recursive: true });
         relay = await spawnSyncRelay({ dbPath: relayDb });
         await claimRelayWorkspace({ baseUrl: relay.baseUrl, token, workspaceId });
         const identity = {
@@ -351,7 +345,7 @@ describe("RelayFilePeer receiver contract", () => {
         const pulled = await receiver.pull(async () => undefined);
         expect(
           pulled.conflictsOpened,
-          "MUTATION: accepting a false beforeLatestMomentId would silently overwrite the receiver head",
+          "accepting a false beforeLatestMomentId would silently overwrite the receiver head",
         ).toBe(1);
       } finally {
         await sessions?.closeAll().catch(() => undefined);

@@ -1,10 +1,10 @@
+import { basenameOf } from "../path";
 import { ChevronDown, Columns2, X } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
 import { prefersReducedMotion } from "../reducedMotion";
 import {
   isChatsTabPath,
   isGraphTabPath,
-  isHistoryDiffTabPath,
   isHistoryTabPath,
   isMomentDiffTabPath,
   isPluginDetailsTabPath,
@@ -12,14 +12,13 @@ import {
   isPluginWebAppTabPath,
   isSingletonEditorTabPath,
   isVersionCompareTabPath,
-  parseHistoryDiffTabPath,
   parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
   parsePluginWebAppTabPath,
 } from "./workbenchState";
 
 export function momentDiffName(label?: string): string {
-  const name = label?.split("/").pop();
+  const name = label === undefined ? undefined : basenameOf(label);
   return name ? `Diff: ${name}` : "History change";
 }
 
@@ -45,16 +44,11 @@ function fileName(path: string, label?: string): string {
   if (isPluginDetailsTabPath(path)) {
     return label ?? parsePluginDetailsTabPath(path)?.pluginId ?? "Plugin";
   }
-  if (isHistoryDiffTabPath(path)) {
-    const parsed = parseHistoryDiffTabPath(path);
-    const name = parsed?.filePath.split("/").pop() ?? "Diff";
-    return `Diff: ${name}`;
-  }
   if (isMomentDiffTabPath(path)) {
     return momentDiffName(label);
   }
   if (isVersionCompareTabPath(path)) return "Compare with Main";
-  return path.split("/").pop() ?? path;
+  return basenameOf(path);
 }
 
 function tabTitle(path: string, label?: string): string {
@@ -75,10 +69,6 @@ function tabTitle(path: string, label?: string): string {
   if (isPluginDetailsTabPath(path)) {
     const details = parsePluginDetailsTabPath(path);
     return details ? `Plugin details: ${details.pluginId}` : "Plugin details";
-  }
-  if (isHistoryDiffTabPath(path)) {
-    const parsed = parseHistoryDiffTabPath(path);
-    return parsed ? `History diff: ${parsed.filePath}` : "History diff";
   }
   if (isMomentDiffTabPath(path)) {
     return label ? `History diff: ${label}` : "History change";
@@ -171,7 +161,7 @@ const Tab = memo(function Tab(props: {
         // Finish the previous pointer's drag before assigning this pointer's
         // state. Otherwise its stale cancel closure clears the new drag.
         cancelDrag.current();
-        // Activate on PRESS (VS Code behavior) — click can't be relied on
+        // Activate on press (VS Code behavior) — click can't be relied on
         // after a drag: the live reorder re-inserts the DOM node, which
         // cancels both pointer capture and click synthesis in Chromium.
         if (!props.active) props.onActivate(props.groupId, props.path);
@@ -359,8 +349,8 @@ function thumbWidth(strip: HTMLElement): number {
 // activation routes through the shell's single openFile() (which fires the
 // file-open-start perf mark), closing through the same closeTab transition
 // Ctrl+W and the menu use, reorder through the pure moveTab. `dirty` is
-// runtime-only and known for the ACTIVE tab (the one mounted inspector
-// reports its save state). h-9: ONE header band height with the side panel
+// runtime-only and known for the active tab (the one mounted inspector
+// reports its save state). h-9: one header band height with the side panel
 // and Chats panel, so the three hairlines meet at the vertical seams.
 type DragPreview = { path: string; toIndex: number } | null;
 
@@ -373,9 +363,9 @@ export const EditorTabs = memo(function EditorTabs(props: {
   /** Display names the tab path cannot supply, keyed by path: plugin titles
    * from manifests and moment paths from history records. */
   tabLabels?: ReadonlyMap<string, string>;
-  // Paths with a set-aside draft (#567). Unlike `activeTabDirty`, this is
-  // knowable for EVERY tab — the store outlives the keyed inspectors — so an
-  // inactive tab keeps its marker (#579 review, r4).
+  // Paths with a set-aside draft. Unlike `activeTabDirty`, this is
+  // knowable for every tab — the store outlives the keyed inspectors — so an
+  // inactive tab keeps its marker.
   recoveryPaths: ReadonlySet<string>;
   onActivate: (groupId: string, path: string) => void;
   onClose: (groupId: string, path: string) => void;
@@ -400,7 +390,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
   const stripRef = useRef<HTMLDivElement | null>(null);
   // Overlay scrollbar (VS Code treatment): the native bar stays hidden
   // because a painted bar eats the 36px strip, so the visible affordance is
-  // a thin thumb drawn OVER the strip's bottom edge — zero layout height,
+  // a thin thumb drawn over the strip's bottom edge — zero layout height,
   // shown on hover, draggable. Positioned imperatively (scroll fires every
   // frame; no reason to re-render the whole strip per tick).
   const thumbRef = useRef<HTMLDivElement | null>(null);
@@ -586,7 +576,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
         />
       </div>
       {/* Overflow affordance: every open tab, reachable even when the strip
-          scrolls. Lives OUTSIDE the scroller so the menu is never clipped. */}
+          scrolls. Lives outside the scroller so the menu is never clipped. */}
       {!empty ? (
         <button
           type="button"

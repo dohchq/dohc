@@ -7,7 +7,6 @@ import {
   createTempWorkspace,
   explorerRow,
   openWorkspaceFromFirstRun,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -96,9 +95,6 @@ test("renaming a live Markdown file first lands the newest editor update", async
   const marker = "rename-keeps-this-edit";
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await writeWorkspaceFiles(temp, [
       { path: "notes.md", contents: "# Notes\n\nBase.\n" },
     ]);

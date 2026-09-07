@@ -1,3 +1,5 @@
+import { SectionLabel } from "../ui/controls";
+import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
   ChevronRight,
@@ -35,17 +37,15 @@ import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { withMarkdownDefault } from "./new-file-name";
 import {
   applyPendingTreeMoves,
-  parentDir,
   pendingTreeMoveSettled,
   type PendingTreeChange,
 } from "./file-tree-optimistic";
-import { buildTree, leafOf, type TreeNode } from "./path-tree";
+import { buildTree, type TreeNode } from "./path-tree";
 import {
   type EditorGroup,
   clampOpenEditorsHeight,
   isCollectionTabPath,
   isGraphTabPath,
-  isHistoryDiffTabPath,
   isHistoryTabPath,
   isMomentDiffTabPath,
   isPluginDetailsTabPath,
@@ -55,7 +55,6 @@ import {
   isVersionCompareTabPath,
   isVirtualTabPath,
   parseCollectionTabPath,
-  parseHistoryDiffTabPath,
   parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
   parsePluginWebAppTabPath,
@@ -63,11 +62,22 @@ import {
 } from "./workbenchState";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 
+// One Explorer disk operation, as the shell's onBeginChanges opens it.
+// `settle` is the deferred draft settlement runChanges awaits before it
+// projects paths. `release` ends the collection cell-edit pause the begin
+// acquired; runChanges holds it until the successful paths are projected —
+// a drain alone is not enough, because a cell edit accepted while
+// moveWorkspacePath is pending would enqueue the path the move vacates.
+export type TreeChangeOperation = {
+  settle: DraftFlush;
+  release: () => void;
+};
+
 // The explorer: a real nested tree over the flat (files, folders) lists with
 // inline create/rename editboxes, optimistic pending ops (rollback on error),
 // multi-select, drag-move, pins, keyboard nav (ported file-tree-nav), and the
 // native context menu via the closed showExplorerMenu invoke. The explorer is
-// NEVER a privileged writer: every mutation is an IPC the watcher observes,
+// never a privileged writer: every mutation is an IPC the watcher observes,
 // so each op lands in history as an ordinary change set.
 
 export interface ExplorerProps {
@@ -77,8 +87,8 @@ export interface ExplorerProps {
   editorGroups: EditorGroup[];
   activeEditorGroup: string;
   dirtyPaths: ReadonlySet<string>;
-  // Paths with a set-aside draft (#567): marks Open Editors rows for every
-  // tab, not only the active one (#579 review, r4).
+  // Paths with a set-aside draft: marks Open Editors rows for every
+  // tab, not only the active one.
   recoveryPaths: ReadonlySet<string>;
   /** Display names for virtual paths that cannot carry a useful file name. */
   tabLabels?: ReadonlyMap<string, string>;
@@ -108,8 +118,9 @@ export interface ExplorerProps {
   onOpenCollection: (path: string) => void;
   // The shell flushes the stable active editor before disk changes and returns
   // a settlement that retains every editor mounted while those changes run.
-  // A rejected initial flush aborts the batch.
-  onBeginChanges?: () => Promise<DraftFlush>;
+  // A rejected begin (a flush failure, an unresolved collection write)
+  // aborts the batch.
+  onBeginChanges?: () => Promise<TreeChangeOperation>;
   // Successful moves/deletes re-project tabs/pins/expansion in the shell.
   onPathsChanged: (changes: PendingTreeChange[]) => void;
   // Import into targetDir ("" = root): the folder that was dropped on, or the
@@ -124,7 +135,7 @@ export interface ExplorerProps {
   shareView: { granterEmail: string | null } | null;
   onRefreshShareMounts: () => void;
   onUnmountShare: (path: string) => void;
-  // "Share…" (PR 18): offered by the main-owned context menu on synced,
+  // "Share…": offered by the main-owned context menu on synced,
   // non-shared-view workspaces; opens the shell's share dialog for the path.
   onShare: (path: string) => void;
   onRefresh: () => void;
@@ -208,13 +219,9 @@ function FileKindIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
 export function editorTitle(path: string, label?: string): string {
   if (isGraphTabPath(path)) return "Graph";
   if (isCollectionTabPath(path)) {
-    return leafOf(parseCollectionTabPath(path) ?? "Collection");
+    return basenameOf(parseCollectionTabPath(path) ?? "Collection");
   }
   if (isHistoryTabPath(path)) return "History";
-  if (isHistoryDiffTabPath(path)) {
-    const parsed = parseHistoryDiffTabPath(path);
-    return `Diff: ${leafOf(parsed?.filePath ?? "file")}`;
-  }
   if (isMomentDiffTabPath(path)) {
     return momentDiffName(label);
   }
@@ -227,9 +234,9 @@ export function editorTitle(path: string, label?: string): string {
   if (isPluginDetailsTabPath(path)) {
     return `Plugin: ${parsePluginDetailsTabPath(path)?.pluginId ?? "details"}`;
   }
-  if (isSiteTabPath(path)) return `Site: ${parseSiteTabPath(path) ?? "preview"}`;
+  if (isSiteTabPath(path)) return `App: ${parseSiteTabPath(path) ?? "preview"}`;
   if (isVersionCompareTabPath(path)) return "Compare with Main";
-  return leafOf(path);
+  return basenameOf(path);
 }
 
 function OpenEditorIcon(props: { path: string; kind: WorkspaceFileEntry["kind"] | null }) {
@@ -357,10 +364,10 @@ const TreeRow = memo(function TreeRow(props: {
         onDragEnd={props.onRowDragEnd}
         // Three distinguishable read-outs (VS Code list semantics): the
         // ACTIVE-tab row keeps the strongest fill, selected-not-active rows a
-        // lighter fill (Delete/drag act on the SELECTION — the visuals must
+        // lighter fill (Delete/drag act on the selection — the visuals must
         // not collapse the two meanings), and the keyboard-FOCUSED row an
         // inset ring. The drag drop-target is a filled tint (list.drop-
-        // Background style) — box-shadow/background only, NEVER `outline`:
+        // Background style) — box-shadow/background only, never `outline`:
         // the base outline-none nulls --tw-outline-style later in the same
         // cascade layer, which made an outline-based highlight unrenderable.
         style={{ height: TREE_ROW_HEIGHT }}
@@ -420,7 +427,7 @@ const TreeRow = memo(function TreeRow(props: {
             )}
           </>
         )}
-        <span className="min-w-0 flex-1 truncate">{leafOf(row.fullPath)}</span>
+        <span className="min-w-0 flex-1 truncate">{basenameOf(row.fullPath)}</span>
       </button>
     </li>
   );
@@ -490,7 +497,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   });
   // Pointer position + cap at drag start — heights derive from the DELTA, not
   // from the list's edges: the list is max-height (shorter lists shrink to
-  // fit), so the handle can sit ABOVE the cap and an edge-based height would
+  // fit), so the handle can sit above the cap and an edge-based height would
   // collapse the saved cap to the content height on the first move.
   const openEditorsDrag = useRef<{ startY: number; startHeight: number } | null>(
     null,
@@ -504,7 +511,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   );
   const editInputRef = useRef<HTMLInputElement>(null);
   // One commit per edit session: Enter/Escape unmount the input, whose blur
-  // fires with a STALE closure — without this latch the edit would commit
+  // fires with a stale closure — without this latch the edit would commit
   // twice (and the second rename would fail on the now-missing source).
   const editDone = useRef(false);
   // Internal drag state: HTML5 DnD dataTransfer is unreadable during
@@ -774,7 +781,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       selectedPath ??
       (activeTab && !isVirtualTabPath(activeTab) ? activeTab : null);
     if (!target) return "";
-    return isFolderPath(target) ? target : parentDir(target);
+    return isFolderPath(target) ? target : dirnameOf(target);
   }, [activeTab, focusedPath, isFolderPath, selection]);
 
   const beginCreateAtFocus = useCallback(
@@ -786,7 +793,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   const beginRename = useCallback(
     (path: string, isFolder: boolean) => {
-      setEditValue(leafOf(path));
+      setEditValue(basenameOf(path));
       editDone.current = false;
       setEditing({ mode: "rename", path, isFolder });
     },
@@ -823,40 +830,47 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     ) => {
       if (changes.length === 0) return;
       setOpError(null);
-      // Land the stable active draft before paths move underneath it. The
-      // operation cannot preserve text that this initial flush rejected.
-      let settleDrafts: DraftFlush | null = null;
+      // Land the stable active draft and drain queued collection writes
+      // before paths move underneath them. The operation cannot preserve
+      // text or values this begin rejected.
+      let operation: TreeChangeOperation | null = null;
       try {
-        settleDrafts = (await onBeginChanges?.()) ?? null;
+        operation = (await onBeginChanges?.()) ?? null;
       } catch (cause) {
         setOpError(cause instanceof Error ? cause.message : String(cause));
         return;
       }
-      setPending((current) => [...current, ...changes]);
-      const succeeded: PendingTreeChange[] = [];
-      for (const change of changes) {
+      try {
+        setPending((current) => [...current, ...changes]);
+        const succeeded: PendingTreeChange[] = [];
+        for (const change of changes) {
+          try {
+            await run(change);
+            succeeded.push(change);
+          } catch (cause) {
+            setPending((current) => current.filter((entry) => entry.id !== change.id));
+            setOpError(cause instanceof Error ? cause.message : String(cause));
+          }
+        }
+        const changedExistingPath = succeeded.some(
+          (change) => change.kind !== "create-file" && change.kind !== "create-folder",
+        );
         try {
-          await run(change);
-          succeeded.push(change);
+          await operation?.settle(
+            changedExistingPath ? { captureOnFailure: true } : undefined,
+          );
         } catch (cause) {
-          setPending((current) => current.filter((entry) => entry.id !== change.id));
+          // The disk change already completed. Surface the settlement error,
+          // then project the successful paths so the shell matches storage.
           setOpError(cause instanceof Error ? cause.message : String(cause));
         }
+        if (succeeded.length > 0) onPathsChanged(succeeded);
+        onRefresh();
+      } finally {
+        // Cell edits resume only after the successful paths are projected,
+        // so nothing can enqueue against a path this operation just changed.
+        operation?.release();
       }
-      const changedExistingPath = succeeded.some(
-        (change) => change.kind !== "create-file" && change.kind !== "create-folder",
-      );
-      try {
-        await settleDrafts?.(
-          changedExistingPath ? { captureOnFailure: true } : undefined,
-        );
-      } catch (cause) {
-        // The disk change already completed. Surface the settlement error,
-        // then project the successful paths so the shell matches storage.
-        setOpError(cause instanceof Error ? cause.message : String(cause));
-      }
-      if (succeeded.length > 0) onPathsChanged(succeeded);
-      onRefresh();
     },
     [onBeginChanges, onPathsChanged, onRefresh],
   );
@@ -890,7 +904,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   const commitRename = useCallback(
     (path: string, isFolder: boolean, value: string) => {
-      const toPath = resolveTypedPath(value, parentDir(path));
+      const toPath = resolveTypedPath(value, dirnameOf(path));
       setEditing(null);
       if (!toPath || toPath === path) return;
       void runChanges(
@@ -1047,7 +1061,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       });
       if (command === null) return;
       const targetDir =
-        kind === "root" ? "" : kind === "folder" ? (path ?? "") : parentDir(path ?? "");
+        kind === "root" ? "" : kind === "folder" ? (path ?? "") : dirnameOf(path ?? "");
       switch (command) {
         case "new-file":
           beginCreate("file", targetDir);
@@ -1151,7 +1165,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   }, []);
 
   const targetDirFor = useCallback(
-    (path: string): string => (isFolderPath(path) ? path : parentDir(path)),
+    (path: string): string => (isFolderPath(path) ? path : dirnameOf(path)),
     [isFolderPath],
   );
 
@@ -1363,7 +1377,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // ---- render ----
 
   // The edit target keeps its species: a folder rename shows the folder icon
-  // AND its chevron (current expansion state) — the row must not morph into
+  // and its chevron (current expansion state) — the row must not morph into
   // a file for the duration of the edit.
   const isFolderEdit =
     editing?.mode === "create" ? editing.kind === "folder" : (editing?.isFolder ?? false);
@@ -1569,7 +1583,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               data-testid="open-editors-toggle"
               aria-expanded={openEditorsExpanded}
               onClick={() => setOpenEditorsExpanded((expanded) => !expanded)}
-              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-[10px] font-semibold uppercase tracking-wide text-subtle group-hover:text-muted"
+              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left dohc-section-label group-hover:text-muted"
             >
               <ChevronRight
                 size={11}
@@ -1622,13 +1636,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                     data-group-id={group.id}
                   >
                     {props.editorGroups.length > 1 ? (
-                      <div
+                      <SectionLabel as="div"
                         role="heading"
                         aria-level={3}
-                        className="h-6 px-3 pt-1 text-[10px] font-semibold uppercase tracking-wide text-subtle"
+                        className="h-6 px-3 pt-1"
                       >
                         Group {groupIndex + 1}
-                      </div>
+                      </SectionLabel>
                     ) : null}
                     <ul
                       aria-label={
@@ -1719,7 +1733,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 // Left button only — a right/middle press must never start a
                 // resize (SidePanel hardening).
                 if (event.button !== 0) return;
-                // Drag starts from the RENDERED cap — from an oversized
+                // Drag starts from the rendered cap — from an oversized
                 // saved cap the drag would otherwise have a huge dead zone
                 // before anything visibly moves.
                 openEditorsDrag.current = {
@@ -1764,7 +1778,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               data-testid="explorer-files-toggle"
               aria-expanded={filesExpanded}
               onClick={() => setFilesExpanded((expanded) => !expanded)}
-              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-[10px] font-semibold uppercase tracking-wide text-subtle group-hover:text-muted"
+              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left dohc-section-label group-hover:text-muted"
             >
               <ChevronRight
                 size={11}
@@ -1803,10 +1817,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                   aria-label="Pinned"
                   className="mb-1 border-b border-line pb-1"
                 >
-                  <header className="flex h-6 items-center gap-1.5 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+                  <SectionLabel as="header" className="flex h-6 items-center gap-1.5 px-3">
                     <Pin size={10} aria-hidden />
                     Pinned
-                  </header>
+                  </SectionLabel>
                   <ul className="m-0 list-none p-0">
                     {props.pinned.map((path) => (
                       <li key={path}>
@@ -1835,7 +1849,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                           ) : (
                             fileGlyph(path)
                           )}
-                          <span className="truncate">{leafOf(path)}</span>
+                          <span className="truncate">{basenameOf(path)}</span>
                         </button>
                       </li>
                     ))}
@@ -1888,7 +1902,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 Delete{" "}
                 <span className="break-all font-medium">
                   {confirmDelete.length === 1
-                    ? leafOf(confirmDelete[0]!)
+                    ? basenameOf(confirmDelete[0]!)
                     : `${confirmDelete.length} items`}
                 </span>
                 ?

@@ -1,3 +1,4 @@
+import { isEditableEditor } from "./pmHelpers";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import type { Editor } from "@tiptap/core";
 import {
@@ -32,7 +33,7 @@ export type SlashCommandId =
   | "table"
   | "image";
 
-export type SlashCommandItem = {
+type SlashCommandItem = {
   id: SlashCommandId;
   label: string;
   hint: string;
@@ -222,13 +223,6 @@ type SlashCommandChain = {
   toggleTaskList: () => SlashCommandChain;
 };
 
-function isEditableEditor(editor: Editor | null | undefined): boolean {
-  if (!editor) return false;
-  if ((editor as { isEditable?: boolean }).isEditable === false) return false;
-  if ((editor.view as { editable?: boolean }).editable === false) return false;
-  return true;
-}
-
 export function filterSlashCommands(query: string): SlashCommandItem[] {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return SLASH_COMMANDS;
@@ -400,7 +394,7 @@ export function SlashCommandMenu({
     <div
       className="dohc-slash-menu"
       data-placement={state.placement}
-      // Above the cursor the menu anchors by its BOTTOM edge: filtering
+      // Above the cursor the menu anchors by its bottom edge: filtering
       // changes its content height, and a top-anchored box (whose top assumes
       // the full maxHeight) would leap up and down with every keystroke.
       style={

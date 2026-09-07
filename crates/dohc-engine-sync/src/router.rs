@@ -88,7 +88,7 @@ pub(crate) fn owned_op_kinds() -> impl Iterator<Item = &'static str> {
 
 /// Whether this engine knows the op kind at all.
 ///
-/// The share boundary asks so it can tell two refusals apart: a KNOWN kind a
+/// The share boundary asks so it can tell two refusals apart: a known kind a
 /// share does not carry is a scope decision, and a kind this engine cannot
 /// interpret is not — no grant admits it, and only the sender can fix it.
 /// One list answers both, so a new op kind cannot drift into the wrong class.
@@ -98,28 +98,7 @@ pub(crate) fn is_owned_op_kind(kind: &str) -> bool {
 
 pub fn apply_replication_envelope(
     store: &mut EngineStore,
-    envelope: &ReplicationEnvelope,
-    faults: &dyn FaultInjector,
-    leases: &dyn LeaseProbe,
-) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
-    apply_replication_envelope_inner(store, None, envelope, faults, leases)
-}
-
-/// Actor pull route carrying the writer-thread document cache to the narrow
-/// Y.Doc PR3 consumers.
-pub fn apply_replication_envelope_with_cache(
-    store: &mut EngineStore,
     cache: &mut WriterDocCache,
-    envelope: &ReplicationEnvelope,
-    faults: &dyn FaultInjector,
-    leases: &dyn LeaseProbe,
-) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
-    apply_replication_envelope_inner(store, Some(cache), envelope, faults, leases)
-}
-
-fn apply_replication_envelope_inner(
-    store: &mut EngineStore,
-    mut cache: Option<&mut WriterDocCache>,
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
@@ -138,9 +117,7 @@ fn apply_replication_envelope_inner(
             |_tx, _op| Err(SyncError::UnsupportedOperation),
         ));
     };
-    if !matches!(route, OwnedRoute::Ydoc)
-        && let Some(cache) = cache.as_deref_mut()
-    {
+    if !matches!(route, OwnedRoute::Ydoc) {
         // Other replicated routes can archive or replace Y.Doc lineages. Clear
         // before their transactions so a later envelope in this pull cannot
         // observe an ABA-valid stale entry after a committed crash.
@@ -155,18 +132,14 @@ fn apply_replication_envelope_inner(
                 ..RoutedApply::default()
             },
         ),
-        OwnedRoute::Ydoc => {
-            let applied = if let Some(cache) = cache {
-                crate::apply_ydoc_envelope_cached(store, cache, envelope, faults, leases)
-            } else {
-                crate::apply_ydoc_envelope(store, envelope, faults, leases)
-            };
-            map_applied(applied, |ydoc| RoutedApply {
+        OwnedRoute::Ydoc => map_applied(
+            crate::apply_ydoc_envelope(store, cache, envelope, faults, leases),
+            |ydoc| RoutedApply {
                 conflicts_opened: ydoc.conflicts_opened,
                 record_facts: ydoc.record_facts,
                 ..RoutedApply::default()
-            })
-        }
+            },
+        ),
         OwnedRoute::Conflict => map_applied(
             crate::apply_conflict_envelope(store, envelope, faults, leases),
             |conflict| {
@@ -206,17 +179,5 @@ fn map_applied<T>(
     result: Result<ApplyOutcome<T>, SyncError>,
     wrap: impl FnOnce(T) -> RoutedApply,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
-    result.map(|outcome| {
-        let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
-        let mapped = match primary {
-            ApplyOutcome::Applied(value) => ApplyOutcome::Applied(wrap(value)),
-            ApplyOutcome::Refused(refusal) => ApplyOutcome::Refused(refusal),
-            ApplyOutcome::Skipped => ApplyOutcome::Skipped,
-            ApplyOutcome::Crashed { committed } => ApplyOutcome::Crashed { committed },
-            ApplyOutcome::WithDiagnostics { .. } => unreachable!("diagnostics were flattened"),
-        };
-        mapped
-            .with_refusals(refusals)
-            .with_sharing_declined(sharing_declined)
-    })
+    result.map(|outcome| outcome.map(wrap))
 }

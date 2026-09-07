@@ -13,9 +13,9 @@ import {
   ApplyEngineYDocUpdatePayload,
   ApplyEngineYDocUpdateResult,
   CloseEngineYDocSessionPayload,
-  EngineYDocLineageReplacementEventSchema,
-  EngineYDocRemoteUpdateEventSchema,
-  EngineYDocSaveStateEventSchema,
+  EngineYDocLineageReplacementEvent,
+  EngineYDocRemoteUpdateEvent,
+  EngineYDocSaveStateEvent,
   OpenEngineYDocSessionPayload,
   OpenEngineYDocSessionResult,
   ReadEngineYDocArtifactAssetPayload,
@@ -43,10 +43,6 @@ import {
   type EngineYDocSessionOutbound,
   type EngineYDocSessionReleaseOutcome,
 } from "./engineYDocSessionOwner";
-import {
-  workspaceRelativePathIdentity,
-  workspaceRelativePathsEqual,
-} from "./workspaceRelativePathIdentity";
 import type {
   WorkspaceFileMutationYDocPort,
 } from "./workspaceFileMutationOwner";
@@ -176,8 +172,7 @@ class DocumentMutationReservations {
   >();
 
   async reserveOpen(authorityId: symbol, path: string): Promise<() => void> {
-    const key = workspaceRelativePathIdentity(path);
-    const state = this.#state(authorityId, key);
+    const state = this.#state(authorityId, path);
     const admittedMutations = state.tail;
     state.openings += 1;
     await admittedMutations;
@@ -186,7 +181,7 @@ class DocumentMutationReservations {
       if (released) return;
       released = true;
       state.openings -= 1;
-      this.#deleteIdle(authorityId, key, state);
+      this.#deleteIdle(authorityId, path, state);
     };
   }
 
@@ -196,10 +191,9 @@ class DocumentMutationReservations {
     ownsDocument: () => boolean,
     mutation: () => Promise<T>,
   ): Promise<T> {
-    const key = workspaceRelativePathIdentity(path);
-    const state = this.#state(authorityId, key);
+    const state = this.#state(authorityId, path);
     if (state.openings > 0 || ownsDocument()) {
-      this.#deleteIdle(authorityId, key, state);
+      this.#deleteIdle(authorityId, path, state);
       return Promise.reject(liveDocumentMutationRefusal());
     }
     state.mutations += 1;
@@ -217,7 +211,7 @@ class DocumentMutationReservations {
       .finally(() => {
         releaseTurn();
         state.mutations -= 1;
-        this.#deleteIdle(authorityId, key, state);
+        this.#deleteIdle(authorityId, path, state);
       });
   }
 
@@ -439,7 +433,7 @@ class EngineYDocSessionIpc {
     authority.assertCurrent();
     if (
       currentPath === null ||
-      !workspaceRelativePathsEqual(currentPath, canonicalPath)
+      currentPath !== canonicalPath
     ) {
       return unavailableOpen({ documentUnavailable: true });
     }
@@ -731,7 +725,7 @@ class EngineYDocSessionIpc {
       if (message.kind === "session-event") {
         outbound.sender.send(
           CHANNELS.engineYDocSaveState,
-          EngineYDocSaveStateEventSchema.parse({
+          EngineYDocSaveStateEvent.parse({
             sessionId: outbound.sessionId,
             ...message.event,
           }),
@@ -741,7 +735,7 @@ class EngineYDocSessionIpc {
       if (message.kind === "remote-update") {
         outbound.sender.send(
           CHANNELS.engineYDocRemoteUpdate,
-          EngineYDocRemoteUpdateEventSchema.parse({
+          EngineYDocRemoteUpdateEvent.parse({
             sessionId: outbound.sessionId,
             update: message.update,
             lineageGeneration: message.lineageGeneration,
@@ -751,7 +745,7 @@ class EngineYDocSessionIpc {
       }
       outbound.sender.send(
         CHANNELS.engineYDocLineageReplacement,
-        EngineYDocLineageReplacementEventSchema.parse({
+        EngineYDocLineageReplacementEvent.parse({
           sessionId: outbound.sessionId,
           ...message.replacement,
           lineageGeneration: message.lineageGeneration,

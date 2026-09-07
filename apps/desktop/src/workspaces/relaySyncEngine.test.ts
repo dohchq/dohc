@@ -10,7 +10,7 @@ import {
 } from "./relaySyncEngine";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
-// The push/pull transport is injected; the capture is NOT over-mocked — its
+// The push/pull transport is injected; the capture is not over-mocked — its
 // runRelaySync invokes the engine's real callback (the closure under test in
 // relaySyncEngine.ts) and honors the commit-after-materialization contract,
 // exactly like the real capture implementation.
@@ -75,7 +75,6 @@ function engine(input: {
   onChange?: () => void;
   syncSharedChannels?: () => Promise<void>;
   afterSuccessfulPull?: () => Promise<void>;
-  onRustEngineAdapterPull?: () => Promise<void>;
   operations?: RelaySyncOperations;
 }) {
   return createRelaySyncEngine({
@@ -86,9 +85,6 @@ function engine(input: {
     ...(input.syncSharedChannels ? { syncSharedChannels: input.syncSharedChannels } : {}),
     ...(input.afterSuccessfulPull
       ? { afterSuccessfulPull: input.afterSuccessfulPull }
-      : {}),
-    ...(input.onRustEngineAdapterPull
-      ? { onRustEngineAdapterPull: input.onRustEngineAdapterPull }
       : {}),
     operations: input.operations ?? mockOperations(),
     debounceMs: 100,
@@ -180,34 +176,6 @@ describe("relaySyncEngine", () => {
     await sync.stop();
   });
 
-  it("runs the dormant Rust adapter hook after a durable pull and contains failure", async () => {
-    const calls: string[] = [];
-    const cap = capture();
-    pullMock.mockImplementation(async (materializePage) => {
-      await materializePage([]);
-      calls.push("commit");
-      return pullResult();
-    });
-    const onRustEngineAdapterPull = vi.fn(async () => {
-      calls.push("rust-shadow");
-      throw new Error("dormant adapter unavailable");
-    });
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const sync = engine({ capture: cap, onRustEngineAdapterPull });
-
-    await expect(sync.start()).resolves.toBeUndefined();
-    expect(calls).toEqual(["commit", "rust-shadow"]);
-    expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
-    expect(sync.snapshot().syncFailing).toBeFalsy();
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Rust engine adapter post-pull failed"),
-      expect.any(Error),
-    );
-
-    errorSpy.mockRestore();
-    await sync.stop();
-  });
-
   it("runs post-pull work after cursor commit and contains its failure", async () => {
     const calls: string[] = [];
     const cap = capture();
@@ -252,7 +220,7 @@ describe("relaySyncEngine", () => {
 
   it("refreshes shared channels on every pass and contains their failures (MU-C4)", async () => {
     const cap = capture();
-    // The callback REJECTING must not fail the workspace pass: shared-channel
+    // The callback rejecting must not fail the workspace pass: shared-channel
     // refresh is best-effort (a revoked share can't wedge file sync).
     const syncSharedChannels = vi
       .fn<() => Promise<void>>()
@@ -479,7 +447,7 @@ describe("relaySyncEngine", () => {
     expect(sync.snapshot().conflictCount).toBe(2);
 
     // The user resolves both conflicts (locally or via a peer's replicated
-    // resolution); the next pass must DROP the count, not keep accumulating.
+    // resolution); the next pass must drop the count, not keep accumulating.
     openConflicts = 0;
     sync.queueSync();
     await vi.advanceTimersByTimeAsync(100);
@@ -487,7 +455,7 @@ describe("relaySyncEngine", () => {
     expect(sync.snapshot().conflictCount).toBe(0);
   });
 
-  // 0P-C gate fix (High): a joining machine must NEVER append ops to the
+  // 0P-C gate fix (High): a joining machine must never append ops to the
   // relay before its first successful pull — pushing first could seed
   // boilerplate into the remote workspace or mint conflicts against it.
   it("join bootstrap pulls before any push and only pushes after the first successful pull", async () => {
@@ -537,7 +505,7 @@ describe("relaySyncEngine", () => {
     await expect(sync.start()).rejects.toThrow("offline");
     expect(pushMock).not.toHaveBeenCalled();
 
-    // Backoff retry while still offline: STILL no push.
+    // Backoff retry while still offline: still no push.
     await vi.advanceTimersByTimeAsync(500);
     expect(pullMock).toHaveBeenCalledTimes(2);
     expect(pushMock).not.toHaveBeenCalled();

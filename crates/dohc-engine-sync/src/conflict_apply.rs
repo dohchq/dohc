@@ -76,7 +76,7 @@ pub(crate) fn redelivered_conflicts_opened(
         return Ok(0);
     }
     let payload: OpenPayload =
-        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
+        Deserialize::deserialize(&envelope.payload).map_err(|_| SyncError::InvalidInput {
             reason: "conflict.open payload is malformed",
         })?;
     store.read_with(|conn| {
@@ -146,7 +146,7 @@ fn apply_open(
     envelope: &ReplicationEnvelope,
 ) -> Result<ConflictApplyResult, SyncError> {
     let payload: OpenPayload =
-        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
+        Deserialize::deserialize(&envelope.payload).map_err(|_| SyncError::InvalidInput {
             reason: "conflict.open payload is malformed",
         })?;
     if payload.workspace_id != envelope.workspace_id {
@@ -322,15 +322,14 @@ fn map_domain(error: DomainError) -> SyncError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ApplyDisposition;
     use dohc_engine_domain::VersionedTextStore;
     use dohc_engine_storage::NoFaults;
-    use dohc_engine_testkit::ScratchDir;
+    use dohc_engine_testkit::{ScratchDir, open_store};
     use serde_json::json;
 
     fn store() -> (ScratchDir, EngineStore) {
-        let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
-        let mut store = EngineStore::open(&path, 1_000).expect("open");
+        let (scratch, _, mut store) = open_store();
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1_000, &NoFaults)
             .expect("workspace");
@@ -387,16 +386,27 @@ mod tests {
             .expect("first open");
         assert!(matches!(
             first,
-            ApplyOutcome::Applied(ConflictApplyResult {
-                inserted: Some(true),
-                matched: true,
-                ..
-            })
+            ApplyOutcome {
+                primary: ApplyDisposition::Applied(ConflictApplyResult {
+                    inserted: Some(true),
+                    matched: true,
+                    ..
+                }),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         let replay =
             apply_conflict_envelope(&mut store, &envelope, &NoFaults, &crate::NoLiveLeases)
                 .expect("replay open");
-        assert!(matches!(replay, ApplyOutcome::Skipped));
+        assert!(matches!(
+            replay,
+            ApplyOutcome {
+                primary: ApplyDisposition::Skipped,
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ));
     }
 
     #[test]
