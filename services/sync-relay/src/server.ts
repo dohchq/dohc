@@ -1,5 +1,6 @@
-import { jsonResponse, sha256Hex, TokenBucketLimiter } from "@dohc/service-http";
+import { jsonResponse, TokenBucketLimiter } from "@dohc/service-http";
 import { randomUUID } from "node:crypto";
+import { sha256Hex } from "@dohc/workspace-core/hash";
 import {
   LINK_SECRET_PATTERN,
   SHA256_HEX_PATTERN,
