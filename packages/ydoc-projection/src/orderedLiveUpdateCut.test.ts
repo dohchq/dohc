@@ -2882,13 +2882,12 @@ describe('[held-boundary] ordered cut portable limits', () => {
       Array.from({ length: 262_143 }, () => null),
     )
     const checkpoint = Y.encodeStateAsUpdate(document)
-    const baseline = accepted(validateOrderedLiveUpdateCut(
-      { mode: 'registration', checkpoint }, highPolicy(),
-    ))
-    const exact = baseline.usage.valueNodeVisits
-    expect(validateOrderedLiveUpdateCut(
+    // Input evidence, application, and complete-state verification each visit every value.
+    const exact = 3 * 262_144
+    const cut = accepted(validateOrderedLiveUpdateCut(
       { mode: 'registration', checkpoint }, highPolicy({ maxValueNodeVisits: exact }),
-    ).kind).toBe('accepted')
+    ))
+    expect(cut.usage.valueNodeVisits).toBe(exact)
     expect(validateOrderedLiveUpdateCut(
       { mode: 'registration', checkpoint },
       highPolicy({ maxValueNodeVisits: exact - 1 }),
