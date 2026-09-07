@@ -34,8 +34,8 @@ mod ydoc_origination;
 mod ydoc_recovery;
 
 pub use apply::{
-    ApplyOutcome, RefusalReason, ReplicationRefusal, apply_chat_envelope, apply_envelope_with,
-    read_replayed_refusal, retain_refusal_for_direct_retry,
+    ApplyDisposition, ApplyOutcome, RefusalReason, ReplicationRefusal, apply_chat_envelope,
+    apply_envelope_with, read_replayed_refusal, retain_refusal_for_direct_retry,
 };
 pub use conflict_apply::{ConflictApplyResult, apply_conflict_envelope};
 pub use conflict_resolve_v1::{
