@@ -1,3 +1,4 @@
+import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
 import {
   databaseOpLogPath,
   defaultWorkspaceRoot,
@@ -15,8 +16,8 @@ import {
   CHATS_METHOD,
   VersionedLiveAdapter,
   WORKSPACE_METHOD,
-  decodeGranularChatMessageSearchResponse,
-  decodeUnreadFileThreads,
+  decodeWorkspaceResult,
+  decodeChatsResult,
 } from "@dohc/workspace-engine-client";
 import {
   app,
@@ -308,7 +309,7 @@ import {
   UpdateStateEvent,
   AcceptShareHandoffPayload,
   DismissShareHandoffPayload,
-  ShareHandoffStatus as ShareHandoffStatusContract,
+  ShareHandoffStatus,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
@@ -826,10 +827,7 @@ import {
   receiveShareHandoffArguments,
   registerShareHandoffProtocol,
 } from "./shareHandoffIngress";
-import {
-  createShareHandoffRedemptionCoordinator,
-  type ShareHandoffStatus,
-} from "./shareHandoffRedemption";
+import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemption";
 
 // A launcher that exited leaves main's stdout/stderr a pipe with no reader, and
 // a pipe write throws synchronously. Diagnostics must never be able to crash the
@@ -1841,7 +1839,7 @@ function clearCachedCredentials(): void {
 }
 
 function publishShareHandoffStatus(status: ShareHandoffStatus): void {
-  const publicStatus = ShareHandoffStatusContract.parse(status);
+  const publicStatus = ShareHandoffStatus.parse(status);
   if (!app.isReady()) return;
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(CHANNELS.shareHandoffStatus, publicStatus);
@@ -2060,7 +2058,7 @@ interface DesktopWorkspaceAuthorityState {
   workspaceChatLifecycle: ReturnType<typeof createWorkspaceChatLifecycle>;
   shareMountCommands: ReturnType<typeof createShareMountCommandsFor>;
   shareViewFiles: ShareViewFilesState;
-  sharedChannelWork: Promise<void>;
+  operationLanes: Map<string, Promise<void>>;
   sharedChannelSyncCursor: string | null;
   lastKnownDmRequestLanes: ReturnType<
     typeof createLastKnownDmRequestLanesCache
@@ -2076,9 +2074,7 @@ interface DesktopWorkspaceAuthorityState {
   activityOpening: Promise<SyncStatusResult> | null;
   activityClosing: Promise<void> | null;
   pendingCliRunMessageLinks: Set<string>;
-  engineStoreRebuild: Promise<void> | null;
   lastEngineStoreRebuildResult: RebuildEngineStoreResult | null;
-  chatBookmarkRuns: Map<string, Promise<void>>;
 }
 
 type DesktopWorkspaceAuthorityLease = WorkspaceAuthorityLease<
@@ -2090,11 +2086,6 @@ type DesktopWorkspaceOperation = WorkspaceAuthorityOperation<
   RegistryEntry,
   DesktopWorkspaceAuthorityState
 >;
-
-interface DesktopWorkspaceOperationAuthority {
-  readonly state: DesktopWorkspaceAuthorityState;
-  assertCurrent(): void;
-}
 
 function createDesktopWorkspaceAuthorityState(
   binding: WorkspaceAuthorityBinding<RegistryEntry>,
@@ -2130,7 +2121,7 @@ function createDesktopWorkspaceAuthorityState(
     workspaceChatLifecycle: createWorkspaceChatLifecycleFor(binding),
     shareMountCommands: createShareMountCommandsFor(binding),
     shareViewFiles: new ShareViewFilesState(),
-    sharedChannelWork: Promise.resolve(),
+    operationLanes: new Map(),
     sharedChannelSyncCursor: null,
     lastKnownDmRequestLanes: createLastKnownDmRequestLanesCache(),
     bookmarkProjectionPending: false,
@@ -2144,9 +2135,7 @@ function createDesktopWorkspaceAuthorityState(
     activityOpening: null,
     activityClosing: null,
     pendingCliRunMessageLinks: new Set(),
-    engineStoreRebuild: null,
     lastEngineStoreRebuildResult: null,
-    chatBookmarkRuns: new Map(),
   };
 }
 
@@ -2595,26 +2584,6 @@ const createJoinedWorkspace = createJoinedWorkspaceRunner({
   logError: (message, error) => console.error(message, error),
 });
 
-function serializeWorkspaceAuthorityWork<Result>(
-  authority: DesktopWorkspaceOperationAuthority,
-  run: () => Promise<Result>,
-): Promise<Result> {
-  const state = authority.state;
-  const result = state.sharedChannelWork
-    .catch(() => undefined)
-    .then(async () => {
-      authority.assertCurrent();
-      const value = await run();
-      authority.assertCurrent();
-      return value;
-    });
-  state.sharedChannelWork = result.then(
-    () => undefined,
-    () => undefined,
-  );
-  return result;
-}
-
 // Presence (MU-C5) relay bounds. Publish/leave are quick, so a 15s cap frees a
 // hung socket. The poll is a long-poll: its own AbortSignal (presenceCancel)
 // governs, and this safety cap only fires if the relay stalls past its hold
@@ -2724,7 +2693,7 @@ function syncWorkspaceSharedChannels(
   priorityChannelWireId?: string,
 ): Promise<number> {
   return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
-    serializeWorkspaceAuthorityWork(lease, () =>
+    runInWorkspaceAuthorityLane(lease, "shared-channels", () =>
       runSharedChannelSyncPass(lease, priorityChannelWireId),
     ),
   );
@@ -2734,7 +2703,7 @@ function syncRendererWorkspaceSharedChannels(
   operation: DesktopRendererWorkspaceOperation,
   priorityChannelWireId?: string,
 ): Promise<number> {
-  return serializeWorkspaceAuthorityWork(operation, () =>
+  return runInWorkspaceAuthorityLane(operation, "shared-channels", () =>
     runSharedChannelSyncPass(operation, priorityChannelWireId),
   );
 }
@@ -3835,38 +3804,12 @@ const workspace = findWorkspace(lease.binding.workspaceId);
   };
 }
 
-async function inWorkspaceEngineStoreLane<Result>(
-  lease: DesktopWorkspaceAuthorityLease,
-  work: () => Promise<Result>,
-): Promise<Result> {
-  const state = lease.state;
-  const previous = state.engineStoreRebuild ?? Promise.resolve();
-const result = previous
-    .catch(() => undefined)
-    .then(async () => {
-      lease.assertCurrent();
-const value = await work();
-      lease.assertCurrent();
-      return value;
-    });
-  const settled = result.then(
-    () => undefined,
-    () => undefined,
-  );
-  state.engineStoreRebuild = settled;
-  try {
-    return await result;
-  } finally {
-    if (state.engineStoreRebuild === settled) state.engineStoreRebuild = null;
-  }
-}
-
 function withEngineStoreRecoveredForAuthority<Result>(
   lease: DesktopWorkspaceAuthorityLease,
   body: () => Promise<Result>,
 ): Promise<Result> {
   const workspace = canonicalWorkspaceFor(lease);
-  return inWorkspaceEngineStoreLane(lease, () =>
+  return runInWorkspaceAuthorityLane(lease, "engine-store", () =>
     withEngineStoreRecoveredUnderEngineStoreLock(workspace, body, (rootPath) =>
       completePendingEngineStoreMoveForWorkspace(workspace, rootPath),
     ),
@@ -4982,7 +4925,8 @@ async function openCliWorkspace(
     fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
     daemonReads: {
       async queryChatMessagesGranular(input: { query: string; limit: number }) {
-        return decodeGranularChatMessageSearchResponse(
+        return decodeWorkspaceResult(
+          WORKSPACE_METHOD.searchQueryChatMessagesGranular,
           await daemon.requestWorkspace(
             workspace.rootPath,
             workspace.workspaceId,
@@ -4995,7 +4939,8 @@ async function openCliWorkspace(
         pageLimit: number;
         afterThreadId?: string;
       }) {
-        return decodeUnreadFileThreads(
+        return decodeChatsResult(
+          CHATS_METHOD.readStateListUnreadFileThreads,
           await daemon.requestWorkspace(
             workspace.rootPath,
             workspace.workspaceId,
@@ -5145,7 +5090,9 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
       // A CLI or MCP reply can mark a live bookmark projection pending.
       queueChatBookmarkProjection(workspace.workspaceId);
       activity.queueCloudSync(workspace.workspaceId);
-      void syncSharedChannelsForChatTarget(workspace.workspaceId, target);
+      void syncSharedChannelsForChatTarget(workspace.workspaceId, target).catch((error) => {
+        console.error("[desktop] shared channel sync:", error);
+      });
       void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
         console.error("[desktop] CLI dispatch scan:", error);
       });
@@ -6502,14 +6449,7 @@ const sitePreviewSenderWorkspaceAuthority = {
         work({
           workspace: operation.workspace,
           session: {
-            isCurrent: () => {
-              try {
-                operation.assertCurrent();
-                return true;
-              } catch {
-                return false;
-              }
-            },
+            isCurrent: operation.isCurrent,
           },
         }),
     );
@@ -7529,7 +7469,7 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.getShareHandoffStatus, (event, ...args: unknown[]) => {
     assertTrustedSender(event);
     assertNoShareHandoffArguments(args);
-    return ShareHandoffStatusContract.parse(shareHandoffRedemption.status());
+    return ShareHandoffStatus.parse(shareHandoffRedemption.status());
   });
 
   ipcMain.handle(CHANNELS.acceptShareHandoff, (event, ...args: unknown[]) => {
@@ -8855,8 +8795,9 @@ function registerIpcHandlers(
         if (workspaceId !== workspace.workspaceId) {
           throw new Error("Shared channel work targeted a different workspace.");
         }
-        return serializeWorkspaceAuthorityWork(
+        return runInWorkspaceAuthorityLane(
           { state: input.operation.state, assertCurrent },
+          "shared-channels",
           run,
         );
       },
@@ -10120,14 +10061,7 @@ function registerIpcHandlers(
               session: {
                 workspaceId: operation.session.workspaceId,
                 generation: operation.session.generation,
-                isCurrent: () => {
-                  try {
-                    operation.assertCurrent();
-                    return true;
-                  } catch {
-                    return false;
-                  }
-                },
+                isCurrent: operation.isCurrent,
               },
             }),
         ),
@@ -10321,7 +10255,9 @@ function registerIpcHandlers(
   // above refuses every received share before the store.
   function syncChatWriteFor(scope: ChatScope, target: { threadId: string }): void {
     if (scope.kind === "share") return;
-    void syncSharedChannelsForChatTarget(scope.workspace.workspaceId, target);
+    void syncSharedChannelsForChatTarget(scope.workspace.workspaceId, target).catch((error) => {
+      console.error("[desktop] shared channel sync:", error);
+    });
     activity.queueCloudSync(scope.workspace.workspaceId);
   }
 
@@ -10650,25 +10586,9 @@ function registerIpcHandlers(
     run: () => Promise<T>,
   ): Promise<T> {
     const lease = requireWorkspaceAuthority(workspaceId);
-    const runs = lease.state.chatBookmarkRuns;
-    const previous = runs.get(bookmarkId) ?? Promise.resolve();
-    const result = previous
-      .catch(() => undefined)
-      .then(async () => {
-        lease.assertCurrent();
-        const value = await run();
-        lease.assertCurrent();
-        return value;
-      });
-    const settled = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    runs.set(bookmarkId, settled);
     try {
-      return await result;
+      return await runInWorkspaceAuthorityLane(lease, `bookmark:${bookmarkId}`, run);
     } finally {
-      if (runs.get(bookmarkId) === settled) runs.delete(bookmarkId);
       lease.release();
     }
   }
@@ -11748,6 +11668,8 @@ function registerIpcHandlers(
     });
     void syncSharedChannelsForChatTarget(workspace.workspaceId, {
       channelId: input.channelId,
+    }).catch((error) => {
+      console.error("[desktop] shared channel sync:", error);
     });
     activity.queueCloudSync(workspace.workspaceId);
     void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
@@ -11882,7 +11804,9 @@ function registerIpcHandlers(
       },
       // MU-C4: reactions in a joined shared channel push out promptly too.
       syncJoinedChannels: (workspaceId) => {
-        void syncWorkspaceSharedChannels(workspaceId);
+        void syncWorkspaceSharedChannels(workspaceId).catch((error) => {
+          console.error("[desktop] shared channel sync:", error);
+        });
       },
       // Signed-in reactions are journaled workspace mutations, so the owner's
       // cloud workspace is nudged too. Signed-out sync attempts are no-ops.
@@ -12635,7 +12559,7 @@ function registerIpcHandlers(
     const registered = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(registered);
     return workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
-      inWorkspaceEngineStoreLane(lease,
+      runInWorkspaceAuthorityLane(lease, "engine-store",
       async () => {
         const workspace = canonicalWorkspaceFor(lease);
         const sessions = requireEngineSessions();
@@ -13006,14 +12930,7 @@ function registerIpcHandlers(
             workspace: operation.workspace,
             attachmentId: operation.workspace.attachmentId,
             signal: operation.signal,
-            isCurrent: () => {
-              try {
-                operation.assertCurrent();
-                return true;
-              } catch {
-                return false;
-              }
-            },
+            isCurrent: operation.isCurrent,
           });
         },
       ),

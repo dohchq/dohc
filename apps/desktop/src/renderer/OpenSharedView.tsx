@@ -1,3 +1,5 @@
+import { useRequestSequence } from "./useRequestSequence";
+import { ipcErrorMessage } from "./ipcError";
 import { ArrowLeft, FolderOpen } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
@@ -11,12 +13,6 @@ import { IconButton, PrimaryButton } from "./ui/controls";
 // live-follows the share — the default when opened from inside a workspace)
 // or open it as a separate read-only view in an empty folder. Mirrors
 // JoinSyncedWorkspace's session gate and unmount guard.
-
-function shareErrorMessage(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  const message = raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "").trim();
-  return message.length > 0 ? message : "Couldn't open the share.";
-}
 
 type Gate =
   | { kind: "checking" }
@@ -51,17 +47,16 @@ export function OpenSharedView(props: {
   );
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const sessionRef = useRef(0);
-  const folderRequestRef = useRef(0);
-  const cancelledRef = useRef(false);
+  const sessionRef = useRequestSequence();
+  const folderRequestRef = useRequestSequence();
+  const actionRequests = useRequestSequence();
 
   function checkSession() {
-    const session = sessionRef.current + 1;
-    sessionRef.current = session;
+    const session = sessionRef.next();
     void bridge()
       .cloudStatus({})
       .then((status) => {
-        if (session !== sessionRef.current) return;
+        if (!sessionRef.isCurrent(session)) return;
         setGate(
           status.connected
             ? { kind: "signed-in", email: status.email ?? "" }
@@ -69,29 +64,26 @@ export function OpenSharedView(props: {
         );
       })
       .catch(() => {
-        if (session === sessionRef.current) setGate({ kind: "signed-out" });
+        if (sessionRef.isCurrent(session)) setGate({ kind: "signed-out" });
       });
   }
 
   useEffect(() => {
-    cancelledRef.current = false;
     if (!props.resolvedShare) checkSession();
     return () => {
-      sessionRef.current += 1;
-      folderRequestRef.current += 1;
-      cancelledRef.current = true;
+      sessionRef.next();
+      folderRequestRef.next();
     };
     // Session check runs once on mount; CloudLogin's onConnected re-runs it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function chooseFolder() {
-    const request = ++folderRequestRef.current;
+    const request = folderRequestRef.next();
     const picked = await bridge().pickWorkspaceRoot();
     if (
       picked &&
-      !cancelledRef.current &&
-      request === folderRequestRef.current
+      folderRequestRef.isCurrent(request)
     ) {
       setFolder(picked);
     }
@@ -103,6 +95,7 @@ export function OpenSharedView(props: {
   async function open() {
     if (opening || shareCode.length === 0) return;
     if (!mounting && !folder) return;
+    const actionRequest = actionRequests.next();
     setOpening(true);
     setError(null);
     try {
@@ -111,7 +104,7 @@ export function OpenSharedView(props: {
           workspaceId: props.mountInto.workspaceId,
           shareCode,
         });
-        if (cancelledRef.current) return;
+        if (!actionRequests.isCurrent(actionRequest)) return;
         props.onOpened?.();
         props.mountInto.onMounted(result.mount.label);
       } else {
@@ -119,15 +112,15 @@ export function OpenSharedView(props: {
           shareCode,
           rootPath: folder!,
         });
-        if (cancelledRef.current) return;
+        if (!actionRequests.isCurrent(actionRequest)) return;
         props.onOpened?.();
         props.onWorkspaceReady(result.workspace);
       }
     } catch (cause) {
-      if (cancelledRef.current) return;
-      setError(shareErrorMessage(cause));
+      if (!actionRequests.isCurrent(actionRequest)) return;
+      setError((ipcErrorMessage(cause).trim() || "Couldn't open the share."));
     } finally {
-      if (!cancelledRef.current) setOpening(false);
+      if (actionRequests.isCurrent(actionRequest)) setOpening(false);
     }
   }
 

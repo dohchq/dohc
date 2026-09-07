@@ -1,3 +1,4 @@
+import { isCodeBlockNode, normalizeLanguage, stopEditorMouseEvent } from "./pmHelpers";
 // Mermaid diagram rendering inside WYSIWYG code blocks — a ProseMirror
 // decoration layer, deliberately not a schema/nodeView change. Mermaid
 // fences are plain `codeBlock` nodes with `language: "mermaid"` (the same
@@ -35,14 +36,6 @@ type DocDescendantNode = {
 }
 type DocLike = {
   descendants: (cb: (node: DocDescendantNode, pos: number) => boolean | void) => void
-}
-
-function isCodeBlockNode(node: { type: { name: string } }): boolean {
-  return node.type.name === 'code_block' || node.type.name === 'codeBlock'
-}
-
-function normalizeLanguage(value: unknown): string {
-  return typeof value === 'string' ? value.trim().toLowerCase() : ''
 }
 
 type MermaidBlock = {
@@ -296,11 +289,6 @@ export async function renderMermaidDiagram(id: string, source: string): Promise<
 
 // ---------------------------------------------------------------------------
 // ProseMirror wiring — decorations + the async render/DOM sync loop.
-
-function stopEditorMouseEvent(event: Event): void {
-  event.preventDefault()
-  event.stopPropagation()
-}
 
 /** Click-on-diagram (or programmatic) entry point back into the source —
  *  mirrors the wikilink pill's "click to edit" affordance. */

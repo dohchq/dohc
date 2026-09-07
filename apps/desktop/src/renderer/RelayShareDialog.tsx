@@ -1,3 +1,5 @@
+import { SectionLabel } from "./ui/controls";
+import { ipcErrorMessage } from "./ipcError";
 import { Check, Copy, Share2, X } from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
@@ -16,11 +18,6 @@ import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 export type RelayShareTarget =
   | { kind: "paths"; paths: [string, ...string[]]; label?: string }
   | { kind: "version"; versionId: string; versionName?: string };
-
-function errorMessage(cause: unknown): string {
-  const text = cause instanceof Error ? cause.message : String(cause);
-  return text.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
-}
 
 const ACCESS_OPTIONS: ReadonlyArray<{
   value: ShareAccess;
@@ -690,7 +687,7 @@ export function RelayShareDialog(props: {
       const result = await bridge().createRelayShare(payload);
       setCreated({ shareCode: result.shareCode, recipientEmail: result.recipientEmail });
     } catch (cause) {
-      setError(errorMessage(cause));
+      setError(ipcErrorMessage(cause));
     } finally {
       setBusy(false);
     }
@@ -1389,7 +1386,7 @@ export function RelayShareDialog(props: {
         return;
       }
       setIndependentGrants([]);
-      setLinksError(errorMessage(cause));
+      setLinksError(ipcErrorMessage(cause));
     } finally {
       if (
         isCurrentLinkScope(scopeGeneration) &&
@@ -1432,7 +1429,7 @@ export function RelayShareDialog(props: {
       ) {
         return;
       }
-      setLinkError(errorMessage(cause));
+      setLinkError(ipcErrorMessage(cause));
       void refreshLinks(scopeGeneration);
     } finally {
       if (
@@ -1582,7 +1579,7 @@ export function RelayShareDialog(props: {
         setMinted(null);
         setLinkCopied(false);
       }
-      setLifecycleError(errorMessage(cause));
+      setLifecycleError(ipcErrorMessage(cause));
       setConfirmation(null);
       void refreshLinks(scopeGeneration);
     } finally {
@@ -1791,14 +1788,13 @@ export function RelayShareDialog(props: {
               <p className="m-0 text-[11px] leading-relaxed text-subtle">
                 You can end this share anytime from Settings → Cloud.
               </p>
-              <button
+              <SecondaryButton
                 type="button"
                 data-testid="share-done"
                 onClick={closeDialog}
-                className="rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink"
               >
                 Done
-              </button>
+              </SecondaryButton>
             </>
           )}
 
@@ -1893,12 +1889,12 @@ export function RelayShareDialog(props: {
           ) : null}
 
           <section className="flex flex-col gap-2" aria-labelledby="share-links-heading">
-            <h3
+            <SectionLabel as="h3"
               id="share-links-heading"
-              className="m-0 text-[10px] font-semibold uppercase tracking-wide text-subtle"
+              className="m-0"
             >
               Links
-            </h3>
+            </SectionLabel>
 
             {linksLoading ? (
               <p className="m-0 text-xs text-muted">Loading links…</p>

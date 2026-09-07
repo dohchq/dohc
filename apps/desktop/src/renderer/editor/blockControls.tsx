@@ -1,3 +1,4 @@
+import { isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
 import { Fragment, useEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
 import { serializeRichdocBody } from "@dohc/ydoc-projection";
@@ -28,22 +29,6 @@ type TopLevelDocLike = {
 };
 
 const blockControlsKey = new PluginKey("dohc-block-controls");
-
-function isEditableEditor(editor: Editor | null | undefined): boolean {
-  if (!editor) return false;
-  if ((editor as { isEditable?: boolean }).isEditable === false) return false;
-  if ((editor.view as { editable?: boolean }).editable === false) return false;
-  return true;
-}
-
-function isEditableView(view: EditorView): boolean {
-  return (view as { editable?: boolean }).editable !== false;
-}
-
-function stopEditorMouseEvent(event: Event) {
-  event.preventDefault();
-  event.stopPropagation();
-}
 
 // ── drag payload ──────────────────────────────────────────────────────────
 
@@ -171,7 +156,7 @@ function buildBlockControlDecorations(
           handle.addEventListener("dragstart", (event) => {
             const dragEvent = event as DragEvent;
             dragEvent.stopPropagation();
-            if (!isEditableView(view) || !dragEvent.dataTransfer) {
+            if (view.editable === false || !dragEvent.dataTransfer) {
               dragEvent.preventDefault();
               return;
             }

@@ -8,7 +8,7 @@ import {
 } from "@dohc/excalidraw-scene";
 import type { BinaryFileData } from "@excalidraw/excalidraw/types";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
-import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
+import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { documentKey, documentVersionKey } from "../documentVersionKey";
 import {

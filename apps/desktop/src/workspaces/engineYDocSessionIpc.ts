@@ -13,9 +13,9 @@ import {
   ApplyEngineYDocUpdatePayload,
   ApplyEngineYDocUpdateResult,
   CloseEngineYDocSessionPayload,
-  EngineYDocLineageReplacementEventSchema,
-  EngineYDocRemoteUpdateEventSchema,
-  EngineYDocSaveStateEventSchema,
+  EngineYDocLineageReplacementEvent,
+  EngineYDocRemoteUpdateEvent,
+  EngineYDocSaveStateEvent,
   OpenEngineYDocSessionPayload,
   OpenEngineYDocSessionResult,
   ReadEngineYDocArtifactAssetPayload,
@@ -725,7 +725,7 @@ class EngineYDocSessionIpc {
       if (message.kind === "session-event") {
         outbound.sender.send(
           CHANNELS.engineYDocSaveState,
-          EngineYDocSaveStateEventSchema.parse({
+          EngineYDocSaveStateEvent.parse({
             sessionId: outbound.sessionId,
             ...message.event,
           }),
@@ -735,7 +735,7 @@ class EngineYDocSessionIpc {
       if (message.kind === "remote-update") {
         outbound.sender.send(
           CHANNELS.engineYDocRemoteUpdate,
-          EngineYDocRemoteUpdateEventSchema.parse({
+          EngineYDocRemoteUpdateEvent.parse({
             sessionId: outbound.sessionId,
             update: message.update,
             lineageGeneration: message.lineageGeneration,
@@ -745,7 +745,7 @@ class EngineYDocSessionIpc {
       }
       outbound.sender.send(
         CHANNELS.engineYDocLineageReplacement,
-        EngineYDocLineageReplacementEventSchema.parse({
+        EngineYDocLineageReplacementEvent.parse({
           sessionId: outbound.sessionId,
           ...message.replacement,
           lineageGeneration: message.lineageGeneration,
