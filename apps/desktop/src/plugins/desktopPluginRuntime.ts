@@ -1,6 +1,6 @@
 import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import type { utilityProcess } from "electron";
-import { pluginHostEnvFor, resolveDohcMcpCommand } from "../agents/chatDispatchService";
+import { pluginHostEnvFor, resolveDohcMcpCommand } from "../agents/dohcMcpCommand";
 import type { CreatedWorkspace } from "../workspaces/createWorkspaceFolder";
 import type { OwnedWorkspaceSdkReadPort } from "../workspaces/ownedWorkspaceSdkReadPort";
 import type { RegistryEntry } from "../workspaces/registryStore";

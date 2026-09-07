@@ -267,12 +267,11 @@ import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import { createTryInVersionSessions } from "./agents/tryInVersion";
 import {
   createChatDispatchService,
-  isAppImageBoot,
-  resolveDohcCliBinDirectory,
-  resolveDohcMcpCommand,
   type ChatDispatchPresenceInput,
   type ChatDispatchWorkspace,
 } from "./agents/chatDispatchService";
+import { isAppImageBoot, resolveDohcMcpCommand } from "./agents/dohcMcpCommand";
+import { resolveDohcCliBinDirectory } from "./agents/chatRunnerProcess";
 import { refreshLinuxStableCliBin } from "./agents/linuxStableCliBin";
 import { CHAT_AGENT_PRESENCE_TOPIC } from "./collab/agentPresence";
 import {
