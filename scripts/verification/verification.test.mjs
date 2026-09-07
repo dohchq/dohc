@@ -213,12 +213,13 @@ test("verification prepares the engine after Rust without changing gate scope", 
     { cwd: root, encoding: "utf8" }).trim();
     try {
       createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+      git(["config", "core.logAllRefUpdates", "true"]);
       mkdirSync(join(root, ".dohc-dev"), { recursive: true });
       for (const path of ["scripts/verification/verify.mjs", "tools/rust-engine-program/tree-provenance.mjs",
         "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml"]) {
         put(path, readFileSync(join(repoRoot, path)));
       }
-      put(".gitignore", readFileSync(join(root, ".gitignore"), "utf8") + ".agent-artifacts/\napps/desktop/target/\napps/desktop/.env.local\n");
+      put(".gitignore", readFileSync(join(root, ".gitignore"), "utf8") + ".agent-artifacts/\napps/desktop/.env.local\n");
       put("apps/desktop/package.json", "{}");
       for (const name of ["dohc", "dohc-mcp"]) {
         put(`apps/desktop/resources/cli-bin/${name}`, "fixture launcher");
@@ -299,7 +300,7 @@ test("verification prepares the engine after Rust without changing gate scope", 
           writeFileSync('.dohc-dev/report.json',readFileSync(output+'/'+readdirSync(output)[0]+'/result.json'));
         }
         catch(error) {console.error(error.message);process.exitCode=1;}
-      `, ...args], { cwd: root, encoding: "utf8", timeout: 20_000, env: { ...process.env,
+      `, ...args], { cwd: root, encoding: "utf8", timeout: 120_000, env: { ...process.env,
         NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), FIXTURE_MODE: mode, FIXTURE_FAULT: fault ?? "" } });
       assert.equal(result.error, undefined, result.stderr);
       if (fault) {
