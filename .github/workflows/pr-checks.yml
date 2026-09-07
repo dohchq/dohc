@@ -53,6 +53,7 @@ jobs:
               - 'rust-toolchain.toml'
               - 'deny.toml'
               - 'tools/rust-engine-program/**'
+              - 'scripts/verification/**'
               - 'packages/ydoc-projection/**'
               # The live fixture oracles and dependency setup are Rust inputs.
               - 'packages/security-contract/**'
