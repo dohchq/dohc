@@ -70,7 +70,7 @@ type TestWorkspaceIdentity = {
 afterEach(closeTestStorages);
 
 function handler(storage: SyncRelayStorage, options: HandlerOverrides = {}): SyncRelayHandler {
-  return testHandler(storage, { resolveUserIdByEmail: undefined, lookupUserEmail: undefined, ...options });
+  return testHandler(storage, { resolveUserIdByEmail: undefined, lookupUserEmail: undefined, lookupVerifiedUserEmail: undefined, ...options });
 }
 
 class KeyIgnoringLinkReadRateLimiter extends TokenBucketLimiter {
