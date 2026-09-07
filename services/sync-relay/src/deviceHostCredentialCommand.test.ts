@@ -32,7 +32,15 @@ async function run(args: string[], umask?: number) {
   }
 }
 
-it("runs the actual provision/replay/revoke commands without printing the credential or changing its instance", async () => {
+it.runIf(process.platform === "darwin")("reports unavailable ACL validation without creating a credential directory", async () => {
+  const directory = join(root, "darwin-credential"), database = join(root, "darwin.sqlite");
+  const result = await run(["provision", "--database", database, "--host-id", "darwin-device", "--output-directory", directory]);
+  expect(result).toMatchObject({ code: 1, stdout: "" });
+  expect(result.stderr).toContain("Device host credential files are unavailable on macOS because ACL validation is not implemented.");
+  await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it.skipIf(process.platform === "darwin")("runs the actual provision/replay/revoke commands without printing the credential or changing its instance", async () => {
   const database = join(root, "relay.sqlite"), directory = join(root, "credential");
   const args = ["provision", "--database", database, "--host-id", "configured-device", "--output-directory", directory];
   const provision = await run(args);
@@ -66,7 +74,7 @@ it("runs the actual provision/replay/revoke commands without printing the creden
   } finally { reopened.close(); }
 }, 60_000);
 
-it("refuses linked output and duplicate arguments and leaves existing files unchanged", async () => {
+it.skipIf(process.platform === "darwin")("refuses linked output and duplicate arguments and leaves existing files unchanged", async () => {
   const database = join(root, "other.sqlite"), directory = join(root, "other-credential");
   const args = ["provision", "--database", database, "--host-id", "other-device", "--output-directory", directory];
   expect((await run(args)).code).toBe(0);
@@ -78,7 +86,7 @@ it("refuses linked output and duplicate arguments and leaves existing files unch
   expect(await readFile(file)).toEqual(before);
 });
 
-it("refuses to read an existing credential file after its permissions widen", async () => {
+it.skipIf(process.platform === "darwin")("refuses to read an existing credential file after its permissions widen", async () => {
   const database = join(root, "permissions.sqlite"), directory = join(root, "permissions-credential");
   const args = ["provision", "--database", database, "--host-id", "permission-device", "--output-directory", directory];
   const provision = await run(args); expect(provision, provision.stderr).toMatchObject({ code: 0 });
@@ -92,7 +100,7 @@ it("refuses to read an existing credential file after its permissions widen", as
   expect(await readFile(file)).toEqual(before);
 });
 
-it("retries after preparation left a private directory without a credential file", async () => {
+it.skipIf(process.platform === "darwin")("retries after preparation left a private directory without a credential file", async () => {
   const directory = join(root, "interrupted-credential"), database = join(root, "interrupted.sqlite");
   const args = ["provision", "--database", database, "--host-id", "interrupted-device", "--output-directory", directory];
   const seed = [...args]; seed[2] = join(root, "private-directory-seed.sqlite");
@@ -110,7 +118,7 @@ it("retries after preparation left a private directory without a credential file
   finally { storage.close(); }
 }, 60_000);
 
-it("does not overwrite a malformed existing credential or reuse a credential from another host", async () => {
+it.skipIf(process.platform === "darwin")("does not overwrite a malformed existing credential or reuse a credential from another host", async () => {
   const directory = join(root, "refused-credential"), database = join(root, "refused.sqlite");
   const args = ["provision", "--database", database, "--host-id", "original-host", "--output-directory", directory];
   expect((await run(args)).code).toBe(0);
@@ -123,7 +131,7 @@ it("does not overwrite a malformed existing credential or reuse a credential fro
   expect(await readFile(file, "utf8")).toBe("interrupted credential bytes");
 });
 
-it("reports the retained admission state when revocation occurs during maintenance", async () => {
+it.skipIf(process.platform === "darwin")("reports the retained admission state when revocation occurs during maintenance", async () => {
   const directory = join(root, "transition-credential"), database = join(root, "transition.sqlite");
   expect((await run(["provision", "--database", database, "--host-id", "transition-device", "--output-directory", directory])).code).toBe(0);
   const credential = parseDeviceHostCredential(JSON.parse(await readFile(join(directory, "device-host-credential.json"), "utf8")));
@@ -139,7 +147,7 @@ it("reports the retained admission state when revocation occurs during maintenan
   expect(result).toMatchObject({ code: 0, stdout: `Device host credential revoked.\nDatabase: ${JSON.stringify(database)}\nHost admission: draining\n` });
 });
 
-it.skipIf(process.platform === "win32")("creates private entries despite a restrictive POSIX umask", async () => {
+it.skipIf(process.platform === "win32" || process.platform === "darwin")("creates private entries despite a restrictive POSIX umask", async () => {
   const directory = join(root, "umask-credential"), database = join(root, "umask.sqlite");
   const storage = openSyncRelayStorage(database); storage.close();
   const args = ["provision", "--database", database, "--host-id", "umask-device", "--output-directory", directory];
@@ -151,7 +159,7 @@ it.skipIf(process.platform === "win32")("creates private entries despite a restr
   expect(await readFile(file)).toEqual(before);
 });
 
-it.skipIf(process.platform === "win32")("rejects a POSIX parent redirect that differs only by case", async ({ skip }) => {
+it.skipIf(process.platform === "win32" || process.platform === "darwin")("rejects a POSIX parent redirect that differs only by case", async ({ skip }) => {
   const parent = join(root, "CaseParent"), alias = join(root, "caseparent");
   await mkdir(parent);
   try { await stat(alias); skip(); return; }

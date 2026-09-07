@@ -13,7 +13,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "start": "node dist/main.js",
-    "host:credential": "node dist/device-host-credential.js"
+    "host:credential": "tsx src/deviceHostCredentialCommand.ts"
   },
   "dependencies": {
     "@dohc/live-session-contract": "workspace:*",

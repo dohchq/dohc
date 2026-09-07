@@ -1,13 +1,14 @@
 import { isAbsolute, resolve } from "node:path";
 import { parseHostControlIdentifier, parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import { openSyncRelayStorage } from "./storage.js";
-import { prepareDeviceHostCredentialFile } from "./deviceHostCredentialFile.js";
+import { DeviceHostCredentialFileUnavailable, prepareDeviceHostCredentialFile } from "./deviceHostCredentialFile.js";
 
 const usage = `Run on the relay host with deployment-operator access to its database.
 provision --database PATH --host-id ID --output-directory NEW_PRIVATE_DIRECTORY
 revoke --database PATH --host-id ID --instance-id ID --confirm-revoke
 Provisioning creates the initial credential at the current host epoch. Retries reuse that credential.
 This command does not renew credentials across host epochs or replace a device instance.
+Credential-file provisioning is unavailable on macOS until ACL validation is implemented.
 Revocation permanently disables this credential. It preserves any maintenance transition.`;
 
 async function main(args: string[]): Promise<void> {
@@ -45,7 +46,8 @@ async function main(args: string[]): Promise<void> {
   } finally { storage.close(); }
 }
 
-main(process.argv.slice(2)).catch(() => {
-  console.error("Device host credential command refused. Use --help for required arguments and revocation consequences.");
+main(process.argv.slice(2)).catch(error => {
+  console.error(error instanceof DeviceHostCredentialFileUnavailable ? error.message :
+    "Device host credential command refused. Use --help for required arguments and revocation consequences.");
   process.exitCode = 1;
 });

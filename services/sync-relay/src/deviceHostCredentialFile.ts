@@ -1,8 +1,16 @@
 import { execFileSync } from "node:child_process";
-import { chmod, lstat, mkdir, open, realpath } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import type { BigIntStats } from "node:fs";
+import { chmod, link, lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createDeviceHostCredential, parseDeviceHostCredential, type DeviceHostCredential } from "./deviceHostCredential.js";
 import type { HostEpoch } from "@dohc/live-session-contract/host-control";
+
+export class DeviceHostCredentialFileUnavailable extends Error {
+  constructor() {
+    super("Device host credential files are unavailable on macOS because ACL validation is not implemented.");
+  }
+}
 
 const windowsAccess = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -26,8 +34,8 @@ foreach ($rule in $acl.Access) {
       $rule.AccessControlType -ne 'Allow' -or $rule.FileSystemRights -ne 'FullControl') { throw 'Unexpected access rule' }
 }`;
 
-async function privatePath(path: string, directory: boolean, create = false): Promise<void> {
-  const stat = await lstat(path);
+async function privatePath(path: string, directory: boolean, create = false): Promise<BigIntStats> {
+  const stat = await lstat(path, { bigint: true });
   const actualPath = resolve(await realpath(path)), requestedPath = resolve(path);
   const samePath = process.platform === "win32" ? actualPath.toLowerCase() === requestedPath.toLowerCase() : actualPath === requestedPath;
   if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile()) ||
@@ -39,13 +47,19 @@ async function privatePath(path: string, directory: boolean, create = false): Pr
         env: { ...process.env, DOHC_HOST_CREDENTIAL_PATH: path, DOHC_HOST_CREDENTIAL_CREATE: create ? "1" : "0",
           DOHC_HOST_CREDENTIAL_DIRECTORY: directory ? "1" : "0" },
       });
-  } else if (stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== (directory ? 0o700 : 0o600)) {
+  } else if (stat.uid !== BigInt(process.getuid?.() ?? -1) || (stat.mode & 0o777n) !== (directory ? 0o700n : 0o600n)) {
     throw new Error("Credential path must be accessible only to its owner.");
   }
+  return stat;
+}
+
+function sameFile(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
 // Persist the secret before provisioning. A crash can then retry with the same file.
 export async function prepareDeviceHostCredentialFile(directory: string, hostId: string, hostEpoch: HostEpoch): Promise<DeviceHostCredential> {
+  if (process.platform === "darwin") throw new DeviceHostCredentialFileUnavailable();
   let created = false;
   try { await mkdir(directory, { mode: 0o700 }); created = true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
@@ -67,14 +81,25 @@ export async function prepareDeviceHostCredentialFile(directory: string, hostId:
     } finally { await handle.close(); }
   }
   const credential = createDeviceHostCredential(hostId, hostEpoch);
-  const handle = await open(path, "wx", 0o600);
+  const temporary = join(directory, `.device-host-credential-${randomUUID()}.tmp`);
+  const handle = await open(temporary, "wx", 0o600);
+  let identity: BigIntStats | undefined;
   try {
+    identity = await handle.stat({ bigint: true });
     if (process.platform !== "win32") await handle.chmod(0o600);
+    if (!sameFile(await privatePath(temporary, false), identity)) throw new Error("Credential file changed.");
     await handle.writeFile(JSON.stringify(credential) + "\n");
     await handle.sync();
+    if (!sameFile(await privatePath(temporary, false), identity)) throw new Error("Credential file changed.");
+    await link(temporary, path);
+  } finally {
+    await handle.close();
+    const current = await lstat(temporary, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (identity && current?.isFile() && sameFile(current, identity)) await unlink(temporary);
   }
-  finally { await handle.close(); }
-  await privatePath(path, false);
   if (process.platform !== "win32") {
     const parent = await open(directory, "r");
     try { await parent.sync(); } finally { await parent.close(); }
