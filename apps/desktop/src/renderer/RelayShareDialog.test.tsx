@@ -7,7 +7,7 @@ import {
   type RelayShareDiscussionMessage,
   type RelayShareGrantedRow,
 } from "../ipc/bridgeContract";
-import { RelayShareDialog } from "./RelayShareDialog";
+import { RelayShareDialog, type RelayShareTarget } from "./RelayShareDialog";
 
 const SHARE_CODE = "dohc-share:share-1:http://relay.test";
 const LINK_URL = "https://relay.test/share/link-secret";
@@ -361,7 +361,202 @@ async function openOwnerComments(
 }
 
 describe("RelayShareDialog", () => {
-  it("defaults the Share with choice to Invite by email", () => {
+  function emailResult(shareId: string) {
+    return {
+      shareId,
+      shareCode: `dohc-share:${shareId}:http://relay.test`,
+      recipientEmail: "friend@dohc.test",
+    };
+  }
+
+  const emailScopeChanges: Array<{
+    name: string;
+    initial: RelayShareTarget;
+    next: RelayShareTarget;
+    nextWorkspaceId: string;
+  }> = [
+    {
+      name: "paths",
+      initial: { kind: "paths", paths: ["docs/a.md"] },
+      next: { kind: "paths", paths: ["docs/b.md"] },
+      nextWorkspaceId: "ws-1",
+    },
+    {
+      name: "target kind",
+      initial: { kind: "paths", paths: ["docs/a.md"] },
+      next: { kind: "version", versionId: "version-a" },
+      nextWorkspaceId: "ws-1",
+    },
+    {
+      name: "version",
+      initial: { kind: "version", versionId: "version-a" },
+      next: { kind: "version", versionId: "version-b" },
+      nextWorkspaceId: "ws-1",
+    },
+    {
+      name: "workspace",
+      initial: { kind: "paths", paths: ["docs/a.md"] },
+      next: { kind: "paths", paths: ["docs/a.md"] },
+      nextWorkspaceId: "ws-2",
+    },
+  ];
+
+  describe.each(emailScopeChanges)("email scope changes by $name", (scope) => {
+    it.each(["success", "failure"] as const)(
+      "ignores an old create %s while the current share is pending",
+      async (outcome) => {
+        const oldCreate = controllable<ReturnType<typeof emailResult>>();
+        const currentCreate = controllable<ReturnType<typeof emailResult>>();
+        bridgeMock.createRelayShare
+          .mockReturnValueOnce(oldCreate.promise)
+          .mockReturnValueOnce(currentCreate.promise);
+        const user = userEvent.setup();
+        const onClose = vi.fn();
+        const view = render(
+          <RelayShareDialog workspaceId="ws-1" target={scope.initial} onClose={onClose} />,
+        );
+        try {
+          await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
+          await user.click(screen.getByTestId("share-create"));
+          expect(bridgeMock.createRelayShare).toHaveBeenCalledOnce();
+
+          view.rerender(
+            <RelayShareDialog
+              workspaceId={scope.nextWorkspaceId}
+              target={scope.next}
+              onClose={onClose}
+            />,
+          );
+          expect((screen.getByTestId("share-email") as HTMLInputElement).value).toBe("");
+          await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
+          await user.click(screen.getByTestId("share-create"));
+          expect(bridgeMock.createRelayShare).toHaveBeenNthCalledWith(2, {
+            workspaceId: scope.nextWorkspaceId,
+            recipientEmail: "friend@dohc.test",
+            access: "view",
+            ...(scope.next.kind === "version"
+              ? { versionId: scope.next.versionId }
+              : { paths: scope.next.paths }),
+          });
+
+          await act(async () => {
+            if (outcome === "success") oldCreate.resolve(emailResult("old"));
+            else oldCreate.reject(new Error("Old share failed."));
+          });
+          expect(screen.queryByTestId("share-code")).toBeNull();
+          expect(screen.queryByTestId("share-error")).toBeNull();
+          expect((screen.getByTestId("share-create") as HTMLButtonElement).disabled).toBe(true);
+          expect(screen.getByTestId("share-create").textContent).toBe("Creating share…");
+
+          await act(async () => currentCreate.resolve(emailResult("current")));
+          expect(screen.getByTestId("share-code").textContent).toBe(emailResult("current").shareCode);
+          expect(screen.queryByText(emailResult("old").shareCode)).toBeNull();
+          expect(screen.queryByTestId("share-error")).toBeNull();
+        } finally {
+          view.unmount();
+          await act(async () => {
+            oldCreate.resolve(emailResult("old"));
+            currentCreate.resolve(emailResult("current"));
+            await Promise.allSettled([oldCreate.promise, currentCreate.promise]);
+          });
+        }
+      },
+    );
+  });
+
+  it("does not mark a replacement email code copied when an old copy finishes", async () => {
+    const oldCopy = controllable<void>();
+    bridgeMock.createRelayShare
+      .mockResolvedValueOnce(emailResult("old"))
+      .mockResolvedValueOnce(emailResult("current"));
+    bridgeMock.writeClipboardText.mockReturnValueOnce(oldCopy.promise);
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const view = render(
+      <RelayShareDialog workspaceId="ws-1" target={{ kind: "paths", paths: ["docs/a.md"] }} onClose={onClose} />,
+    );
+    try {
+      await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
+      await user.click(screen.getByTestId("share-create"));
+      await user.click(await screen.findByTestId("share-code-copy"));
+      expect(bridgeMock.writeClipboardText).toHaveBeenCalledWith({ text: emailResult("old").shareCode });
+
+      view.rerender(
+        <RelayShareDialog workspaceId="ws-1" target={{ kind: "paths", paths: ["docs/b.md"] }} onClose={onClose} />,
+      );
+      expect(screen.queryByTestId("share-code")).toBeNull();
+      await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
+      await user.click(screen.getByTestId("share-create"));
+      expect((await screen.findByTestId("share-code")).textContent).toBe(emailResult("current").shareCode);
+      await act(async () => oldCopy.resolve());
+      expect(screen.getByTestId("share-code-copy").textContent).toBe("Copy");
+      await user.click(screen.getByTestId("share-code-copy"));
+      expect(bridgeMock.writeClipboardText).toHaveBeenLastCalledWith({ text: emailResult("current").shareCode });
+      expect(screen.getByTestId("share-code-copy").textContent).toBe("Copied");
+    } finally {
+      view.unmount();
+      await act(async () => {
+        oldCopy.resolve();
+        await oldCopy.promise;
+      });
+    }
+  });
+
+  it.each<{ name: string; initial: RelayShareTarget; equivalent: RelayShareTarget }>([
+    {
+      name: "equivalent paths and a new label",
+      initial: { kind: "paths", paths: ["docs/a.md", "docs/b.md"], label: "Before" },
+      equivalent: { kind: "paths", paths: ["docs\\b.md", "docs/./a.md", "docs/tmp/../a.md"], label: "After" },
+    },
+    {
+      name: "the same version with a new name",
+      initial: { kind: "version", versionId: "version-a", versionName: "Before" },
+      equivalent: { kind: "version", versionId: "version-a", versionName: "After" },
+    },
+  ])("keeps email state and pending work across pane switches and $name", async ({ initial, equivalent }) => {
+    const create = controllable<ReturnType<typeof emailResult>>();
+    const copy = controllable<void>();
+    bridgeMock.createRelayShare.mockReturnValueOnce(create.promise);
+    bridgeMock.writeClipboardText.mockReturnValueOnce(copy.promise);
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const view = render(<RelayShareDialog workspaceId="ws-1" target={initial} onClose={onClose} />);
+    try {
+      await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
+      await user.click(screen.getByTestId("share-access-edit"));
+      view.rerender(<RelayShareDialog workspaceId="ws-1" target={equivalent} onClose={onClose} />);
+      await showLinkPane(user);
+      await user.click(screen.getByRole("radio", { name: "Invite by email" }));
+      expect((screen.getByTestId("share-email") as HTMLInputElement).value).toBe("friend@dohc.test");
+      expect(screen.getByTestId("share-access-edit").getAttribute("aria-checked")).toBe("true");
+      await user.click(screen.getByTestId("share-create"));
+      expect(bridgeMock.createRelayShare).toHaveBeenCalledOnce();
+
+      view.rerender(<RelayShareDialog workspaceId="ws-1" target={initial} onClose={onClose} />);
+      await showLinkPane(user);
+      await act(async () => create.resolve(emailResult("current")));
+      await user.click(screen.getByRole("radio", { name: "Invite by email" }));
+      expect(screen.getByTestId("share-code").textContent).toBe(emailResult("current").shareCode);
+      await user.click(screen.getByTestId("share-code-copy"));
+      view.rerender(<RelayShareDialog workspaceId="ws-1" target={equivalent} onClose={onClose} />);
+      await showLinkPane(user);
+      await act(async () => copy.resolve());
+      await user.click(screen.getByRole("radio", { name: "Invite by email" }));
+      expect(screen.getByTestId("share-code").textContent).toBe(emailResult("current").shareCode);
+      expect(screen.getByTestId("share-code-copy").textContent).toBe("Copied");
+      expect(bridgeMock.createRelayShare).toHaveBeenCalledOnce();
+    } finally {
+      view.unmount();
+      await act(async () => {
+        create.resolve(emailResult("current"));
+        copy.resolve();
+        await Promise.allSettled([create.promise, copy.promise]);
+      });
+    }
+  });
+
+  it("defaults to email and hides its controls when switching to links", async () => {
+    const user = userEvent.setup();
     render(
       <RelayShareDialog
         workspaceId="ws-1"
@@ -383,15 +578,19 @@ describe("RelayShareDialog", () => {
     ).toBe("false");
     expect(screen.getByTestId("share-email")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Create link" })).toBeNull();
+    await showLinkPane(user);
+    expect(screen.queryByTestId("share-email")).toBeNull();
+    expect(screen.getByRole("button", { name: "Create link" })).toBeTruthy();
   });
 
-  it("creates a version share addressed by version id", async () => {
+  it("creates a version share addressed by version id and closes on Done", async () => {
     const user = userEvent.setup();
+    const onClose = vi.fn();
     render(
       <RelayShareDialog
         workspaceId="ws-1"
         target={{ kind: "version", versionId: "version-7", versionName: "review" }}
-        onClose={() => {}}
+        onClose={onClose}
       />,
     );
     expect(screen.getByText(/version “review”/)).toBeTruthy();
@@ -404,6 +603,8 @@ describe("RelayShareDialog", () => {
       access: "view",
       versionId: "version-7",
     });
+    await user.click(await screen.findByTestId("share-done"));
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it("drops the read-only claim from the lead sentence", () => {

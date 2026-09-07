@@ -1,4 +1,3 @@
-import { SectionLabel } from "./ui/controls";
 import { ipcErrorMessage } from "./ipcError";
 import { Check, Copy } from "lucide-react";
 import {
@@ -18,7 +17,7 @@ import type {
 } from "../ipc/bridgeContract";
 import type { RelayShareTarget } from "./RelayShareDialog";
 import { bridge } from "./bridge";
-import { PrimaryButton, SecondaryButton } from "./ui/controls";
+import { PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
 
 type LinkAccess = "view" | "comment";
 
@@ -158,6 +157,12 @@ function pathsEqual(left: readonly string[], right: readonly string[]): boolean 
     normalizedLeft.length === normalizedRight.length &&
     normalizedLeft.every((path, index) => path === normalizedRight[index])
   );
+}
+
+export function relayShareTargetKey(target: RelayShareTarget): string {
+  return target.kind === "version"
+    ? JSON.stringify(["version", target.versionId])
+    : JSON.stringify(["paths", ...normalizedPathSet(target.paths)]);
 }
 
 function rowMatchesTarget(row: RelayShareLinkRow, target: RelayShareTarget): boolean {
@@ -438,10 +443,7 @@ export function useRelayShareLinkPane(props: {
   const activeOwnerMutationShareId = useRef<string | null>(null);
   const eligibleShareIdsRef = useRef<Set<string>>(new Set());
 
-  const targetKey =
-    props.target.kind === "version"
-      ? JSON.stringify(["version", props.target.versionId])
-      : JSON.stringify(["paths", ...normalizedPathSet(props.target.paths)]);
+  const targetKey = relayShareTargetKey(props.target);
   const linkScope = JSON.stringify([props.workspaceId, targetKey]);
 
   const visibleLinks = useMemo(() => {
