@@ -28,6 +28,7 @@ import {
 } from "./pluginHostOwnership";
 import { verifyPluginIcon } from "./pluginIcon";
 import { installPluginDependencies } from "./pluginInstallRunner";
+import { PluginJobQueues } from "./pluginJobQueue";
 import { scanPluginLifecycleScripts } from "./pluginLifecycleScan";
 import {
   mutatePluginRecord,
@@ -270,17 +271,6 @@ interface PluginPipelineOptions {
   operations?: Partial<PluginPipelineOperations>;
 }
 
-
-interface QueuedJob {
-  sourceRefresh: boolean;
-  run: () => Promise<void>;
-}
-
-interface PluginJobQueue {
-  jobs: QueuedJob[];
-  sourceRefreshQueued: boolean;
-  draining: Promise<void> | null;
-}
 
 interface UninstallRecordFingerprint {
   approvedHash: string | null;
@@ -725,7 +715,7 @@ export class PluginPipeline {
   // 5, merged #779 round 26 simplification 8).
   private readonly recoveryState = new Map<string, DohcPluginManifest | null>();
   private readonly lastApprovedAttemptHash = new Map<string, string>();
-  private readonly queues = new Map<string, PluginJobQueue>();
+  private readonly jobQueues: PluginJobQueues;
   private readonly uninstallConfirmations = new Map<string, UninstallConfirmation>();
   /**
    * Every door-written file since the approved baseline, per plugin:
@@ -767,6 +757,15 @@ export class PluginPipeline {
     this.dohcDir = pluginDataDir(options.stateDir, this.workspaceRoot);
     this.operations = { ...DEFAULT_OPERATIONS, ...options.operations };
     this.platform = options.platform ?? process.platform;
+    this.jobQueues = new PluginJobQueues((pluginId, error) => {
+      const candidate = this.validCandidate(pluginId);
+      if (candidate) {
+        this.failure(
+          pluginId,
+          pipelineError("runtime", "refresh-failed", errorMessage(error)),
+        );
+      }
+    });
   }
 
   /**
@@ -1829,11 +1828,7 @@ export class PluginPipeline {
     );
     try {
       await this.discoveryTail.catch(() => undefined);
-      await Promise.all(
-        [...this.queues.values()]
-          .map((queue) => queue.draining)
-          .filter((draining): draining is Promise<void> => draining !== null),
-      );
+      await this.jobQueues.waitForCurrentJobs();
       const outcome = await ownershipOutcome;
       if (!outcome.ok) throw outcome.error;
     } finally {
@@ -4134,19 +4129,11 @@ export class PluginPipeline {
     if (this.freshInstallsInFlight.has(pluginId)) {
       this.sourceChangedDuringInstall.add(pluginId);
     }
-    const queue = this.queueFor(pluginId);
-    if (queue.sourceRefreshQueued) return;
-    queue.sourceRefreshQueued = true;
-    const reservation = this.hostOwnership.reserveChange(pluginId);
-    queue.jobs.push({
-      sourceRefresh: true,
-      run: async () => {
-        queue.sourceRefreshQueued = false;
-        await reservation.run(async (change) =>
-          change.preserve(await run(change)));
-      },
+    this.jobQueues.enqueueSourceRefresh(pluginId, () => {
+      const reservation = this.hostOwnership.reserveChange(pluginId);
+      return () => reservation.run(async (change) =>
+        change.preserve(await run(change)));
     });
-    this.drain(pluginId, queue);
   }
 
   private enqueuePreservedBackground<T>(
@@ -4237,61 +4224,8 @@ export class PluginPipeline {
     if (this.disposed) {
       return Promise.reject(new PluginPipelineClosedError());
     }
-    return new Promise<T>((resolveResult, rejectResult) => {
-      const queue = this.queueFor(pluginId);
-      queue.jobs.push({
-        sourceRefresh: false,
-        run: async () => {
-          try {
-            resolveResult(await run());
-          } catch (error) {
-            rejectResult(error);
-          }
-        },
-      });
-      this.drain(pluginId, queue);
-    });
+    return this.jobQueues.enqueueActionValue(pluginId, run);
   }
 
-  private queueFor(pluginId: string): PluginJobQueue {
-    const existing = this.queues.get(pluginId);
-    if (existing) return existing;
-    const queue: PluginJobQueue = {
-      jobs: [],
-      sourceRefreshQueued: false,
-      draining: null,
-    };
-    this.queues.set(pluginId, queue);
-    return queue;
-  }
 
-  private drain(pluginId: string, queue: PluginJobQueue): void {
-    if (queue.draining) return;
-    queue.draining = (async () => {
-      while (queue.jobs.length > 0) {
-        const job = queue.jobs.shift();
-        if (!job) continue;
-        try {
-          await job.run();
-        } catch (error) {
-          if (job.sourceRefresh) {
-            const candidate = this.validCandidate(pluginId);
-            if (candidate) {
-              this.failure(
-                pluginId,
-                pipelineError("runtime", "refresh-failed", errorMessage(error)),
-              );
-            }
-          }
-        }
-      }
-    })().finally(() => {
-      queue.draining = null;
-      if (queue.jobs.length > 0) {
-        this.drain(pluginId, queue);
-      } else if (this.queues.get(pluginId) === queue) {
-        this.queues.delete(pluginId);
-      }
-    });
-  }
 }
