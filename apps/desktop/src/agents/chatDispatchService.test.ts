@@ -188,29 +188,7 @@ interface Fixture {
 
 const fixtures: Fixture[] = [];
 
-async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
-  const root = await createTestScratch("dohc-chat-dispatch-");
-  const stateRoot = join(root, "state");
-  const appRoot = join(root, "app");
-  const workspace: ChatDispatchWorkspace = {
-    workspaceId: WORKSPACE_ID,
-    rootPath: root,
-    ...(options.workspaceAttachmentId
-      ? { attachmentId: options.workspaceAttachmentId }
-      : {}),
-  };
-  const chatIds = { channel: 0, message: 0, thread: 0 };
-  let chatNow = CHAT_START_MS;
-  let nextChatTimestamp: number | null = null;
-  const now = { value: 1_000_000 };
-  let nextRunId = 0;
-  let nextSelfTestId = 0;
-  const runner: RunnerSettings = {
-    command: "claude -p",
-    enabled: true,
-    timeoutMinutes: 30,
-    ...options.runner,
-  };
+function fakeRunner() {
   const spawnCalls: SpawnCall[] = [];
   let nextPid = 4_100;
   const spawnRunner: SpawnRunner = (command, args, spawnOptions) => {
@@ -229,16 +207,33 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     return process;
   };
   const killCalls: Fixture["killCalls"] = [];
-  const postedWorkspaces: string[] = [];
-  const runUpdatedWorkspaces: string[] = [];
-  const syncRequests: string[] = [];
-  const syncWorkspaces: ChatDispatchWorkspace[] = [];
-  const presence: ChatDispatchPresenceInput[] = [];
-  const attributions: Fixture["attributions"] = [];
-  const errors: unknown[] = [];
-  const requeues: Fixture["requeues"] = [];
-  const runActivity = { acquires: 0, releases: 0 };
-  const storeResolves = { chat: 0, dispatch: 0 };
+
+  return {
+    spawnRunner,
+    spawnCalls,
+    killCalls,
+    killProcessGroup: (pid: number, signal: NodeJS.Signals) => {
+      killCalls.push({ pid, signal });
+    },
+  };
+}
+
+async function fakeDispatchDaemon(
+  workspace: ChatDispatchWorkspace,
+  now: Fixture["now"],
+  options: Pick<
+    FixtureOptions,
+    | "markFailureNoteFailures"
+    | "deferClaim"
+    | "claimFailures"
+    | "ambiguousClaimOnce"
+    | "recordEligibleTriggerFailures"
+  >,
+) {
+  const chatIds = { channel: 0, message: 0, thread: 0 };
+  let chatNow = CHAT_START_MS;
+  let nextChatTimestamp: number | null = null;
+  let nextRunId = 0;
   const engine = new ChatsLoopbackEngine();
   const dispatchRequests: Request[] = [];
   let failRunRequests = 0;
@@ -454,6 +449,93 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     };
   }
 
+  return {
+    chat,
+    dispatch,
+    serviceDispatch,
+    listRecoveriesRaw,
+    readDispatch: (triggerMessageId: string, threadId: string) => {
+      const dispatch = engine.readDispatch(WORKSPACE_ID, triggerMessageId);
+      if (dispatch === undefined || dispatch.threadId !== threadId) {
+        throw new Error(`Expected dispatch ${triggerMessageId} for thread ${threadId}.`);
+      }
+      return dispatch;
+    },
+    setNextChatTimestamp: (value: number) => {
+      nextChatTimestamp = value;
+    },
+    requeueRaw,
+    restartDaemon,
+    rejectNextRunMessageLookup,
+    rejectNextFailRun,
+    rejectFailRuns,
+    rejectCompleteRuns,
+    dispatchRequests,
+    get failRunRequests() {
+      return failRunRequests;
+    },
+    get completeRunRequests() {
+      return completeRunRequests;
+    },
+    get completeFailureAtMs() {
+      return completeFailureAtMs;
+    },
+    ...(claimStarted ? { claimStarted } : {}),
+    ...(releaseClaim ? { releaseClaim } : {}),
+    closeDispatch,
+  };
+}
+
+async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
+  const root = await createTestScratch("dohc-chat-dispatch-");
+  const stateRoot = join(root, "state");
+  const appRoot = join(root, "app");
+  const workspace: ChatDispatchWorkspace = {
+    workspaceId: WORKSPACE_ID,
+    rootPath: root,
+    ...(options.workspaceAttachmentId
+      ? { attachmentId: options.workspaceAttachmentId }
+      : {}),
+  };
+  const now = { value: 1_000_000 };
+  let nextSelfTestId = 0;
+  const runner: RunnerSettings = {
+    command: "claude -p",
+    enabled: true,
+    timeoutMinutes: 30,
+    ...options.runner,
+  };
+  const { spawnRunner, spawnCalls, killCalls, killProcessGroup } = fakeRunner();
+  const postedWorkspaces: string[] = [];
+  const runUpdatedWorkspaces: string[] = [];
+  const syncRequests: string[] = [];
+  const syncWorkspaces: ChatDispatchWorkspace[] = [];
+  const presence: ChatDispatchPresenceInput[] = [];
+  const attributions: Fixture["attributions"] = [];
+  const errors: unknown[] = [];
+  const requeues: Fixture["requeues"] = [];
+  const runActivity = { acquires: 0, releases: 0 };
+  const storeResolves = { chat: 0, dispatch: 0 };
+  const dispatchDaemon = await fakeDispatchDaemon(workspace, now, options);
+  const {
+    chat,
+    dispatch,
+    serviceDispatch,
+    listRecoveriesRaw,
+    readDispatch,
+    setNextChatTimestamp,
+    requeueRaw,
+    restartDaemon,
+    rejectNextRunMessageLookup,
+    rejectNextFailRun,
+    rejectFailRuns,
+    rejectCompleteRuns,
+    dispatchRequests,
+    claimStarted,
+    releaseClaim,
+    closeDispatch,
+  } = dispatchDaemon;
+
   const service = createChatDispatchService({
     workspaceFor: (workspaceId) => (workspaceId === WORKSPACE_ID ? workspace : null),
     listOpenWorkspaces: () => [],
@@ -529,9 +611,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     listAppQuitRecoveries: (dispatchWorkspace) =>
       listRecoveriesRaw(dispatchWorkspace.workspaceId),
     spawnRunner,
-    killProcessGroup: (pid, signal) => {
-      killCalls.push({ pid, signal });
-    },
+    killProcessGroup,
     platform: "linux",
     nowMs: () => now.value,
     createId: () => `self_test_id_${(nextSelfTestId += 1)}`,
@@ -560,16 +640,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     runActivity,
     storeResolves,
     now,
-    readDispatch: (triggerMessageId, threadId) => {
-      const dispatch = engine.readDispatch(WORKSPACE_ID, triggerMessageId);
-      if (dispatch === undefined || dispatch.threadId !== threadId) {
-        throw new Error(`Expected dispatch ${triggerMessageId} for thread ${threadId}.`);
-      }
-      return dispatch;
-    },
-    setNextChatTimestamp: (value) => {
-      nextChatTimestamp = value;
-    },
+    readDispatch,
+    setNextChatTimestamp,
     requeueRaw,
     restartDaemon,
     rejectNextRunMessageLookup,
@@ -578,13 +650,13 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     rejectCompleteRuns,
     dispatchRequests,
     get failRunRequests() {
-      return failRunRequests;
+      return dispatchDaemon.failRunRequests;
     },
     get completeRunRequests() {
-      return completeRunRequests;
+      return dispatchDaemon.completeRunRequests;
     },
     get completeFailureAtMs() {
-      return completeFailureAtMs;
+      return dispatchDaemon.completeFailureAtMs;
     },
     ...(claimStarted ? { claimStarted } : {}),
     ...(releaseClaim ? { releaseClaim } : {}),
