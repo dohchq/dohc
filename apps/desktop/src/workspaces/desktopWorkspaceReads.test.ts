@@ -312,4 +312,3 @@ describe("desktop workspace reads", () => {
     expect(await port.readText(test.path("missing.md"))).toMatchObject({ text: "canonical search text" });
   });
 });
-
