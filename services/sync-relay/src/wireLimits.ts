@@ -17,3 +17,11 @@ export const MAX_LOG_PAGE_SIZE = 500;
 // MAX_INGEST_BLOB_BYTES (crates/dohc-engine-sync/src/hydration.rs); no test
 // compares the two, so check both when widening either.
 export const MAX_BLOB_BYTES = 20 * 1024 * 1024;
+export const MAX_ORIGIN_ID_CHARS = 256;
+
+// One PAGE of the continuous replication lane, for the two log routes. It is
+// not the submit bound: a submit is one user act carrying one intent, and it
+// is bounded by what a person changes (MAX_SHARE_PROPOSAL_OPS), not by what a
+// page should hold. Raising this one would only lengthen each replication
+// stall.
+export const MAX_OPS_PER_REQUEST = 500;
