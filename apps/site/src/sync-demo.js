@@ -1,3 +1,28 @@
+export function mergeSyncEdits(basis, left, right) {
+  if (left === right) return left;
+  if (left === basis) return right;
+  if (right === basis) return left;
+  const original = Array.from(basis);
+  const unchanged = (start, end) => original.slice(start, end).join('');
+  const edit = (value) => {
+    const characters = Array.from(value);
+    let start = 0;
+    while (start < original.length && start < characters.length && original[start] === characters[start]) start++;
+    let end = original.length;
+    let valueEnd = characters.length;
+    while (end > start && valueEnd > start && original[end - 1] === characters[valueEnd - 1]) { end--; valueEnd--; }
+    return { start, end, text: characters.slice(start, valueEnd).join('') };
+  };
+  const a = edit(left);
+  const b = edit(right);
+  const [first, second] = a.start <= b.start ? [a, b] : [b, a];
+  if (first.end <= second.start) {
+    return unchanged(0, first.start) + first.text + unchanged(first.end, second.start) + second.text + unchanged(second.end);
+  }
+  // Overlapping replacements keep both insertions, in laptop/phone order.
+  return unchanged(0, first.start) + a.text + b.text + unchanged(Math.max(a.end, b.end));
+}
+
 export function createSyncDemo(syncDemo) {
   const motion = matchMedia('(prefers-reduced-motion: reduce)');
   let reduced = motion.matches;
@@ -14,6 +39,7 @@ export function createSyncDemo(syncDemo) {
   const START = a.value;
   let base = START;
   let manual = false;
+  // The checkbox has already changed when its change event reaches takeover.
   let connected = toggle.checked;
   let timers = [];
 
@@ -59,25 +85,6 @@ export function createSyncDemo(syncDemo) {
     swapText(foot[key], footText);
   };
   const savedOn = (key) => (key === 'a' ? 'saved on this laptop' : 'saved on this phone');
-
-  // Three-way merge on sentences: keep what both changed, append what one added.
-  const merge = (basis, left, right) => {
-    if (left === right) return left;
-    if (left === basis) return right;
-    if (right === basis) return left;
-    const split = (s) => s.split(/(?<=[.!?])\s+/).filter(Boolean);
-    const ls = split(left), rs = split(right), bs = split(basis);
-    const out = [];
-    const seen = new Set();
-    ls.concat(rs).forEach((s) => {
-      if (seen.has(s)) return;
-      const inBase = bs.includes(s);
-      if (inBase && !(ls.includes(s) && rs.includes(s))) return;
-      seen.add(s);
-      out.push(s);
-    });
-    return out.join(' ');
-  };
 
   // Stream an editor toward a target value from where they diverge.
   const receiving = { a: null, b: null };
@@ -129,7 +136,7 @@ export function createSyncDemo(syncDemo) {
     link.classList.toggle('is-off', !on);
     if (signal) signal.classList.toggle('is-off', !on);
     if (on) {
-      const merged = merge(base, a.value, b.value);
+      const merged = mergeSyncEdits(base, a.value, b.value);
       const changed = merged !== a.value || merged !== b.value;
       base = merged;
       receive(a, merged);

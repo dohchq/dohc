@@ -79,7 +79,8 @@ describe('download architecture', () => {
     expect(fetch).not.toHaveBeenCalled();
     expect(card.href).toBe('https://github.com/dohc-ai/dohc/releases');
     card.dispatchEvent(new Event('pointerenter'));
-    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    if (preferred) await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    else expect(fetch).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(card.href).toBe(href));
     expect(card.href).toBe(href);
     expect(card.classList.contains('is-preferred')).toBe(preferred);
@@ -89,7 +90,7 @@ describe('download architecture', () => {
 
 it('resolves current release assets on first activation before navigating', async () => {
   const navigate = vi.fn();
-  vi.stubGlobal('window', { IntersectionObserver, location: { assign: navigate } });
+  vi.stubGlobal('location', { assign: navigate });
   vi.mocked(fetch).mockImplementation(async () => Response.json([{ draft: false, prerelease: false, assets: [
     { name: 'dohc-x64.exe', browser_download_url: 'https://example.com/new-release.exe' },
   ] }]));
@@ -108,11 +109,69 @@ it('resolves current release assets on first activation before navigating', asyn
 
 it('keeps a usable releases link when fresh asset resolution fails', async () => {
   const navigate = vi.fn();
-  vi.stubGlobal('window', { IntersectionObserver, location: { assign: navigate } });
+  vi.stubGlobal('location', { assign: navigate });
   vi.mocked(fetch).mockRejectedValue(new Error('offline'));
   await mount('#downloads');
   document.querySelector('[data-download-card="windows-x64"]').click();
   await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith('https://github.com/dohc-ai/dohc/releases'));
+  expect(document.querySelector('[aria-busy="true"]')).toBeNull();
+  expect(document.querySelector('.download-card-action').textContent.trim()).toBe('Download');
+});
+
+it('shows progress for a slow download lookup and navigates only once after repeated activation', async () => {
+  const navigate = vi.fn();
+  vi.stubGlobal('location', { assign: navigate });
+  let finish;
+  vi.mocked(fetch).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  await mount('#downloads');
+  const card = document.querySelector('[data-download-card="windows-x64"]');
+  const action = card.querySelector('.download-card-action');
+  const original = action.textContent;
+  card.click();
+  expect(card.getAttribute('aria-busy')).toBe('true');
+  expect(card.getAttribute('aria-disabled')).toBe('true');
+  expect(action.textContent).toContain('Checking release');
+  expect(document.querySelector('[role="status"]').textContent).toContain('Checking the latest release');
+  card.click();
+  document.querySelector('[data-download-card="linux-x64"]').click();
+  await vi.advanceTimersByTimeAsync(1500);
+  expect(navigate).not.toHaveBeenCalled();
+  expect(fetch).toHaveBeenCalledOnce();
+  finish(Response.json([{ draft: false, prerelease: false, assets: [
+    { name: 'dohc-x64.exe', browser_download_url: 'https://example.com/new-release.exe' },
+  ] }]));
+  await vi.waitFor(() => expect(navigate).toHaveBeenCalledOnce());
+  expect(navigate).toHaveBeenCalledWith('https://example.com/new-release.exe');
+  expect(card.hasAttribute('aria-busy')).toBe(false);
+  expect(card.hasAttribute('aria-disabled')).toBe(false);
+  expect(action.textContent).toBe(original);
+  expect(document.querySelector('[role="status"]')).toBeNull();
+});
+
+it('opens unknown-architecture Mac releases immediately without an asset request', async () => {
+  const navigate = vi.fn();
+  vi.stubGlobal('location', { assign: navigate });
+  vi.stubGlobal('navigator', { userAgent: 'Macintosh; Intel Mac OS X', platform: 'MacIntel', maxTouchPoints: 0 });
+  await mount('#downloads');
+  const card = document.querySelector('[data-download-card="mac"]');
+  card.click();
+  expect(navigate).toHaveBeenCalledWith('https://github.com/dohc-ai/dohc/releases');
+  expect(fetch).not.toHaveBeenCalled();
+  expect(card.hasAttribute('aria-busy')).toBe(false);
+});
+
+it('leaves modified download activations to the browser', async () => {
+  const navigate = vi.fn();
+  vi.stubGlobal('location', { assign: navigate });
+  await mount('#downloads');
+  const card = document.querySelector('[data-download-card="windows-x64"]');
+  // Observe prevention before blocking jsdom's own unimplemented navigation.
+  let prevented;
+  card.addEventListener('click', event => { prevented = event.defaultPrevented; event.preventDefault(); });
+  card.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true }));
+  expect(prevented).toBe(false);
+  expect(fetch).not.toHaveBeenCalled();
+  expect(navigate).not.toHaveBeenCalled();
 });
 
 it('hands sync autoplay to keyboard input while its typing animation is active', async () => {
@@ -171,6 +230,18 @@ it('preserves both completed offline edits when reconnecting', async () => {
   await vi.advanceTimersByTimeAsync(2000);
   expect(editor.value).toBe(`${initial} Local edit. Phone edit.`);
   expect(other.value).toBe(editor.value);
+});
+
+it('reconnects both offline autoplay edits without losing their text', async () => {
+  await mount('#sync');
+  const editor = document.querySelector('[data-sync-editor="a"]');
+  const other = document.querySelector('[data-sync-editor="b"]');
+  const initial = editor.value;
+  intersections.find(io => io.target.matches('[data-sync-demo]')).callback([{ isIntersecting: true }]);
+  await vi.advanceTimersByTimeAsync(12000);
+  expect(editor.value).toBe(`${initial} Underline the bit about habits. Chapter 4 next week. Ask Dana if she has read it.`);
+  expect(other.value).toBe(editor.value);
+  expect(document.querySelector('[data-sync-toggle]').checked).toBe(true);
 });
 
 it('settles a manual receive animation before disconnecting', async () => {

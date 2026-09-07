@@ -266,6 +266,7 @@ body {
 
 .download-control { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .download-primary { min-width: 194px; gap: 9px; }
+.download-primary[aria-busy='true'], .download-card[aria-busy='true'] { cursor: progress; }
 .download-os-icon { width: 18px; height: 18px; flex: none; fill: currentColor; stroke: none; }
 .download-primary .download-os-icon { width: 17px; height: 17px; }
 .download-other {

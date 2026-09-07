@@ -107,6 +107,7 @@ function configureDownloadControl(control, preferredKey) {
 
   const updatePrimary = () => {
     const build = preferredKey ? downloadBuilds[preferredKey] : null;
+    primary.dataset.downloadBuild = preferredKey ?? '';
     primary.href = build?.url ?? RELEASES_URL;
     primaryLabel.textContent = build ? `Download for ${build.label}` : 'Download dohc';
     primaryIcon.setAttribute('href', `#os-${build?.icon ?? 'download'}`);
@@ -137,6 +138,7 @@ preferredDownloadKey().then((key) => {
 });
 
 let resolvingDownloads;
+let downloadPending = false;
 const resolveDownloads = () => resolvingDownloads ??= releaseAssets().then((assets) => {
   Object.values(downloadBuilds).forEach((build) => {
     const asset = assets.find((candidate) => build.matches(candidate.name));
@@ -146,13 +148,38 @@ const resolveDownloads = () => resolvingDownloads ??= releaseAssets().then((asse
   downloadControls.forEach(control => control.updateResolvedDownloads?.());
 });
 for (const link of document.querySelectorAll('[data-download-primary], [data-download-card]')) {
-  link.addEventListener('pointerenter', resolveDownloads, { once: true });
-  link.addEventListener('focus', resolveDownloads, { once: true });
+  const canResolve = () => Boolean(downloadBuilds[link.dataset.downloadCard ?? link.dataset.downloadBuild]);
+  const prepare = () => { if (canResolve()) void resolveDownloads(); };
+  link.addEventListener('pointerenter', prepare, { once: true });
+  link.addEventListener('focus', prepare, { once: true });
   link.addEventListener('click', async event => {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || link.target === '_blank') return;
     event.preventDefault();
-    await resolveDownloads();
-    window.location.assign(link.href);
+    if (downloadPending) return;
+    if (!canResolve()) { location.assign(RELEASES_URL); return; }
+    downloadPending = true;
+    const label = link.querySelector('[data-download-primary-label], .download-card-action');
+    const originalText = label?.firstChild?.textContent;
+    const status = document.createElement('span');
+    status.className = 'visually-hidden';
+    status.setAttribute('role', 'status');
+    link.after(status);
+    link.setAttribute('aria-busy', 'true');
+    link.setAttribute('aria-disabled', 'true');
+    if (label?.firstChild) label.firstChild.textContent = 'Checking release…';
+    status.textContent = 'Checking the latest release…';
+    try {
+      await resolveDownloads();
+    } catch {
+      link.href = RELEASES_URL;
+    } finally {
+      link.removeAttribute('aria-busy');
+      link.removeAttribute('aria-disabled');
+      if (label?.firstChild) label.firstChild.textContent = originalText;
+      status.remove();
+      downloadPending = false;
+    }
+    location.assign(link.href);
   });
 }
 
