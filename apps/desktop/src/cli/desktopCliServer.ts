@@ -2,8 +2,8 @@ import { resolve } from "node:path";
 import {
   CHATS_METHOD,
   WORKSPACE_METHOD,
-  decodeGranularChatMessageSearchResponse,
-  decodeUnreadFileThreads,
+  decodeWorkspaceResult,
+  decodeChatsResult,
   type VersionedLiveAdapter,
 } from "@dohc/workspace-engine-client";
 import type {
@@ -172,7 +172,8 @@ export function createDesktopCliServer<State extends CliAuthorityState>(
       fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
       daemonReads: {
         async queryChatMessagesGranular(input: { query: string; limit: number }) {
-          return decodeGranularChatMessageSearchResponse(
+          return decodeWorkspaceResult(
+            WORKSPACE_METHOD.searchQueryChatMessagesGranular,
             await daemon.requestWorkspace(
               workspace.rootPath,
               workspace.workspaceId,
@@ -185,7 +186,8 @@ export function createDesktopCliServer<State extends CliAuthorityState>(
           pageLimit: number;
           afterThreadId?: string;
         }) {
-          return decodeUnreadFileThreads(
+          return decodeChatsResult(
+            CHATS_METHOD.readStateListUnreadFileThreads,
             await daemon.requestWorkspace(
               workspace.rootPath,
               workspace.workspaceId,
