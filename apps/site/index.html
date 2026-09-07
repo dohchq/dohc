@@ -223,25 +223,25 @@
     <div class="readers" data-readers aria-label="Two sides of the same workspace">
       <div class="reader-card reader-agent" data-reader-face="agent" inert aria-hidden="true">
         <div class="device-bar"><span class="reader-who is-agent" aria-hidden="true">🤖</span><span class="reader-face-label">What your agent sees</span></div>
-        <div class="reader-tree" role="tablist" aria-label="Files in the launch folder" aria-orientation="vertical">
+        <div class="reader-tree" role="group" aria-label="Files in the launch folder">
           <span class="reader-dir">launch/</span>
-          <button class="reader-file in1" type="button" role="tab" aria-selected="true" data-reader-pick="plan">plan.md</button>
+          <button class="reader-file in1" type="button" aria-pressed="true" data-reader-pick="plan">plan.md</button>
           <span class="reader-dir in1">tasks/</span>
-          <button class="reader-file in2" type="button" role="tab" aria-selected="false" data-reader-pick="tasks">collection.yaml</button>
-          <button class="reader-file in2" type="button" role="tab" aria-selected="false" data-reader-pick="tasks">pricing-page.md</button>
-          <button class="reader-file in2" type="button" role="tab" aria-selected="false" data-reader-pick="tasks">payment-sandbox.md</button>
+          <button class="reader-file in2" type="button" aria-pressed="false" data-reader-pick="tasks">collection.yaml</button>
+          <button class="reader-file in2" type="button" aria-pressed="false" data-reader-pick="tasks">pricing-page.md</button>
+          <button class="reader-file in2" type="button" aria-pressed="false" data-reader-pick="tasks">payment-sandbox.md</button>
           <span class="reader-dir in2">… 4 more</span>
-          <button class="reader-file in1" type="button" role="tab" aria-selected="false" data-reader-pick="drawing">flow.excalidraw</button>
+          <button class="reader-file in1" type="button" aria-pressed="false" data-reader-pick="drawing">flow.excalidraw</button>
           <span class="reader-dir in1">split/</span>
-          <button class="reader-file in2" type="button" role="tab" aria-selected="false" data-reader-pick="app">dohc-app.json</button>
-          <button class="reader-file in2" type="button" role="tab" aria-selected="false" data-reader-pick="app">index.html</button>
+          <button class="reader-file in2" type="button" aria-pressed="false" data-reader-pick="app">dohc-app.json</button>
+          <button class="reader-file in2" type="button" aria-pressed="false" data-reader-pick="app">index.html</button>
           <span class="reader-dir in1">.dohc/</span>
-          <button class="reader-file in2" type="button" role="tab" aria-selected="false" data-reader-pick="chat">chats/launch.md</button>
-          <button class="reader-file in2" type="button" role="tab" aria-selected="false" data-reader-pick="history">history</button>
+          <button class="reader-file in2" type="button" aria-pressed="false" data-reader-pick="chat">chats/launch.md</button>
+          <button class="reader-file in2" type="button" aria-pressed="false" data-reader-pick="history">history</button>
         </div>
       </div>
 
-      <div class="reader-card reader-window" role="tabpanel" data-reader-face="human">
+      <div class="reader-card reader-window" data-reader-face="human">
         <div class="device-bar"><span class="reader-who" aria-hidden="true">👤</span><span class="reader-face-label">What you see</span><span class="mono" data-reader-name>Plan</span></div>
         <div class="reader-view" data-reader-view></div>
         <div class="device-foot" data-reader-foot></div>
@@ -311,6 +311,7 @@
           <span class="app-hero-meta" data-split-meta></span>
         </div>
         <div class="app-transfers" data-split-transfers></div>
+        <p class="app-settlement-note">Changing items resets settlements.</p>
         <div class="app-list" data-split-receipts></div>
       </div>
     </div>

@@ -96,14 +96,14 @@ async function initialize(canvas: OffscreenCanvas, pixelRatio: number, studioUrl
     camera.lookAt(center);
     renderer.render(scene, camera);
   };
-  canvas.addEventListener('webglcontextlost', () => { renderView = undefined; cancelAnimationFrame(frame); send({ type: 'error' }); });
+  canvas.addEventListener('webglcontextlost', () => { renderView = undefined; cancelAnimationFrame(frame); send({ type: 'error', message: 'WebGL context lost' }); });
   send({ type: 'ready' });
   requestDraw();
 }
 
 self.onmessage = ({ data }: MessageEvent<EngineWorkerRequest>) => {
   if (data.type === 'init') {
-    void initialize(data.canvas, data.pixelRatio, data.studioUrl).catch(() => send({ type: 'error' }));
+    void initialize(data.canvas, data.pixelRatio, data.studioUrl).catch(error => send({ type: 'error', message: String(error), stack: error instanceof Error ? error.stack : undefined }));
   } else if (data.type === 'view') {
     latestView = data.view;
     requestDraw();

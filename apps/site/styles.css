@@ -1255,7 +1255,7 @@ body {
 }
 
 .reader-file:hover { background-color: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--ink); }
-.reader-file[aria-selected='true'] { background-color: color-mix(in srgb, var(--ink) 8%, transparent); font-weight: 500; color: var(--ink); box-shadow: inset 2px 0 var(--accent); }
+.reader-file[aria-pressed='true'] { background-color: color-mix(in srgb, var(--ink) 8%, transparent); font-weight: 500; color: var(--ink); box-shadow: inset 2px 0 var(--accent); }
 .reader-file { transition: background-color 0.22s ease-out; }
 .reader-file:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
@@ -1832,6 +1832,7 @@ body {
 }
 
 .app-list { padding: 0 14px 8px; border-top: 1px solid var(--line); }
+.app-settlement-note { margin: -8px 22px 14px; color: var(--muted); font-size: 11px; }
 .app-receipt + .app-receipt { border-top: 1px solid var(--line); }
 .app-receipt[open] { padding-bottom: 10px; }
 .app-group {

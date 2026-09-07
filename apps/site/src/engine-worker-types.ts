@@ -13,4 +13,4 @@ export type EngineWorkerRequest =
 export type EngineWorkerResponse =
   | { type: 'ready' }
   | { type: 'rendered' }
-  | { type: 'error' };
+  | { type: 'error'; message: string; stack?: string };

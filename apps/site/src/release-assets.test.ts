@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { releaseAssets } from '../release-assets';
 
-describe('release assets embedded in the site', () => {
+describe('release asset selection', () => {
   const asset = (name: string) => ({ name, browser_download_url: `https://github.com/dohc-ai/dohc/releases/download/v1/${name}` });
   const fetchReleases = (releases: unknown) => (async () => Response.json(releases)) as typeof fetch;
 
@@ -25,7 +25,7 @@ describe('release assets embedded in the site', () => {
     expect(await releaseAssets(fetchReleases([]))).toEqual([]);
   });
 
-  it('allows offline builds and tolerates malformed API responses', async () => {
+  it('keeps the releases fallback offline and tolerates malformed API responses', async () => {
     expect(await releaseAssets((async () => { throw new Error('offline'); }) as typeof fetch)).toEqual([]);
     expect(await releaseAssets(fetchReleases({ message: 'rate limited' }))).toEqual([]);
   });

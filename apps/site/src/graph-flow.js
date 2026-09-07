@@ -109,11 +109,9 @@ export function createGraphFlow(graph) {
       badge.style.transform = `translate(-50%, calc(-50% + ${(1 - opacity) * 3}px))`;
     }
   }
-  const observer = new IntersectionObserver(([entry]) => { visible = entry.isIntersecting; visibility(); });
-  observer.observe(canvas);
   document.addEventListener('visibilitychange', visibility, { signal: lifetime.signal });
   reduced.addEventListener('change', visibility, { signal: lifetime.signal });
   visibility();
-  if (import.meta.hot) import.meta.hot.dispose(() => { observer.disconnect(); lifetime.abort(); layer.remove(); badge.remove(); });
-  return { render };
+  if (import.meta.hot) import.meta.hot.dispose(() => { lifetime.abort(); layer.remove(); badge.remove(); });
+  return { render, setVisible(value) { visible = value; visibility(); } };
 }

@@ -91,9 +91,15 @@ export function mountEngine(host: HTMLElement) {
       ready = true;
       fit();
     } else if (data.type === 'rendered') host.classList.add('engine-loaded');
-    else dispose();
+    else {
+      console.error('Unable to render the dohc engine', data.message, data.stack ?? '');
+      dispose();
+    }
   }, { signal });
-  worker.addEventListener('error', dispose, { signal });
+  worker.addEventListener('error', event => {
+    console.error('Unable to render the dohc engine', event.error ?? event.message, event.filename, event.lineno, event.colno);
+    dispose();
+  }, { signal });
   const offscreen = canvas.transferControlToOffscreen();
   worker.postMessage({ type: 'init', canvas: offscreen, pixelRatio: Math.min(devicePixelRatio, 1.75), studioUrl: new URL('/engine-studio.hdr', location.href).href } satisfies EngineWorkerRequest, [offscreen]);
 

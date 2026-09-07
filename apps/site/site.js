@@ -1,5 +1,7 @@
+import { createSyncDemo } from './src/sync-demo.js';
 import { createReaderFlip } from './src/reader-flip.js';
 import { createGraphFlow } from './src/graph-flow.js';
+import { releaseAssets } from './release-assets.ts';
 
 // dohc marketing site: downloads, theme toggle, and scroll reveals.
 
@@ -134,12 +136,25 @@ preferredDownloadKey().then((key) => {
   updateStandaloneDownloadLinks();
 });
 
-// Resolve assets at build time so visitors do not depend on GitHub's API.
-Object.values(downloadBuilds).forEach((build) => {
-  const asset = __DOHC_RELEASE_ASSETS__.find((candidate) => build.matches(candidate.name));
-  if (asset?.browser_download_url) build.url = asset.browser_download_url;
+let resolvingDownloads;
+const resolveDownloads = () => resolvingDownloads ??= releaseAssets().then((assets) => {
+  Object.values(downloadBuilds).forEach((build) => {
+    const asset = assets.find((candidate) => build.matches(candidate.name));
+    if (asset?.browser_download_url) build.url = asset.browser_download_url;
+  });
+  updateStandaloneDownloadLinks();
+  downloadControls.forEach(control => control.updateResolvedDownloads?.());
 });
-updateStandaloneDownloadLinks();
+for (const link of document.querySelectorAll('[data-download-primary], [data-download-card]')) {
+  link.addEventListener('pointerenter', resolveDownloads, { once: true });
+  link.addEventListener('focus', resolveDownloads, { once: true });
+  link.addEventListener('click', async event => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || link.target === '_blank') return;
+    event.preventDefault();
+    await resolveDownloads();
+    window.location.assign(link.href);
+  });
+}
 
 const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const targets = document.querySelectorAll('.reveal');
@@ -181,7 +196,6 @@ if (principlesGraph) {
   const principleCanvas = principlesGraph.querySelector('.principles-graph-canvas');
   const principleSvg = principlesGraph.querySelector('.principles-edges');
   const principleCore = principlesGraph.querySelector('.principle-core');
-  const graphFlow = createGraphFlow(principlesGraph);
   const reducedGraphMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   let restartPhysics = () => {};
   let activePrincipleIndex = 0;
@@ -251,6 +265,7 @@ if (principlesGraph) {
   document.addEventListener('visibilitychange', startSelectionRotation);
 
   if (principleCanvas && principleSvg && principleCore) {
+    const graphFlow = createGraphFlow(principlesGraph);
     const percent = (element, property) =>
       Number.parseFloat(element.style.getPropertyValue(property)) / 100;
     const scatter = [
@@ -571,6 +586,7 @@ if (principlesGraph) {
     if ('IntersectionObserver' in window) {
       const graphObserver = new IntersectionObserver(([entry]) => {
         graphIsVisible = entry.isIntersecting;
+        graphFlow.setVisible(graphIsVisible);
         selectionVisible = entry.isIntersecting;
         if (graphIsVisible) {
           launchGraph();
@@ -584,6 +600,7 @@ if (principlesGraph) {
       graphObserver.observe(principleCanvas);
     } else {
       graphIsVisible = true;
+      graphFlow.setVisible(true);
       selectionVisible = true;
       launchGraph();
       startSelectionRotation();
@@ -708,10 +725,6 @@ if (agentDemo) {
         item.row = row;
         item.box = row.querySelector('input');
         item.box.addEventListener('change', () => {
-          if (!item.box.checked && item.had.length === 1 && item.had.includes(person)) {
-            item.box.checked = true;
-            return;
-          }
           const set = new Set(item.had);
           if (item.box.checked) set.add(person); else set.delete(person);
           item.had = Array.from(set);
@@ -826,279 +839,8 @@ if (agentDemo) {
 
 }
 
-// Local-first sync demo: a laptop and a phone hold the same file. It plays
-// itself (type, go offline, type on both, reconnect, merge, loop) and hands
-// control to the visitor on their first click, keypress, or switch flip.
 const syncDemo = document.querySelector('[data-sync-demo]');
-
-if (syncDemo) {
-  const a = syncDemo.querySelector('[data-sync-editor="a"]');
-  const b = syncDemo.querySelector('[data-sync-editor="b"]');
-  const toggle = document.querySelector('[data-sync-toggle]');
-  const hint = document.querySelector('[data-sync-hint]');
-  const link = syncDemo.querySelector('[data-sync-link]');
-  const linkLabel = syncDemo.querySelector('[data-sync-link-label]');
-  const signal = syncDemo.querySelector('[data-sync-signal]');
-  const clock = syncDemo.querySelector('[data-sync-clock]');
-  const state = { a: syncDemo.querySelector('[data-sync-state="a"]'), b: syncDemo.querySelector('[data-sync-state="b"]') };
-  const foot = { a: syncDemo.querySelector('[data-sync-foot="a"]'), b: syncDemo.querySelector('[data-sync-foot="b"]') };
-  const START = a.value;
-  let base = START;
-  let manual = false;
-  let timers = [];
-
-  if (clock) {
-    const now = new Date();
-    clock.textContent = `${now.getHours() % 12 || 12}:${String(now.getMinutes()).padStart(2, '0')}`;
-  }
-
-  // Schedule fn on the next frame, but no later than 50ms, so streams keep
-  // moving in a hidden or throttled tab. Returns a handle for cancelTick.
-  const tick = (fn) => {
-    const handle = { done: false };
-    const run = (now) => {
-      if (handle.done) return;
-      handle.done = true;
-      cancelAnimationFrame(handle.raf);
-      clearTimeout(handle.timer);
-      fn(now || performance.now());
-    };
-    handle.raf = requestAnimationFrame(run);
-    handle.timer = setTimeout(run, 50);
-    return handle;
-  };
-  const cancelTick = (handle) => {
-    if (!handle) return;
-    handle.done = true;
-    cancelAnimationFrame(handle.raf);
-    clearTimeout(handle.timer);
-  };
-
-  // One pending swap per label, so a fast pair of changes can't land out
-  // of order and leave a stale word on screen.
-  const pendingSwap = new WeakMap();
-  const swapText = (el, text) => {
-    clearTimeout(pendingSwap.get(el));
-    if (el.textContent === text) { el.classList.remove('is-swapping'); return; }
-    if (reduced) { el.textContent = text; return; }
-    el.classList.add('is-swapping');
-    pendingSwap.set(el, setTimeout(() => { el.textContent = text; el.classList.remove('is-swapping'); }, 180));
-  };
-  const setStatus = (key, text, footText) => {
-    swapText(state[key], text);
-    swapText(foot[key], footText);
-  };
-  const savedOn = (key) => (key === 'a' ? 'saved on this laptop' : 'saved on this phone');
-
-  // Three-way merge on sentences: keep what both changed, append what one added.
-  const merge = (basis, left, right) => {
-    if (left === right) return left;
-    if (left === basis) return right;
-    if (right === basis) return left;
-    const split = (s) => s.split(/(?<=[.!?])\s+/).filter(Boolean);
-    const ls = split(left), rs = split(right), bs = split(basis);
-    const out = [];
-    const seen = new Set();
-    ls.concat(rs).forEach((s) => {
-      if (seen.has(s)) return;
-      const inBase = bs.includes(s);
-      if (inBase && !(ls.includes(s) && rs.includes(s))) return;
-      seen.add(s);
-      out.push(s);
-    });
-    return out.join(' ');
-  };
-
-  // Stream an editor toward a target value from where they diverge.
-  const receiving = { a: null, b: null };
-  const keyOf = (el) => (el === a ? 'a' : 'b');
-  const stopReceiving = (el) => {
-    cancelTick(receiving[keyOf(el)]);
-    receiving[keyOf(el)] = null;
-    el.classList.remove('is-receiving');
-  };
-  const receive = (el, target) => {
-    const key = keyOf(el);
-    stopReceiving(el);
-    if (reduced || el.value === target) { el.value = target; return; }
-    let start = 0;
-    while (start < el.value.length && start < target.length && el.value[start] === target[start]) start += 1;
-    const remaining = target.length - start;
-    const duration = Math.min(1400, Math.max(240, remaining * 16));
-    const t0 = performance.now();
-    el.value = target.slice(0, start);
-    el.classList.add('is-receiving');
-    const frame = (now) => {
-      const p = Math.min(1, (now - t0) / duration);
-      const eased = 1 - (1 - p) * (1 - p);
-      el.value = target.slice(0, start + Math.round(remaining * eased));
-      if (p < 1) receiving[key] = tick(frame);
-      else { receiving[key] = null; el.value = target; el.classList.remove('is-receiving'); }
-    };
-    receiving[key] = tick(frame);
-  };
-
-  const onInput = (from) => {
-    const other = from === a ? b : a;
-    const key = keyOf(from);
-    const otherKey = keyOf(other);
-    if (toggle.checked) {
-      receive(other, from.value);
-      base = from.value;
-      setStatus(key, 'in sync', savedOn(key));
-      setStatus(otherKey, 'in sync', 'just updated');
-    } else {
-      setStatus(key, 'offline', 'saved here · will sync later');
-    }
-  };
-
-  const setConnection = (on) => {
-    toggle.checked = on;
-    link.classList.toggle('is-off', !on);
-    if (signal) signal.classList.toggle('is-off', !on);
-    if (on) {
-      const merged = merge(base, a.value, b.value);
-      const changed = merged !== a.value || merged !== b.value;
-      base = merged;
-      receive(a, merged);
-      receive(b, merged);
-      swapText(linkLabel, 'connected');
-      setStatus('a', 'in sync', changed ? 'both edits kept' : savedOn('a'));
-      setStatus('b', 'in sync', changed ? 'both edits kept' : savedOn('b'));
-      swapText(hint, changed ? 'back online. nothing was lost.' : (manual ? 'try typing on either device' : 'watching. click or type to take over.'));
-    } else {
-      swapText(linkLabel, 'no connection');
-      setStatus('a', 'offline', 'saved here · will sync later');
-      setStatus('b', 'offline', 'saved here · will sync later');
-      swapText(hint, manual ? 'now type on both, then turn it back on' : 'no signal. both devices keep working.');
-    }
-  };
-
-  // ---------- autoplay ----------
-  let typeFrame = null;
-  let autoplayVisible = false;
-  const foregroundWaiters = new Set();
-  const canAutoplay = () => autoplayVisible && !document.hidden;
-  const whenVisible = () => manual || canAutoplay() ? Promise.resolve() : new Promise(resolve => foregroundWaiters.add(resolve));
-  const resumeAutoplay = () => {
-    syncDemo.classList.toggle('is-autoplay-paused', !manual && !canAutoplay());
-    if (manual || canAutoplay()) {
-      foregroundWaiters.forEach(resolve => resolve());
-      foregroundWaiters.clear();
-    }
-  };
-  const wait = async (ms) => {
-    await whenVisible();
-    if (manual) return;
-    await new Promise((resolve) => {
-      const timer = setTimeout(() => { timers = timers.filter(id => id !== timer); resolve(); }, ms);
-      timers.push(timer);
-    });
-    await whenVisible();
-  };
-  const clearTimers = () => {
-    timers.forEach(clearTimeout);
-    timers = [];
-    cancelTick(typeFrame);
-    typeFrame = null;
-  };
-
-  const type = (el, text) => new Promise((resolve) => {
-    const startValue = el.value;
-    let t0 = performance.now();
-    let shown = 0;
-    const frame = (now) => {
-      if (manual) { typeFrame = null; resolve(); return; }
-      if (!canAutoplay()) {
-        const pausedAt = performance.now();
-        typeFrame = null;
-        whenVisible().then(() => { t0 += performance.now() - pausedAt; typeFrame = tick(frame); });
-        return;
-      }
-      const want = Math.min(text.length, Math.floor((now - t0) / 42));
-      if (want > shown) {
-        shown = want;
-        el.value = startValue + text.slice(0, shown);
-        onInput(el);
-      }
-      if (shown < text.length) typeFrame = tick(frame);
-      else { typeFrame = null; resolve(); }
-    };
-    typeFrame = tick(frame);
-  });
-
-  const resetEditors = async () => {
-    if (a.value === START && b.value === START) return;
-    a.classList.add('is-fading');
-    b.classList.add('is-fading');
-    await wait(380);
-    if (manual) return;
-    a.value = START; b.value = START; base = START;
-    a.classList.remove('is-fading');
-    b.classList.remove('is-fading');
-    await wait(420);
-  };
-
-  const play = async () => {
-    while (!manual) {
-      await resetEditors(); if (manual) break;
-      setConnection(true);
-      swapText(hint, 'watching. click or type to take over.');
-      await wait(1200); if (manual) break;
-      await type(a, ' Underline the bit about habits.'); if (manual) break;
-      await wait(1400); if (manual) break;
-      setConnection(false);
-      await wait(1300); if (manual) break;
-      await type(b, ' Ask Dana if she has read it.'); if (manual) break;
-      await wait(500); if (manual) break;
-      await type(a, ' Chapter 4 next week.'); if (manual) break;
-      await wait(1400); if (manual) break;
-      setConnection(true);
-      await wait(5000);
-    }
-  };
-
-  const takeOver = () => {
-    if (manual) return;
-    manual = true;
-    resumeAutoplay();
-    clearTimers();
-    [a, b].forEach((el) => { stopReceiving(el); el.classList.remove('is-fading'); });
-    if (toggle.checked) {
-      const m = merge(base, a.value, b.value);
-      a.value = m; b.value = m; base = m;
-    }
-    hint.textContent = toggle.checked ? 'your turn. try typing on either device' : 'now type on both, then turn it back on';
-  };
-
-  a.addEventListener('input', () => { takeOver(); onInput(a); });
-  b.addEventListener('input', () => { takeOver(); onInput(b); });
-  a.addEventListener('pointerdown', takeOver);
-  b.addEventListener('pointerdown', takeOver);
-  toggle.addEventListener('change', () => { takeOver(); setConnection(toggle.checked); });
-
-  if (reduced) {
-    manual = true;
-    hint.textContent = 'try typing on either device';
-  } else {
-    // Start when the section is close to view so the loop isn't half over
-    // by the time anyone sees it.
-    let started = false;
-    const start = () => { if (!started) { started = true; play(); } };
-    document.addEventListener('visibilitychange', resumeAutoplay);
-    if ('IntersectionObserver' in window) {
-      const io = new IntersectionObserver((entries) => {
-        autoplayVisible = entries.some((entry) => entry.isIntersecting);
-        resumeAutoplay();
-        if (autoplayVisible) start();
-      });
-      io.observe(syncDemo);
-    } else {
-      autoplayVisible = true;
-      start();
-    }
-  }
-}
+if (syncDemo) createSyncDemo(syncDemo);
 
 // Two readers: the agent's side is a file tree, yours is the window that
 // renders whatever file is picked. Same folder, no second copy.
@@ -1144,7 +886,7 @@ if (readers) {
   const name = readers.querySelector('[data-reader-name]');
   const view = readers.querySelector('[data-reader-view]');
   const foot = readers.querySelector('[data-reader-foot]');
-  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)');
   let current = 'plan';
   let swapTimer = 0;
 
@@ -1158,30 +900,21 @@ if (readers) {
 
   const show = (key, pick) => {
     picks.forEach((candidate) => {
-      candidate.setAttribute('aria-selected', String(candidate === pick));
-      candidate.tabIndex = candidate === pick ? 0 : -1;
+      candidate.setAttribute('aria-pressed', String(candidate === pick));
     });
     if (key === current) return;
     current = key;
     clearTimeout(swapTimer);
-    if (reduced) { render(key); return; }
+    if (reduced.matches) { render(key); return; }
     view.classList.add('is-swapping');
     swapTimer = setTimeout(() => { render(key); view.classList.remove('is-swapping'); }, 160);
   };
 
   const flip = createReaderFlip(readers.closest('[data-reader-showcase]'));
-  picks.forEach((pick, index) => {
+  picks.forEach((pick) => {
     pick.addEventListener('click', () => {
       show(pick.dataset.readerPick, pick);
       flip.show('human', true);
-    });
-    pick.addEventListener('keydown', (event) => {
-      const dir = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0;
-      if (!dir) return;
-      event.preventDefault();
-      const next = picks[(index + dir + picks.length) % picks.length];
-      next.focus();
-      show(next.dataset.readerPick, next);
     });
   });
   render(current);
