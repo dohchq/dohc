@@ -19,8 +19,8 @@ import { isCodeBlock, isCodeMark } from "./pmHelpers";
 // in prose (emails, handles), so it must not fire mid-word (e.g.
 // `user@example`).
 
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { PluginKey } from '@tiptap/pm/state'
-import type { PMDocLike } from './inlineAtomPlugin'
 import {
   type AutocompleteState,
 } from './wikilinkPlugin'
@@ -41,14 +41,14 @@ const MENTION_RE = /(?<=^|\s)@([^\s@[]*)$/
  *  here so the picker component doesn't need to know which trigger
  *  fired it. */
 export function detectMentionAutocomplete(
-  doc: PMDocLike,
+  doc: ProseMirrorNode,
   cursorPos: number,
 ): AutocompleteState {
   let found: AutocompleteState = { active: false }
   doc.descendants((node, pos, parent) => {
     if (!node.isText || !node.text) return
     if (isCodeBlock(parent)) return
-    if ((node.marks ?? []).some(isCodeMark)) return
+    if (node.marks.some(isCodeMark)) return
     const nodeStart = pos
     const nodeEnd = pos + node.text.length
     if (cursorPos < nodeStart || cursorPos > nodeEnd) return
