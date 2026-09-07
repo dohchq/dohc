@@ -11,6 +11,7 @@ import {
 import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
 import type { PendingTextUndo } from "./fileEditorUndo";
 import {
+  AUTOSAVE_DEBOUNCE_MS,
   publishOwnedUnmountDraft,
   type DraftFlush,
   type SaveState,
@@ -88,10 +89,6 @@ export interface ScrollTarget {
 }
 
 export type HeadingTarget = HeadingNavigationTarget;
-
-// The markdown autosave debounce. Named because the rearm on unblock has to
-// use the same window the keystroke armed — two literals would drift.
-const AUTOSAVE_DEBOUNCE_MS = 800;
 
 // Source is a read-only projection of the live Y.Doc. Coalesce update bursts
 // without starving a source view that stays visible during sustained edits.

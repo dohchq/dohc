@@ -1,5 +1,4 @@
 // @vitest-environment jsdom
-import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
 import { describe, expect, it } from "vitest";
 import { classifyForView } from "./FileInspector";
 import { lineSpanInText } from "./FileInspector.editor-fixture";
@@ -8,8 +7,6 @@ import {
   resolveWorkspaceLinkNavigation,
   resolveWikilinkNavigation,
 } from "./wikilinkNavigation";
-
-setupFileInspectorTests();
 
 // Build legacy app-model path markers through interpolation so this test does
 // not contain the raw deprecated folder or manifest filenames that the

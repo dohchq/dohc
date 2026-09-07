@@ -3,6 +3,8 @@ import { bridge } from "./bridge";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
 
+export const AUTOSAVE_DEBOUNCE_MS = 800;
+
 export function publishOwnedUnmountDraft(
   buffer: SharedLocalDocument,
   body: string,
@@ -561,7 +563,7 @@ export function useAutosavedTextDraft(props: {
     unsavedDraft.current = true;
     setSaveState("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => void saveNow(), 800);
+    saveTimer.current = setTimeout(() => void saveNow(), AUTOSAVE_DEBOUNCE_MS);
   }
 
   const { workspaceId, path, registerDraftFlush, localBuffer } = props;

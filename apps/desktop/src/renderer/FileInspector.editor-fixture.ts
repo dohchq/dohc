@@ -2,6 +2,7 @@ import { EditorView } from "@codemirror/view";
 import { act, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 import userEvent from "@testing-library/user-event";
+import { AUTOSAVE_DEBOUNCE_MS } from "./useAutosavedTextDraft";
 
 // Expected [start, end) selection offsets for a 1-based line.
 // The end excludes the newline. Lines past the end clamp to the last line.
@@ -128,11 +129,7 @@ export async function findTextEditorContent(): Promise<HTMLElement> {
   return await textEditorContent(await screen.findByTestId("view-text-editor"));
 }
 
-// Fake-timer helpers for the tests below that drive their own clock instead
-// of racing the machine. AUTOSAVE_DEBOUNCE_MS mirrors FileInspector's
-// own debounce; ONE_FRAME_MS pumps a single fake animation frame — far under
-// the debounce, so pumping frames can never itself fire the autosave.
-const AUTOSAVE_DEBOUNCE_MS = 800;
+// One fake frame stays below the autosave delay.
 
 export const ONE_FRAME_MS = 20;
 
