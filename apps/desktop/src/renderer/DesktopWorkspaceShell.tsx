@@ -1,3 +1,8 @@
+import {
+  preloadMarkdownEditor,
+  type HeadingTarget,
+  type ScrollTarget,
+} from "./MarkdownView";
 import type { FileSaveState } from "./fileInspectorUi";
 import type { DraftFlush, DraftFlushOptions } from "./useAutosavedTextDraft";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
@@ -93,9 +98,6 @@ import { QuickOpenPalette } from "./QuickOpenPalette";
 import {
   classifyForView,
   FileInspector,
-  preloadMarkdownEditor,
-  type HeadingTarget,
-  type ScrollTarget,
 } from "./FileInspector";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";

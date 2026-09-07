@@ -1,6 +1,10 @@
+import { CopyButton } from "./ui/CopyButton";
+import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
+import { dismissOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
+import { DismissDraftControls } from "./RecoveryList";
 import { Share2 } from "lucide-react";
 import { bridge } from "./bridge";
-import type { EngineDocSaveState } from "./collab/useEngineDoc";
+import type { EngineDocSaveState, EngineRemovalInProgress } from "./collab/useEngineDoc";
 import { IconButton, SectionLabel } from "./ui/controls";
 import type { SaveState } from "./useAutosavedTextDraft";
 
@@ -196,6 +200,69 @@ export function AffordanceCard(props: {
           Open externally
         </button>
       ) : null}
+    </div>
+  );
+}
+
+export function OrphanedDraftNotices(props: {
+  workspaceId: string;
+  path: string;
+  message?: string;
+}) {
+  const drafts = useOrphanedDrafts(props.workspaceId, props.path);
+  if (drafts.length === 0) return null;
+  return (
+    <div>
+      {drafts.map((draft) => (
+        <div
+          key={draft.id}
+          data-testid="orphaned-draft-notice"
+          className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px]"
+        >
+          <span className="text-danger">
+            {props.message ??
+              "This document reopened before your last edit saved. Copy your text to keep it."}
+          </span>
+          <div className="flex items-center gap-2">
+            {/* Same rule as the recovery list's Copy: a draft the projection
+                never refined carries the document inside an encoded comment,
+                and the decode runs at the click. */}
+            <CopyButton
+              testId="orphaned-draft-copy"
+              getText={() => restoreRecoveryDraftText(draft.text)}
+            />
+            {/* Deleting the only copy needs the explicit confirm step (#579
+                review, r6) — the same control the recovery list uses. */}
+            <DismissDraftControls
+              onDismiss={() =>
+                dismissOrphanedDraft(props.workspaceId, props.path, draft.id)
+              }
+            />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function EngineRemovalInProgressNotice(props: {
+  removal: EngineRemovalInProgress;
+  onRetry: () => void;
+}) {
+  return (
+    <div
+      data-testid="engine-removal-in-progress-notice"
+      data-operation={props.removal.operation}
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+    >
+      <span>{props.removal.message} Wait for it to finish.</span>
+      <button
+        type="button"
+        onClick={props.onRetry}
+        className="text-subtle hover:text-ink"
+      >
+        Try again
+      </button>
     </div>
   );
 }
