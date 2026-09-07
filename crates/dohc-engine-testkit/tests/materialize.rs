@@ -6,8 +6,8 @@
 //! replaying — durability is never trusted from the in-process outcome flag.
 
 use dohc_engine_files::{
-    AtomicReplacer, DurabilityPolicy, JobOutcome, NoBackoff, ReplaceBackoff, StdReplacer,
-    backoff_delay, materialize_secret_one, run_pending_jobs,
+    AtomicReplacer, DurabilityPolicy, JobOutcome, MaterializeOptions, NoBackoff, ReplaceBackoff,
+    StdReplacer, backoff_delay, materialize_secret_one, run_pending_jobs,
 };
 use dohc_engine_storage::{
     EngineStore, FaultPoint, JobStatus, MaterializationJobSpec, NoFaults, Preimage, StorageError,
@@ -106,7 +106,7 @@ fn materializes_a_new_file_and_marks_complete() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -171,7 +171,7 @@ fn ordinary_write_refuses_symlinked_ancestor_then_recovers_with_real_directory()
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -201,7 +201,7 @@ fn ordinary_write_refuses_symlinked_ancestor_then_recovers_with_real_directory()
     let recovered = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -257,7 +257,7 @@ fn ordinary_write_temp_symlink_blocks_only_that_job_then_recovers() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -289,7 +289,7 @@ fn ordinary_write_temp_symlink_blocks_only_that_job_then_recovers() {
     let recovered = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -343,7 +343,7 @@ fn ordinary_delete_refuses_symlinked_ancestor_then_recovers_with_real_directory(
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -362,7 +362,7 @@ fn ordinary_delete_refuses_symlinked_ancestor_then_recovers_with_real_directory(
     let recovered = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -404,7 +404,7 @@ fn ordinary_conflict_sibling_refuses_symlinked_ancestor_then_recovers() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -427,7 +427,7 @@ fn ordinary_conflict_sibling_refuses_symlinked_ancestor_then_recovers() {
     let recovered = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -474,7 +474,7 @@ fn job_committed_but_pipeline_unrun_replays_after_restart() {
         let results = run_pending_jobs(
             &store,
             sc.workspace(),
-            &dohc_engine_files::MaterializeOptions {
+            &MaterializeOptions {
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -495,7 +495,7 @@ fn job_committed_but_pipeline_unrun_replays_after_restart() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -524,7 +524,7 @@ fn crash_after_temp_write_leaves_no_torn_target_and_replay_completes() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -545,7 +545,7 @@ fn crash_after_temp_write_leaves_no_torn_target_and_replay_completes() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -571,7 +571,7 @@ fn crash_after_flush_before_rename_replays_to_completion() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -589,7 +589,7 @@ fn crash_after_flush_before_rename_replays_to_completion() {
     run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -614,7 +614,7 @@ fn crash_after_rename_before_complete_replays_exactly_once() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -632,7 +632,7 @@ fn crash_after_rename_before_complete_replays_exactly_once() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -669,7 +669,7 @@ fn external_newer_content_is_preserved_not_clobbered() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -721,7 +721,7 @@ fn delete_job_replays_after_remove_before_complete() {
     let first = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -739,7 +739,7 @@ fn delete_job_replays_after_remove_before_complete() {
     let recovered = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -780,7 +780,7 @@ fn delete_job_syncs_parent_dir_before_marking_complete() {
     let first = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -798,7 +798,7 @@ fn delete_job_syncs_parent_dir_before_marking_complete() {
     let recovered = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -834,7 +834,7 @@ fn superseded_lower_generation_job_is_skipped() {
     let r = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -851,7 +851,7 @@ fn superseded_lower_generation_job_is_skipped() {
     let r = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -953,7 +953,7 @@ fn secret_non_transient_replace_error_removes_plaintext_temp() {
         sc.workspace(),
         &job,
         b"SECRET=plaintext",
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &NonTransientFailingReplacer,
             backoff: &NoBackoff,
@@ -1010,7 +1010,7 @@ fn bounded_retry_succeeds_below_the_cap_with_exact_attempt_count_and_backoff() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &replacer,
             backoff: &backoff,
@@ -1049,7 +1049,7 @@ fn bounded_retry_fails_closed_at_the_cap_and_leaves_job_pending() {
     let err = run_pending_jobs(
         &store,
         sc.workspace(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::none(),
             replacer: &replacer,
             backoff: &backoff,
@@ -1126,7 +1126,7 @@ fn every_materialize_fault_point_has_a_live_call_site() {
         let results = run_pending_jobs(
             &store,
             sc.workspace(),
-            &dohc_engine_files::MaterializeOptions {
+            &MaterializeOptions {
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,

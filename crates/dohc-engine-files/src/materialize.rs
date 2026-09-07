@@ -523,7 +523,6 @@ fn materialize_one_ordinary(
         job,
         &content,
         options,
-        true,
         None,
         &StdSecretTempRemover,
     )
@@ -596,7 +595,6 @@ fn materialize_secret_one_with_remover(
         &plaintext_job,
         plaintext,
         options,
-        false,
         Some(&canonical_root),
         secret_temp_remover,
     )
@@ -609,6 +607,7 @@ fn materialize_secret_one_with_remover(
 /// adopt the current regular file; version-switch deletes retain their
 /// phase-1 plaintext hash so an intervening edit conflicts. Neither path emits
 /// a plaintext conflict artifact.
+/// Deletion does not use `options.replacer` or `options.backoff`.
 pub fn materialize_secret_delete_one(
     store: &EngineStore,
     root: &Path,
@@ -760,7 +759,6 @@ fn materialize_write_content(
     job: &MaterializationJob,
     content: &[u8],
     options: &MaterializeOptions<'_>,
-    preserve_conflict_artifact: bool,
     secret_root: Option<&Path>,
     secret_temp_remover: &dyn SecretTempRemover,
 ) -> Result<JobOutcome, MaterializeError> {
@@ -821,7 +819,7 @@ fn materialize_write_content(
         Some(tmp_name.as_os_str()),
         false,
     );
-    let temp_file = if preserve_conflict_artifact {
+    let temp_file = if secret_root.is_none() {
         write_temp(&tmp, content)?
     } else {
         let parent = secret_parent
@@ -879,7 +877,7 @@ fn materialize_write_content(
         // `.conflict` artifact is on the path floor, so the scanner does not
         // auto-capture it as a new tracked document — the user/agent inspects
         // and resolves it manually.
-        if preserve_conflict_artifact {
+        if secret_root.is_none() {
             let conflict_path = conflict_sibling(target, &job.job_id);
             rename_no_follow(&tmp, &conflict_path, replacer)?;
         } else if secret_temp_remover

@@ -14,7 +14,9 @@ use dohc_engine_domain::{
     insert_text_conflict_if_absent, live_state_matches_conflict_current, store::text_blob_sha256,
     write_binary_file_in_tx,
 };
-use dohc_engine_files::{DurabilityPolicy, JobOutcome, NoBackoff, StdReplacer, run_pending_jobs};
+use dohc_engine_files::{
+    DurabilityPolicy, JobOutcome, MaterializeOptions, NoBackoff, StdReplacer, run_pending_jobs,
+};
 use dohc_engine_storage::{
     EngineStore, FaultPoint, JobStatus, MaterializationOperation, Preimage, hex_sha256,
     put_binary_blob,
@@ -546,7 +548,7 @@ fn merge_materialization_is_gated_to_the_active_target_version_across_reopen() {
         run_pending_jobs(
             &store,
             scratch.path(),
-            &dohc_engine_files::MaterializeOptions {
+            &MaterializeOptions {
                 policy: DurabilityPolicy::per_os(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -1401,7 +1403,7 @@ fn merge_job_crash_then_external_edit_is_preserved_on_recovery() {
     let first = run_pending_jobs(
         &store,
         scratch.path(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -1419,7 +1421,7 @@ fn merge_job_crash_then_external_edit_is_preserved_on_recovery() {
     let recovered = run_pending_jobs(
         &store,
         scratch.path(),
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,

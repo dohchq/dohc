@@ -87,8 +87,8 @@ use dohc_engine_domain::{
     write_text_in_tx,
 };
 use dohc_engine_files::{
-    DurabilityPolicy, JobOutcome, MaterializeError, ProjectionTargetKind, ProjectionTargetState,
-    StdBackoff, StdReplacer, materialize_one, materialize_secret_delete_one,
+    DurabilityPolicy, JobOutcome, MaterializeError, MaterializeOptions, ProjectionTargetKind,
+    ProjectionTargetState, StdBackoff, StdReplacer, materialize_one, materialize_secret_delete_one,
     materialize_secret_one, probe_projection_target,
 };
 use dohc_engine_storage::{
@@ -5705,7 +5705,7 @@ fn replay_pending_materializations(
                     store,
                     root_dir,
                     &job,
-                    &dohc_engine_files::MaterializeOptions {
+                    &MaterializeOptions {
                         policy: DurabilityPolicy::per_os(),
                         replacer: &StdReplacer,
                         backoff: &StdBackoff,
@@ -5757,7 +5757,7 @@ fn replay_pending_materializations(
                 root_dir,
                 &job,
                 plaintext.as_bytes(),
-                &dohc_engine_files::MaterializeOptions {
+                &MaterializeOptions {
                     policy: DurabilityPolicy::per_os(),
                     replacer: &StdReplacer,
                     backoff: &StdBackoff,
@@ -5853,7 +5853,7 @@ fn replay_pending_materializations(
                 store,
                 root_dir,
                 &job,
-                &dohc_engine_files::MaterializeOptions {
+                &MaterializeOptions {
                     policy: DurabilityPolicy::per_os(),
                     replacer: &StdReplacer,
                     backoff: &StdBackoff,
@@ -7871,7 +7871,7 @@ fn ydoc_settle_on_store(
                 store,
                 root_dir,
                 &job,
-                &dohc_engine_files::MaterializeOptions {
+                &MaterializeOptions {
                     policy: DurabilityPolicy::per_os(),
                     replacer: &StdReplacer,
                     backoff: &StdBackoff,
@@ -8143,7 +8143,7 @@ fn ydoc_settle_on_store(
         store,
         root_dir,
         &job,
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &StdBackoff,
@@ -8717,7 +8717,7 @@ fn materialize_pending_job(
         store,
         root_dir,
         job,
-        &dohc_engine_files::MaterializeOptions {
+        &MaterializeOptions {
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &StdBackoff,
