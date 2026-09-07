@@ -133,34 +133,37 @@ For desktop QA, start with `pnpm doctor`. Use `pnpm qa:smoke` for boot, editing,
 Run the smallest check that proves the change.
 
 - Run the affected package's typecheck and focused unit or integration tests while editing.
-- CI owns the full suite. Run repository-wide checks locally only when requested, diagnosing CI, or replacing unavailable CI.
+- One verification owner runs the full selected gates through `pnpm verify:pr --base <target-ref>`.
+- Other agents run focused checks and reuse the owner's evidence instead of repeating full gates.
 - `pnpm test:desktop:e2e` prepares and verifies the desktop and native engine before launching Playwright.
 - For Rust work, use the [`rust-gate` skill](.agents/skills/rust-gate/SKILL.md), never a bare `cargo` command. Read the gate's `== summary ==` block rather than its exit code.
 - A test that needs a sleep to pass is wrong. Wait for the actual condition.
 
 ## Pull requests and merging
 
-CI runs on pull requests, pushes to `main`, merge groups, and manual dispatches.
+PR verification runs locally because cloud CI costs remain out of budget.
+GitHub PR checks stay dispatch-only and require self-hosted runners. Do not enable cloud runners.
 Keep one concern per PR. Keep required contract, caller, and test changes together.
 Finish implementation, self-simplification, and focused checks before requesting independent review.
 
 ### Verify the final commit
 
-The [`PR checks` workflow](.github/workflows/pr-checks.yml) selects the JavaScript and Rust gates from changed paths.
+The canonical local runner selects JavaScript and Rust gates from the [`PR checks` workflow's filters](.github/workflows/pr-checks.yml).
 Use `pnpm verify:plan --base <target-ref>` to inspect that selection locally.
 
 - One agent owns verification and the PR's evidence. Other agents run focused checks for their changes.
-- Before merging, require successful CI for the final head and its tested integration with the target branch.
+- Before merging, require passing local evidence for the final head against the current target branch.
 - Require every selected job to pass. A missing, cancelled, or failed run is not a pass.
 - If a job reads a changed file outside its filter, correct the filter and run that job.
-- When impact is unclear, run both jobs. A manual dispatch runs both.
-- Link the CI run in the PR. State which gates ran, or why no code gate applies.
+- When impact is unclear, run both jobs with explicit `--job js` and `--job rust` invocations.
+- Record the commit, target ref, selected gates, result, and evidence location in the PR.
+- If no code gate applies, record the runner's selection and reason.
 - Add focused platform verification when changed behavior depends on Windows or macOS.
 
-If CI is unavailable, use `pnpm verify:pr --base <target-ref>` as the single local fallback.
+Use `pnpm verify:pr --base <target-ref>` as the single full-verification entry point.
 It owns the service setup, prebuilds, gate selection, and evidence. Follow [the verification procedure](docs/how-to/verify-agent-work.md#verify-a-pull-request).
 Preserve every applicable check. Accept its `result.json` only for the final, unchanged commit.
-The Rust gate retains its build budget and mandatory summary-verdict checks in both environments.
+The Rust gate retains its build budget and mandatory summary-verdict checks.
 
 ### Select reviewers
 
@@ -194,5 +197,5 @@ Treat a finding as evidence, not a command. Verify it against the current head a
 - Record reviewed commits, delta coverage, and dispositions in one maintained PR review note.
 
 When ready to merge, add the review-round count, useful fixes, and any reviewer or verification delays to that note.
-Use CI job timings or local step durations for verification time. Report unknown durations as unknown.
+Use local step durations for verification time. Report unknown durations as unknown.
 Use these records to identify repeated delays and slow or overlapping tests before adding gates or removing coverage.

@@ -3,15 +3,15 @@ name: rust-gate
 description: >-
   Run the canonical Rust engine gate with the machine's build budget: disk
   preflight, build-slot queueing, capped cargo parallelism, and a verdict read
-  from the summary block. Use for local Rust verification when CI is unavailable,
+  from the summary block. Use for local Rust PR verification,
   whenever a task says to run the Rust gate or cargo checks for
   the workspace, and before starting any long cargo build outside the gate.
 ---
 
 # Run the Rust gate
 
-CI runs the full engine gate for matching changes. Reuse that result instead of duplicating the gate locally.
-For a local PR fallback, use `pnpm verify:pr --base <target-ref> --job rust` to include tool checks and evidence.
+One verification owner runs the full engine gate for matching changes. Other agents reuse its evidence.
+For PR verification, use `pnpm verify:pr --base <target-ref> --job rust` to include tool checks and evidence.
 
 The gate is one command. Run it from the root of the worktree you want
 judged:

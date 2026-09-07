@@ -1,19 +1,15 @@
-# CI owns the full correctness suite. Local work uses focused checks.
-# Path filters skip unrelated gates; draft PRs defer the full suite until ready.
+# Cloud CI is out of budget. PR verification uses pnpm verify:pr locally.
+# Keep dispatch-only; a manual run requires a registered local Linux x64 runner.
+# The local verifier reads the path filters and tool pins below.
 # Packaging, signing, and update manifests stay in Desktop Release.
 name: PR checks
 
 on:
-  pull_request:
-    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
-  push:
-    branches: [main]
-  merge_group:
   workflow_dispatch:
 
 concurrency:
   group: pr-checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -24,14 +20,10 @@ env:
   CARGO_NEXTEST_VERSION: "0.9.143"
 
 jobs:
-  # ~30 seconds on the smallest runner. For pull_request events dorny reads
-  # the diff through the API (no checkout needed). merge_group and
-  # workflow_dispatch bypass the filter and run everything -- a merge queue and
-  # a manual dispatch both want the full answer, not a shortcut.
+  # Manual dispatch runs both jobs. The local verifier selects from these filters.
   changes:
     name: what changed
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 5
     permissions:
       pull-requests: read
@@ -111,7 +103,7 @@ jobs:
     name: typecheck + tests
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.js == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 30
     # packages/workspace-auth exercises Better Auth against a REAL Postgres: it
     # applies the actual 0001_better_auth.sql migration and drives session and
@@ -172,10 +164,7 @@ jobs:
 
       # Registry + ./target cache for the daemon debug build below. Keyed
       # separately from the engine gate's cache: the two jobs build different
-      # subsets and would thrash a shared target cache. Upstream Swatinem, not
-      # the useblacksmith fork -- the fork is archived (last push 2025-10);
-      # Blacksmith's cache service accelerates the standard cache API on its
-      # runners, so upstream is both maintained and fast there.
+      # subsets and would thrash a shared target cache.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: js-daemon
@@ -214,7 +203,7 @@ jobs:
     name: engine gate
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

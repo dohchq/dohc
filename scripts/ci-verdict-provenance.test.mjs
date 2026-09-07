@@ -396,15 +396,14 @@ test("both gate filters select on ignore rules and vendored engine dependencies"
   assert.doesNotMatch(rustFilter, /- 'scripts\/\*\*'/);
 });
 
-test("PR workflow checks ready PRs, main pushes, merge groups, and manual runs", () => {
+test("PR workflow stays dispatch-only and cannot schedule cloud runners", () => {
   const document = load(workflow);
-  assert.deepEqual(document.on.pull_request.types, ["opened", "reopened", "synchronize", "ready_for_review", "converted_to_draft"]);
-  assert.deepEqual(document.on.push.branches, ["main"]);
-  assert.ok(Object.hasOwn(document.on, "merge_group"));
-  assert.ok(Object.hasOwn(document.on, "workflow_dispatch"));
-  assert.ok(!Object.hasOwn(document.on, "pull_request_target"));
-  assert.equal(document.jobs.changes.if, "github.event_name != 'pull_request' || !github.event.pull_request.draft");
-  assert.equal(document.concurrency["cancel-in-progress"], "${{ github.event_name == 'pull_request' }}");
+  assert.deepEqual(Object.keys(document.on), ["workflow_dispatch"]);
+  for (const [name, job] of Object.entries(document.jobs)) {
+    assert.ok(Array.isArray(job["runs-on"]), `${name} must use explicit local runner labels`);
+    assert.ok(job["runs-on"].includes("self-hosted"), `${name} must use a self-hosted runner`);
+  }
+  assert.equal(document.concurrency["cancel-in-progress"], false);
 });
 
 // A run's readings: the tree before the first step, then after each step. A
