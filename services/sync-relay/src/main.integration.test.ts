@@ -854,14 +854,16 @@ function sendDoubleTerminationSignal(child: ChildProcess): void {
 }
 
 describe("sync relay startup guards", () => {
+  const namedBrowserLimitsReason =
+    "DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS must be valid JSON with all required positive limits within their supported bounds, a safe expiry timestamp, and capacity for the named session envelopes.";
   it.each([
     { label: "missing origin", origin: undefined, key: "x".repeat(32), expected: "DOHC_RELAY_SHARE_WEB_ORIGIN must be an HTTPS origin" },
     { label: "HTTP origin", origin: "http://127.0.0.1:48123", key: "x".repeat(32), expected: "DOHC_RELAY_SHARE_WEB_ORIGIN must be an HTTPS origin" },
     { label: "missing key", origin: "https://share.example.test", key: undefined, expected: "DOHC_RELAY_EXCHANGE_KEY must be set" },
     { label: "short key", origin: "https://share.example.test", key: "x".repeat(31), expected: "DOHC_RELAY_EXCHANGE_KEY must be at least 32 characters" },
-    { label: "small request", origin: "https://share.example.test", key: "x".repeat(32), maxRequestBytes: 1037, expected: "DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS must contain" },
-    { label: "small response", origin: "https://share.example.test", key: "x".repeat(32), maxResponseBytes: 4151, expected: "DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS must contain" },
-    { label: "unsafe expiry", origin: "https://share.example.test", key: "x".repeat(32), retentionMs: Number.MAX_SAFE_INTEGER, expected: "DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS must contain" },
+    { label: "small request", origin: "https://share.example.test", key: "x".repeat(32), maxRequestBytes: 1037, expected: namedBrowserLimitsReason },
+    { label: "small response", origin: "https://share.example.test", key: "x".repeat(32), maxResponseBytes: 4151, expected: namedBrowserLimitsReason },
+    { label: "unsafe expiry", origin: "https://share.example.test", key: "x".repeat(32), retentionMs: Number.MAX_SAFE_INTEGER, expected: namedBrowserLimitsReason },
   ])("refuses named browser configuration before opening storage: $label", async ({ label, origin, key, expected, ...overrides }) => {
     const dbPath = join(await tempRoot(`named-${label.replaceAll(" ", "-")}`), "relay.sqlite");
     const { code, stderr } = await spawnRelayExpectExit({

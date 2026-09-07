@@ -268,7 +268,7 @@ function loadNamedBrowserSessionLimits(): NamedLiveBrowserHttpLimits | undefined
     fatal("FATAL: DOHC_RELAY_EXCHANGE_KEY must be set when named browser sessions are enabled.");
   }
   try { return parseNamedLiveBrowserHttpLimits(JSON.parse(value)); }
-  catch { fatal("FATAL: DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS must contain all explicit positive limits with capacity for the named session envelopes."); }
+  catch { fatal("FATAL: DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS must be valid JSON with all required positive limits within their supported bounds, a safe expiry timestamp, and capacity for the named session envelopes."); }
 }
 
 function isNamedBrowserSessionPath(pathname: string): boolean {

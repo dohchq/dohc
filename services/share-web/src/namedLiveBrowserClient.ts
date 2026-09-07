@@ -105,10 +105,11 @@ export function createNamedLiveBrowserClient(options: {
         if (!result || typeof result !== "object" || Array.isArray(result)) return null;
         const record = result as Record<string, unknown>;
         if (discriminator === undefined) {
+          const expiresAtMs = record.expiresAtMs;
           if (Object.keys(record).sort().join(",") !== "discriminator,expiresAtMs" ||
               typeof record.discriminator !== "string" || !/^[A-Za-z0-9_-]{12}$/u.test(record.discriminator) ||
-              !Number.isSafeInteger(record.expiresAtMs) || Number(record.expiresAtMs) <= 0) return null;
-          return { discriminator: record.discriminator, expiresAtMs: Number(record.expiresAtMs) };
+              typeof expiresAtMs !== "number" || !Number.isSafeInteger(expiresAtMs) || expiresAtMs <= 0) return null;
+          return { discriminator: record.discriminator, expiresAtMs };
         } else {
           if (Object.keys(record).sort().join(",") !== "grantId,shareId,userId,workspaceId") return null;
           return {
