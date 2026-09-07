@@ -4,7 +4,7 @@ import {
   createChatRunnerProcess,
   RUNNER_KILL_GRACE_MS,
   type RunnerProcess,
-  type SpawnRunner,
+  type ChatRunnerProcessOptions,
 } from "./chatRunnerProcess";
 import type {
   AgentDispatchClaim,
@@ -68,7 +68,7 @@ export interface ChatDispatchRecovery {
   attemptCount: number;
 }
 
-interface ChatDispatchServiceOptions {
+interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   workspaceFor(workspaceId: string): ChatDispatchWorkspace | null;
   listOpenWorkspaces(): ChatDispatchWorkspace[];
   listSyncWorkspaces(): ChatDispatchWorkspace[];
@@ -81,10 +81,6 @@ interface ChatDispatchServiceOptions {
     workspace: ChatDispatchWorkspace,
     target?: { channelId: string } | { threadId: string },
   ): Promise<ChatDispatchIdentity>;
-  stateDir(): string;
-  appRoot(): string;
-  isPackaged(): boolean;
-  resourcesPath?: () => string | undefined;
   queueSync(workspace: ChatDispatchWorkspace): void | boolean | Promise<void | boolean>;
   prepareRunWorkspace?(
     workspace: ChatDispatchWorkspace,
@@ -114,9 +110,6 @@ interface ChatDispatchServiceOptions {
   listAppQuitRecoveries?(
     workspace: ChatDispatchWorkspace,
   ): ChatDispatchRecovery[] | Promise<ChatDispatchRecovery[]>;
-  spawnRunner?: SpawnRunner;
-  killProcessGroup?: (pid: number, signal: NodeJS.Signals) => void;
-  platform?: NodeJS.Platform;
   nowMs?: () => number;
   createId?: () => string;
   onError?: (error: unknown) => void;
@@ -729,8 +722,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (stopped) {
         throw new Error("dohc is quitting before the runner can start.");
       }
-      const spawned = spawnConfiguredRunner({
-        workspace,
+      const child = spawnConfiguredRunner({
+        rootPath: workspace.rootPath,
         threadId: claim.run.threadId,
         runId: claim.run.runId,
         logPath,
@@ -743,8 +736,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const live: LiveRun = {
         workspace,
         claim,
-        child: spawned.child,
-        logPath: spawned.logPath,
+        child,
+        logPath,
         timeoutMinutes: runner.timeoutMinutes,
         timeout,
         presenceHeartbeat: null,
@@ -756,14 +749,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       };
       liveRuns.set(workspace.workspaceId, live);
       runReservations.delete(workspace.workspaceId);
-      spawned.child.onExit((code, signal) => {
+      child.onExit((code, signal) => {
         void enqueue(workspace.workspaceId, async () => {
           if (await finishLiveRun(live, code, signal)) {
             await scanAndDrain(live.workspace);
           }
         });
       });
-      spawned.child.onError((error) => {
+      child.onError((error) => {
         reportError(error);
         void enqueue(workspace.workspaceId, async () => {
           if (await finishLiveRun(live, 1, null)) {
@@ -1461,8 +1454,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           onBehalfOf: "local",
           agentRunId: runId,
         });
-        const spawned = spawnConfiguredRunner({
-          workspace,
+        const child = spawnConfiguredRunner({
+          rootPath: workspace.rootPath,
           threadId: scratchThreadId,
           runId,
           logPath,
@@ -1550,7 +1543,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           }, RUNNER_SELF_TEST_TIMEOUT_MS);
           const state: SelfTestState = {
             workspace,
-            child: spawned.child,
+            child,
             threadId: scratchThreadId,
             runId,
             settled: false,
@@ -1560,14 +1553,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             resolve: resolveResult,
           };
           selfTests.set(workspaceId, state);
-          spawned.child.onError((error) => {
+          child.onError((error) => {
             reportError(error);
             void complete({
               ok: false,
               detail: `Runner self-test failed to start. Log: ${logPath}`,
             });
           });
-          spawned.child.onExit(() => {
+          child.onExit(() => {
             void (async () => {
               await check();
               const current = selfTests.get(workspaceId);

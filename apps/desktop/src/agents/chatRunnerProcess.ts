@@ -2,7 +2,6 @@ import { chmodSync, closeSync, fchmodSync, mkdirSync, openSync } from "node:fs";
 import { delimiter, dirname, resolve } from "node:path";
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
-import type { ChatDispatchWorkspace } from "./chatDispatchService";
 
 export const RUNNER_KILL_GRACE_MS = 10_000;
 
@@ -35,11 +34,6 @@ export type SpawnRunner = (
   args: string[],
   options: RunnerSpawnOptions,
 ) => RunnerProcess;
-
-interface SpawnedRun {
-  child: RunnerProcess;
-  logPath: string;
-}
 
 function defaultSpawnRunner(
   command: string,
@@ -140,7 +134,7 @@ export function tokenizeRunnerCommand(command: string): string[] {
   return tokens;
 }
 
-interface ChatRunnerProcessOptions {
+export interface ChatRunnerProcessOptions {
   stateDir(): string;
   appRoot(): string;
   isPackaged(): boolean;
@@ -172,7 +166,6 @@ export function createChatRunnerProcess(
   }
 
   function runnerEnvironment(input: {
-    workspaceId: string;
     threadId: string;
     runId: string;
   }): NodeJS.ProcessEnv {
@@ -195,13 +188,13 @@ export function createChatRunnerProcess(
   }
 
   function spawnConfiguredRunner(input: {
-    workspace: ChatDispatchWorkspace;
+    rootPath: string;
     threadId: string;
     runId: string;
     logPath: string;
     command: string;
     prompt: string;
-  }): SpawnedRun {
+  }): RunnerProcess {
     const commandParts = tokenizeRunnerCommand(input.command);
     const executable = commandParts[0]!;
     // The prompt is DATA and rides stdin, never argv. It carries the rendered
@@ -217,7 +210,6 @@ export function createChatRunnerProcess(
     // stdin has neither limit and needs no escaping at all.
     const args = commandParts.slice(1);
     const env = runnerEnvironment({
-      workspaceId: input.workspace.workspaceId,
       threadId: input.threadId,
       runId: input.runId,
     });
@@ -227,10 +219,10 @@ export function createChatRunnerProcess(
       // and the log descriptor closes in finally.
       const resolved = resolveSpawnCommand(executable, args, {
         env,
-        cwd: input.workspace.rootPath,
+        cwd: input.rootPath,
       });
       const child = spawnRunner(resolved.command, resolved.args, {
-        cwd: input.workspace.rootPath,
+        cwd: input.rootPath,
         env,
         detached: true,
         stdio: ["pipe", logFd, logFd],
@@ -240,7 +232,7 @@ export function createChatRunnerProcess(
           : {}),
       });
       child.writeStdin(input.prompt);
-      return { child, logPath: input.logPath };
+      return child;
     } finally {
       closeSync(logFd);
     }
