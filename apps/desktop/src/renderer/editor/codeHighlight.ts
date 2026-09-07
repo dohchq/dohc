@@ -1,3 +1,4 @@
+import { isCodeBlockNode, normalizeLanguage } from "./pmHelpers";
 // Syntax highlighting inside WYSIWYG code blocks — a ProseMirror decoration
 // plugin, deliberately not a schema/nodeView change. The `codeBlock` schema
 // is contract-locked across the desktop and workspace-api packages (see
@@ -122,14 +123,6 @@ export type PMNodeLike = {
 }
 export type PMDocLike = {
   descendants: (cb: (node: PMNodeLike, pos: number) => boolean | void) => void
-}
-
-function isCodeBlockNode(node: { type: { name: string } }): boolean {
-  return node.type.name === 'code_block' || node.type.name === 'codeBlock'
-}
-
-function normalizeLanguage(value: unknown): string {
-  return typeof value === 'string' ? value.trim().toLowerCase() : ''
 }
 
 type CodeHighlightRange = { from: number; to: number; className: string }
