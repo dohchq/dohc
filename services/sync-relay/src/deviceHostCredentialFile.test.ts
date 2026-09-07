@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import { createDeviceHostCredential } from "./deviceHostCredential.js";
-import { prepareDeviceHostCredentialFile } from "./deviceHostCredentialFile.js";
+import { DeviceHostCredentialFileUnavailable, prepareDeviceHostCredentialFile, readDeviceHostCredentialFile } from "./deviceHostCredentialFile.js";
 
 vi.mock("node:fs/promises", async importOriginal => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -43,6 +43,16 @@ it("refuses unvalidated Darwin ACLs before creating credential paths", async () 
     "Device host credential files are unavailable on macOS because ACL validation is not implemented.",
   );
   await expect(actual.lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("refuses to read a copied credential on Darwin before inspecting paths", async () => {
+  const { directory, final } = paths();
+  await actual.mkdir(directory, { mode: 0o700 });
+  await actual.writeFile(final, JSON.stringify(createDeviceHostCredential("host", epoch)), { mode: 0o600 });
+  vi.stubGlobal("process", { ...process, platform: "darwin" });
+  await expect(readDeviceHostCredentialFile(directory)).rejects.toBeInstanceOf(DeviceHostCredentialFileUnavailable);
+  expect(lstat).not.toHaveBeenCalled();
+  expect(open).not.toHaveBeenCalled();
 });
 
 it.skipIf(process.platform === "darwin")("checks a new file before writing secrets, removes it on refusal, and retries with a fresh secret", async () => {
@@ -226,6 +236,27 @@ it.skipIf(process.platform === "darwin")("refuses an existing file replaced afte
   });
   await expect(prepareDeviceHostCredentialFile(directory, "host", epoch)).rejects.toThrow("Credential file changed.");
   expect(read).toBe(false); expect(synced).toBe(false);
+  expect(await actual.readFile(final)).toEqual(before); expect(await actual.readFile(held)).toEqual(before);
+});
+
+it.skipIf(process.platform === "darwin")("refuses a read-only credential replaced between validation and opening", async () => {
+  const { directory, final } = paths();
+  await prepareDeviceHostCredentialFile(directory, "host", epoch);
+  const before = await actual.readFile(final), held = join(directory, "held-original");
+  let read = false, closed = false;
+  vi.mocked(open).mockImplementation(async (...args) => {
+    expect(String(args[0])).toBe(final); expect(args[1]).toBe("r");
+    await actual.rename(final, held);
+    await actual.writeFile(final, before, { flag: "wx", mode: 0o600 });
+    const handle = await actual.open(...args);
+    const originalRead = handle.readFile.bind(handle), close = handle.close.bind(handle);
+    vi.spyOn(handle, "readFile").mockImplementation(async (...readArgs) => { read = true; return originalRead(...readArgs); });
+    vi.spyOn(handle, "close").mockImplementation(async () => { await close(); closed = true; });
+    for (const method of ["writeFile", "truncate", "chmod", "sync"] as const) vi.spyOn(handle, method).mockImplementation(async () => { throw new Error("Read-only credential mutation"); });
+    return handle;
+  });
+  await expect(readDeviceHostCredentialFile(directory)).rejects.toThrow("Credential file changed.");
+  expect(read).toBe(false); expect(closed).toBe(true);
   expect(await actual.readFile(final)).toEqual(before); expect(await actual.readFile(held)).toEqual(before);
 });
 
