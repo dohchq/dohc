@@ -774,7 +774,7 @@ fn rollback_of_a_capture_binary_moment_still_restores_disk() {
 fn capture_supersedes_an_older_pending_materialization_job() {
     use dohc_engine_domain::{WriteBinaryFile, write_binary_file_in_tx};
     use dohc_engine_files::{
-        DurabilityPolicy, JobOutcome, NoBackoff, StdReplacer, run_pending_jobs,
+        DurabilityPolicy, JobOutcome, MaterializeOptions, NoBackoff, StdReplacer, run_pending_jobs,
     };
     use dohc_engine_storage::{Preimage, hex_sha256, put_binary_blob};
 
@@ -819,11 +819,13 @@ fn capture_supersedes_an_older_pending_materialization_job() {
     let results = run_pending_jobs(
         &store,
         scratch.path(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        200,
-        &NO_FAULTS,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 200,
+            faults: &NO_FAULTS,
+        },
     )
     .expect("drain");
     let stale = results
@@ -903,7 +905,7 @@ fn recapture_after_rollback_advances_past_the_durable_restore() {
 fn deduped_capture_marks_the_confirmed_head_as_materialized() {
     use dohc_engine_domain::{WriteBinaryFile, write_binary_file_in_tx};
     use dohc_engine_files::{
-        DurabilityPolicy, JobOutcome, NoBackoff, StdReplacer, run_pending_jobs,
+        DurabilityPolicy, JobOutcome, MaterializeOptions, NoBackoff, StdReplacer, run_pending_jobs,
     };
     use dohc_engine_storage::{Preimage, hex_sha256, put_binary_blob};
 
@@ -967,11 +969,13 @@ fn deduped_capture_marks_the_confirmed_head_as_materialized() {
     let results = run_pending_jobs(
         &store,
         scratch.path(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        200,
-        &NO_FAULTS,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 200,
+            faults: &NO_FAULTS,
+        },
     )
     .expect("drain");
     let stale = results

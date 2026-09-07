@@ -13,6 +13,7 @@ use dohc_engine_domain::{
     SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread, VersionedTextStore,
     WriteBinary, attachment_id_for, channel_slug_for_name,
 };
+use dohc_engine_files::MaterializeOptions;
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{
     ScratchDir, ScriptedFaults, decode_hex, engine_db_path, flip_byte, open_store,
@@ -14092,11 +14093,13 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
         let materialized = dohc_engine_files::run_pending_jobs(
             store,
             scratch.path(),
-            dohc_engine_files::DurabilityPolicy::per_os(),
-            &dohc_engine_files::StdReplacer,
-            &dohc_engine_files::NoBackoff,
-            2_500,
-            &NoFaults,
+            &MaterializeOptions {
+                policy: dohc_engine_files::DurabilityPolicy::per_os(),
+                replacer: &dohc_engine_files::StdReplacer,
+                backoff: &dohc_engine_files::NoBackoff,
+                now_ms: 2_500,
+                faults: &NoFaults,
+            },
         )
         .expect("materialize replicated scene and sidecar");
         assert!(

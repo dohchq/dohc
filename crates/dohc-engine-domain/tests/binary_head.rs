@@ -6,7 +6,9 @@ use dohc_engine_domain::{
     EngineStore, NoFaults, RollbackTextFileMutation, VersionedTextStore, WriteBinaryFile,
     WriteText, binary_rollback_job_identity, write_binary_file_in_tx,
 };
-use dohc_engine_files::{DurabilityPolicy, JobOutcome, NoBackoff, StdReplacer, run_pending_jobs};
+use dohc_engine_files::{
+    DurabilityPolicy, JobOutcome, MaterializeOptions, NoBackoff, StdReplacer, run_pending_jobs,
+};
 use dohc_engine_storage::{
     FaultPoint, MaterializationJobSpec, Preimage, StorageError, enqueue_job, hex_sha256,
     put_binary_blob,
@@ -149,11 +151,13 @@ fn m2_same_path_binary_gen_is_strictly_below_next_text_and_is_superseded() {
     let results = run_pending_jobs(
         &store,
         scratch.path(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        200,
-        &NoFaults,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 200,
+            faults: &NoFaults,
+        },
     )
     .expect("drain");
 
@@ -328,11 +332,13 @@ fn rollback_first_binary_write_removes_file_and_object() {
     run_pending_jobs(
         &store,
         scratch.path(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        200,
-        &NoFaults,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 200,
+            faults: &NoFaults,
+        },
     )
     .expect("drain after rollback");
     assert!(
@@ -401,11 +407,13 @@ fn rollback_of_completed_binary_write_deletes_the_materialized_file() {
     run_pending_jobs(
         &store,
         scratch.path(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        50,
-        &NoFaults,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 50,
+            faults: &NoFaults,
+        },
     )
     .expect("drain write to disk");
     assert!(
@@ -450,11 +458,13 @@ fn rollback_of_completed_binary_write_deletes_the_materialized_file() {
     run_pending_jobs(
         &store,
         scratch.path(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        60,
-        &NoFaults,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 60,
+            faults: &NoFaults,
+        },
     )
     .expect("drain compensating delete");
     assert!(
@@ -509,11 +519,13 @@ fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
     run_pending_jobs(
         &store,
         scratch.path(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        50,
-        &NoFaults,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 50,
+            faults: &NoFaults,
+        },
     )
     .expect("drain writes to disk");
     assert_eq!(
@@ -542,11 +554,13 @@ fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
     run_pending_jobs(
         &store,
         scratch.path(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        60,
-        &NoFaults,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 60,
+            faults: &NoFaults,
+        },
     )
     .expect("drain compensating restore");
     assert_eq!(
@@ -678,11 +692,13 @@ fn rollback_of_pending_binary_write_with_bytes_on_disk_cleans_disk() {
     let results = run_pending_jobs(
         &store,
         scratch.path(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        20,
-        faults.as_ref(),
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: faults.as_ref(),
+        },
     )
     .expect("drain with post-rename crash");
     assert!(
@@ -730,11 +746,13 @@ fn rollback_of_pending_binary_write_with_bytes_on_disk_cleans_disk() {
     run_pending_jobs(
         &store,
         scratch.path(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        30,
-        &NoFaults,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 30,
+            faults: &NoFaults,
+        },
     )
     .expect("drain compensating delete");
     assert!(
