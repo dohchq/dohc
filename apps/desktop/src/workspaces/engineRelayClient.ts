@@ -1,4 +1,4 @@
-import { createKeyedSerializer } from "../keyedSerializer";
+import { runInKeyedLane } from "../keyedLane";
 import {
   RelayConflictError,
   RelayKeyEnvelopeMissingError,
@@ -201,7 +201,6 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
   close(): void {
     this.client.close();
   }
-
 }
 
 /**
@@ -576,7 +575,7 @@ export class EngineRelayClient {
   private readonly requestDeadlineMs: number;
   private readonly activeLocations = new Map<string | symbol, string>();
   private readonly boundWorkspaces = new Map<string | symbol, EngineWorkspace>();
-  private readonly serialize = createKeyedSerializer<string | symbol>();
+  private readonly lanes = new Map<string | symbol, Promise<void>>();
 
   constructor(options: EngineRelayClientOptions) {
     this.sessions = options.sessions;
@@ -619,7 +618,7 @@ export class EngineRelayClient {
       method: string,
       params: Record<string, JsonValue | undefined>,
     ): Promise<JsonValue> =>
-      await this.serialize(workspaceKey, async () => {
+      await runInKeyedLane(this.lanes, workspaceKey, async () => {
         if (this.activeLocations.get(workspaceKey) !== connectionKey) {
           await this.sessions
             .closeWorkspaceBinding(workspace)
@@ -850,7 +849,7 @@ export class EngineRelayClient {
           // activity.open creates the ordinary captured session only after the
           // authoritative coordinate is durable. Keep the relay route: the
           // first ordinary pull reopens this same client through it.
-          await this.serialize(workspaceKey, async () => {
+          await runInKeyedLane(this.lanes, workspaceKey, async () => {
             await this.sessions.closeWorkspace(workspace);
           });
         }
@@ -1144,7 +1143,7 @@ export class EngineRelayClient {
     const workspaceId =
       typeof workspace === "string" ? workspace : workspace.workspaceId;
     const workspaceKey = this.workspaceKey(workspace);
-    await this.serialize(workspaceKey, async () => {
+    await runInKeyedLane(this.lanes, workspaceKey, async () => {
       const registered = this.boundWorkspaces.get(workspaceKey);
       const descriptor =
         registered ?? (typeof workspace === "string" ? null : workspace);
