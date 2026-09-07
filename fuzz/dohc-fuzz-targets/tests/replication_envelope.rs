@@ -25,7 +25,7 @@
 //!   rejected WITHOUT the caller's `mutation` closure ever running.
 //! - **No untrusted secret applies**: against a fresh store with no prior
 //!   version state, no random secret envelope may reach
-//!   `ApplyOutcome::Applied` (an `Err` or a no-op `Skipped` is fine -- both
+//!   `ApplyDisposition::Applied` (an `Err` or a no-op `Skipped` is fine -- both
 //!   mean nothing was durably written).
 //! - **No unbounded growth**: the payload byte cap
 //!   (`model::MAX_PAYLOAD_BYTES`, 10 MiB) and identifier byte cap
@@ -34,7 +34,8 @@
 
 use dohc_engine_storage::{EngineStore, NoFaults};
 use dohc_engine_sync::{
-    ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with, apply_secret_envelope,
+    ApplyDisposition, ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with,
+    apply_secret_envelope,
 };
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use proptest::prelude::*;
@@ -242,7 +243,7 @@ proptest! {
     /// 4th untrusted surface: encrypted secret replication envelopes through
     /// `apply_secret_envelope`. Never panics; against a fresh store with NO
     /// prior version state, no random secret envelope may reach
-    /// `ApplyOutcome::Applied` (an `Err`, or a no-op `Skipped`, is fine --
+    /// `ApplyDisposition::Applied` (an `Err`, or a no-op `Skipped`, is fine --
     /// neither writes a durable secret).
     #[test]
     fn structurally_random_secret_envelopes_never_apply(
@@ -251,7 +252,7 @@ proptest! {
         let (_scratch, mut engine) = store();
         let result = apply_secret_envelope(&mut engine, &envelope, &NoFaults);
         prop_assert!(
-            !matches!(result, Ok(ApplyOutcome::Applied(()))),
+            !matches!(result, Ok(ApplyOutcome { primary: ApplyDisposition::Applied(()), .. })),
             "an untrusted secret envelope must never apply against a store with no prior state: {envelope:?} -> {result:?}"
         );
     }

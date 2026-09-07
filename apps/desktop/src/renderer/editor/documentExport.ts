@@ -7,19 +7,11 @@
 // identically through Electron's printToPDF. Pure and dependency-free
 // beyond import-export.ts, so it's covered by ordinary unit tests instead of
 // needing an Electron window.
+import { escapeHtml } from '@dohc/workspace-core/html'
 import katex from 'katex'
 import { parseFrontmatter, displayFrontmatterValue } from '../markdown/frontmatter'
 import { markdownBodyToHtml } from './import-export'
 import { KATEX_EXPORT_CSS } from './katexExportStyles'
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;')
-}
 
 // The document's display title: the `title` frontmatter key (same key
 // PageIdentity.tsx reads/writes), falling back to the filename stem —

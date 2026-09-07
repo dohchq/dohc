@@ -3,7 +3,8 @@ import { createReadStream } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { hasIgnoredSegment, isDatabaseSidecar } from "@dohc/workspace-core";
-import { assertSafeWorkspacePath, mediaTypeForPath, sha256 } from "./metadata";
+import { sha256Hex } from "@dohc/workspace-core/hash";
+import { assertSafeWorkspacePath, mediaTypeForPath } from "./metadata";
 
 export const MAX_INLINE_FILE_SIZE = 10 * 1024 * 1024;
 
@@ -100,7 +101,7 @@ async function scanFileEntry(relativePath: string, fullPath: string): Promise<Sc
     mediaType,
     bytes,
     size,
-    sha256: bytes ? sha256(bytes) : await sha256File(fullPath),
+    sha256: bytes ? sha256Hex(bytes) : await sha256File(fullPath),
   };
 }
 

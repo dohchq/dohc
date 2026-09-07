@@ -87,8 +87,8 @@ use dohc_engine_domain::{
     write_text_in_tx,
 };
 use dohc_engine_files::{
-    DurabilityPolicy, JobOutcome, MaterializeError, ProjectionTargetKind, ProjectionTargetState,
-    StdBackoff, StdReplacer, materialize_one, materialize_secret_delete_one,
+    DurabilityPolicy, JobOutcome, MaterializeError, MaterializeOptions, ProjectionTargetKind,
+    ProjectionTargetState, StdBackoff, StdReplacer, materialize_one, materialize_secret_delete_one,
     materialize_secret_one, probe_projection_target,
 };
 use dohc_engine_storage::{
@@ -97,9 +97,9 @@ use dohc_engine_storage::{
     hex_sha256, put_binary_blob, upsert_projection_job,
 };
 use dohc_engine_sync::{
-    ApplyOutcome, BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse,
-    BlobHaveRequest, BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse,
-    ConflictApplyResult, EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest,
+    ApplyDisposition, ApplyOutcome, BlobDownloadBatchRequest, BlobDownloadBatchResponse,
+    BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse, BlobUploadRequest, ClaimRequest,
+    ClaimResponse, ConflictApplyResult, EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest,
     KeyEnvelopeDownloadResponse, KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest,
     LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest,
     PullResponse, PushRequest, PushResponse, RecoverResponse, RelayCursor, RelayError,
@@ -1303,13 +1303,6 @@ type ActorWork = Box<dyn FnOnce(&mut EngineStore, &mut WriterDocCache) + Send>;
 
 enum Command {
     Run(ActorWork),
-    Relay {
-        transport: DeferredRelayTransport,
-        operation: RelayOperation,
-        leases: LeaseRegistry,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<RelayOperationOutcome, RuntimeError>>,
-    },
     /// Break the loop and release the connection. Carries no reply: the caller
     /// joins the worker, and the join is the completion signal (so `close`
     /// needs no `blocking_recv`, staying safe to call from a `Drop` that runs
@@ -1736,17 +1729,15 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<CaptureRetireResult, RuntimeError> {
-        let workspace_root: Option<CommandWorkspaceRoot> = None;
         let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
         let token: CancellationToken = CancellationToken::new();
         self.run_blocking(move |store, cache| {
-            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
             with_local_file_mutation_cache_reset(cache, || {
                 capture_retire_on_store(
                     store,
                     &input,
-                    root_dir,
-                    root_guard,
+                    None,
+                    None,
                     self_writes.as_deref(),
                     &leases,
                     faults.as_ref(),
@@ -2848,17 +2839,8 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        let workspace_root: Option<CommandWorkspaceRoot> = None;
         self.run(move |store, _cache| {
-            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
-            capture_secret_retire_on_store(
-                store,
-                &input,
-                root_dir,
-                root_guard,
-                faults.as_ref(),
-                &token,
-            )
+            capture_secret_retire_on_store(store, &input, None, None, faults.as_ref(), &token)
         })
         .await
     }
@@ -2871,16 +2853,14 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<CaptureRetireResult, RuntimeError> {
-        let workspace_root: Option<CommandWorkspaceRoot> = None;
         let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
         self.run(move |store, cache| {
-            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
             with_local_file_mutation_cache_reset(cache, || {
                 capture_retire_on_store(
                     store,
                     &input,
-                    root_dir,
-                    root_guard,
+                    None,
+                    None,
                     self_writes.as_deref(),
                     &leases,
                     faults.as_ref(),
@@ -3447,13 +3427,25 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 match apply_conflict_envelope(store, &envelope, faults.as_ref(), &leases) {
-                    Ok(outcome @ ApplyOutcome::Refused(_)) => {
-                        retain_refusal_for_direct_retry(store, &envelope, faults.as_ref())
-                            .map(|()| outcome)
-                            .map_err(RuntimeError::from)
-                    }
-                    Ok(ApplyOutcome::Skipped) => read_replayed_refusal(store, &envelope)
-                        .map(|refusal| refusal.map_or(ApplyOutcome::Skipped, ApplyOutcome::Refused))
+                    Ok(
+                        outcome @ ApplyOutcome {
+                            primary: ApplyDisposition::Refused(_),
+                            ..
+                        },
+                    ) => retain_refusal_for_direct_retry(store, &envelope, faults.as_ref())
+                        .map(|()| outcome)
+                        .map_err(RuntimeError::from),
+                    Ok(
+                        mut outcome @ ApplyOutcome {
+                            primary: ApplyDisposition::Skipped,
+                            ..
+                        },
+                    ) => read_replayed_refusal(store, &envelope)
+                        .map(|refusal| {
+                            outcome.primary = refusal
+                                .map_or(ApplyDisposition::Skipped, ApplyDisposition::Refused);
+                            outcome
+                        })
                         .map_err(RuntimeError::from),
                     outcome => outcome.map_err(RuntimeError::from),
                 }
@@ -4902,18 +4894,29 @@ impl ActorHandle {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
-            let (reply, reply_rx) = oneshot::channel();
-            self.tx
-                .send(Command::Relay {
-                    transport: transport.clone(),
-                    operation: operation.clone(),
-                    leases: leases.clone(),
-                    token: token.clone(),
-                    reply,
+            let queued_transport = transport.clone();
+            let queued_operation = operation.clone();
+            let queued_leases = leases.clone();
+            let queued_token = token.clone();
+            let outcome = self
+                .run(move |store, cache| {
+                    let outcome = if queued_token.is_cancelled() {
+                        Err(RuntimeError::Cancelled)
+                    } else {
+                        execute_relay_operation(
+                            store,
+                            cache,
+                            queued_transport,
+                            queued_operation,
+                            &queued_leases,
+                        )
+                    };
+                    // A pull can claim, replace, or advance lineages behind the
+                    // local path (probe-covered; reset hooks stay unconditional).
+                    cache.clear();
+                    outcome
                 })
-                .await
-                .map_err(|_| RuntimeError::ActorUnavailable)?;
-            let outcome = reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?;
+                .await;
             match outcome {
                 Err(RuntimeError::Relay(RelayError::Local(reason)))
                     if reason == RELAY_IO_PENDING =>
@@ -5702,9 +5705,13 @@ fn replay_pending_materializations(
                     store,
                     root_dir,
                     &job,
-                    DurabilityPolicy::per_os(),
-                    now_ms,
-                    faults,
+                    &MaterializeOptions {
+                        policy: DurabilityPolicy::per_os(),
+                        replacer: &StdReplacer,
+                        backoff: &StdBackoff,
+                        now_ms,
+                        faults,
+                    },
                 ) {
                     Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
                         summary.completed += 1;
@@ -5750,11 +5757,13 @@ fn replay_pending_materializations(
                 root_dir,
                 &job,
                 plaintext.as_bytes(),
-                DurabilityPolicy::per_os(),
-                &StdReplacer,
-                &StdBackoff,
-                now_ms,
-                faults,
+                &MaterializeOptions {
+                    policy: DurabilityPolicy::per_os(),
+                    replacer: &StdReplacer,
+                    backoff: &StdBackoff,
+                    now_ms,
+                    faults,
+                },
             );
             match outcome {
                 Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
@@ -5844,11 +5853,13 @@ fn replay_pending_materializations(
                 store,
                 root_dir,
                 &job,
-                DurabilityPolicy::per_os(),
-                &StdReplacer,
-                &StdBackoff,
-                now_ms,
-                faults,
+                &MaterializeOptions {
+                    policy: DurabilityPolicy::per_os(),
+                    replacer: &StdReplacer,
+                    backoff: &StdBackoff,
+                    now_ms,
+                    faults,
+                },
             )
             .map_err(RuntimeError::from)
         };
@@ -6559,29 +6570,6 @@ fn worker_main(
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
-            Command::Relay {
-                transport,
-                operation,
-                leases,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    execute_relay_operation(
-                        &mut store,
-                        &mut doc_cache,
-                        transport,
-                        operation,
-                        &leases,
-                    )
-                };
-                // A pull can claim, replace, or advance lineages behind the
-                // local path (probe-covered; reset hooks stay unconditional).
-                doc_cache.clear();
-                let _ = reply.send(outcome);
-            }
             Command::Close => {
                 // FIFO ordering means every command enqueued before Close has
                 // already been served; there is nothing left to drain.
@@ -7006,22 +6994,25 @@ fn seed_scene_from_artifact_on_store(
     // guarded closure can run again after a crash retry, so it rebuilds the
     // list from scratch each attempt.
     let mut created_moment_ids: Vec<String> = Vec::new();
-    let outcome = dohc_engine_collab::record_local_update_creating_marker_guarded(
+    let outcome = dohc_engine_collab::record_local_update(
         store,
         doc_cache,
         key,
-        Some(path),
-        ContentKind::Scene,
-        Regime::LocalOnly,
         &seed_update,
-        None,
-        None,
-        true,
-        true,
-        Some(&request_id),
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some(path),
+                content_kind: ContentKind::Scene,
+                regime: Regime::LocalOnly,
+            }),
+            ensure_parent_row: true,
+            require_empty_lineage: true,
+            request_id: Some(&request_id),
+            ..Default::default()
+        },
         faults,
         now_ms,
-        |tx, _| {
+        |tx, _, _update_sha| {
             created_moment_ids.clear();
             let version_is_active: bool = tx
                 .query_row(
@@ -7459,25 +7450,31 @@ fn ydoc_record_update_on_store(
     let journal_key = key.clone();
     let journal_path = path.to_owned();
     let journal_kind = content_kind;
-    match dohc_engine_collab::record_local_update_creating_marker_guarded_for_lineage(
+    match dohc_engine_collab::record_local_update(
         store,
         doc_cache,
         key,
-        Some(path),
-        content_kind,
-        regime,
         update,
-        actor_origin_id.as_deref(),
-        attribution.as_ref(),
-        expected_lineage_claim_id.as_deref(),
-        // Parent row, seed guard, marker, append, and outbound journal all
-        // commit in one transaction — no bare-parent crash window, and a
-        // timed-out-commit seed retry dedupes inside the guard instead of
-        // refusing seed-onto-existing-lineage.
-        true,
-        require_empty_lineage,
-        seed_source_sha256.as_deref(),
-        request_id.as_deref(),
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some(path),
+                content_kind,
+                regime,
+            }),
+            actor_origin_id: actor_origin_id.as_deref(),
+            attribution: attribution.as_ref(),
+            lineage_guard: dohc_engine_collab::LineageGuard::Expect(
+                expected_lineage_claim_id.as_deref(),
+            ),
+            // Parent row, seed guard, marker, append, and outbound journal all
+            // commit in one transaction — no bare-parent crash window, and a
+            // timed-out-commit seed retry dedupes inside the guard instead of
+            // refusing seed-onto-existing-lineage.
+            ensure_parent_row: true,
+            require_empty_lineage,
+            seed_source_sha256: seed_source_sha256.as_deref(),
+            request_id: request_id.as_deref(),
+        },
         faults,
         now_ms,
         |tx, outcome, update_sha| {
@@ -7874,11 +7871,13 @@ fn ydoc_settle_on_store(
                 store,
                 root_dir,
                 &job,
-                DurabilityPolicy::per_os(),
-                &StdReplacer,
-                &StdBackoff,
-                now_ms,
-                faults,
+                &MaterializeOptions {
+                    policy: DurabilityPolicy::per_os(),
+                    replacer: &StdReplacer,
+                    backoff: &StdBackoff,
+                    now_ms,
+                    faults,
+                },
             );
             let replay_outcome = match replay_outcome {
                 Ok(outcome) => outcome,
@@ -8144,11 +8143,13 @@ fn ydoc_settle_on_store(
         store,
         root_dir,
         &job,
-        DurabilityPolicy::per_os(),
-        &StdReplacer,
-        &StdBackoff,
-        now_ms,
-        faults,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &StdBackoff,
+            now_ms,
+            faults,
+        },
     );
     let job_outcome = match job_outcome {
         Ok(outcome) => outcome,
@@ -8716,11 +8717,13 @@ fn materialize_pending_job(
         store,
         root_dir,
         job,
-        DurabilityPolicy::per_os(),
-        &StdReplacer,
-        &StdBackoff,
-        now_ms,
-        faults,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &StdBackoff,
+            now_ms,
+            faults,
+        },
     );
     let (materialized, reported) = match outcome {
         Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
@@ -11768,17 +11771,22 @@ mod collection_relation_cleanup_tests {
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
             .expect("seed rich document");
         let mut cache = WriterDocCache::new();
-        let appended = dohc_engine_collab::record_local_update_creating_marker(
+        let appended = dohc_engine_collab::record_local_update(
             &mut store,
             &mut cache,
             &key,
-            Some(SOURCE_PATH),
-            ContentKind::Richdoc,
-            Regime::LocalOnly,
             &doc.encode_full_state(),
-            None,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some(SOURCE_PATH),
+                    content_kind: ContentKind::Richdoc,
+                    regime: Regime::LocalOnly,
+                }),
+                ..Default::default()
+            },
             &NoFaults,
             4,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("seed source lineage");
         assert!(matches!(appended, TxnOutcome::Committed(_)));
@@ -11879,22 +11887,23 @@ mod doc_cache_reset_tests {
         let key = DocKey::new("workspace", "main", "document").expect("document key");
         let update = Ydoc::wire().plaintext_insert(0, "cached");
         let mut cache = WriterDocCache::new();
-        let appended = dohc_engine_collab::record_local_update_creating_marker_guarded(
+        let appended = dohc_engine_collab::record_local_update(
             &mut store,
             &mut cache,
             &key,
-            Some("document.md"),
-            ContentKind::Plaintext,
-            Regime::LocalOnly,
             &update,
-            None,
-            None,
-            true,
-            false,
-            None,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some("document.md"),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                ensure_parent_row: true,
+                ..Default::default()
+            },
             &NoFaults,
             2,
-            |_tx, _outcome| Ok(()),
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("append update");
         assert!(matches!(appended, TxnOutcome::Committed(_)));
@@ -12592,7 +12601,6 @@ mod capture_secret_root_guard_tests {
                 let actor = supervisor.open(&db, 1).expect("actor").actor;
                 let blocker = PausedRootGuard::bind(&root);
                 let blocker_guard: Arc<dyn WorkspaceRootGuard> = blocker.clone();
-                let (blocker_reply, blocker_rx) = oneshot::channel();
                 let blocker_input = CaptureRetire {
                     workspace_id: WORKSPACE_ID.to_owned(),
                     version_id: VERSION_ID.to_owned(),
@@ -12605,30 +12613,17 @@ mod capture_secret_root_guard_tests {
                     only_if_capture_origin: true,
                     allow_ydoc_origin: true,
                 };
-                let workspace_root: Option<CommandWorkspaceRoot> =
-                    Some((root, Some(blocker_guard)));
-                let leases = LeaseRegistry::new();
-                let blocker_token = CancellationToken::new();
-                actor
-                    .tx
-                    .blocking_send(Command::Run(Box::new(move |store, cache| {
-                        let (root_dir, root_guard) =
-                            command_workspace_root_parts(workspace_root.as_ref());
-                        let outcome = with_local_file_mutation_cache_reset(cache, || {
-                            capture_retire_on_store(
-                                store,
-                                &blocker_input,
-                                root_dir,
-                                root_guard,
-                                None,
-                                &leases,
-                                &NoFaults,
-                                &blocker_token,
-                            )
-                        });
-                        let _ = blocker_reply.send(outcome);
-                    })))
-                    .expect("queue blocker");
+                let blocker_actor = actor.clone();
+                let blocker_thread = std::thread::spawn(move || {
+                    blocker_actor.capture_retire_materialized_blocking_guarded(
+                        blocker_input,
+                        root,
+                        Arc::new(()),
+                        LeaseRegistry::new(),
+                        Arc::new(NoFaults),
+                        blocker_guard,
+                    )
+                });
                 blocker.wait_until_reached();
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -12702,7 +12697,7 @@ mod capture_secret_root_guard_tests {
                     })))
                     .expect("queue read barrier after cancelled mutation");
                 blocker.release();
-                let blocker_result = blocker_rx.blocking_recv();
+                let blocker_result = blocker_thread.join().expect("join blocker caller");
                 let result = pending.map(|pending| runtime.block_on(pending));
                 let drained_result = drained_rx.blocking_recv();
                 drop(actor);
@@ -12731,6 +12726,18 @@ mod capture_secret_root_guard_tests {
                 assert_eq!(after, before, "{method}, abandoned reply={abandon_reply}");
             }
         }
+    }
+
+    fn wait_for_command_admission(actor: &ActorHandle, available_before: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while actor.tx.capacity() == available_before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "public call did not acquire an actor channel slot"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(actor.tx.capacity(), available_before - 1);
     }
 
     struct RejectSecondValidation {
@@ -12833,12 +12840,10 @@ mod capture_secret_root_guard_tests {
         std::fs::create_dir_all(root.join("notes")).expect("create original notes");
         std::fs::write(root.join(PATH), b"original body").expect("write original file");
 
-        // Hold the writer on a command already ahead of the batch. Enqueuing
-        // both commands directly proves the root replacement happens after the
-        // batch entered the actor queue and before its transaction can start.
+        // Hold the writer until the public batch call acquires a channel slot.
+        // Replace the root before that call can start its transaction.
         let blocker = PausedRootGuard::bind(&root);
         let blocker_guard: Arc<dyn WorkspaceRootGuard> = blocker.clone();
-        let (blocker_reply, blocker_reply_rx) = oneshot::channel();
         let input: CaptureRetire = CaptureRetire {
             workspace_id: WORKSPACE_ID.to_owned(),
             version_id: VERSION_ID.to_owned(),
@@ -12851,35 +12856,21 @@ mod capture_secret_root_guard_tests {
             only_if_capture_origin: true,
             allow_ydoc_origin: true,
         };
-        let workspace_root: Option<CommandWorkspaceRoot> =
-            Some((root.clone(), Some(blocker_guard)));
-        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
-        let leases: LeaseRegistry = LeaseRegistry::new();
-        let faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
-        let token: CancellationToken = CancellationToken::new();
-        actor
-            .tx
-            .blocking_send(Command::Run(Box::new(move |store, cache| {
-                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
-                let outcome = with_local_file_mutation_cache_reset(cache, || {
-                    capture_retire_on_store(
-                        store,
-                        &input,
-                        root_dir,
-                        root_guard,
-                        self_writes.as_deref(),
-                        &leases,
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = blocker_reply.send(outcome);
-            })))
-            .expect("queue actor blocker");
+        let blocker_actor = actor.clone();
+        let blocker_root = root.clone();
+        let blocker_thread = std::thread::spawn(move || {
+            blocker_actor.capture_retire_materialized_blocking_guarded(
+                input,
+                blocker_root,
+                Arc::new(()),
+                LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                blocker_guard,
+            )
+        });
         blocker.wait_until_reached();
 
         let captured_guard: Arc<dyn WorkspaceRootGuard> = Arc::new(BoundRootGuard::bind(&root));
-        let (batch_reply, batch_reply_rx) = oneshot::channel();
         let inputs: Vec<CaptureIngest> = vec![CaptureIngest {
             workspace_id: WORKSPACE_ID.to_owned(),
             version_id: VERSION_ID.to_owned(),
@@ -12894,40 +12885,28 @@ mod capture_secret_root_guard_tests {
             claim_foreign_head: false,
         }];
         let search_policy: Arc<SearchPolicySnapshot> = Arc::new(read_engine_search_policy(&root));
-        let leases: LeaseRegistry = LeaseRegistry::new();
-        let faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
-        let root_dir: PathBuf = root.clone();
-        let root_guard: Arc<dyn WorkspaceRootGuard> = captured_guard;
-        let token: CancellationToken = CancellationToken::new();
-        actor
-            .tx
-            .blocking_send(Command::Run(Box::new(move |store, cache| {
-                let outcome = with_local_file_mutation_cache_reset(cache, || {
-                    capture_ingest_batch_on_store(
-                        store,
-                        &inputs,
-                        &search_policy,
-                        &leases,
-                        faults.as_ref(),
-                        &token,
-                        (&root_dir, root_guard.as_ref()),
-                    )
-                });
-                let _ = batch_reply.send(outcome);
-            })))
-            .expect("queue capture batch behind blocker");
+        let batch_actor = actor.clone();
+        let batch_root = root.clone();
+        let available_before = actor.tx.capacity();
+        let batch_thread = std::thread::spawn(move || {
+            batch_actor.capture_ingest_batch_blocking(
+                inputs,
+                search_policy,
+                LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                batch_root,
+                captured_guard,
+            )
+        });
+        wait_for_command_admission(&actor, available_before);
 
         std::fs::rename(&root, &moved_root).expect("move original workspace root");
         std::fs::create_dir_all(root.join("notes")).expect("create replacement notes");
         std::fs::write(root.join(PATH), b"replacement body").expect("write replacement file");
         let replacement_before = std::fs::read(root.join(PATH)).expect("read replacement file");
         blocker.release();
-        let blocker_result = blocker_reply_rx
-            .blocking_recv()
-            .expect("receive blocker result");
-        let batch_result = batch_reply_rx
-            .blocking_recv()
-            .expect("receive batch result");
+        let blocker_result = blocker_thread.join().expect("join blocker caller");
+        let batch_result = batch_thread.join().expect("join batch caller");
         let replacement_after = std::fs::read(root.join(PATH)).expect("reread replacement file");
 
         std::fs::remove_dir_all(&root).expect("remove replacement workspace root");
@@ -13008,12 +12987,10 @@ mod capture_secret_root_guard_tests {
             .expect("seed captured secret");
         std::fs::remove_file(root.join(SECRET_PATH)).expect("observe original secret removal");
 
-        // Hold the worker on a command already ahead of the secret retire.
-        // Sending the retire below therefore proves it entered the real actor
-        // queue before the pathname is rebound to a replacement directory.
+        // Hold the writer until the public secret retire call acquires a channel
+        // slot, then replace the root before the worker can validate it.
         let blocker = PausedRootGuard::bind(&root);
         let blocker_guard: Arc<dyn WorkspaceRootGuard> = blocker.clone();
-        let (blocker_reply, blocker_reply_rx) = oneshot::channel();
         let input: CaptureRetire = CaptureRetire {
             workspace_id: WORKSPACE_ID.to_owned(),
             version_id: VERSION_ID.to_owned(),
@@ -13026,35 +13003,21 @@ mod capture_secret_root_guard_tests {
             only_if_capture_origin: true,
             allow_ydoc_origin: true,
         };
-        let workspace_root: Option<CommandWorkspaceRoot> =
-            Some((root.clone(), Some(blocker_guard)));
-        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
-        let leases: LeaseRegistry = LeaseRegistry::new();
-        let faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
-        let token: CancellationToken = CancellationToken::new();
-        actor
-            .tx
-            .blocking_send(Command::Run(Box::new(move |store, cache| {
-                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
-                let outcome = with_local_file_mutation_cache_reset(cache, || {
-                    capture_retire_on_store(
-                        store,
-                        &input,
-                        root_dir,
-                        root_guard,
-                        self_writes.as_deref(),
-                        &leases,
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = blocker_reply.send(outcome);
-            })))
-            .expect("queue actor blocker");
+        let blocker_actor = actor.clone();
+        let blocker_root = root.clone();
+        let blocker_thread = std::thread::spawn(move || {
+            blocker_actor.capture_retire_materialized_blocking_guarded(
+                input,
+                blocker_root,
+                Arc::new(()),
+                LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                blocker_guard,
+            )
+        });
         blocker.wait_until_reached();
 
         let captured_guard: Arc<dyn WorkspaceRootGuard> = Arc::new(BoundRootGuard::bind(&root));
-        let (retire_reply, retire_reply_rx) = oneshot::channel();
         let input: CaptureSecretRetire = CaptureSecretRetire {
             workspace_id: WORKSPACE_ID.to_owned(),
             version_id: VERSION_ID.to_owned(),
@@ -13064,25 +13027,18 @@ mod capture_secret_root_guard_tests {
             now_ms: 4,
             only_if_own_origin: true,
         };
-        let workspace_root: Option<CommandWorkspaceRoot> =
-            Some((root.clone(), Some(captured_guard)));
-        let faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
-        let token: CancellationToken = CancellationToken::new();
-        actor
-            .tx
-            .blocking_send(Command::Run(Box::new(move |store, _cache| {
-                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
-                let outcome = capture_secret_retire_on_store(
-                    store,
-                    &input,
-                    root_dir,
-                    root_guard,
-                    faults.as_ref(),
-                    &token,
-                );
-                let _ = retire_reply.send(outcome);
-            })))
-            .expect("queue secret retire behind blocker");
+        let retire_actor = actor.clone();
+        let retire_root = root.clone();
+        let available_before = actor.tx.capacity();
+        let retire_thread = std::thread::spawn(move || {
+            retire_actor.capture_secret_retire_blocking_guarded(
+                input,
+                retire_root,
+                Arc::new(NoFaults),
+                captured_guard,
+            )
+        });
+        wait_for_command_admission(&actor, available_before);
 
         std::fs::rename(&root, &moved_root).expect("move original workspace root");
         std::fs::create_dir(&root).expect("create replacement workspace root");
@@ -13091,12 +13047,8 @@ mod capture_secret_root_guard_tests {
         let replacement_before =
             std::fs::read(root.join(SECRET_PATH)).expect("read replacement secret");
         blocker.release();
-        let blocker_result = blocker_reply_rx
-            .blocking_recv()
-            .expect("receive blocker result");
-        let retire_result = retire_reply_rx
-            .blocking_recv()
-            .expect("receive secret retire result");
+        let blocker_result = blocker_thread.join().expect("join blocker caller");
+        let retire_result = retire_thread.join().expect("join secret retire caller");
         let replacement_after =
             std::fs::read(root.join(SECRET_PATH)).expect("reread replacement secret");
 

@@ -18,6 +18,49 @@ interface TestSession {
 }
 
 describe("renderer workspace operation runner", () => {
+  it.each(["renderer", "physical"] as const)(
+    "reports a retired %s operation without throwing",
+    async (retiredOwner) => {
+      const attachmentId = Symbol("attachment");
+      let current = true;
+      const session: TestSession = {
+        workspaceId: "workspace",
+        attachmentId,
+        generation: 1,
+        isCurrent: () => retiredOwner !== "renderer" || current,
+      };
+      const run = createRendererWorkspaceOperationRunner<
+        object,
+        TestWorkspace,
+        Record<string, never>,
+        TestSession
+      >({
+        currentSession: () => session,
+        withPhysicalOperation: async (_workspaceId, work) => work({
+          workspace: {
+            workspaceId: "workspace",
+            attachmentId,
+            rootPath: "C:/canonical",
+          },
+          state: {},
+          signal: new AbortController().signal,
+          assertCurrent: () => {
+            if (retiredOwner === "physical" && !current) {
+              throw new Error("physical retired");
+            }
+          },
+        }),
+      });
+
+      await expect(run({}, "workspace", "renderer retired", (operation) => {
+        const isCurrent = operation.isCurrent;
+        expect(isCurrent()).toBe(true);
+        current = false;
+        expect(isCurrent()).toBe(false);
+      })).rejects.toThrow(`${retiredOwner} retired`);
+    },
+  );
+
   it("admits only the active renderer attachment and keeps its canonical root", async () => {
     const attachmentA = Symbol("A");
     const attachmentB = Symbol("B");

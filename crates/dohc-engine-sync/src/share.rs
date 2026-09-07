@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::apply::apply_envelope_with;
 use crate::cursor::advance_shared_peer_tx;
 use crate::{
-    ApplyOutcome, PathClass, ReplicationEnvelope, SyncError, classify_share_path,
+    ApplyDisposition, ApplyOutcome, PathClass, ReplicationEnvelope, SyncError, classify_share_path,
     read_shared_peer_position,
 };
 
@@ -169,7 +169,9 @@ pub fn apply_shared_envelope(
         boundary.surface == ShareSurface::ShareView && is_share_view_chat_kind(&envelope.op_kind);
     if boundary.surface == ShareSurface::ShareView && !share_view_chat {
         enforce_share_view_boundary(boundary, envelope)?;
-        return Ok(ApplyOutcome::Applied(envelope.origin_seq));
+        return Ok(ApplyOutcome::new(ApplyDisposition::Applied(
+            envelope.origin_seq,
+        )));
     }
     if share_view_chat {
         enforce_share_view_thread_create(boundary, envelope)?;
@@ -184,7 +186,7 @@ pub fn apply_shared_envelope(
         &source_origin_id,
     )?;
     if source_origin_seq <= position.applied_origin_seq {
-        return Ok(ApplyOutcome::Skipped);
+        return Ok(ApplyOutcome::new(ApplyDisposition::Skipped));
     }
     let dense_seq = position
         .dense_seq
@@ -195,7 +197,7 @@ pub fn apply_shared_envelope(
     dense.origin_seq = dense_seq;
 
     let mut replay_refusals = Vec::new();
-    let outcome = apply_envelope_with(store, &dense, faults, |tx, op| {
+    let mut outcome = apply_envelope_with(store, &dense, faults, |tx, op| {
         if share_view_chat {
             enforce_share_view_chat_boundary(tx, boundary, op)?;
         } else {
@@ -210,10 +212,9 @@ pub fn apply_shared_envelope(
             source_origin_seq,
         )
     })?;
-    let advance_source = match &outcome {
-        ApplyOutcome::Applied(_) | ApplyOutcome::Crashed { .. } => false,
-        ApplyOutcome::Refused(_) | ApplyOutcome::Skipped => true,
-        ApplyOutcome::WithDiagnostics { .. } => unreachable!("diagnostics are attached below"),
+    let advance_source = match &outcome.primary {
+        ApplyDisposition::Applied(_) | ApplyDisposition::Crashed { .. } => false,
+        ApplyDisposition::Refused(_) | ApplyDisposition::Skipped => true,
     };
     if advance_source {
         match store.write_with(faults, |tx| {
@@ -230,7 +231,8 @@ pub fn apply_shared_envelope(
             TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
         }
     }
-    Ok(outcome.with_refusals(replay_refusals))
+    outcome.refusals.extend(replay_refusals);
+    Ok(outcome)
 }
 
 /// Fail-closed SharedChannel scoping. Every admitted op must positively bind to

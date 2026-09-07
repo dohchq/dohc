@@ -30,11 +30,6 @@ type BuilderTreeNode = {
 // The last path segment — the name a tree row displays. Lives beside the tree
 // model (rather than inline in the explorer) so row-render tests can spy it as
 // their render-count probe (the chatFileMentions precedent).
-export function leafOf(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash < 0 ? path : path.slice(slash + 1);
-}
-
 // Build a tree from files + explicit folder rows. Obsidian-style: folders are
 // first-class containers (can sit empty), files are leaves at their full path.
 export function buildTree(
