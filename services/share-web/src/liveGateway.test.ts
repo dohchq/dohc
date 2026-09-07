@@ -41,6 +41,7 @@ beforeAll(() => { console.info(`NAMED_GATEWAY_TEST_PID=${process.pid}`); });
 afterEach(async () => {
   vi.restoreAllMocks();
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  vi.useRealTimers();
 });
 
 async function fixture(overrides: Partial<LiveGatewayOptions> = {}) {
@@ -216,17 +217,68 @@ describe("private named live gateway", () => {
     const late = deferred<LiveGatewayHostRoute>();
     let signal!: AbortSignal;
     let receive!: LiveGatewayHostReceiveOptions;
-    const state = await fixture({ limits: { ...limits, upgradeTimeoutMs: 25 }, openHostRoute: async (_ticket, cancellation, options) => {
+    const state = await fixture({ openHostRoute: async (_ticket, cancellation, options) => {
       signal = cancellation; receive = options; ready.resolve(); return late.promise;
     } });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const client = state.browser();
     await ready.promise;
+    await vi.advanceTimersByTimeAsync(limits.upgradeTimeoutMs);
     expect(await client.status).toBe(404);
     expect(signal.aborted).toBe(true);
     await Promise.all(state.completions);
+    vi.useRealTimers();
     const route = await state.makeRoute(ticket(), receive);
     const closed = once(route.socket, "close");
     late.resolve(route);
+    await closed;
+    expect(client.messages).toEqual([]);
+  });
+
+  it("disposes a fulfilled host route when shutdown wins before delivery", async () => {
+    const state = await fixture();
+    const route = await state.makeRoute(ticket(), state.receiveOptions);
+    const terminate = vi.spyOn(route.socket, "terminate");
+    state.open.mockImplementation(() => {
+      queueMicrotask(() => queueMicrotask(() => state.gateway.close()));
+      return Promise.resolve(route);
+    });
+    const client = state.browser();
+    expect(await client.status).toBe(404);
+    await Promise.all(state.completions);
+    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(client.messages).toEqual([]);
+  });
+
+  it("normalizes a Blob-mode host socket before forwarding real binary frames", async () => {
+    const state = await fixture();
+    state.open.mockImplementation(async (redeemed, _signal, receive) => {
+      const route = await state.makeRoute(redeemed, receive);
+      Reflect.set(route.socket, "binaryType", "blob");
+      expect(route.socket.binaryType).toBe("blob");
+      return route;
+    });
+    const client = state.browser();
+    expect(await client.status).toBe(101);
+    const route = (await state.open.mock.results[0]!.value)!;
+    expect(route.socket.binaryType).toBe("nodebuffer");
+    const received = once(client.socket, "message");
+    state.hosts[0]!.send(Buffer.from("host frame"));
+    expect((await received)[0]).toEqual(Buffer.from("host frame"));
+  });
+
+  it.each([
+    { name: "Blob", payload: new Blob(["unexpected"]) },
+    { name: "ArrayBuffer", payload: new ArrayBuffer(1) },
+    { name: "fragments", payload: [Buffer.from("unexpected")] },
+  ])("contains an unexpected $name payload after admission", async ({ payload }) => {
+    const state = await fixture();
+    const client = state.browser();
+    expect(await client.status).toBe(101);
+    const route = (await state.open.mock.results[0]!.value)!;
+    const closed = once(client.socket, "close");
+    expect(() => route.socket.emit("message", payload, true)).not.toThrow();
+    expect(route.socket.readyState).not.toBe(WebSocket.OPEN);
     await closed;
     expect(client.messages).toEqual([]);
   });

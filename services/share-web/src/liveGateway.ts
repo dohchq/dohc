@@ -1,6 +1,6 @@
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
-import { WebSocket, WebSocketServer, type RawData } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 import { parseRedeemedLiveTicket, type RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
 import { createLiveGatewayRequestParser } from "./liveGatewayRequest.js";
 
@@ -64,16 +64,14 @@ function copiedSession(value: NamedLiveGatewaySession): NamedLiveGatewaySession 
   return Object.freeze({ userId, workspaceId, shareId, grantId });
 }
 
-function byteLength(data: RawData): number {
-  return Array.isArray(data) ? data.reduce((total, chunk) => total + chunk.length, 0) : data.byteLength;
-}
-
-function untilCancelled<T>(pending: Promise<T>, signal: AbortSignal): Promise<T | null> {
+function untilCancelled<T>(pending: Promise<T>, signal: AbortSignal, dispose?: (value: T) => void): Promise<T | null> {
   return new Promise((resolve, reject) => {
     const cancelled = () => resolve(null);
     signal.addEventListener("abort", cancelled, { once: true });
     if (signal.aborted) cancelled();
-    pending.then(resolve, reject).finally(() => signal.removeEventListener("abort", cancelled));
+    pending.then(value => {
+      if (signal.aborted) dispose?.(value); else resolve(value);
+    }, reject).finally(() => signal.removeEventListener("abort", cancelled));
   });
 }
 
@@ -191,14 +189,12 @@ export function createLiveGateway(options: LiveGatewayOptions) {
         ticket.authority.principalId !== session.userId || ticket.authority.grantId !== session.grantId ||
         ticket.binding.workspaceId !== session.workspaceId) { stop(); return; }
       const identity = JSON.stringify(ticket);
-      const opened = await untilCancelled(openHostRoute(parseRedeemedLiveTicket(ticket), abort.signal, hostReceive).then(late => {
-        if (late !== null && abort.signal.aborted) {
+      const opened = await untilCancelled(openHostRoute(parseRedeemedLiveTicket(ticket), abort.signal, hostReceive), abort.signal, late => {
+        if (late !== null) {
           late.socket.on("error", () => undefined);
           late.socket.terminate();
-          return null;
         }
-        return late;
-      }), abort.signal);
+      });
       if (opened === null) { stop(); return; }
       if (done) { opened.socket.terminate(); return; }
       route = { ticket: opened.ticket, socket: opened.socket, invalidated: opened.invalidated };
@@ -207,12 +203,14 @@ export function createLiveGateway(options: LiveGatewayOptions) {
       if (JSON.stringify(parseRedeemedLiveTicket(route.ticket)) !== identity || route.socket.readyState !== WebSocket.OPEN || !route.socket.isPaused) {
         stop(); return;
       }
+      route.socket.binaryType = "nodebuffer";
       route.invalidated.addEventListener("abort", stop, { once: true });
       if (route.invalidated.aborted || done || socket.destroyed || !socket.readable || !socket.writable) { stop(); return; }
       // No asynchronous step may separate this invalidation check from the 101.
       server.handleUpgrade(request, socket, head, accepted => {
         browser = accepted;
         if (done) { accepted.terminate(); return; }
+        accepted.binaryType = "nodebuffer";
         const host = route!.socket;
         accepted.on("error", stop);
         accepted.once("close", stop);
@@ -220,23 +218,23 @@ export function createLiveGateway(options: LiveGatewayOptions) {
         function writer(destination: WebSocket) {
           let pendingBytes = 0;
           let pendingFrames = 0;
-          return (data: RawData, pong = false) => {
+          return (data: unknown, pong = false) => {
             if (done || draining) return;
-            const size = byteLength(data);
+            if (!Buffer.isBuffer(data)) { stop(); return; }
+            const size = data.byteLength;
             if ((!pong && (size === 0 || size > limits.maxFrameBytes)) || size > limits.maxPendingBytes - pendingBytes ||
               pendingFrames >= limits.maxPendingFrames || destination.readyState !== WebSocket.OPEN ||
               destination.bufferedAmount > limits.maxPendingBytes - size) { stop(); return; }
-            const bytes = Array.isArray(data) ? Buffer.concat(data, size) :
-              data instanceof ArrayBuffer ? Buffer.from(new Uint8Array(data)) : Buffer.from(data);
-            pendingBytes += size;
-            pendingFrames += 1;
-            touch();
-            const completed = (error?: Error) => {
-              pendingBytes -= size;
-              pendingFrames -= 1;
-              if (error) stop();
-            };
             try {
+              const bytes = Buffer.from(data);
+              pendingBytes += size;
+              pendingFrames += 1;
+              touch();
+              const completed = (error?: Error) => {
+                pendingBytes -= size;
+                pendingFrames -= 1;
+                if (error) stop();
+              };
               if (pong) destination.pong(bytes, undefined, completed);
               else destination.send(bytes, { binary: true, compress: false }, completed);
             } catch { stop(); }
