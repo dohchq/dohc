@@ -1,7 +1,7 @@
 import { asRecord } from "@dohc/workspace-core";
 import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { MAX_LOG_PAGE_SIZE, MAX_SHARE_ID_CHARS } from "./wireLimits";
-import { badRequest } from "./errors";
+import { badRequest, notFound } from "./errors";
 
 export async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
   let value: unknown;
@@ -127,4 +127,16 @@ export function parseLimit(value: string | null): number {
 
 export function assertSha256(value: string): void {
   if (!SHA256_HEX_PATTERN.test(value)) throw badRequest("sha256 must be 64 lowercase hex characters");
+}
+
+export function parseShareId(value: string | undefined): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_SHARE_ID_CHARS ||
+    !/^[a-z0-9][a-z0-9-]*$/u.test(value)
+  ) {
+    throw notFound();
+  }
+  return value;
 }
