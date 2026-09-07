@@ -117,8 +117,11 @@ it("keeps storage failures internal and strips credential-bearing errors", async
       expect(error).toBeInstanceOf(Error);
       if (!(error instanceof Error)) throw new Error("Expected an internal failure");
       expect(String(error)).toBe("Error: Live-ticket operation failed.");
-      expect(JSON.stringify(error)).not.toContain(token);
-      expect(JSON.stringify(error)).not.toContain(hash);
+      expect(error.stack).not.toContain(token);
+      expect(error.stack).not.toContain(hash);
+      const serialized = JSON.stringify(error, Object.getOwnPropertyNames(error));
+      expect(serialized).not.toContain(token);
+      expect(serialized).not.toContain(hash);
       expect(error.cause).toBeUndefined();
     }
   } finally { await state.close(); }

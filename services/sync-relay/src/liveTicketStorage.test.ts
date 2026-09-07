@@ -413,7 +413,7 @@ it("refuses both operations while the host is draining", async () => {
 });
 
 it("refuses activation, freezes the ticket epoch, and preserves capacity across host changes", async () => {
-  const state = await fixture();
+  const state = await fixture({ liveTickets: { retainedTicketsPerPrincipalGrant: 3, expiredTicketCleanupBatchSize: 1, now: () => 1000 } });
   try {
     state.storage.mintNamedLiveTicket(mint);
     state.storage.mintNamedLiveTicket(another(2));
@@ -428,7 +428,11 @@ it("refuses activation, freezes the ticket epoch, and preserves capacity across 
     expect(state.storage.activateLiveHostTransition({ ...coordinate, transitionId: "transition-1", transitionGeneration,
       transitionFromEpoch: host.hostEpoch, updatedAtMs: 7, guard: () => undefined }).ok).toBe(true);
     expect(state.storage.redeemNamedLiveTicket({ ...redeem, report: { ...report, connection: coordinate } })).toBeNull();
-    expect(state.storage.mintNamedLiveTicket({ ...another(3), report: { ...report, connection: coordinate } })).toBeNull();
+    expect(state.storage.mintNamedLiveTicket({ ...another(3), report: { ...report, connection: coordinate } })).not.toBeNull();
+    expect(state.storage.mintNamedLiveTicket({ ...another(4), report: { ...report, connection: coordinate } })).toBeNull();
+    expect(state.raw.prepare(`SELECT ticket_id FROM ${table} ORDER BY ticket_id`).all()).toEqual([
+      { ticket_id: "ticket-1" }, { ticket_id: "ticket-2" }, { ticket_id: "ticket-3" },
+    ]);
   } finally { await state.close(); }
 });
 
