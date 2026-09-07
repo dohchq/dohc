@@ -65,4 +65,6 @@ pub use dohc_engine_domain::{
     ResolveTextConflict, ResolveTextConflictResult, RollbackTextFileMutation, TextConflict,
     TextSnapshot, VersionFileChange, VersionedTextComparison, WriteBinary, WriteResult, WriteText,
 };
-pub use dohc_engine_sync::{ApplyOutcome, ConflictApplyResult, ReplicationEnvelope};
+pub use dohc_engine_sync::{
+    ApplyDisposition, ApplyOutcome, ConflictApplyResult, ReplicationEnvelope,
+};

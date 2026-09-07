@@ -55,6 +55,7 @@ export function useAgentSetup(
     const wasOpen = previousSettingsSection.current !== null;
     previousSettingsSection.current = settingsSection;
     if (!wasOpen || settingsSection !== null) return;
+    bootstrapAgentStatusRead.current = null;
     const version = agentSetupRequestRef.current + 1;
     agentSetupRequestRef.current = version;
     void bridge()

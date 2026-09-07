@@ -327,16 +327,18 @@ export function EngineMomentDiffPage({
           >
             {engineMomentSummary(moment)}
           </p>
-          {restoreState.status === "restored" || restoreState.status === "error" ? (
-            <p
-              data-testid="engine-diff-restore-status"
-              className={`mb-0 mt-1 text-[11px] ${
-                restoreState.status === "error" ? "text-danger" : "text-success"
-              }`}
-            >
-              {restoreState.message}
-            </p>
-          ) : null}
+          <div role="status" aria-live="polite">
+            {restoreState.status === "restored" || restoreState.status === "error" ? (
+              <p
+                data-testid="engine-diff-restore-status"
+                className={`mb-0 mt-1 text-[11px] ${
+                  restoreState.status === "error" ? "text-danger" : "text-success"
+                }`}
+              >
+                {restoreState.message}
+              </p>
+            ) : null}
+          </div>
         </div>
         <button
           type="button"

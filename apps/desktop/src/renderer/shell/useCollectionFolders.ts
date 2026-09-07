@@ -12,8 +12,8 @@ export function useCollectionFolders(
 ) {
   // Collection folders: the engine's collections.list result,
   // cached as the set of folder paths so the Explorer can route a click on a
-  // collection folder to its views. Latest-wins request watermark, same as
-  // the file listing; a failure quietly keeps the last known set — the engine
+  // collection folder to its views. Only the latest issued request commits;
+  // a failure quietly keeps the last known set — the engine
   // may simply not be running, and every activity batch retries.
   const [collectionFolders, setCollectionFolders] = useState<
     ReadonlySet<string>

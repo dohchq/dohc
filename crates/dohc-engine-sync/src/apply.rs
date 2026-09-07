@@ -25,117 +25,46 @@ use crate::{ReplicationEnvelope, SyncError};
 const DIRECT_RPC_REFUSAL_REPORT_ID: &str = "direct-rpc";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApplyOutcome<T> {
+pub struct ApplyOutcome<T> {
+    pub primary: ApplyDisposition<T>,
+    pub refusals: Vec<ReplicationRefusal>,
+    pub sharing_declined: Vec<crate::SharingDeclined>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyDisposition<T> {
     Applied(T),
     Refused(ReplicationRefusal),
     Skipped,
-    Crashed {
-        committed: bool,
-    },
-    /// The envelope has the nested primary disposition plus diagnostics
-    /// surfaced while draining older durable work.
-    WithDiagnostics {
-        outcome: Box<ApplyOutcome<T>>,
-        refusals: Vec<ReplicationRefusal>,
-        sharing_declined: Vec<crate::SharingDeclined>,
-    },
+    Crashed { committed: bool },
 }
 
 impl<T> ApplyOutcome<T> {
+    pub fn new(primary: ApplyDisposition<T>) -> Self {
+        Self {
+            primary,
+            refusals: Vec::new(),
+            sharing_declined: Vec::new(),
+        }
+    }
+
     pub(crate) fn map<U>(self, map: impl FnOnce(T) -> U) -> ApplyOutcome<U> {
-        match self {
-            Self::Applied(value) => ApplyOutcome::Applied(map(value)),
-            Self::Refused(refusal) => ApplyOutcome::Refused(refusal),
-            Self::Skipped => ApplyOutcome::Skipped,
-            Self::Crashed { committed } => ApplyOutcome::Crashed { committed },
-            Self::WithDiagnostics {
-                outcome,
-                refusals,
-                sharing_declined,
-            } => ApplyOutcome::WithDiagnostics {
-                outcome: Box::new(outcome.map(map)),
-                refusals,
-                sharing_declined,
+        ApplyOutcome {
+            primary: match self.primary {
+                ApplyDisposition::Applied(value) => ApplyDisposition::Applied(map(value)),
+                ApplyDisposition::Refused(refusal) => ApplyDisposition::Refused(refusal),
+                ApplyDisposition::Skipped => ApplyDisposition::Skipped,
+                ApplyDisposition::Crashed { committed } => ApplyDisposition::Crashed { committed },
             },
-        }
-    }
-
-    pub(crate) fn with_refusals(self, refusals: Vec<ReplicationRefusal>) -> Self {
-        if refusals.is_empty() {
-            return self;
-        }
-        match self {
-            Self::WithDiagnostics {
-                outcome,
-                refusals: mut existing,
-                sharing_declined,
-            } => {
-                existing.extend(refusals);
-                Self::WithDiagnostics {
-                    outcome,
-                    refusals: existing,
-                    sharing_declined,
-                }
-            }
-            outcome => Self::WithDiagnostics {
-                outcome: Box::new(outcome),
-                refusals,
-                sharing_declined: Vec::new(),
-            },
-        }
-    }
-
-    pub(crate) fn with_sharing_declined(
-        self,
-        sharing_declined: Vec<crate::SharingDeclined>,
-    ) -> Self {
-        if sharing_declined.is_empty() {
-            return self;
-        }
-        match self {
-            Self::WithDiagnostics {
-                outcome,
-                refusals,
-                sharing_declined: mut existing,
-            } => {
-                existing.extend(sharing_declined);
-                Self::WithDiagnostics {
-                    outcome,
-                    refusals,
-                    sharing_declined: existing,
-                }
-            }
-            outcome => Self::WithDiagnostics {
-                outcome: Box::new(outcome),
-                refusals: Vec::new(),
-                sharing_declined,
-            },
-        }
-    }
-
-    pub(crate) fn into_primary_and_diagnostics(
-        self,
-    ) -> (Self, Vec<ReplicationRefusal>, Vec<crate::SharingDeclined>) {
-        match self {
-            Self::WithDiagnostics {
-                outcome,
-                refusals,
-                sharing_declined,
-            } => {
-                let (primary, mut nested_refusals, mut nested_declines) =
-                    outcome.into_primary_and_diagnostics();
-                nested_refusals.extend(refusals);
-                nested_declines.extend(sharing_declined);
-                (primary, nested_refusals, nested_declines)
-            }
-            primary => (primary, Vec::new(), Vec::new()),
+            refusals: self.refusals,
+            sharing_declined: self.sharing_declined,
         }
     }
 }
 
 #[cfg(test)]
 mod diagnostic_tests {
-    use super::{ApplyOutcome, RefusalReason, ReplicationRefusal};
+    use super::{ApplyDisposition, ApplyOutcome, RefusalReason, ReplicationRefusal};
 
     #[test]
     fn sharing_decline_survives_a_skipped_primary_outcome() {
@@ -145,17 +74,20 @@ mod diagnostic_tests {
             limit_bytes: 20,
             observed_bytes: 21,
         };
-        let (primary, refusals, declines) = ApplyOutcome::<()>::Skipped
-            .with_sharing_declined(vec![declined.clone()])
-            .into_primary_and_diagnostics();
+        let outcome = ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: Vec::new(),
+            sharing_declined: vec![declined.clone()],
+        }
+        .map::<()>(|()| panic!("a skipped outcome has no applied payload"));
 
-        assert!(matches!(primary, ApplyOutcome::Skipped));
-        assert!(refusals.is_empty());
-        assert_eq!(declines, [declined]);
+        assert!(matches!(outcome.primary, ApplyDisposition::Skipped));
+        assert!(outcome.refusals.is_empty());
+        assert_eq!(outcome.sharing_declined, [declined]);
     }
 
     #[test]
-    fn map_preserves_nested_refusal_and_sharing_decline_through_unwrapping() {
+    fn map_preserves_refusal_and_sharing_decline_order() {
         let refusal = ReplicationRefusal {
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
@@ -165,22 +97,51 @@ mod diagnostic_tests {
                 reason: "invalid update".to_owned(),
             },
         };
+        let refusals = vec![
+            refusal.clone(),
+            ReplicationRefusal {
+                origin_seq: 4,
+                ..refusal.clone()
+            },
+        ];
         let declined = crate::SharingDeclined {
-            path: "notes/nested.md".to_owned(),
+            path: "notes/first.md".to_owned(),
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limit_bytes: 20,
             observed_bytes: 21,
         };
+        let declines = vec![
+            declined.clone(),
+            crate::SharingDeclined {
+                path: "notes/second.md".to_owned(),
+                ..declined
+            },
+        ];
+        let mapped = ApplyOutcome {
+            primary: ApplyDisposition::Applied("mapped value"),
+            refusals: refusals.clone(),
+            sharing_declined: declines.clone(),
+        }
+        .map(str::len);
 
-        let (primary, refusals, declines) = ApplyOutcome::Applied("mapped value")
-            .with_refusals(vec![refusal.clone()])
-            .with_sharing_declined(vec![declined.clone()])
-            .map(str::len)
-            .into_primary_and_diagnostics();
-
-        assert!(matches!(primary, ApplyOutcome::Applied(12)));
-        assert_eq!(refusals, [refusal]);
-        assert_eq!(declines, [declined]);
+        assert_eq!(mapped.primary, ApplyDisposition::Applied(12));
+        assert_eq!(mapped.refusals, refusals);
+        assert_eq!(mapped.sharing_declined, declines);
+        for primary in [
+            ApplyDisposition::<()>::Refused(refusal),
+            ApplyDisposition::Skipped,
+            ApplyDisposition::Crashed { committed: false },
+            ApplyDisposition::Crashed { committed: true },
+        ] {
+            let outcome = ApplyOutcome {
+                primary,
+                refusals: refusals.clone(),
+                sharing_declined: declines.clone(),
+            };
+            let expected = outcome.clone();
+            let mapped = outcome.map(|()| panic!("only an applied payload can be mapped"));
+            assert_eq!(mapped, expected);
+        }
     }
 }
 
@@ -363,16 +324,17 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         }
         Ok(admission)
     });
-    match result {
-        Ok(TxnOutcome::Committed(Admission::Applied(value))) => Ok(ApplyOutcome::Applied(value)),
+    let primary = match result {
+        Ok(TxnOutcome::Committed(Admission::Applied(value))) => ApplyDisposition::Applied(value),
         Ok(TxnOutcome::Committed(Admission::Refused(refusal))) => {
-            Ok(ApplyOutcome::Refused(refusal))
+            ApplyDisposition::Refused(refusal)
         }
-        Ok(TxnOutcome::Committed(Admission::Skipped)) => Ok(ApplyOutcome::Skipped),
-        Ok(TxnOutcome::Crashed { committed }) => Ok(ApplyOutcome::Crashed { committed }),
-        Err(SyncError::FaultCrash) => Ok(ApplyOutcome::Crashed { committed: false }),
-        Err(err) => Err(err),
-    }
+        Ok(TxnOutcome::Committed(Admission::Skipped)) => ApplyDisposition::Skipped,
+        Ok(TxnOutcome::Crashed { committed }) => ApplyDisposition::Crashed { committed },
+        Err(SyncError::FaultCrash) => ApplyDisposition::Crashed { committed: false },
+        Err(err) => return Err(err),
+    };
+    Ok(ApplyOutcome::new(primary))
 }
 
 fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
@@ -569,10 +531,11 @@ pub fn apply_chat_envelope(
     }
     apply_envelope_with(store, envelope, faults, apply_chat_tx).map(|outcome| {
         let mut replay_refusals = Vec::new();
-        let outcome = outcome.map(|refusals| {
+        let mut outcome = outcome.map(|refusals| {
             replay_refusals = refusals;
         });
-        outcome.with_refusals(replay_refusals)
+        outcome.refusals.extend(replay_refusals);
+        outcome
     })
 }
 

@@ -97,6 +97,7 @@ export function useShareMounts(
   // switch consumes that snapshot without another full-registry IPC; registry
   // change events and explicit writers refresh it at the root.
   useEffect(() => {
+    shareMountsToken.current += 1;
     commitShareMounts(workspaceShareMounts);
   }, [commitShareMounts, workspaceShareMounts]);
 

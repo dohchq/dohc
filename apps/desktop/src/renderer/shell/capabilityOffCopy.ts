@@ -1,4 +1,4 @@
-import type { SyncStatusResult } from "../../ipc/bridgeContract";
+import { engineStoreRefusalSentence, type SyncStatusResult } from "../../ipc/bridgeContract";
 
 // What the history-off placeholder may claim. Whether changes are recorded
 // is main's answer (syncStatus, from the open that decided the recorder),
@@ -21,6 +21,9 @@ export function historyOffPlaceholderCopy(
       ? `A shared view records no history. ${share.granterEmail ?? "The person who shared it"} ended this share. You can still open the files it shared.`
       : "A shared view records no history. Refresh the shared view to get the latest shared changes.";
   }
+  if (syncStatus?.engineStoreRefused) {
+    return `${engineStoreRefusalSentence(syncStatus.engineStoreRefused)} Open Notices and choose Rebuild to review recovery options.`;
+  }
   if (syncStatus?.historyRecordingUnavailable) {
     // A failure, not a decision — same copy as the notice center.
     return "dohc could not start recording history for this workspace. Your files still save normally. Restart dohc to try again.";
@@ -42,6 +45,9 @@ export function historyOffPlaceholderCopy(
 // not established. Every line here says what dohc cannot do now, and none of
 // them says what does not exist.
 export function versionCompareOffCopy(syncStatus: SyncStatusResult | null): string {
+  if (syncStatus?.engineStoreRefused) {
+    return `${engineStoreRefusalSentence(syncStatus.engineStoreRefused)} Open Notices and choose Rebuild to review recovery options.`;
+  }
   if (syncStatus?.historyRecordingUnavailable) {
     // A failure, not a decision, and not an emptiness.
     return "dohc could not open versions for this workspace. Your files still save normally. Restart dohc to try again.";
@@ -60,6 +66,9 @@ export function versionCompareOffCopy(syncStatus: SyncStatusResult | null): stri
 // both: the panel has no tab to close, and restarting is what re-runs the
 // capture build either way.
 export function chatsOffCopy(syncStatus: SyncStatusResult | null): string {
+  if (syncStatus?.engineStoreRefused) {
+    return `${engineStoreRefusalSentence(syncStatus.engineStoreRefused)} Open Notices and choose Rebuild to review recovery options.`;
+  }
   if (syncStatus?.historyRecordingUnavailable) {
     // A failure, not a decision, and not an emptiness.
     return "dohc could not open chats for this workspace. Your files still save normally. Restart dohc to try again.";
