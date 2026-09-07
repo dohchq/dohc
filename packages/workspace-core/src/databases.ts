@@ -1,4 +1,4 @@
-import type { ChangeAuthor } from "./changeSet";
+import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 
 // Local-first database rules. The on-disk .sqlite IS the user's canonical
 // artifact — visible and inspectable. Its raw bytes never travel through CRDT
