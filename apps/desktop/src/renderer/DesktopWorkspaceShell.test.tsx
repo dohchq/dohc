@@ -5419,14 +5419,21 @@ describe("ui-state merge-on-load", () => {
     }>();
     let issued = 0;
     const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["b.md", "pulled.md"], "b.md")),
+      Promise.resolve({
+        ...storedStateWithTabs(["b.md", "pulled.md"], "b.md"),
+        chatsVisible: false,
+      }),
     );
     bridge.listWorkspaceFiles = vi.fn(() =>
       ++issued === 1 ? older.promise : newer.promise,
     );
     renderShell(bridge);
 
-    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+      expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
+    });
     act(() => {
       bridge.emitWorkspaceActivity();
     });
@@ -6648,7 +6655,10 @@ describe("ui-state merge-on-load", () => {
     const newer = deferred<Listing>();
     let issued = 0;
     const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["b.md", "live.md"], "b.md")),
+      Promise.resolve({
+        ...storedStateWithTabs(["b.md", "live.md"], "b.md"),
+        chatsVisible: false,
+      }),
     );
     bridge.listWorkspaceFiles = vi.fn(() =>
       ++issued === 1 ? older.promise : newer.promise,
@@ -6656,7 +6666,11 @@ describe("ui-state merge-on-load", () => {
     renderShell(bridge);
 
     // A second listing is issued while the first is still in flight.
-    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+      expect(screen.getByTestId("tab-live.md")).toBeTruthy();
+    });
     act(() => {
       bridge.emitWorkspaceActivity();
     });
@@ -15965,6 +15979,8 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+
     vi.useFakeTimers();
     try {
       const listings = bridge.listWorkspaceFiles.mock.calls.length;
@@ -16066,6 +16082,8 @@ describe("workbench render cost", () => {
     const bridge = makeBridge(Promise.resolve(null));
     renderShell(bridge);
     await screen.findAllByTestId("tree-row");
+
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {

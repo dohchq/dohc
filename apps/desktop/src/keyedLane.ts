@@ -1,6 +1,7 @@
-export async function runInKeyedLane<T>(
-  lanes: Map<string, Promise<void>>,
-  key: string,
+// Calls queue without coalescing; different keys stay concurrent.
+export async function runInKeyedLane<T, Key = string>(
+  lanes: Map<Key, Promise<void>>,
+  key: Key,
   operation: () => Promise<T>,
 ): Promise<T> {
   const previous = lanes.get(key) ?? Promise.resolve();
