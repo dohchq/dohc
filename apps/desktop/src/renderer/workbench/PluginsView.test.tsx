@@ -1024,6 +1024,10 @@ describe("PluginsView", () => {
     bridgeMock.installPlugin.mockReturnValue(install.promise);
     renderList();
     await userEvent.click(await screen.findByTestId("plugin-install"));
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [{ ...original, directoryName: "chat-b", status: "disabled", disabledReason: "user" }],
+    });
     act(() => {
       statusListener?.({ kind: "renamed", workspaceId: "ws-1", pluginId: "agent-chat", from: "chat-a", to: "chat-b" });
       statusListener?.({ kind: "changed", workspaceId: "ws-1", plugin: { ...original, directoryName: "chat-b", status: "disabled", disabledReason: "user" } });
@@ -1033,6 +1037,43 @@ describe("PluginsView", () => {
       await install.promise;
     });
     expect(screen.getAllByTestId("plugin-row")).toHaveLength(1);
+  });
+
+  it("keeps a renamed row while its authoritative list supersedes an older refresh", async () => {
+    const original = plugin("app", { directoryName: "old-app", displayName: "App" });
+    const older = deferred<{ ok: true; plugins: PluginStatusRecord[] }>();
+    const renamed = deferred<{ ok: true; plugins: PluginStatusRecord[] }>();
+    bridgeMock.listPlugins.mockResolvedValueOnce({ ok: true, plugins: [original] })
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(renamed.promise);
+    renderList();
+    await screen.findByText("plugins/old-app");
+
+    act(() => statusListener?.({ kind: "discovery-changed", workspaceId: "ws-1" }));
+    act(() => statusListener?.({
+      kind: "renamed", workspaceId: "ws-1", pluginId: "app", from: "old-app", to: "new-app",
+    }));
+    expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(3);
+    expect(screen.getByText("plugins/new-app")).toBeTruthy();
+    expect(screen.queryByText("plugins/old-app")).toBeNull();
+
+    await act(async () => {
+      older.resolve({ ok: true, plugins: [original] });
+      await older.promise;
+    });
+    expect(screen.getByText("plugins/new-app")).toBeTruthy();
+    expect(screen.getAllByTestId("plugin-row")).toHaveLength(1);
+
+    act(() => statusListener?.({
+      kind: "changed", workspaceId: "ws-1",
+      plugin: { ...original, directoryName: "new-app", rootPath: "/workspace/plugins/new-app", status: "starting" },
+    }));
+    await act(async () => {
+      renamed.resolve({ ok: true, plugins: [{ ...original, directoryName: "new-app", rootPath: "/workspace/plugins/new-app" }] });
+      await renamed.promise;
+    });
+    expect(screen.getAllByTestId("plugin-row")).toHaveLength(1);
+    expect(screen.getByTestId("plugin-status").getAttribute("data-status")).toBe("starting");
   });
 
   it("lets a status event newer than an in-flight action's response win", async () => {
