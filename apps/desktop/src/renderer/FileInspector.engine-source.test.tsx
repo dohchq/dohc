@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, replaceYDocWithMarkdown } from "./editor/import-export";
-import { FileInspector, lineSpanInText } from "./FileInspector";
+import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 import * as orphanedDraftsModule from "./orphanedDrafts";
@@ -13,6 +13,7 @@ import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { getSharedLocalDocument } from "./sharedLocalDocument";
 import { documentVersionKey } from "./documentVersionKey";
 import {
+  lineSpanInText,
   textEditorContent,
   codeEditorView,
   codeEditorText,

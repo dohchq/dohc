@@ -57,25 +57,6 @@ function assetUrl(workspaceId: string, path: string, refreshKey: number): string
   return `dohc-file://${workspaceId}/${encoded}?v=${refreshKey}`;
 }
 
-// [start, end) character span of 1-based `line` within `text` (end excludes
-// the newline). Lines past the end clamp to the last line. Pure — unit
-// tested; the editor uses it to select the landed-on line.
-export function lineSpanInText(
-  text: string,
-  line: number,
-): { start: number; end: number } {
-  let start = 0;
-  let current = 1;
-  while (current < line) {
-    const nextBreak = text.indexOf("\n", start);
-    if (nextBreak === -1) break;
-    start = nextBreak + 1;
-    current += 1;
-  }
-  const lineEnd = text.indexOf("\n", start);
-  return { start, end: lineEnd === -1 ? text.length : lineEnd };
-}
-
 const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "webp", "gif", "svg"]);
 const AUDIO_EXT = new Set(["m4a", "mp3", "wav", "ogg"]);
 const DB_EXT = new Set(["sqlite", "sqlite3", "db"]);
@@ -126,7 +107,7 @@ const LazyDatabaseStudioView = lazy(() =>
   })),
 );
 
-export type FileViewKind =
+type FileViewKind =
   | "markdown"
   | "drawing"
   | "csv"
