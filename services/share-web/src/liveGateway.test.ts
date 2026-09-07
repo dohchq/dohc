@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { connect, type Socket } from "node:net";
+import type { Duplex } from "node:stream";
 import { once } from "node:events";
 import { createHash } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
@@ -44,7 +45,7 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-async function fixture(overrides: Partial<LiveGatewayOptions> = {}) {
+async function fixture(overrides: Partial<LiveGatewayOptions> = {}, onUpgrade?: (socket: Duplex) => void) {
   const http = createServer((_request, response) => { response.writeHead(404); response.end(); });
   const hostHttp = createServer();
   const hostServer = new WebSocketServer({ server: hostHttp, perMessageDeflate: false, autoPong: false });
@@ -68,8 +69,9 @@ async function fixture(overrides: Partial<LiveGatewayOptions> = {}) {
     expect(receive).toEqual(receiveOptions);
     expect(Object.isFrozen(receive)).toBe(true);
     const socket = new WebSocket(`ws://127.0.0.1:${hostPort}`, receive);
-    socket.on("error", () => undefined);
     sockets.push(socket);
+    // once owns connection errors until open. The fixture host sends no early
+    // application bytes; this does not prove a production adapter's pause timing.
     await once(socket, "open");
     socket.pause();
     return { ticket: redeemed, socket, invalidated: invalidated.signal };
@@ -80,7 +82,10 @@ async function fixture(overrides: Partial<LiveGatewayOptions> = {}) {
   const gateway = createLiveGateway({ publicHosts: new Set(["share.example.test"]), publicOrigin: origin,
     limits, resolveNamedSession: resolve, redeem, openHostRoute: open, ...overrides });
   const completions: Promise<void>[] = [];
-  http.on("upgrade", (request, socket, head) => { completions.push(gateway.handleUpgrade(request, socket, head)); });
+  http.on("upgrade", (request, socket, head) => {
+    onUpgrade?.(socket);
+    completions.push(gateway.handleUpgrade(request, socket, head));
+  });
   http.listen(0, "127.0.0.1");
   await once(http, "listening");
   const port = (http.address() as { port: number }).port;
@@ -102,7 +107,7 @@ async function fixture(overrides: Partial<LiveGatewayOptions> = {}) {
     });
     return { socket, status, messages };
   }
-  async function raw(headers: string[]) {
+  async function raw(headers: string[], handshake = { key: "dGhlIHNhbXBsZSBub25jZQ==", version: "13" }) {
     const socket = connect(port, "127.0.0.1");
     rawSockets.push(socket);
     socket.on("error", () => undefined);
@@ -111,7 +116,7 @@ async function fixture(overrides: Partial<LiveGatewayOptions> = {}) {
     await once(socket, "connect");
     const closed = once(socket, "close");
     socket.write([`GET /api/live?session=${discriminator} HTTP/1.1`, "Connection: Upgrade", "Upgrade: websocket",
-      "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version: 13", ...headers, "", ""].join("\r\n"));
+      `Sec-WebSocket-Key: ${handshake.key}`, `Sec-WebSocket-Version: ${handshake.version}`, ...headers, "", ""].join("\r\n"));
     await closed;
     return received;
   }
@@ -238,7 +243,14 @@ describe("private named live gateway", () => {
   it("disposes a fulfilled host route when shutdown wins before delivery", async () => {
     const state = await fixture();
     const route = await state.makeRoute(ticket(), state.receiveOptions);
-    const terminate = vi.spyOn(route.socket, "terminate");
+    expect(route.socket.listenerCount("error")).toBe(0);
+    let terminationErrorHandled = false;
+    const originalTerminate = route.socket.terminate.bind(route.socket);
+    const terminate = vi.spyOn(route.socket, "terminate").mockImplementation(() => {
+      originalTerminate();
+      route.socket.emit("error", new Error("queued host write failed during termination"));
+      terminationErrorHandled = true;
+    });
     state.open.mockImplementation(() => {
       queueMicrotask(() => queueMicrotask(() => state.gateway.close()));
       return Promise.resolve(route);
@@ -247,7 +259,33 @@ describe("private named live gateway", () => {
     expect(await client.status).toBe(404);
     await Promise.all(state.completions);
     expect(terminate).toHaveBeenCalledTimes(1);
+    expect(terminationErrorHandled).toBe(true);
     expect(client.messages).toEqual([]);
+  });
+
+  it.each([
+    { key: "invalid", version: "13" },
+    { key: "dGhlIHNhbXBsZSBub25jZQ==", version: "7" },
+  ])("flushes an invalid WebSocket handshake refusal and releases the host and reservation: $version/$key", async handshake => {
+    let destroyedBeforeFlush = false;
+    const state = await fixture({ limits: { ...limits, maxConnections: 1, maxConnectionsPerSession: 1 } }, socket => {
+      const destroy = socket.destroy.bind(socket);
+      vi.spyOn(socket, "destroy").mockImplementation(error => {
+        if (socket.writableEnded && !socket.writableFinished) destroyedBeforeFlush = true;
+        return destroy(error);
+      });
+    });
+    const response = await state.raw(["Host: share.example.test", `Origin: ${origin}`,
+      `Sec-WebSocket-Protocol: dohc-live-v1, dohc-live-ticket.${token}`], handshake);
+    await Promise.all(state.completions);
+    expect(state.redeem).toHaveBeenCalledTimes(1);
+    expect(state.open).toHaveBeenCalledTimes(1);
+    const route = (await state.open.mock.results[0]!.value)!;
+    if (route.socket.readyState !== WebSocket.CLOSED) await once(route.socket, "close");
+    expect(route.socket.readyState).toBe(WebSocket.CLOSED);
+    expect(await state.browser().status).toBe(101);
+    expect(response).toBe("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+    expect(destroyedBeforeFlush).toBe(false);
   });
 
   it("normalizes a Blob-mode host socket before forwarding real binary frames", async () => {

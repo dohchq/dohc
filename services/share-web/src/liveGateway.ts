@@ -13,8 +13,9 @@ export interface NamedLiveGatewaySession {
 
 export interface LiveGatewayHostRoute {
   readonly ticket: RedeemedLiveTicket;
-  // Exclusively owned, open and paused. The router checks current host, binding
-  // and fence before returning; invalidation precedes replacement or fencing.
+  // Exclusively owned, open, and paused before any application bytes are read.
+  // The adapter installs an error listener at construction. The router checks
+  // current host, binding and fence; invalidation precedes replacement or fencing.
   readonly socket: WebSocket;
   readonly invalidated: AbortSignal;
 }
@@ -101,12 +102,14 @@ export function createLiveGateway(options: LiveGatewayOptions) {
   const server = new WebSocketServer(wsOptions);
   const connections = new Map<() => void, () => void>();
   const heldSockets = new WeakSet<Duplex>();
+  const refusedSockets = new WeakSet<Duplex>();
   const counts = new Map<string, number>();
   let closed = false;
 
   function refuse(socket: Duplex) {
-    if (socket.destroyed) return;
+    if (socket.destroyed || refusedSockets.has(socket)) return;
     if (socket.writableEnded || !socket.writable) { socket.destroy(); return; }
+    refusedSockets.add(socket);
     socket.once("error", () => socket.destroy());
     socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", () => socket.destroy());
   }
@@ -196,9 +199,9 @@ export function createLiveGateway(options: LiveGatewayOptions) {
         }
       });
       if (opened === null) { stop(); return; }
+      opened.socket.on("error", stop);
       if (done) { opened.socket.terminate(); return; }
       route = { ticket: opened.ticket, socket: opened.socket, invalidated: opened.invalidated };
-      route.socket.on("error", stop);
       route.socket.once("close", stop);
       if (JSON.stringify(parseRedeemedLiveTicket(route.ticket)) !== identity || route.socket.readyState !== WebSocket.OPEN || !route.socket.isPaused) {
         stop(); return;
