@@ -673,11 +673,11 @@ import {
   createChatDispatchService,
   isAppImageBoot,
   pluginHostEnvFor,
-  resolveDohcCliBinDirectory,
   resolveDohcMcpCommand,
   type ChatDispatchPresenceInput,
   type ChatDispatchWorkspace,
 } from "./agents/chatDispatchService";
+import { resolveDohcCliBinDirectory } from "./agents/chatRunnerProcess";
 import { refreshLinuxStableCliBin } from "./agents/linuxStableCliBin";
 import { CHAT_AGENT_PRESENCE_TOPIC } from "./collab/agentPresence";
 import {

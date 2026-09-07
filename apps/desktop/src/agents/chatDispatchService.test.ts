@@ -1,3 +1,10 @@
+import {
+  APP_QUIT_KILL_GRACE_MS,
+  RUNNER_KILL_GRACE_MS,
+  type RunnerProcess,
+  type RunnerSpawnOptions,
+  type SpawnRunner,
+} from "./chatRunnerProcess";
 import { rm } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
 import {
@@ -21,26 +28,20 @@ import {
 import { createTestScratch } from "../workspaces/testTemp";
 import {
   APP_QUIT_EXIT_CODE,
-  APP_QUIT_KILL_GRACE_MS,
   CHAT_DISPATCH_BUDGET_MAX,
   CHAT_DISPATCH_PUMP_MS,
   CHAT_DISPATCH_RECOVERY_BACKOFF_MS,
   NO_RUNNER_NOTE,
-  RUNNER_KILL_GRACE_MS,
   RUNNER_SELF_TEST_TIMEOUT_MS,
   createChatDispatchService,
   isAppImageBoot,
   messageCanTrigger,
   pluginHostEnvFor,
   resolveDohcMcpCommand,
-  tokenizeRunnerCommand,
   type ChatDispatchIdentity,
   type ChatDispatchPresenceInput,
   type ChatDispatchService,
   type ChatDispatchWorkspace,
-  type RunnerProcess,
-  type RunnerSpawnOptions,
-  type SpawnRunner,
 } from "./chatDispatchService";
 import {
   AGENT_DISPATCH_RPC_DEADLINE_MS,
@@ -2759,15 +2760,6 @@ describe("chatDispatchService", () => {
       pid: -process.pid!,
       signal: "SIGKILL",
     });
-  });
-
-  it("tokenizes quoted runner arguments and rejects an unterminated command", () => {
-    expect(
-      tokenizeRunnerCommand('claude -p --allowedTools "Bash(dohc chat:*)" --label "two words"'),
-    ).toEqual(["claude", "-p", "--allowedTools", "Bash(dohc chat:*)", "--label", "two words"]);
-    expect(() => tokenizeRunnerCommand('claude -p "unterminated')).toThrow(
-      "Runner command has an unterminated double quote.",
-    );
   });
 
   describe("resolveDohcMcpCommand", () => {
