@@ -117,6 +117,7 @@ function handler(storage: SyncRelayStorage, overrides: HandlerOverrides = {}): S
     newShareId: () => "share-existing",
     resolveUserIdByEmail: () => null,
     lookupUserEmail: undefined,
+    lookupVerifiedUserEmail: undefined,
     ...overrides,
   });
 }
@@ -2006,49 +2007,43 @@ describe("owner link inventory and impact preconditions", () => {
     const expectedGrantIds = Array.from({ length: 1_001 }, (_, index) =>
       `grant-promoted-${String(index).padStart(4, "0")}`,
     );
-    const firstGrantId = expectedGrantIds[0]!;
-    expect(
-      seedDependentGrant(storage, {
-        shareId: "share-independent-pages",
-        parentGrantId: "link-independent-pages",
-        grantId: firstGrantId,
-        principalUserId: "recipient-0000",
-        createdAtMs: 3_000,
-      }),
-    ).toMatchObject({ ok: true });
-    expect(
-      storage.promoteShareGrant({
-        shareId: "share-independent-pages",
-        grantId: firstGrantId,
-        expectedParentGrantId: "link-independent-pages",
-        expectedParentGeneration: 1,
-        guard: () => {},
-      }),
-    ).toMatchObject({ ok: true, grant: { parentGrantId: null } });
-
-    // Copy the promoted row in one transaction; this test exercises pagination.
-    const database = inspectDatabase(storagePath(storage), { foreignKeys: true });
+    const fixture = inspectDatabase(storagePath(storage));
     try {
-      database.exec("BEGIN IMMEDIATE");
-      const insert = database.prepare(`
-        INSERT INTO sync_relay_share_grants (
-          grant_id, share_id, principal_kind, principal_user_id, principal_email,
-          access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
-        )
-        SELECT ?, share_id, principal_kind, ?, principal_email,
-          access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
-        FROM sync_relay_share_grants WHERE grant_id = ?
-      `);
-      for (let index = 1; index < expectedGrantIds.length; index += 1) {
-        insert.run(
-          expectedGrantIds[index],
-          `recipient-${String(index).padStart(4, "0")}`,
-          firstGrantId,
-        );
+      fixture.exec("BEGIN IMMEDIATE");
+      const insert = fixture.prepare(
+        `INSERT INTO sync_relay_share_grants (
+           grant_id, share_id, principal_kind, principal_user_id, principal_email,
+           access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
+         ) VALUES (?, 'share-independent-pages', 'user', ?, NULL,
+           'comment', 1, 'active', 3000, NULL, 'link-independent-pages')`,
+      );
+      for (const [index, grantId] of expectedGrantIds.entries()) {
+        expect(Number(insert.run(grantId, `recipient-${String(index).padStart(4, "0")}`).changes)).toBe(1);
       }
-      database.exec("COMMIT");
+      fixture.exec("COMMIT");
+    } catch (error) {
+      try { fixture.exec("ROLLBACK"); } catch { /* Preserve the setup failure. */ }
+      throw error;
     } finally {
-      database.close();
+      fixture.close();
+    }
+    for (const [index, grantId] of expectedGrantIds.entries()) {
+      expect(storage.getShareGrant(grantId)).toMatchObject({
+        grantId, shareId: "share-independent-pages", parentGrantId: "link-independent-pages",
+        principalKind: "user", principalUserId: `recipient-${String(index).padStart(4, "0")}`,
+        access: "comment", generation: 1, status: "active", revokedAtMs: null,
+      });
+    }
+    for (const grantId of expectedGrantIds) {
+      expect(
+        storage.promoteShareGrant({
+          shareId: "share-independent-pages",
+          grantId,
+          expectedParentGrantId: "link-independent-pages",
+          expectedParentGeneration: 1,
+          guard: () => {},
+        }),
+      ).toMatchObject({ ok: true, grant: { parentGrantId: null } });
     }
 
     const h = handler(storage);
