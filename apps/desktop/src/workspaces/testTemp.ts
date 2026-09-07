@@ -1,4 +1,4 @@
-import { errorMessage } from "./workspaceError";
+import { errorMessage } from "./workspaceError.ts";
 import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
 import {
   lstat,
