@@ -227,17 +227,14 @@ import {
 } from "./workspaces/workspaceActivity";
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
 import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
+import { createDesktopEngine } from "./workspaces/desktopEngine";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import type { ActiveAgentRun } from "./workspaces/workspaceWatcher";
 import {
   createRustEngineDaemon,
   defaultEngineBinaryPath,
-  type EngineDaemonLifecycle,
 } from "@dohc/workspace-engine-client/daemon";
-import { bridgeCaptureEventsToRenderer } from "./workspaces/captureActivityBridge";
-import { bridgeRecordEventsToPlugins } from "./workspaces/recordEventsBridge";
-import { bridgeAutomationClaimsToExecutors } from "./workspaces/automationClaimsBridge";
 import {
   broadcastWorkspaceActivity,
   workspaceActivityPayload,
@@ -246,9 +243,6 @@ import {
 import { WorkspaceFileListingCache } from "./workspaces/workspaceFileListingCache";
 import { probeRelayWorkspace } from "./workspaces/relayWorkspaceProbe";
 import {
-  EngineRelayClient,
-  RelayConfiguredDaemonClientSource,
-  RelayTransportRouteGuard,
   type EngineRelayWorkspaceClient,
 } from "./workspaces/engineRelayClient";
 // The proposal routes that do not go through the engine: reviewing,
@@ -262,7 +256,6 @@ import {
   withdrawShareProposal,
 } from "./workspaces/shareProposalRelay";
 import {
-  EngineWorkspaceSessions,
   type AttachedEngineWorkspace,
   type EngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
@@ -2081,10 +2074,10 @@ function relayClientForWorkspace(input: {
   attachmentId?: symbol;
   relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
 }): EngineRelayWorkspaceClient {
-  if (!rustEngineRelayClient) {
+  if (!desktopEngine.relayClient) {
     throw new Error("Rust engine relay client is unavailable.");
   }
-  return rustEngineRelayClient.bind(input);
+  return desktopEngine.relayClient.bind(input);
 }
 
 function engineForWorkspace(
@@ -2558,7 +2551,7 @@ function linkedChatStoreFor(
     }
   const existing = lease.state.linkedChatStore;
   if (existing) return existing;
-  if (!rustEngineWorkspaceSessions) {
+  if (!desktopEngine.sessions) {
     throw new Error("Rust engine workspace sessions are unavailable.");
   }
   const current = findWorkspace(lease.binding.workspaceId);
@@ -2572,7 +2565,7 @@ function linkedChatStoreFor(
       attachmentId: binding.attachmentId,
     });
     const store = createDesktopLinkedChatStore(engineWorkspace, {
-    sessions: rustEngineWorkspaceSessions,
+    sessions: desktopEngine.sessions,
       runWithAuthority: (work) =>
         workspaceAuthorities.withBinding(binding, () => work()),
     });
@@ -2599,7 +2592,7 @@ function agentDispatchStoreHandleFor(workspace: {
     }
     const existing = lease.state.agentDispatchStoreHandle;
   if (existing) return existing;
-  if (!rustEngineWorkspaceSessions) {
+  if (!desktopEngine.sessions) {
     throw new Error("Rust engine workspace sessions are unavailable.");
   }
   const binding = lease.binding;
@@ -2609,7 +2602,7 @@ function agentDispatchStoreHandleFor(workspace: {
         rootPath: binding.canonicalRootPath,
         attachmentId: binding.attachmentId,
       },
-    rustEngineWorkspaceSessions,
+    desktopEngine.sessions,
       {
         runWithAuthority: (work) =>
           workspaceAuthorities.withBinding(binding, () => work()),
@@ -2663,7 +2656,7 @@ async function withEngineAdapter<T>(
   workspace: EngineWorkspace,
   work: (adapter: VersionedLiveAdapter) => Promise<T>,
 ): Promise<T | null> {
-  const sessions = rustEngineWorkspaceSessions;
+  const sessions = desktopEngine.sessions;
   if (!sessions) return null;
   const read = async (engineWorkspace: EngineWorkspace) =>
     await sessions.run(engineWorkspace, async (binding) =>
@@ -3382,7 +3375,7 @@ async function openWorkspaceActivityForOperation(
   // A fast renderer can ask to open a workspace while the daemon is still
   // handshaking (the window loads during it). Wait for the handshake instead
   // of building a capture over null engine sessions.
-  await engineDaemonStartup;
+  await desktopEngine.startup;
   operation.assertCurrent();
   const canonicalWorkspace = operation.workspace;
   operation.state.retainedActivity = true;
@@ -3867,7 +3860,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   openWorkspaceActivity,
   activity,
   linkedChatStoreFor,
-  currentDaemon: () => rustEngineDaemon,
+  currentDaemon: () => desktopEngine.daemon,
   agentDispatchStoreHandleFor,
   sharedViewOf,
   withPhysicalWorkspaceOperation,
@@ -4012,40 +4005,24 @@ async function showOrCreateMainWindow(): Promise<BrowserWindow> {
   return window;
 }
 
-let rustEngineDaemon: EngineDaemonLifecycle | null = null;
-let rustEngineWorkspaceSessions: EngineWorkspaceSessions | null = null;
-let rustEngineRelayClient: EngineRelayClient | null = null;
-// Settles with the daemon handshake (false = startup failed and the app is
-// quitting). The whenReady continuation creates the window while the daemon
-// starts, so a fast renderer can ask for the engine before the handshake
-// settles; boot-time paths that need engine sessions await this first instead
-// of throwing the broken-invariant error at it.
-let engineDaemonStartup: Promise<boolean> = Promise.resolve(false);
-const relayTransportRoutes = new RelayTransportRouteGuard();
-
-// Narrowing for the engine-access gates. The invariant is real:
-// every boot-time path that can reach the engine awaits engineDaemonStartup
-// first (openWorkspaceActivityWith, cloudStatus, the share-view file and
-// mount lanes), and startRustEngineDaemon
-// quits the app when the handshake fails; this handle is nulled only on that
-// failure path. A later startup-smoke failure restarts the daemon without
-// nulling it. A throw here would mean that invariant broke, which must be
-// loud, not a silent drop to the legacy engine.
-function requireEngineSessions(): EngineWorkspaceSessions {
-  if (!rustEngineWorkspaceSessions) {
-    throw new Error("Rust engine workspace sessions are unavailable.");
-  }
-  return rustEngineWorkspaceSessions;
-}
+const desktopEngine = createDesktopEngine({
+  app, dialog, process, createRustEngineDaemon, defaultEngineBinaryPath,
+  isQuitting: () => appLifecycle.isQuitting(),
+  workspaceAuthorities, pluginWorkspaceRuntimes, notifyRenderer,
+  notifyAutomationFailuresChanged, launchMarks, desktopMarks, logLaunchMarksOnce,
+});
+const {
+  requireEngineSessions, closeRelayTransportWorkspace, closeAllRelayTransportWorkspaces,
+} = desktopEngine;
 
 const receivedShareEngine = createReceivedShareEngineAccess({
   sessions: requireEngineSessions,
   createStores: createCaptureLiveStores,
   relayClient: () => {
-    if (!rustEngineRelayClient) {
+    if (!desktopEngine.relayClient) {
       throw new Error("Rust engine relay client is unavailable.");
     }
-    return rustEngineRelayClient;
+    return desktopEngine.relayClient;
   },
 });
 
@@ -4097,7 +4074,7 @@ const withExactMountOperation = createExactMountOperationRunner<
   DesktopWorkspaceOperation
 >({
   withOperation: withPhysicalWorkspaceOperation,
-  engineReady: () => engineDaemonStartup,
+  engineReady: () => desktopEngine.startup,
 });
 
 const shareMountCommands: Pick<
@@ -4345,7 +4322,7 @@ async function shareViewFilesTargetForPath(
 // stay concurrent with the handshake.
 const gatedShareViewFileReads: Pick<ShareViewFiles, "read"> = {
   read: async (target, request) => {
-    await engineDaemonStartup;
+    await desktopEngine.startup;
     return shareViewFiles.read(target, request);
   },
 };
@@ -4395,7 +4372,7 @@ async function listOwnedWorkspaceFilesFor(
     // The shell lists at mount, which can precede the daemon handshake now
     // that the window loads during it; the share store needs sessions. A
     // plain workspace's disk listing below stays ungated on purpose.
-    await engineDaemonStartup;
+    await desktopEngine.startup;
     return shareViewFiles.list(
       {
         kind: "standalone",
@@ -4409,7 +4386,7 @@ async function listOwnedWorkspaceFilesFor(
     includeContentIdentity: true,
   });
   if (!shareMountRegistryIsPresent(workspace)) return disk;
-  await engineDaemonStartup;
+  await desktopEngine.startup;
   return overlayCanonicalShareMountFiles({
     disk,
     mounts,
@@ -4578,7 +4555,7 @@ const workspaceSearchOwner = new WorkspaceSearchOwner<
     await ownedWorkspaceReadsFor(workspace).prepareSearch(),
   engineCaptureFor: (workspaceId) => activity.engineCaptureFor(workspaceId),
   queryEngine: createWorkspaceSearchDaemonQuery(
-    () => rustEngineWorkspaceSessions,
+    () => desktopEngine.sessions,
   ),
   logError: (message, error) => console.error(`[desktop] ${message}`, error),
 });
@@ -4686,30 +4663,6 @@ async function syncStatusWithOwnedProjection(
   };
 }
 
-async function closeRelayTransportWorkspace(
-  workspace: string | EngineWorkspace,
-): Promise<void> {
-  const workspaceId =
-    typeof workspace === "string" ? workspace : workspace.workspaceId;
-  if (rustEngineRelayClient) {
-    await rustEngineRelayClient.closeWorkspace(workspace);
-    return;
-  }
-  await rustEngineWorkspaceSessions?.closeWorkspace(workspace);
-  relayTransportRoutes.releaseWorkspace(workspaceId);
-}
-
-async function closeAllRelayTransportWorkspaces(): Promise<void> {
-  if (rustEngineRelayClient) {
-    await rustEngineRelayClient.closeAll();
-    return;
-  }
-  await rustEngineWorkspaceSessions?.closeAll();
-  for (const workspaceId of relayTransportRoutes.workspaceIds()) {
-    relayTransportRoutes.releaseWorkspace(workspaceId);
-  }
-}
-
 const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, DesktopUserSettingsResult>({
   app,
   runtime: process,
@@ -4739,10 +4692,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       launchMarks.appReady();
       desktopMarks.markOnce("app-ready");
     },
-    startEngine: () => {
-      engineDaemonStartup = startRustEngineDaemon();
-      return engineDaemonStartup;
-    },
+    startEngine: () => desktopEngine.start(),
     loadSettings: () => readCachedUserSettingsFile(stateDir()),
     applySettings: ({ settings }) => {
       cachedPreferredName = settings.profile.preferredName;
@@ -4819,7 +4769,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
   shutdown: {
     budgetMs: WILL_QUIT_BUDGET_MS,
     beginEngineShutdown: () => {
-      rustEngineWorkspaceSessions?.beginShutdown();
+      desktopEngine.sessions?.beginShutdown();
       desktopChatBookmarks.stop();
     },
     stopSearch: () => workspaceSearchOwner.dispose(),
@@ -4830,7 +4780,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     closeWorkspaces: () => workspaceAuthorities.close(),
     disposeDatabase: () => workspaceDatabaseWorker.dispose(),
     closeRelay: closeAllRelayTransportWorkspaces,
-    stopEngine: async () => { await rustEngineDaemon?.stop(); },
+    stopEngine: async () => { await desktopEngine.daemon?.stop(); },
   },
 });
 
@@ -5134,8 +5084,8 @@ function registerIpcHandlers(): void {
     reconcileCloud: () => activity.reconcileCloud(),
     notifyCloudSessionChanged, notifyCloudSessionChangedWithKey,
     notifyRenderer, findWorkspace, managedCloudConfiguration,
-    engineDaemonStartup: () => engineDaemonStartup,
-    requireEngineSessions, currentEngineSessions: () => rustEngineWorkspaceSessions,
+    engineDaemonStartup: () => desktopEngine.startup,
+    requireEngineSessions, currentEngineSessions: () => desktopEngine.sessions,
     withPhysicalWorkspaceOperation, withRendererWorkspaceOperation, receivedShareEngine,
     readWorkspaceSecretState, readWorkspaceDataKeyForEnrollment, assertWritableWorkspace,
     relayClientForWorkspace, enrollWorkspaceKeyEnvelope, installWorkspaceDataKey,
@@ -5221,7 +5171,7 @@ function registerIpcHandlers(): void {
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, withRendererWorkspaceOperation, loadAndCacheCurrentCredentials,
     warmCredentialCache, currentCredentials: () => cachedCredentials,
-    engineDaemonStartup: () => engineDaemonStartup,
+    engineDaemonStartup: () => desktopEngine.startup,
     fetchShareViewInfo, usableRoot, readdir, mkdir, createJoinedWorkspace,
     setWorkspaceShareView, refreshNativeWorkspaceSurfaces, workspaceAuthorities,
     canonicalWorkspaceFor, withStaleSensitiveWorkspaceOperation, shareViewFiles,
@@ -5470,163 +5420,5 @@ function registerIpcHandlers(): void {
 // Linux X11/Wayland launcher association use the package identities.
 if (process.platform === "win32") app.setAppUserModelId("app.dohc.desktop");
 if (process.platform === "linux") app.setDesktopName("dohc.desktop");
-
-// Test-only daemon restart seam (hermetic E2E: the daemon-kill spec needs the
-// outage to outlive the transport retry window, which production restarts far
-// too fast to reach). Ignored outside DOHC_DESKTOP_TEST like every other
-// DOHC_TEST_* seam.
-function testEngineRestartOverrides(): {
-  initialBackoffMs?: number;
-  maxBackoffMs?: number;
-} {
-  if (process.env.DOHC_DESKTOP_TEST !== "1" || app.isPackaged) return {};
-  const backoff = Number(process.env.DOHC_TEST_ENGINE_RESTART_BACKOFF_MS);
-  if (!Number.isFinite(backoff) || backoff <= 0) return {};
-  return { initialBackoffMs: backoff, maxBackoffMs: backoff };
-}
-
-async function startRustEngineDaemon(): Promise<boolean> {
-  const restartingPluginRuntimes = new Set<PluginWorkspaceRuntimes<CreatedWorkspace>>();
-  // Everything, including resolving the binary path, runs inside the try: a
-  // throw while building the options would otherwise reject this whenReady
-  // callback and leave the user with no dialog, on the one path whose job is
-  // to explain that the engine could not start.
-  try {
-    rustEngineDaemon = createRustEngineDaemon({
-      ...testEngineRestartOverrides(),
-      command: defaultEngineBinaryPath({
-        isPackaged: app.isPackaged,
-        appPath: app.getAppPath(),
-        resourcesPath: process.resourcesPath,
-      }),
-      onFailure: (error, terminal) => {
-        if (terminal) {
-          for (const runtimes of restartingPluginRuntimes) {
-            runtimes.failEngineRestart(error);
-          }
-        }
-        // The supervisor's diagnostic is for us: it names engine.ping, probe
-        // counts and wedge budgets, which tell a developer or an agent exactly
-        // which limit was hit. It goes to the log in full.
-        console.error("[desktop] Rust engine daemon:", error);
-        if (terminal && !appLifecycle.isQuitting()) {
-          // The dialog is for the user, so it says what broke and what to do
-          // instead — no internal names, one instruction per sentence
-          // (the dohc-interface skill). "The workspace engine" is the noun the
-          // shipping UI already uses for this (SettingsDialog, StatusBar,
-          // NoticeCenter), so this must not invent another one.
-          //
-          // Cause-neutral on purpose: a terminal failure also arrives from the
-          // restart limit and the crash window, where the engine crashed
-          // rather than went silent. Every one of them ends the same way.
-          dialog.showErrorBox(
-            "The workspace engine stopped",
-            "dohc stopped restarting the workspace engine.\n\n" +
-              "Restart dohc. If this happens again, review the desktop logs. " +
-              "If it continues, reinstall dohc.",
-          );
-        }
-      },
-      beforePublish: async () => {
-        await Promise.all(workspaceAuthorities.workspaceIds().map((workspaceId) =>
-          workspaceAuthorities.withAuthority(workspaceId, (lease) => {
-            const runtimes = lease.state.pluginRuntimes;
-            restartingPluginRuntimes.add(runtimes);
-            return runtimes.prepareForEngineRestart();
-          }),
-        ));
-      },
-      // A capture event can die with the previous daemon's transport after its
-      // moment committed; the replacement never re-emits it (its baseline finds
-      // disk and manifest agreeing). One repaint per healthy launch closes that
-      // staleness window. Scope-free: the lost event could have belonged to
-      // any open workspace.
-      onLaunch: () => {
-        for (const runtimes of restartingPluginRuntimes) {
-          runtimes.resumeAfterEngineRestart();
-        }
-        restartingPluginRuntimes.clear();
-        notifyRenderer();
-      },
-    });
-    await rustEngineDaemon.start();
-    // The daemon owns capture: its capture.momentRecorded events are the only
-    // signal that a moment landed, so bridge them onto the renderer's
-    // workspace-activity ping or the history timeline goes permanently stale.
-    bridgeCaptureEventsToRenderer(rustEngineDaemon, notifyRenderer);
-    // The daemon also records collection changes autonomously: its record
-    // events are the only live signal behind a plugin's collections.watch
-    // subscription, so route each one to the owning workspace's registry.
-    bridgeRecordEventsToPlugins(rustEngineDaemon, (workspaceId) =>
-      pluginWorkspaceRuntimes.current(workspaceId)?.workspaceEvents,
-    );
-    // The daemon also claims each local record change for its subscribed
-    // automations (ADR 0008); its automation.claimed events wake the owning
-    // workspace's executor to drain the durable claim table, and a claim
-    // inserted already failed (the depth cap's chain-stopped stop report)
-    // pokes the owner's failure notice instead.
-    bridgeAutomationClaimsToExecutors(
-      rustEngineDaemon,
-      (workspaceId) => pluginWorkspaceRuntimes.current(workspaceId)?.automations,
-      notifyAutomationFailuresChanged,
-    );
-    const relaySource = new RelayConfiguredDaemonClientSource(
-      rustEngineDaemon,
-      relayTransportRoutes,
-    );
-    // A fresh debug-engine adoption measured 18.7 s for 5,000 files and
-    // 101.8 s for 15,000 files on the launch fixture; 120 s bounds that path
-    // with headroom. The renderer names the wait.
-    rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource, {
-      workspaceOpenDeadlineMs: 120_000,
-    });
-    rustEngineRelayClient = new EngineRelayClient({
-      sessions: rustEngineWorkspaceSessions,
-      routes: relayTransportRoutes,
-    });
-    console.info(
-      "[desktop] Rust engine daemon handshake complete; startup smoke running.",
-    );
-    // Marked here, where the handshake actually completes — the bootstrap
-    // gate's await also covers the cached-settings read, which would inflate
-    // this mark.
-    launchMarks.daemonReady();
-    desktopMarks.markOnce("daemon-ready");
-    logLaunchMarksOnce();
-    return true;
-  } catch (error) {
-    for (const runtimes of restartingPluginRuntimes) {
-      runtimes.failEngineRestart(error);
-    }
-    const message =
-      error instanceof Error ? error.message : "Unknown Rust engine startup error.";
-    console.error("[desktop] Rust engine daemon failed to start:", error);
-    dialog.showErrorBox(
-      "Rust engine failed to start",
-      `${message}\n\nThe desktop cannot start without the Rust engine.`,
-    );
-    // Contained: a stop() throw here would reject engineDaemonStartup itself,
-    // skip the quit below, and rethrow from every gated await instead of
-    // letting the quit land.
-    await rustEngineDaemon?.stop().catch((stopError: unknown) => {
-      console.error(
-        "[desktop] Rust engine daemon stop after failed start:",
-        stopError,
-      );
-    });
-    rustEngineDaemon = null;
-    rustEngineWorkspaceSessions = null;
-    rustEngineRelayClient = null;
-    // The window may already be up — it loads while the daemon handshakes —
-    // and by the time the user dismisses the dialog above, a restored tab can
-    // hold edits (local reads and the plain editor never wait for the
-    // daemon). So this quit goes through the ordinary path: before-quit
-    // intercepts while a workspace window is live, and the quit guard's ask
-    // lets the renderer flush or warn about that work — a destroy() here
-    // would discard it with no beforeunload and no ask.
-    app.quit();
-    return false;
-  }
-}
 
 void appLifecycle.start();
