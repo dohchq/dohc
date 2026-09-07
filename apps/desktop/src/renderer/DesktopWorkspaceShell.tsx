@@ -1,4 +1,4 @@
-import { EngineMomentDiffPage, type ActiveUndoHandler } from "./workbench/EngineMomentDiffPage";
+import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { hasBlockingModal } from "./modalFocus";
 import { PanelLoading } from "./workbench/PanelLoading";
 import { goneMountProjections, shareUnmountProjection } from "./shell/shareProjection";
@@ -74,6 +74,7 @@ import {
 import { runCanonicalDmNavigation } from "./shell/canonicalDmNavigation";
 import { useAgentSetup } from "./shell/useAgentSetup";
 import { useCloudPresence } from "./shell/useCloudPresence";
+import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useTabTitles } from "./shell/useTabTitles";
 import type { SearchResultsEventEntry } from "../ipc/bridgeContract";
 import {
@@ -96,9 +97,6 @@ import {
   classifyForView,
   FileInspector,
   preloadMarkdownEditor,
-  type DraftFlush,
-  type DraftFlushOptions,
-  type FileSaveState,
   type HeadingTarget,
   type ScrollTarget,
 } from "./FileInspector";
@@ -114,7 +112,6 @@ import {
   useCollectionWritesBlockingAdmission,
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
-import { beginCollectionLineageOperation } from "./collections/collectionLineageGate";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -133,7 +130,7 @@ import {
 import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
-import { Explorer, type TreeChangeOperation } from "./workbench/Explorer";
+import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import { indexFileListing } from "./workbench/file-listing-index";
 import {
@@ -508,20 +505,6 @@ function uniqueUntitledPath(
   return `Untitled ${Date.now()}.${extension}`;
 }
 
-type MountedEditorRegistration = {
-  tab: WorkbenchTab;
-  flush?: DraftFlush;
-  sourceToggle?: () => void;
-  undo?: ActiveUndoHandler;
-};
-
-type EditorRegistrationCallbacks = {
-  onSaveStateChange: (state: FileSaveState) => void;
-  registerDraftFlush: (flush: DraftFlush | null) => void;
-  registerSourceToggle: (toggle: (() => void) | null) => void;
-  registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
-};
-
 type EditorFocus = {
   groupId: string;
   tab: WorkbenchTab | null;
@@ -753,16 +736,6 @@ export function DesktopWorkspaceShell(props: {
   const [wb, setWb] = useState<WorkbenchState>(defaultWorkbenchState);
   const wbRef = useRef(wb);
 
-  // Mounted editors are group-scoped. A split keeps every active surface
-  // mounted, so a singleton flush/source/undo slot would let either pane
-  // overwrite the other and could discard the surviving pane during cleanup.
-  const mountedEditorsRef = useRef(new Map<string, MountedEditorRegistration>());
-  const editorCallbacksRef = useRef(
-    new WeakMap<WorkbenchTab, Map<string, EditorRegistrationCallbacks>>(),
-  );
-  const dirtyTabsRef = useRef(new WeakSet<WorkbenchTab>());
-  const dirtyEpochsRef = useRef(new WeakMap<WorkbenchTab, number>());
-  const [dirtyRevision, setDirtyRevision] = useState(0);
   const openSettings = useCallback(
     (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => setSettingsSection(section),
     [],
@@ -775,171 +748,20 @@ export function DesktopWorkspaceShell(props: {
     settingsSection,
   );
 
-  // An Explorer operation retains every closure that is current while its
-  // disk mutation is active. This keeps late drafts tied to the editor that
-  // created them, including editors in inactive groups.
-  const draftOperationScopesRef = useRef(
-    new Set<{ flushes: Set<DraftFlush> }>(),
-  );
-  const callbacksForEditor = useCallback(
-    (groupId: string, tab: WorkbenchTab): EditorRegistrationCallbacks => {
-      let byGroup = editorCallbacksRef.current.get(tab);
-      if (!byGroup) {
-        byGroup = new Map();
-        editorCallbacksRef.current.set(tab, byGroup);
-      }
-      const cached = byGroup.get(groupId);
-      if (cached) return cached;
-
-      const updateRegistration = <K extends keyof Omit<MountedEditorRegistration, "tab">>(
-        key: K,
-        value: MountedEditorRegistration[K] | null,
-      ) => {
-        const current = mountedEditorsRef.current.get(groupId);
-        if (value === null) {
-          if (current?.tab !== tab) return;
-          const next = { ...current };
-          delete next[key];
-          if (!next.flush && !next.sourceToggle && !next.undo) {
-            mountedEditorsRef.current.delete(groupId);
-          } else {
-            mountedEditorsRef.current.set(groupId, next);
-          }
-          return;
-        }
-        const next = current?.tab === tab ? { ...current } : { tab };
-        next[key] = value;
-        mountedEditorsRef.current.set(groupId, next);
-      };
-      const callbacks: EditorRegistrationCallbacks = {
-        onSaveStateChange: (state) => {
-          const dirty = state !== "saved" && state !== "deleted";
-          if (dirty === dirtyTabsRef.current.has(tab)) return;
-          if (dirty) {
-            dirtyTabsRef.current.add(tab);
-            dirtyEpochsRef.current.set(
-              tab,
-              (dirtyEpochsRef.current.get(tab) ?? 0) + 1,
-            );
-          } else {
-            dirtyTabsRef.current.delete(tab);
-          }
-          setDirtyRevision((revision) => revision + 1);
-        },
-        registerDraftFlush: (flush) => {
-          if (flush === null && dirtyTabsRef.current.delete(tab)) {
-            setDirtyRevision((revision) => revision + 1);
-          }
-          updateRegistration("flush", flush);
-          if (flush) {
-            for (const scope of draftOperationScopesRef.current) {
-              scope.flushes.add(flush);
-            }
-          }
-        },
-        registerSourceToggle: (toggle) => updateRegistration("sourceToggle", toggle),
-        registerActiveUndo: (handler) => updateRegistration("undo", handler),
-      };
-      byGroup.set(groupId, callbacks);
-      return callbacks;
-    },
-    [],
-  );
-  const flushStableDrafts = useCallback(
-    async (
-      shouldFlush: (groupId: string, tab: WorkbenchTab) => boolean = () => true,
-    ) => {
-      const flushedAtEpoch = new Map<DraftFlush, number>();
-      while (true) {
-        const batch = [...mountedEditorsRef.current.entries()]
-          .filter(
-            ([groupId, registration]) =>
-              registration.flush &&
-              (flushedAtEpoch.get(registration.flush) ?? -1) <
-                (dirtyEpochsRef.current.get(registration.tab) ?? 0) &&
-              shouldFlush(groupId, registration.tab),
-          )
-          .map(([, registration]) => ({
-            flush: registration.flush as DraftFlush,
-            epoch: dirtyEpochsRef.current.get(registration.tab) ?? 0,
-          }));
-        if (batch.length === 0) return;
-        for (const { flush, epoch } of batch) {
-          flushedAtEpoch.set(flush, epoch);
-          await flush();
-        }
-      }
-    },
-    [],
-  );
-  const flushActiveDraft = useCallback(() => flushStableDrafts(), [flushStableDrafts]);
   const workspaceId = props.workspace.workspaceId;
+  const openTabs = useMemo(() => allTabs(wb), [wb.editorGroups]);
+  const {
+    callbacksForEditor,
+    dirtyPaths,
+    hasDrafts,
+    flushStableDrafts,
+    undoForEditor,
+    toggleSource,
+    beginLineageOperation,
+    beginDraftOperation,
+  } = useEditorRegistry(workspaceId, openTabs);
+  const flushActiveDraft = useCallback(() => flushStableDrafts(), [flushStableDrafts]);
   const collectionLineage = useCollectionWriteLineage(workspaceId);
-  // Version switches, merges, and moment restores are workspace-wide lineage
-  // changes: every mounted draft and queued collection write must settle
-  // first, and no cell edit may be accepted while the change is in flight.
-  // The caller holds the returned release across its IPCs.
-  const beginLineageOperation = useCallback(
-    () => beginCollectionLineageOperation(workspaceId, flushStableDrafts),
-    [flushStableDrafts, workspaceId],
-  );
-  const beginDraftOperation = useCallback(async (): Promise<TreeChangeOperation> => {
-    const scope = { flushes: new Set<DraftFlush>() };
-    for (const registration of mountedEditorsRef.current.values()) {
-      if (registration.flush) scope.flushes.add(registration.flush);
-    }
-    draftOperationScopesRef.current.add(scope);
-
-    // A queued collection cell write names its record by PATH, which the
-    // caller's move is about to change. The gate pauses new cell acceptance
-    // for the whole operation and drains the queue — flushing drafts only
-    // settles mounted editors — and refuses the operation over a retained
-    // failure, whose retry would otherwise land on the vacated path.
-    let releaseCollectionWrites: () => void;
-    try {
-      releaseCollectionWrites = await beginCollectionLineageOperation(
-        workspaceId,
-        flushStableDrafts,
-      );
-    } catch (error) {
-      draftOperationScopesRef.current.delete(scope);
-      throw error;
-    }
-
-    let settlement: Promise<void> | null = null;
-    const settle = (options?: DraftFlushOptions) => {
-      if (settlement) return settlement;
-      settlement = (async () => {
-        const drained = new Set<DraftFlush>();
-        let firstError: unknown;
-        let failed = false;
-        try {
-          while (true) {
-            const batch = [...scope.flushes].filter(
-              (flush) => !drained.has(flush),
-            );
-            if (batch.length === 0) break;
-            for (const flush of batch) {
-              drained.add(flush);
-              try {
-                await flush(options);
-              } catch (error) {
-                if (!failed) {
-                  failed = true;
-                  firstError = error;
-                }
-              }
-            }
-          }
-        } finally {
-          draftOperationScopesRef.current.delete(scope);
-        }
-        if (failed) throw firstError;
-      })();
-      return settlement;
-    };
-    return { settle, release: releaseCollectionWrites };
-  }, [flushStableDrafts, workspaceId]);
 
   // `openWorkspace` installs main's exact renderer session before it waits
   // for watcher readiness. Its response is the renderer's existing proof that
@@ -1123,16 +945,6 @@ export function DesktopWorkspaceShell(props: {
   // the way the explorer marks the open file. Directory, not only id: an
   // id can collide between two discovered rows.
   const activePluginDetails = parsePluginDetailsTabPath(focusedTabPath);
-  const openTabs = useMemo(() => allTabs(wb), [wb.editorGroups]);
-  const dirtyPaths = useMemo(
-    () =>
-      new Set(
-        openTabs
-          .filter((tab) => dirtyTabsRef.current.has(tab))
-          .map((tab) => tab.path),
-      ),
-    [dirtyRevision, openTabs],
-  );
   const {
     tabLabels,
     rememberWebAppTitle,
@@ -2557,11 +2369,8 @@ export function DesktopWorkspaceShell(props: {
       );
       const needsFlush =
         !targetAlreadyOwnsPath &&
-        [...mountedEditorsRef.current.entries()].some(
-          ([groupId, registration]) =>
-            groupId !== targetGroupId &&
-            registration.tab.path === path &&
-            registration.flush,
+        hasDrafts(
+          (groupId, tab) => groupId !== targetGroupId && tab.path === path,
         );
       if (!needsFlush) {
         commitOpen();
@@ -2581,6 +2390,7 @@ export function DesktopWorkspaceShell(props: {
     },
     [
       flushStableDrafts,
+      hasDrafts,
       clearTabLimitError,
       invalidateDeferredFileOpen,
       mutateWb,
@@ -3033,9 +2843,8 @@ export function DesktopWorkspaceShell(props: {
         }
         mutateWb(closeRequestedTabs);
       };
-      const needsFlush = [...mountedEditorsRef.current.entries()].some(
-        ([groupId, registration]) =>
-          registration.flush && requested.get(registration.tab) === groupId,
+      const needsFlush = hasDrafts(
+        (groupId, tab) => requested.get(tab) === groupId,
       );
       if (!needsFlush) {
         commitClose();
@@ -3058,6 +2867,7 @@ export function DesktopWorkspaceShell(props: {
     },
     [
       flushStableDrafts,
+      hasDrafts,
       invalidateDeferredFileOpen,
       mutateWb,
       reportShellError,
@@ -3082,8 +2892,12 @@ export function DesktopWorkspaceShell(props: {
       failureMessage: string,
       commit: () => void,
     ) => {
-      const registration = mountedEditorsRef.current.get(groupId);
-      if (registration?.tab !== tab || !registration.flush) {
+      if (
+        !hasDrafts(
+          (candidateGroupId, candidateTab) =>
+            candidateGroupId === groupId && candidateTab === tab,
+        )
+      ) {
         commit();
         return;
       }
@@ -3094,7 +2908,7 @@ export function DesktopWorkspaceShell(props: {
         .then(commit)
         .catch((error) => reportShellError(failureMessage, error));
     },
-    [flushStableDrafts, reportShellError],
+    [flushStableDrafts, hasDrafts, reportShellError],
   );
 
   const closeActiveTab = useCallback(() => {
@@ -4026,9 +3840,7 @@ export function DesktopWorkspaceShell(props: {
         !event.shiftKey &&
         !event.altKey
       ) {
-        const activeUndo = mountedEditorsRef.current.get(
-          wbRef.current.activeEditorGroup,
-        )?.undo;
+        const activeUndo = undoForEditor(wbRef.current.activeEditorGroup);
         if (activeUndo?.acceptsEvent(event)) {
           event.preventDefault();
           void activeUndo.run().catch((error) =>
@@ -4080,6 +3892,7 @@ export function DesktopWorkspaceShell(props: {
     mutateWb,
     openSettings,
     reportShellError,
+    undoForEditor,
   ]);
 
   const openWorkspaceFolder = useCallback(async () => {
@@ -4169,9 +3982,7 @@ export function DesktopWorkspaceShell(props: {
             {
               id: "toggle-markdown-source",
               label: "Toggle markdown source view",
-              run: () =>
-                mountedEditorsRef.current.get(wbRef.current.activeEditorGroup)
-                  ?.sourceToggle?.(),
+              run: () => toggleSource(wbRef.current.activeEditorGroup),
             },
           ]
         : []),
@@ -4306,6 +4117,7 @@ export function DesktopWorkspaceShell(props: {
       openEditorGroupRight,
       openSettings,
       reportShellError,
+      toggleSource,
       workspaceId,
       props.workspace.shareView,
     ],
