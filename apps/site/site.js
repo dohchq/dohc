@@ -27,23 +27,26 @@ syncThemeToggle();
 
 const fontComparison = document.querySelector('.font-comparison');
 if (fontComparison) {
-  const choices = Array.from(fontComparison.querySelectorAll('[data-font-choice]'));
-  const applyFonts = (choice) => {
-    root.dataset.fonts = choice;
+  fontComparison.querySelectorAll('[data-font-role]').forEach((group) => {
+    const role = group.dataset.fontRole;
+    const choices = Array.from(group.querySelectorAll('[data-font-value]'));
+    const applyFont = (value) => {
+      root.setAttribute('data-font-' + role, value);
+      choices.forEach((button) => {
+        button.setAttribute('aria-pressed', String(button.dataset.fontValue === value));
+      });
+    };
+    applyFont(root.getAttribute('data-font-' + role) === 'alternate' ? 'alternate' : 'current');
     choices.forEach((button) => {
-      button.setAttribute('aria-pressed', String(button.dataset.fontChoice === choice));
-    });
-  };
-  applyFonts(choices.some((button) => button.dataset.fontChoice === root.dataset.fonts) ? root.dataset.fonts : 'current');
-  choices.forEach((button) => {
-    button.addEventListener('click', () => {
-      const choice = button.dataset.fontChoice;
-      applyFonts(choice);
-      try {
-        localStorage.setItem('dohc-fonts', choice);
-      } catch {
-        // Comparison still works when storage is unavailable.
-      }
+      button.addEventListener('click', () => {
+        const value = button.dataset.fontValue;
+        applyFont(value);
+        try {
+          localStorage.setItem('dohc-font-' + role, value);
+        } catch {
+          // Comparison still works when storage is unavailable.
+        }
+      });
     });
   });
   fontComparison.hidden = false;
