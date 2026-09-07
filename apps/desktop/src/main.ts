@@ -59,8 +59,6 @@ import { basename, dirname, join, resolve } from "node:path";
 import {
   PluginPanelSdkEvent,
   PluginStatusChangedEvent,
-  PluginPanelInvalidatedEvent,
-  PluginWebAppFailedEvent,
   WorkspaceIdPayload,
   McpConfigResult,
   DesktopUserSettingsResult,
@@ -86,6 +84,7 @@ import { registerWorkspaceSearchIpcHandlers } from "./ipc/workspaceSearchIpc";
 import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 
 import { createDesktopRendererWorkspaceRetirement } from "./mainRendererWorkspaceRetirement";
+import { createDesktopPluginSurfaces } from "./plugins/desktopPluginSurfaces";
 import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
 import { createExactRendererWorkspaceReferenceOwner } from "./window/exactRendererWorkspaceReference";
 import {
@@ -318,9 +317,8 @@ import { pluginDataDir } from "./plugins/pluginLocalState";
 import type { RegisteredPlugin } from "./plugins/pluginPanelRegistration";
 import { PluginWorkspaceRuntimes } from "./plugins/pluginWorkspaceRuntimes";
 import {
-  PluginSurfaces,
+  type PluginSurfaces,
   type PluginPanelSdkAuthorization,
-  type PluginWebAppContainer,
 } from "./plugins/pluginSurfaces";
 
 import {
@@ -939,6 +937,14 @@ const {
   prepareAfterRendererCrash,
   showOrCreateMainWindow,
 } = desktopWindows;
+const { createPluginWebAppContainer, createPluginSurfaces } =
+  createDesktopPluginSurfaces<WebContents, WebContentsView>({
+    BrowserWindow, WebContentsView, webContents, session, bindGuestZoom,
+    allowLoopbackFrameOrigin, withWorkspaceAttachment,
+    get rendererWorkspaceSessions(): RendererWorkspaceSessionOwner<WebContents> {
+      return rendererWorkspaceSessions;
+    },
+  });
 
 // Synchronous mirror of the credential store for status derivation (the
 // status handler path is hot). Refreshed at ready, login, and logout.
@@ -3237,122 +3243,6 @@ async function startAgentRunWithWorkspaceActivity(
   });
   if (!run) throw new Error("The agent run did not start.");
   return run;
-}
-
-function createPluginWebAppContainer(
-  sender: WebContents,
-): PluginWebAppContainer<WebContentsView> {
-  let attachedWindow: BrowserWindow | null = null;
-  return {
-    isDestroyed: () => {
-      const window = attachedWindow ?? BrowserWindow.fromWebContents(sender);
-      return !window || window.isDestroyed();
-    },
-    attach: (view) => {
-      const window = BrowserWindow.fromWebContents(sender);
-      if (!window || window.isDestroyed()) {
-        throw new Error("The plugin web app request has no open window.");
-      }
-      attachedWindow = window;
-      window.contentView.addChildView(view);
-    },
-    detach: (view) => {
-      const window = attachedWindow;
-      attachedWindow = null;
-      if (!window || window.isDestroyed()) return;
-      window.contentView.removeChildView(view);
-    },
-  };
-}
-
-// Tells one renderer its guest died after the start already answered "ok".
-// Without it the page keeps a `ready` state over an empty frame and the user
-// sees a blank tab with nothing to act on. The event carries no failure text:
-// the load error can embed the start URL, credential fragment included.
-//
-// generation gates this the same way every other send in this file does
-// (round-13 finding 3): WebContents ids recycle across a crash-reload, so
-// a sender resolved by a stale id — or a captured reference whose renderer
-// has since reloaded — could otherwise deliver a dead guest's failure to
-// whatever unrelated page now answers to that id or generation.
-function notifyPluginWebAppFailed(
-  sender: WebContents,
-  generation: number,
-  event: PluginWebAppFailedEvent,
-): void {
-  if (
-    sender.isDestroyed() ||
-    rendererWorkspaceSessions.current(sender)?.generation !== generation
-  ) {
-    return;
-  }
-  sender.send(CHANNELS.pluginWebAppFailed, PluginWebAppFailedEvent.parse(event));
-}
-
-function notifyPluginPanelInvalidated(
-  sender: WebContents,
-  generation: number,
-  event: PluginPanelInvalidatedEvent,
-): void {
-  if (
-    sender.isDestroyed() ||
-    rendererWorkspaceSessions.current(sender)?.generation !== generation
-  ) {
-    return;
-  }
-  sender.send(
-    CHANNELS.pluginPanelInvalidated,
-    PluginPanelInvalidatedEvent.parse(event),
-  );
-}
-
-function createPluginSurfaces(
-  binding: WorkspaceAuthorityBinding<RegistryEntry>,
-  pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>,
-): PluginSurfaces<WebContentsView> {
-  return new PluginSurfaces<WebContentsView>({
-  ViewClass: WebContentsView,
-  bindWebAppZoom: bindGuestZoom,
-  allowPanelOrigin: allowLoopbackFrameOrigin,
-  clearPanelStorage: (options) =>
-    session.defaultSession.clearStorageData(options),
-  clearGuestPartition: (partition) =>
-    session.fromPartition(partition).clearStorageData(),
-  notifyWebAppFailed: ({ senderId, generation, ...event }) => {
-    const sender = webContents.fromId(senderId);
-    if (!sender) return;
-    withWorkspaceAttachment(
-      {
-        workspaceId: binding.workspaceId,
-        attachmentId: binding.attachmentId,
-      },
-      () => notifyPluginWebAppFailed(sender, generation, event),
-    );
-  },
-  notifyPanelInvalidated: ({ senderId, generation, ...event }) => {
-    const sender = webContents.fromId(senderId);
-    if (!sender) return;
-    withWorkspaceAttachment(
-      {
-        workspaceId: binding.workspaceId,
-        attachmentId: binding.attachmentId,
-      },
-      () => notifyPluginPanelInvalidated(sender, generation, event),
-    );
-  },
-  onPanelDisposed: ({ workspaceId, pluginId, panelId, surfaceId }) => {
-    pluginRuntimes.current(workspaceId)?.workspaceEvents.disposeOwner({
-      kind: "panel",
-      workspaceId,
-      pluginId,
-      panelId,
-      surfaceId,
-    });
-  },
-  onError: (error, context) => {
-    console.warn(`[desktop] ${context}`, error);
-  },
-  });
 }
 
 async function requirePluginEngineCaptureForOperation(
