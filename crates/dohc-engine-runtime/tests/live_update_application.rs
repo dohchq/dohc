@@ -1,0 +1,465 @@
+use dohc_engine_collab::live_object_binding::LiveObjectBinding;
+use dohc_engine_collab::live_update_application::{
+    AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationError, ApplicationHostCoordinate,
+    ApplicationPending, ApplicationResult, LiveUpdateReceipt, RelayAcceptedLiveUpdate,
+    ServerDerivedLiveUpdateAuthority,
+};
+use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc, durable};
+use dohc_engine_runtime::actor::{ActorLiveApplicationHandle, ActorLiveApplicationOwner};
+use dohc_engine_runtime::{ActorHandle, RuntimeError, WorkspaceSupervisor};
+use dohc_engine_storage::{
+    EngineStore, FaultAction, FaultInjector, FaultPoint, NoFaults, StorageError, hex_sha256,
+    put_binary_blob_with_sha,
+};
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+fn binding(object: &str) -> LiveObjectBinding {
+    LiveObjectBinding {
+        workspace_id: "workspace".into(),
+        main_version_id: "main".into(),
+        object_id: object.into(),
+        lineage_claim_id: hex_sha256(&Ydoc::wire().encode_full_state()),
+        current_path: format!("{object}.md"),
+        selector_paths: vec![format!("{object}.md")],
+        restore_fence_generation: 7,
+    }
+}
+fn coordinate(connection: &str) -> ApplicationHostCoordinate {
+    ApplicationHostCoordinate {
+        host_id: "host".into(),
+        host_epoch: 2,
+        instance_id: "instance".into(),
+        connection_id: connection.into(),
+    }
+}
+fn fixture() -> (ScratchDir, PathBuf, WorkspaceSupervisor, ActorHandle) {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut store = EngineStore::open(&db, 0).unwrap();
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .ensure_main_version("workspace", "main", 0, &NoFaults)
+        .unwrap();
+    for object in ["one", "two"] {
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES ('workspace',?1,0)", [object]).unwrap();
+            Ok::<_, StorageError>(())
+        }).unwrap();
+        let key = DocKey::new("workspace", "main", object).unwrap();
+        durable::ensure_marker(
+            &mut store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::Replicated,
+            &NoFaults,
+            0,
+        )
+        .unwrap();
+        store.write_with(&NoFaults, |tx| {
+            put_binary_blob_with_sha(tx, &Ydoc::wire().encode_full_state(), &binding(object).lineage_claim_id).unwrap();
+            tx.execute("UPDATE ydoc_docs SET lineage_claim_status='exact',lineage_claim_id=?1,path=?2 WHERE object_id=?3", rusqlite::params![binding(object).lineage_claim_id,binding(object).current_path,object]).unwrap();
+            Ok::<_, StorageError>(())
+        }).unwrap();
+    }
+    drop(store);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    (scratch, db, supervisor, actor)
+}
+async fn registered(
+    actor: &ActorHandle,
+) -> (ActorLiveApplicationOwner, ActorLiveApplicationHandle) {
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = owner
+        .register("relay-A".into(), coordinate("connection"), binding("one"))
+        .await
+        .unwrap();
+    (owner, handle)
+}
+fn event(delivery: &str, cursor: i64, object: &str, bytes: Vec<u8>) -> AdmittedLiveUpdate {
+    AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: delivery.into(),
+                    update_digest: hex_sha256(&bytes),
+                    journal_cursor: cursor,
+                    accepting_host_epoch: 1,
+                },
+                binding: binding(object),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "person".into(),
+                },
+                received_at_ms: 2,
+            },
+            first_seen: vec![],
+        },
+        update_bytes: bytes,
+    }
+}
+fn ack(
+    result: ApplicationResult,
+) -> dohc_engine_collab::live_update_application::LiveUpdateHostApplicationAck {
+    match result {
+        ApplicationResult::Applied(value) => value,
+        other => panic!("expected ACK: {other:?}"),
+    }
+}
+struct Crash(FaultPoint);
+impl FaultInjector for Crash {
+    fn poll(&self, point: FaultPoint) -> FaultAction {
+        if point == self.0 {
+            FaultAction::Crash
+        } else {
+            FaultAction::Continue
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn documents_use_the_actor_writer_and_owner_replacement_retires_captured_handles() {
+    let (_scratch, db, supervisor, actor) = fixture();
+    let (owner, one) = registered(&actor).await;
+    let two = owner
+        .register("relay-A".into(), coordinate("connection"), binding("two"))
+        .await
+        .unwrap();
+    let first = event("one", 1, "one", Ydoc::wire().plaintext_insert(0, "first"));
+    let second = event("two", 2, "two", Ydoc::wire().plaintext_insert(0, "second"));
+    ack(one.apply(first.clone(), Arc::new(NoFaults)).await.unwrap());
+    ack(two.apply(second.clone(), Arc::new(NoFaults)).await.unwrap());
+    let replacement = owner
+        .register("relay-A".into(), coordinate("connection"), binding("one"))
+        .await
+        .unwrap();
+    assert_eq!(
+        one.apply(first.clone(), Arc::new(NoFaults)).await.unwrap(),
+        ApplicationResult::Pending(ApplicationPending::ApplicabilityUnavailable)
+    );
+    assert!(ack(two.apply(second.clone(), Arc::new(NoFaults)).await.unwrap()).application_replayed);
+    let (next_owner, next) = registered(&actor).await;
+    assert!(matches!(
+        replacement.apply(first.clone(), Arc::new(NoFaults)).await,
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    assert!(matches!(
+        two.apply(second, Arc::new(NoFaults)).await,
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    assert!(ack(next.apply(first.clone(), Arc::new(NoFaults)).await.unwrap()).application_replayed);
+    drop(next_owner);
+    assert!(matches!(
+        next.clone().apply(first, Arc::new(NoFaults)).await,
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    supervisor.close(&db).unwrap();
+    let store = EngineStore::open(&db, 20).unwrap();
+    assert_eq!(
+        store
+            .table_row_count("live_device_update_applications")
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        store.table_row_count("owner_ydoc_outbox_entries").unwrap(),
+        0
+    );
+    assert_eq!(store.table_row_count("ydoc_updates").unwrap(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn identical_strings_cannot_redirect_an_old_handle_after_restart_or_new_supervisor() {
+    let (_scratch, db, supervisor, actor) = fixture();
+    let (owner, old) = registered(&actor).await;
+    let update = event(
+        "replay",
+        1,
+        "one",
+        Ydoc::wire().plaintext_insert(0, "durable"),
+    );
+    let original = ack(old.apply(update.clone(), Arc::new(NoFaults)).await.unwrap());
+    let restarted = supervisor.restart(&db, 5).unwrap();
+    assert!(matches!(
+        old.apply(update.clone(), Arc::new(NoFaults)).await,
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    assert!(matches!(
+        owner
+            .register("relay-A".into(), coordinate("connection"), binding("one"))
+            .await,
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    let (_new_owner, new) = registered(&restarted).await;
+    let replay = ack(new.apply(update.clone(), Arc::new(NoFaults)).await.unwrap());
+    assert!(replay.application_replayed);
+    assert_eq!(replay.local_ydoc_sequence, original.local_ydoc_sequence);
+    assert_eq!(replay.accepting_host_epoch, 1);
+    supervisor.close(&db).unwrap();
+    let mut store = EngineStore::open(&db, 6).unwrap();
+    durable::maybe_compact(
+        &mut store,
+        &DocKey::new("workspace", "main", "one").unwrap(),
+        0,
+        &NoFaults,
+        7,
+    )
+    .unwrap();
+    drop(store);
+    let other_supervisor = WorkspaceSupervisor::new();
+    let other = other_supervisor.open(&db, 8).unwrap().actor;
+    let (_other_owner, live) = registered(&other).await;
+    assert!(matches!(
+        new.apply(update.clone(), Arc::new(NoFaults)).await,
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    assert_eq!(
+        ack(live.apply(update, Arc::new(NoFaults)).await.unwrap()).local_ydoc_sequence,
+        original.local_ydoc_sequence
+    );
+    other_supervisor.close(&db).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_conflicts_and_storage_failures_keep_their_typed_errors() {
+    let (_scratch, db, supervisor, actor) = fixture();
+    let (owner, handle) = registered(&actor).await;
+    let mut wrong = binding("one");
+    wrong.workspace_id = "foreign".into();
+    assert!(matches!(
+        owner
+            .register("relay-A".into(), coordinate("connection"), wrong)
+            .await,
+        Err(RuntimeError::LiveApplication(
+            ApplicationError::WorkspaceMismatch
+        ))
+    ));
+    let update = event("same", 1, "one", vec![0, 0]);
+    ack(handle
+        .apply(update.clone(), Arc::new(NoFaults))
+        .await
+        .unwrap());
+    let mut conflict = update;
+    conflict.metadata.accepted.received_at_ms += 1;
+    let error = handle
+        .apply(conflict, Arc::new(NoFaults))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RuntimeError::LiveApplication(ApplicationError::Conflict)
+    ));
+    assert_eq!(error.code(), "live-application-conflict");
+    owner.close().await.unwrap();
+    assert!(matches!(
+        handle
+            .apply(event("late", 2, "one", vec![0, 0]), Arc::new(NoFaults))
+            .await,
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_only_actor_cannot_register_an_application_handle() {
+    let (_scratch, db, supervisor, _actor) = fixture();
+    supervisor.close(&db).unwrap();
+    let actor = supervisor.open_read_only(&db).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    assert!(matches!(
+        owner
+            .register("relay-A".into(), coordinate("connection"), binding("one"))
+            .await,
+        Err(RuntimeError::LiveApplication(ApplicationError::Storage(_)))
+    ));
+    supervisor.close(&db).unwrap();
+    let store = EngineStore::open(&db, 5).unwrap();
+    assert_eq!(
+        store
+            .table_row_count("live_device_application_bindings")
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dependencies_and_commit_crashes_recover_through_the_real_actor() {
+    for delete in [false, true] {
+        for parked in [false, true] {
+            let (_scratch, db, supervisor, actor) = fixture();
+            let producer = Ydoc::wire();
+            let first = producer.plaintext_insert(0, "x");
+            let dependent = if delete {
+                producer.plaintext_delete(0, 1)
+            } else {
+                producer.plaintext_insert(1, "y")
+            };
+            let actor = if parked {
+                supervisor.close(&db).unwrap();
+                let mut store = EngineStore::open(&db, 2).unwrap();
+                store
+                    .write_with(&NoFaults, |tx| {
+                        durable::record_update_in_tx(
+                            tx,
+                            &DocKey::new("workspace", "main", "one").unwrap(),
+                            &dependent,
+                            None,
+                            None,
+                            2,
+                        )
+                    })
+                    .unwrap();
+                drop(store);
+                supervisor.open(&db, 3).unwrap().actor
+            } else {
+                actor
+            };
+            let (_owner, handle) = registered(&actor).await;
+            let update = event("dependent", 2, "one", dependent);
+            assert_eq!(
+                handle
+                    .apply(update.clone(), Arc::new(NoFaults))
+                    .await
+                    .unwrap(),
+                ApplicationResult::Pending(ApplicationPending::DependenciesUnresolved)
+            );
+            ack(handle
+                .apply(event("first", 1, "one", first), Arc::new(NoFaults))
+                .await
+                .unwrap());
+            assert!(matches!(
+                handle
+                    .apply(
+                        update.clone(),
+                        Arc::new(Crash(FaultPoint::StorageAfterCommitBeforeAck))
+                    )
+                    .await,
+                Err(RuntimeError::LiveApplication(ApplicationError::Interrupted))
+            ));
+            let restarted = supervisor.restart(&db, 5).unwrap();
+            let (_new_owner, new) = registered(&restarted).await;
+            assert!(matches!(
+                handle.apply(update.clone(), Arc::new(NoFaults)).await,
+                Err(RuntimeError::ActorUnavailable)
+            ));
+            assert!(ack(new.apply(update, Arc::new(NoFaults)).await.unwrap()).application_replayed);
+            supervisor.close(&db).unwrap();
+            let store = EngineStore::open(&db, 6).unwrap();
+            assert_eq!(
+                store
+                    .table_row_count("live_device_update_applications")
+                    .unwrap(),
+                2
+            );
+            let doc = store
+                .read_with(|conn| {
+                    durable::load_doc_from_connection(
+                        conn,
+                        &DocKey::new("workspace", "main", "one").unwrap(),
+                    )
+                })
+                .unwrap();
+            assert!(
+                dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&doc, &producer)
+                    .unwrap()
+            );
+        }
+    }
+}
+
+struct HoldCommit {
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+impl FaultInjector for HoldCommit {
+    fn poll(&self, point: FaultPoint) -> FaultAction {
+        if point == FaultPoint::StorageAfterCommitBeforeAck {
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                entered.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+            }
+        }
+        FaultAction::Continue
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owner_drop_suppresses_a_committed_ack_and_a_queued_request() {
+    let (_scratch, db, supervisor, actor) = fixture();
+    let (owner, handle) = registered(&actor).await;
+    let update = event("commit", 1, "one", Ydoc::wire().plaintext_insert(0, "x"));
+    let (entered, at_commit) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let held = Arc::new(HoldCommit {
+        entered: Mutex::new(Some(entered)),
+        release: Mutex::new(wait),
+    });
+    let in_flight = tokio::spawn({
+        let handle = handle.clone();
+        let update = update.clone();
+        async move { handle.apply(update, held).await }
+    });
+    at_commit.await.unwrap();
+    let later = event("queued", 2, "one", vec![0, 0]);
+    let mut queued = Box::pin(handle.apply(later, Arc::new(NoFaults)));
+    assert!(
+        std::future::poll_fn(|context| std::task::Poll::Ready(
+            queued.as_mut().poll(context).is_pending()
+        ))
+        .await
+    );
+    drop(owner);
+    release.send(()).unwrap();
+    assert!(matches!(
+        in_flight.await.unwrap(),
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    assert!(matches!(queued.await, Err(RuntimeError::ActorUnavailable)));
+    let (_new_owner, current) = registered(&actor).await;
+    assert!(ack(current.apply(update, Arc::new(NoFaults)).await.unwrap()).application_replayed);
+    supervisor.close(&db).unwrap();
+    let store = EngineStore::open(&db, 5).unwrap();
+    assert_eq!(
+        store
+            .table_row_count("live_device_update_applications")
+            .unwrap(),
+        1
+    );
+}
+
+struct PanicCommit;
+impl FaultInjector for PanicCommit {
+    fn poll(&self, point: FaultPoint) -> FaultAction {
+        assert_ne!(
+            point,
+            FaultPoint::StorageBeforePersist,
+            "injected worker panic"
+        );
+        FaultAction::Continue
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_panic_retires_owner_and_rolls_back_before_restart() {
+    let (_scratch, db, supervisor, actor) = fixture();
+    let (_owner, old) = registered(&actor).await;
+    let update = event("panic", 1, "one", Ydoc::wire().plaintext_insert(0, "x"));
+    assert!(matches!(
+        old.apply(update.clone(), Arc::new(PanicCommit)).await,
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    let restarted = supervisor.restart(&db, 3).unwrap();
+    let (_new_owner, new) = registered(&restarted).await;
+    assert!(matches!(
+        old.apply(update.clone(), Arc::new(NoFaults)).await,
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    assert!(!ack(new.apply(update, Arc::new(NoFaults)).await.unwrap()).application_replayed);
+    supervisor.close(&db).unwrap();
+}
