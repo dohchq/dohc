@@ -330,11 +330,34 @@ impl EngineService {
             params.registration_id,
         )?;
         let host = registration.host.clone();
-        let serial = Arc::clone(&host.open.session_ops).lock_owned().await;
+        let cancellation = super::request::OperationCancellation::new(&ctx);
+        // Check synchronously too: the token's deadline bridge may not have run yet.
+        let check_interruption = || {
+            if ctx.cancel.is_cancelled() {
+                Err(WireError::new(
+                    ErrorCode::Cancelled,
+                    "live settlement cancelled",
+                ))
+            } else if ctx.deadline.is_some_and(|end| Instant::now() >= end) {
+                Err(WireError::new(
+                    ErrorCode::DeadlineExceeded,
+                    "live settlement deadline elapsed",
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        check_interruption()?;
+        let serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("live settlement (queued)"));
+            }
+            serial = Arc::clone(&host.open.session_ops).lock_owned() => serial,
+        };
+        check_interruption()?;
         if !host.current(connection)
             || registration.retired.is_cancelled()
-            || ctx.cancel.is_cancelled()
-            || ctx.deadline.is_some_and(|end| Instant::now() >= end)
             || !Arc::ptr_eq(&self.open(request.workspace.as_ref())?, &host.open)
         {
             return Err(WireError::new(
@@ -343,12 +366,11 @@ impl EngineService {
             ));
         }
         let (max_applications, reservation) = self.configured_settlement_admission(&ctx)?;
-        let cancellation = super::request::OperationCancellation::new(&ctx);
         let now_ms = super::request::now_ms()?;
         let token = cancellation.token();
         let guard = Arc::new(ApplicationOutputGuard {
             registration: registration.clone(),
-            cancel: ctx.cancel,
+            cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
             _reservation: reservation.clone(),
         });
@@ -368,12 +390,20 @@ impl EngineService {
                 )
                 .await
         });
-        let outcome = operation.await;
+        let outcome = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("live settlement"));
+            }
+            outcome = operation => outcome,
+        };
         retirement.0 = None;
+        check_interruption()?;
         let result = outcome
             .map_err(|_| WireError::new(ErrorCode::Internal, "live-application-interrupted"))?
             .map_err(map_runtime)?;
         if !guard.is_current() {
+            check_interruption()?;
             return Err(WireError::new(
                 ErrorCode::Cancelled,
                 "live-application-retired",
@@ -725,6 +755,267 @@ mod tests {
     use dohc_engine_protocol::transport::EngineService as _;
     use dohc_engine_protocol::wire::BlobStart;
     use dohc_engine_storage::hex_sha256;
+
+    async fn settle_queued_interruption(deadline: bool) {
+        let (_scratch, service, owner, workspace, registration, _) = fixture().await;
+        let workspace = WorkspaceHandle(workspace);
+        let open = service.open(Some(&workspace)).unwrap();
+        let serial = open.session_ops.lock().await;
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        if deadline {
+            tokio::time::pause();
+            ctx.deadline =
+                Some(tokio::time::Instant::now().into_std() + std::time::Duration::from_secs(60));
+        }
+        let cancel = ctx.cancel.clone();
+        let request = Request {
+            id: 71,
+            method: "liveApplication.settle".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            params: json!({"registrationId": registration, "terminalReceipt": null}),
+        };
+        let mut waiting = Box::pin(service.live_application_settle(ctx, request));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        if deadline {
+            tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        } else {
+            cancel.cancel();
+        }
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiting).await;
+        if deadline {
+            tokio::time::resume();
+        }
+        assert!(
+            result.is_ok(),
+            "queued settlement must stop before the serial is released"
+        );
+        let error = result.unwrap().unwrap_err();
+        assert_eq!(
+            error.code,
+            if deadline {
+                ErrorCode::DeadlineExceeded
+            } else {
+                ErrorCode::Cancelled
+            }
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), registration)
+                .is_ok(),
+            "a request cancelled before actor submission must preserve the host"
+        );
+        drop(serial);
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn settle_queued_cancel_does_not_wait_for_session_serialization() {
+        settle_queued_interruption(false).await;
+    }
+
+    #[tokio::test]
+    async fn settle_queued_deadline_does_not_wait_for_session_serialization() {
+        settle_queued_interruption(true).await;
+    }
+
+    #[tokio::test]
+    async fn settle_expired_deadline_preserves_the_deadline_error_before_submission() {
+        let (_scratch, service, owner, workspace, registration, _) = fixture().await;
+        let workspace = WorkspaceHandle(workspace);
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        ctx.deadline = Some(Instant::now());
+        let request = Request {
+            id: 73,
+            method: "liveApplication.settle".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            params: json!({"registrationId": registration, "terminalReceipt": null}),
+        };
+        assert_eq!(
+            service
+                .live_application_settle(ctx, request)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::DeadlineExceeded
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), registration)
+                .is_ok()
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    async fn settle_actor_interruption(deadline: bool) {
+        use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
+        struct BlockWriter {
+            started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl FaultInjector for BlockWriter {
+            fn poll(&self, point: FaultPoint) -> FaultAction {
+                if point == FaultPoint::StorageBeforePersist
+                    && let Some(started) = lock(&self.started).take()
+                {
+                    let _ = started.send(());
+                    lock(&self.release)
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                }
+                FaultAction::Continue
+            }
+        }
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let configuration = serde_json::from_value(json!({
+            "version": 1, "relayNamespace": "cancel-test",
+            "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
+            "workspaces": [{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4}],
+            "ingress": {"aggregateBytes":400_000_000,"applicationWorkingReserveBytes":1_000_000,"maxUploads":1,"uploadDeadlineMs":30_000},
+            "settlement": {"maxApplicationsPerSettlement":4}
+        })).unwrap();
+        let (service, owner, ingress) = EngineService::configured_live_host(configuration)
+            .await
+            .unwrap();
+        let workspace = lock(&service.handles).keys().next().unwrap().clone();
+        let open = service.open(Some(&workspace)).unwrap();
+        open.actor
+            .ensure_main_version(
+                "workspace".into(),
+                0,
+                Arc::new(NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let binding = LiveObjectBinding {
+            workspace_id: "workspace".into(),
+            main_version_id: "main".into(),
+            object_id: "document".into(),
+            lineage_claim_id: hex_sha256(&Ydoc::wire().encode_full_state()),
+            current_path: "document.md".into(),
+            selector_paths: vec!["document.md".into()],
+            restore_fence_generation: 0,
+        };
+        let registration = service
+            .live_application_register(&ctx, Some(workspace.clone()), json!({"binding": binding}))
+            .await
+            .unwrap()["registrationId"]
+            .as_u64()
+            .unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let actor = open.actor.clone();
+        let blocker = tokio::spawn(async move {
+            actor
+                .ensure_main_version(
+                    "blocking-workspace".into(),
+                    0,
+                    Arc::new(BlockWriter {
+                        started: Mutex::new(Some(started_tx)),
+                        release: Mutex::new(release_rx),
+                    }),
+                    dohc_engine_runtime::CancellationToken::new(),
+                )
+                .await
+        });
+        started_rx.await.unwrap();
+        if deadline {
+            tokio::time::pause();
+            ctx.deadline =
+                Some(tokio::time::Instant::now().into_std() + std::time::Duration::from_secs(60));
+        }
+        let cancel = ctx.cancel.clone();
+        let request = Request {
+            id: 72,
+            method: "liveApplication.settle".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            params: json!({"registrationId":registration,"terminalReceipt":null}),
+        };
+        let mut waiting = Box::pin(service.live_application_settle(ctx, request));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        if deadline {
+            tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        } else {
+            cancel.cancel();
+        }
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiting).await;
+        if deadline {
+            tokio::time::resume();
+        }
+        let serial_held = open.session_ops.try_lock().is_err();
+        let reservation_held = ingress.settlement_admission(4).unwrap().reserve().is_err();
+        let host_retired = service
+            .live_application_registration(&owner.handle(), Some(&workspace), registration)
+            .is_err();
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        let serial =
+            tokio::time::timeout(std::time::Duration::from_secs(1), open.session_ops.lock())
+                .await
+                .unwrap();
+        drop(serial);
+        let admission = ingress.settlement_admission(4).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while admission.reserve().is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor completion releases admission");
+        service.workspace_close(Some(workspace)).await.unwrap();
+        assert!(
+            result.is_ok(),
+            "cancelled settlement must return before the blocked actor is released"
+        );
+        assert_eq!(
+            result.unwrap().unwrap_err().code,
+            if deadline {
+                ErrorCode::DeadlineExceeded
+            } else {
+                ErrorCode::Cancelled
+            }
+        );
+        assert!(
+            serial_held,
+            "actor work must retain session exclusion after RPC cancellation"
+        );
+        assert!(
+            reservation_held,
+            "actor work must retain its admission charge after RPC cancellation"
+        );
+        assert!(
+            host_retired,
+            "cancelled submitted work must retire the host before a retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn settle_actor_cancel_keeps_exclusion_and_reservation_until_completion() {
+        settle_actor_interruption(false).await;
+    }
+
+    #[tokio::test]
+    async fn settle_actor_deadline_keeps_exclusion_and_reservation_until_completion() {
+        settle_actor_interruption(true).await;
+    }
 
     #[tokio::test]
     async fn invalid_live_application_replacement_preserves_the_registration() {

@@ -271,7 +271,7 @@ export function decodeLiveDocumentAuthorityStructure(db: SqliteDb, document: Liv
     projectedLength: projectionLength, ranges: decodedRanges, registeredAtMs };
 }
 
-function canonicalLiveSelector(share: SyncRelayShareRow, selector: ShareSelector): boolean {
+export function canonicalLiveSelector(share: SyncRelayShareRow, selector: ShareSelector): boolean {
   const raw = JSON.parse(share.selectorJson) as Record<string, unknown>;
   if (Object.keys(raw).length !== 2 || !Object.hasOwn(raw, "paths") || !Object.hasOwn(raw, "versionId")) return false;
   return new Set(selector.paths).size === selector.paths.length && selector.paths.every(path => {

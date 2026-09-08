@@ -73,7 +73,8 @@ afterAll(async () => {
 
 function child(args: string[], env: NodeJS.ProcessEnv = {}) {
   const processChild = spawn(process.execPath, args, { cwd: root, windowsHide: true,
-    env: { ...process.env, NODE_OPTIONS: "", NODE_ENV: "test", ...env }, stdio: ["pipe", "pipe", "pipe"] });
+    env: { ...process.env, NODE_OPTIONS: "", NODE_ENV: "test",
+      DOHC_RELAY_SERVICE_HOST_CONFIG: undefined, DOHC_RELAY_DEVICE_DELIVERY_CONFIG: undefined, ...env }, stdio: ["pipe", "pipe", "pipe"] });
   let stdout = "", stderr = "";
   processChild.stdout.on("data", bytes => { stdout += String(bytes); });
   processChild.stderr.on("data", bytes => { stderr += String(bytes); });
