@@ -18,12 +18,13 @@
 //! Policy-flip convergence (the #205-review obligation): `.dohc` is unwatched
 //! (policy edits generate no watcher events — TS parity), so each drive cycle
 //! fingerprints `.dohc/files.toml` + `.dohc/visibility.toml`. On a change the
-//! files layer is respawned with an empty manifest, which re-offers every
-//! scanned path through the sink — narrowed-but-unchanged paths retire via
-//! the sink's NotOwned branch, and newly-widened paths re-ingest.
+//! files layer is respawned with a manifest seeded from captured state.
+//! Narrowed entries carry a sentinel hash so unchanged paths retire via the
+//! sink's NotOwned branch. The seed preserves deletion detection, and paths
+//! whose policy widens re-ingest.
 
 use crate::capture_sink::{
-    CaptureProvenance, CapturedRoot, SelfWriteSuppression, StoreCaptureSink,
+    CaptureProvenance, CapturedRoot, PolicyState, SelfWriteSuppression, StoreCaptureSink,
 };
 use crate::{CAPTURE_MOMENT_RECORDED_EVENT, EngineEvents};
 use dohc_engine_collab::LeaseRegistry;
@@ -2231,17 +2232,7 @@ async fn manifest_seed(
     // in neither the listing nor the manifest).
     let policy = dohc_engine_runtime::search::read_engine_search_policy(root).files_policy;
     let manifest = ScanManifest::from_entries(entries.into_iter().map(|entry| {
-        let narrowed = policy.as_ref().is_some_and(|rules| {
-            !matches!(
-                dohc_engine_files::policy::classify_engine_file_path(&entry.path),
-                dohc_engine_files::policy::PathClassification::Secret
-            ) && !dohc_engine_runtime::search::resolve_effective_policy(
-                &entry.path,
-                Some(rules.as_slice()),
-                None,
-            )
-            .tracked
-        });
+        let narrowed = policy_excludes(&policy, &entry.path);
         let sha256 = if narrowed {
             NARROWED_SEED_SENTINEL_SHA.to_owned()
         } else {
@@ -2265,25 +2256,17 @@ async fn manifest_seed(
 /// Never a valid hex digest, so a seeded entry carrying it always re-offers.
 const NARROWED_SEED_SENTINEL_SHA: &str = "policy-narrowed-reoffer";
 
-/// Whether `.dohc/files.toml` currently narrows `path` out of engine
-/// ownership (the secret floor is policy-independent and never narrowed).
 /// One policy read for a whole apply run's over-cap evaluations.
-/// `Some(rules)` under a known policy (`None` inside = no narrowing);
-/// outer `None` when files.toml exists but cannot be read — the caller must
-/// hold loudly (failed apply), because a silent skip records no failure,
-/// keeps nothing dirty, and so the policy-recovery rebuild would never fire
-/// to retry it.
-type CapturePolicy = Option<Option<Vec<dohc_engine_runtime::search::FilesPolicyRule>>>;
-
-fn read_capture_policy(root: &Path) -> CapturePolicy {
+/// An unavailable policy holds the run dirty for recovery.
+fn read_capture_policy(root: &Path) -> PolicyState {
     let snapshot = dohc_engine_runtime::search::read_engine_search_policy(root);
     if snapshot.diagnostics.iter().any(|diagnostic| {
         diagnostic.file == "files.toml"
             && diagnostic.reason == dohc_engine_runtime::search::DiagnosticReason::Unreadable
     }) {
-        return None;
+        return PolicyState::Unavailable;
     }
-    Some(snapshot.files_policy)
+    PolicyState::Known(snapshot.files_policy)
 }
 
 /// Whether a known policy narrows `path` out of engine ownership (the secret
@@ -3650,18 +3633,18 @@ async fn apply_bound_run_with_handle(
     // round-trips for one answer, and could even give different paths a
     // different policy if an edit raced the loop.
     let capture_policy = if plan.retained_over_cap.is_empty() {
-        Some(None)
+        PolicyState::Known(None)
     } else {
         read_capture_policy(root)
     };
     for path in &plan.retained_over_cap {
         let excluded = match &capture_policy {
-            Some(policy) => policy_excludes(policy, path),
+            PolicyState::Known(policy) => policy_excludes(policy, path),
             // Unknown policy: hold LOUDLY. This loop is the only mechanism
             // that can retire an over-cap narrowed head, so the hold must
             // register as a failure (dirty + degraded) for the recovery
             // rebuild to retry — a silent skip strands the head forever.
-            None => {
+            PolicyState::Unavailable => {
                 result.failed_applies.push(path.clone());
                 result.degraded = true;
                 status.mark_degraded();
@@ -3858,6 +3841,199 @@ mod root_bound_run_tests {
     use dohc_engine_testkit::ScratchDir;
 
     const WORKSPACE_ID: &str = "ws-root-bound-run";
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seeded_deletes_survive_an_over_cap_policy_hold_and_recovery() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().to_path_buf();
+        for path in ["big.md", "gone.md", ".env"] {
+            std::fs::write(root.join(path), b"captured content").expect("write captured file");
+        }
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let seed_actor = actor.clone();
+        let seed_root = root.clone();
+        std::thread::spawn(move || {
+            let mut sink =
+                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 1, None);
+            for path in ["big.md", "gone.md", ".env"] {
+                assert!(matches!(
+                    sink.ingest(path, 0, "advisory-sha", "text/plain", IngestReason::Added)
+                        .expect("seed captured head"),
+                    dohc_engine_files::IngestOutcome::Captured { .. }
+                ));
+            }
+        })
+        .join()
+        .expect("workspace seed thread");
+
+        let bounds = ScanBounds::builder().max_file_bytes(64).build();
+        std::fs::write(root.join("big.md"), [b'x'; 65]).expect("grow beyond scan cap");
+        let policy_path = root.join(".dohc/files.toml");
+        let policy = b"[[rule]]\npath = \"**\"\ntracked = false\n";
+        std::fs::write(&policy_path, policy).expect("narrow all ordinary files");
+        let fingerprint = policy_fingerprint(&root);
+        assert!(fingerprint.is_some());
+        let (manifest, generation) = manifest_seed(&root, &actor, WORKSPACE_ID)
+            .await
+            .expect("captured-state seed")
+            .into_scan_seed()
+            .expect("existing captured entries");
+        for path in ["big.md", "gone.md"] {
+            let entry = manifest.get(path).expect("narrowed identity stays seeded");
+            assert_eq!(entry.sha256, NARROWED_SEED_SENTINEL_SHA);
+            assert_eq!(entry.mtime_ms, 0);
+        }
+        assert_ne!(
+            manifest
+                .get(".env")
+                .expect("secret identity stays seeded")
+                .sha256,
+            NARROWED_SEED_SENTINEL_SHA,
+            "the secret floor cannot be narrowed by policy"
+        );
+        std::fs::remove_file(root.join("gone.md")).expect("delete after seed and before scan");
+
+        let leases = LeaseRegistry::new();
+        let status = Arc::new(DriverStatus::default());
+        let self_writes = SelfWriteSuppression::default();
+        let events = EngineEvents::default();
+        let mut notices = events.subscribe();
+        let mut seed = Some((manifest, generation));
+        for recovery in [false, true] {
+            if recovery {
+                std::fs::remove_dir(&policy_path).expect("remove unreadable policy");
+                std::fs::write(&policy_path, policy).expect("restore narrowing policy");
+                assert_eq!(policy_fingerprint(&root), fingerprint);
+                seed = manifest_seed(&root, &actor, WORKSPACE_ID)
+                    .await
+                    .expect("recovery seed")
+                    .into_scan_seed();
+            }
+            let files = FilesActor::spawn_async_with_manifest(root.clone(), bounds, seed.take())
+                .await
+                .expect("seeded files actor");
+            let files = FilesActorCloseGuard::new(files);
+            let captured_root = Arc::new(CapturedRoot::bind(&root).expect("bind capture root"));
+            let run = files
+                .handle()
+                .reconcile(CancellationToken::new())
+                .await
+                .expect("scan");
+            let ReconcileRun::Completed(plan) = &run else {
+                panic!("a seeded scan must produce a plan");
+            };
+            assert_eq!(plan.retained_over_cap, ["big.md"]);
+            assert!(!plan.ops.iter().any(|op| op.path() == "big.md"));
+            assert!(
+                plan.ops.iter().any(|op| matches!(op,
+                    CaptureOp::Ingest { path, .. } if path == ".env"
+                )),
+                "secret seed entries re-offer through their own sentinel"
+            );
+            let ordinary_ops: Vec<_> = plan.ops.iter().filter(|op| op.path() != ".env").collect();
+            if recovery {
+                assert!(
+                    ordinary_ops.is_empty(),
+                    "the confirmed delete was already acknowledged"
+                );
+            } else {
+                assert_eq!(
+                    ordinary_ops,
+                    [&CaptureOp::Retire {
+                        path: "gone.md".to_owned()
+                    }]
+                );
+                std::fs::remove_file(&policy_path).expect("remove readable policy");
+                std::fs::create_dir(&policy_path).expect("make policy unreadable before apply");
+            }
+            let clean = apply_bound_run_with_handle(
+                ApplyRunContext {
+                    root: &root,
+                    actor: &actor,
+                    workspace_id: WORKSPACE_ID,
+                    leases: &leases,
+                    status: &status,
+                    self_writes: &self_writes,
+                    author_json: None,
+                    provenance: CaptureProvenance {
+                        summary: Some("Reconciled offline edits".to_owned()),
+                        correlation_id: Some("policy-recovery-pass".to_owned()),
+                    },
+                    events: events.clone(),
+                    #[cfg(feature = "harness")]
+                    apply_probe: None,
+                },
+                &files.handle(),
+                RootBoundRun { captured_root, run },
+                &CancellationToken::new(),
+            )
+            .await;
+            assert_eq!(clean, recovery);
+            assert!(
+                actor
+                    .versioned_text_read(
+                        WORKSPACE_ID.to_owned(),
+                        "main".to_owned(),
+                        "gone.md".to_owned(),
+                        CancellationToken::new()
+                    )
+                    .await
+                    .expect("read confirmed delete")
+                    .is_none(),
+                "confirmed deletion is independent of policy availability"
+            );
+            let head = actor
+                .versioned_text_read(
+                    WORKSPACE_ID.to_owned(),
+                    "main".to_owned(),
+                    "big.md".to_owned(),
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("read over-cap head");
+            if recovery {
+                assert!(
+                    head.is_none(),
+                    "the over-cap loop must retire the narrowed head"
+                );
+                let notice = notices.try_recv().expect("policy retirement event");
+                assert_eq!(notice.name, CAPTURE_MOMENT_RECORDED_EVENT);
+                assert_eq!(notice.payload["notOwnedCount"], serde_json::json!(1));
+            } else {
+                assert_eq!(head.expect("held head survives").text, "captured content");
+                assert!(status.degraded());
+                assert!(
+                    status.take_policy_hold(),
+                    "the over-cap hold must arm recovery"
+                );
+                assert!(
+                    files
+                        .handle()
+                        .stats()
+                        .await
+                        .expect("held files stats")
+                        .dirty
+                );
+                while notices.try_recv().is_ok() {}
+            }
+            files.close().await;
+        }
+        supervisor.close(&db).expect("close actor");
+        let connection = rusqlite::Connection::open(&db).expect("open store observer");
+        let (summary, correlation): (Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT metadata_summary, metadata_correlation_id FROM moments
+             WHERE workspace_id = ?1 AND path = 'big.md' ORDER BY moment_order DESC LIMIT 1",
+                [WORKSPACE_ID],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("policy retire metadata");
+        assert_eq!(summary.as_deref(), Some("Stopped tracking by policy"));
+        assert_eq!(correlation.as_deref(), Some("policy-recovery-pass"));
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prepared_and_converged_runs_refuse_a_replacement_workspace_root() {
