@@ -62,6 +62,7 @@ import { parseBoundedV1Json } from './boundedV1Json.js'
 import {
   validateOrderedLiveUpdateCut,
   validateRegistrationCutForProjection,
+  validateJournalCutForProjection,
   type OrderedLiveUpdateCutFailureStage,
   type OrderedLiveUpdateCutFinalizeResult,
   type OrderedLiveUpdateCutPolicy,
@@ -2663,7 +2664,7 @@ describe('validateOrderedLiveUpdateCut', () => {
     expect(source).toContain('Y.decodeUpdateV2(')
     expect(source).toContain('Y.readUpdateV2(')
     expect([...source.matchAll(/export function (\w+)/g)].map(match => match[1])).toEqual([
-      'validateOrderedLiveUpdateCut', 'validateRegistrationCutForProjection',
+      'validateOrderedLiveUpdateCut', 'validateRegistrationCutForProjection', 'validateJournalCutForProjection',
     ])
 
     const finalizer = namedFunction(sourceAst, 'createFinalizer')
@@ -3202,5 +3203,77 @@ describe('[held-boundary] ordered cut portable limits', () => {
       kind: 'refused',
       reason: 'capacity-refused',
     })
+  })
+})
+
+
+describe('journal projection topology', () => {
+  it('rejects registration mode at runtime before decoding', () => {
+    resetProbe()
+    refused(Reflect.apply(validateJournalCutForProjection, undefined, [
+      { mode: 'registration', checkpoint: new Uint8Array([0, 0]) }, highPolicy(),
+    ]), 'invalid-input', { kind: 'call' })
+    expect(yjsProbe.documentConstructions).toBe(0)
+    expect(yjsProbe.digestViews).toHaveLength(0)
+    refused(Reflect.apply(validateJournalCutForProjection, undefined, [
+      { mode: 'registration', checkpoint: new Uint8Array(20 * 1024 * 1024 + 1) }, highPolicy(),
+    ]), 'invalid-input', { kind: 'call' })
+    refused(Reflect.apply(validateRegistrationCutForProjection, undefined, [
+      { mode: 'journal-candidate', checkpoint: new Uint8Array([0, 0]), suffix: new Array(4095), candidate: new Uint8Array([0, 0]) }, highPolicy(),
+    ]), 'invalid-input', { kind: 'call' })
+  })
+
+  it('preserves generic journal results while proving incompatible final topology', () => {
+    const doc = new Y.Doc({ gc: false })
+    doc.getMap('body').set('hidden', 1)
+    const candidate = Y.encodeStateAsUpdate(doc)
+    doc.destroy()
+    const input = { mode: 'journal-candidate' as const, checkpoint: new Uint8Array([0, 0]), suffix: [], candidate }
+    resetProbe()
+    const generic = accepted(validateOrderedLiveUpdateCut(input, highPolicy()))
+    const calls = { ...yjsProbe, digestViews: yjsProbe.digestViews.length }
+    resetProbe()
+    const result = validateJournalCutForProjection(input, highPolicy())
+    expect(result.kind).toBe('accepted')
+    if (result.kind !== 'accepted') return
+    try {
+      expect({ ...yjsProbe, digestViews: yjsProbe.digestViews.length }).toEqual(calls)
+      expect(result.topology).toEqual({ kind: 'incompatible' })
+      expect(result.cut.usage).toEqual({ ...generic.usage, indexOperations: result.cut.usage.indexOperations })
+      expect(result.cut.usage.indexOperations).toBeGreaterThan(generic.usage.indexOperations)
+      expect(result.cut.candidate).toEqual(generic.mode === 'journal-candidate' ? generic.candidate : null)
+      expect(result.cut.finishAfterProjection().kind).toBe('accepted')
+      expect(generic.finishAfterProjection().kind).toBe('accepted')
+    } finally { result.cut.document.destroy(); generic.document.destroy() }
+  })
+
+  it('closes journal scratch when the specialized complete proof exceeds its budget', () => {
+    const input = { mode: 'journal-candidate' as const, checkpoint: updateWithText('budget'), suffix: [], candidate: new Uint8Array([0, 0]) }
+    const measured = validateJournalCutForProjection(input, highPolicy())
+    expect(measured.kind).toBe('accepted')
+    if (measured.kind !== 'accepted') return
+    const limit = measured.cut.usage.indexOperations - 1
+    measured.cut.finishAfterProjection()
+    measured.cut.document.destroy()
+    const destroy = vi.spyOn(Y.Doc.prototype, 'destroy')
+    try {
+      refused(validateJournalCutForProjection(input, highPolicy({ maxIndexOperations: limit })), 'capacity-refused', { kind: 'final' })
+      expect(destroy).toHaveBeenCalledTimes(1)
+    } finally { destroy.mockRestore() }
+  })
+
+  it.each(['checkpoint', 'suffix', 'candidate'] as const)('stops real %s failure before later decoding', role => {
+    const checkpoint = updateWithText('checkpoint')
+    const candidate = updateWithText('candidate')
+    const malformed = new Uint8Array([0])
+    resetProbe()
+    const result = validateJournalCutForProjection({ mode: 'journal-candidate',
+      checkpoint: role === 'checkpoint' ? malformed : checkpoint,
+      suffix: role === 'suffix' ? [malformed] : [],
+      candidate: role === 'candidate' ? malformed : candidate,
+    }, highPolicy())
+    refused(result, 'invalid-update', role === 'suffix' ? { kind: 'input', role, index: 0 } : { kind: 'input', role })
+    expect(yjsProbe.digestViews.some(view => view.buffer === candidate.buffer)).toBe(false)
+    expect(yjsProbe.documentConstructions).toBe(0)
   })
 })

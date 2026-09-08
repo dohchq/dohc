@@ -9,7 +9,7 @@ import * as projection from './import-export.js'
 import { getDohcYDocFrontmatter, markdownToYDoc } from './import-export.js'
 import * as ordered from './orderedLiveUpdateCut.js'
 import { type OrderedLiveUpdateCutPolicy } from './orderedLiveUpdateCut.js'
-import { createLiveMarkdownRegistrationValidator, type LiveMarkdownRegistrationEvidence } from './liveDocumentValidation.js'
+import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator, type LiveMarkdownRegistrationEvidence } from './liveDocumentValidation.js'
 
 const fixturePolicy: OrderedLiveUpdateCutPolicy = {
   maxStructVisits: 1_000_000,
@@ -492,6 +492,322 @@ it('keeps the constructor and ordered policy outside package exports', async () 
   const barrel = await import('./index.js')
   expect(barrel).not.toHaveProperty('createLiveMarkdownRegistrationValidator')
   expect(barrel).not.toHaveProperty('validateRegistrationCutForProjection')
+  expect(barrel).not.toHaveProperty('createLiveMarkdownJournalValidator')
+  expect(barrel).not.toHaveProperty('validateJournalCutForProjection')
   const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   expect(manifest.exports).toEqual({ '.': './src/index.ts', './image-src': './src/image-src.ts' })
+})
+
+
+function journalFixture(edits: ((doc: Y.Doc) => void)[] = []) {
+  const doc = markdownToYDoc('Text')
+  try {
+    const checkpoint = Y.encodeStateAsUpdate(doc)
+    const updates = edits.map(edit => {
+      const vector = Y.encodeStateVector(doc)
+      edit(doc)
+      return Y.encodeStateAsUpdate(doc, vector)
+    })
+    return { ...input(checkpoint), suffix: updates.slice(0, -1), candidate: updates.at(-1) ?? new Uint8Array([0, 0]) }
+  } finally { doc.destroy() }
+}
+const journal = createLiveMarkdownJournalValidator(fixturePolicy)
+const editText = (text: string) => (doc: Y.Doc) => {
+  ((doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText).insert(0, text)
+}
+function observeJournalCuts() {
+  const actual = ordered.validateJournalCutForProjection
+  const scratches: { doc: Y.Doc; finalizations: number }[] = []
+  const spy = vi.spyOn(ordered, 'validateJournalCutForProjection').mockImplementation((...args) => {
+    const result = actual(...args)
+    if (result.kind === 'accepted') {
+      const entry = { doc: result.cut.document, finalizations: 0 }
+      scratches.push(entry)
+      const off = entry.doc.off.bind(entry.doc)
+      vi.spyOn(entry.doc, 'off').mockImplementation((...args) => {
+        if (args[0] === 'beforeTransaction') entry.finalizations++
+        return off(...args)
+      })
+    }
+    return result
+  })
+  return { spy, scratches }
+}
+
+describe('private journal evidence and ownership', () => {
+  it('retains original ordered identities and only candidate ranges, with reusable finalized state', () => {
+    const call = journalFixture([editText('first '), editText('second ')])
+    const result = journal(call)
+    expect(result.kind).toBe('accepted')
+    if (result.kind !== 'accepted') return
+    const evidence = result.evidence
+    expect(evidence.checkpointDigest).toBe(hash(call.checkpoint))
+    expect(evidence.suffixDigests).toEqual(call.suffix.map(hash))
+    expect(evidence.candidate.updateDigest).toBe(hash(call.candidate))
+    expect(evidence.stateUpdateSha256).toBe(hash(evidence.stateUpdate))
+    expect(evidence.stateUpdateByteLength).toBe(evidence.stateUpdate.byteLength)
+    expect(evidence.stateUpdateSha256).not.toBe(evidence.checkpointDigest)
+    const originalRanges = Y.decodeUpdate(call.candidate).structs.map(struct => ({ clientId: struct.id.client, startClock: struct.id.clock, endClock: struct.id.clock + struct.length }))
+    expect(evidence.candidate.ranges).toEqual(originalRanges)
+    const registered = createLiveMarkdownRegistrationValidator(fixturePolicy)(input(evidence.stateUpdate))
+    expect(registered.kind).toBe('accepted')
+    if (registered.kind === 'accepted') {
+      expect(evidence.projectedMarkdownSha256).toBe(registered.evidence.projectedMarkdownSha256)
+      expect(evidence.projectedMarkdownByteLength).toBe(registered.evidence.projectedMarkdownByteLength)
+    }
+    expect(Object.keys(evidence).sort()).toEqual(['version', 'document', 'currentPath', 'checkpointDigest', 'suffixDigests', 'candidate', 'projectedMarkdownSha256', 'projectedMarkdownByteLength', 'stateUpdate', 'stateUpdateSha256', 'stateUpdateByteLength'].sort())
+    for (const record of [result, evidence, evidence.document, evidence.suffixDigests, evidence.candidate, evidence.candidate.ranges, ...evidence.candidate.ranges]) expect(Object.isFrozen(record)).toBe(true)
+    const original = evidence.stateUpdate
+    evidence.stateUpdate.fill(255)
+    call.checkpoint.fill(255); call.suffix[0].fill(255); call.candidate.fill(255)
+    call.document.workspaceId = 'changed'; call.currentPath = 'changed.md'
+    expect(evidence.stateUpdate).toEqual(original)
+    expect(evidence.stateUpdate).not.toBe(evidence.stateUpdate)
+    expect(evidence.document).toEqual(document)
+    expect(evidence.currentPath).toBe('notes/example.md')
+  })
+
+  it('keeps noncanonical original checkpoint digest separate from final encoding', () => {
+    const checkpoint = new Uint8Array([0x80, 0, 0])
+    const result = journal({ ...input(checkpoint), suffix: [], candidate: new Uint8Array([0, 0]) })
+    expect(result.kind).toBe('accepted')
+    if (result.kind !== 'accepted') return
+    expect(result.evidence.checkpointDigest).toBe(hash(checkpoint))
+    expect(result.evidence.stateUpdate).toEqual(new Uint8Array([0, 0]))
+    expect(result.evidence.stateUpdateSha256).not.toBe(result.evidence.checkpointDigest)
+  })
+
+  it('captures policy once and permits no per-call override', () => {
+    const policy = { ...fixturePolicy }
+    const validate = createLiveMarkdownJournalValidator(policy)
+    policy.maxStructVisits = 1
+    expect(validate(journalFixture()).kind).toBe('accepted')
+    expect(validate({ ...journalFixture(), policy: fixturePolicy })).toEqual({ kind: 'refused', reason: 'invalid-input', source: 'call' })
+    expect(() => createLiveMarkdownJournalValidator({ ...fixturePolicy, maxStructVisits: 0 })).toThrow(TypeError)
+  })
+
+  it('captures intrinsic byte views once without invoking hostile instance accessors', () => {
+    const call = journalFixture([editText('one '), editText('two ')])
+    const hostile = vi.fn(() => { throw new Error('read caller') })
+    for (const bytes of [call.checkpoint, ...call.suffix, call.candidate]) {
+      for (const key of ['buffer', 'byteOffset', 'byteLength', 'slice', 'subarray', Symbol.iterator]) Object.defineProperty(bytes, key, { get: hostile })
+    }
+    expect(journal(call).kind).toBe('accepted')
+    expect(hostile).not.toHaveBeenCalled()
+  })
+
+  it('rejects descriptor, path, sparse and accessor suffix failures at call without reading getters', () => {
+    const getter = vi.fn(() => new Uint8Array([0, 0]))
+    const accessor = Object.defineProperty([new Uint8Array([0, 0])], '0', { get: getter })
+    const hidden = Object.defineProperty([new Uint8Array([0, 0])], '0', { enumerable: false })
+    const extra = Object.assign([], { extra: true })
+    const call = journalFixture()
+    for (const value of [null, [], { ...call, extra: 1 }, { ...call, currentPath: '../bad.md' },
+      { ...call, document: { ...document, mainVersionId: 'branch' } },
+      Object.defineProperty({ ...call }, 'candidate', { get: getter }),
+      ...[new Array(1), accessor, hidden, extra, null, Object.create([])].map(suffix => ({ ...call, suffix })),
+    ]) expect(journal(value)).toEqual({ kind: 'refused', reason: 'invalid-input', source: 'call' })
+    expect(getter).not.toHaveBeenCalled()
+    const excessive = new Array(4095)
+    Object.defineProperty(excessive, '0', { get: getter })
+    expect(journal({ ...call, suffix: excessive })).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'call' })
+    expect(getter).not.toHaveBeenCalled()
+  })
+
+  it.each(['checkpoint', 'suffix', 'candidate'] as const)('classifies incompatible %s views as call failures', role => {
+    const detached = new Uint8Array([0, 0])
+    structuredClone(detached.buffer, { transfer: [detached.buffer] })
+    const resizable = Reflect.construct(ArrayBuffer, [2, { maxByteLength: 4 }]) as ArrayBuffer
+    for (const bytes of [detached, new Uint8Array(resizable), new Uint8Array(new SharedArrayBuffer(2)), new Int8Array([0, 0]), new Uint8Array(), null]) {
+      const call = journalFixture()
+      expect(journal({ ...call, [role]: role === 'suffix' ? [bytes] : bytes })).toEqual({ kind: 'refused', reason: 'invalid-input', source: 'call' })
+    }
+  })
+})
+
+describe('private journal refusal attribution and cleanup', () => {
+  it.each(['checkpoint', 'suffix', 'candidate'] as const)('does not diagnose an input-stage %s refusal', role => {
+    const call = journalFixture([editText('first '), editText('second ')])
+    const probe = observeJournalCuts()
+    const registration = vi.spyOn(ordered, 'validateRegistrationCutForProjection')
+    expect(journal({ ...call, [role]: role === 'suffix' ? [new Uint8Array([0])] : new Uint8Array([0]) })).toEqual({
+      kind: 'refused', reason: 'invalid-update', source: role === 'candidate' ? 'candidate' : 'admitted-cut',
+    })
+    expect(probe.spy).toHaveBeenCalledOnce()
+    expect(registration).not.toHaveBeenCalled()
+    expect(probe.scratches).toHaveLength(0)
+  })
+
+  it.each([false, true])('diagnoses a valid prefix once after final schema refusal, suffix=%s', withSuffix => {
+    const edits = withSuffix ? [editText('prefix ')] : []
+    const call = journalFixture([...edits, doc => doc.getMap('meta').set('unknown', 1)])
+    const probe = observeJournalCuts()
+    const registration = vi.spyOn(ordered, 'validateRegistrationCutForProjection')
+    expect(journal(call)).toEqual({ kind: 'refused', reason: 'invalid-schema', source: 'final' })
+    expect(probe.spy).toHaveBeenCalledTimes(withSuffix ? 2 : 1)
+    expect(registration).toHaveBeenCalledTimes(withSuffix ? 0 : 1)
+    for (const entry of probe.scratches) { expect(entry.finalizations).toBe(1); expect(entry.doc.isDestroyed).toBe(true) }
+  })
+
+  it.each([false, true])('diagnoses an invalid prefix once without recursion, suffix=%s', withSuffix => {
+    const call = withSuffix
+      ? journalFixture([doc => doc.getMap('meta').set('unknown', 1), editText('candidate ')])
+      : { ...journalFixture(), checkpoint: encode('Text', doc => doc.getMap('meta').set('unknown', 1)) }
+    const probe = observeJournalCuts()
+    const registration = vi.spyOn(ordered, 'validateRegistrationCutForProjection')
+    expect(journal(call)).toEqual({ kind: 'refused', reason: 'invalid-schema', source: 'admitted-cut' })
+    expect(probe.spy).toHaveBeenCalledTimes(withSuffix ? 2 : 1)
+    expect(registration).toHaveBeenCalledTimes(withSuffix ? 0 : 1)
+    for (const entry of probe.scratches) { expect(entry.finalizations).toBe(1); expect(entry.doc.isDestroyed).toBe(true) }
+  })
+
+  it.each(['throw', 'transaction', 'destroy'] as const)('finalizes once on projection %s and never diagnoses mutation', action => {
+    const probe = observeJournalCuts()
+    const registration = vi.spyOn(ordered, 'validateRegistrationCutForProjection')
+    const original = projection.yDocToMarkdown
+    vi.spyOn(projection, 'yDocToMarkdown').mockImplementation(doc => {
+      if (doc === probe.scratches[0]?.doc) {
+        if (action === 'transaction') doc.transact(() => {})
+        if (action === 'destroy') doc.destroy()
+        throw new Error('projection failed')
+      }
+      return original(doc)
+    })
+    expect(journal(journalFixture())).toEqual({ kind: 'refused', reason: action === 'throw' ? 'invalid-schema' : 'projection-mutated', source: 'final' })
+    expect(probe.spy).toHaveBeenCalledOnce()
+    expect(registration).toHaveBeenCalledTimes(action === 'throw' ? 1 : 0)
+    expect(probe.scratches[0].finalizations).toBe(1)
+    expect(probe.scratches[0].doc.isDestroyed).toBe(true)
+  })
+
+  it('keeps admitted prefix capacity refusal and finalizer precedence', () => {
+    const call = { ...journalFixture(), checkpoint: encode('Text', doc => doc.getMap('meta').set('unknown', 1)) }
+    let witnessed = false
+    for (let limit = 1; limit < 500; limit++) {
+      const policy = { ...fixturePolicy, maxDecodedPayloadByteVisits: limit }
+      const result = ordered.validateJournalCutForProjection({ mode: 'journal-candidate', checkpoint: call.checkpoint, suffix: [], candidate: call.candidate }, policy)
+      if (result.kind === 'refused') continue
+      const final = result.cut.finishAfterProjection()
+      result.cut.document.destroy()
+      if (final.kind !== 'refused' || final.reason !== 'capacity-refused') continue
+      const prefix = createLiveMarkdownRegistrationValidator(policy)(input(call.checkpoint))
+      if (prefix.kind !== 'refused' || prefix.reason !== 'capacity-refused') continue
+      expect(createLiveMarkdownJournalValidator(policy)(call)).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'admitted-cut' })
+      witnessed = true
+      break
+    }
+    expect(witnessed).toBe(true)
+  })
+})
+
+
+describe('journal real cut counterexamples and checkpoint feasibility', () => {
+  it.each([false, true])('preserves a failed prefix reason after a different real final cut refusal, invalidPrefix=%s', invalidPrefix => {
+    const doc = markdownToYDoc('Text')
+    let call: ReturnType<typeof journalFixture>
+    try {
+      if (invalidPrefix) doc.getMap('meta').set('unknown', 1)
+      const checkpoint = Y.encodeStateAsUpdate(doc)
+      const vector = Y.encodeStateVector(doc)
+      for (let index = 0; index < 32; index++) doc.getMap('frontmatter').set(`key${index}`, index)
+      call = { ...input(checkpoint), suffix: [], candidate: Y.encodeStateAsUpdate(doc, vector) }
+    } finally { doc.destroy() }
+    const cutInput = { mode: 'journal-candidate' as const, checkpoint: call.checkpoint, suffix: [], candidate: call.candidate }
+    const measured = ordered.validateJournalCutForProjection(cutInput, fixturePolicy)
+    expect(measured.kind).toBe('accepted')
+    if (measured.kind !== 'accepted') return
+    const limit = measured.cut.usage.indexOperations - 1
+    measured.cut.finishAfterProjection(); measured.cut.document.destroy()
+    const policy = { ...fixturePolicy, maxIndexOperations: limit }
+    const actual = ordered.validateJournalCutForProjection(cutInput, policy)
+    expect(actual).toMatchObject({ kind: 'refused', reason: 'capacity-refused', stage: { kind: 'final' } })
+    const prefix = createLiveMarkdownRegistrationValidator(policy)(input(call.checkpoint))
+    expect(prefix.kind).toBe(invalidPrefix ? 'refused' : 'accepted')
+    const probe = observeJournalCuts()
+    const registration = vi.spyOn(ordered, 'validateRegistrationCutForProjection')
+    expect(createLiveMarkdownJournalValidator(policy)(call)).toEqual({ kind: 'refused',
+      reason: invalidPrefix ? 'invalid-schema' : 'capacity-refused', source: invalidPrefix ? 'admitted-cut' : 'final' })
+    expect(probe.spy).toHaveBeenCalledOnce()
+    expect(registration).toHaveBeenCalledOnce()
+    expect(probe.scratches).toHaveLength(0)
+  })
+
+  it('keeps a diagnostic projection mutation as an integration failure without further diagnosis', () => {
+    const call = journalFixture([editText('prefix '), doc => doc.getMap('meta').set('unknown', 1)])
+    const probe = observeJournalCuts()
+    const registration = vi.spyOn(ordered, 'validateRegistrationCutForProjection')
+    vi.spyOn(projection, 'yDocToMarkdown').mockImplementation(doc => { doc.transact(() => {}); throw new Error('mutation') })
+    expect(journal(call)).toEqual({ kind: 'refused', reason: 'projection-mutated', source: 'admitted-cut' })
+    expect(probe.spy).toHaveBeenCalledTimes(2)
+    expect(registration).not.toHaveBeenCalled()
+    for (const entry of probe.scratches) { expect(entry.finalizations).toBe(1); expect(entry.doc.isDestroyed).toBe(true) }
+  })
+
+  it('retains candidate Item and GC ranges separately from admitted ranges', () => {
+    const call = journalFixture([doc => {
+      const paragraph = new Y.XmlElement('paragraph')
+      const text = new Y.XmlText('removed')
+      paragraph.push([text])
+      const body = doc.getXmlFragment('body')
+      body.push([paragraph])
+      body.delete(body.length - 1, 1)
+      doc.getMap('frontmatter').set('retained', true)
+    }])
+    const decoded = Y.decodeUpdate(call.candidate)
+    expect(decoded.structs.some(struct => struct instanceof Y.GC)).toBe(true)
+    expect(decoded.structs.some(struct => struct instanceof Y.Item)).toBe(true)
+    const result = journal(call)
+    expect(result.kind).toBe('accepted')
+    if (result.kind !== 'accepted') return
+    for (const struct of decoded.structs) expect(result.evidence.candidate.ranges.some(range => range.clientId === struct.id.client
+      && range.startClock <= struct.id.clock && range.endClock >= struct.id.clock + struct.length)).toBe(true)
+    const prior = Y.decodeUpdate(call.checkpoint).structs
+    for (const range of result.evidence.candidate.ranges) expect(prior.some(struct => struct.id.client === range.clientId
+      && struct.id.clock < range.endClock && struct.id.clock + struct.length > range.startClock)).toBe(false)
+  })
+
+  it.each([1, 5])('revalidates finalized journal checkpoints under the exact measured work policy, suffix=%s', suffixCount => {
+    const call = journalFixture(Array.from({ length: suffixCount + 1 }, (_, index) => editText(`${index} `)))
+    const measured = ordered.validateJournalCutForProjection({ mode: 'journal-candidate', checkpoint: call.checkpoint, suffix: call.suffix, candidate: call.candidate }, fixturePolicy)
+    expect(measured.kind).toBe('accepted')
+    if (measured.kind !== 'accepted') return
+    const final = measured.cut.finishAfterProjection()
+    measured.cut.document.destroy()
+    expect(final.kind).toBe('accepted')
+    if (final.kind !== 'accepted') return
+    const policy = {
+      maxStructVisits: Math.max(1, final.usage.structVisits),
+      maxValueNodeVisits: Math.max(1, final.usage.valueNodeVisits),
+      maxDecodedPayloadByteVisits: Math.max(1, final.usage.decodedPayloadByteVisits),
+      maxStructClientGroupVisits: Math.max(1, final.usage.structClientGroupVisits),
+      maxDeleteClientGroupVisits: Math.max(1, final.usage.deleteClientGroupVisits),
+      maxDeleteIntervalVisits: Math.max(1, final.usage.deleteIntervalVisits),
+      maxIndexOperations: Math.max(1, final.usage.indexOperations),
+    }
+    const result = createLiveMarkdownJournalValidator(policy)(call)
+    expect(result.kind).toBe('accepted')
+    if (result.kind !== 'accepted') return
+    expect(createLiveMarkdownRegistrationValidator(policy)(input(result.evidence.stateUpdate)).kind).toBe('accepted')
+  })
+
+  it('applies the final public body limit and repaired attribute domains to journal cuts', () => {
+    const oversized = encode('x'.repeat(2 * 1024 * 1024 + 1))
+    expect(journal({ ...input(), suffix: [], candidate: oversized })).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'final' })
+    const malformed = encode('Text', doc => (doc.getXmlFragment('body').get(0) as Y.XmlElement).setAttribute('unknown', 'value'))
+    expect(journal({ ...input(), suffix: [], candidate: malformed })).toEqual({ kind: 'refused', reason: 'invalid-schema', source: 'final' })
+  }, 60_000)
+})
+
+
+it('journal refuses keyed body topology that the generic cut accepts', () => {
+  const doc = new Y.Doc({ gc: false })
+  doc.getMap('body').set('hidden', 'value')
+  doc.getMap('meta').set('schemaVersion', 1)
+  const candidate = Y.encodeStateAsUpdate(doc)
+  doc.destroy()
+  const call = { ...input(), suffix: [], candidate }
+  const generic = ordered.validateOrderedLiveUpdateCut({ mode: 'journal-candidate', checkpoint: call.checkpoint, suffix: [], candidate }, fixturePolicy)
+  expect(generic.kind).toBe('accepted')
+  if (generic.kind === 'accepted') { expect(generic.cut.finishAfterProjection().kind).toBe('accepted'); generic.cut.document.destroy() }
+  expect(journal(call)).toEqual({ kind: 'refused', reason: 'invalid-schema', source: 'final' })
 })

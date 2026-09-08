@@ -108,7 +108,7 @@ export type OrderedLiveUpdateCutResult =
   | { readonly kind: 'accepted'; readonly cut: ValidatedLiveUpdateCut }
   | OrderedLiveUpdateCutRefusal
 
-export type RegistrationTopology =
+export type ProjectionTopology =
   | {
       readonly kind: 'compatible'
       readonly bodyHasActiveItem: boolean
@@ -120,7 +120,15 @@ export type RegistrationCutForProjectionResult =
   | {
       readonly kind: 'accepted'
       readonly cut: Extract<ValidatedLiveUpdateCut, { mode: 'registration' }>
-      readonly topology: RegistrationTopology
+      readonly topology: ProjectionTopology
+    }
+  | OrderedLiveUpdateCutRefusal
+
+export type JournalCutForProjectionResult =
+  | {
+      readonly kind: 'accepted'
+      readonly cut: Extract<ValidatedLiveUpdateCut, { mode: 'journal-candidate' }>
+      readonly topology: ProjectionTopology
     }
   | OrderedLiveUpdateCutRefusal
 
@@ -628,6 +636,7 @@ function snapshotSuffix(
 function snapshotInput(
   inputValue: unknown,
   budget: ValidationBudget,
+  expectedMode?: OwnedLiveUpdateCutInput['mode'],
 ): InputSnapshot {
   if (typeof inputValue !== 'object' || inputValue === null || Array.isArray(inputValue)) {
     fail('invalid-input', { kind: 'call' })
@@ -640,6 +649,7 @@ function snapshotInput(
   ) {
     fail('invalid-input', { kind: 'call' })
   }
+  if (expectedMode !== undefined && modeDescriptor.value !== expectedMode) fail('invalid-input', { kind: 'call' })
   if (modeDescriptor.value === 'registration') {
     const record = exactRecord(inputValue, REGISTRATION_FIELDS)
     const stage = { kind: 'input', role: 'checkpoint' } as const
@@ -3044,8 +3054,8 @@ function verifyStateVector(
   return vector
 }
 
-interface RegistrationTopologyCapture {
-  value?: RegistrationTopology
+interface ProjectionTopologyCapture {
+  value?: ProjectionTopology
 }
 
 interface TopologyPlacement {
@@ -3058,12 +3068,12 @@ interface TopologyScope {
   readonly compatible: boolean
 }
 
-function proveRegistrationTopology(
+function proveProjectionTopology(
   decoded: ReturnType<typeof Y.decodeUpdateV2>,
   normalized: NormalizedInput,
   budget: ValidationBudget,
   stage: OrderedLiveUpdateCutFailureStage,
-): RegistrationTopology {
+): ProjectionTopology {
   const providers = new Map<number, ProviderInterval[]>()
   for (const node of stableSort(normalized.integrationNodes, rangeCompare, budget, stage)) {
     budget.visitIndexOperation(stage)
@@ -3241,7 +3251,7 @@ function decodeCompleteState(
   bytes: Uint8Array,
   budget: ValidationBudget,
   stage: OrderedLiveUpdateCutFailureStage,
-  topology?: RegistrationTopologyCapture,
+  topology?: ProjectionTopologyCapture,
 ): ReplayFrontier {
   budget.startDecoderPass(stage)
   const sink: DecoderEvidenceSink = {
@@ -3277,7 +3287,7 @@ function decodeCompleteState(
   )
   const frontier = new ReplayFrontier()
   frontier.apply(normalized, budget, stage)
-  if (topology !== undefined) topology.value = proveRegistrationTopology(decoded, normalized, budget, stage)
+  if (topology !== undefined) topology.value = proveProjectionTopology(decoded, normalized, budget, stage)
   return frontier
 }
 
@@ -3291,7 +3301,7 @@ function completeProof(
   expected: ReplayFrontier,
   budget: ValidationBudget,
   stage: OrderedLiveUpdateCutFailureStage,
-  topology?: RegistrationTopologyCapture,
+  topology?: ProjectionTopologyCapture,
 ): CompleteProof {
   const stateVector = verifyStateVector(document, expected, budget, stage)
   const measured = measureState(document, budget, stage)
@@ -3464,21 +3474,28 @@ export function validateOrderedLiveUpdateCut(
   input: OwnedLiveUpdateCutInput,
   policy: OrderedLiveUpdateCutPolicy,
 ): OrderedLiveUpdateCutResult {
-  return validateCut(input, policy, false)
+  return validateCut(input, policy)
 }
 
 export function validateRegistrationCutForProjection(
   input: Extract<OwnedLiveUpdateCutInput, { mode: 'registration' }>,
   policy: OrderedLiveUpdateCutPolicy,
 ): RegistrationCutForProjectionResult {
-  return validateCut(input, policy, true) as RegistrationCutForProjectionResult
+  return validateCut(input, policy, 'registration') as RegistrationCutForProjectionResult
+}
+
+export function validateJournalCutForProjection(
+  input: Extract<OwnedLiveUpdateCutInput, { mode: 'journal-candidate' }>,
+  policy: OrderedLiveUpdateCutPolicy,
+): JournalCutForProjectionResult {
+  return validateCut(input, policy, 'journal-candidate') as JournalCutForProjectionResult
 }
 
 function validateCut(
   input: OwnedLiveUpdateCutInput,
   policy: OrderedLiveUpdateCutPolicy,
-  registrationProjection: boolean,
-): OrderedLiveUpdateCutResult | RegistrationCutForProjectionResult {
+  projectionMode?: OwnedLiveUpdateCutInput['mode'],
+): OrderedLiveUpdateCutResult | RegistrationCutForProjectionResult | JournalCutForProjectionResult {
   const hostileInput: unknown = input
   const hostilePolicy: unknown = policy
   let budget: ValidationBudget | undefined
@@ -3486,8 +3503,7 @@ function validateCut(
   try {
     const ownedPolicy = snapshotPolicy(hostilePolicy)
     budget = new ValidationBudget(ownedPolicy)
-    const snapshot = snapshotInput(hostileInput, budget)
-    if (registrationProjection && snapshot.mode !== 'registration') fail('invalid-input', { kind: 'call' })
+    const snapshot = snapshotInput(hostileInput, budget, projectionMode)
     const preEvidenceUsage = budget.cappedSnapshot()
     let projectedUsage = { ...preEvidenceUsage }
     const frontier = new ReplayFrontier()
@@ -3551,7 +3567,7 @@ function validateCut(
     ) fail('invalid-update', lastStage)
 
     const document = new Y.Doc({ gc: false })
-    if (registrationProjection) projectionDocument = document
+    if (projectionMode !== undefined) projectionDocument = document
     document.getXmlFragment('body')
     document.getMap('frontmatter')
     document.getMap('meta')
@@ -3564,7 +3580,7 @@ function validateCut(
       )
     }
 
-    const topology: RegistrationTopologyCapture | undefined = registrationProjection ? {} : undefined
+    const topology: ProjectionTopologyCapture | undefined = projectionMode !== undefined ? {} : undefined
     const initialProof = completeProof(document, frontier, budget, { kind: 'final' }, topology)
     const dirtyLatch: DirtyLatch = { dirty: false }
     const beforeTransactionListener: BeforeTransactionListener = () => {
@@ -3607,23 +3623,26 @@ function validateCut(
       })
     }
     const candidate = inputEvidence[inputEvidence.length - 1] as ValidatedCutInputEvidence
-    return Object.freeze({
-      kind: 'accepted',
-      cut: Object.freeze({
-        mode: 'journal-candidate',
-        document,
-        usage: acceptedUsage,
-        finishAfterProjection,
-        checkpointDigest: (inputEvidence[0] as ValidatedCutInputEvidence).updateDigest,
-        suffixDigests: Object.freeze(
-          inputEvidence.slice(1, 1 + snapshot.suffixCount).map(entry => entry.updateDigest),
-        ),
-        candidate: frozenInputEvidence(
-          candidate.updateDigest,
-          candidate.ranges,
-        ),
-      }),
+    const cut = Object.freeze({
+      mode: 'journal-candidate' as const,
+      document,
+      usage: acceptedUsage,
+      finishAfterProjection,
+      checkpointDigest: (inputEvidence[0] as ValidatedCutInputEvidence).updateDigest,
+      suffixDigests: Object.freeze(
+        inputEvidence.slice(1, 1 + snapshot.suffixCount).map(entry => entry.updateDigest),
+      ),
+      candidate: frozenInputEvidence(
+        candidate.updateDigest,
+        candidate.ranges,
+      ),
     })
+    if (topology !== undefined) {
+      if (topology.value === undefined) fail('invalid-update', { kind: 'final' })
+      projectionDocument = undefined
+      return Object.freeze({ kind: 'accepted', cut, topology: topology.value })
+    }
+    return Object.freeze({ kind: 'accepted', cut })
   } catch (error) {
     projectionDocument?.destroy()
     const failure = error instanceof CutFailure
