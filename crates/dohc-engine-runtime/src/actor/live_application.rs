@@ -1,12 +1,12 @@
 use super::{ActorHandle, Command, LifecycleState};
 use crate::RuntimeError;
-use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
+use dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, ApplicationError, ApplicationHandle, ApplicationHostCoordinate,
     ApplicationOwner, ApplicationResult, apply_committed,
 };
-use dohc_engine_collab::{DocKey, WriterDocCache, durable};
+use dohc_engine_collab::{CollabError, WriterDocCache};
 use dohc_engine_storage::{EngineStore, FaultInjector};
 use std::collections::HashMap;
 use std::sync::{
@@ -140,6 +140,13 @@ impl ActorLiveApplicationHandle {
         faults: Arc<dyn FaultInjector>,
     ) -> Result<ApplicationResult, RuntimeError> {
         current(&self.actor, &self.token)?;
+        if event.update_bytes.len() > MAX_YDOC_UPDATE_BYTES {
+            return Err(ApplicationError::Collab(CollabError::UpdateTooLarge {
+                actual: event.update_bytes.len(),
+                max: MAX_YDOC_UPDATE_BYTES,
+            })
+            .into());
+        }
         let (reply, receive) = oneshot::channel();
         self.actor
             .tx
@@ -269,19 +276,8 @@ impl Request {
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
-                    let binding = event.metadata.accepted.binding.clone();
-                    let now_ms = event.metadata.accepted.received_at_ms;
-                    let result = apply_committed(store, cache, &application, event, faults.as_ref())?;
-                    if matches!(&result, ApplicationResult::Applied(ack) if !ack.application_replayed) {
-                        let key = DocKey::new(&binding.workspace_id, &binding.main_version_id, &binding.object_id)
-                            .map_err(ApplicationError::from)?;
-                        // The application is durable. A failed fold suppresses this
-                        // reply, but exact replay retains the original application.
-                        // An injected fold crash is best effort, as in self_bound_log.
-                        durable::maybe_compact(store, &key, DEFAULT_COMPACTION_THRESHOLD, faults.as_ref(), now_ms)
-                            .map_err(ApplicationError::from)?;
-                    }
-                    Ok(result)
+                    apply_committed(store, cache, &application, event, faults.as_ref())
+                        .map_err(Into::into)
                 });
                 let _ = reply.send(result);
             }

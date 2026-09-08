@@ -186,7 +186,34 @@ async fn committed_application_compacts_and_preserves_replay_through_fold_failur
                 assert_eq!(applied.local_ydoc_sequence, cursor);
             }
             deliveries.push(update);
+            if cursor == 63 {
+                actor
+                    .ydoc_resync(
+                        DocKey::new("workspace", "main", "one").unwrap(),
+                        Some(binding("one").lineage_claim_id),
+                        tokio_util::sync::CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap();
+            }
         }
+        let refreshed = actor
+            .ydoc_resync(
+                DocKey::new("workspace", "main", "one").unwrap(),
+                Some(binding("one").lineage_claim_id),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let refreshed_doc = Ydoc::wire();
+        refreshed_doc.apply(&refreshed.initial_update).unwrap();
+        assert!(
+            dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(
+                &refreshed_doc,
+                &source
+            )
+            .unwrap()
+        );
         let count = |table: &str| -> i64 {
             raw.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
                 row.get(0)
@@ -211,18 +238,34 @@ async fn committed_application_compacts_and_preserves_replay_through_fold_failur
             raw.execute_batch("DROP TRIGGER refuse_fold").unwrap();
         }
         if !folded {
-            ack(handle
-                .apply(
-                    event("delivery-65", 65, "one", source.plaintext_insert(64, "x")),
-                    Arc::new(NoFaults),
-                )
+            let mut duplicate_bytes = deliveries[0].clone();
+            duplicate_bytes.metadata.accepted.receipt.delivery_id = "delivery-65".into();
+            duplicate_bytes.metadata.accepted.receipt.journal_cursor = 65;
+            let applied = ack(handle
+                .apply(duplicate_bytes, Arc::new(NoFaults))
                 .await
                 .unwrap());
+            assert!(!applied.application_replayed);
+            assert_eq!(applied.local_ydoc_sequence, 1);
             assert_eq!(count("ydoc_updates"), 0);
             assert_eq!(count("live_device_update_applications"), 65);
         }
         drop(raw);
         supervisor.close(&db).unwrap();
+        let store = EngineStore::open(&db, 99).unwrap();
+        let restored = store
+            .read_with(|conn| {
+                durable::load_doc_from_connection(
+                    conn,
+                    &DocKey::new("workspace", "main", "one").unwrap(),
+                )
+            })
+            .unwrap();
+        assert!(
+            dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&restored, &source)
+                .unwrap()
+        );
+        drop(store);
         let restarted = supervisor.open(&db, 100).unwrap().actor;
         let (_next_owner, next) = registered(&restarted).await;
         for update in deliveries {
@@ -585,6 +628,17 @@ async fn owner_drop_suppresses_a_committed_ack_and_a_queued_request() {
         async move { handle.apply(update, held).await }
     });
     at_commit.await.unwrap();
+    let mut oversized = event(
+        "oversized",
+        3,
+        "one",
+        vec![0; dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES + 1],
+    );
+    oversized.metadata.accepted.receipt.update_digest = "a".repeat(64);
+    let mut oversized = Box::pin(handle.apply(oversized, Arc::new(NoFaults)));
+    let oversized_result =
+        std::future::poll_fn(|context| std::task::Poll::Ready(oversized.as_mut().poll(context)))
+            .await;
     let later = event("queued", 2, "one", vec![0, 0]);
     let mut queued = Box::pin(handle.apply(later, Arc::new(NoFaults)));
     assert!(
@@ -595,6 +649,12 @@ async fn owner_drop_suppresses_a_committed_ack_and_a_queued_request() {
     );
     drop(owner);
     release.send(()).unwrap();
+    assert!(matches!(
+        oversized_result,
+        std::task::Poll::Ready(Err(RuntimeError::LiveApplication(
+            ApplicationError::Collab(dohc_engine_collab::CollabError::UpdateTooLarge { .. })
+        )))
+    ));
     assert!(matches!(
         in_flight.await.unwrap(),
         Err(RuntimeError::ActorUnavailable)
