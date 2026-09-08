@@ -1,3 +1,4 @@
+import type { AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveUpdateSubmissionMetadata, LiveUpdateAcceptResult } from "@dohc/live-session-contract/live-update-admission";
 import type {
   HostControlSnapshot,
   HostMode,
@@ -470,7 +471,90 @@ export interface AppendLogBatchGuardContext {
   ): EnforceWorkspaceIdentityResult;
 }
 
+export interface StoredLiveDocumentAuthority {
+  binding: LiveObjectBinding;
+  current: boolean;
+  open: boolean;
+  replacesLineageClaimId: string | null;
+  baselineSequence: number;
+  baselineDigest: string;
+  baselineBytes: Uint8Array;
+  projectedDigest: string;
+  projectedLength: number;
+  ranges: LiveUpdateStructRange[];
+  registeredAtMs: number;
+}
+
+export interface LiveJournalStoredUpdate {
+  readonly cursor: number;
+  readonly digest: string;
+  readonly bytes: Uint8Array;
+  readonly metadata: AdmittedLiveUpdateMetadata;
+}
+export interface LiveUpdateJournalCut {
+  readonly authorityHistory: readonly StoredLiveDocumentAuthority[];
+  readonly document: LiveDocumentKey;
+  readonly currentPath: string;
+  readonly restoreFenceGeneration: number;
+  readonly baseline: {
+    readonly sequence: number;
+    readonly digest: string;
+    readonly bytes: Uint8Array;
+    readonly ranges: readonly LiveUpdateStructRange[];
+    readonly projectedDigest: string;
+    readonly projectedLength: number;
+    readonly registeredAtMs: number;
+    readonly replacesLineageClaimId: string | null;
+  };
+  readonly checkpoint: { readonly cursor: number | null; readonly digest: string; readonly bytes: Uint8Array;
+    readonly metadata: AdmittedLiveUpdateMetadata | null; readonly updateBytes: Uint8Array | null };
+  readonly suffix: readonly LiveJournalStoredUpdate[];
+  readonly highWater: number | null;
+  readonly suffixCount: number;
+  readonly suffixBytes: number;
+}
+export type LiveUpdateJournalCutResult =
+  | { readonly kind: "cut"; readonly cut: LiveUpdateJournalCut }
+  | { readonly kind: "refused"; readonly reason: "baseline-missing" | "authority-refused" | "stale-binding" };
+export type LiveJournalValidation =
+  | { readonly kind: "accepted"; readonly evidence: {
+      readonly version: 1;
+      readonly document: LiveDocumentKey;
+      readonly currentPath: string;
+      readonly checkpointDigest: string;
+      readonly suffixDigests: readonly string[];
+      readonly candidate: { readonly updateDigest: string; readonly ranges: readonly LiveUpdateStructRange[] };
+      readonly stateUpdate?: Uint8Array;
+      readonly stateUpdateSha256: string;
+      readonly stateUpdateByteLength: number;
+  } }
+  | { readonly kind: "refused";
+      readonly reason: "invalid-input" | "invalid-update" | "invalid-schema" | "projection-mutated" | "capacity-refused";
+      readonly source: "call" | "admitted-cut" | "candidate" | "final" };
+export interface LiveUpdateJournalCommitInput {
+  readonly host: LiveHostConnectionCoordinate;
+  readonly actor: CurrentLiveBindingRequest["actor"];
+  readonly expectedAuthority: ServerDerivedLiveUpdateAuthority;
+  readonly metadata: LiveUpdateSubmissionMetadata;
+  readonly cutToken: LiveUpdateJournalCut;
+  readonly validation: LiveJournalValidation;
+  readonly updateBytes: Uint8Array;
+  readonly receivedAtMs: number;
+}
+export type RelayLiveUpdateJournalResult =
+  | { readonly result: Extract<LiveUpdateAcceptResult, { kind: "accepted" }>; readonly admitted: AdmittedLiveUpdate }
+  | { readonly result: Exclude<LiveUpdateAcceptResult, { kind: "accepted" }>; readonly admitted: null };
+export type CommittedLiveUpdateResult =
+  | { readonly kind: "committed"; readonly admitted: AdmittedLiveUpdate }
+  | { readonly kind: "missing" }
+  | { readonly kind: "refused"; readonly reason: "stale-session" }
+  | { readonly kind: "retry"; readonly reason: "host-unavailable" };
+
 export interface SyncRelayStorage {
+  readLiveUpdateJournalCut(input: { document: LiveDocumentKey }): LiveUpdateJournalCutResult;
+  commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput): RelayLiveUpdateJournalResult;
+  readCommittedLiveUpdate(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; journalCursor: number }): CommittedLiveUpdateResult;
+
   close(): void;
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult;
   registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult;

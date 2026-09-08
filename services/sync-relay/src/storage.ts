@@ -1,3 +1,8 @@
+import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
+import type { LiveJournalStoredUpdate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveJournalValidation, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult } from "./storage/types";
+export type { LiveJournalStoredUpdate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveJournalValidation, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult } from "./storage/types";
+export { LiveJournalAdmittedCapacityError } from "./storage/errors";
+import * as liveUpdateJournalStorage from "./storage/liveUpdateJournal";
 import type {
   SqliteDb,
   OpenSyncRelayStorageOptions,
@@ -308,6 +313,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult {
     return liveDocumentAuthorityStorage.registerLiveDocumentBaseline(this, input);
+  }
+
+  readLiveUpdateJournalCut(input: { document: LiveDocumentKey }): LiveUpdateJournalCutResult {
+    return liveUpdateJournalStorage.readLiveUpdateJournalCut(this, input);
+  }
+
+  commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput): RelayLiveUpdateJournalResult {
+    return liveUpdateJournalStorage.commitLiveUpdateJournal(this, input);
+  }
+
+  readCommittedLiveUpdate(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; journalCursor: number }): CommittedLiveUpdateResult {
+    return liveUpdateJournalStorage.readCommittedLiveUpdate(this, input);
   }
 
   getLiveHostControl(): HostControlSnapshot | null {
