@@ -436,9 +436,10 @@ body {
 .hero-engine { min-width: 0; position: relative; }
 .hero-engine-view { position: relative; width: 100%; height: 510px; }
 .hero-engine-view canvas, .hero-engine-poster { display: block; width: 100%; height: 100%; object-fit: contain; }
-.hero-engine-view canvas { position: absolute; inset: 0; cursor: grab; }
+.hero-engine-view canvas { position: absolute; inset: 0; cursor: grab; visibility: hidden; }
 .hero-engine-view canvas:active { cursor: grabbing; }
 .hero-engine-view canvas:focus-visible { outline: 1px solid var(--muted); outline-offset: 3px; border-radius: 8px; }
+.hero-engine-view.engine-loaded canvas { visibility: visible; }
 .engine-loaded .hero-engine-poster { visibility: hidden; }
 @media (max-width: 780px) {
   .hero-with-engine { grid-template-columns: 1fr; text-align: center; gap: 28px; }
