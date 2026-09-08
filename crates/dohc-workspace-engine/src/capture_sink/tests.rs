@@ -110,7 +110,7 @@ fn seed_captured_richdoc_lineage_from_markdown(
                     None,
                     state.lineage_claim_id,
                     true,
-                    state.head_blob_sha256,
+                    state.owner_seed_source,
                     None,
                     12,
                     Arc::new(FilesNoFaults),

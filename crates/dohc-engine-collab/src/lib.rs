@@ -28,6 +28,7 @@ pub mod lease;
 pub mod limits;
 pub mod live_object_binding;
 pub mod live_update_application;
+pub mod owner_base_source;
 pub mod owner_outbox;
 pub mod replay_parity;
 pub mod replication;

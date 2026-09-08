@@ -155,6 +155,7 @@ fn version_fence_session_view(
         first_update_pending: session.first_update_pending,
         last_settled_sha: session.last_settled_sha.clone(),
         open_head_sha: session.open_head_sha.clone(),
+        owner_seed_source: session.owner_seed_source.clone(),
     })
 }
 

@@ -48,6 +48,7 @@ pub(crate) struct YdocSession {
     /// The head sha observed at open — the settle preimage expectation
     /// until the session's first settle replaces it.
     pub(super) open_head_sha: Option<String>,
+    pub(super) owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     _lease: Lease,
 }
 
@@ -62,6 +63,7 @@ pub(super) struct YdocSessionView {
     pub(super) first_update_pending: bool,
     pub(super) last_settled_sha: Option<String>,
     pub(super) open_head_sha: Option<String>,
+    pub(super) owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
 }
 
 fn map_ydoc_open_runtime(error: RuntimeError) -> WireError {
@@ -884,6 +886,7 @@ impl EngineService {
                 first_update_pending: !state.lineage_existing,
                 last_settled_sha: None,
                 open_head_sha: state.head_blob_sha256,
+                owner_seed_source: state.owner_seed_source,
                 _lease: lease,
             },
         );
@@ -945,7 +948,10 @@ impl EngineService {
                 "seed-not-first-update",
             ));
         }
-        let seed_source_sha256 = params.seed.then(|| session.open_head_sha.clone()).flatten();
+        let seed_source = params
+            .seed
+            .then(|| session.owner_seed_source.clone())
+            .flatten();
         // The record and the first-seed flag transition run in a spawned
         // task: if the seed commits but a deadline/cancel drops this future
         // before the post-await assignment, the session would keep
@@ -972,7 +978,7 @@ impl EngineService {
                         params.attribution,
                         session.lineage_claim_id,
                         require_empty,
-                        seed_source_sha256,
+                        seed_source,
                         idempotency_key,
                         now,
                         Arc::new(NoFaults),
@@ -1393,6 +1399,7 @@ impl EngineService {
                 first_update_pending: session.first_update_pending,
                 last_settled_sha: session.last_settled_sha.clone(),
                 open_head_sha: session.open_head_sha.clone(),
+                owner_seed_source: session.owner_seed_source.clone(),
             },
         ))
     }
@@ -1449,6 +1456,113 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn captured_owner_seed_retains_exact_original_source_moment() {
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../../../dohc-engine-collab/tests/fixtures/live-bootstrap.json"
+        ))
+        .unwrap();
+        let vector = vectors
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == "rich-unicode")
+            .unwrap();
+        let markdown = vector["markdown"].as_str().unwrap().to_owned();
+        let bytes: Vec<u8> = serde_json::from_value(vector["bytes"].clone()).unwrap();
+        let scratch = ScratchDir::new().unwrap();
+        std::fs::write(scratch.path().join("owner.md"), &markdown).unwrap();
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let opened = service.workspace_open(&RequestContext::unbounded(), json!({
+            "rootDir":scratch.path().to_string_lossy(),"workspaceId":"owner-source","captureMode":"none"
+        })).await.unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let actor = service.open(Some(&handle)).unwrap().actor.clone();
+        let captured = actor
+            .capture_ingest(
+                dohc_engine_runtime::CaptureIngest {
+                    workspace_id: "owner-source".into(),
+                    version_id: "main".into(),
+                    path: "owner.md".into(),
+                    text: markdown.clone(),
+                    metadata_origin: "capture".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1,
+                    request_id: Some("owner-source-capture".into()),
+                    claim_foreign_head: true,
+                },
+                LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let source_moment = captured.snapshot.latest_moment_id.clone();
+        let object_id = captured.snapshot.object_id.clone();
+        service.workspace_close(Some(handle)).await.unwrap();
+        drop(actor);
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+        {
+            let mut store = dohc_engine_storage::EngineStore::open(&db_path, 2).unwrap();
+            store.write_with(&NoFaults,|tx| {
+                tx.execute("INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('owner-source','origin','epoch','stream',1)",[]).map_err(dohc_engine_storage::StorageError::persist_public)?;
+                tx.execute("INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) VALUES ('owner-source','origin',0)",[]).map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_,dohc_engine_storage::StorageError>(())
+            }).unwrap();
+        }
+        let reopened_workspace = service.workspace_open(&RequestContext::unbounded(), json!({
+            "rootDir":scratch.path().to_string_lossy(),"workspaceId":"owner-source","captureMode":"none"
+        })).await.unwrap();
+        let handle: WorkspaceHandle =
+            serde_json::from_value(reopened_workspace["workspace"].clone()).unwrap();
+        let (session, egress) = service
+            .ydoc_open(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({"versionId":"main","path":"owner.md","contentKind":"richdoc"}),
+                1,
+            )
+            .await
+            .unwrap();
+        drop(egress);
+        assert_eq!(session["seedContent"], markdown);
+        service.ydoc_record_update(&RequestContext::unbounded(),Some(handle.clone()),Some("owner-source-seed".into()),json!({
+            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&bytes),"seed":true
+        })).await.unwrap();
+        let expected_source = source_moment.clone();
+        let expected_markdown = markdown.clone();
+        service.workspace_close(Some(handle)).await.unwrap();
+        {
+            let store = dohc_engine_storage::EngineStore::open(&db_path, 3).unwrap();
+            let row:(String,String,String,i64,i64) = store.read_with(|conn|conn.query_row(
+                "SELECT b.source_moment_id,b.source_blob_sha256,b.lineage_claim_id,d.head_update_seq,(SELECT COUNT(*) FROM moments WHERE workspace_id='owner-source') FROM ydoc_owner_base_sources b JOIN ydoc_docs d USING(workspace_id,version_id,object_id) WHERE b.object_id=?1",
+                [&object_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))
+            )).unwrap();
+            assert_eq!(row.0, expected_source);
+            assert_eq!(
+                row.1,
+                dohc_engine_storage::hex_sha256(expected_markdown.as_bytes())
+            );
+            assert_eq!(row.3, 1);
+            assert_eq!(row.4, 1, "retaining source must not create a domain moment");
+            let original: String = store.read_with(|conn|conn.query_row("SELECT snapshot_blob_sha256 FROM ydoc_snapshots WHERE object_id=?1 AND up_to_seq=0",[&object_id],|r|r.get(0))).unwrap();
+            assert_eq!(row.2, original);
+        }
+        let reopened = dohc_engine_storage::EngineStore::open(
+            &scratch.path().join(".dohc/engine/engine.db"),
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            reopened.table_row_count("ydoc_owner_base_sources").unwrap(),
+            1
+        );
+    }
 
     fn owner_outbox_append_params(workspace_id: &str, append_key: &str) -> Value {
         let vectors: Value = serde_json::from_str(include_str!(

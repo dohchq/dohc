@@ -40,6 +40,7 @@ const SYNCHRONOUS_NORMAL: i64 = 1;
 const REQUIRED_TABLES: &[&str] = &[
     "live_device_bootstraps",
     "live_device_settlements",
+    "ydoc_owner_base_sources",
     "live_device_application_bindings",
     "live_device_update_applications",
     "live_device_application_first_seen",
