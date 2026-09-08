@@ -8,7 +8,7 @@ import { YdocLiveAdapter } from "./ydocLiveAdapter";
 import { YDOC_METHOD } from "./ydocWireContract";
 
 const fixture = new URL(
-  "../../../../crates/dohc-engine-collab/tests/fixtures/owner-source-seed.json",
+  "../../../../crates/dohc-engine-collab/tests/owner-source/owner-source-seed.json",
   import.meta.url,
 );
 

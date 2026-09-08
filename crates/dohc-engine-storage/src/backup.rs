@@ -566,7 +566,11 @@ mod tests {
 
     #[test]
     fn backup_compares_owner_ydoc_outbox_tables() {
-        for table in ["owner_ydoc_outboxes", "owner_ydoc_outbox_entries"] {
+        for table in [
+            "owner_ydoc_outboxes",
+            "owner_ydoc_outbox_entries",
+            "ydoc_owner_base_sources",
+        ] {
             assert!(
                 COMPARED_TABLES.contains(&table),
                 "backup restore verification must compare {table}"

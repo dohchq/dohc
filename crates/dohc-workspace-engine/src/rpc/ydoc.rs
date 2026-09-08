@@ -1460,7 +1460,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn captured_owner_seed_retains_exact_original_source_moment() {
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../dohc-engine-collab/tests/fixtures/owner-source-seed.json"
+            "../../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
         ))
         .unwrap();
         let markdown = vector["markdown"].as_str().unwrap().to_owned();

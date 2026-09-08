@@ -117,6 +117,47 @@ mod tests {
     }
 
     #[test]
+    fn canonical_source_without_witness_retains_the_base() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("canonical-owner-source").unwrap();
+        let mut store = EngineStore::open(&scratch.join("engine.db"), 0).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("workspace", "main", 0, &NoFaults)
+            .unwrap();
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "canonical source")
+            .unwrap();
+        let text = doc.project(ContentKind::Richdoc).unwrap().content;
+        assert!(doc.preserved_markdown_source(&text).is_none());
+        let baseline = doc.encode_full_state();
+        let digest = hex_sha256(&baseline);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        write(&mut store, &text, "source", 1);
+        durable::claim_base(
+            &mut store,
+            &key,
+            ContentKind::Richdoc,
+            &baseline,
+            &NoFaults,
+            2,
+        )
+        .unwrap();
+        let source = OwnerSeedSource {
+            moment_id: "source".into(),
+            blob_sha256: hex_sha256(text.as_bytes()),
+        };
+        assert!(matches!(
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute("UPDATE ydoc_docs SET path='owner.md'", [])
+                        .unwrap();
+                    retain_owner_base_source_in_tx(tx, &key, "owner.md", &digest, &source)
+                })
+                .unwrap(),
+            TxnOutcome::Committed(true)
+        ));
+    }
+
+    #[test]
     fn owner_source_keeps_exact_moment_and_rolls_back_with_transaction() {
         let scratch = dohc_test_scratch::ScratchDir::new_named("owner-source").unwrap();
         let mut store = EngineStore::open(&scratch.join("engine.db"), 0).unwrap();
@@ -124,7 +165,8 @@ mod tests {
             .ensure_main_version("workspace", "main", 0, &NoFaults)
             .unwrap();
         let vector: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/fixtures/owner-source-seed.json")).unwrap();
+            serde_json::from_str(include_str!("../tests/owner-source/owner-source-seed.json"))
+                .unwrap();
         let text = vector["markdown"].as_str().unwrap();
         let baseline: Vec<u8> = serde_json::from_value(vector["bytes"].clone()).unwrap();
         let key = DocKey::new("workspace", "main", "object").unwrap();
