@@ -303,18 +303,25 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         journalIntegrity(due === anticipatedCheckpoint);
         const checkpointBytes = due ? validation.evidence.stateUpdate! : null;
         const checkpointDigest = due ? validation.evidence.stateUpdateSha256 : null;
-        const charge = updateBytes.byteLength + (checkpointBytes?.byteLength ?? 0);
+        const nextCursor = sequence + 1;
+        const values = [metadata.deliveryId, metadata.updateDigest, ...documentParams(document),
+          current.binding.currentPath, JSON.stringify(current.binding.selectorPaths), current.binding.restoreFenceGeneration,
+          current.authority.principalKind, current.authority.principalId, current.authority.grantId, current.authority.grantGeneration,
+          host.hostEpoch, receivedAtMs];
+        // Logical stored values, as with delivery reservations; excludes SQLite pages and indexes.
+        const metadataBytes = Buffer.byteLength(JSON.stringify([nextCursor, ...values, checkpointDigest]));
+        const provenanceBytes = firstSeen.reduce((total, range) => total + Buffer.byteLength(JSON.stringify([
+          ...documentParams(document), range.clientId, range.startClock, range.endClock, nextCursor,
+        ])), 0);
+        const charge = updateBytes.byteLength + (checkpointBytes?.byteLength ?? 0) + metadataBytes + provenanceBytes;
         assertWorkspaceQuota(storage, document.workspaceId, charge);
         firstWriteAttempted = true;
         const insert = storage.db.prepare(`INSERT INTO ${LIVE_JOURNAL_TABLE}(delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,
           current_path,selector_paths_json,restore_fence_generation,principal_kind,principal_id,grant_id,grant_generation,
           accepting_host_epoch,received_at_ms,update_bytes,validation_checkpoint_sha256,validation_checkpoint_bytes)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(metadata.deliveryId, metadata.updateDigest, ...documentParams(document),
-          current.binding.currentPath, JSON.stringify(current.binding.selectorPaths), current.binding.restoreFenceGeneration,
-          current.authority.principalKind, current.authority.principalId, current.authority.grantId, current.authority.grantGeneration,
-          host.hostEpoch, receivedAtMs, updateBytes, checkpointDigest, checkpointBytes);
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...values, updateBytes, checkpointDigest, checkpointBytes);
         const cursor = authorityInteger(typeof insert.lastInsertRowid === "bigint" ? Number(insert.lastInsertRowid) : insert.lastInsertRowid, 1);
-        journalIntegrity(cursor > sequence);
+        journalIntegrity(cursor === nextCursor);
         const insertRange = storage.db.prepare(`INSERT INTO ${LIVE_JOURNAL_PROVENANCE}(workspace_id,main_version_id,object_id,lineage_claim_id,client_id,start_clock,end_clock,journal_cursor) VALUES (?,?,?,?,?,?,?,?)`);
         for (const range of firstSeen) insertRange.run(...documentParams(document), range.clientId, range.startClock, range.endClock, cursor);
         const raw = storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE journal_cursor=?`).get(cursor);
