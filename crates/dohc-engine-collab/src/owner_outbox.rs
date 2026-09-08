@@ -226,6 +226,23 @@ fn append_with_retained_base(
         .map_err(OwnerOutboxError::InvalidInput)?;
     require_workspace(workspace_id, &binding.workspace_id)?;
     input.limits.validate()?;
+    let adopted: Option<(String, i64, i64)> = tx.query_row(
+        "SELECT binding_json,max_pending_bytes,max_pending_age_ms FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+        params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).optional().map_err(read_sql)?;
+    if let Some((saved_binding, bytes, age)) = adopted {
+        let saved: LiveObjectBinding =
+            serde_json::from_str(&saved_binding).map_err(|_| OwnerOutboxError::Corrupt)?;
+        if saved != binding {
+            return Err(OwnerOutboxError::ParentMismatch);
+        }
+        if input.limits.max_pending_bytes != bytes || input.limits.max_pending_age_ms != age {
+            return Err(OwnerOutboxError::InvalidInput(
+                "append limits differ from persisted owner adoption",
+            ));
+        }
+    }
     validate_identifier(
         &input.append_key,
         "append key must be non-empty and bounded",

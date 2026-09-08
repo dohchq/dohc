@@ -62,6 +62,7 @@ export function startOwnerAdmission(options: {
         afterObject = document.objectId; visited++;
         await options.control.settle(document,signal);
       }
+      lastError = undefined;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!stopped && !options.storage.unavailable.aborted && message !== lastError) {lastError = message; options.onError(error);}

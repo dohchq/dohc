@@ -46,3 +46,22 @@ it("resumes a bounded workspace scan and aborts the active pass on close",async 
     await vi.advanceTimersByTimeAsync(1000); expect(calls).toHaveLength(4);
   } finally {runner.close(); vi.useRealTimers();}
 });
+
+it("reports a recurring failure again after a successful pass",async () => {
+  vi.useFakeTimers();
+  let fails = true;
+  const onError = vi.fn(), unavailable = new AbortController();
+  const storage = {unavailable: unavailable.signal,createLiveCommittedDeliveryStore: () => ({nextOwnerDocument() {
+    return {workspaceId: "a",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64)};
+  }})};
+  const runner = startOwnerAdmission({storage: storage as never,history: {} as never,onError,
+    config: {admission: {shares: new Map([["a","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 1000,validate: vi.fn()},maxDocumentsPerPass: 1,pollIntervalMs: 100,passDeadlineMs: 30_000},
+    control: {settle: async () => {if (fails) throw new Error("offline"); return {} as never;}},
+  });
+  try {
+    await vi.advanceTimersByTimeAsync(0); expect(onError).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(100); expect(onError).toHaveBeenCalledTimes(1);
+    fails = false; await vi.advanceTimersByTimeAsync(100);
+    fails = true; await vi.advanceTimersByTimeAsync(100); expect(onError).toHaveBeenCalledTimes(2);
+  } finally {runner.close(); vi.useRealTimers();}
+});

@@ -40,7 +40,7 @@ interface Operation {
   id: number; method: string; workspace: string; params: Record<string, unknown>; signal: AbortController;
   timer: ReturnType<typeof setTimeout>; streams: Attachment[]; charge: number;
 }
-interface Registration { nativeId: number; binding: LiveObjectBinding; owner: ExistingOwnerSession; adopted: boolean; outboxId?: string; handoffTimer?: ReturnType<typeof setTimeout> }
+interface Registration { nativeId: number; binding: LiveObjectBinding; owner: ExistingOwnerSession; adopted: boolean; adopting?: boolean; outboxId?: string; handoffTimer?: ReturnType<typeof setTimeout> }
 
 function integer(value: unknown, minimum = 0, maximum = Number.MAX_SAFE_INTEGER): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum || value > maximum) throw new Error("Invalid device owner integer.");
@@ -138,13 +138,14 @@ export function startExistingOwnerDeviceTransport(options: {
             params: {outboxId: registration.outboxId,...(reading ? (params.cursor === undefined ? {} : {cursor: params.cursor as never}) : {receipts: params.receipts as never})}},signal);
           owner.assertCurrent(); result = response.result;
         } else if (operation.method === "liveApplication.adoptOwner") {
-          if (!registration.handoffTimer) throw new Error("Owner handoff was not prepared.");
+          if (!registration.handoffTimer || registration.adopting) throw new Error("Owner handoff was not prepared.");
           if (operation.params.sessionId !== String(registration.nativeId)) throw new Error("Owner session mismatch.");
+          registration.adopting = true; armedHandoff = true;
           const response = await config.client.forwardLiveOwnerAdoption(native,operation.streams[0]!.bytes,config.maxAdoptionBytes,signal);
           owner.assertCurrent();
           const adopted = configRecord(response.result,["status","adoption"]);
           if (adopted.status !== "adopted") throw new Error("Owner adoption did not commit.");
-          registration.adopted = true; clearTimeout(registration.handoffTimer); registration.handoffTimer = undefined; result = response.result;
+          registration.adopted = true; result = response.result;
         } else if (operation.method === "liveApplication.apply") {
           if (!registration.adopted) throw new Error("Owner adoption must finish first.");
           const update = operation.streams[0]!.bytes, packed = operation.streams[1]!.bytes, firstSeen: LiveUpdateStructRange[] = [];
@@ -163,18 +164,21 @@ export function startExistingOwnerDeviceTransport(options: {
       }
       check(); if (operation.signal.signal.aborted) throw operation.signal.signal.reason;
       await send({ type: "response",id: operation.id,result });
-      if (operation.method === "liveApplication.adoptOwner") await owner!.finishHandoff(true);
+      if (operation.method === "liveApplication.adoptOwner") {
+        await owner!.finishHandoff(true);
+        clearTimeout(registration!.handoffTimer); registration!.handoffTimer = undefined; registration!.adopting = false;
+      }
     } catch {
       if (owner) {try {owner.assertCurrent();} catch {stop();}}
-      if (owner && (armedHandoff || operation.method === "liveApplication.adoptOwner")) {
-        clearTimeout(registration?.handoffTimer); if (registration) registration.handoffTimer = undefined;
+      if (owner && armedHandoff) {
+        clearTimeout(registration?.handoffTimer); if (registration) { registration.handoffTimer = undefined; registration.adopting = false; }
         await owner.finishHandoff(false).catch(() => undefined);
       }
       if (!closed) await send({ type: "error",id: operation.id,error: { code: "FORBIDDEN",message: "owner-device-operation-refused",retryability: "no" } }).catch(stop);
     } finally { operations.delete(operation.id); charged -= operation.charge; clearTimeout(operation.timer); }
   }
-  function attachment(id: unknown,size: unknown,digest: unknown): Attachment {
-    const streamId = integer(id,lastStream+1), length = integer(size,0,config.maxAdoptionBytes), hash = string(digest);
+  function attachment(id: unknown,size: unknown,digest: unknown,maximum: number): Attachment {
+    const streamId = integer(id,lastStream+1), length = integer(size,0,maximum), hash = string(digest);
     if (!/^[0-9a-f]{64}$/.test(hash)) throw new Error("Invalid owner stream digest.");
     lastStream = streamId;
     return { id: streamId,size: length,digest: hash,bytes: Buffer.alloc(length),offset: 0,started: false,finished: false };
@@ -212,19 +216,21 @@ export function startExistingOwnerDeviceTransport(options: {
     if (!["liveApplication.hosts","liveApplication.register","liveApplication.ownerState","liveApplication.ownerOutbox","liveApplication.readOwnerOutbox","liveApplication.acknowledgeOwnerOutbox","liveApplication.adoptOwner","liveApplication.apply","liveApplication.settle"].includes(method) || (method !== "liveApplication.hosts" && !workspaces.has(workspace)) || value.idempotencyKey != null) throw new Error("Owner method is unavailable.");
     const params = value.params as Record<string,unknown>;
     if (!params || typeof params !== "object" || Array.isArray(params)) throw new Error("Invalid owner params.");
-    const bytes = method === "liveApplication.adoptOwner" ? integer(params.byteLength,1,config.maxAdoptionBytes) : method === "liveApplication.apply" ? integer(params.updateByteLength,2,20_971_520) + integer(params.rangeCount,0)*16 : 0;
+    const updateBytes = method === "liveApplication.apply" ? integer(params.updateByteLength,2,20_971_520) : 0;
+    const rangeBytes = method === "liveApplication.apply" ? integer(params.rangeCount,0,Math.floor((updateBytes-2)/5))*16 : 0;
+    const bytes = method === "liveApplication.adoptOwner" ? integer(params.byteLength,1,config.maxAdoptionBytes) : updateBytes + rangeBytes;
     const charge = bytes * 3 + config.maxFrameBytes;
     if (!Number.isSafeInteger(charge) || charged + charge > config.aggregateBytes) throw new Error("Owner operation capacity exceeded.");
     charged += charge; lastId = id;
     const signal = new AbortController(), timer = setTimeout(stop,Math.min(integer(value.deadlineMs ?? config.requestDeadlineMs,1),config.requestDeadlineMs)); timer.unref();
     const operation: Operation = { id,method,workspace,params,signal,timer,streams: [],charge };
     operations.set(id,operation);
-    if (method === "liveApplication.adoptOwner") operation.streams = [attachment(params.streamId,params.byteLength,params.digest)];
+    if (method === "liveApplication.adoptOwner") operation.streams = [attachment(params.streamId,params.byteLength,params.digest,config.maxAdoptionBytes)];
     else if (method === "liveApplication.apply") {
       const accepted = configRecord(params.accepted,["receipt","binding","authority","receivedAtMs"]);
       const receipt = configRecord(accepted.receipt,["deliveryId","updateDigest","journalCursor","acceptingHostEpoch"]);
       // The sender allocates the update stream first and the range stream second.
-      operation.streams = [attachment(params.updateStreamId,params.updateByteLength,receipt.updateDigest),attachment(params.rangeStreamId,integer(params.rangeCount)*16,params.rangeDigest)];
+      operation.streams = [attachment(params.updateStreamId,updateBytes,receipt.updateDigest,20_971_520),attachment(params.rangeStreamId,rangeBytes,params.rangeDigest,Math.floor((updateBytes-2)/5)*16)];
     } else void execute(operation);
   }
   const startup = (async () => {

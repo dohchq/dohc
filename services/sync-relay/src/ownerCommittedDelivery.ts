@@ -79,8 +79,9 @@ export class OwnerCommittedDelivery {
       if (saved.settled && saved.settled.terminalCursor === (progress.terminal?.journalCursor ?? 0)) return saved.settled;
       const response = await c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal);
       check(); latest.assertCurrent();
-      saved.settled = settlementResult(response.result,progress.terminal);
-      return saved.settled;
+      const settled = settlementResult(response.result,progress.terminal);
+      if (settled.materialized) saved.settled = settled;
+      return settled;
     } finally { this.#active.delete(key); }
   }
   drain(document: LiveDocumentKey,signal?: AbortSignal) { return this.#run(document,false,signal); }

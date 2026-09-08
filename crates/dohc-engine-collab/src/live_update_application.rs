@@ -1552,6 +1552,35 @@ mod tests {
     }
 
     #[test]
+    fn historical_byte_delivery_preserves_its_original_update_sequence() {
+        let (_dir, mut store, mut cache, _owner, handle) = fixture();
+        let producer = Ydoc::wire();
+        let first_bytes = producer.plaintext_insert(0, "first");
+        let first = event("first", 1, first_bytes.clone());
+        let initial = ack(apply(&mut store, &mut cache, &handle, first.clone()));
+        let later = producer.plaintext_insert(5, " later");
+        let head = ack(apply(
+            &mut store,
+            &mut cache,
+            &handle,
+            event("later", 2, later),
+        ));
+        assert!(head.local_ydoc_sequence > initial.local_ydoc_sequence);
+        let deduped = ack(apply(
+            &mut store,
+            &mut cache,
+            &handle,
+            event("historical", 3, first_bytes),
+        ));
+        assert_eq!(deduped.local_ydoc_sequence, initial.local_ydoc_sequence);
+        assert!(!deduped.application_replayed);
+        let replay = ack(apply(&mut store, &mut cache, &handle, first));
+        assert!(replay.application_replayed);
+        assert_eq!(replay.local_ydoc_sequence, initial.local_ydoc_sequence);
+        assert_eq!(count(&store, "ydoc_updates"), 2);
+    }
+
+    #[test]
     fn missing_insert_and_delete_roll_back_fresh_and_parked_deduped_attempts() {
         for delete in [false, true] {
             for parked in [false, true] {

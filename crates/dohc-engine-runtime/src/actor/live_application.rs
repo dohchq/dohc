@@ -435,6 +435,11 @@ impl Request {
                         cut,
                         max_bytes,
                         max_events,
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+                            .ok_or(RuntimeError::ActorUnavailable)?,
                         faults.as_ref(),
                     )
                     .map_err(Into::into)

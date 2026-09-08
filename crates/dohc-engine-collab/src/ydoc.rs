@@ -31,7 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use yrs::encoding::write::Write as _;
 use yrs::types::text::{TextDiffChunk, YChange};
@@ -45,6 +45,7 @@ use yrs::{
 use crate::error::CollabError;
 use crate::limits::{MAX_PROJECTION_BYTES, MAX_PROJECTION_DEPTH, MAX_PROJECTION_NODES};
 
+mod bounded_encoder;
 mod frontmatter_yaml;
 
 /// The declared dohc root schema. The Yjs v1 wire format does not carry
@@ -635,6 +636,14 @@ impl Ydoc {
     pub fn encode_full_state(&self) -> Vec<u8> {
         let txn = self.doc.transact();
         txn.encode_state_as_update_v1(&StateVector::default())
+    }
+
+    pub(crate) fn encode_full_state_bounded(&self, max_bytes: usize) -> Option<Vec<u8>> {
+        let mut encoder = bounded_encoder::BoundedEncoder::new(max_bytes)?;
+        self.doc
+            .transact()
+            .encode_state_as_update(&StateVector::default(), &mut encoder);
+        encoder.finish()
     }
 
     /// The state vector, v1-encoded in ascending client-id order — the
@@ -3693,11 +3702,7 @@ fn render_inline(
                             leading_whitespace.iter().enumerate()
                         {
                             let replacement = if index == 0 {
-                                if whitespace == b' ' {
-                                    "&#32;"
-                                } else {
-                                    "&#9;"
-                                }
+                                if whitespace == b' ' { "&#32;" } else { "&#9;" }
                             } else if whitespace == b' ' {
                                 " "
                             } else {
@@ -4246,8 +4251,8 @@ mod projection_tests {
     use std::sync::Arc;
 
     use crate::limits::MAX_PROJECTION_BYTES;
-    use yrs::types::xml::XmlIn;
     use yrs::types::Attrs;
+    use yrs::types::xml::XmlIn;
 
     fn scene_map_set(doc: &Ydoc, root: &str, key: &str, value: &str) -> Vec<u8> {
         let map = doc.doc.get_or_insert_map(root);

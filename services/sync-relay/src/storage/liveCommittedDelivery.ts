@@ -247,13 +247,16 @@ export class LiveCommittedDeliveryStore {
       const next = this.nextOwnerApplication(capture); integrity(next);
       const receipt = next.metadata.accepted.receipt;
       integrity(sameReceipt(receipt,{deliveryId: ack.deliveryId,updateDigest: ack.updateDigest,journalCursor: ack.journalCursor,acceptingHostEpoch: ack.acceptingHostEpoch}));
-      const row = this.#ownerRow(host,document); integrity(row && ack.localYDocSequence >= authorityInteger(row.tip_sequence));
-      const tip = JSON.stringify(receipt), values = [this.#history.namespace,...documentParams(document),host.hostId,row.origin_json,tip,ack.journalCursor,ack.localYDocSequence];
+      const row = this.#ownerRow(host,document); integrity(row);
+      // Content dedupe reports the original native update sequence. Retain the
+      // greatest sequence already proved by an authenticated application ACK.
+      const sequence = Math.max(authorityInteger(row.tip_sequence),ack.localYDocSequence);
+      const tip = JSON.stringify(receipt), values = [this.#history.namespace,...documentParams(document),host.hostId,row.origin_json,tip,ack.journalCursor,sequence];
       const charge = Buffer.byteLength(JSON.stringify(values)), previousCharge = authorityInteger(row.accounted_bytes,1), delta = Math.max(1,charge-previousCharge);
       consumeLiveDeliveryReservation(this.#storage,document,host.hostId,ack.journalCursor,delta,true);
       const refund = previousCharge + delta - charge; if (refund) this.#refundOwner(document.workspaceId,refund);
       this.#storage.db.prepare(`UPDATE ${OWNERS} SET tip_receipt_json=?,tip_cursor=?,tip_sequence=?,accounted_bytes=? WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id=?`)
-        .run(tip,ack.journalCursor,ack.localYDocSequence,charge,this.#history.namespace,...documentParams(document),host.hostId);
+        .run(tip,ack.journalCursor,sequence,charge,this.#history.namespace,...documentParams(document),host.hostId);
     });
   }
   captureOwnerCut(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; adoptionId: string;
@@ -266,7 +269,7 @@ export class LiveCommittedDeliveryStore {
     const captured = this.#storage.readTx(() => {
       this.#standing(host);
       const count = this.#storage.db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(length(update_bytes)),0) AS bytes FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=?`).get(...documentParams(document),requestedCursor ?? Number.MAX_SAFE_INTEGER)!;
-      if (authorityInteger(count.count) > maxEvents || authorityInteger(count.bytes) > maxBytes) throw new Error("Owner adoption cut exceeds its configured bounds.");
+      if (authorityInteger(count.count) > maxEvents || authorityInteger(count.bytes) > maxBytes) throw new Error(`Owner adoption cut exceeds configured bounds: ${count.count} journal events / ${maxEvents} allowed; ${count.bytes} journal bytes / ${maxBytes} allowed.`);
       const result = liveJournalCut(this.#storage, document);
       if (result.kind !== "cut") throw new Error(`Owner adoption ${result.reason}.`);
       const authority = result.cut.authorityHistory.find(row => row.current)!;
@@ -326,14 +329,6 @@ export class LiveCommittedDeliveryStore {
     return this.#storage.db.prepare(`SELECT * FROM ${OWNERS} WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id=?`)
       .get(this.#history.namespace,...documentParams(document),host.hostId);
   }
-  ownerProgress(capture: OwnerCutCapture): { terminal: LiveUpdateReceipt | null; sequence: number } {
-    const { host,document } = this.#ownerCapture(capture), row = this.#ownerRow(host,document);
-    integrity(row);
-    const terminal = JSON.parse(String(row.tip_receipt_json));
-    const parsed = terminal === null ? null : parseLiveUpdateReceipt(terminal);
-    integrity((parsed?.journalCursor ?? 0) === row.tip_cursor);
-    return { terminal: parsed,sequence: authorityInteger(row.tip_sequence) };
-  }
   acknowledgeOwnerAdoption(capture: OwnerCutCapture, value: unknown): void {
     const { host,document } = this.#ownerCapture(capture), cut = capture.cut;
     const ack = baselineRecord(value,["adoptionId","localYDocSequence","terminalCursor","adoptionReplayed"]);
@@ -355,25 +350,6 @@ export class LiveCommittedDeliveryStore {
         this.#refundOwner(document.workspaceId,1);
       }
       this.#storage.db.prepare(`INSERT INTO ${OWNERS}(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,host_id,origin_json,tip_receipt_json,tip_cursor,tip_sequence,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(...values,charge);
-    });
-  }
-  acknowledgeOwnerApplication(capture: OwnerCutCapture, value: unknown): void {
-    const ack = parseLiveUpdateHostApplicationAck(value), { host,document } = this.#ownerCapture(capture);
-    const acknowledged = { deliveryId: ack.deliveryId,updateDigest: ack.updateDigest,journalCursor: ack.journalCursor,acceptingHostEpoch: ack.acceptingHostEpoch };
-    this.#storage.tx(() => {
-      this.#ownerCapture(capture);
-      const row = this.#ownerRow(host,document); integrity(row);
-      const cursor = authorityInteger(row.tip_cursor), previousSequence = authorityInteger(row.tip_sequence);
-      const next = capture.cut.events.find(event => event.metadata.accepted.receipt.journalCursor > cursor);
-      if (ack.journalCursor === cursor) { integrity(sameReceipt(JSON.parse(String(row.tip_receipt_json)),acknowledged) && ack.localYDocSequence === previousSequence); return; }
-      integrity(next && sameReceipt(next.metadata.accepted.receipt,acknowledged) && ack.localYDocSequence >= previousSequence);
-      const tip = JSON.stringify(next.metadata.accepted.receipt), values = [this.#history.namespace,...documentParams(document),host.hostId,row.origin_json,tip,ack.journalCursor,ack.localYDocSequence];
-      const charge = Buffer.byteLength(JSON.stringify(values)), previousCharge = authorityInteger(row.accounted_bytes,1), delta = Math.max(1,charge-previousCharge);
-      consumeLiveDeliveryReservation(this.#storage,document,host.hostId,ack.journalCursor,delta,true);
-      const refund = previousCharge + delta - charge;
-      if (refund) this.#refundOwner(document.workspaceId,refund);
-      this.#storage.db.prepare(`UPDATE ${OWNERS} SET tip_receipt_json=?,tip_cursor=?,tip_sequence=?,accounted_bytes=? WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id=?`)
-        .run(tip,ack.journalCursor,ack.localYDocSequence,charge,this.#history.namespace,...documentParams(document),host.hostId);
     });
   }
   #refundOwner(workspaceId: string, amount: number) {

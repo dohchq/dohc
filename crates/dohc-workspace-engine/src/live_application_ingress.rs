@@ -414,8 +414,9 @@ impl LiveApplicationIngress {
             request.workspace.as_ref(),
             registration_id,
         )?;
-        let reserved = if matches!(metadata, Metadata::Adoption { .. }) {
-            self.adoption_reservation(update.expected)
+        let reserved = if let Metadata::Adoption { max_bytes, .. } = &metadata {
+            // First adoption can seed a native head larger than the relay baseline.
+            self.adoption_reservation(*max_bytes)
         } else {
             self.config.reservation_bytes(update.expected, range_count)
         }

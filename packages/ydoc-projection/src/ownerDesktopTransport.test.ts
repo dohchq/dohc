@@ -90,6 +90,10 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     const origin = native.prepare("SELECT s.object_id,s.latest_moment_id,b.bytes,d.lineage_claim_id FROM snapshots s JOIN ydoc_docs d USING(workspace_id,version_id,object_id) JOIN ydoc_snapshots y USING(workspace_id,version_id,object_id) JOIN binary_blobs b ON b.sha256=y.snapshot_blob_sha256 WHERE y.up_to_seq=0").get()!;
     const document = {workspaceId: "workspace",mainVersionId: "main",objectId: String(origin.object_id),lineageClaimId: String(origin.lineage_claim_id)};
     const initialSession = native.prepare("SELECT COUNT(*) AS count FROM moments").get()!.count;
+    rendererDoc.getMap("frontmatter").set("beforeConnection","Owner edit before first connection");
+    await renderer.flushPendingLocalUpdates();
+    await expect.poll(() => native.prepare("SELECT head_update_seq FROM ydoc_docs WHERE object_id=?").get(document.objectId)!.head_update_seq).toBeGreaterThan(0);
+    expect(native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries").get()!.count).toBe(0);
     const configPath = join(root,"deployment.json");
     initializeRelayDeployment({configPath,relayPath: join(root,"relay","relay.sqlite"),continuityDirectory: join(root,"continuity")}); deployment = openRelayDeployment(configPath);
     const credential = createDeviceHostCredential("host",parseHostEpoch(1));
@@ -167,6 +171,8 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
       await expect.poll(() => native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.count,{timeout: 30_000}).toBe(0);
       expect(native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries").get()!.count).toBeGreaterThan(0);
       expect(rendererDoc.getMap("frontmatter").get("duringHandoff")).toBe("Queued owner edit");
+      expect(rendererDoc.getMap("frontmatter").get("beforeConnection")).toBe("Owner edit before first connection");
+      expect(readFileSync(join(workspaceRoot,"docs/a.md"),"utf8")).toContain("Owner edit before first connection");
       expect(handoffCount).toBe(initialHandoffs);
       connection.stop(); await connection.closed;
       rendererDoc.getMap("frontmatter").set("offline","Reconnect owner edit"); await renderer.flushPendingLocalUpdates();
@@ -182,7 +188,9 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     const drain = async () => {let result: unknown,failure: unknown; await expect.poll(async () => {try {result = await control.drain(document); return true;} catch (error) {if ((error as Error).message.includes("not ready")) return false; failure = error; return true;}},{timeout: 30_000}).toBe(true); if (failure) throw failure; return result;};
     expect(await drain()).toMatchObject({kind: "done"});
     expect(native.prepare("SELECT COUNT(*) AS count FROM live_device_bootstraps").get()!.count).toBe(0);
-    expect(native.prepare("SELECT COUNT(*) AS count FROM moments").get()!.count).toBe(initialSession);
+    expect(native.prepare("SELECT COUNT(*) AS count FROM moments").get()!.count).toBeGreaterThanOrEqual(Number(initialSession));
+    expect(rendererDoc.getMap("frontmatter").get("beforeConnection")).toBe("Owner edit before first connection");
+    expect(native.prepare("SELECT covered_outbox_sequence FROM live_owner_adoptions").get()!.covered_outbox_sequence).toBe(0);
     rendererDoc.getMap("frontmatter").set("title","Owner edit"); await renderer.flushPendingLocalUpdates();
     const binding = deployment.storage.resolveCurrentLiveDocumentBinding({document,actor: {kind: "owner",userId: "owner",shareId: "share"}});
     if (binding.kind !== "current") throw new Error("Owner binding unavailable.");
@@ -205,6 +213,14 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
         cutToken: cut.cut,validation: createLiveMarkdownJournalValidator(policy)({document,currentPath: "docs/a.md",checkpoint: cut.cut.checkpoint.bytes,suffix: cut.cut.suffix.map(row => row.bytes),candidate: bytes}),updateBytes: bytes,receivedAtMs: Date.now()}).result.kind).toBe("accepted");
     }
     await control.settle(document); await control.settle(document);
+    const beforeGrowth = Y.encodeStateVector(remote);
+    remote.getMap("frontmatter").set("growth","x".repeat(1_000_100));
+    const growth = Y.encodeStateAsUpdate(remote,beforeGrowth), growthCurrent = deployment.storage.resolveCurrentLiveDocumentBinding({document,actor}), growthCut = deployment.storage.readLiveUpdateJournalCut({document});
+    expect(growth.byteLength).toBeGreaterThan(1_000_000);
+    if (growthCurrent.kind !== "current" || growthCut.kind !== "cut") throw new Error("Growth cut unavailable.");
+    expect(deployment.storage.commitLiveUpdateJournal({host,actor,expectedAuthority: growthCurrent.authority,metadata: {deliveryId: "growth",updateDigest: hash(growth),binding: growthCurrent.binding},
+      cutToken: growthCut.cut,validation: createLiveMarkdownJournalValidator(policy)({document,currentPath: "docs/a.md",checkpoint: growthCut.cut.checkpoint.bytes,suffix: growthCut.cut.suffix.map(row => row.bytes),candidate: growth}),updateBytes: growth,receivedAtMs: Date.now()}).result.kind).toBe("accepted");
+    await control.settle(document);
     const captured = captures.mock.calls.length, requests = vi.spyOn(singleton,"sendRequest");
     await control.settle(document); await control.settle(document);
     expect(captures.mock.calls.length).toBe(captured);

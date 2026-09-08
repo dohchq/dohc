@@ -221,8 +221,31 @@ mod tests {
                 self.cut.clone(),
                 1_000_000,
                 100,
+                10,
                 &NoFaults,
             )
+        }
+        fn local_edit_before_adoption(&mut self) {
+            self.doc
+                .rewrite_content_to_markdown(ContentKind::Richdoc, "edited before connecting")
+                .unwrap();
+            let TxnOutcome::Committed(update) = self
+                .store
+                .write_with(&NoFaults, |tx| {
+                    durable::record_update_in_tx(
+                        tx,
+                        &self.key,
+                        &self.doc.encode_full_state(),
+                        None,
+                        None,
+                        4,
+                    )
+                })
+                .unwrap()
+            else {
+                panic!("local edit interrupted")
+            };
+            self.cut.expected_local_sequence = update.seq;
         }
         fn counts(&self) -> Vec<i64> {
             [
@@ -238,6 +261,142 @@ mod tests {
             .map(|t| self.store.table_row_count(t).unwrap())
             .collect()
         }
+    }
+    #[test]
+    fn first_adoption_seeds_only_pending_local_state_and_preserves_history() {
+        let mut f = Fixture::new();
+        f.local_edit_before_adoption();
+        let before = f.counts();
+        let ack = f.adopt().unwrap();
+        assert_eq!(ack.local_ydoc_sequence, 1);
+        assert_eq!(ack.terminal_cursor, 0);
+        assert_eq!(&before[..5], &f.counts()[..5]);
+        assert_eq!(&f.counts()[5..], &[1, 1]);
+        let (bytes, pending, created, coverage): (Vec<u8>, i64, i64, i64) = f.store.read_with(|tx| tx.query_row(
+            "SELECT b.bytes,e.pending,e.created_at_ms,a.covered_outbox_sequence FROM owner_ydoc_outbox_entries e JOIN binary_blobs b ON b.sha256=e.update_blob_digest CROSS JOIN live_owner_adoptions a", [], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))).unwrap();
+        assert_eq!((pending, created, coverage), (1, 10, 0));
+        let seeded = Ydoc::wire();
+        seeded.apply(&bytes).unwrap();
+        assert!(crate::replay_parity::structurally_equal_v2(&f.doc, &seeded).unwrap());
+        assert!(f.adopt().unwrap().adoption_replayed);
+        assert_eq!(f.counts()[6], 1);
+        let original: String = f
+            .store
+            .read_with(|tx| {
+                tx.query_row(
+                    "SELECT source_moment_id FROM ydoc_owner_base_sources",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(original, "original");
+    }
+
+    #[test]
+    fn seeded_queue_seals_at_byte_and_age_limits_without_losing_the_trigger() {
+        for byte_limit in [1, 1_000_000] {
+            let mut f = Fixture::new();
+            f.local_edit_before_adoption();
+            f.cut.outbox_limits.max_pending_bytes = byte_limit;
+            f.cut.outbox_limits.max_pending_age_ms = 20;
+            f.adopt().unwrap();
+            let state: String = f
+                .store
+                .read_with(|tx| {
+                    tx.query_row("SELECT state FROM owner_ydoc_outboxes", [], |r| r.get(0))
+                })
+                .unwrap();
+            assert_eq!(state, if byte_limit == 1 { "sealed" } else { "active" });
+            if byte_limit != 1 {
+                let result = owner_outbox::append(
+                    &mut f.store,
+                    "workspace",
+                    crate::OwnerOutboxAppendInput {
+                        binding: f.binding.clone(),
+                        base_update: f.cut.baseline_bytes.clone(),
+                        append_key: "later".into(),
+                        update: f.doc.encode_full_state(),
+                        limits: f.cut.outbox_limits.clone(),
+                        created_at_ms: 30,
+                    },
+                )
+                .unwrap();
+                assert_eq!(result.state, crate::OwnerOutboxState::Sealed);
+                assert_eq!(result.sequence, 2);
+                assert_eq!(result.oldest_entry_at_ms, 10);
+            }
+            assert!(f.adopt().unwrap().adoption_replayed);
+        }
+    }
+
+    #[test]
+    fn adopted_queue_refuses_caller_selected_limits_without_mutation() {
+        let mut f = Fixture::new();
+        f.local_edit_before_adoption();
+        f.adopt().unwrap();
+        for (bytes, age) in [
+            (2_000_000, 100_000),
+            (1, 100_000),
+            (1_000_000, 200_000),
+            (1_000_000, 1),
+        ] {
+            let before = f.counts();
+            assert!(
+                owner_outbox::append(
+                    &mut f.store,
+                    "workspace",
+                    crate::OwnerOutboxAppendInput {
+                        binding: f.binding.clone(),
+                        base_update: f.cut.baseline_bytes.clone(),
+                        append_key: "caller-selected".into(),
+                        update: f.doc.encode_full_state(),
+                        limits: crate::OwnerOutboxLimits {
+                            max_pending_bytes: bytes,
+                            max_pending_age_ms: age
+                        },
+                        created_at_ms: 11,
+                    }
+                )
+                .is_err()
+            );
+            assert_eq!(before, f.counts());
+        }
+    }
+
+    #[test]
+    fn local_replay_budget_refuses_before_seeding() {
+        let mut f = Fixture::new();
+        f.local_edit_before_adoption();
+        let before = f.counts();
+        assert!(
+            adopt_owner_committed(
+                &mut f.store,
+                &f.handle,
+                f.cut.clone(),
+                f.cut.baseline_bytes.len() + 1,
+                100,
+                10,
+                &NoFaults
+            )
+            .is_err()
+        );
+        assert_eq!(before, f.counts());
+        assert_eq!(f.store.table_row_count("live_owner_adoptions").unwrap(), 0);
+    }
+
+    #[test]
+    fn bounded_seed_encoder_matches_native_state_and_refuses_overflow() {
+        let mut f = Fixture::new();
+        f.local_edit_before_adoption();
+        let size = f.doc.encode_full_state().len();
+        assert!(f.doc.encode_full_state_bounded(size - 1).is_none());
+        assert!(f.doc.encode_full_state_bounded(0).is_none());
+        let bytes = f.doc.encode_full_state_bounded(size).unwrap();
+        assert_eq!(bytes.len(), size);
+        let decoded = Ydoc::wire();
+        decoded.apply(&bytes).unwrap();
+        assert!(crate::replay_parity::structurally_equal_v2(&f.doc, &decoded).unwrap());
     }
     #[test]
     fn owner_adoption_is_the_origin_for_remote_apply_and_settlement_coverage() {
@@ -515,7 +674,7 @@ mod tests {
             FaultPoint::StorageAfterCommitBeforeAck,
         ] {
             let mut f = Fixture::new();
-            f.edit(true);
+            f.local_edit_before_adoption();
             let before = f.counts();
             assert!(
                 adopt_owner_committed(
@@ -524,12 +683,17 @@ mod tests {
                     f.cut.clone(),
                     1_000_000,
                     100,
+                    10,
                     &Crash(point)
                 )
                 .is_err()
             );
-            assert_eq!(before, f.counts());
             let committed = point == FaultPoint::StorageAfterCommitBeforeAck;
+            assert_eq!(&before[..5], &f.counts()[..5]);
+            assert_eq!(
+                &f.counts()[5..],
+                &[i64::from(committed), i64::from(committed)]
+            );
             assert_eq!(
                 f.store.table_row_count("live_owner_adoptions").unwrap(),
                 i64::from(committed)
@@ -540,6 +704,12 @@ mod tests {
             let ack = f.adopt().unwrap();
             assert_eq!(ack.adoption_replayed, committed);
             assert_eq!(f.store.table_row_count("live_owner_adoptions").unwrap(), 1);
+            assert_eq!(
+                f.store
+                    .table_row_count("owner_ydoc_outbox_entries")
+                    .unwrap(),
+                1
+            );
             f.cut.adoption_id = "another-id".into();
             assert!(f.adopt().is_err());
         }
@@ -635,7 +805,8 @@ fn validate_cut(
 }
 
 /// Prove an existing owner's state without changing its domain history, base,
-/// update sequence, delivery entries, or projection. The captured registration
+/// update sequence, or projection. First adoption can seed a pending local cut.
+/// The captured registration
 /// mutex and actor writer lane remain held through the audit transaction.
 pub fn adopt_owner_committed(
     store: &mut EngineStore,
@@ -643,6 +814,7 @@ pub fn adopt_owner_committed(
     cut: OwnerAdoptionCut,
     max_bytes: usize,
     max_events: usize,
+    now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<OwnerAdoptionAck, ApplicationError> {
     let held = handle
@@ -718,16 +890,31 @@ pub fn adopt_owner_committed(
             params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |r| r.get(0)).map_err(read_sql)?;
         if existing_document { return Err(ApplicationError::Conflict); }
         if marker.head_update_seq != cut.expected_local_sequence { return Err(invalid("owner adoption evidence is stale")); }
+        require_local_replay_budget(tx, &key, max_bytes)?;
         let local = durable::load_doc_in(tx, &key)?;
         let journal = Ydoc::wire();
         journal.apply(&cut.baseline_bytes)?;
         journal.validate_public_baseline(&cut.baseline_bytes)?;
         for event in &cut.events { journal.apply(&event.update_bytes)?; }
-        if local.has_missing_updates() || journal.has_missing_updates()
-            || !crate::replay_parity::structurally_equal_v2(&local, &journal)? {
+        if local.has_missing_updates() || journal.has_missing_updates() {
             return Err(invalid("owner adoption journal does not account for durable state"));
         }
         let (coverage,covered_sequence) = outbox_coverage(tx, b, &cut.events, max_events,None)?;
+        if !crate::replay_parity::structurally_equal_v2(&local, &journal)? {
+            let existing_outbox: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
+                params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |r|r.get(0)).map_err(read_sql)?;
+            if existing_outbox || !cut.events.is_empty() || cut.terminal_receipt.is_some() {
+                return Err(invalid("owner adoption journal does not account for durable state"));
+            }
+            let seed = local.encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
+                .ok_or(invalid("owner adoption local seed exceeds configured budget"))?;
+            let append_key = format!("owner-adoption:{}",hex_sha256(&serde_json::to_vec(&(&cut.adoption_id,marker.head_update_seq,hex_sha256(&seed))).map_err(|_|ApplicationError::Corrupt)?));
+            crate::owner_outbox::append_in_tx(tx,&b.workspace_id,crate::OwnerOutboxAppendInput {
+                binding:b.clone(),base_update:cut.baseline_bytes.clone(),append_key,update:seed,
+                limits:cut.outbox_limits.clone(),created_at_ms:now_ms,
+            }).map_err(|_| invalid("owner adoption local seed could not be retained"))?;
+        }
         let terminal_cursor = cut.terminal_receipt.as_ref().map_or(0,|r|r.journal_cursor);
         tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
@@ -738,6 +925,45 @@ pub fn adopt_owner_committed(
         TxnOutcome::Committed(ack) => Ok(ack),
         TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
     }
+}
+
+fn require_local_replay_budget(
+    conn: &Connection,
+    key: &DocKey,
+    max_bytes: usize,
+) -> Result<(), ApplicationError> {
+    let (sequence, digest) =
+        durable::latest_snapshot(conn, key)?.ok_or(ApplicationError::Corrupt)?;
+    let mut total: i64 = conn
+        .query_row(
+            "SELECT length(bytes) FROM binary_blobs WHERE sha256=?1",
+            [digest],
+            |r| r.get(0),
+        )
+        .map_err(read_sql)?;
+    let mut statement = conn.prepare("SELECT length(b.bytes) FROM ydoc_updates u LEFT JOIN binary_blobs b ON b.sha256=u.update_blob_sha256 WHERE u.workspace_id=?1 AND u.version_id=?2 AND u.object_id=?3 AND u.seq>?4 ORDER BY u.seq").map_err(read_sql)?;
+    let rows = statement
+        .query_map(
+            params![key.workspace_id, key.version_id, key.object_id, sequence],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(read_sql)?;
+    for size in rows {
+        total = total
+            .checked_add(size.map_err(read_sql)?)
+            .ok_or(ApplicationError::Corrupt)?;
+        if total as u64 > max_bytes as u64 {
+            return Err(invalid(
+                "owner adoption local replay exceeds configured budget",
+            ));
+        }
+    }
+    if total < 0 || total as u64 > max_bytes as u64 {
+        return Err(invalid(
+            "owner adoption local replay exceeds configured budget",
+        ));
+    }
+    Ok(())
 }
 
 fn outbox_coverage(
