@@ -7,6 +7,7 @@ import { prepare, assertPrepared, sourceFingerprint, buildEnvironment } from "./
 import { doctor } from "./doctor.mjs";
 import { git, pnpm, repoRoot, run } from "./process.mjs";
 import { cancellationScope } from "./cancellation.mjs";
+import { prepareOrderedDeliveryFixture } from "./ordered-delivery-fixture.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
@@ -164,9 +165,12 @@ export async function verify(args) {
       await checkTree("prepare");
     }
     if (mode === "pr" && gates.js) {
+      report.orderedDeliveryFixture = await prepareOrderedDeliveryFixture({ output });
+      await checkTree("ordered-delivery-fixture");
       database = await postgres(output);
       report.postgres = { id: database.id }; save();
-      const env = { ...process.env, POSTGRES_URL: database.url, DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_REQUIRE_PLUGIN_INSTALL_E2E: "1" };
+      const env = { ...process.env, POSTGRES_URL: database.url, DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_REQUIRE_PLUGIN_INSTALL_E2E: "1",
+        DOHC_ORDERED_DELIVERY_FIXTURE: report.orderedDeliveryFixture.path };
       await step("typecheck", ...pnpm(["run", "typecheck"]), env);
       await step("tests", ...pnpm(["run", "test"]), env);
     }

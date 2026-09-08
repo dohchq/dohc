@@ -136,6 +136,7 @@ jobs:
       # into a failure rather than a silent skip. Override with
       # DOHC_TEST_ENGINE_BINARY only to point at a binary somewhere else.
       DOHC_REQUIRE_ENGINE_E2E: "1"
+      DOHC_ORDERED_DELIVERY_FIXTURE: ${{ github.workspace }}/.dohc-dev/verification/ordered-delivery-fixture
       # The plugin install proofs run the real pinned pnpm against the real
       # registry. They are the only measured evidence behind the install
       # pins, so a checkout that cannot stage pnpm must fail here rather than
@@ -184,6 +185,9 @@ jobs:
       # missing binary here into a failure rather than a silent skip.
       - name: Build the engine daemon for the desktop e2e
         run: cargo build -p dohc-workspace-engine --bin dohc-workspace-engine
+
+      - name: Build the ordered delivery integration fixture
+        run: node scripts/verification/ordered-delivery-fixture.mjs
 
       # Runs every package, not just the one a PR touched. apps/site was broken
       # on main for weeks precisely because a red typecheck there read as noise

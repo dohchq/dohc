@@ -1,3 +1,5 @@
+import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
+import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveJournalStoredUpdate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveJournalValidation, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult } from "./storage/types";
 export type { LiveJournalStoredUpdate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveJournalValidation, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult } from "./storage/types";
@@ -325,6 +327,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   readCommittedLiveUpdate(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; journalCursor: number }): CommittedLiveUpdateResult {
     return liveUpdateJournalStorage.readCommittedLiveUpdate(this, input);
+  }
+
+  createLiveCommittedDeliveryStore(history: LiveJournalHistoryAuthority): LiveCommittedDeliveryStore {
+    return new LiveCommittedDeliveryStore(this, history);
   }
 
   getLiveHostControl(): HostControlSnapshot | null {
