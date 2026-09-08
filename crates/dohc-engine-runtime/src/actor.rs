@@ -29,6 +29,7 @@ mod capture;
 mod chats;
 mod collections;
 mod journal;
+mod live_application;
 mod materialization;
 mod relay;
 mod search;
@@ -41,6 +42,7 @@ pub use capture::{
     MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, WorkspaceRootGuard,
 };
 pub use dohc_engine_sync::SharingDeclined;
+pub use live_application::{ActorLiveApplicationHandle, ActorLiveApplicationOwner};
 pub use materialization::{PostCommitMaterializeOutcome, SelfWriteRecorder};
 pub use relay::{
     RelayConfiguration, RelayOperation, RelayOperationOutcome, ShareViewIdentityRecord,
@@ -113,6 +115,7 @@ type ActorWork = Box<dyn FnOnce(&mut EngineStore, &mut WriterDocCache) + Send>;
 
 enum Command {
     Run(ActorWork),
+    LiveApplication(Box<live_application::Request>),
     /// Break the loop and release the connection. Carries no reply: the caller
     /// joins the worker, and the join is the completion signal (so `close`
     /// needs no `blocking_recv`, staying safe to call from a `Drop` that runs
@@ -420,6 +423,7 @@ fn worker_main(
     // lives and dies with this thread — exactly the single-writer scope its
     // validity proof (`doc_cache.rs`, CACHE-VALID) assumes.
     let mut doc_cache = WriterDocCache::new();
+    let mut live_applications = live_application::Registry::default();
 
     // Blocking recv on the tokio channel keeps the SQLite work on this
     // dedicated thread, off the async runtime. `blocking_recv` returns `None`
@@ -427,6 +431,9 @@ fn worker_main(
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
+            Command::LiveApplication(request) => {
+                request.execute(&mut live_applications, &mut store, &mut doc_cache);
+            }
             Command::Close => {
                 // FIFO ordering means every command enqueued before Close has
                 // already been served; there is nothing left to drain.
