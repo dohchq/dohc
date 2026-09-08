@@ -49,6 +49,8 @@ import {
   assertJournalCheckpointPosition,
 } from "./liveUpdateJournal";
 import { bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
+import { requireStopRestoreCut, requireStopRestoreOwnerOrigin, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
+import { LIVE_RESTORE_OPERATIONS } from "./liveRestoreOperationSchema";
 
 export interface CommittedBootstrap {
   readonly bootstrapId: string;
@@ -83,6 +85,15 @@ export interface OwnerDeliveryCapture {
   binding: LiveObjectBinding;
   assertCurrent(): void;
 }
+export interface StopRestoreCutCapture { readonly binding: LiveObjectBinding }
+type RestoreCapture = {
+  baselineBytes: Uint8Array;
+  lookup: StopRestoreLookup;
+  host: LiveHostConnectionCoordinate;
+  operation: StopRestoreOperation;
+  drain?: CommittedDeliveryDrain;
+  owner?: OwnerDeliveryCapture;
+};
 export type CommittedDeliveryStep =
   | { kind: "bootstrap"; baseline: CommittedBootstrap }
   | {
@@ -92,6 +103,7 @@ export type CommittedDeliveryStep =
     }
   | { kind: "done"; terminalReceipt: LiveUpdateReceipt | null };
 interface DrainCapture {
+  restore?: {lookup: StopRestoreLookup; operation: StopRestoreOperation};
   host: LiveHostConnectionCoordinate;
   document: LiveDocumentKey;
   authority: StoredLiveDocumentAuthority;
@@ -182,6 +194,7 @@ export class LiveCommittedDeliveryStore {
   readonly #history: LiveJournalHistoryAuthority;
   readonly #ownerCuts = new WeakMap<OwnerCutCapture,{ host: LiveHostConnectionCoordinate; document: LiveDocumentKey; digest: string }>();
   readonly #ownerDeliveries = new WeakMap<OwnerDeliveryCapture,{host: LiveHostConnectionCoordinate;document: LiveDocumentKey;highWater: number}>();
+  readonly #restores = new WeakMap<StopRestoreCutCapture,RestoreCapture>();
   constructor(storage: StorageContext, history: LiveJournalHistoryAuthority) {
     this.#storage = storage;
     this.#history = history;
@@ -225,12 +238,15 @@ export class LiveCommittedDeliveryStore {
     return capture;
   }
   #ownerDelivery(capture: OwnerDeliveryCapture) {
-    const saved = this.#ownerDeliveries.get(capture); integrity(saved); capture.assertCurrent(); return saved;
+    const saved = this.#ownerDeliveries.get(capture); integrity(saved);
+    capture.assertCurrent();
+    return saved;
   }
   ownerDeliveryProgress(capture: OwnerDeliveryCapture): {terminal: LiveUpdateReceipt | null;sequence: number} {
     const {host,document} = this.#ownerDelivery(capture), row = this.#ownerRow(host,document); integrity(row);
     const terminal = JSON.parse(String(row.tip_receipt_json)), parsed = terminal === null ? null : parseLiveUpdateReceipt(terminal);
     integrity((parsed?.journalCursor ?? 0) === row.tip_cursor);
+    integrity(authorityInteger(row.tip_application_sequence) <= authorityInteger(row.tip_sequence));
     return {terminal: parsed,sequence: authorityInteger(row.tip_sequence)};
   }
   nextOwnerApplication(capture: OwnerDeliveryCapture): AdmittedLiveUpdate | undefined {
@@ -242,21 +258,40 @@ export class LiveCommittedDeliveryStore {
     return row.admitted;
   }
   acknowledgeOwnerDeliveryApplication(capture: OwnerDeliveryCapture,value: unknown): void {
+    this.#acknowledgeOwnerApplication(capture,value);
+  }
+  #acknowledgeOwnerApplication(capture: OwnerDeliveryCapture,value: unknown,predecessor?: LiveUpdateReceipt | null): void {
     const ack = parseLiveUpdateHostApplicationAck(value), {host,document} = this.#ownerDelivery(capture);
     this.#storage.tx(() => {
+      const acknowledged = {deliveryId: ack.deliveryId,updateDigest: ack.updateDigest,journalCursor: ack.journalCursor,acceptingHostEpoch: ack.acceptingHostEpoch};
+      if (predecessor !== undefined) {
+        const progress = this.ownerDeliveryProgress(capture);
+        if (sameReceipt(progress.terminal,acknowledged)) {
+          const row = this.#ownerRow(host,document); integrity(row && row.tip_application_sequence === ack.localYDocSequence);
+          const previous = this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<? ORDER BY journal_cursor DESC LIMIT 1`)
+            .get(...documentParams(document),ack.journalCursor);
+          if (previous) {
+            const decoded = decodeJournalRow(this.#storage.db,previous); assertJournalCheckpointPosition(this.#storage.db,decoded); verifyJournalRow(decoded);
+            integrity(sameReceipt(decoded.admitted.metadata.accepted.receipt,predecessor));
+          } else integrity(predecessor === null);
+          return;
+        }
+        integrity(sameReceipt(progress.terminal,predecessor));
+      }
       const next = this.nextOwnerApplication(capture); integrity(next);
       const receipt = next.metadata.accepted.receipt;
-      integrity(sameReceipt(receipt,{deliveryId: ack.deliveryId,updateDigest: ack.updateDigest,journalCursor: ack.journalCursor,acceptingHostEpoch: ack.acceptingHostEpoch}));
+      integrity(sameReceipt(receipt,acknowledged));
       const row = this.#ownerRow(host,document); integrity(row);
       // Content dedupe reports the original native update sequence. Retain the
       // greatest sequence already proved by an authenticated application ACK.
       const sequence = Math.max(authorityInteger(row.tip_sequence),ack.localYDocSequence);
-      const tip = JSON.stringify(receipt), values = [this.#history.namespace,...documentParams(document),host.hostId,row.origin_json,tip,ack.journalCursor,sequence];
+      const tip = JSON.stringify(receipt), values = [this.#history.namespace,...documentParams(document),host.hostId,row.origin_json,tip,ack.journalCursor,sequence,ack.localYDocSequence];
       const charge = Buffer.byteLength(JSON.stringify(values)), previousCharge = authorityInteger(row.accounted_bytes,1), delta = Math.max(1,charge-previousCharge);
       consumeLiveDeliveryReservation(this.#storage,document,host.hostId,ack.journalCursor,delta,true);
       const refund = previousCharge + delta - charge; if (refund) this.#refundOwner(document.workspaceId,refund);
-      this.#storage.db.prepare(`UPDATE ${OWNERS} SET tip_receipt_json=?,tip_cursor=?,tip_sequence=?,accounted_bytes=? WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id=?`)
-        .run(tip,ack.journalCursor,sequence,charge,this.#history.namespace,...documentParams(document),host.hostId);
+      const changed = this.#storage.db.prepare(`UPDATE ${OWNERS} SET tip_receipt_json=?,tip_cursor=?,tip_sequence=?,tip_application_sequence=?,accounted_bytes=? WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id=?`)
+        .run(tip,ack.journalCursor,sequence,ack.localYDocSequence,charge,this.#history.namespace,...documentParams(document),host.hostId);
+      integrity(changed.changes === 1);
     });
   }
   captureOwnerCut(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; adoptionId: string;
@@ -342,14 +377,14 @@ export class LiveCommittedDeliveryStore {
       const previous = this.#ownerRow(host,document);
       if (previous) { integrity(previous.origin_json === origin && Number(previous.tip_cursor) >= Number(ack.terminalCursor)); return; }
       const tip = JSON.stringify(cut.terminalReceipt), cursor = cut.terminalReceipt?.journalCursor ?? 0;
-      const values = [this.#history.namespace,...documentParams(document),host.hostId,origin,tip,cursor,cut.expectedLocalSequence];
+      const values = [this.#history.namespace,...documentParams(document),host.hostId,origin,tip,cursor,cut.expectedLocalSequence,cut.expectedLocalSequence];
       const charge = Buffer.byteLength(JSON.stringify(values));
       consumeLiveDeliveryReservation(this.#storage,document,host.hostId,0,charge,true);
       for (const event of cut.events) {
         consumeLiveDeliveryReservation(this.#storage,document,host.hostId,event.metadata.accepted.receipt.journalCursor,1,true);
         this.#refundOwner(document.workspaceId,1);
       }
-      this.#storage.db.prepare(`INSERT INTO ${OWNERS}(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,host_id,origin_json,tip_receipt_json,tip_cursor,tip_sequence,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(...values,charge);
+      this.#storage.db.prepare(`INSERT INTO ${OWNERS}(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,host_id,origin_json,tip_receipt_json,tip_cursor,tip_sequence,tip_application_sequence,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(...values,charge);
     });
   }
   #refundOwner(workspaceId: string, amount: number) {
@@ -365,6 +400,10 @@ export class LiveCommittedDeliveryStore {
     const capture = this.#drains.get(drain);
     if (!capture) throw new TypeError("Unknown committed delivery drain.");
     this.#standing(capture.host);
+    if (capture.restore) {
+      this.#restore(capture.restore.lookup,capture.host,capture.restore.operation,capture.authority.baselineBytes);
+      return capture;
+    }
     const raw = this.#storage.db
       .prepare(
         `SELECT workspace_id,main_version_id,object_id,lineage_claim_id,current_path,
@@ -474,23 +513,28 @@ export class LiveCommittedDeliveryStore {
     });
     verifyJournalCut(read.cut);
     if (read.terminal) verifyJournalRow(read.terminal);
+    return this.#createDrain(host,document,read.authority,read.terminal?.admitted.metadata.accepted.receipt ?? null,createBootstrap);
+  }
+  #createDrain(host: LiveHostConnectionCoordinate,document: LiveDocumentKey,authority: StoredLiveDocumentAuthority,
+    terminal: LiveUpdateReceipt | null,createBootstrap: boolean,restore?: DrainCapture["restore"]): CommittedDeliveryDrain {
     const baseline: CommittedBootstrap = {
       bootstrapId: randomUUID(),
       bootstrapMomentId: randomUUID(),
-      binding: structuredClone(read.authority.binding),
-      baselineMomentRelaySequence: read.authority.baselineSequence,
-      baselineRegisteredAtMs: read.authority.registeredAtMs,
-      baselineDigest: read.authority.baselineDigest,
-      projectedMarkdownDigest: read.authority.projectedDigest,
-      projectedMarkdownByteLength: read.authority.projectedLength,
-      baselineBytes: new Uint8Array(read.authority.baselineBytes),
+      binding: structuredClone(authority.binding),
+      baselineMomentRelaySequence: authority.baselineSequence,
+      baselineRegisteredAtMs: authority.registeredAtMs,
+      baselineDigest: authority.baselineDigest,
+      projectedMarkdownDigest: authority.projectedDigest,
+      projectedMarkdownByteLength: authority.projectedLength,
+      baselineBytes: new Uint8Array(authority.baselineBytes),
     };
     const capture: DrainCapture = {
       host,
       document,
-      authority: structuredClone(read.authority),
+      authority: structuredClone(authority),
       baseline,
-      terminal: read.terminal?.admitted.metadata.accepted.receipt ?? null,
+      terminal,
+      ...(restore ? {restore} : {}),
     };
     const drain: CommittedDeliveryDrain = Object.freeze({
       get baseline() {
@@ -505,6 +549,7 @@ export class LiveCommittedDeliveryStore {
       this.#storage.tx(() => {
         this.#capture(drain);
         bindLiveDeliveryHostNamespace(this.#storage, document.workspaceId, host.hostId, this.#history.namespace);
+        if (restore) integrity(!this.#ownerRow(host,document));
         const row = this.#storage.db
           .prepare(`SELECT * FROM ${BOOTSTRAPS} WHERE ${WHERE_BOOTSTRAP}`)
           .get(
@@ -706,10 +751,114 @@ export class LiveCommittedDeliveryStore {
     binding: LiveObjectBinding;
     terminalReceipt: LiveUpdateReceipt | null;
   } {
+    integrity(!this.#drains.get(drain)?.restore);
     const next = this.next(drain);
     if (next.kind !== "done") throw new Error("Committed delivery must finish before settlement.");
     const capture = this.#drains.get(drain)!;
     return { binding: structuredClone(capture.authority.binding), terminalReceipt: next.terminalReceipt };
+  }
+
+  #restore(lookup: StopRestoreLookup,host: LiveHostConnectionCoordinate,expected?: StopRestoreOperation,checkedBaseline?: Uint8Array) {
+    this.#standing(host);
+    const current = requireStopRestoreCut(this.#storage,lookup,checkedBaseline);
+    integrity(current.operation.basis.namespace === this.#history.namespace &&
+      current.operation.basis.hostMode === host.mode && current.operation.basis.hostId === host.hostId);
+    if (expected) integrity(current.operation.phase === "fenced" && isDeepStrictEqual(current.operation,expected));
+    return current;
+  }
+
+  openStopRestoreCut(input: StopRestoreLookup & {host: LiveHostConnectionCoordinate}):
+    {kind: "waiting"} | {kind: "complete"; receipt: StopRestoreApplied} | {kind: "ready"; capture: StopRestoreCutCapture} {
+    const lookup = {operationId: parseLiveUpdateIdentifier(input.operationId),workspaceId: parseLiveUpdateIdentifier(input.workspaceId),ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)};
+    const host = snapshotHostCoordinate(input.host);
+    const {operation,authority} = this.#storage.readTx(() => this.#restore(lookup,host));
+    if (operation.phase === "old-cut-applied") {integrity(operation.applied); return {kind: "complete",receipt: structuredClone(operation.applied)};}
+    const document = operation.intent.document;
+    const saved: RestoreCapture = {lookup,host,operation,baselineBytes:authority.baselineBytes};
+    if (operation.intent.deliveryKind === "owner") {
+      const owner = this.#ownerRow(host,document);
+      if (operation.basis.ownerOrigin === null) return {kind: "waiting"};
+      integrity(owner && owner.origin_json === operation.basis.ownerOrigin);
+      const originJson = String(owner.origin_json);
+      requireStopRestoreOwnerOrigin(this.#storage,operation.basis);
+      const assertCurrent = () => {
+        this.#restore(lookup,host,operation,authority.baselineBytes);
+        integrity(this.#ownerRow(host,document)?.origin_json === originJson);
+      };
+      const capture: OwnerDeliveryCapture = {binding: structuredClone(operation.basis.ownerBinding),assertCurrent};
+      this.#ownerDeliveries.set(capture,{host,document,highWater: operation.cutoverCursor!});
+      const progress = this.ownerDeliveryProgress(capture);
+      integrity((progress.terminal?.journalCursor ?? 0) <= operation.cutoverCursor!);
+      if (progress.terminal) {
+        const raw = this.#storage.db.prepare(`SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor=?`)
+          .get(...documentParams(document),progress.terminal.journalCursor);
+        integrity(raw && sameReceipt(receipt(raw),progress.terminal));
+      }
+      saved.owner = capture;
+    } else {
+      integrity(!this.#ownerRow(host,document));
+      saved.drain = this.#createDrain(host,document,authority,operation.terminal,true,{lookup,operation});
+    }
+    const binding = structuredClone(operation.intent.deliveryKind === "owner" ? operation.basis.ownerBinding : operation.basis.binding);
+    const capture: StopRestoreCutCapture = Object.freeze({get binding() {return structuredClone(binding);}});
+    this.#restores.set(capture,saved);
+    return {kind: "ready",capture};
+  }
+  #savedRestoreCapture(capture: StopRestoreCutCapture): RestoreCapture {
+    const saved = this.#restores.get(capture);
+    if (!saved) throw new TypeError("Unknown restore cut capture.");
+    return saved;
+  }
+  nextStopRestoreCut(capture: StopRestoreCutCapture): CommittedDeliveryStep {
+    const saved = this.#savedRestoreCapture(capture);
+    if (saved.drain) return this.next(saved.drain);
+    return this.#storage.readTx(() => {
+      integrity(saved.owner);
+      const progress = this.ownerDeliveryProgress(saved.owner), next = this.nextOwnerApplication(saved.owner);
+      if (!next) {integrity(sameReceipt(progress.terminal,saved.operation.terminal)); return {kind: "done",terminalReceipt: progress.terminal};}
+      return {kind: "next",admitted: next,predecessor: progress.terminal};
+    });
+  }
+  acknowledgeStopRestoreBootstrap(capture: StopRestoreCutCapture,ack: unknown): void {
+    const saved = this.#savedRestoreCapture(capture); integrity(saved.drain); this.acknowledgeBootstrap(saved.drain,ack);
+  }
+  acknowledgeStopRestoreApplication(capture: StopRestoreCutCapture,predecessor: LiveUpdateReceipt | null,ack: unknown): void {
+    const saved = this.#savedRestoreCapture(capture);
+    if (saved.drain) this.acknowledge(saved.drain,predecessor,ack);
+    else {
+      integrity(saved.owner && predecessor !== undefined);
+      this.#acknowledgeOwnerApplication(saved.owner,ack,predecessor);
+    }
+  }
+  completeStopRestoreCut(capture: StopRestoreCutCapture): StopRestoreApplied {
+    const saved = this.#restores.get(capture);
+    if (!saved) throw new TypeError("Unknown restore cut capture.");
+    return this.#storage.tx(() => {
+      const current = this.#restore(saved.lookup,saved.host,undefined,saved.baselineBytes);
+      if (current.operation.phase === "old-cut-applied") {integrity(current.operation.applied); return structuredClone(current.operation.applied);}
+      let sourceId: string, localYDocSequence: number;
+      if (saved.drain) {
+        const drain = this.#capture(saved.drain), progress = this.#progress(drain);
+        integrity(progress.bootstrap.local_ydoc_sequence !== null && sameReceipt(progress.predecessor,saved.operation.terminal));
+        sourceId = drain.baseline.bootstrapId;
+        const tip = drain.progress?.tip;
+        localYDocSequence = authorityInteger(tip?.local_ydoc_sequence ?? progress.bootstrap.local_ydoc_sequence);
+      } else {
+        integrity(saved.owner);
+        const progress = this.ownerDeliveryProgress(saved.owner), row = this.#ownerRow(saved.host,saved.operation.intent.document); integrity(row);
+        integrity(sameReceipt(progress.terminal,saved.operation.terminal));
+        sourceId = parseLiveUpdateIdentifier(JSON.parse(String(row.origin_json)).adoptionId);
+        localYDocSequence = authorityInteger(row.tip_application_sequence);
+      }
+      const applied: StopRestoreApplied = {operationId:saved.lookup.operationId,
+        binding: saved.operation.intent.deliveryKind === "owner" ? saved.operation.basis.ownerBinding : saved.operation.basis.binding,
+        kind: saved.operation.intent.deliveryKind,namespace: this.#history.namespace,
+        hostMode: saved.host.mode,hostId: saved.host.hostId,sourceId,localYDocSequence,terminal: saved.operation.terminal};
+      const changed = this.#storage.db.prepare(`UPDATE ${LIVE_RESTORE_OPERATIONS} SET phase='old-cut-applied',applied_json=? WHERE operation_id=? AND workspace_id=? AND phase='fenced'`)
+        .run(JSON.stringify(applied),saved.lookup.operationId,saved.lookup.workspaceId);
+      integrity(changed.changes === 1);
+      return structuredClone(applied);
+    });
   }
   acknowledgeBootstrap(drain: CommittedDeliveryDrain, input: unknown): void {
     const ack = parseBootstrapAck(input);

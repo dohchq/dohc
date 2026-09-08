@@ -24,7 +24,8 @@ const objects = {
     ${identifier("object_id")}, ${digest("lineage_claim_id")}, ${hostIdentifier("host_id")},
     origin_json TEXT NOT NULL CHECK (json_valid(origin_json)),
     tip_receipt_json TEXT NOT NULL CHECK (json_valid(tip_receipt_json)),
-    ${integer("tip_cursor")}, ${integer("tip_sequence")}, ${integer("accounted_bytes",1)},
+    ${integer("tip_cursor")}, ${integer("tip_sequence")}, ${integer("tip_application_sequence")}, ${integer("accounted_bytes",1)},
+    CHECK (tip_application_sequence <= tip_sequence),
     PRIMARY KEY (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,host_id),
     FOREIGN KEY (workspace_id,main_version_id,object_id,lineage_claim_id) REFERENCES ${LIVE_DELIVERY_DOCUMENTS}(workspace_id,main_version_id,object_id,lineage_claim_id) ON DELETE CASCADE,
     FOREIGN KEY (host_id,workspace_id) REFERENCES ${LIVE_DELIVERY_HOSTS}(host_id,workspace_id)
