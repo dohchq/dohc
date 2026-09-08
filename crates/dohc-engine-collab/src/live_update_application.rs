@@ -24,9 +24,11 @@ use std::sync::{Arc, Mutex};
 const SAFE: i64 = 9_007_199_254_740_991;
 
 mod bootstrap;
+mod settlement;
 pub use bootstrap::{
     bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
 };
+pub use settlement::{with_settlement, LiveSettlementAudit, LiveSettlementResult};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApplicationError {

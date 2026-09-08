@@ -2,10 +2,11 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { parseHostControlIdentifier, parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { DeviceControlLimits } from "@dohc/live-session-contract/device-control";
+import { parseLiveSettlementConfig } from "./liveSettlementConfig.js";
 
-export function configRecord(value: unknown, keys: string[]): Record<string, unknown> {
+export function configRecord(value: unknown, keys: string[], optional: string[] = []): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
-    Object.keys(value).sort().join() !== keys.slice().sort().join()) throw new TypeError("Invalid device delivery configuration.");
+    keys.some(key => !Object.hasOwn(value, key)) || Object.keys(value).some(key => !keys.includes(key) && !optional.includes(key))) throw new TypeError("Invalid device delivery configuration.");
   return value as Record<string, unknown>;
 }
 function integer(value: unknown, minimum = 1, maximum = 2_147_483_647): number {
@@ -25,7 +26,7 @@ function read(value: string): unknown {
   return JSON.parse(readFileSync(file, "utf8"));
 }
 export function readDeviceLiveHostConfig(file: string, limits: DeviceControlLimits) {
-  const row = configRecord(read(file), ["version", "engineExecutable", "hostId", "hostEpoch", "instanceId", "workspaces", "ingress", "maxQueuedBytes", "shutdownGraceMs"]);
+  const row = configRecord(read(file), ["version", "engineExecutable", "hostId", "hostEpoch", "instanceId", "workspaces", "ingress", "maxQueuedBytes", "shutdownGraceMs"], ["settlement"]);
   if (row.version !== 1 || !Array.isArray(row.workspaces) || row.workspaces.length < 1 || row.workspaces.length > 64) throw new TypeError("Invalid device delivery configuration.");
   const workspaces = row.workspaces.map(item => {
     const entry = configRecord(item, ["root", "workspaceId", "maxRegistrations"]);
@@ -35,6 +36,7 @@ export function readDeviceLiveHostConfig(file: string, limits: DeviceControlLimi
     new Set(workspaces.map(item => process.platform === "win32" ? item.root.toLowerCase() : item.root)).size !== workspaces.length) throw new TypeError("Duplicate device workspace.");
   const ingress = configRecord(row.ingress, ["aggregateBytes", "applicationWorkingReserveBytes", "maxUploads", "uploadDeadlineMs"]);
   return Object.freeze({ version: 1 as const, engineExecutable: path(row.engineExecutable, false),
+    settlement: parseLiveSettlementConfig(row.settlement),
     shutdownGraceMs: integer(row.shutdownGraceMs),
     hostId: parseHostControlIdentifier(row.hostId), hostEpoch: parseHostEpoch(row.hostEpoch), instanceId: parseHostControlIdentifier(row.instanceId),
     workspaces: Object.freeze(workspaces), maxQueuedBytes: integer(row.maxQueuedBytes, Math.max(limits.maxPayloadBytes + 16, 65_536 + Math.ceil(65_536 / limits.maxPayloadBytes) * 16)),

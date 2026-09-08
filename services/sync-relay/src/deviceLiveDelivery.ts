@@ -95,6 +95,18 @@ export function createDeviceLiveDelivery(options: {
         return outcome;
       } finally { active--; }
     },
+    async settle(value: LiveDocumentKey, signal?: AbortSignal) {
+      check();
+      if (!ready || active >= config.maxActiveDrains) throw new Error("Device delivery is not ready or is full.");
+      const document = parseLiveDocumentKey(value), consumer = consumers.get(document.workspaceId);
+      if (!consumer) throw new Error("Workspace is not configured on this device host.");
+      active++;
+      try {
+        const outcome = await consumer.settle(document, AbortSignal.any([invalidated.signal, ...(signal ? [signal] : [])]));
+        check();
+        return outcome;
+      } finally { active--; }
+    },
     close(): void {
       if (closed) return;
       closed = true; ready = false; clearTimeout(timer); invalidated.abort(); client?.close(); connection?.close(); consumers.clear();

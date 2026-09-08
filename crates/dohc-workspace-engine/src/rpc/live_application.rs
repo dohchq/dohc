@@ -165,6 +165,92 @@ impl OutputGuard for ApplicationOutputGuard {
 }
 
 impl EngineService {
+    pub(super) async fn live_application_settle(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+    ) -> Result<ServiceResponse, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            registration_id: u64,
+            terminal_receipt:
+                Option<dohc_engine_collab::live_update_application::LiveUpdateReceipt>,
+        }
+        if request.idempotency_key.is_some() || request.params.get("terminalReceipt").is_none() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid-live-settlement",
+            ));
+        }
+        let params: Params = serde_json::from_value(request.params)
+            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-live-settlement"))?;
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        let registration = self.live_application_registration(
+            connection,
+            request.workspace.as_ref(),
+            params.registration_id,
+        )?;
+        let host = registration.host.clone();
+        let serial = Arc::clone(&host.open.session_ops).lock_owned().await;
+        if !host.current(connection)
+            || registration.retired.is_cancelled()
+            || ctx.cancel.is_cancelled()
+            || ctx.deadline.is_some_and(|end| Instant::now() >= end)
+            || !Arc::ptr_eq(&self.open(request.workspace.as_ref())?, &host.open)
+        {
+            return Err(WireError::new(
+                ErrorCode::Cancelled,
+                "live-application-retired",
+            ));
+        }
+        let (max_applications, reservation) = self.configured_settlement_admission(&ctx)?;
+        let cancellation = super::request::OperationCancellation::new(&ctx);
+        let now_ms = super::request::now_ms()?;
+        let token = cancellation.token();
+        let guard = Arc::new(ApplicationOutputGuard {
+            registration: registration.clone(),
+            cancel: ctx.cancel,
+            deadline: ctx.deadline,
+            _reservation: reservation.clone(),
+        });
+        let mut retirement = RetireOnCancellation(Some(host));
+        let operation = tokio::spawn(async move {
+            let _serial = serial;
+            registration
+                .handle
+                .settle(
+                    params.terminal_receipt,
+                    max_applications,
+                    registration.host.open.root.clone(),
+                    now_ms,
+                    Arc::new(NoFaults),
+                    token,
+                    reservation,
+                )
+                .await
+        });
+        let outcome = operation.await;
+        retirement.0 = None;
+        let result = outcome
+            .map_err(|_| WireError::new(ErrorCode::Internal, "live-application-interrupted"))?
+            .map_err(map_runtime)?;
+        if !guard.is_current() {
+            return Err(WireError::new(
+                ErrorCode::Cancelled,
+                "live-application-retired",
+            ));
+        }
+        Ok(ServiceResponse {
+            response: Response {
+                id: request.id,
+                result: json!({"status":"settled", "settlement":result}),
+            },
+            blob_egress: None,
+            output_guard: Some(guard),
+        })
+    }
+
     /// Trusted host setup. No RPC derives these fields from a caller's event.
     #[doc(hidden)]
     pub async fn provision_live_application(

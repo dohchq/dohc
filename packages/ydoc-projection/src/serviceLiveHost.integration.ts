@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
-import { markdownToYDoc } from "./import-export.js";
+import { yDocToMarkdown, markdownToYDoc } from "./import-export.js";
 import { createLiveMarkdownRegistrationValidator, createLiveMarkdownJournalValidator } from "./liveDocumentValidation.js";
 import { createEngineClient } from "../../workspace-engine-client/src/daemon/engineClient.js";
 import { initializeRelayDeployment, openRelayDeployment } from "../../../services/sync-relay/src/relayDeployment.js";
@@ -42,6 +42,7 @@ it("bootstraps and applies through a configured production daemon, then recovers
   const serviceConfig = join(root, "service.json");
   writeFileSync(serviceConfig, JSON.stringify({ version: 1, engineExecutable: executable, hostId: "service", instanceId: "instance",
     workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 8 }],
+    settlement: { maxApplicationsPerSettlement: 8 },
     ingress: { aggregateBytes: 400_000_000, applicationWorkingReserveBytes: 1_000_000, maxUploads: 2, uploadDeadlineMs: 30_000 },
     client: { aggregateBytes: 200_000_000, maxUploads: 2, connectTimeoutMs: 30_000, requestDeadlineMs: 30_000 } }));
   const doc = markdownToYDoc("Hello");
@@ -87,24 +88,33 @@ it("bootstraps and applies through a configured production daemon, then recovers
     const firstDigest = admit("delivery");
     const first = await active.drain(document);
     expect(first).toMatchObject({ kind: "done", terminalReceipt: { deliveryId: "delivery", updateDigest: firstDigest } });
-    results.push({ round: 1, coordinate: active.coordinate, result: first });
+    const firstSettlement = await active.settle(document);
+    expect(firstSettlement.materialized).toBe(true);
+    expect(readFileSync(join(workspace,"docs/a.md"),"utf8")).toBe(yDocToMarkdown(doc));
+    results.push({ round: 1, coordinate: active.coordinate, result: first, settlement: firstSettlement });
     await active.close(); active = undefined;
     deployment.storage.close();
     deployment = openRelayDeployment(deploymentConfig);
     active = await startServiceLiveHost({ configPath: serviceConfig, ...deployment });
     const second = await active.drain(document);
     expect(second).toEqual(first);
+    expect(await active.settle(document)).toEqual(firstSettlement);
     results.push({ round: 2, coordinate: active.coordinate, result: second });
     const secondDigest = admit("after-restart");
     const continued = await active.drain(document);
     expect(continued).toMatchObject({ kind: "done", terminalReceipt: { deliveryId: "after-restart", updateDigest: secondDigest } });
-    results.push({ round: 2, continued });
+    const continuedSettlement = await active.settle(document);
+    expect(continuedSettlement).toMatchObject({ previousCursor: 1, terminalCursor: 2, applicationCount: 1, materialized: true });
+    expect(readFileSync(join(workspace,"docs/a.md"),"utf8")).toBe(yDocToMarkdown(doc));
+    results.push({ round: 2, continued, settlement: continuedSettlement });
     await active.close(); active = undefined;
     const engine = new DatabaseSync(join(workspace, ".dohc", "engine", "engine.db"), { readOnly: true });
     try {
       const applications = engine.prepare("SELECT delivery_id, update_digest FROM live_device_update_applications ORDER BY journal_cursor").all();
       expect(applications).toEqual([{ delivery_id: "delivery", update_digest: firstDigest }, { delivery_id: "after-restart", update_digest: secondDigest }]);
       expect(engine.prepare("SELECT COUNT(*) AS count FROM live_device_bootstraps").get()!.count).toBe(1);
+      expect(engine.prepare("SELECT text FROM engine_search_files_fts WHERE object_id='object'").get()!.text).toBe(yDocToMarkdown(doc));
+      expect(engine.prepare("SELECT COUNT(*) AS count FROM live_device_settlements").get()!.count).toBe(2);
       results.push({ applications });
     } finally { engine.close(); }
     expect(hash(readFileSync(executable))).toBe(expectedHash.toLowerCase());

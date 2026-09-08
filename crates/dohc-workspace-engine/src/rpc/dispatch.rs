@@ -67,6 +67,7 @@ impl EngineService {
                     | "liveApplication.register"
                     | "liveApplication.bootstrap"
                     | "liveApplication.apply"
+                    | "liveApplication.settle"
             )
         {
             return Err(WireError::new(
@@ -98,6 +99,9 @@ impl EngineService {
         self.ensure_configured_host_method(&request.method)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
+        if request.method == "liveApplication.settle" {
+            return self.live_application_settle(ctx, request).await;
+        }
         if request.method == "versionedBinary.readBlob" {
             let (result, blob_egress) = self
                 .versioned_binary_read_blob(&ctx, request.workspace, request.params, id)

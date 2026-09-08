@@ -145,6 +145,10 @@ export function createDeviceControl(options: {
   options.storage.unavailable.addEventListener("abort", close, { once: true });
   if (options.storage.unavailable.aborted) close();
   return { handleUpgrade, close,
+    async settle(document: LiveDocumentKey, signal?: AbortSignal) {
+      if (!currentDelivery) throw new Error("Device delivery is unavailable.");
+      return currentDelivery.settle(document, signal);
+    },
     async drain(document: LiveDocumentKey, signal?: AbortSignal) {
       if (!currentDelivery) throw new Error("Device delivery is unavailable.");
       return currentDelivery.drain(document, signal);
