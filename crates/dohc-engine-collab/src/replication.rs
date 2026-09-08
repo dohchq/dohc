@@ -26,8 +26,8 @@ use crate::doc_cache::{GateBaseSource, RemoteAppendProbe, ServedGateBase};
 use dohc_engine_domain::ChangeAttribution;
 
 use crate::durable::{
-    append_validated_and_index_update, blob_seq_in_log, load_doc_in, maybe_compact,
-    read_marker_in, validate_update_bytes, CompactOutcome, Regime,
+    append_validated_and_index_update, blob_seq_in_log, load_doc_in, maybe_compact, read_marker_in,
+    validate_update_bytes, CompactOutcome, Regime,
 };
 use crate::error::CollabError;
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;

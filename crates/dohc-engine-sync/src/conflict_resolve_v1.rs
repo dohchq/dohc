@@ -1703,8 +1703,7 @@ fn preflight_imported_lineage(
                     reason: "ydoc-lineage-result-mismatch",
                 });
             }
-            let doc =
-                dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
+            let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
             if doc.has_pending_dependencies()
                 || dohc_engine_storage::hex_sha256(&doc.encode_state_vector())
                     != successor.state_vector_blob_sha256

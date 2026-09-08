@@ -38,10 +38,9 @@ pub mod ydoc;
 pub use doc_cache::{CacheStats, RemoteAppendProbe, WriterDocCache};
 pub use durable::{
     archive_active_lineage_in_tx, claim_base, claim_base_at_relay, claim_base_at_relay_in_tx,
-    claim_base_in_tx, close_session, encode_origination_base_in_tx, ensure_marker,
-    load_doc_in, load_persisted, mark_base_coordinate_absent_in_tx, maybe_compact,
-    read_last_settled_sha, read_marker, read_marker_in, read_pristine_seed_lineage_source,
-    read_seed_only_lineage_source,
+    claim_base_in_tx, close_session, encode_origination_base_in_tx, ensure_marker, load_doc_in,
+    load_persisted, mark_base_coordinate_absent_in_tx, maybe_compact, read_last_settled_sha,
+    read_marker, read_marker_in, read_pristine_seed_lineage_source, read_seed_only_lineage_source,
     record_base_coordinate_in_tx, record_local_update, record_update_in_tx,
     replace_lineage_with_successor, replace_lineage_with_successor_in_tx,
     rewrite_bare_marker_content_kind, settle, validate_remote_update, AppendOutcome,

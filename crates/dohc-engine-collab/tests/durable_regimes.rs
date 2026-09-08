@@ -2313,20 +2313,21 @@ fn relay_base_arbitration_is_ordered_and_claim_safe() {
         other => panic!("unexpected first claim: {other:?}"),
     };
     committed(
-        ts.store.write_with(&NoFaults, |tx| {
-            record_base_coordinate_in_tx(
-                tx,
-                BaseCoordinateRecord {
-                    key: &key,
-                    lineage_claim_id: &first_claim,
-                    origin_id: "first-origin",
-                    origin_seq: 7,
-                    relay_seq: Some(10),
-                    now_ms: 1_010,
-                },
-            )
-        })
-        .expect("stamp first relay coordinate"),
+        ts.store
+            .write_with(&NoFaults, |tx| {
+                record_base_coordinate_in_tx(
+                    tx,
+                    BaseCoordinateRecord {
+                        key: &key,
+                        lineage_claim_id: &first_claim,
+                        origin_id: "first-origin",
+                        origin_seq: 7,
+                        relay_seq: Some(10),
+                        now_ms: 1_010,
+                    },
+                )
+            })
+            .expect("stamp first relay coordinate"),
     );
 
     let later = Ydoc::wire();

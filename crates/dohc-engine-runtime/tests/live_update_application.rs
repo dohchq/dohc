@@ -255,10 +255,7 @@ async fn committed_application_compacts_and_preserves_replay_through_fold_failur
         let store = EngineStore::open(&db, 99).unwrap();
         let restored = store
             .read_with(|conn| {
-                durable::load_doc_in(
-                    conn,
-                    &DocKey::new("workspace", "main", "one").unwrap(),
-                )
+                durable::load_doc_in(conn, &DocKey::new("workspace", "main", "one").unwrap())
             })
             .unwrap();
         assert!(
@@ -581,10 +578,7 @@ async fn dependencies_and_commit_crashes_recover_through_the_real_actor() {
             );
             let doc = store
                 .read_with(|conn| {
-                    durable::load_doc_in(
-                        conn,
-                        &DocKey::new("workspace", "main", "one").unwrap(),
-                    )
+                    durable::load_doc_in(conn, &DocKey::new("workspace", "main", "one").unwrap())
                 })
                 .unwrap();
             assert!(

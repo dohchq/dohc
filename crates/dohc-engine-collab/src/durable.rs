@@ -1443,7 +1443,8 @@ fn claim_base_with_coordinate_in_tx(
                                         now_ms,
                                     },
                                 )?;
-                                let winner = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+                                let winner =
+                                    read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
                                 return Ok(ClaimOutcome::Replaced {
                                     losing_lineage_claim_id: stored,
                                     winner,
