@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import { prosemirrorJSONToYXmlFragment } from 'y-prosemirror'
+import { TableCell, TableHeader } from '@tiptap/extension-table'
+import { getExtensionField } from '@tiptap/core'
 import * as projection from './import-export.js'
 import { getDohcYDocFrontmatter, markdownToYDoc } from './import-export.js'
 import * as ordered from './orderedLiveUpdateCut.js'
@@ -217,7 +219,7 @@ describe('public Markdown schema', () => {
   it.each([
     ['orderedList', 'start', NaN], ['orderedList', 'start', Infinity],
     ['tableRow', 'height', NaN], ['tableRow', 'height', Infinity],
-    ['tableCell', 'colwidth', [80, NaN]], ['tableHeader', 'colwidth', [80, Infinity]],
+    ['tableCell', 'colwidth', [80, -Infinity]], ['tableHeader', 'colwidth', [80, Infinity]],
     ['heading', 'level', 0], ['heading', 'level', 7],
   ] as const)('refuses decoded numeric value %s.%s = %s', (name, key, value) => {
     const checkpoint = nodeCheckpoint(name, { [key]: value })
@@ -237,6 +239,28 @@ describe('public Markdown schema', () => {
       expect(attributes?.[key]).toEqual(value)
     } finally { decoded.destroy() }
     refused(checkpoint)
+  })
+  it.each([TableCell, TableHeader])('preserves the HTML parser no-width value from $name', extension => {
+    const attributes = getExtensionField(extension, 'addAttributes', {
+      name: extension.name, options: extension.options, storage: extension.storage,
+    })!()
+    const parse = attributes.colwidth.parseHTML!
+    const element = { getAttribute: (name: string) => name === 'colwidth' ? '80,auto' : null }
+    const widths = parse(element as HTMLElement)
+    expect(widths[0]).toBe(80)
+    expect(Number.isNaN(widths[1])).toBe(true)
+    const checkpoint = nodeCheckpoint(extension.name, { colspan: 2, colwidth: widths })
+    const evidence = accepted(checkpoint)
+    expect(evidence.checkpoint.bytes).toEqual(checkpoint)
+    const restored = new Y.Doc()
+    try {
+      Y.applyUpdate(restored, evidence.checkpoint.bytes)
+      const cell = ((restored.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlElement).get(0) as Y.XmlElement
+      const decodedWidths = (cell.getAttributes() as Record<string, unknown>).colwidth as number[]
+      expect(decodedWidths[0]).toBe(80)
+      expect(Number.isNaN(decodedWidths[1])).toBe(true)
+    } finally { restored.destroy() }
+    expect(evidence.projectedMarkdown).toBe(accepted(nodeCheckpoint(extension.name, { colspan: 2, colwidth: [80, 0] })).projectedMarkdown)
   })
   it.each([
     ['heading', { level: 6 }], ['orderedList', { start: 0 }], ['taskItem', { checked: true }],

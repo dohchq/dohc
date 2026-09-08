@@ -367,7 +367,7 @@ function validBodyAttribute(nodeName: string, key: string, value: unknown): bool
       return typeof value === 'boolean'
     case 'tableCell.colwidth': case 'tableHeader.colwidth':
       return value === null || (Array.isArray(value)
-        && value.every(width => typeof width === 'number' && Number.isFinite(width)))
+        && value.every(width => typeof width === 'number' && (Number.isFinite(width) || Number.isNaN(width))))
     case 'tableCell.align': case 'tableHeader.align':
       return value === null || value === 'left' || value === 'right' || value === 'center'
     case 'tableRow.height':
