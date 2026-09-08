@@ -3,7 +3,12 @@ import { openRelayDeployment } from "./relayDeployment";
 
 const [configPath, boundary] = process.argv.slice(2);
 if (boundary === "contender") {
-  try { openRelayDeployment(configPath!); } catch { process.exit(0); }
+  try { openRelayDeployment(configPath!); } catch (error) {
+    if (error instanceof Error && "errcode" in error && error.errcode === 5 && error.message === "database is locked") {
+      process.exit(0);
+    }
+    throw error;
+  }
   throw new Error("A competing process acquired the live deployment.");
 }
 const { storage } = openRelayDeployment(configPath!);
