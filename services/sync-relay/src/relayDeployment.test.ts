@@ -175,3 +175,24 @@ describe("relay write and response lifetime", () => {
     owner.close();
   });
 });
+
+it("includes a claimed email grant in the independent mutation record", () => {
+  const f = fixture(), { storage } = openRelayDeployment(f.configPath);
+  try {
+    storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
+    storage.createShare({
+      share: { shareId: "s", workspaceId: "w", granterUserId: "owner", selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }), createdAtMs: 1 },
+      grant: { grantId: "g", shareId: "s", principalKind: "email", principalUserId: null, principalEmail: "reader@example.test",
+        access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null },
+    });
+    const side = join(f.continuityDirectory, "continuity.sqlite");
+    const before = Number(read(side, "continuity").expected_stamp);
+    expect(storage.claimPendingSharesForEmail("reader@example.test", "reader")).toBe(1);
+    expect(storage.getShareGrant("g")?.principalUserId).toBe("reader");
+    const after = read(side, "continuity");
+    expect(Number(after.expected_stamp)).toBeGreaterThan(before);
+    expect(read(f.relayPath, "sync_relay_continuity").stamp).toBe(after.expected_stamp);
+    expect(storage.claimPendingSharesForEmail("reader@example.test", "reader")).toBe(0);
+    expect(read(side, "continuity")).toEqual(after);
+  } finally { storage.close(); }
+});
