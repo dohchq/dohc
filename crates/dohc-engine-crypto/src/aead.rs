@@ -146,7 +146,7 @@ fn cipher_for(key: &SecretDataKey) -> Result<Aes256Gcm, CryptoError> {
 }
 
 /// The always-compiled sealing core. Private: the only public entry is [`seal`]
-/// (fresh CSPRNG IV). `seal_with_iv` (gated) also routes here for parity tests.
+/// (fresh CSPRNG IV). `seal_with_iv` also routes here for parity tests.
 fn seal_core(
     key: &SecretDataKey,
     workspace_id: &str,

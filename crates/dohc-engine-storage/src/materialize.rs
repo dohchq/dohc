@@ -458,7 +458,7 @@ pub(crate) fn pending_job_count(conn: &Connection) -> Result<i64, StorageError> 
 /// materialization pipeline uses this to skip a pending ordinary job whose
 /// generation is superseded by an already-materialized newer generation for
 /// the same path (concurrent/out-of-order jobs must never regress a path).
-pub fn max_completed_generation_for_path(
+pub(crate) fn max_completed_generation_for_path(
     conn: &Connection,
     workspace_id: &str,
     path: &str,
