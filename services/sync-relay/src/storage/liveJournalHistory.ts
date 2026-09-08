@@ -13,6 +13,13 @@ const authorities = new WeakMap<
 >();
 const attached = new WeakMap<StorageContext, LiveJournalHistoryAuthority>();
 
+export function liveJournalHistoryNamespace(storage: StorageContext): string {
+  const current = attached.get(storage);
+  if (!current) throw new Error("Relay history authority is not attached.");
+  requireLiveJournalHistory(storage);
+  return current.namespace;
+}
+
 /** Private provisioning; the caller owns history continuity outside the relay backup. */
 export function createLiveJournalHistoryAuthority(input: {
   namespace: string;
