@@ -67,7 +67,7 @@ pub(super) const ENGINE_EVENT_QUEUE_CAPACITY: usize = 256;
 /// never subscribes owes no drain.
 #[derive(Clone, Default)]
 pub struct EngineEvents {
-    subscriber: Arc<Mutex<Option<tokio::sync::mpsc::Sender<EngineEventNotice>>>>,
+    pub(super) subscriber: Arc<Mutex<Option<tokio::sync::mpsc::Sender<EngineEventNotice>>>>,
 }
 
 impl EngineEvents {

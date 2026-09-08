@@ -1,3 +1,4 @@
+import { useRequestSequence } from "../useRequestSequence";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Bot, Check, Copy, RefreshCw } from "lucide-react";
 import type {
@@ -70,10 +71,9 @@ export function AgentsMcpSettings(props: {
   const [drivers, setDrivers] = useState<AgentPanelSnapshotResult["drivers"] | null>(null);
   const [probeError, setProbeError] = useState(false);
   const [probing, setProbing] = useState(false);
-  const mountedRef = useRef(false);
   // Workspace async safety invariant: IPC responses are allowed to update this
   // panel only if they belong to the latest workspace/request version.
-  const requestVersionRef = useRef(0);
+  const requestVersionRef = useRequestSequence();
   const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearCopyResetTimer = useCallback(() => {
@@ -84,7 +84,7 @@ export function AgentsMcpSettings(props: {
   }, []);
 
   const isCurrentRequest = useCallback(
-    (version: number) => mountedRef.current && requestVersionRef.current === version,
+    (version: number) => requestVersionRef.isCurrent(version),
     [],
   );
 
@@ -102,7 +102,7 @@ export function AgentsMcpSettings(props: {
   }, [isCurrentRequest, workspaceId]);
 
   const retryRefresh = useCallback(() => {
-    const version = requestVersionRef.current;
+    const version = requestVersionRef.current();
     setLoadError(null);
     void refresh(version).catch(() => {
       if (isCurrentRequest(version)) {
@@ -125,9 +125,7 @@ export function AgentsMcpSettings(props: {
   }, [isCurrentRequest, workspaceId]);
 
   useEffect(() => {
-    mountedRef.current = true;
-    const version = requestVersionRef.current + 1;
-    requestVersionRef.current = version;
+    const version = requestVersionRef.next();
     setStatus(null);
     setConfig(null);
     setCopied(false);
@@ -144,8 +142,7 @@ export function AgentsMcpSettings(props: {
     });
     void probeDrivers(version);
     return () => {
-      requestVersionRef.current += 1;
-      mountedRef.current = false;
+      requestVersionRef.next();
       clearCopyResetTimer();
     };
   }, [clearCopyResetTimer, isCurrentRequest, probeDrivers, refresh, workspaceId]);
@@ -159,7 +156,7 @@ export function AgentsMcpSettings(props: {
   const setupReady = Boolean(preferredName) && runner.enabled;
 
   const toggle = useCallback(async () => {
-    const version = requestVersionRef.current;
+    const version = requestVersionRef.current();
     const renderedRunId = status?.activeRun?.id ?? null;
     setBusy(true);
     try {
@@ -192,7 +189,7 @@ export function AgentsMcpSettings(props: {
 
   const copyConfig = useCallback(async () => {
     if (!config || "unavailable" in config) return;
-    const version = requestVersionRef.current;
+    const version = requestVersionRef.current();
     const text = configSnippet(config);
     try {
       if (window.dohcDesktop?.writeClipboardText) {
@@ -268,7 +265,7 @@ export function AgentsMcpSettings(props: {
                 aria-label="Check local agents again"
                 title="Check again"
                 disabled={probing}
-                onClick={() => void probeDrivers(requestVersionRef.current)}
+                onClick={() => void probeDrivers(requestVersionRef.current())}
                 className="ml-auto grid size-6 place-items-center rounded text-subtle hover:bg-bg hover:text-ink disabled:opacity-50"
               >
                 <RefreshCw size={12} aria-hidden className={probing ? "animate-spin" : undefined} />

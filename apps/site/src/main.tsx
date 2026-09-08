@@ -1,12 +1,28 @@
-import { createRoot } from "react-dom/client";
+import type { Root } from "react-dom/client";
 
 const host = document.getElementById("desktop-demo");
 
 if (host) {
   let mounted = false;
+  const status = host.querySelector<HTMLElement>("[data-demo-status]");
+  const retry = host.querySelector<HTMLButtonElement>("[data-demo-retry]");
+  let reactRoot: Root | undefined;
+  const failed = (error: unknown) => {
+    console.error("Unable to load the interactive dohc demo", error);
+    queueMicrotask(() => {
+      reactRoot?.unmount();
+      reactRoot = undefined;
+      host.shadowRoot?.replaceChildren(document.createElement("slot"));
+      mounted = false;
+      if (status) status.textContent = "The demo could not load. Try again.";
+      if (retry) retry.hidden = false;
+    });
+  };
   const mount = async (): Promise<boolean> => {
     if (mounted) return false;
     mounted = true;
+    if (status) status.textContent = "Loading your workspace…";
+    if (retry) retry.hidden = true;
     try {
       const [
         ,
@@ -15,6 +31,8 @@ if (host) {
         { ProductDemo },
         { default: demoCss },
         { hydrateDemoWorkspaceAssets },
+        { createRoot },
+        { createElement },
       ] = await Promise.all([
         import("@fontsource-variable/inter/index.css"),
         import("@fontsource/ibm-plex-mono/400.css"),
@@ -22,6 +40,8 @@ if (host) {
         import("./ProductDemo"),
         import("./demo.css?inline"),
         import("./demoDesktopBridge"),
+        import("react-dom/client"),
+        import("react"),
       ]);
       await hydrateDemoWorkspaceAssets();
       const shadow = host.shadowRoot ?? host.attachShadow({ mode: "open" });
@@ -31,14 +51,15 @@ if (host) {
       root.id = "root";
       root.style.height = "100%";
       shadow.replaceChildren(style, root);
-      createRoot(root).render(<ProductDemo />);
+      reactRoot = createRoot(root, { onUncaughtError: failed });
+      reactRoot.render(createElement(ProductDemo));
       return true;
     } catch (error) {
-      mounted = false;
-      console.error("Unable to load the interactive dohc demo", error);
+      failed(error);
       return false;
     }
   };
+  retry?.addEventListener("click", () => { void mount(); });
 
   if ("IntersectionObserver" in window) {
     const observer = new IntersectionObserver(
@@ -48,7 +69,7 @@ if (host) {
           if (didMount) observer.disconnect();
         });
       },
-      { rootMargin: "600px 0px" },
+      { rootMargin: "0px" },
     );
     observer.observe(host);
   } else {

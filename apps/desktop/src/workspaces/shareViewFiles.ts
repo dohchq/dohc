@@ -1,3 +1,4 @@
+import { errorMessage } from "./workspaceError";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import {
@@ -597,10 +598,6 @@ function committedValueAfterFailure(
     case "delete":
       return { trashed: false };
   }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export function createShareViewFiles(

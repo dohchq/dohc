@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { errorMessage } from "./workspaceError";
 
 export interface CreatedWorkspace {
   workspaceId: string;
@@ -123,7 +124,7 @@ export async function createWorkspaceFolder(input: {
     if ((statError as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw new Error(
       `Unable to verify ${SHARED_WITH_ME_FOLDER}: ${
-        statError instanceof Error ? statError.message : String(statError)
+        errorMessage(statError)
       }`,
     );
   });
@@ -136,7 +137,7 @@ export async function createWorkspaceFolder(input: {
     const createdSharedFolder = await lstat(sharedWithMePath).catch((statError: unknown) => {
       throw new Error(
         `Unable to verify ${SHARED_WITH_ME_FOLDER}: ${
-          statError instanceof Error ? statError.message : String(statError)
+          errorMessage(statError)
         }`,
       );
     });

@@ -12,7 +12,9 @@
     "dev": "tsx watch src/main.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "host:credential": "tsx src/deviceHostCredentialCommand.ts",
+    "host:connect": "node dist/device-host-connect.js"
   },
   "dependencies": {
     "@dohc/live-session-contract": "workspace:*",
@@ -22,11 +24,13 @@
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "better-auth": "^1.6.26",
-    "pg": "^8.22.0"
+    "pg": "^8.22.0",
+    "ws": "8.21.3"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
     "@types/pg": "^8.20.4",
+    "@types/ws": "8.18.1",
     "esbuild": "0.28.1",
     "tsx": "^4.23.11",
     "typescript": "^7.0.2",

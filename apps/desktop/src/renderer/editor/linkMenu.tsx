@@ -1,3 +1,4 @@
+import { isEditableEditor } from "./pmHelpers";
 // Link editing UI: the StarterKit Link mark + autolink are already active in
 // the schema (round-trips as `[text](url)` via @tiptap/markdown) — this file
 // is the missing UI layer on top of it.
@@ -55,13 +56,6 @@ export type LinkMenuState =
     };
 
 export const CLOSED_LINK_MENU_STATE: LinkMenuState = { open: false };
-
-function isEditableEditor(editor: Editor | null | undefined): boolean {
-  if (!editor) return false;
-  if ((editor as { isEditable?: boolean }).isEditable === false) return false;
-  if ((editor.view as { editable?: boolean }).editable === false) return false;
-  return true;
-}
 
 function isViewEditable(view: EditorView): boolean {
   return (view as { editable?: boolean }).editable !== false;

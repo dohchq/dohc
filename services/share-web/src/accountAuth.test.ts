@@ -201,6 +201,20 @@ describe("browser account transport", () => {
     expect((await handler(async () => { throw new Error("upstream secret"); })(request("session"))).status).toBe(503);
   });
 
+  it("refuses invalid UTF-8 without repairing request credentials or upstream identity", async () => {
+    const invalid = (prefix: string, suffix: string) => Buffer.concat([Buffer.from(prefix), Buffer.from([255]), Buffer.from(suffix)]);
+    const fetchAuth = vi.fn(async () => upstreamSignIn());
+    const serve = handler(fetchAuth);
+    const response = await serve(request("sign-in", { body: invalid('{"email":"reader@example.test","password":"', '"}') }));
+    expect(response.status).toBe(404);
+    expect(fetchAuth).not.toHaveBeenCalled();
+    const invalidResponse = await handler(async () => new Response(invalid('{"user":{"id":"reader","name":"', '"}}'), {
+      headers: { "content-type": "application/json" },
+    }))(request("session"));
+    expect(invalidResponse.status).toBe(503);
+    expect(await invalidResponse.json()).toEqual({ ok: false });
+  });
+
   it("bounds both bodies and cancels an aborted upstream response", async () => {
     const fetchAuth = vi.fn(async () => upstreamSignIn());
     const small = createAccountAuthHandler({ ...accountAuth, fetchAuth, maxRequestBytes: 8, maxResponseBytes: 8, timeoutMs: 10_000 });

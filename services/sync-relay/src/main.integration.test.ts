@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { request as httpRequest } from "node:http";
 import { createServer } from "node:net";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -801,6 +801,7 @@ async function spawnRelayExpectExit(
     cwd: packageRoot(),
     env,
     stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
   });
   children.push(child);
   return await new Promise((resolve, reject) => {
@@ -853,6 +854,31 @@ function sendDoubleTerminationSignal(child: ChildProcess): void {
 }
 
 describe("sync relay startup guards", () => {
+  const namedBrowserLimitsReason =
+    "DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS must be valid JSON with all required positive limits within their supported bounds, a safe expiry timestamp, and capacity for the named session envelopes.";
+  it.each([
+    { label: "missing origin", origin: undefined, key: "x".repeat(32), expected: "DOHC_RELAY_SHARE_WEB_ORIGIN must be an HTTPS origin" },
+    { label: "HTTP origin", origin: "http://127.0.0.1:48123", key: "x".repeat(32), expected: "DOHC_RELAY_SHARE_WEB_ORIGIN must be an HTTPS origin" },
+    { label: "missing key", origin: "https://share.example.test", key: undefined, expected: "DOHC_RELAY_EXCHANGE_KEY must be set" },
+    { label: "short key", origin: "https://share.example.test", key: "x".repeat(31), expected: "DOHC_RELAY_EXCHANGE_KEY must be at least 32 characters" },
+    { label: "small request", origin: "https://share.example.test", key: "x".repeat(32), maxRequestBytes: 1037, expected: namedBrowserLimitsReason },
+    { label: "small response", origin: "https://share.example.test", key: "x".repeat(32), maxResponseBytes: 4151, expected: namedBrowserLimitsReason },
+    { label: "unsafe expiry", origin: "https://share.example.test", key: "x".repeat(32), retentionMs: Number.MAX_SAFE_INTEGER, expected: namedBrowserLimitsReason },
+  ])("refuses named browser configuration before opening storage: $label", async ({ label, origin, key, expected, ...overrides }) => {
+    const dbPath = join(await tempRoot(`named-${label.replaceAll(" ", "-")}`), "relay.sqlite");
+    const { code, stderr } = await spawnRelayExpectExit({
+      NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1", SYNC_RELAY_PORT: "0", SYNC_RELAY_DB_PATH: dbPath,
+      DOHC_RELAY_SHARE_WEB_ORIGIN: origin, DOHC_RELAY_EXCHANGE_KEY: key,
+      DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS: JSON.stringify({ maxSessions: 4, retentionMs: 60000,
+        maxPendingRequests: 2, maxRequestBytes: 1038, maxResponseBytes: 4152, timeoutMs: 1000, ...overrides }),
+      FORCE_COLOR: "0",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain(`FATAL: ${expected}`);
+    expect(stderr).not.toContain("TypeError:");
+    await expect(access(dbPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   const absoluteShareWebOriginReason =
     "FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must be an absolute HTTP(S) origin.";
   const invalidShareWebOriginShapeReason =

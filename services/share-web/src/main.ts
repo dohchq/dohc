@@ -8,6 +8,8 @@ import {
   serveFetchHandler,
 } from "@dohc/service-http";
 import { loadShareWebConfig } from "./config";
+import { createDeviceControlBridge } from "./deviceControlBridge";
+import { clientAddress } from "./clientAddress";
 import {
   createShareWebApplication,
   SHARE_WEB_SECURITY_HEADERS,
@@ -40,11 +42,13 @@ const { handle: handler } = createShareWebApplication({
   publicHosts: config.publicHosts,
   viewerAssetsDir,
   accountAuth: config.accountAuth,
+  namedBrowserSessionLimits: config.namedBrowserSessionLimits,
 });
 
 const server = serveFetchHandler({
   handler,
-  maxBodyBytes: () => MAX_REQUEST_BODY_BYTES,
+  maxBodyBytes: url => url.pathname === "/api/live/named-session" && config.namedBrowserSessionLimits
+    ? config.namedBrowserSessionLimits.maxRequestBytes : MAX_REQUEST_BODY_BYTES,
   oversized: refusal,
   failure: refusal,
   prepareHeaders: (headers, incoming) => {
@@ -58,6 +62,25 @@ const server = serveFetchHandler({
     );
   },
 });
+
+let deviceControl: ReturnType<typeof createDeviceControlBridge> | undefined;
+if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
+  try {
+    deviceControl = createDeviceControlBridge({
+      publicHosts: config.publicHosts, relayUrl: config.relayUrl, relayExchangeKey: config.relayExchangeKey ?? "",
+      limits: JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS),
+      admission: JSON.parse(process.env.DOHC_SHARE_WEB_DEVICE_CONTROL_ADMISSION ?? "null"), trustedProxies: config.trustedProxies,
+    });
+  } catch {
+    fatal("FATAL: Invalid device control configuration. Check DOHC_DEVICE_CONTROL_LIMITS, DOHC_SHARE_WEB_DEVICE_CONTROL_ADMISSION, and relay settings.");
+  }
+}
+if (deviceControl) {
+  server.on("upgrade", deviceControl.handleUpgrade);
+  process.once("SIGINT", deviceControl.close);
+  process.once("SIGTERM", deviceControl.close);
+  server.once("close", deviceControl.close);
+}
 
 server.listen(config.port, config.bind, () => {
   const address = server.address();
@@ -93,21 +116,4 @@ function refusal(): Response {
     status: 404,
     headers: { "content-type": "application/json", ...SHARE_WEB_SECURITY_HEADERS },
   });
-}
-
-function clientAddress(
-  peerAddress: string | undefined,
-  forwardedFor: string | null,
-  trustedProxies: ReadonlySet<string>,
-): string {
-  if (peerAddress === undefined || !trustedProxies.has(peerAddress)) {
-    return peerAddress ?? "unknown";
-  }
-
-  const entries = forwardedFor?.split(",") ?? [];
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index]?.trim();
-    if (entry && !trustedProxies.has(entry)) return entry;
-  }
-  return "unknown";
 }

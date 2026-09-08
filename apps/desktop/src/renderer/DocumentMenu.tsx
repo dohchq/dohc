@@ -1,3 +1,4 @@
+import { useRequestSequence } from "./useRequestSequence";
 import { useEffect, useRef, useState } from "react";
 import { MoreHorizontal } from "lucide-react";
 import { IconButton } from "./ui/controls";
@@ -71,7 +72,7 @@ export function DocumentMenu(props: {
   // clipboard write settles after the click that started it, so its outcome
   // can land on a menu that has moved on — over a refusal the user is still
   // reading, on a menu that closed, or on the next one they open.
-  const attempts = useRef(0);
+  const attempts = useRequestSequence();
 
   useEffect(() => {
     if (!open) return;
@@ -92,7 +93,7 @@ export function DocumentMenu(props: {
     // focus would fall to document.body, breaking the WAI-ARIA menu-button
     // contract. Mirrors PageIdentity's emoji picker (phase 2).
     return () => {
-      attempts.current += 1;
+      attempts.next();
       if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
       triggerRef.current?.focus();
     };
@@ -178,7 +179,7 @@ export function DocumentMenu(props: {
     }
     // A later attempt already answered. Its answer is what the menu shows,
     // and this one describes a click the user has moved past.
-    if (attempt !== attempts.current) return;
+    if (!attempts.isCurrent(attempt)) return;
     showFeedback("copy-markdown", label);
   }
 
@@ -237,7 +238,7 @@ export function DocumentMenu(props: {
   }
 
   function runItem(id: DocumentMenuItemId) {
-    const attempt = ++attempts.current;
+    const attempt = attempts.next();
     // The token says who may speak next. This says the last one has stopped —
     // a new action retires its predecessor's answer when it starts, not when
     // it finishes. Its own result can be a while away (a clipboard write can
