@@ -2,6 +2,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { parseHostControlIdentifier, parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { DeviceControlLimits } from "@dohc/live-session-contract/device-control";
+import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveSettlementConfig } from "./liveSettlementConfig.js";
 
 export function configRecord(value: unknown, keys: string[], optional: string[] = []): Record<string, unknown> {
@@ -30,7 +31,7 @@ export function readDeviceLiveHostConfig(file: string, limits: DeviceControlLimi
   if (row.version !== 1 || !Array.isArray(row.workspaces) || row.workspaces.length < 1 || row.workspaces.length > 64) throw new TypeError("Invalid device delivery configuration.");
   const workspaces = row.workspaces.map(item => {
     const entry = configRecord(item, ["root", "workspaceId", "maxRegistrations"]);
-    return Object.freeze({ root: path(entry.root, true), workspaceId: parseHostControlIdentifier(entry.workspaceId), maxRegistrations: integer(entry.maxRegistrations) });
+    return Object.freeze({ root: path(entry.root, true), workspaceId: parseLiveUpdateIdentifier(entry.workspaceId), maxRegistrations: integer(entry.maxRegistrations) });
   });
   if (new Set(workspaces.map(item => item.workspaceId)).size !== workspaces.length ||
     new Set(workspaces.map(item => process.platform === "win32" ? item.root.toLowerCase() : item.root)).size !== workspaces.length) throw new TypeError("Duplicate device workspace.");
@@ -51,7 +52,7 @@ export type DeviceLiveHostConfig = ReturnType<typeof readDeviceLiveHostConfig>;
 export function readRelayDeviceDeliveryConfig(file: string, limits: DeviceControlLimits) {
   const row = configRecord(read(file), ["version", "workspaceIds", "client", "maxQueuedBytes", "maxActiveDrains"]);
   if (row.version !== 1 || !Array.isArray(row.workspaceIds) || row.workspaceIds.length < 1 || row.workspaceIds.length > 64) throw new TypeError("Invalid relay delivery configuration.");
-  const workspaceIds = row.workspaceIds.map(value => parseHostControlIdentifier(value));
+  const workspaceIds = row.workspaceIds.map(value => parseLiveUpdateIdentifier(value));
   if (new Set(workspaceIds).size !== workspaceIds.length) throw new TypeError("Duplicate relay workspace.");
   const client = configRecord(row.client, ["aggregateBytes", "maxUploads", "connectTimeoutMs", "requestDeadlineMs", "maxFrameBytes"]);
   const maxFrameBytes = integer(client.maxFrameBytes, 1024 * 1024);

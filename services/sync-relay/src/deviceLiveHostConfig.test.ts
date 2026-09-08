@@ -12,6 +12,17 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 const limits = { maxConnections: 2, maxHeaderBytes: 8192, maxCredentialBytes: 4096, maxPayloadBytes: 4096,
   maxPendingBytes: 8192, maxFragments: 8, maxBufferedChunks: 8, handshakeTimeoutMs: 1000,
   heartbeatIntervalMs: 1000, heartbeatTimeoutMs: 1000, closeTimeoutMs: 100 };
+
+it.each(["a".repeat(512), "é".repeat(256)])("bounds workspace IDs by UTF-8 bytes while preserving host ID limits", workspaceId => {
+  const run = fixture();
+  const device = { ...run.value, hostId: "h".repeat(1024), workspaces: [{ ...run.value.workspaces[0]!, workspaceId }] };
+  const relay = { version: 1, workspaceIds: [workspaceId], maxQueuedBytes: 4_000_000, maxActiveDrains: 2,
+    client: { aggregateBytes: 200_000_000, maxUploads: 2, connectTimeoutMs: 1000, requestDeadlineMs: 1000, maxFrameBytes: 1_048_576 } };
+  expect(readDeviceLiveHostConfig(run.write(device), limits).workspaces[0]!.workspaceId).toBe(workspaceId);
+  expect(readRelayDeviceDeliveryConfig(run.write(relay), limits).workspaceIds).toEqual([workspaceId]);
+  expect(() => readDeviceLiveHostConfig(run.write({ ...device, workspaces: [{ ...device.workspaces[0], workspaceId: workspaceId + "a" }] }), limits)).toThrow();
+  expect(() => readRelayDeviceDeliveryConfig(run.write({ ...relay, workspaceIds: [workspaceId + "a"] }), limits)).toThrow();
+});
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "dohc-device-config-")); roots.push(root);
   const workspace = join(root, "workspace"); mkdirSync(workspace);

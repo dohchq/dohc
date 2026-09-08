@@ -54,6 +54,14 @@ function packageRoot(): string {
   return dirname(dirname(fileURLToPath(import.meta.url)));
 }
 
+it("ignores inherited device-delivery config in a presence relay child", async () => {
+  vi.stubEnv("DOHC_RELAY_DEVICE_DELIVERY_CONFIG", "inherited-device-delivery-must-not-open.json");
+  try {
+    const root = await mkdtemp(join(tmpdir(), "dohc-presence-env-")); roots.push(root);
+    expect(await spawnRelay(join(root, "relay.sqlite"))).toMatch(/^http:\/\/127\.0\.0\.1:/);
+  } finally { vi.unstubAllEnvs(); }
+}, 60_000);
+
 async function spawnRelay(dbPath: string): Promise<string> {
   const child = spawn(process.execPath, ["--import", "tsx/esm", "src/main.ts"], {
     cwd: packageRoot(),
@@ -61,6 +69,7 @@ async function spawnRelay(dbPath: string): Promise<string> {
       ...process.env,
       DOHC_RELAY_DEPLOYMENT_CONFIG: undefined,
       DOHC_RELAY_SERVICE_HOST_CONFIG: undefined,
+      DOHC_RELAY_DEVICE_DELIVERY_CONFIG: undefined,
       NODE_ENV: "test",
       SYNC_RELAY_TEST_AUTH: "1",
       SYNC_RELAY_PORT: "0",
