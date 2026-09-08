@@ -511,6 +511,16 @@ export class LiveCommittedDeliveryStore {
       predecessor: result.predecessor ? { ...result.predecessor } : null,
     };
   }
+
+  settlement(drain: CommittedDeliveryDrain): {
+    binding: LiveObjectBinding;
+    terminalReceipt: LiveUpdateReceipt | null;
+  } {
+    const next = this.next(drain);
+    if (next.kind !== "done") throw new Error("Committed delivery must finish before settlement.");
+    const capture = this.#drains.get(drain)!;
+    return { binding: structuredClone(capture.authority.binding), terminalReceipt: next.terminalReceipt };
+  }
   acknowledgeBootstrap(drain: CommittedDeliveryDrain, input: unknown): void {
     const ack = parseBootstrapAck(input);
     this.#storage.tx(() => {

@@ -9,6 +9,7 @@ import { parseLiveDocumentKey, parseLiveUpdateIdentifier, type LiveDocumentKey }
 import { LiveCommittedDelivery, type CommittedDeliveryOutcome } from "./liveCommittedDelivery.js";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.js";
 import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
+import { parseLiveSettlementConfig, type LiveSettlementConfig } from "./liveSettlementConfig.js";
 
 interface ServiceLiveHostConfig {
   readonly version: 1;
@@ -18,11 +19,12 @@ interface ServiceLiveHostConfig {
   readonly workspaces: readonly { readonly root: string; readonly workspaceId: string; readonly maxRegistrations: number }[];
   readonly ingress: { readonly aggregateBytes: number; readonly applicationWorkingReserveBytes: number; readonly maxUploads: number; readonly uploadDeadlineMs: number };
   readonly client: { readonly aggregateBytes: number; readonly maxUploads: number; readonly connectTimeoutMs: number; readonly requestDeadlineMs: number };
+  readonly settlement?: LiveSettlementConfig;
 }
 
-function record(value: unknown, keys: string[]): Record<string, unknown> {
+function record(value: unknown, keys: string[], optional: string[] = []): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
-    Object.keys(value).sort().join() !== keys.slice().sort().join()) throw new TypeError("Invalid service host configuration.");
+    keys.some(key => !Object.hasOwn(value, key)) || Object.keys(value).some(key => !keys.includes(key) && !optional.includes(key))) throw new TypeError("Invalid service host configuration.");
   return value as Record<string, unknown>;
 }
 function integer(value: unknown, minimum = 1, maximum = Number.MAX_SAFE_INTEGER): number {
@@ -40,7 +42,7 @@ function path(value: unknown, directory: boolean): string {
 /** Operator configuration only. Incoming document fields never supply these paths. */
 function readServiceLiveHostConfig(configPath: string): ServiceLiveHostConfig {
   const value = record(JSON.parse(readFileSync(path(configPath, false), "utf8")),
-    ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"]);
+    ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"], ["settlement"]);
   if (value.version !== 1 || !Array.isArray(value.workspaces) || !value.workspaces.length) throw new TypeError("Invalid service host configuration.");
   const workspaces = value.workspaces.map(item => {
     const row = record(item, ["root", "workspaceId", "maxRegistrations"]);
@@ -53,6 +55,7 @@ function readServiceLiveHostConfig(configPath: string): ServiceLiveHostConfig {
   return Object.freeze({ version: 1, engineExecutable: path(value.engineExecutable, false),
     hostId: parseLiveUpdateIdentifier(value.hostId, "host ID"), instanceId: parseLiveUpdateIdentifier(value.instanceId, "instance ID"),
     workspaces: Object.freeze(workspaces),
+    settlement: parseLiveSettlementConfig(value.settlement),
     ingress: Object.freeze({ aggregateBytes: integer(ingress.aggregateBytes), applicationWorkingReserveBytes: integer(ingress.applicationWorkingReserveBytes, 0),
       maxUploads: integer(ingress.maxUploads), uploadDeadlineMs: integer(ingress.uploadDeadlineMs, 1, 2_147_483_647) }),
     client: Object.freeze({ aggregateBytes: integer(client.aggregateBytes), maxUploads: integer(client.maxUploads),
@@ -125,7 +128,7 @@ export async function startServiceLiveHost(options: {
     temporary = await mkdtemp(join(tmpdir(), "dohc-service-live-host-"));
     const nativeConfig = join(temporary, "host.json");
     await writeFile(nativeConfig, JSON.stringify({ version: 1, relayNamespace: history.namespace, host,
-      workspaces: config.workspaces, ingress: config.ingress }), { flag: "wx", mode: 0o600 });
+      workspaces: config.workspaces, ingress: config.ingress, settlement: config.settlement }), { flag: "wx", mode: 0o600 });
     client = await createEngineClient({ command: config.engineExecutable, authToken: randomBytes(32).toString("base64url"),
       protocolVersion: 2, capabilities: ["blobs"], privateLiveApplication: config.client, connectTimeoutMs: config.client.connectTimeoutMs,
       env: { DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig }, signal,
@@ -152,6 +155,15 @@ export async function startServiceLiveHost(options: {
     check();
     finishStartup();
     return Object.freeze({ coordinate, invalidated: signal,
+      async settle(value: LiveDocumentKey, callerSignal?: AbortSignal) {
+        check();
+        if (!config.settlement) throw new Error("Settlement is not configured on this service host.");
+        const document = parseLiveDocumentKey(value), consumer = consumers.get(document.workspaceId);
+        if (!consumer) throw new Error("Workspace is not configured on this service host.");
+        const result = await consumer.settle(document, AbortSignal.any([signal, ...(callerSignal ? [callerSignal] : [])]));
+        check();
+        return result;
+      },
       async drain(value: LiveDocumentKey, callerSignal?: AbortSignal): Promise<CommittedDeliveryOutcome> {
         check();
         const document = parseLiveDocumentKey(value), consumer = consumers.get(document.workspaceId);

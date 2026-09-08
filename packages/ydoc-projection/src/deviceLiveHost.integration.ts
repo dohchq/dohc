@@ -56,6 +56,7 @@ it("delivers through the outbound TLS device pipe and replays a lost durable ack
   writeFileSync(deviceConfig, JSON.stringify({ version: 1, engineExecutable: executable, hostId: credential.hostId,
     hostEpoch: credential.hostEpoch, instanceId: credential.instanceId, maxQueuedBytes: 4_000_000,
     workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 8 }],
+    settlement: { maxApplicationsPerSettlement: 8 },
     ingress: { aggregateBytes: 400_000_000, applicationWorkingReserveBytes: 1_000_000, maxUploads: 2, uploadDeadlineMs: 30_000 } }));
   writeFileSync(relayConfig, JSON.stringify({ version: 1, workspaceIds: ["workspace"], maxQueuedBytes: 4_000_000, maxActiveDrains: 2,
     client: { aggregateBytes: 200_000_000, maxUploads: 2, connectTimeoutMs: 30_000, requestDeadlineMs: 30_000, maxFrameBytes: 1_048_576 } }));
@@ -180,13 +181,17 @@ syncBuiltinESMExports();\n`);
     const firstDigest = admit("delivery");
     const first = await active.drain(document);
     expect(first).toMatchObject({ kind: "done", terminalReceipt: { deliveryId: "delivery", updateDigest: firstDigest } });
-    results.push({ round: 1, coordinate: active.coordinate, result: first });
+    const firstSettlement=await control!.settle(document);
+    expect(firstSettlement.materialized).toBe(true);
+    expect(readFileSync(join(workspace,"docs/a.md"),"utf8")).toBe(yDocToMarkdown(doc));
+    results.push({ round: 1, coordinate: active.coordinate, result: first, settlement:firstSettlement });
     await closeTransport(); active = undefined;
     deployment.storage.close();
     deployment = openRelayDeployment(deploymentConfig);
     active = await launch();
     const second = await active.drain(document);
     expect(second).toEqual(first);
+    expect(await control!.settle(document)).toEqual(firstSettlement);
     results.push({ round: 2, coordinate: active.coordinate, result: second });
     const secondDigest = admit("after-restart");
     const continued = await active.drain(document);
@@ -245,6 +250,11 @@ syncBuiltinESMExports();\n`);
         .rejects.toMatchObject({ wireError: { code: "FORBIDDEN" } });
       results.push({ replacement, staleAcknowledgementRefused: true });
     } finally { release(); heldResult.mockRestore(); }
+    const finalSettlement=await control!.settle(document);
+    expect(finalSettlement).toMatchObject({ previousCursor:1, terminalCursor:4, applicationCount:3, materialized:true });
+    expect(readFileSync(join(workspace,"docs/a.md"),"utf8")).toBe(yDocToMarkdown(doc));
+    expect(await control!.settle(document)).toEqual(finalSettlement);
+    results.push({finalSettlement});
     const finalConnectionId = active.coordinate.connectionId;
     expect(deployment.storage.revokeDeviceHostCredential({ hostId: credential.hostId, instanceId: credential.instanceId, updatedAtMs: Date.now() }).ok).toBe(true);
     await Promise.all([...childClosures.values()]);
@@ -257,6 +267,8 @@ syncBuiltinESMExports();\n`);
         { delivery_id: "lost-ack", update_digest: lostDigest }, { delivery_id: "replacement", update_digest: staleDigest }]);
       expect(engine.prepare("SELECT COUNT(*) AS count FROM live_device_bootstraps").get()!.count).toBe(1);
       const indexed = engine.prepare("SELECT path, text FROM engine_search_files_fts WHERE object_id = 'object'").all();
+      expect(indexed).toEqual([{path:"docs/a.md",text:yDocToMarkdown(doc)}]);
+      expect(engine.prepare("SELECT COUNT(*) n FROM live_device_settlements").get()!.n).toBe(2);
       const nativeDoc = new Y.Doc();
       try {
         const checkpoint = engine.prepare("SELECT b.bytes FROM ydoc_snapshots s JOIN binary_blobs b ON b.sha256=s.snapshot_blob_sha256 WHERE s.object_id='object' ORDER BY up_to_seq DESC LIMIT 1").get()!;
@@ -266,7 +278,7 @@ syncBuiltinESMExports();\n`);
         }
         expect(yDocToMarkdown(nativeDoc)).toBe(yDocToMarkdown(doc));
         results.push({ applications, durableMarkdown: yDocToMarkdown(nativeDoc),
-          settlement: { status: "pending-separate-integration", indexed, artifactExists: existsSync(join(workspace, "docs", "a.md")) } });
+          settlement: { status: "materialized", indexed, artifactExists: existsSync(join(workspace, "docs", "a.md")) } });
       } finally { nativeDoc.destroy(); }
     } finally { engine.close(); }
     const relayObserver = new DatabaseSync(relayPath, { readOnly: true });
@@ -280,7 +292,7 @@ syncBuiltinESMExports();\n`);
     expect(hash(readFileSync(executable))).toBe(expectedHash.toLowerCase());
     expect(children.size).toBe(0);
     expect(processRows.every(row => row.nativePid)).toBe(true);
-    writeFileSync(join(root, "result.json"), JSON.stringify({ verdict: "PASS", scope: "durable-outbound-delivery; settlement remains pending", executable, sha256: expectedHash, results, processRows }, null, 2));
+    writeFileSync(join(root, "result.json"), JSON.stringify({ verdict: "PASS", scope: "durable-outbound-delivery and explicit configured settlement", executable, sha256: expectedHash, results, processRows }, null, 2));
   } finally {
     await closeTransport();
     writeFileSync(join(root, "processes.json"), JSON.stringify(processRows, null, 2));
