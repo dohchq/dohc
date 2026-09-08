@@ -2,7 +2,7 @@ use crate::live_application_ingress::{LiveApplicationIngress, LiveApplicationIng
 use crate::{EngineService, LiveApplicationHostConfig, lock};
 use dohc_engine_collab::live_update_application::{ApplicationHostCoordinate, ApplicationOwner};
 use dohc_engine_protocol::error::{ErrorCode, WireError};
-use dohc_engine_protocol::limits::WireLimits;
+use dohc_engine_protocol::limits::{MAX_WIRE_INTEGER, MIN_NEGOTIABLE_FRAME_BYTES, WireLimits};
 use dohc_engine_protocol::transport::{ConnectionHandle, ConnectionOwner, RequestContext};
 use dohc_engine_protocol::wire::{Envelope, Request, Response, WorkspaceHandle, encode_control};
 use serde::{Deserialize, Serialize};
@@ -73,19 +73,33 @@ impl ConfiguredLiveHostConfig {
         if !path.is_absolute() {
             return Err(invalid("live host configuration path must be absolute"));
         }
-        let file = std::fs::File::open(path)
-            .map_err(|_| invalid("live host configuration unavailable"))?;
+        let file = std::fs::File::open(path).map_err(|error| {
+            invalid(&format!(
+                "live host configuration {}: {error}",
+                path.display()
+            ))
+        })?;
         let mut bytes = Vec::new();
         file.take(MAX_CONFIG_BYTES + 1)
             .read_to_end(&mut bytes)
-            .map_err(|_| invalid("live host configuration unreadable"))?;
+            .map_err(|error| {
+                invalid(&format!(
+                    "live host configuration {}: {error}",
+                    path.display()
+                ))
+            })?;
         if bytes.len() as u64 > MAX_CONFIG_BYTES {
             return Err(invalid("live host configuration too large"));
         }
-        serde_json::from_slice(&bytes).map_err(|_| invalid("invalid live host configuration"))
+        serde_json::from_slice(&bytes).map_err(|error| {
+            invalid(&format!(
+                "live host configuration {}: {error}",
+                path.display()
+            ))
+        })
     }
 
-    fn validate(&mut self) -> Result<LiveApplicationIngressConfig, WireError> {
+    fn canonicalize_and_validate(&mut self) -> Result<LiveApplicationIngressConfig, WireError> {
         if self.version != 1
             || self.relay_namespace.is_empty()
             || self.workspaces.is_empty()
@@ -107,6 +121,9 @@ impl ConfiguredLiveHostConfig {
             }
             workspace.root = std::fs::canonicalize(&workspace.root)
                 .map_err(|_| invalid("live host workspace root unavailable"))?;
+            if workspace.root.to_str().is_none() {
+                return Err(invalid("live host workspace root must be UTF-8"));
+            }
             if !workspace.root.is_dir()
                 || !roots.insert(workspace.root.clone())
                 || !identities.insert(workspace.workspace_id.clone())
@@ -120,12 +137,12 @@ impl ConfiguredLiveHostConfig {
             json!({"workspaceId": workspace.workspace_id, "workspaceHandle": "ws-ffffffffffffffff"})
         ).collect();
         validate_discovery(
-            &json!({"relayNamespace": self.relay_namespace, "host": self.host, "workspaces": workspaces}),
-            dohc_engine_protocol::limits::MAX_WIRE_INTEGER,
-            1024 * 1024,
+            &discovery(&self.relay_namespace, &self.host, workspaces),
+            MAX_WIRE_INTEGER,
+            MIN_NEGOTIABLE_FRAME_BYTES,
         )?;
         let upload_deadline = Duration::from_millis(self.ingress.upload_deadline_ms);
-        if self.ingress.upload_deadline_ms > dohc_engine_protocol::limits::MAX_WIRE_INTEGER
+        if self.ingress.upload_deadline_ms > MAX_WIRE_INTEGER
             || Instant::now().checked_add(upload_deadline).is_none()
         {
             return Err(invalid("invalid live host upload deadline"));
@@ -149,7 +166,7 @@ impl EngineService {
     pub async fn configured_live_host(
         mut config: ConfiguredLiveHostConfig,
     ) -> Result<(Arc<Self>, ConnectionOwner, LiveApplicationIngress), WireError> {
-        let ingress_config = config.validate()?;
+        let ingress_config = config.canonicalize_and_validate()?;
         let service = Arc::new(Self::new());
         let ingress = LiveApplicationIngress::new(service.clone(), ingress_config)?;
         let owner = ConnectionOwner::authenticated();
@@ -169,9 +186,9 @@ impl EngineService {
                 }).await?;
                 workspaces.push(json!({"workspaceId": workspace.workspace_id, "workspaceHandle": handle}));
             }
-            let result = json!({"relayNamespace": config.relay_namespace, "host": config.host, "workspaces": workspaces});
+            let result = discovery(&config.relay_namespace, &config.host, workspaces);
             // The smallest supported negotiated frame must hold readiness.
-            validate_discovery(&result, 0, 1024 * 1024)?;
+            validate_discovery(&result, MAX_WIRE_INTEGER, MIN_NEGOTIABLE_FRAME_BYTES)?;
             Ok::<_, WireError>(result)
         }.await;
         match result {
@@ -227,6 +244,10 @@ impl EngineService {
         validate_discovery(&discovery.result, request.id, ctx.max_frame_bytes)?;
         Ok(discovery.result.clone())
     }
+}
+
+fn discovery(namespace: &str, host: &HostCoordinate, workspaces: Vec<Value>) -> Value {
+    json!({"relayNamespace": namespace, "host": host, "workspaces": workspaces})
 }
 
 fn validate_discovery(result: &Value, id: u64, max_frame_bytes: u32) -> Result<(), WireError> {

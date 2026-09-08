@@ -108,7 +108,14 @@ fn production_entrypoint_discovers_fixed_roots_after_authentication() {
     )
     .unwrap();
     let path = scratch.path().join("host.json");
-    std::fs::write(&path, configuration(&root).to_string()).unwrap();
+    let second = scratch.path().join("second");
+    std::fs::create_dir(&second).unwrap();
+    let mut config = configuration(&root);
+    config["workspaces"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"root":second,"workspaceId":"second","maxRegistrations":2}));
+    std::fs::write(&path, config.to_string()).unwrap();
     let mut daemon = Daemon(command(Some(&path)).spawn().unwrap());
     daemon.hello("configured-test-secret");
     assert!(matches!(daemon.read(), Envelope::HelloAck(_)));
@@ -118,9 +125,29 @@ fn production_entrypoint_discovers_fixed_roots_after_authentication() {
     };
     assert_eq!(response.result["relayNamespace"], "configured-test-relay");
     assert_eq!(response.result["host"], configuration(&root)["host"]);
-    assert_eq!(response.result["workspaces"].as_array().unwrap().len(), 1);
+    assert_eq!(response.result["workspaces"].as_array().unwrap().len(), 2);
     assert_eq!(response.result["workspaces"][0]["workspaceId"], "workspace");
-    assert!(!response.result.to_string().contains("root"));
+    assert_eq!(
+        response
+            .result
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["host", "relayNamespace", "workspaces"]
+    );
+    for workspace in response.result["workspaces"].as_array().unwrap() {
+        assert_eq!(
+            workspace
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["workspaceHandle", "workspaceId"]
+        );
+    }
     let handle =
         serde_json::from_value(response.result["workspaces"][0]["workspaceHandle"].clone())
             .unwrap();
@@ -192,6 +219,16 @@ fn invalid_complete_configuration_never_opens_the_first_root() {
     }
     std::fs::remove_file(&path).unwrap();
     assert!(!command(Some(&path)).output().unwrap().status.success());
+    assert!(
+        !command(Some(Path::new("relative-host.json")))
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    std::fs::write(&path, vec![b' '; 1024 * 1024 + 1]).unwrap();
+    assert!(!command(Some(&path)).output().unwrap().status.success());
+    assert!(!root.join(".dohc").exists());
 }
 
 #[test]
