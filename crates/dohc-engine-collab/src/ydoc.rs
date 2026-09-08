@@ -31,7 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use yrs::encoding::write::Write as _;
 use yrs::types::text::{TextDiffChunk, YChange};
@@ -527,15 +527,15 @@ impl Ydoc {
             }
         }
         for (key, value) in meta.iter(&txn) {
-            let valid = match (key, value) {
-                ("schemaVersion", Out::Any(Any::Number(1.0))) => true,
-                (MARKDOWN_CRLF_META_KEY, Out::Any(Any::Bool(true))) => true,
-                (
-                    TAGGED_FRONTMATTER_PREFIX_META_KEY | TAGGED_FRONTMATTER_BASELINE_META_KEY,
-                    Out::Any(Any::String(_)),
-                ) => true,
-                _ => false,
-            };
+            let valid = matches!(
+                (key, value),
+                ("schemaVersion", Out::Any(Any::Number(1.0)))
+                    | (MARKDOWN_CRLF_META_KEY, Out::Any(Any::Bool(true)))
+                    | (
+                        TAGGED_FRONTMATTER_PREFIX_META_KEY | TAGGED_FRONTMATTER_BASELINE_META_KEY,
+                        Out::Any(Any::String(_)),
+                    )
+            );
             if !valid {
                 return Err(invalid());
             }
@@ -3659,7 +3659,11 @@ fn render_inline(
                             leading_whitespace.iter().enumerate()
                         {
                             let replacement = if index == 0 {
-                                if whitespace == b' ' { "&#32;" } else { "&#9;" }
+                                if whitespace == b' ' {
+                                    "&#32;"
+                                } else {
+                                    "&#9;"
+                                }
                             } else if whitespace == b' ' {
                                 " "
                             } else {
@@ -4208,8 +4212,8 @@ mod projection_tests {
     use std::sync::Arc;
 
     use crate::limits::MAX_PROJECTION_BYTES;
-    use yrs::types::Attrs;
     use yrs::types::xml::XmlIn;
+    use yrs::types::Attrs;
 
     fn scene_map_set(doc: &Ydoc, root: &str, key: &str, value: &str) -> Vec<u8> {
         let map = doc.doc.get_or_insert_map(root);
@@ -5789,7 +5793,10 @@ fn main() {}
             .expect("richdoc rewrite");
 
         let projected = doc.project(ContentKind::Richdoc).expect("projection");
-        assert_eq!(projected.content, "---\ndone: 'true'\nsummary: 'TODO: call Bob'\n---\n\nbody text");
+        assert_eq!(
+            projected.content,
+            "---\ndone: 'true'\nsummary: 'TODO: call Bob'\n---\n\nbody text"
+        );
         assert_eq!(doc.frontmatter_json()["done"], json!("true"));
         assert_eq!(doc.frontmatter_json()["summary"], json!("TODO: call Bob"));
     }

@@ -1,6 +1,6 @@
 use super::*;
 use crate::{ContentKind, Ydoc};
-use dohc_engine_domain::{DomainError, WriteResult, WriteText, write_text_in_tx};
+use dohc_engine_domain::{write_text_in_tx, DomainError, WriteResult, WriteText};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -126,7 +126,7 @@ where
             if original != input || retained_binding != *binding {
                 return Err(E::from(ApplicationError::Conflict));
             }
-            let marker = durable::read_marker_in_tx(tx, &key).map_err(ApplicationError::from).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;
+            let marker = durable::read_marker_in(tx, &key).map_err(ApplicationError::from).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;
             if marker.regime != Regime::Replicated || marker.lineage_claim_id.as_deref() != Some(&input.baseline_digest)
                 || marker.lineage_claim_status != durable::LineageClaimStatus::Exact || marker.content_kind != ContentKind::Richdoc
                 || marker.path.as_deref() != Some(&binding.current_path) || marker.head_update_seq < sequence || sequence != 0 {
@@ -142,7 +142,7 @@ where
             if !retained_domain { return Err(E::from(ApplicationError::Corrupt)); }
             return Ok(BootstrapResult::Bootstrapped(LiveApplicationBootstrapAck::new(&input, sequence, true)));
         }
-        if durable::read_marker_in_tx(tx, &key).map_err(ApplicationError::from).map_err(E::from)?.is_some() {
+        if durable::read_marker_in(tx, &key).map_err(ApplicationError::from).map_err(E::from)?.is_some() {
             return Err(E::from(ApplicationError::Conflict));
         }
         let occupied: bool = tx.query_row(
@@ -182,7 +182,7 @@ where
         }
         tx.execute("UPDATE ydoc_docs SET path=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
             params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.current_path]).map_err(write_sql).map_err(E::from)?;
-        let marker = durable::read_marker_in_tx(tx, &key).map_err(ApplicationError::from).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;
+        let marker = durable::read_marker_in(tx, &key).map_err(ApplicationError::from).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;
         if marker.head_update_seq != 0 || marker.lineage_claim_id.as_deref() != Some(&input.baseline_digest) { return Err(E::from(ApplicationError::Corrupt)); }
         insert_bootstrap(tx, &held, &input, marker.head_update_seq).map_err(E::from)?;
         follow_up(tx, &written)?;
@@ -329,22 +329,43 @@ mod tests {
     fn shared_projections_preserve_tagged_prefix_and_change_fallback() {
         let mut mismatches = Vec::new();
         for vector in vectors() {
-            if !vector.registration_accepted && vector.name.starts_with("public-frontmatter-") {continue;}
+            if !vector.registration_accepted && vector.name.starts_with("public-frontmatter-") {
+                continue;
+            }
             let doc = Ydoc::wire();
             doc.apply(&vector.bytes).unwrap();
             let actual = doc.project(ContentKind::Richdoc).unwrap().content;
-            if actual != vector.markdown { mismatches.push(format!("{}: actual={actual:?}; expected={:?}",vector.name,vector.markdown)); }
+            if actual != vector.markdown {
+                mismatches.push(format!(
+                    "{}: actual={actual:?}; expected={:?}",
+                    vector.name, vector.markdown
+                ));
+            }
             if vector.name == "negative-zero" {
-                assert_eq!(doc.encode_full_state(),vector.bytes,"Yrs emits the exact bytes that the TypeScript fixture decodes as negative zero");
-                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/live-bootstrap-negative-zero-yrs.json");
+                assert_eq!(
+                    doc.encode_full_state(),
+                    vector.bytes,
+                    "Yrs emits the exact bytes that the TypeScript fixture decodes as negative zero"
+                );
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/live-bootstrap-negative-zero-yrs.json");
                 if std::env::var("DOHC_WRITE_BOOTSTRAP_VECTORS").as_deref() == Ok("1") {
-                    std::fs::write(&path,serde_json::to_string(&doc.encode_full_state()).unwrap()+"\n").unwrap();
+                    std::fs::write(
+                        &path,
+                        serde_json::to_string(&doc.encode_full_state()).unwrap() + "\n",
+                    )
+                    .unwrap();
                 }
-                let exported: Vec<u8> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-                assert_eq!(doc.encode_full_state(),exported,"committed Rust re-encoding consumed by TypeScript");
+                let exported: Vec<u8> =
+                    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                assert_eq!(
+                    doc.encode_full_state(),
+                    exported,
+                    "committed Rust re-encoding consumed by TypeScript"
+                );
             }
         }
-        assert!(mismatches.is_empty(),"{}",mismatches.join("\n"));
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
     }
     #[test]
     fn admitted_baselines_commit_atomically_and_replay_after_reopen() {
@@ -377,10 +398,7 @@ mod tests {
             assert_eq!(counts(&store), (1, 1, 1, 1));
             let loaded = store
                 .read_with(|conn| {
-                    durable::load_doc_from_connection(
-                        conn,
-                        &DocKey::new("workspace", "main", "object").unwrap(),
-                    )
+                    durable::load_doc_in(conn, &DocKey::new("workspace", "main", "object").unwrap())
                 })
                 .unwrap();
             assert_eq!(
@@ -388,7 +406,11 @@ mod tests {
                 vector.markdown
             );
             if vector.name == "negative-zero" {
-                assert_eq!(loaded.encode_full_state(),vector.bytes,"persisted reopen preserves the signed-zero wire value");
+                assert_eq!(
+                    loaded.encode_full_state(),
+                    vector.bytes,
+                    "persisted reopen preserves the signed-zero wire value"
+                );
             }
             drop(owner);
         }
@@ -499,13 +521,12 @@ mod tests {
         store
             .write_with(&NoFaults, |tx| {
                 tx.execute("DELETE FROM ydoc_snapshots", []).unwrap();
-                assert!(
-                    tx.execute(
+                assert!(tx
+                    .execute(
                         "DELETE FROM binary_blobs WHERE sha256=?1",
                         [hex_sha256(&vector.bytes)]
                     )
-                    .is_err()
-                );
+                    .is_err());
                 tx.execute(
                     "DELETE FROM versioned_workspaces WHERE workspace_id='workspace'",
                     [],

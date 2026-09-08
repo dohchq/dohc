@@ -116,7 +116,7 @@ fn atom(value: &Value, indent: usize) -> ProjectionResult<String> {
                     let mut text = ryu_js::Buffer::new().format_finite(value).to_owned();
                     if let Some(index) = text.find('e') {
                         if !text[..index].contains('.') {
-                            text.insert_str(index, ".");
+                            text.insert(index, '.');
                         }
                     }
                     if value.fract() == 0.0
@@ -180,8 +180,8 @@ fn scalar(value: &str, indent: usize, key: bool) -> ProjectionResult<String> {
     // The domain parser retains non-finite floats as strings. YAML still resolves
     // these tokens implicitly, so the presenter must quote their string values.
     let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
-    plain &= !matches!(unsigned, ".inf" | ".Inf" | ".INF")
-        && !matches!(value, ".nan" | ".NaN" | ".NAN");
+    plain &=
+        !matches!(unsigned, ".inf" | ".Inf" | ".INF") && !matches!(value, ".nan" | ".NaN" | ".NAN");
     for marker in ["---", "..."] {
         if let Some(rest) = value.strip_prefix(marker) {
             plain &= !rest.is_empty() && !rest.starts_with([' ', '\t', '\r', '\n']);
