@@ -87,10 +87,11 @@ async function initialize(canvas: OffscreenCanvas, pixelRatio: number, studioUrl
       width = view.width; height = view.height;
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
+      const halfFov = THREE.MathUtils.degToRad(33 / 2);
+      // Keep the square preview's perspective and object-fit: contain framing.
+      camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(halfFov) / Math.min(1, camera.aspect)));
       camera.updateProjectionMatrix();
-      const halfFov = THREE.MathUtils.degToRad(camera.fov / 2);
-      const limitingFov = Math.min(halfFov, Math.atan(Math.tan(halfFov) * camera.aspect));
-      distance = radius / Math.sin(limitingFov) * .83;
+      distance = radius / Math.sin(halfFov) * .83;
     }
     camera.position.setFromSphericalCoords(distance, view.phi, view.theta).add(center);
     camera.lookAt(center);
