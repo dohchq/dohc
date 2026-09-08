@@ -276,6 +276,31 @@ describe("outbound backpressure", () => {
 });
 
 describe("private admitted-update upload", () => {
+  it.each(["local chunk", "local blob budget", "negotiated chunk"])("refuses a zero %s before writing an upload", async mode => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, {
+      privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 },
+      ...(mode === "local chunk" ? {maxBlobChunkBytes:0} : mode === "local blob budget" ? {maxBlobBytes:0} : {}),
+    });
+    peer.send(helloAck({...LIMITS,maxBlobChunkBytes:mode === "negotiated chunk" ? 0 : LIMITS.maxBlobChunkBytes}));
+    await transport.ready();
+    const bytes = new Uint8Array([0, 0]);
+    const accepted = parseRelayAcceptedLiveUpdate({
+      receipt: { deliveryId: "delivery", updateDigest: createHash("sha256").update(bytes).digest("hex"), journalCursor: 1, acceptingHostEpoch: 1 },
+      binding: { workspaceId: "workspace", mainVersionId: "main", objectId: "one", lineageClaimId: "a".repeat(64), currentPath: "one.md", selectorPaths: ["one.md"], restoreFenceGeneration: 0 },
+      authority: { principalKind: "owner", principalId: "owner", grantId: null, grantGeneration: null }, receivedAtMs: 0,
+    });
+    peer.onBlobChunk = () => { transport.close(); throw new Error("A refused upload wrote a chunk."); };
+    try {
+      for (const id of [1,2]) await expect(transport.sendLiveApplication(
+        {id,workspace:"ws-0000000000000001",registrationId:1,deadlineMs:30_000},
+        {metadata:{accepted,firstSeen:[]},updateBytes:bytes},
+      )).rejects.toThrow("require a positive blob chunk limit");
+      expect(peer.received.filter(envelope=>envelope.type === "request" || envelope.type === "blobStart")).toEqual([]);
+      peer.onEnvelope = envelope => { if(envelope.type === "request")peer.send({type:"response",id:envelope.id,result:{}}); };
+      await expect(transport.sendRequest(request(3,"after.refusal"))).resolves.toMatchObject({result:{}});
+    } finally { transport.close(); }
+  });
   it.each(["busy", "deadline", "abort", "abort-without-reply"])("keeps the connection after a fully drained upload reaches %s", async mode => {
     const peer = new FakePeerConnection();
     const transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });

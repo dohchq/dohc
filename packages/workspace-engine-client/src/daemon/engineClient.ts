@@ -842,6 +842,9 @@ export class EngineClient implements EngineTransport {
     }
     if (signal?.aborted) throw signal.reason;
     const byteLength = event.updateBytes.byteLength;
+    if (this.maxBlobChunkBytes === 0) {
+      throw new TypeError("Private live application uploads require a positive blob chunk limit.");
+    }
     const ranges = event.metadata.firstSeen;
     if (byteLength < 2 || byteLength > MAX_LIVE_UPDATE_BYTES || ranges.length > Math.floor((byteLength - 2) / 5)) {
       throw new TypeError("Invalid live application attachment bounds.");
