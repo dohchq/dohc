@@ -791,7 +791,6 @@ impl Ydoc {
         &self,
         projection_node_budget: usize,
     ) -> Result<String, CollabError> {
-        let mut out = ProjectionBuffer::new();
         // Acquire both roots before opening the read txn: yrs `get_or_insert_*`
         // takes the store lock, so calling one while a transaction is live
         // deadlocks (spike harness note).
@@ -823,15 +822,12 @@ impl Ydoc {
                     )?,
                 );
             }
-            out.push_str("---\n")?;
             let mut ordered: Vec<_> = entries.iter().collect();
             ordered
                 .sort_by(|(left, _), (right, _)| frontmatter_yaml::compare_keys(left, right, true));
             for (k, v) in ordered {
                 frontmatter_yaml.push_str(&project_frontmatter(k, v)?)?;
             }
-            out.push_str(&frontmatter_yaml.value)?;
-            out.push_str("---")?;
         }
         let children: Vec<MarkdownNode> = body
             .children(&txn)
@@ -861,7 +857,11 @@ impl Ydoc {
                 return Ok(preserved.into_string());
             }
         }
+        let mut out = ProjectionBuffer::new();
         if has_frontmatter {
+            out.push_str("---\n")?;
+            out.push_str(&frontmatter_yaml.value)?;
+            out.push_str("---")?;
             out.push_str(if body_markdown.starts_with('\n') {
                 "\n"
             } else {

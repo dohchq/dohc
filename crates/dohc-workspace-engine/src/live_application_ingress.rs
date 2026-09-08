@@ -402,10 +402,11 @@ impl LiveApplicationIngress {
                     let end = u32::from_le_bytes(raw[12..16].try_into().expect("four bytes"));
                     if client > MAX_WIRE_INTEGER
                         || start >= end
-                        || upload
-                            .first_seen
-                            .last()
-                            .is_some_and(|previous| previous.client_id >= client as i64)
+                        || upload.first_seen.last().is_some_and(|previous| {
+                            previous.client_id > client as i64
+                                || (previous.client_id == client as i64
+                                    && previous.end_clock >= i64::from(start))
+                        })
                     {
                         return Err(invalid("invalid-live-range"));
                     }
@@ -626,6 +627,63 @@ pub(crate) mod tests {
                 "accepted": { "receipt": { "deliveryId": "delivery", "updateDigest": hex_sha256(bytes), "journalCursor": 1, "acceptingHostEpoch": 1 }, "binding": binding, "authority": { "principalKind": "owner", "principalId": "owner", "grantId": null, "grantGeneration": null }, "receivedAtMs": 0 },
                 "registrationId": registration, "rangeCount": ranges.len()/16, "rangeStreamId": 2, "rangeDigest": hex_sha256(ranges), "updateStreamId": 1, "updateByteLength": bytes.len(),
             }),
+        }
+    }
+
+    #[tokio::test]
+    async fn packed_ranges_preserve_disjoint_spans_and_refuse_noncanonical_order() {
+        let (_scratch, service, owner, workspace, registration, binding) = fixture().await;
+        let bytes = Ydoc::wire().plaintext_insert(0, "abcdefghij");
+        for (spans, allowed) in [
+            ([(7_u64, 0_u32, 3_u32), (7, 5, 10)], true),
+            ([(7, 0, 3), (7, 3, 10)], false),
+            ([(7, 0, 6), (7, 5, 10)], false),
+            ([(7, 0, 3), (6, 5, 10)], false),
+        ] {
+            let ranges: Vec<u8> = spans
+                .iter()
+                .flat_map(|(client, start, end)| {
+                    let mut packed = client.to_le_bytes().to_vec();
+                    packed.extend(start.to_le_bytes());
+                    packed.extend(end.to_le_bytes());
+                    packed
+                })
+                .collect();
+            let mut ingress = LiveApplicationIngress::new(service.clone(), config()).unwrap();
+            ingress
+                .begin(
+                    request(&workspace, registration, &binding, &bytes, &ranges),
+                    &owner.handle(),
+                )
+                .unwrap();
+            for (stream_id, payload) in [(1, &bytes), (2, &ranges)] {
+                ingress
+                    .start(BlobStart {
+                        request_id: 3,
+                        stream_id,
+                        total_bytes: Some(payload.len() as u64),
+                        sha256: Some(hex_sha256(payload)),
+                    })
+                    .unwrap();
+            }
+            assert!(ingress.chunk(1, true, &bytes).unwrap().is_none());
+            let decoded = ingress.chunk(2, true, &ranges);
+            if allowed {
+                let (_, input) = decoded.unwrap().unwrap();
+                let LiveApplicationOperation::Apply(event) = input.operation else {
+                    panic!("expected application");
+                };
+                assert_eq!(
+                    event.metadata.first_seen,
+                    spans.map(|(client, start, end)| LiveUpdateStructRange {
+                        client_id: client as i64,
+                        start_clock: i64::from(start),
+                        end_clock: i64::from(end)
+                    })
+                );
+            } else {
+                assert!(decoded.is_err());
+            }
         }
     }
 

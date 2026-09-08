@@ -907,11 +907,14 @@ export class EngineClient implements EngineTransport {
           ranges.length * PACKED_LIVE_RANGE_BYTES,
         );
         let previous = -1;
+        let previousEnd = 0;
         for (let index = 0; index < ranges.length; index++) {
           const range = ranges[index]!;
           if (
             !Number.isSafeInteger(range.clientId) ||
-            range.clientId <= previous ||
+            range.clientId < 0 ||
+            range.clientId < previous ||
+            (range.clientId === previous && range.startClock <= previousEnd) ||
             !Number.isInteger(range.startClock) ||
             range.startClock < 0 ||
             !Number.isInteger(range.endClock) ||
@@ -921,6 +924,7 @@ export class EngineClient implements EngineTransport {
             throw new TypeError("Invalid live application range.");
           }
           previous = range.clientId;
+          previousEnd = range.endClock;
           const offset = index * PACKED_LIVE_RANGE_BYTES;
           packed.writeBigUInt64LE(BigInt(range.clientId), offset);
           packed.writeUInt32LE(range.startClock, offset + 8);
