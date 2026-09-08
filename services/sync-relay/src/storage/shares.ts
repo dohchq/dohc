@@ -325,14 +325,20 @@ export function retuneShareGrant(storage: StorageContext, input: {
     });
   }
 
-export function revokeShareGrant(storage: StorageContext, input: {
+type RevokeShareGrantInput = {
     shareId: string;
     grantId: string;
     revokedAtMs: number;
     expectedDependentGrantIds?: readonly string[];
     guard?: () => void;
-  }): LinkGrantTransitionResult {
-    return storage.tx(() => {
+  };
+
+export function revokeShareGrant(storage: StorageContext, input: RevokeShareGrantInput): LinkGrantTransitionResult {
+    return storage.tx(() => revokeShareGrantInTransaction(storage, input));
+  }
+
+// The caller owns the synchronous relay transaction.
+export function revokeShareGrantInTransaction(storage: StorageContext, input: RevokeShareGrantInput): LinkGrantTransitionResult {
       input.guard?.();
       const grant = storage.getShareGrant(input.grantId);
       if (
@@ -368,7 +374,6 @@ export function revokeShareGrant(storage: StorageContext, input: {
           .run(revokedAtMs, grant.grantId);
       }
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
-    });
   }
 
 export function promoteShareGrant(storage: StorageContext, input: {
