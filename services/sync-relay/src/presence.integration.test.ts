@@ -95,6 +95,7 @@ async function spawnRelay(dbPath: string): Promise<string> {
     });
     child.on("exit", (code) => {
       clearTimeout(timeout);
+      if (code !== null && code !== 0) console.error(`Relay child exited with ${code}:\n${stderr}`);
       reject(new Error(`relay exited before listening: ${code}\n${stdout}\n${stderr}`));
     });
   });

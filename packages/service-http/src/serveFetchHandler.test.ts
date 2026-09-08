@@ -42,6 +42,29 @@ function firstChunk(response: IncomingMessage): Promise<Buffer> {
 }
 
 describe("serveFetchHandler", () => {
+  it("disposes an errored response returned after its client disconnected", async () => {
+    let entered!: () => void, returned!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const completed = new Promise<void>(resolve => { returned = resolve; });
+    const { port } = await serve({ handler: async request => {
+      if (new URL(request.url).pathname === "/health") return Response.json({ ok: true });
+      await new Promise<void>(resolve => {
+        request.signal.addEventListener("abort", () => resolve(), { once: true });
+        entered();
+      });
+      const response = new Response(new ReadableStream({ start(controller) { controller.error(new Error("retired response")); } }));
+      returned();
+      return response;
+    } });
+    const request = httpRequest(`http://127.0.0.1:${port}/park`);
+    request.on("error", () => {});
+    request.end();
+    await started;
+    request.destroy();
+    await completed;
+    expect(await (await fetch(`http://127.0.0.1:${port}/health`)).json()).toEqual({ ok: true });
+  });
+
   it("passes raw request and response bytes through untouched", async () => {
     const bytes = Uint8Array.from([0, 1, 2, 253, 254, 255, 128, 200]);
     let received: Uint8Array | undefined;

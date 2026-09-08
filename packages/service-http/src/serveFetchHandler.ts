@@ -86,7 +86,7 @@ async function writeResponse(
   closeAfter?: IncomingMessage,
 ): Promise<void> {
   if (outgoing.destroyed) {
-    void response.body?.cancel();
+    await response.body?.cancel().catch(() => undefined);
     return;
   }
   outgoing.statusCode = response.status;
