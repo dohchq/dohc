@@ -14,16 +14,15 @@ export class BoundedSendQueue {
       options.maxSegmentBytes <= 0 || options.maxBytes < options.maxSegmentBytes + 16) throw new TypeError("Invalid send queue limits.");
   }
 
-  write(bytes: Buffer, binary: boolean): boolean {
+  write(bytes: Buffer, binary: boolean): void {
     const retained = bytes.length + 16;
     if (this.closed || !bytes.length || (!binary && bytes.length > this.options.maxSegmentBytes) ||
       retained > this.options.maxBytes - this.pending) {
-      this.close(); this.options.onError(); return false;
+      this.close(); this.options.onError(); return;
     }
     this.pending += retained;
     this.queue.push({ bytes: Buffer.from(bytes), binary, offset: 0 });
     this.pump();
-    return false;
   }
 
   close(): void { this.closed = true; this.queue = []; this.pending = 0; }

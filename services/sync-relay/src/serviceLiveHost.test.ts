@@ -111,3 +111,20 @@ it("preserves a replacement connection when an older host closes", async () => {
   await host.close();
   expect(f.storage.getLiveHostControl()).toMatchObject({ registeredConnectionId: "replacement", admissionState: "open" });
 });
+
+it("rejects settlement without an application reserve before spawning", async () => {
+  const f = await fixture();
+  f.config.ingress.applicationWorkingReserveBytes = 0;
+  const settlement = { maxApplicationsPerSettlement: 8 };
+  await writeFile(f.configPath, JSON.stringify({ ...f.config, settlement }));
+  await expect(startServiceLiveHost(f)).rejects.toThrow("Settlement requires a positive applicationWorkingReserveBytes limit.");
+  expect(spawn).not.toHaveBeenCalled();
+  spawn.mockImplementation(async options => clientFrom(options).client);
+  await f.save();
+  const host = await startServiceLiveHost(f);
+  await host.close();
+  f.config.ingress.applicationWorkingReserveBytes = 1;
+  await writeFile(f.configPath, JSON.stringify({ ...f.config, settlement }));
+  const withSettlement = await startServiceLiveHost(f);
+  await withSettlement.close();
+});

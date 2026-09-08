@@ -29,7 +29,7 @@ export class DeviceCreditSender {
         send();
       }, onDrain: options.onDrain, onError: () => this.fail() });
   }
-  write(bytes: Buffer): boolean { return this.queue.write(bytes, true); }
+  write(bytes: Buffer): void { this.queue.write(bytes, true); }
   acknowledge(total: number): void {
     if (this.closed) return;
     if (!Number.isSafeInteger(total) || total <= this.acknowledged || total > this.sent) { this.fail(); return; }

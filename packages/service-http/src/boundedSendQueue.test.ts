@@ -13,7 +13,7 @@ describe("bounded transport send queue", () => {
   it("segments byte streams without changing order and drains only after callbacks", () => {
     const run = fixture();
     const source = Buffer.from("0123456789abcdefghi");
-    expect(run.queue.write(source, true)).toBe(false);
+    run.queue.write(source, true);
     source.fill(0);
     expect(run.sent).toHaveLength(1);
     run.sent[0]!.callback();

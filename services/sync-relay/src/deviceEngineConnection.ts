@@ -22,7 +22,11 @@ export class DeviceEngineConnection implements EngineClientConnection {
   credit(total: number): void { this.queue.acknowledge(total); }
   acknowledge(total: number): void { this.writer.acknowledge(total); }
   receive(bytes: Buffer): void { if (!this.closed) this.events.emit("data", bytes); }
-  write(bytes: Buffer): boolean { return this.queue.write(bytes); }
+  write(bytes: Buffer): boolean {
+    this.queue.write(bytes);
+    // EngineClient waits for the queue's drain event before its next frame.
+    return false;
+  }
   close(): void {
     if (this.closed) return;
     this.closed = true; this.queue.close(); this.writer.close(); this.events.emit("close"); this.stop();

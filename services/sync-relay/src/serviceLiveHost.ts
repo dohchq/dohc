@@ -52,11 +52,14 @@ function readServiceLiveHostConfig(configPath: string): ServiceLiveHostConfig {
     new Set(workspaces.map(row => process.platform === "win32" ? row.root.toLowerCase() : row.root)).size !== workspaces.length) throw new TypeError("Duplicate service workspace.");
   const ingress = record(value.ingress, ["aggregateBytes", "applicationWorkingReserveBytes", "maxUploads", "uploadDeadlineMs"]);
   const client = record(value.client, ["aggregateBytes", "maxUploads", "connectTimeoutMs", "requestDeadlineMs"]);
+  const settlement = parseLiveSettlementConfig(value.settlement);
+  const applicationWorkingReserveBytes = integer(ingress.applicationWorkingReserveBytes, 0);
+  if (settlement && applicationWorkingReserveBytes === 0) throw new TypeError("Settlement requires a positive applicationWorkingReserveBytes limit.");
   return Object.freeze({ version: 1, engineExecutable: path(value.engineExecutable, false),
     hostId: parseLiveUpdateIdentifier(value.hostId, "host ID"), instanceId: parseLiveUpdateIdentifier(value.instanceId, "instance ID"),
     workspaces: Object.freeze(workspaces),
-    settlement: parseLiveSettlementConfig(value.settlement),
-    ingress: Object.freeze({ aggregateBytes: integer(ingress.aggregateBytes), applicationWorkingReserveBytes: integer(ingress.applicationWorkingReserveBytes, 0),
+    settlement,
+    ingress: Object.freeze({ aggregateBytes: integer(ingress.aggregateBytes), applicationWorkingReserveBytes,
       maxUploads: integer(ingress.maxUploads), uploadDeadlineMs: integer(ingress.uploadDeadlineMs, 1, 2_147_483_647) }),
     client: Object.freeze({ aggregateBytes: integer(client.aggregateBytes), maxUploads: integer(client.maxUploads),
       connectTimeoutMs: integer(client.connectTimeoutMs, 1, 2_147_483_647), requestDeadlineMs: integer(client.requestDeadlineMs, 1, 2_147_483_647) }),

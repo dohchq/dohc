@@ -35,12 +35,15 @@ export function readDeviceLiveHostConfig(file: string, limits: DeviceControlLimi
   if (new Set(workspaces.map(item => item.workspaceId)).size !== workspaces.length ||
     new Set(workspaces.map(item => process.platform === "win32" ? item.root.toLowerCase() : item.root)).size !== workspaces.length) throw new TypeError("Duplicate device workspace.");
   const ingress = configRecord(row.ingress, ["aggregateBytes", "applicationWorkingReserveBytes", "maxUploads", "uploadDeadlineMs"]);
+  const settlement = parseLiveSettlementConfig(row.settlement);
+  const applicationWorkingReserveBytes = integer(ingress.applicationWorkingReserveBytes, 0);
+  if (settlement && applicationWorkingReserveBytes === 0) throw new TypeError("Settlement requires a positive applicationWorkingReserveBytes limit.");
   return Object.freeze({ version: 1 as const, engineExecutable: path(row.engineExecutable, false),
-    settlement: parseLiveSettlementConfig(row.settlement),
+    settlement,
     shutdownGraceMs: integer(row.shutdownGraceMs),
     hostId: parseHostControlIdentifier(row.hostId), hostEpoch: parseHostEpoch(row.hostEpoch), instanceId: parseHostControlIdentifier(row.instanceId),
     workspaces: Object.freeze(workspaces), maxQueuedBytes: integer(row.maxQueuedBytes, Math.max(limits.maxPayloadBytes + 16, 65_536 + 16)),
-    ingress: Object.freeze({ aggregateBytes: integer(ingress.aggregateBytes), applicationWorkingReserveBytes: integer(ingress.applicationWorkingReserveBytes, 0),
+    ingress: Object.freeze({ aggregateBytes: integer(ingress.aggregateBytes), applicationWorkingReserveBytes,
       maxUploads: integer(ingress.maxUploads), uploadDeadlineMs: integer(ingress.uploadDeadlineMs) }) });
 }
 export type DeviceLiveHostConfig = ReturnType<typeof readDeviceLiveHostConfig>;

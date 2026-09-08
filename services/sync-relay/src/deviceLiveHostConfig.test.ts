@@ -46,6 +46,15 @@ it("requires explicit relay workspace routing and compatible upload and frame bu
   }
 });
 
+it("requires a positive application reserve only when settlement is configured", () => {
+  const run = fixture();
+  const value = { ...run.value, ingress: { ...run.value.ingress, applicationWorkingReserveBytes: 0 } };
+  expect(readDeviceLiveHostConfig(run.write(value), limits).ingress.applicationWorkingReserveBytes).toBe(0);
+  const settlement = { maxApplicationsPerSettlement: 8 };
+  expect(() => readDeviceLiveHostConfig(run.write({ ...value, settlement }), limits)).toThrow("Settlement requires a positive applicationWorkingReserveBytes limit.");
+  expect(readDeviceLiveHostConfig(run.write({ ...run.value, settlement }), limits).settlement).toEqual(settlement);
+});
+
 it("rejects relay queues smaller than an advertised payload before connecting", () => {
   const run = fixture();
   const wide = { ...limits, maxPayloadBytes: 4_194_304, maxPendingBytes: 4_194_320 };
