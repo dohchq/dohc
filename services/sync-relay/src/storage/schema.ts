@@ -614,6 +614,237 @@ function initializeLiveDocumentAuthoritySchema(db: SqliteDb): void {
     .run(LIVE_DOCUMENT_AUTHORITY_MIGRATION_ID, Date.now());
 }
 
+const LIVE_JOURNAL_MARKER = "live-update-journal-v1";
+export const LIVE_JOURNAL_TABLE = "sync_relay_live_update_journal";
+export const LIVE_JOURNAL_PROVENANCE = "sync_relay_live_update_struct_provenance";
+const LIVE_JOURNAL_SCHEMA = {
+  sync_relay_live_update_journal: `
+CREATE TABLE sync_relay_live_update_journal (
+  journal_cursor INTEGER PRIMARY KEY AUTOINCREMENT
+    CHECK (journal_cursor BETWEEN 1 AND 9007199254740991),
+  delivery_id TEXT NOT NULL UNIQUE
+    CHECK (length(CAST(delivery_id AS BLOB)) BETWEEN 1 AND 512),
+  update_digest TEXT NOT NULL
+    CHECK (
+      length(update_digest) = 64 AND
+      update_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+  workspace_id TEXT NOT NULL
+    CHECK (length(CAST(workspace_id AS BLOB)) BETWEEN 1 AND 512),
+  main_version_id TEXT NOT NULL
+    CHECK (main_version_id = 'main'),
+  object_id TEXT NOT NULL
+    CHECK (length(CAST(object_id AS BLOB)) BETWEEN 1 AND 512),
+  lineage_claim_id TEXT NOT NULL
+    CHECK (
+      length(lineage_claim_id) = 64 AND
+      lineage_claim_id NOT GLOB '*[^0-9a-f]*'
+    ),
+  current_path TEXT NOT NULL
+    CHECK (length(CAST(current_path AS BLOB)) BETWEEN 1 AND 1024),
+  selector_paths_json TEXT NOT NULL
+    CHECK (length(CAST(selector_paths_json AS BLOB)) BETWEEN 5 AND 205101),
+  restore_fence_generation INTEGER NOT NULL
+    CHECK (restore_fence_generation BETWEEN 0 AND 9007199254740991),
+  principal_kind TEXT NOT NULL
+    CHECK (principal_kind IN ('owner', 'named', 'link')),
+  principal_id TEXT NOT NULL
+    CHECK (length(CAST(principal_id AS BLOB)) BETWEEN 1 AND 512),
+  grant_id TEXT
+    CHECK (
+      grant_id IS NULL OR
+      length(CAST(grant_id AS BLOB)) BETWEEN 1 AND 512
+    ),
+  grant_generation INTEGER
+    CHECK (
+      grant_generation IS NULL OR
+      grant_generation BETWEEN 1 AND 9007199254740991
+    ),
+  accepting_host_epoch INTEGER NOT NULL
+    CHECK (accepting_host_epoch BETWEEN 1 AND 9007199254740991),
+  received_at_ms INTEGER NOT NULL
+    CHECK (received_at_ms BETWEEN 0 AND 9007199254740991),
+  update_bytes BLOB NOT NULL
+    CHECK (length(update_bytes) BETWEEN 1 AND 20971520),
+  validation_checkpoint_sha256 TEXT
+    CHECK (
+      validation_checkpoint_sha256 IS NULL OR (
+        length(validation_checkpoint_sha256) = 64 AND
+        validation_checkpoint_sha256 NOT GLOB '*[^0-9a-f]*'
+      )
+    ),
+  validation_checkpoint_bytes BLOB
+    CHECK (
+      validation_checkpoint_bytes IS NULL OR
+      length(validation_checkpoint_bytes) BETWEEN 1 AND 20971520
+    ),
+  UNIQUE (
+    journal_cursor,
+    workspace_id, main_version_id, object_id, lineage_claim_id
+  ),
+  CHECK (
+    (principal_kind = 'owner' AND grant_id IS NULL AND grant_generation IS NULL)
+    OR
+    (principal_kind IN ('named', 'link') AND grant_id IS NOT NULL AND grant_generation IS NOT NULL)
+  ),
+  CHECK (
+    (validation_checkpoint_sha256 IS NULL AND validation_checkpoint_bytes IS NULL)
+    OR
+    (validation_checkpoint_sha256 IS NOT NULL AND validation_checkpoint_bytes IS NOT NULL)
+  ),
+  FOREIGN KEY (workspace_id)
+    REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+`,
+  idx_sync_relay_live_update_journal_document: `
+CREATE INDEX idx_sync_relay_live_update_journal_document
+  ON sync_relay_live_update_journal(
+    workspace_id, main_version_id, object_id, lineage_claim_id, journal_cursor
+  );
+`,
+  idx_sync_relay_live_update_journal_checkpoint: `
+CREATE INDEX idx_sync_relay_live_update_journal_checkpoint
+  ON sync_relay_live_update_journal(
+    workspace_id, main_version_id, object_id, lineage_claim_id, journal_cursor
+  ) WHERE validation_checkpoint_bytes IS NOT NULL;
+`,
+  sync_relay_live_update_struct_provenance: `
+CREATE TABLE sync_relay_live_update_struct_provenance (
+  workspace_id TEXT NOT NULL,
+  main_version_id TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  lineage_claim_id TEXT NOT NULL,
+  client_id INTEGER NOT NULL
+    CHECK (client_id BETWEEN 0 AND 9007199254740991),
+  start_clock INTEGER NOT NULL
+    CHECK (start_clock BETWEEN 0 AND 4294967294),
+  end_clock INTEGER NOT NULL
+    CHECK (end_clock BETWEEN 1 AND 4294967295 AND start_clock < end_clock),
+  journal_cursor INTEGER NOT NULL
+    CHECK (journal_cursor BETWEEN 1 AND 9007199254740991),
+  PRIMARY KEY (
+    workspace_id, main_version_id, object_id, lineage_claim_id,
+    client_id, start_clock
+  ),
+  FOREIGN KEY (
+    journal_cursor,
+    workspace_id, main_version_id, object_id, lineage_claim_id
+  ) REFERENCES sync_relay_live_update_journal(
+    journal_cursor,
+    workspace_id, main_version_id, object_id, lineage_claim_id
+  ) ON DELETE CASCADE
+) STRICT;
+`,
+  idx_sync_relay_live_update_struct_provenance_coverage: `
+CREATE INDEX idx_sync_relay_live_update_struct_provenance_coverage
+  ON sync_relay_live_update_struct_provenance(
+    workspace_id, main_version_id, object_id, lineage_claim_id,
+    client_id, start_clock, end_clock, journal_cursor
+  );
+`,
+  idx_sync_relay_live_update_struct_provenance_journal: `
+CREATE INDEX idx_sync_relay_live_update_struct_provenance_journal
+  ON sync_relay_live_update_struct_provenance(
+    journal_cursor, client_id, start_clock
+  );
+`,
+} as const;
+const LIVE_JOURNAL_SHAPE = {
+  sync_relay_live_update_journal: {
+    columns: [
+      [0,"journal_cursor","INTEGER",0,null,1],
+      [1,"delivery_id","TEXT",1,null,0],
+      [2,"update_digest","TEXT",1,null,0],
+      [3,"workspace_id","TEXT",1,null,0],
+      [4,"main_version_id","TEXT",1,null,0],
+      [5,"object_id","TEXT",1,null,0],
+      [6,"lineage_claim_id","TEXT",1,null,0],
+      [7,"current_path","TEXT",1,null,0],
+      [8,"selector_paths_json","TEXT",1,null,0],
+      [9,"restore_fence_generation","INTEGER",1,null,0],
+      [10,"principal_kind","TEXT",1,null,0],
+      [11,"principal_id","TEXT",1,null,0],
+      [12,"grant_id","TEXT",0,null,0],
+      [13,"grant_generation","INTEGER",0,null,0],
+      [14,"accepting_host_epoch","INTEGER",1,null,0],
+      [15,"received_at_ms","INTEGER",1,null,0],
+      [16,"update_bytes","BLOB",1,null,0],
+      [17,"validation_checkpoint_sha256","TEXT",0,null,0],
+      [18,"validation_checkpoint_bytes","BLOB",0,null,0],
+    ],
+    foreignKeys: [
+      [0,0,"sync_relay_workspaces","workspace_id","workspace_id","NO ACTION","CASCADE","NONE"],
+    ],
+    indexes: [
+      ["idx_sync_relay_live_update_journal_checkpoint",0,"c",1],
+      ["idx_sync_relay_live_update_journal_document",0,"c",0],
+      ["sqlite_autoindex_sync_relay_live_update_journal_1",1,"u",0],
+      ["sqlite_autoindex_sync_relay_live_update_journal_2",1,"u",0],
+    ],
+    indexColumns: {
+      idx_sync_relay_live_update_journal_checkpoint: [[0,3,"workspace_id"],[1,4,"main_version_id"],[2,5,"object_id"],[3,6,"lineage_claim_id"],[4,0,"journal_cursor"]],
+      idx_sync_relay_live_update_journal_document: [[0,3,"workspace_id"],[1,4,"main_version_id"],[2,5,"object_id"],[3,6,"lineage_claim_id"],[4,0,"journal_cursor"]],
+      sqlite_autoindex_sync_relay_live_update_journal_1: [[0,1,"delivery_id"]],
+      sqlite_autoindex_sync_relay_live_update_journal_2: [[0,0,"journal_cursor"],[1,3,"workspace_id"],[2,4,"main_version_id"],[3,5,"object_id"],[4,6,"lineage_claim_id"]],
+    },
+  },
+  sync_relay_live_update_struct_provenance: {
+    columns: [
+      [0,"workspace_id","TEXT",1,null,1],
+      [1,"main_version_id","TEXT",1,null,2],
+      [2,"object_id","TEXT",1,null,3],
+      [3,"lineage_claim_id","TEXT",1,null,4],
+      [4,"client_id","INTEGER",1,null,5],
+      [5,"start_clock","INTEGER",1,null,6],
+      [6,"end_clock","INTEGER",1,null,0],
+      [7,"journal_cursor","INTEGER",1,null,0],
+    ],
+    foreignKeys: [
+      [0,0,"sync_relay_live_update_journal","journal_cursor","journal_cursor","NO ACTION","CASCADE","NONE"],
+      [0,1,"sync_relay_live_update_journal","workspace_id","workspace_id","NO ACTION","CASCADE","NONE"],
+      [0,2,"sync_relay_live_update_journal","main_version_id","main_version_id","NO ACTION","CASCADE","NONE"],
+      [0,3,"sync_relay_live_update_journal","object_id","object_id","NO ACTION","CASCADE","NONE"],
+      [0,4,"sync_relay_live_update_journal","lineage_claim_id","lineage_claim_id","NO ACTION","CASCADE","NONE"],
+    ],
+    indexes: [
+      ["idx_sync_relay_live_update_struct_provenance_coverage",0,"c",0],
+      ["idx_sync_relay_live_update_struct_provenance_journal",0,"c",0],
+      ["sqlite_autoindex_sync_relay_live_update_struct_provenance_1",1,"pk",0],
+    ],
+    indexColumns: {
+      idx_sync_relay_live_update_struct_provenance_coverage: [[0,0,"workspace_id"],[1,1,"main_version_id"],[2,2,"object_id"],[3,3,"lineage_claim_id"],[4,4,"client_id"],[5,5,"start_clock"],[6,6,"end_clock"],[7,7,"journal_cursor"]],
+      idx_sync_relay_live_update_struct_provenance_journal: [[0,7,"journal_cursor"],[1,4,"client_id"],[2,5,"start_clock"]],
+      sqlite_autoindex_sync_relay_live_update_struct_provenance_1: [[0,0,"workspace_id"],[1,1,"main_version_id"],[2,2,"object_id"],[3,3,"lineage_claim_id"],[4,4,"client_id"],[5,5,"start_clock"]],
+    },
+  },
+};
+function assertLiveJournalSchema(db: SqliteDb): void {
+  const same = (actual: unknown, expected: unknown) => { if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("live update journal schema is missing or damaged"); };
+  for (const [name, sql] of Object.entries(LIVE_JOURNAL_SCHEMA)) {
+    const rows = db.prepare("SELECT type,tbl_name,sql FROM sqlite_schema WHERE name=?").all(name);
+    const row = rows[0];
+    same(rows.length, 1);
+    same(row?.type, name.startsWith("idx_") ? "index" : "table");
+    same(row?.tbl_name, name.includes("struct_provenance") ? LIVE_JOURNAL_PROVENANCE : LIVE_JOURNAL_TABLE);
+    same(typeof row?.sql === "string" ? normalizedSchemaSql(row.sql) : null, normalizedSchemaSql(sql));
+  }
+  for (const [table, expected] of Object.entries(LIVE_JOURNAL_SHAPE)) {
+    same(db.prepare(`PRAGMA table_info(${table})`).all().map(r => [r.cid,r.name,r.type,r.notnull,r.dflt_value,r.pk]), expected.columns);
+    same(db.prepare(`PRAGMA foreign_key_list(${table})`).all().map(r => [r.id,r.seq,r.table,r.from,r.to,r.on_update,r.on_delete,r.match]), expected.foreignKeys);
+    same(db.prepare(`PRAGMA index_list(${table})`).all().map(r => [r.name,r.unique,r.origin,r.partial]).sort((a,b) => String(a[0]).localeCompare(String(b[0]))), expected.indexes);
+    for (const [name, columns] of Object.entries(expected.indexColumns)) same(db.prepare(`PRAGMA index_info(${name})`).all().map(r => [r.seqno,r.cid,r.name]), columns);
+  }
+}
+function initializeLiveJournalSchema(db: SqliteDb): void {
+  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(LIVE_JOURNAL_MARKER);
+  if (marked) { assertLiveJournalSchema(db); return; }
+  const existing = db.prepare("SELECT name FROM sqlite_schema WHERE name IN (?,?,?,?,?,?)").all(...Object.keys(LIVE_JOURNAL_SCHEMA));
+  if (existing.length) throw new Error("unmarked live update journal schema already exists");
+  for (const sql of Object.values(LIVE_JOURNAL_SCHEMA)) db.exec(sql);
+  assertLiveJournalSchema(db);
+  db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(LIVE_JOURNAL_MARKER,Date.now());
+}
+
 export function initializeSyncRelaySchema(db: SqliteDb): void {
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -913,6 +1144,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeSessionHostControlSchema(db);
     initializeDeviceHostCredentialSchema(db);
     initializeLiveDocumentAuthoritySchema(db);
+    initializeLiveJournalSchema(db);
     initializeLiveTicketSchema(db);
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
