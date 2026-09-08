@@ -2,6 +2,7 @@ use crate::capture_driver;
 use crate::root_binding;
 use dohc_engine_collab::CollabError;
 use dohc_engine_collab::OwnerOutboxError;
+use dohc_engine_collab::live_update_application::ApplicationError;
 use dohc_engine_domain::DomainError;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
@@ -94,6 +95,10 @@ fn store_busy(error: &RuntimeError) -> bool {
             ))
             | RuntimeError::Domain(DomainError::Storage(StorageError::FileLocked))
             | RuntimeError::Collab(CollabError::Storage(StorageError::FileLocked))
+            | RuntimeError::LiveApplication(ApplicationError::Storage(StorageError::FileLocked))
+            | RuntimeError::LiveApplication(ApplicationError::Collab(CollabError::Storage(
+                StorageError::FileLocked
+            )))
             | RuntimeError::Sync(SyncError::Storage(StorageError::FileLocked))
             | RuntimeError::Search(SearchError::Store(StorageError::FileLocked))
             // The relay route carries it under its own type rather than a
@@ -510,7 +515,7 @@ mod tests {
     }
 
     /// A busy SQLite handle is transient wherever it appears, and it appears
-    /// under seven wrappers. Answering it under one and standing down under the
+    /// through several wrappers. Answering it under one and standing down under the
     /// next would leave the same condition retryable or terminal by accident
     /// of which layer noticed it first.
     ///
@@ -528,6 +533,10 @@ mod tests {
             )),
             RuntimeError::Domain(DomainError::Storage(StorageError::FileLocked)),
             RuntimeError::Collab(CollabError::Storage(StorageError::FileLocked)),
+            RuntimeError::LiveApplication(ApplicationError::Storage(StorageError::FileLocked)),
+            RuntimeError::LiveApplication(ApplicationError::Collab(CollabError::Storage(
+                StorageError::FileLocked,
+            ))),
             RuntimeError::Sync(SyncError::Storage(StorageError::FileLocked)),
             RuntimeError::Search(SearchError::Store(StorageError::FileLocked)),
             // The search index's other carrier: a raw rusqlite failure that

@@ -28,7 +28,7 @@
 
 use crate::cancel::CancelSignal;
 use crate::error::{ErrorCode, WireError};
-use crate::transport::{EngineService, RequestContext, ServiceResponse};
+use crate::transport::{ConnectionHandle, EngineService, RequestContext, ServiceResponse};
 #[cfg(test)]
 use crate::wire::Response;
 use crate::wire::{Request, RequestId};
@@ -125,6 +125,29 @@ impl<S: EngineService + 'static> Supervisor<S> {
     where
         F: FnOnce(&RequestOutcome) + Send + 'static,
     {
+        self.try_submit_input(
+            request,
+            capabilities,
+            max_frame_bytes,
+            None,
+            None,
+            before_cancel_release,
+        )
+    }
+
+    /// Move a service attachment through the same bounded request queue.
+    pub fn try_submit_input<F>(
+        &self,
+        request: Request,
+        capabilities: Arc<[String]>,
+        max_frame_bytes: u32,
+        connection: Option<ConnectionHandle>,
+        input: Option<S::Input>,
+        before_cancel_release: F,
+    ) -> Result<oneshot::Receiver<RequestOutcome>, WireError>
+    where
+        F: FnOnce(&RequestOutcome) + Send + 'static,
+    {
         let cancel = CancelSignal::new();
         {
             let mut cancels = lock(&self.cancels);
@@ -172,6 +195,8 @@ impl<S: EngineService + 'static> Supervisor<S> {
                 deadline,
                 capabilities,
                 max_frame_bytes,
+                connection,
+                input,
             )
             .await;
             before_cancel_release(&outcome);
@@ -198,14 +223,16 @@ impl<S: EngineService + 'static> Supervisor<S> {
 /// Wait for an execution slot, then run. A queued request resolves its own
 /// cancellation or deadline instead of waiting behind in-flight handlers.
 #[allow(clippy::too_many_arguments)]
-async fn acquire_and_run(
+async fn acquire_and_run<S: EngineService>(
     semaphore: Arc<Semaphore>,
-    service: &impl EngineService,
+    service: &S,
     request: &Request,
     cancel: &CancelSignal,
     deadline: Instant,
     capabilities: Arc<[String]>,
     max_frame_bytes: u32,
+    connection: Option<ConnectionHandle>,
+    input: Option<S::Input>,
 ) -> RequestOutcome {
     let _permit = tokio::select! {
         biased;
@@ -230,17 +257,22 @@ async fn acquire_and_run(
         deadline,
         capabilities,
         max_frame_bytes,
+        connection,
+        input,
     )
     .await
 }
 
-async fn run_job(
-    service: &impl EngineService,
+#[allow(clippy::too_many_arguments)]
+async fn run_job<S: EngineService>(
+    service: &S,
     request: &Request,
     cancel: &CancelSignal,
     deadline: Instant,
     capabilities: Arc<[String]>,
     max_frame_bytes: u32,
+    connection: Option<ConnectionHandle>,
+    input: Option<S::Input>,
 ) -> RequestOutcome {
     if cancel.is_cancelled() {
         return Err(WireError::new(
@@ -253,6 +285,7 @@ async fn run_job(
         deadline: Some(deadline.into_std()),
         capabilities,
         max_frame_bytes,
+        connection,
     };
     tokio::select! {
         () = cancel.cancelled() => Err(WireError::new(ErrorCode::Cancelled, "request cancelled")),
@@ -261,7 +294,7 @@ async fn run_job(
             cancel.cancel();
             Err(WireError::new(ErrorCode::DeadlineExceeded, "request deadline elapsed"))
         }
-        outcome = service.call(ctx, request.clone()) => outcome,
+        outcome = service.call_with_input(ctx, request.clone(), input) => outcome,
     }
 }
 
@@ -277,6 +310,101 @@ mod tests {
     use crate::transport::BlobEgress;
     use serde_json::{Value, json};
     use tokio::sync::Notify;
+
+    #[derive(Debug)]
+    struct OwnedInput(Arc<AtomicUsize>);
+
+    impl Drop for OwnedInput {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl crate::transport::OutputGuard for OwnedInput {
+        fn is_current(&self) -> bool {
+            true
+        }
+        fn cancel_signal(&self) -> CancelSignal {
+            CancelSignal::new()
+        }
+    }
+
+    struct InputService {
+        entered: Notify,
+        release: Notify,
+    }
+
+    impl EngineService for InputService {
+        type Input = OwnedInput;
+
+        async fn call(&self, _ctx: RequestContext, request: Request) -> RequestOutcome {
+            Ok(ServiceResponse::response(Response {
+                id: request.id,
+                result: Value::Null,
+            }))
+        }
+
+        async fn call_with_input(
+            &self,
+            _ctx: RequestContext,
+            request: Request,
+            input: Option<Self::Input>,
+        ) -> RequestOutcome {
+            self.entered.notify_one();
+            self.release.notified().await;
+            let mut response = ServiceResponse::response(Response {
+                id: request.id,
+                result: Value::Null,
+            });
+            response.output_guard =
+                input.map(|input| Arc::new(input) as Arc<dyn crate::transport::OutputGuard>);
+            Ok(response)
+        }
+    }
+
+    #[tokio::test]
+    async fn input_is_owned_through_queue_cancellation_and_response_disposal() {
+        let service = Arc::new(InputService {
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        let supervisor = Supervisor::new(config(1, 1), service.clone());
+        let first_drops = Arc::new(AtomicUsize::new(0));
+        let queued_drops = Arc::new(AtomicUsize::new(0));
+        let first = supervisor
+            .try_submit_input(
+                request(1),
+                Arc::from([]),
+                1024,
+                None,
+                Some(OwnedInput(first_drops.clone())),
+                |_| {},
+            )
+            .unwrap();
+        service.entered.notified().await;
+        let queued = supervisor
+            .try_submit_input(
+                request(2),
+                Arc::from([]),
+                1024,
+                None,
+                Some(OwnedInput(queued_drops.clone())),
+                |_| {},
+            )
+            .unwrap();
+        assert_eq!(queued_drops.load(Ordering::SeqCst), 0);
+        assert!(supervisor.cancel(2));
+        assert_eq!(
+            queued.await.unwrap().unwrap_err().code,
+            ErrorCode::Cancelled
+        );
+        assert_eq!(queued_drops.load(Ordering::SeqCst), 1);
+        service.release.notify_one();
+        let response = first.await.unwrap().unwrap();
+        assert_eq!(first_drops.load(Ordering::SeqCst), 0);
+        drop(response);
+        assert_eq!(first_drops.load(Ordering::SeqCst), 1);
+    }
 
     fn request(id: RequestId) -> Request {
         Request {
@@ -305,6 +433,7 @@ mod tests {
     }
 
     impl EngineService for ConcurrencyProbe {
+        type Input = ();
         async fn call(&self, _ctx: RequestContext, request: Request) -> RequestOutcome {
             let now = self.current.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(now, Ordering::SeqCst);
@@ -345,6 +474,7 @@ mod tests {
     }
 
     impl EngineService for Gate {
+        type Input = ();
         async fn call(&self, ctx: RequestContext, request: Request) -> RequestOutcome {
             self.started.notify_one();
             tokio::select! {
@@ -414,8 +544,10 @@ mod tests {
     struct BlobCompletion;
 
     impl EngineService for BlobCompletion {
+        type Input = ();
         async fn call(&self, ctx: RequestContext, request: Request) -> RequestOutcome {
             Ok(ServiceResponse {
+                output_guard: None,
                 response: Response {
                     id: request.id,
                     result: Value::Null,
@@ -512,6 +644,7 @@ mod tests {
     struct Sleeper;
 
     impl EngineService for Sleeper {
+        type Input = ();
         async fn call(&self, _ctx: RequestContext, request: Request) -> RequestOutcome {
             tokio::time::sleep(Duration::from_secs(3600)).await;
             Ok(ServiceResponse::response(Response {

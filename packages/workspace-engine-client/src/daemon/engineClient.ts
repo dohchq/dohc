@@ -4,6 +4,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, type Hash } from "node:crypto";
 import { Duplex } from "node:stream";
 import { TextDecoder } from "node:util";
+import { parseRelayAcceptedLiveUpdate, type AdmittedLiveUpdate } from "@dohc/live-session-contract";
 import type { BlobStart, Envelope, Event, Request, Response, WireError } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 
@@ -36,6 +37,13 @@ const MIN_NEGOTIABLE_MAX_FRAME_BYTES = 64 * 1024;
 const MIN_REQUESTABLE_MAX_FRAME_BYTES = 1024 * 1024;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const ENGINE_AUTH_TOKEN_ENV = "DOHC_ENGINE_AUTH_TOKEN";
+const MAX_LIVE_UPDATE_BYTES = 20 * 1024 * 1024;
+const PACKED_LIVE_RANGE_BYTES = 16;
+
+interface PrivateLiveApplicationConfig {
+  readonly aggregateBytes: number;
+  readonly maxUploads: number;
+}
 
 export const enum FrameType {
   Control = 1,
@@ -549,6 +557,8 @@ export interface EngineClientConnectOptions {
   maxFrameBytes?: number;
   maxBlobChunkBytes?: number;
   maxBlobBytes?: number;
+  /** Explicit private host setup; ordinary clients leave this absent. */
+  privateLiveApplication?: PrivateLiveApplicationConfig;
 }
 
 export interface EngineClientConnection {
@@ -556,9 +566,11 @@ export interface EngineClientConnection {
   onData(handler: (chunk: Buffer | Uint8Array) => void): void;
   onClose(handler: () => void): void;
   onError(handler: (error: unknown) => void): void;
+  onDrain(handler: () => void): void;
   offData(handler: (chunk: Buffer | Uint8Array) => void): void;
   offClose(handler: () => void): void;
   offError(handler: (error: unknown) => void): void;
+  offDrain(handler: () => void): void;
   close(): void;
 }
 
@@ -615,6 +627,12 @@ export class EngineClient implements EngineTransport {
   private connectTimer: ReturnType<typeof setTimeout> | undefined;
   helloAck: HelloAckEnvelope | undefined;
   private inboundFrames = 0;
+  private writeTail: Promise<void> | null = null;
+  private readonly writeWaiters = new Set<(error: unknown) => void>();
+  private readonly liveConfig: PrivateLiveApplicationConfig | undefined;
+  private liveUploadBytes = 0;
+  private liveUploads = 0;
+  private nextLiveStreamId = 1;
 
   constructor(
     private readonly connection: EngineClientConnection,
@@ -623,6 +641,12 @@ export class EngineClient implements EngineTransport {
       connection.close(),
     private readonly termination: Promise<void> = Promise.resolve(),
   ) {
+    this.liveConfig = connectOptions.privateLiveApplication;
+    if (this.liveConfig && (
+      !Number.isSafeInteger(this.liveConfig.aggregateBytes)
+      || this.liveConfig.aggregateBytes < MAX_LIVE_UPDATE_BYTES + Math.floor((MAX_LIVE_UPDATE_BYTES - 2) / 5) * PACKED_LIVE_RANGE_BYTES + 3 * 1024 * 1024
+      || !Number.isSafeInteger(this.liveConfig.maxUploads) || this.liveConfig.maxUploads < 1
+    )) throw new TypeError("Invalid private live-application budget.");
     this.maxFrameBytes =
       connectOptions.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
     if (
@@ -714,6 +738,10 @@ export class EngineClient implements EngineTransport {
   }
 
   async sendRequest(request: Request): Promise<Response> {
+    return this.sendRequestWithInput(request);
+  }
+
+  private async sendRequestWithInput(request: Request, writeInput?: (wireId: number) => Promise<void>): Promise<Response> {
     if (this.closed) {
       const cause = this.closeCause;
       throw new EngineClientError(
@@ -750,7 +778,8 @@ export class EngineClient implements EngineTransport {
       );
     }
     const deadlineMs = request.deadlineMs ?? null;
-    return new Promise<Response>((resolve, reject) => {
+    let writeTask: Promise<void> = Promise.resolve();
+    const response = new Promise<Response>((resolve, reject) => {
       const deadlineTimer =
         deadlineMs !== null
           ? setTimeout(() => {
@@ -769,7 +798,8 @@ export class EngineClient implements EngineTransport {
         reject,
         ...(deadlineTimer ? { deadlineTimer } : {}),
       });
-      void this.writeEnvelope(envelope).catch((cause: unknown) => {
+      writeTask = this.writeEnvelope(envelope).then(() => writeInput?.(wireId));
+      void writeTask.catch((cause: unknown) => {
         const pending = this.pending.get(wireId);
         if (!pending) return;
         this.pending.delete(wireId);
@@ -783,6 +813,101 @@ export class EngineClient implements EngineTransport {
         );
       });
     });
+    if (!writeInput) return response;
+    return response.then(async (response) => {
+      await writeTask;
+      return response;
+    }, async (error: unknown) => {
+      // A cancelled upload cannot leave a half-written stream on this connection.
+      this.close();
+      await writeTask.catch(() => undefined);
+      throw error;
+    });
+  }
+
+  /** Private admitted-event transport. The host has already provisioned registrationId. */
+  async sendLiveApplication(
+    request: { id: number; workspace: string; registrationId: number; deadlineMs: number },
+    event: AdmittedLiveUpdate,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    if (!this.liveConfig || !this.helloAck?.capabilities.includes(BLOB_CAPABILITY)) {
+      throw new TypeError("Private live application transport is not configured.");
+    }
+    if (signal?.aborted) throw signal.reason;
+    const byteLength = event.updateBytes.byteLength;
+    const ranges = event.metadata.firstSeen;
+    if (byteLength < 2 || byteLength > MAX_LIVE_UPDATE_BYTES || ranges.length > Math.floor((byteLength - 2) / 5)) {
+      throw new TypeError("Invalid live application attachment bounds.");
+    }
+    if (!Number.isSafeInteger(request.registrationId) || request.registrationId < 1
+      || !Number.isSafeInteger(request.deadlineMs) || request.deadlineMs < 1 || request.deadlineMs > MAX_U32) {
+      throw new TypeError("Invalid live application request.");
+    }
+    const accepted = parseRelayAcceptedLiveUpdate(event.metadata.accepted);
+    const charge = byteLength + ranges.length * PACKED_LIVE_RANGE_BYTES + 3 * 1024 * 1024;
+    if (this.liveUploads >= this.liveConfig.maxUploads || charge > this.liveConfig.aggregateBytes - this.liveUploadBytes) {
+      throw new TypeError("Private live application upload capacity is full.");
+    }
+    this.liveUploadBytes += charge;
+    this.liveUploads += 1;
+    let stopped = false;
+    const abort = (): void => { stopped = true; this.close(); };
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      // Capture bytes once. Caller mutations cannot change a queued upload.
+      const update = Buffer.from(event.updateBytes);
+      const packed = Buffer.allocUnsafe(ranges.length * PACKED_LIVE_RANGE_BYTES);
+      let previous = -1;
+      for (let index = 0; index < ranges.length; index++) {
+        const range = ranges[index]!;
+        if (!Number.isSafeInteger(range.clientId) || range.clientId <= previous
+          || !Number.isInteger(range.startClock) || range.startClock < 0
+          || !Number.isInteger(range.endClock) || range.endClock > MAX_U32 || range.startClock >= range.endClock) {
+          throw new TypeError("Invalid live application range.");
+        }
+        previous = range.clientId;
+        const offset = index * PACKED_LIVE_RANGE_BYTES;
+        packed.writeBigUInt64LE(BigInt(range.clientId), offset);
+        packed.writeUInt32LE(range.startClock, offset + 8);
+        packed.writeUInt32LE(range.endClock, offset + 12);
+      }
+      if (createHash("sha256").update(update).digest("hex") !== accepted.receipt.updateDigest) {
+        throw new TypeError("Live application update digest mismatch.");
+      }
+      const rangeDigest = createHash("sha256").update(packed).digest("hex");
+      const updateStreamId = this.nextLiveStreamId++;
+      const rangeStreamId = this.nextLiveStreamId++;
+      if (!Number.isSafeInteger(rangeStreamId)) throw new TypeError("Live stream identifiers exhausted.");
+      const writeInput = async (wireId: number): Promise<void> => {
+        const current = (): void => {
+          if (stopped || signal?.aborted || !this.pending.has(wireId) || this.closed) {
+            throw new EngineClientError("closed", "Live application upload is no longer current.");
+          }
+        };
+        for (const [streamId, bytes, digest] of [[updateStreamId, update, accepted.receipt.updateDigest], [rangeStreamId, packed, rangeDigest]] as const) {
+          current();
+          await this.writeEnvelope({ type: "blobStart", requestId: wireId, streamId, totalBytes: bytes.byteLength, sha256: digest });
+          for (let offset = 0; offset < bytes.byteLength || (offset === 0 && bytes.byteLength === 0); offset += this.maxBlobChunkBytes) {
+            const end = Math.min(offset + this.maxBlobChunkBytes, bytes.byteLength);
+            await this.writeFrame(() => {
+              current();
+              return encodeFrame(FrameType.BlobChunk, end === bytes.byteLength ? BLOB_FIN_FLAG : 0,
+                { streamId, bytes: bytes.subarray(offset, end) }, this.maxBlobChunkBytes);
+            });
+          }
+        }
+      };
+      return await this.sendRequestWithInput({
+        id: request.id, workspace: request.workspace, method: "liveApplication.apply", deadlineMs: request.deadlineMs,
+        idempotencyKey: null,
+        params: JSON.parse(JSON.stringify({ accepted, registrationId: request.registrationId, rangeCount: ranges.length, rangeStreamId, rangeDigest, updateStreamId, updateByteLength: byteLength })) as Request["params"],
+      }, writeInput);
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      this.liveUploadBytes -= charge;
+      this.liveUploads -= 1;
+    }
   }
 
   async cancelRequest(callerId: number): Promise<void> {
@@ -1359,18 +1484,44 @@ export class EngineClient implements EngineTransport {
     } catch (error) {
       return Promise.reject(error);
     }
-    try {
-      this.connection.write(frame);
-      return Promise.resolve();
-    } catch (error) {
-      return Promise.reject(error);
-    }
+    return this.writeFrame(() => frame);
+  }
+
+  private writeFrame(encode: () => Buffer): Promise<void> {
+    let blocked = false;
+    const send = (): Promise<void> => {
+      if (this.closed) return Promise.reject(this.closeCause);
+      return new Promise<void>((resolve, reject) => {
+        const cleanup = (): void => {
+          this.connection.offDrain(drained);
+          this.writeWaiters.delete(failed);
+        };
+        const drained = (): void => { cleanup(); resolve(); };
+        const failed = (error: unknown): void => { cleanup(); reject(error); };
+        this.writeWaiters.add(failed);
+        this.connection.onDrain(drained);
+        try {
+          if (this.connection.write(encode())) drained();
+          else blocked = true;
+        } catch (error) {
+          failed(error);
+        }
+      });
+    };
+    const queued = this.writeTail !== null;
+    const write = this.writeTail ? this.writeTail.then(send) : send();
+    if (!queued && !blocked) return write;
+    const tail = write.catch(() => undefined);
+    this.writeTail = tail;
+    void tail.then(() => { if (this.writeTail === tail) this.writeTail = null; });
+    return write;
   }
 
   private fail(error: EngineClientError, force = false): void {
     if (this.closed) return;
     this.closed = true;
     this.closeCause = error;
+    for (const reject of [...this.writeWaiters]) reject(error);
     this.readyState = false;
     if (this.connectTimer !== undefined) clearTimeout(this.connectTimer);
     this.connectTimer = undefined;
@@ -1419,6 +1570,10 @@ export class DuplexEngineClientConnection implements EngineClientConnection {
     this.duplex.on("error", handler);
   }
 
+  onDrain(handler: () => void): void {
+    this.duplex.on("drain", handler);
+  }
+
   offData(handler: (chunk: Buffer | Uint8Array) => void): void {
     this.duplex.off("data", handler);
   }
@@ -1430,6 +1585,10 @@ export class DuplexEngineClientConnection implements EngineClientConnection {
 
   offError(handler: (error: unknown) => void): void {
     this.duplex.off("error", handler);
+  }
+
+  offDrain(handler: () => void): void {
+    this.duplex.off("drain", handler);
   }
 
   close(): void {

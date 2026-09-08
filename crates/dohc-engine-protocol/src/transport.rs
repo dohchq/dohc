@@ -16,7 +16,7 @@ use crate::cancel::CancelSignal;
 use crate::error::WireError;
 use crate::wire::{Request, Response};
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
 /// Raw blob bytes attached to a successful service response for framed
@@ -41,6 +41,8 @@ pub struct BlobEgress {
 pub struct ServiceResponse {
     pub response: Response,
     pub blob_egress: Option<BlobEgress>,
+    /// Retains input reservations and fences an acknowledgement at the writer.
+    pub output_guard: Option<Arc<dyn OutputGuard>>,
 }
 
 impl ServiceResponse {
@@ -48,7 +50,111 @@ impl ServiceResponse {
         ServiceResponse {
             response,
             blob_egress: None,
+            output_guard: None,
         }
+    }
+}
+
+/// A service-owned response lifetime, checked immediately before output.
+pub trait OutputGuard: std::fmt::Debug + Send + Sync {
+    fn is_current(&self) -> bool;
+    fn cancel_signal(&self) -> CancelSignal;
+    fn retirement_signal(&self) -> CancelSignal {
+        self.cancel_signal()
+    }
+    /// Serialize one nonblocking output poll with synchronous owner retirement.
+    fn with_current(&self, action: &mut dyn FnMut()) -> bool {
+        if !self.is_current() {
+            return false;
+        }
+        action();
+        true
+    }
+    fn deadline(&self) -> Option<Instant> {
+        None
+    }
+}
+
+/// Resources that must retire synchronously when their connection closes.
+pub trait ConnectionResource: std::fmt::Debug + Send + Sync {
+    fn retire(&self);
+}
+
+#[derive(Debug, Default)]
+struct ConnectionState {
+    retired: bool,
+    cancel: CancelSignal,
+    resources: Vec<Weak<dyn ConnectionResource>>,
+}
+
+/// Unforgeable identity captured from an authenticated transport, never JSON.
+#[derive(Debug, Clone)]
+pub struct ConnectionHandle(Arc<Mutex<ConnectionState>>);
+
+impl ConnectionHandle {
+    pub fn cancel_signal(&self) -> CancelSignal {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cancel
+            .clone()
+    }
+    pub fn is_current(&self) -> bool {
+        !self.0.lock().unwrap_or_else(|e| e.into_inner()).retired
+    }
+
+    pub fn same_connection(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    pub fn retain(&self, resource: &Arc<dyn ConnectionResource>) -> bool {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.retired {
+            resource.retire();
+            return false;
+        }
+        state
+            .resources
+            .retain(|resource| resource.strong_count() > 0);
+        state.resources.push(Arc::downgrade(resource));
+        true
+    }
+}
+
+/// The transport alone owns retirement. Dropping it retires captured resources.
+#[derive(Debug)]
+pub struct ConnectionOwner(ConnectionHandle);
+
+impl ConnectionOwner {
+    pub fn authenticated() -> Self {
+        Self(ConnectionHandle(Arc::new(Mutex::new(
+            ConnectionState::default(),
+        ))))
+    }
+
+    pub fn handle(&self) -> ConnectionHandle {
+        self.0.clone()
+    }
+
+    pub fn retire(&self) {
+        let resources = {
+            let mut state = self.0.0.lock().unwrap_or_else(|e| e.into_inner());
+            state.retired = true;
+            state.cancel.cancel();
+            std::mem::take(&mut state.resources)
+        };
+        for resource in resources
+            .into_iter()
+            .filter_map(|resource| resource.upgrade())
+        {
+            resource.retire();
+        }
+    }
+}
+
+impl Drop for ConnectionOwner {
+    fn drop(&mut self) {
+        self.retire();
     }
 }
 
@@ -67,6 +173,7 @@ pub struct RequestContext {
     /// The largest control frame the session's client accepts, negotiated in
     /// `hello`. Direct in-process calls default to the engine default.
     pub max_frame_bytes: u32,
+    pub connection: Option<ConnectionHandle>,
 }
 
 impl RequestContext {
@@ -76,6 +183,7 @@ impl RequestContext {
             deadline: None,
             capabilities: Arc::from([]),
             max_frame_bytes: crate::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes,
+            connection: None,
         }
     }
 
@@ -100,11 +208,31 @@ impl RequestContext {
 
 /// The engine's request-handling surface, transport-independent.
 pub trait EngineService: Send + Sync {
+    /// A move-owned attachment defined by the service, outside control JSON.
+    type Input: Send + 'static;
+
     fn call(
         &self,
         ctx: RequestContext,
         request: Request,
     ) -> impl Future<Output = Result<ServiceResponse, WireError>> + Send;
+
+    fn call_with_input(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+        input: Option<Self::Input>,
+    ) -> impl Future<Output = Result<ServiceResponse, WireError>> + Send {
+        async move {
+            if input.is_some() {
+                return Err(WireError::new(
+                    crate::error::ErrorCode::InvalidParams,
+                    "input attachment unsupported",
+                ));
+            }
+            self.call(ctx, request).await
+        }
+    }
 }
 
 /// A client-side transport: something a generated client can issue typed
@@ -136,5 +264,37 @@ impl<S: EngineService> EngineTransport for InProcessTransport<S> {
             .call(ctx, request)
             .await
             .map(|output| output.response)
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Debug)]
+    struct Resource(AtomicBool);
+    impl ConnectionResource for Resource {
+        fn retire(&self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn connection_retirement_is_synchronous_and_identity_is_not_a_visible_name() {
+        let owner = ConnectionOwner::authenticated();
+        let captured = owner.handle();
+        let replacement = ConnectionOwner::authenticated();
+        let resource = Arc::new(Resource(AtomicBool::new(false)));
+        assert!(captured.retain(&(resource.clone() as Arc<dyn ConnectionResource>)));
+        assert!(!captured.same_connection(&replacement.handle()));
+        drop(owner);
+        assert!(!captured.is_current());
+        assert!(resource.0.load(Ordering::SeqCst));
+        assert!(captured.cancel_signal().is_cancelled());
+        let late = Arc::new(Resource(AtomicBool::new(false)));
+        assert!(!captured.retain(&(late.clone() as Arc<dyn ConnectionResource>)));
+        assert!(late.0.load(Ordering::SeqCst));
+        assert!(replacement.handle().is_current());
     }
 }

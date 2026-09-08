@@ -790,6 +790,7 @@ impl EngineService {
             // service's open_lock) observes Closing at supervisor.open and waits
             // for a fresh actor instead of the one being torn down.
             let closing = supervisor.begin_close(&open.db_path).map_err(map_runtime)?;
+            lock(&self.live_applications).retire_workspace(&open);
             let (removed, attached_handles) = {
                 let mut handles = lock(&self.handles);
                 let removed = handles.remove(&handle);

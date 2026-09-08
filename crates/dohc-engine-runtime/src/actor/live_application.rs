@@ -81,6 +81,15 @@ impl ActorHandle {
 }
 
 impl ActorLiveApplicationOwner {
+    /// Retire handles synchronously at the transport's close boundary.
+    pub fn retire(&self) {
+        self.token.store(false, Ordering::Release);
+    }
+
+    pub fn is_current(&self) -> bool {
+        current(&self.actor, &self.token).is_ok()
+    }
+
     /// Register an authenticated coordinate and prepared document binding.
     pub async fn register(
         &self,
@@ -139,6 +148,17 @@ impl ActorLiveApplicationHandle {
         event: AdmittedLiveUpdate,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<ApplicationResult, RuntimeError> {
+        self.apply_with_reservation(event, faults, None).await
+    }
+
+    /// Keep input memory charged while its command remains on the writer queue,
+    /// even when the caller stops awaiting the result.
+    pub async fn apply_with_reservation(
+        &self,
+        event: AdmittedLiveUpdate,
+        faults: Arc<dyn FaultInjector>,
+        reservation: Option<Arc<dyn Send + Sync>>,
+    ) -> Result<ApplicationResult, RuntimeError> {
         current(&self.actor, &self.token)?;
         if event.update_bytes.len() > MAX_YDOC_UPDATE_BYTES {
             return Err(ApplicationError::Collab(CollabError::UpdateTooLarge {
@@ -156,6 +176,7 @@ impl ActorLiveApplicationHandle {
                 application: self.application.clone(),
                 event,
                 faults,
+                reservation,
                 reply,
             })))
             .await
@@ -214,6 +235,7 @@ pub(super) enum Request {
         application: ApplicationHandle,
         event: AdmittedLiveUpdate,
         faults: Arc<dyn FaultInjector>,
+        reservation: Option<Arc<dyn Send + Sync>>,
         reply: Reply<ApplicationResult>,
     },
     Close {
@@ -273,6 +295,7 @@ impl Request {
                 application,
                 event,
                 faults,
+                reservation: _reservation,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {

@@ -1,7 +1,10 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
+import { appendFileSync, writeFileSync } from "node:fs";
+import * as Y from "yjs";
 import { Duplex, PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
+import { parseRelayAcceptedLiveUpdate } from "@dohc/live-session-contract";
 import type { Envelope, Request } from "../protocol";
 import { isDaemonReconnectError } from "../live/daemonLiveAdapter";
 import {
@@ -79,20 +82,27 @@ function blobChunkFrame(
 class FakePeerConnection implements EngineClientConnection {
   readonly received: Envelope[] = [];
   onEnvelope: ((envelope: Envelope) => void) | null = null;
+  onBlobChunk: ((frame: Extract<ReturnType<FrameDecoder["push"]>[number], { kind: "blobChunk" }>) => void) | null = null;
   private readonly decoder = new FrameDecoder(LIMITS.maxFrameBytes);
   private readonly dataHandlers = new Set<(chunk: Buffer | Uint8Array) => void>();
   private readonly closeHandlers = new Set<() => void>();
   private readonly errorHandlers = new Set<(error: unknown) => void>();
+  private readonly drainHandlers = new Set<() => void>();
+  backpressured = false;
   private closed = false;
 
   write(buffer: Buffer): boolean {
     if (this.closed) throw new Error("fake peer is closed");
     for (const frame of this.decoder.push(buffer)) {
+      if (frame.kind === "blobChunk") {
+        this.onBlobChunk?.(frame);
+        continue;
+      }
       const envelope = JSON.parse(frame.payload.toString("utf8")) as Envelope;
       this.received.push(envelope);
       this.onEnvelope?.(envelope);
     }
-    return true;
+    return !this.backpressured;
   }
 
   send(envelope: Envelope, chunkSize = Number.POSITIVE_INFINITY): void {
@@ -133,6 +143,15 @@ class FakePeerConnection implements EngineClientConnection {
     this.errorHandlers.add(handler);
   }
 
+  onDrain(handler: () => void): void {
+    this.drainHandlers.add(handler);
+  }
+
+  drain(): void {
+    this.backpressured = false;
+    for (const handler of [...this.drainHandlers]) handler();
+  }
+
   offData(handler: (chunk: Buffer | Uint8Array) => void): void {
     this.dataHandlers.delete(handler);
   }
@@ -143,6 +162,10 @@ class FakePeerConnection implements EngineClientConnection {
 
   offError(handler: (error: unknown) => void): void {
     this.errorHandlers.delete(handler);
+  }
+
+  offDrain(handler: () => void): void {
+    this.drainHandlers.delete(handler);
   }
 
   close(): void {
@@ -194,6 +217,155 @@ function realStreamClient(connectTimeoutMs = 5_000): {
 function nextImmediate(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
+
+describe("outbound backpressure", () => {
+  it("holds later frames until drain and releases the writer on close", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const firstWritten = Promise.withResolvers<void>();
+    const secondWritten = Promise.withResolvers<void>();
+    peer.onEnvelope = (envelope) => {
+      if (envelope.type !== "request") return;
+      if (envelope.method === "first") {
+        peer.backpressured = true;
+        firstWritten.resolve();
+      } else {
+        secondWritten.resolve();
+      }
+    };
+    const first = transport.sendRequest(request(1, "first")).catch((error: unknown) => error);
+    await firstWritten.promise;
+    const secondRequest = request(2, "second");
+    const second = transport.sendRequest(secondRequest).catch((error: unknown) => error);
+    await nextImmediate();
+    secondRequest.params = { method: "caller-mutated" };
+    await nextImmediate();
+    expect(peer.received.filter((envelope) => envelope.type === "request")).toHaveLength(1);
+    peer.drain();
+    await secondWritten.promise;
+    expect(peer.received.find((envelope) => envelope.type === "request" && envelope.method === "second"))
+      .toMatchObject({ params: { method: "second" } });
+    peer.closeFromPeer();
+    expect(await first).toBeInstanceOf(EngineClientError);
+    expect(await second).toBeInstanceOf(EngineClientError);
+  });
+
+  it("rejects requests waiting for drain when the connection closes", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const written = Promise.withResolvers<void>();
+    peer.onEnvelope = (envelope) => {
+      if (envelope.type === "request") {
+        peer.backpressured = true;
+        written.resolve();
+      }
+    };
+    const first = transport.sendRequest(request(1, "first")).catch((error: unknown) => error);
+    await written.promise;
+    const second = transport.sendRequest(request(2, "second")).catch((error: unknown) => error);
+    transport.close();
+    expect(await first).toBeInstanceOf(EngineClientError);
+    expect(await second).toBeInstanceOf(EngineClientError);
+    peer.drain();
+    expect(peer.received.filter((envelope) => envelope.type === "request")).toHaveLength(1);
+  });
+});
+
+describe("private admitted-update upload", () => {
+  it("captures a valid maximum-size Yjs update through the real client", async () => {
+    const maximum = 20 * 1024 * 1024;
+    const rangeCount = 16_385;
+    const single = (clientId: number, length: number): Uint8Array => {
+      const doc = new Y.Doc();
+      doc.clientID = clientId;
+      doc.getText("plainText").insert(0, "x".repeat(length));
+      const update = Y.encodeStateAsUpdate(doc);
+      doc.destroy();
+      return update;
+    };
+    const small = Array.from({ length: rangeCount - 1 }, (_, index) => single(index + 1, 1));
+    const encode = (length: number): Uint8Array => Y.mergeUpdates([...small, single(rangeCount, length)]);
+    const measured = encode(maximum - 100);
+    const finalLength = maximum - (measured.length - (maximum - 100));
+    const bytes = encode(finalLength);
+    expect(bytes).toHaveLength(maximum);
+    const binding = {
+      workspaceId: "workspace", mainVersionId: "main", objectId: "one",
+      lineageClaimId: createHash("sha256").update(new Uint8Array([0, 0])).digest("hex"),
+      currentPath: "one.md", selectorPaths: ["one.md"], restoreFenceGeneration: 0,
+    };
+    const accepted = parseRelayAcceptedLiveUpdate({
+      receipt: { deliveryId: "delivery", updateDigest: createHash("sha256").update(bytes).digest("hex"), journalCursor: 1, acceptingHostEpoch: 1 },
+      binding, authority: { principalKind: "owner", principalId: "owner", grantId: null, grantGeneration: null }, receivedAtMs: 0,
+    });
+    // An explicit path retains the exact client transcript for the Rust host test.
+    const fixturePath = process.env.DOHC_LIVE_APPLICATION_CLIENT_FIXTURE;
+    if (fixturePath) writeFileSync(fixturePath, new Uint8Array());
+    class RecordingPeer extends FakePeerConnection {
+      override write(buffer: Buffer): boolean {
+        if (fixturePath) appendFileSync(fixturePath, buffer);
+        return super.write(buffer);
+      }
+    }
+    const peer = new RecordingPeer();
+    const transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge();
+    await transport.ready();
+    let completed = 0;
+    peer.onBlobChunk = frame => {
+      if (frame.fin && ++completed === 2) peer.send({ type: "response", id: 1, result: { status: "applied" } });
+    };
+    const firstSeen = Array.from({ length: rangeCount }, (_, index) => ({ clientId: index + 1, startClock: 0, endClock: index + 1 === rangeCount ? finalLength : 1 }));
+    await transport.sendLiveApplication({ id: 1, workspace: "ws-0000000000000001", registrationId: 1, deadlineMs: 30_000 }, { metadata: { accepted, firstSeen }, updateBytes: bytes });
+    expect(completed).toBe(2);
+    transport.close();
+  }, 30_000);
+  it("frames exactly 20 MiB and more than 16,384 ranges under negotiated bounds", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge();
+    await transport.ready();
+    const bytes = Buffer.alloc(20 * 1024 * 1024, 7);
+    const ranges = Array.from({ length: 16_385 }, (_, index) => ({ clientId: index + 1, startClock: 0, endClock: 1 }));
+    const accepted = parseRelayAcceptedLiveUpdate({
+      receipt: { deliveryId: "delivery-1", updateDigest: createHash("sha256").update(bytes).digest("hex"), journalCursor: 1, acceptingHostEpoch: 1 },
+      binding: { workspaceId: "workspace-1", mainVersionId: "main-1", objectId: "object-1", lineageClaimId: "lineage-1", currentPath: "notes/a.md", selectorPaths: ["notes/a.md"], restoreFenceGeneration: 0 },
+      authority: { principalKind: "owner" as const, principalId: "owner-1", grantId: null, grantGeneration: null },
+      receivedAtMs: 0,
+    });
+    const streams = new Map<number, { hash: ReturnType<typeof createHash>; length: number; requestId: number }>();
+    let updateDigest = "";
+    let completed = 0;
+    peer.onEnvelope = (envelope) => {
+      if (envelope.type === "request") {
+        expect(Buffer.byteLength(JSON.stringify(envelope))).toBeLessThan(LIMITS.maxFrameBytes);
+        expect(envelope.params).not.toHaveProperty("firstSeen");
+      }
+      if (envelope.type === "blobStart") streams.set(envelope.streamId, { hash: createHash("sha256"), length: 0, requestId: envelope.requestId });
+    };
+    peer.onBlobChunk = (frame) => {
+      expect(frame.payload.length).toBeLessThanOrEqual(LIMITS.maxBlobChunkBytes);
+      const stream = streams.get(frame.streamId)!;
+      stream.hash.update(frame.payload);
+      stream.length += frame.payload.length;
+      if (frame.fin) {
+        const digest = stream.hash.digest("hex");
+        if (stream.length === bytes.length) updateDigest = digest;
+        else expect(stream.length).toBe(ranges.length * 16);
+        if (++completed === 2) peer.send({ type: "response", id: stream.requestId, result: { status: "applied" } });
+      }
+    };
+    await expect(transport.sendLiveApplication({ id: 71, workspace: "ws-0000000000000001", registrationId: 1, deadlineMs: 30_000 }, { metadata: { accepted, firstSeen: ranges }, updateBytes: bytes }))
+      .resolves.toMatchObject({ id: 71, result: { status: "applied" } });
+    expect(updateDigest).toBe(accepted.receipt.updateDigest);
+    expect(completed).toBe(2);
+    transport.close();
+  });
+});
 
 describe("a request that cannot be framed", () => {
   it("is refused by name, is not a transport failure, and leaves the session up", async () => {
