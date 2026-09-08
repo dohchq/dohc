@@ -488,7 +488,7 @@ it('charges baseline payload, metadata, ranges and delivery once, preserving quo
   } finally { f.close() }
 })
 
-it('refuses a first baseline one byte below its original payload charge', () => {
+it('refuses a first baseline when its payload alone exceeds quota', () => {
   const input = validated(), f = fixture({ workspaceQuotaBytes: input.baselineBytes.byteLength - 1 })
   try {
     f.moment(input)
@@ -497,7 +497,7 @@ it('refuses a first baseline one byte below its original payload charge', () => 
   } finally { f.close() }
 })
 
-it('refuses one byte below the full baseline charge without leaving metadata or reservations', () => {
+it('refuses one byte below the combined registration charge without leaving metadata or reservations', () => {
   const input = validated(checkpoint('Unicode', doc => {
     for (let client = 1; client <= 24; client++) {
       doc.clientID = client
