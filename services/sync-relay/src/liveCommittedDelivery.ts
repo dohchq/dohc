@@ -15,6 +15,8 @@ import {
 } from "./storage/liveJournalHistory";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import { snapshotHostCoordinate } from "./liveTicketInputs";
+import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
+import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
 export { createLiveJournalHistoryAuthority, type LiveJournalHistoryAuthority };
 
 export type CommittedDeliveryOutcome =
@@ -184,6 +186,15 @@ export class LiveCommittedDelivery {
       if (drain) this.#store.close(drain);
       this.#active.delete(key);
     }
+  }
+
+  async stopRestore(value: StopRestoreLookup, signal?: AbortSignal) {
+    const lookup = snapshotStopRestoreLookup(value), document = this.#store.stopRestoreDocument({...lookup, host: this.#connection.host});
+    const key = JSON.stringify([document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId]);
+    if (this.#active.has(key)) throw new Error("A committed delivery operation already owns this document.");
+    this.#active.add(key);
+    try {return await deliverStopRestore({store: this.#store, lookup, connection: this.#connection, deliveryKind: "bootstrap", signal});}
+    finally {this.#active.delete(key);}
   }
 
   async settle(document: LiveDocumentKey, signal?: AbortSignal): Promise<CommittedSettlement> {

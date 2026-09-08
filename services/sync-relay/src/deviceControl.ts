@@ -13,6 +13,7 @@ import type { LiveJournalHistoryAuthority } from "./liveCommittedDelivery.js";
 import { parseRelayDeviceDeliveryConfig,type RelayDeviceDeliveryConfig } from "./deviceLiveHostConfig.js";
 import { createDeviceLiveDelivery } from "./deviceLiveDelivery.js";
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
+import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
 
 export function createDeviceControl(options: {
   storage: SyncRelayStorage; hosts: ReadonlySet<string>; relayExchangeKey: string; limits: DeviceControlLimits;
@@ -146,6 +147,10 @@ export function createDeviceControl(options: {
   options.storage.unavailable.addEventListener("abort", close, { once: true });
   if (options.storage.unavailable.aborted) close();
   return { handleUpgrade, close,
+    async stopRestore(lookup: StopRestoreLookup, signal?: AbortSignal) {
+      if (!currentDelivery) throw new Error("Device delivery is unavailable.");
+      return currentDelivery.stopRestore(lookup, signal);
+    },
     async settle(document: LiveDocumentKey, signal?: AbortSignal) {
       if (!currentDelivery) throw new Error("Device delivery is unavailable.");
       return currentDelivery.settle(document, signal);

@@ -12,6 +12,8 @@ import { LiveCommittedDelivery, type LiveJournalHistoryAuthority } from "./liveC
 import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
 import { OwnerCommittedDelivery } from "./ownerCommittedDelivery.js";
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
+import {snapshotStopRestoreLookup} from "./liveRestoreDelivery.js";
+import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
 
 export function createDeviceLiveDelivery(options: {
   ws: WebSocket; limits: DeviceControlLimits; config: RelayDeviceDeliveryConfig;
@@ -105,6 +107,18 @@ export function createDeviceLiveDelivery(options: {
         check();
         return outcome;
       } finally { active--; }
+    },
+    async stopRestore(value: StopRestoreLookup, signal?: AbortSignal) {
+      check();
+      if (!ready || active >= config.maxActiveDrains) throw new Error("Device delivery is not ready or is full.");
+      const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
+      if (!consumer) throw new Error("Workspace is not configured on this device host.");
+      active++;
+      try {
+        const outcome = await consumer.stopRestore(lookup, AbortSignal.any([invalidated.signal, ...(signal ? [signal] : [])]));
+        check();
+        return outcome;
+      } finally {active--;}
     },
     async settle(value: LiveDocumentKey, signal?: AbortSignal) {
       check();

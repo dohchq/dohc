@@ -92,6 +92,30 @@ impl ActorLiveApplicationOwner {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<NativeRestoreFenceReceipt, RuntimeError> {
+        self.fence_restore_inner(input, coordinate, now_ms, faults, false)
+            .await
+    }
+
+    /// Trusted transport recovery under its authenticated current host guard.
+    pub async fn fence_restore_after_reconnect(
+        &self,
+        input: NativeRestoreFence,
+        coordinate: ApplicationHostCoordinate,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<NativeRestoreFenceReceipt, RuntimeError> {
+        self.fence_restore_inner(input, coordinate, now_ms, faults, true)
+            .await
+    }
+
+    async fn fence_restore_inner(
+        &self,
+        input: NativeRestoreFence,
+        coordinate: ApplicationHostCoordinate,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        after_reconnect: bool,
+    ) -> Result<NativeRestoreFenceReceipt, RuntimeError> {
         current(&self.actor, &self.token)?;
         let (reply, receive) = oneshot::channel();
         self.actor
@@ -101,6 +125,7 @@ impl ActorLiveApplicationOwner {
                 token: self.token.clone(),
                 input,
                 coordinate,
+                after_reconnect,
                 now_ms,
                 faults,
                 reply,
@@ -380,6 +405,7 @@ pub(super) enum Request {
         token: Token,
         input: NativeRestoreFence,
         coordinate: ApplicationHostCoordinate,
+        after_reconnect: bool,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         reply: Reply<NativeRestoreFenceReceipt>,
@@ -461,14 +487,24 @@ impl Request {
                 token,
                 input,
                 coordinate,
+                after_reconnect,
                 now_ms,
                 faults,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
-                    owner
-                        .fence_restore(store, input, coordinate, now_ms, faults.as_ref())
-                        .map_err(Into::into)
+                    if after_reconnect {
+                        owner.fence_restore_after_reconnect(
+                            store,
+                            input,
+                            coordinate,
+                            now_ms,
+                            faults.as_ref(),
+                        )
+                    } else {
+                        owner.fence_restore(store, input, coordinate, now_ms, faults.as_ref())
+                    }
+                    .map_err(Into::into)
                 });
                 let _ = reply.send(result);
             }

@@ -49,7 +49,8 @@ import {
   assertJournalCheckpointPosition,
 } from "./liveUpdateJournal";
 import { bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
-import { requireStopRestoreCut, requireStopRestoreOwnerOrigin, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
+import { nativeRestoreFence, requireStopRestoreCut, requireStopRestoreOwnerOrigin, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
+import {parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
 import { LIVE_RESTORE_OPERATIONS } from "./liveRestoreOperationSchema";
 
 export interface CommittedBootstrap {
@@ -85,7 +86,11 @@ export interface OwnerDeliveryCapture {
   binding: LiveObjectBinding;
   assertCurrent(): void;
 }
-export interface StopRestoreCutCapture { readonly binding: LiveObjectBinding }
+export interface StopRestoreCutCapture {
+  readonly binding: LiveObjectBinding;
+  readonly deliveryKind: "bootstrap" | "owner";
+  readonly resumeAdoptionId: string | null;
+}
 type RestoreCapture = {
   baselineBytes: Uint8Array;
   lookup: StopRestoreLookup;
@@ -772,7 +777,7 @@ export class LiveCommittedDeliveryStore {
     const lookup = {operationId: parseLiveUpdateIdentifier(input.operationId),workspaceId: parseLiveUpdateIdentifier(input.workspaceId),ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)};
     const host = snapshotHostCoordinate(input.host);
     const {operation,authority} = this.#storage.readTx(() => this.#restore(lookup,host));
-    if (operation.phase === "old-cut-applied") {integrity(operation.applied); return {kind: "complete",receipt: structuredClone(operation.applied)};}
+    if (operation.phase === "old-cut-applied" || operation.phase === "native-fenced") {integrity(operation.applied); return {kind: "complete",receipt: structuredClone(operation.applied)};}
     const document = operation.intent.document;
     const saved: RestoreCapture = {lookup,host,operation,baselineBytes:authority.baselineBytes};
     if (operation.intent.deliveryKind === "owner") {
@@ -800,7 +805,9 @@ export class LiveCommittedDeliveryStore {
       saved.drain = this.#createDrain(host,document,authority,operation.terminal,true,{lookup,operation});
     }
     const binding = structuredClone(operation.intent.deliveryKind === "owner" ? operation.basis.ownerBinding : operation.basis.binding);
-    const capture: StopRestoreCutCapture = Object.freeze({get binding() {return structuredClone(binding);}});
+    const capture: StopRestoreCutCapture = Object.freeze({get binding() {return structuredClone(binding);},
+      deliveryKind: operation.intent.deliveryKind,
+      resumeAdoptionId: operation.intent.deliveryKind === "owner" ? parseLiveUpdateIdentifier(JSON.parse(operation.basis.ownerOrigin!).adoptionId) : null});
     this.#restores.set(capture,saved);
     return {kind: "ready",capture};
   }
@@ -836,6 +843,7 @@ export class LiveCommittedDeliveryStore {
     return this.#storage.tx(() => {
       const current = this.#restore(saved.lookup,saved.host,undefined,saved.baselineBytes);
       if (current.operation.phase === "old-cut-applied") {integrity(current.operation.applied); return structuredClone(current.operation.applied);}
+      integrity(current.operation.phase === "fenced");
       let sourceId: string, localYDocSequence: number;
       if (saved.drain) {
         const drain = this.#capture(saved.drain), progress = this.#progress(drain);
@@ -859,6 +867,39 @@ export class LiveCommittedDeliveryStore {
       integrity(changed.changes === 1);
       return structuredClone(applied);
     });
+  }
+  stopRestoreDocument(input: StopRestoreLookup & {host: LiveHostConnectionCoordinate}): LiveDocumentKey {
+    return this.#storage.readTx(() => structuredClone(this.#restore(input, input.host).operation.intent.document));
+  }
+  pendingStopRestoreFence(input: StopRestoreLookup & {host: LiveHostConnectionCoordinate}) {
+    return this.#storage.readTx(() => {
+      const {operation} = this.#restore(input, input.host);
+      integrity((operation.phase === "old-cut-applied" || operation.phase === "native-fenced") && operation.applied && operation.newFence !== null);
+      return {operation: nativeRestoreFence(operation.applied, operation.newFence), receipt: structuredClone(operation.nativeReceipt)};
+    });
+  }
+  acknowledgeStopRestoreFence(input: StopRestoreLookup & {host: LiveHostConnectionCoordinate}, value: unknown): NativeRestoreFenceReceipt {
+    const receipt = parseNativeRestoreFenceReceipt(value);
+    return this.#storage.tx(() => {
+      const {operation} = this.#restore(input, input.host);
+      integrity((operation.phase === "old-cut-applied" || operation.phase === "native-fenced") && operation.applied && operation.newFence !== null);
+      integrity(isDeepStrictEqual(receipt.operation, nativeRestoreFence(operation.applied, operation.newFence)));
+      if (operation.nativeReceipt) {
+        integrity(isDeepStrictEqual(operation.nativeReceipt, receipt));
+        return structuredClone(operation.nativeReceipt);
+      }
+      const changed = this.#storage.db.prepare(`UPDATE ${LIVE_RESTORE_OPERATIONS} SET phase='native-fenced',native_receipt_json=? WHERE operation_id=? AND workspace_id=? AND phase='old-cut-applied'`)
+        .run(JSON.stringify(receipt), input.operationId, input.workspaceId);
+      integrity(changed.changes === 1);
+      return structuredClone(receipt);
+    });
+  }
+  closeStopRestoreCut(capture: StopRestoreCutCapture): void {
+    const saved = this.#restores.get(capture);
+    if (!saved) return;
+    if (saved.drain) this.close(saved.drain);
+    if (saved.owner) this.#ownerDeliveries.delete(saved.owner);
+    this.#restores.delete(capture);
   }
   acknowledgeBootstrap(drain: CommittedDeliveryDrain, input: unknown): void {
     const ack = parseBootstrapAck(input);

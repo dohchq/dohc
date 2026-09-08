@@ -10,6 +10,8 @@ import { LiveCommittedDelivery, type CommittedDeliveryOutcome } from "./liveComm
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.js";
 import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
 import { parseLiveSettlementConfig, type LiveSettlementConfig } from "./liveSettlementConfig.js";
+import {snapshotStopRestoreLookup} from "./liveRestoreDelivery.js";
+import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
 
 interface ServiceLiveHostConfig {
   readonly version: 1;
@@ -158,6 +160,14 @@ export async function startServiceLiveHost(options: {
     check();
     finishStartup();
     return Object.freeze({ coordinate, invalidated: signal,
+      async stopRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {
+        check();
+        const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
+        if (!consumer) throw new Error("Workspace is not configured on this service host.");
+        const result = await consumer.stopRestore(lookup, AbortSignal.any([signal, ...(callerSignal ? [callerSignal] : [])]));
+        check();
+        return result;
+      },
       async settle(value: LiveDocumentKey, callerSignal?: AbortSignal) {
         check();
         if (!config.settlement) throw new Error("Settlement is not configured on this service host.");

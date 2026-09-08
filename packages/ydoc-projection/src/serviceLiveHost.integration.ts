@@ -2,13 +2,16 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { yDocToMarkdown, markdownToYDoc } from "./import-export.js";
 import { createLiveMarkdownRegistrationValidator, createLiveMarkdownJournalValidator } from "./liveDocumentValidation.js";
-import { createEngineClient } from "../../workspace-engine-client/src/daemon/engineClient.js";
+import { createEngineClient, EngineClient } from "../../workspace-engine-client/src/daemon/engineClient.js";
 import { initializeRelayDeployment, openRelayDeployment } from "../../../services/sync-relay/src/relayDeployment.js";
 import { startServiceLiveHost } from "../../../services/sync-relay/src/serviceLiveHost.js";
+import {beginStopRestore, advanceStopRestoreFence, readStopRestore} from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
+import type {StorageContext} from "../../../services/sync-relay/src/storage/context.js";
+import {LiveCommittedDeliveryStore} from "../../../services/sync-relay/src/storage/liveCommittedDelivery.js";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 // Test inputs, not a release policy.
@@ -16,7 +19,7 @@ const policy = { maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000,
   maxDecodedPayloadByteVisits: 100_000_000, maxStructClientGroupVisits: 1_000_000,
   maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000 };
 
-it("bootstraps and applies through a configured production daemon, then recovers both owners", async () => {
+it.each(["before-native-fence", "after-native-fence"] as const)("bootstraps and applies through a configured production daemon, then recovers both owners at %s", async boundary => {
   const executable = process.env.DOHC_SERVICE_HOST_PROOF_BINARY ? resolve(process.env.DOHC_SERVICE_HOST_PROOF_BINARY) : undefined;
   const expectedHash = process.env.DOHC_SERVICE_HOST_PROOF_SHA256;
   const output = process.env.DOHC_SERVICE_HOST_PROOF_OUTPUT;
@@ -107,13 +110,51 @@ it("bootstraps and applies through a configured production daemon, then recovers
     expect(continuedSettlement).toMatchObject({ previousCursor: 1, terminalCursor: 2, applicationCount: 1, materialized: true });
     expect(readFileSync(join(workspace,"docs/a.md"),"utf8")).toBe(yDocToMarkdown(doc));
     results.push({ round: 2, continued, settlement: continuedSettlement });
+    const finalDigest = admit("stop-cut");
+    const authority = deployment.storage.resolveCurrentLiveDocumentBinding({document, actor});
+    if (authority.kind !== "current") throw new Error("Restore authority unavailable.");
+    const lookup = {operationId: "restore-stop", workspaceId: "workspace", ownerUserId: "owner"};
+    beginStopRestore(deployment.storage as StorageContext, {deliveryKind: "bootstrap", ...lookup, document,
+      shareId: "share", grantId: "grant", expectedGrantGeneration: 1, expectedDependentGrantIds: [],
+      expectedFence: authority.binding.restoreFenceGeneration, restorePointCursor: 0, restorePointReceiptDigest: hash(baseline)}, Date.now());
+    advanceStopRestoreFence(deployment.storage as StorageContext, lookup, Date.now());
+    const originalRequest = EngineClient.prototype.sendRequest;
+    let interrupted = false;
+    const lost = boundary === "after-native-fence"
+      ? vi.spyOn(LiveCommittedDeliveryStore.prototype, "acknowledgeStopRestoreFence").mockImplementationOnce(() => {throw new Error("lost native-fence boundary");})
+      : vi.spyOn(EngineClient.prototype, "sendRequest").mockImplementation(function(this: EngineClient, ...args: Parameters<EngineClient["sendRequest"]>) {
+        if (!interrupted && args[0].method === "liveApplication.fenceRestore") {interrupted = true; return Promise.reject(new Error("lost native-fence boundary"));}
+        return originalRequest.apply(this, args);
+      });
+    try {await expect(active.stopRestore(lookup)).rejects.toThrow("lost native-fence boundary");}
+    finally {lost.mockRestore();}
+    expect(readStopRestore(deployment.storage as StorageContext, lookup)?.phase).toBe("old-cut-applied");
+    await active.close(); active = undefined;
+    let nativeReceipt: unknown;
+    const stopped = new DatabaseSync(join(workspace, ".dohc", "engine", "engine.db"), {readOnly: true});
+    try {
+      const saved = stopped.prepare("SELECT receipt_json FROM live_restore_fences").get();
+      nativeReceipt = saved ? JSON.parse(String(saved.receipt_json)) : null;
+      expect(nativeReceipt === null).toBe(boundary === "before-native-fence");
+    }
+    finally {stopped.close();}
+    deployment.storage.close();
+    deployment = openRelayDeployment(deploymentConfig);
+    active = await startServiceLiveHost({configPath: serviceConfig, ...deployment});
+    const restored = await active.stopRestore(lookup);
+    if (nativeReceipt !== null) expect(restored).toEqual({kind: "done", receipt: nativeReceipt});
+    expect(restored).toMatchObject({receipt: {operation: {origin: {kind: "bootstrap"}, terminal: {deliveryId: "stop-cut", updateDigest: finalDigest}, newFence: authority.binding.restoreFenceGeneration + 1}}});
+    expect(await active.stopRestore(lookup)).toEqual(restored);
+    expect(readStopRestore(deployment.storage as StorageContext, lookup)?.phase).toBe("native-fenced");
+    await expect(active.drain(document)).rejects.toThrow();
+    results.push({stop: restored});
     await active.close(); active = undefined;
     const engine = new DatabaseSync(join(workspace, ".dohc", "engine", "engine.db"), { readOnly: true });
     try {
       const applications = engine.prepare("SELECT delivery_id, update_digest FROM live_device_update_applications ORDER BY journal_cursor").all();
-      expect(applications).toEqual([{ delivery_id: "delivery", update_digest: firstDigest }, { delivery_id: "after-restart", update_digest: secondDigest }]);
+      expect(applications).toEqual([{ delivery_id: "delivery", update_digest: firstDigest }, { delivery_id: "after-restart", update_digest: secondDigest }, {delivery_id: "stop-cut", update_digest: finalDigest}]);
       expect(engine.prepare("SELECT COUNT(*) AS count FROM live_device_bootstraps").get()!.count).toBe(1);
-      expect(engine.prepare("SELECT text FROM engine_search_files_fts WHERE object_id='object'").get()!.text).toBe(yDocToMarkdown(doc));
+      expect(engine.prepare("SELECT available,restore_fence_generation FROM live_device_application_bindings").get()).toMatchObject({available: 0, restore_fence_generation: authority.binding.restoreFenceGeneration + 1});
       expect(engine.prepare("SELECT COUNT(*) AS count FROM live_device_settlements").get()!.count).toBe(2);
       results.push({ applications });
     } finally { engine.close(); }

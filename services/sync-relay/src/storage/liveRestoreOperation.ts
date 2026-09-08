@@ -15,6 +15,7 @@ import { canonicalLiveSelector, currentLiveDocumentMoment, decodeLiveDocumentAut
 import { requireLiveJournalHistory, liveJournalHistoryNamespace } from "./liveJournalHistory";
 import type { StoredLiveDocumentAuthority } from "./types";
 import { decodeJournalRow, verifyJournalRow } from "./liveUpdateJournal";
+import { parseNativeRestoreFenceReceipt, type NativeRestoreFence, type NativeRestoreFenceReceipt } from "../liveRestoreFence";
 
 export type StopRestoreIntent = {
   deliveryKind: "bootstrap" | "owner";
@@ -61,7 +62,8 @@ export type StopRestoreOperation = {
   basis: StopRestoreBasis;
   terminal: LiveUpdateReceipt | null;
   applied: StopRestoreApplied | null;
-  phase: "authority-invalidated" | "fenced" | "old-cut-applied";
+  nativeReceipt: NativeRestoreFenceReceipt | null;
+  phase: "authority-invalidated" | "fenced" | "old-cut-applied" | "native-fenced";
   oldFence: number;
   newFence: number | null;
   cutoverCursor: number | null;
@@ -160,11 +162,20 @@ function read(storage: StorageContext, operationId: string, workspaceId: string)
       applied.hostId !== savedBasis.hostId || !isDeepStrictEqual(applied.terminal,terminal)) refuse();
     parseLiveUpdateIdentifier(applied.sourceId); integer(applied.localYDocSequence);
   }
-  return { intent, basis: savedBasis, terminal: terminal === null ? null : parseLiveUpdateReceipt(terminal), applied,
+  const nativeReceipt = row.native_receipt_json === null ? null : parseNativeRestoreFenceReceipt(JSON.parse(String(row.native_receipt_json)));
+  if ((row.phase === "native-fenced") !== (nativeReceipt !== null)) refuse();
+  if (nativeReceipt && (!applied || !isDeepStrictEqual(nativeReceipt.operation, nativeRestoreFence(applied, Number(row.new_fence))))) refuse();
+  return { intent, basis: savedBasis, terminal: terminal === null ? null : parseLiveUpdateReceipt(terminal), applied, nativeReceipt,
     phase: row.phase as StopRestoreOperation["phase"], oldFence: Number(row.old_fence),
     newFence: row.new_fence === null ? null : Number(row.new_fence), cutoverCursor: row.cutover_cursor === null ? null : Number(row.cutover_cursor),
     revokedGeneration: Number(row.revoked_generation), invalidatedAtMs: Number(row.invalidated_at_ms),
     fencedAtMs: row.fenced_at_ms === null ? null : Number(row.fenced_at_ms) };
+}
+
+export function nativeRestoreFence(applied: StopRestoreApplied, newFence: number): NativeRestoreFence {
+  return {operationId: applied.operationId, relayDatabaseNamespace: applied.namespace, oldBinding: structuredClone(applied.binding),
+    hostId: applied.hostId, newFence, origin: {kind: applied.kind, id: applied.sourceId},
+    terminal: applied.terminal ? {...applied.terminal} : null, appliedSequence: applied.localYDocSequence};
 }
 
 // Internal storage operation. No network or desktop route initiates restoration.
@@ -206,7 +217,9 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
     const maximumApplied = {operationId: intent.operationId,binding: intent.deliveryKind === "owner" ? initialBasis.ownerBinding : initialBasis.binding,
       kind: "bootstrap",namespace: initialBasis.namespace,hostMode: initialBasis.hostMode,
       hostId: initialBasis.hostId,sourceId: "\\".repeat(512),localYDocSequence: Number.MAX_SAFE_INTEGER,terminal: maximumReceipt};
-    const charge = Buffer.byteLength(JSON.stringify([intent.operationId, ...key(intent.document), intentJson, basisJson, JSON.stringify(maximumReceipt),JSON.stringify(maximumApplied), "authority-invalidated",
+    const maximumNativeReceipt = {operation: nativeRestoreFence(maximumApplied as StopRestoreApplied, Number.MAX_SAFE_INTEGER),
+      localHeadSequence: Number.MAX_SAFE_INTEGER, recordedAtMs: Number.MAX_SAFE_INTEGER};
+    const charge = Buffer.byteLength(JSON.stringify([intent.operationId, ...key(intent.document), intentJson, basisJson, JSON.stringify(maximumReceipt),JSON.stringify(maximumApplied),JSON.stringify(maximumNativeReceipt), "authority-invalidated",
       intent.expectedFence, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, intent.expectedGrantGeneration + 1, at, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]));
     assertWorkspaceQuota(storage, intent.document.workspaceId, charge);
     const revoked = revokeShareGrantInTransaction(storage, { shareId: intent.shareId, grantId: intent.grantId,

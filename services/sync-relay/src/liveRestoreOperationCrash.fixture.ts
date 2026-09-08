@@ -9,10 +9,10 @@ const intent = JSON.parse(readFileSync(intentPath!, "utf8")) as StopRestoreInten
 const { storage, history } = openRelayDeployment(configPath!);
 const context = storage as StorageContext;
 if (boundary === "before-operation") process.exit(80);
-if (boundary!.startsWith("fence-") || boundary!.startsWith("complete-")) beginStopRestore(context, intent, 40);
+if (boundary!.startsWith("fence-") || boundary!.startsWith("complete-") || boundary!.startsWith("native-")) beginStopRestore(context, intent, 40);
 const lookup = {operationId:intent.operationId,workspaceId:intent.document.workspaceId,ownerUserId:intent.ownerUserId};
 let finish: (()=>void) | undefined;
-if (boundary!.startsWith("complete-")) {
+if (boundary!.startsWith("complete-") || boundary!.startsWith("native-")) {
   advanceStopRestoreFence(context,lookup,50);
   const host = storage.getLiveHostControl()!;
   const store = storage.createLiveCommittedDeliveryStore(history);
@@ -23,6 +23,12 @@ if (boundary!.startsWith("complete-")) {
   store.acknowledgeStopRestoreBootstrap(opened.capture,{bootstrapId:next.baseline.bootstrapId,bootstrapMomentId:next.baseline.bootstrapMomentId,
     baselineDigest:next.baseline.baselineDigest,baselineMomentRelaySequence:next.baseline.baselineMomentRelaySequence,localYDocSequence:0,bootstrapReplayed:false});
   finish=()=>{store.completeStopRestoreCut(opened.capture);};
+  if (boundary!.startsWith("native-")) {
+    store.completeStopRestoreCut(opened.capture);
+    const input = {...lookup,host:{mode:host.configuredMode,hostId:host.configuredHostId,hostEpoch:host.hostEpoch,instanceId:host.registeredInstanceId!,connectionId:host.registeredConnectionId!}};
+    const operation = store.pendingStopRestoreFence(input).operation;
+    finish=()=>{store.acknowledgeStopRestoreFence(input,{operation,localHeadSequence:0,recordedAtMs:100});};
+  }
 }
 const exec = DatabaseSync.prototype.exec;
 DatabaseSync.prototype.exec = function(sql: string) {
