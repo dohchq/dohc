@@ -600,7 +600,7 @@ mod tests {
         );
         assert!(response.output_guard.as_ref().unwrap().is_current());
         assert!(ingress.budget.available_permits() < capacity);
-        let mut second = request(&workspace, registration, &binding, &bytes, &[]);
+        let mut second = self::request(&workspace, registration, &binding, &bytes, &[]);
         second.id = 4;
         second.params["updateStreamId"] = json!(3);
         second.params["rangeStreamId"] = json!(4);
