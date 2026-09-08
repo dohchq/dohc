@@ -55,11 +55,35 @@ access, unless the owner reset or ended the link. Do not run more than one
 instance or enable horizontal scaling in v1 because the instances do not
 share session state.
 
-The sync relay stores its SQLite database in the
-`dohc_self_host_sync_relay` volume. Stop `share-web` and `sync-relay` before a
-backup or restore. Back up the complete volume, not only one SQLite file.
-Restore into an empty relay volume, then start the relay before `share-web`.
-Test the restore on a separate deployment before relying on the backup.
+The sync relay stores its database in `dohc_self_host_sync_relay`. A separate
+`dohc_self_host_relay_continuity` volume holds deployment configuration, the
+writer lock, and continuity metadata. Keep that volume outside relay backups.
+The configured paths belong to one physical deployment host. Cross-host takeover
+and network filesystems are unsupported.
+
+Before the first start, initialize a fresh deployment explicitly:
+
+```sh
+docker compose --env-file .env.self-host -f docker-compose.self-host.yml run --rm --no-deps sync-relay sh -c 'corepack enable && corepack prepare pnpm@11.20.0 --activate && pnpm install --frozen-lockfile && pnpm --filter @dohc/sync-relay deployment initialize --config /continuity/deployment.json --database /data/sync-relay.sqlite --continuity-directory /continuity/history'
+```
+
+Initialization refuses existing data. Ordinary startup never initializes missing
+continuity metadata. Outside development and tests, `DOHC_RELAY_DEPLOYMENT_CONFIG`
+must name the external configuration file. That file owns the database path;
+`SYNC_RELAY_DB_PATH` cannot override it.
+
+Stop `share-web` and `sync-relay` before backup or restore. Back up the complete
+relay volume, including SQLite side files. Keep the original volume before
+restoring into an empty replacement. The relay refuses startup if the restored
+database is behind its independent continuity record, including a lost grant
+revocation. Missing continuity also refuses startup.
+
+This implementation does not provide automatic reconciliation of an older
+backup. Keep the service stopped and preserve both volumes when continuity
+refuses. Do not copy an older continuity record alongside a backup to make its
+markers match. Host reprovisioning does not restore grant authority. Recovery
+that discards or reconstructs intervening accepted work requires a separate
+verified procedure; no reset or marker-repair command is provided here.
 
 The relay does not persist viewer IP addresses. It keeps share and grant rows
 until the owner deletes their containing share or grant. Retired link
@@ -119,6 +143,10 @@ Set the proxy's idle timeout above the configured heartbeat interval plus deadli
 The device command always verifies the public TLS certificate.
 
 Use `pnpm --filter @dohc/sync-relay host:credential --help` for initial provisioning and permanent revocation.
+Stop the relay before maintenance. Pass `--deployment-config` with its external
+configuration path. Maintenance acquires the same lifetime writer lock and
+refuses while the relay is running. A bare database path cannot open a configured
+deployment for credential changes.
 Place the resulting credential directory on the device with access restricted to its owner.
 Build the relay package before running the outbound connector.
 Run `pnpm --filter @dohc/sync-relay host:connect --help` for the outbound connector arguments.
@@ -126,9 +154,10 @@ The connector reads the existing credential and opens no listener or relay datab
 Credential-file creation, reading, and the connector are unavailable on macOS until ACL validation is implemented.
 It exits when its connection closes; rerunning it reconnects the same instance with a new server-generated connection ID.
 
-Revocation through a separate SQLite connection blocks later registration transactions.
-The active connection closes when a heartbeat observes the changed durable host coordinate.
-That observation is not a synchronous notification from the operator's transaction.
+Credential maintenance requires the running relay to stop and release deployment
+ownership. After revocation, the next relay process refuses the revoked
+credential. A runtime continuity failure closes active device connections before
+the storage owner releases its lock.
 
 ## Reserved later-phase deployment work
 

@@ -13,14 +13,13 @@ import { promisify } from "node:util";
 import { WebSocket } from "ws";
 import { build } from "esbuild";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { openSyncRelayStorage } from "@dohc/sync-relay/storage";
 import { DEVICE_CONTROL_PROTOCOL, type DeviceControlLimits } from "@dohc/live-session-contract/device-control";
 
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL("../../..", import.meta.url));
 const certificate = fileURLToPath(new URL("./testing/device-control/localhost-cert.pem", import.meta.url));
 const privateKey = fileURLToPath(new URL("./testing/device-control/localhost-key.pem", import.meta.url));
-let relayMain: string, shareMain: string, credentialCommand: string, connectorCommand: string;
+let relayMain: string, shareMain: string, deploymentCommand: string, credentialCommand: string, connectorCommand: string;
 const limits: DeviceControlLimits = { maxConnections: 8, maxHeaderBytes: 8192, maxCredentialBytes: 4096,
   maxPayloadBytes: 4096, maxPendingBytes: 8192, maxFragments: 8, maxBufferedChunks: 8,
   handshakeTimeoutMs: 5000, heartbeatIntervalMs: 100, heartbeatTimeoutMs: 2000, closeTimeoutMs: 100 };
@@ -55,8 +54,10 @@ beforeAll(async () => {
   relayMain = join(scratch, "relay-main.mjs");
   shareMain = join(scratch, "share-main.mjs");
   credentialCommand = join(scratch, "device-host-credential.mjs");
+  deploymentCommand = join(scratch, "relay-deployment.mjs");
   connectorCommand = join(scratch, "device-host-connect.mjs");
   await build({ entryPoints: { "relay-main": join(root, "services/sync-relay/src/main.ts"),
+    "relay-deployment": join(root, "services/sync-relay/src/relayDeploymentCommand.ts"),
     "device-host-credential": join(root, "services/sync-relay/src/deviceHostCredentialCommand.ts"),
     "device-host-connect": join(root, "services/sync-relay/src/deviceHostConnectCommand.ts") },
     outdir: scratch, outExtension: { ".js": ".mjs" }, bundle: true, platform: "node", format: "esm", target: "node22",
@@ -133,10 +134,14 @@ it("reports unsupported credential-file platforms without exposing other connect
 });
 
 it.skipIf(process.platform === "darwin")("runs the built connector outbound through actual share-web and relay, with no document authority", async () => {
-  const database = join(scratch, "relay.sqlite"), directory = join(scratch, "credential"), assets = join(scratch, "viewer");
+  const database = join(scratch, "relay", "relay.sqlite"), directory = join(scratch, "credential"), assets = join(scratch, "viewer");
+  const deployment = join(scratch, "deployment.json");
   await mkdir(assets);
   await writeFile(join(assets, "index.html"), "<!doctype html><title>Control transport fixture</title>");
-  const provision = await exec(process.execPath, [credentialCommand, "provision", "--database", database,
+  await exec(process.execPath, [deploymentCommand, "initialize", "--config", deployment,
+    "--database", database, "--continuity-directory", join(scratch, "continuity")],
+  { windowsHide: true, env: { ...process.env, NODE_OPTIONS: "" } });
+  const provision = await exec(process.execPath, [credentialCommand, "provision", "--deployment-config", deployment,
     "--host-id", "outbound-device", "--output-directory", directory], { windowsHide: true, env: { ...process.env, NODE_OPTIONS: "" } });
   const credentialFile = join(directory, "device-host-credential.json"), before = await readFile(credentialFile);
   const permissionBefore = (await stat(credentialFile)).mode;
@@ -145,12 +150,19 @@ it.skipIf(process.platform === "darwin")("runs the built connector outbound thro
   const credential = JSON.parse(before.toString());
   expect(provision.stdout + provision.stderr).not.toContain(credential.secret);
   const relayPort = await freePort();
-  const relay = child([relayMain], { SYNC_RELAY_TEST_AUTH: "1", SYNC_RELAY_PORT: String(relayPort),
-    SYNC_RELAY_DB_PATH: database, DOHC_RELAY_EXCHANGE_KEY: exchangeKey, DOHC_DEVICE_CONTROL_LIMITS: JSON.stringify(limits),
-    DOHC_RELAY_DEVICE_CONTROL_HOSTS: `127.0.0.1:${relayPort}` });
+  const relayEnv = { SYNC_RELAY_TEST_AUTH: "1", SYNC_RELAY_PORT: String(relayPort),
+    SYNC_RELAY_DB_PATH: undefined, DOHC_RELAY_DEPLOYMENT_CONFIG: deployment,
+    DOHC_RELAY_EXCHANGE_KEY: exchangeKey, DOHC_DEVICE_CONTROL_LIMITS: JSON.stringify(limits),
+    DOHC_RELAY_DEVICE_CONTROL_HOSTS: `127.0.0.1:${relayPort}` };
+  const relay = child([relayMain], relayEnv);
   await relay.output(/SYNC_RELAY_LISTENING host=127\.0\.0\.1 port=(\d+)/);
-  const authority = openSyncRelayStorage(database);
-  cleanups.push(async () => authority.close());
+  const observer = new DatabaseSync(database, { readOnly: true });
+  cleanups.push(async () => observer.close());
+  const authority = { getLiveHostControl: () => observer.prepare(`SELECT
+    configured_mode AS configuredMode, configured_host_id AS configuredHostId,
+    host_epoch AS hostEpoch, registered_instance_id AS registeredInstanceId,
+    registered_connection_id AS registeredConnectionId, admission_state AS admissionState
+    FROM sync_relay_session_host_control WHERE singleton_id = 1`).get() };
 
   let sharePort = 0;
   const proxySockets = new Set<Duplex>();
@@ -238,17 +250,25 @@ if (process.env.DENY_DEVICE_LISTEN === '1') {
   expect(untrusted.logs()).not.toContain('"type":"registered"');
   expect(authority.getLiveHostControl()?.registeredConnectionId).toBe(thirdNotice.connectionId);
 
-  // This command opens a separate real SQLite handle; liveness observes its committed revocation.
-  await exec(process.execPath, [credentialCommand, "revoke", "--database", database, "--host-id", credential.hostId,
-    "--instance-id", credential.instanceId, "--confirm-revoke"], { windowsHide: true, env: { ...process.env, NODE_OPTIONS: "" } });
+  const revokeArgs = [credentialCommand, "revoke", "--deployment-config", deployment, "--host-id", credential.hostId,
+    "--instance-id", credential.instanceId, "--confirm-revoke"];
+  // The operator command cannot become a second writer while the daemon owns the deployment.
+  await expect(exec(process.execPath, revokeArgs, { windowsHide: true, env: { ...process.env, NODE_OPTIONS: "" } }))
+    .rejects.toMatchObject({ code: 1 });
+  expect(authority.getLiveHostControl()?.registeredConnectionId).toBe(thirdNotice.connectionId);
+  relay.process.kill();
+  await relay.exited;
   await third.exited;
+  await exec(process.execPath, revokeArgs, { windowsHide: true, env: { ...process.env, NODE_OPTIONS: "" } });
   expect(authority.getLiveHostControl()?.admissionState).toBe("closed");
+  const restartedRelay = child([relayMain], relayEnv);
+  await restartedRelay.output(/SYNC_RELAY_LISTENING host=127\.0\.0\.1 port=(\d+)/);
   const revoked = child(args, connectorEnv);
   expect(await revoked.exited).toBe(1);
   expect(revoked.logs()).not.toContain('"type":"registered"');
   expect(share.logs()).toContain("OUTBOUND_RELAY_ONLY");
   expect(share.logs()).not.toContain("Share-web may connect only");
-  for (const processHandle of [relay, share, first, second, third, untrusted, revoked]) {
+  for (const processHandle of [relay, restartedRelay, share, first, second, third, untrusted, revoked]) {
     expect(processHandle.logs()).not.toContain(credential.secret);
     expect(processHandle.logs()).not.toContain("Device listener forbidden");
   }

@@ -29,6 +29,8 @@ export function createDeviceControl(options: {
   server.on("wsClientError", (_error, socket) => refuseDeviceControl(socket, limits.closeTimeoutMs));
 
   function handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
+    if (options.storage.unavailable.aborted) { refuseDeviceControl(socket, limits.closeTimeoutMs); return; }
+    const checkStanding = options.storage.captureStanding();
     const headers = parseRequest(request);
     if (closed || connections.size >= limits.maxConnections || head.length > limits.maxPendingBytes || !headers ||
       !verifyRelayExchangeKey(headers.get("x-dohc-relay-exchange-key") ?? null, keyHash)) {
@@ -65,6 +67,7 @@ export function createDeviceControl(options: {
       }
     };
     const isCurrent = () => {
+      checkStanding();
       const host = options.storage.getLiveHostControl();
       return host?.admissionState === "open" && host.configuredMode === "device" &&
         host.configuredHostId === parsedCredential.hostId && host.hostEpoch === parsedCredential.hostEpoch &&
@@ -113,10 +116,13 @@ export function createDeviceControl(options: {
     } catch { stop(); }
   }
 
-  return { handleUpgrade, close() {
+  const close = () => {
     if (closed) return;
     closed = true;
     for (const stop of connections) stop();
     server.close();
-  } };
+  };
+  options.storage.unavailable.addEventListener("abort", close, { once: true });
+  if (options.storage.unavailable.aborted) close();
+  return { handleUpgrade, close };
 }

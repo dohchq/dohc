@@ -26,15 +26,13 @@ export function claimWorkspace(storage: StorageContext, input: {
     ownerUserId: string;
     createdAtMs: number;
   }): "created" | "owned" | "not-owner" {
-    storage.db.exec("BEGIN IMMEDIATE");
-    try {
+    return storage.tx(() => {
       const existing = storage.db
         .prepare(
           "SELECT owner_user_id FROM sync_relay_workspaces WHERE workspace_id = ?",
         )
         .get(input.workspaceId);
       if (typeof existing?.owner_user_id === "string") {
-        storage.db.exec("COMMIT");
         return existing.owner_user_id === input.ownerUserId ? "owned" : "not-owner";
       }
       storage.db
@@ -43,14 +41,8 @@ export function claimWorkspace(storage: StorageContext, input: {
            VALUES (?, ?, ?)`,
         )
         .run(input.workspaceId, input.ownerUserId, Math.trunc(input.createdAtMs));
-      storage.db.exec("COMMIT");
       return "created";
-    } catch (error) {
-      try {
-        storage.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    });
   }
 
 export function getWorkspaceIdentity(storage: StorageContext, workspaceId: string): WorkspaceSyncIdentity | null {
@@ -165,8 +157,7 @@ export function claimWorkspaceIdentity(storage: StorageContext, input: {
 
     // Only first adoption needs a write transaction. Re-read after acquiring
     // the lock to close the race with another claimant.
-    storage.db.exec("BEGIN IMMEDIATE");
-    try {
+    return storage.tx(() => {
       const row = storage.db
         .prepare(
           `SELECT replication_epoch, stream_identity
@@ -186,18 +177,11 @@ export function claimWorkspaceIdentity(storage: StorageContext, input: {
              WHERE workspace_id = ?`,
           )
           .run(input.replicationEpoch, input.streamIdentity, input.workspaceId);
-        storage.db.exec("COMMIT");
         return "claimed";
       }
       const result = classifyWorkspaceIdentity(storage, input.workspaceId, current, input);
-      storage.db.exec("COMMIT");
       return result;
-    } catch (error) {
-      try {
-        storage.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    });
   }
 
 export function rotateWorkspaceIdentity(storage: StorageContext, input: {
@@ -207,8 +191,7 @@ export function rotateWorkspaceIdentity(storage: StorageContext, input: {
     streamIdentity: string;
     rotatedAtMs: number;
   }): RotateWorkspaceIdentityResult {
-    storage.db.exec("BEGIN IMMEDIATE");
-    try {
+    return storage.tx(() => {
       const row = storage.db
         .prepare(
           `SELECT owner_user_id, replication_epoch, stream_identity
@@ -217,7 +200,6 @@ export function rotateWorkspaceIdentity(storage: StorageContext, input: {
         )
         .get(input.workspaceId);
       if (row === undefined || row.owner_user_id !== input.ownerUserId) {
-        storage.db.exec("COMMIT");
         return "not-owner";
       }
       const replicationEpoch = row.replication_epoch;
@@ -238,7 +220,6 @@ export function rotateWorkspaceIdentity(storage: StorageContext, input: {
         replicationEpoch === input.replicationEpoch &&
         streamIdentity === input.streamIdentity
       ) {
-        storage.db.exec("COMMIT");
         return "unchanged";
       }
 
@@ -255,7 +236,6 @@ export function rotateWorkspaceIdentity(storage: StorageContext, input: {
           )
           .get(input.workspaceId, input.replicationEpoch) !== undefined;
       if (targetEpochWasSuperseded) {
-        storage.db.exec("COMMIT");
         return "epoch-superseded";
       }
       if (typeof replicationEpoch === "string" && typeof streamIdentity === "string") {
@@ -309,14 +289,8 @@ export function rotateWorkspaceIdentity(storage: StorageContext, input: {
            WHERE workspace_id = ?`,
         )
         .run(input.workspaceId);
-      storage.db.exec("COMMIT");
       return "rotated";
-    } catch (error) {
-      try {
-        storage.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    });
   }
 
 export function classifyWorkspaceIdentity(

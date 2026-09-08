@@ -59,6 +59,7 @@ async function spawnRelay(dbPath: string): Promise<string> {
     cwd: packageRoot(),
     env: {
       ...process.env,
+      DOHC_RELAY_DEPLOYMENT_CONFIG: undefined,
       NODE_ENV: "test",
       SYNC_RELAY_TEST_AUTH: "1",
       SYNC_RELAY_PORT: "0",
@@ -93,6 +94,7 @@ async function spawnRelay(dbPath: string): Promise<string> {
     });
     child.on("exit", (code) => {
       clearTimeout(timeout);
+      if (code !== null && code !== 0) console.error(`Relay child exited with ${code}:\n${stderr}`);
       reject(new Error(`relay exited before listening: ${code}\n${stdout}\n${stderr}`));
     });
   });

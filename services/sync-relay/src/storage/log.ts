@@ -31,8 +31,7 @@ export function appendLogBatch(storage: StorageContext, input: {
         throw new Error("recordedAtMs must be an integer in the safe wire range");
       }
     }
-    storage.db.exec("BEGIN IMMEDIATE");
-    try {
+    return storage.tx(() => {
       // Authorization re-verification under the write lock (see the interface
       // comment): BEGIN IMMEDIATE serializes writers, so a revoke committed
       // by another writer is either already visible here (guard throws, batch
@@ -202,15 +201,8 @@ export function appendLogBatch(storage: StorageContext, input: {
           Number(result.lastInsertRowid),
         );
       }
-
-      storage.db.exec("COMMIT");
       return { inserted, skipped, currentMaxOriginSeq: currentMax };
-    } catch (error) {
-      try {
-        storage.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    });
   }
 
 export function maxOriginSeq(storage: StorageContext, workspaceId: string, originId: string): number {

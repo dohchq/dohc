@@ -79,6 +79,7 @@ function checkComposeConfig() {
 }
 
 function startComposeStack() {
+  console.log('The relay must already be explicitly initialized. See services/share-web/README.md; this check never initializes or repairs deployment continuity.')
   const up = spawnSync('docker', composeArgs('up', '-d', ...REQUIRED_SERVICES), {
     stdio: 'inherit',
   })
