@@ -301,7 +301,7 @@ impl EngineService {
             &cancellation,
             "versionedText.read",
             open.actor.read_text_inband(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.version_id,
                 params.path,
                 MAX_DESKTOP_CAPTURE_TEXT_BYTES,
@@ -369,7 +369,7 @@ impl EngineService {
             let versions = Self::read_under_ctx(
                 &cancellation,
                 "versionedText.list",
-                open.actor.list_versions(open.workspace_id),
+                open.actor.list_versions(open.workspace_id.clone()),
             )
             .await?;
             if !versions
@@ -442,7 +442,7 @@ impl EngineService {
                 return Err(cancellation.interruption("versionedBinary.read"));
             }
             result = open.actor.read_binary_inband(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.version_id,
                 params.path,
                 MAX_INBAND_CONTENT_BYTES,
@@ -517,7 +517,7 @@ impl EngineService {
                 &cancellation,
                 "versionedBinary.readBlob",
                 open.actor
-                    .read_binary_blob_for_egress(open.workspace_id, sha256.clone()),
+                    .read_binary_blob_for_egress(open.workspace_id.clone(), sha256.clone()),
             )
             .await?
             .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
@@ -594,7 +594,7 @@ impl EngineService {
                 &cancellation,
                 "versionedText.readBlob",
                 open.actor
-                    .read_text_blob_for_egress(open.workspace_id, sha256.clone()),
+                    .read_text_blob_for_egress(open.workspace_id.clone(), sha256.clone()),
             )
             .await?
             .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;

@@ -479,7 +479,7 @@ impl EngineService {
             "chats.messages.send",
             open.actor.chat_message_send(
                 SendMessage {
-                    workspace_id: open.workspace_id,
+                    workspace_id: open.workspace_id.clone(),
                     thread_id: params.thread_id,
                     message_id: params.message_id,
                     author_kind,
@@ -521,7 +521,7 @@ impl EngineService {
             "chats.decisions.resolve",
             open.actor.chat_decision_resolve(
                 ResolveDecision {
-                    workspace_id: open.workspace_id,
+                    workspace_id: open.workspace_id.clone(),
                     thread_id: params.thread_id,
                     message_id: params.message_id,
                     resolved_by_message_id: params.resolved_by_message_id,
@@ -611,7 +611,7 @@ impl EngineService {
             "chats.reactions.set",
             open.actor.chat_reaction_set(
                 SetReaction {
-                    workspace_id: open.workspace_id,
+                    workspace_id: open.workspace_id.clone(),
                     thread_id: params.thread_id,
                     message_id: params.message_id,
                     emoji: params.emoji,
@@ -694,7 +694,7 @@ impl EngineService {
             &cancellation,
             "chats.messages.list",
             open.actor.chat_messages_list(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.thread_id,
                 params.limit.unwrap_or(100).min(500),
                 params.after_message_order,
