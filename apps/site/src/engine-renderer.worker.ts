@@ -36,10 +36,12 @@ async function initialize(canvas: OffscreenCanvas, pixelRatio: number, studioUrl
   renderer.shadowMap.type = THREE.VSMShadowMap;
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(33, 1, 0.1, 60);
+  const halfFov = THREE.MathUtils.degToRad(camera.fov / 2);
   scene.add(engine);
   const box = new THREE.Box3().setFromObject(engine);
   const center = box.getCenter(new THREE.Vector3());
   const radius = box.getBoundingSphere(new THREE.Sphere()).radius;
+  const distance = radius / Math.sin(halfFov) * .83;
   const groundGeometry = new THREE.PlaneGeometry(30, 30);
   const groundMaterial = new THREE.ShadowMaterial({ opacity: 0.12, depthWrite: false });
   const ground = new THREE.Mesh(groundGeometry, groundMaterial);
@@ -81,16 +83,15 @@ async function initialize(canvas: OffscreenCanvas, pixelRatio: number, studioUrl
   renderer.shadowMap.autoUpdate = false;
   renderer.shadowMap.needsUpdate = true;
   await renderer.compileAsync(scene, camera);
-  let width = 0, height = 0, distance = 0;
+  let width = 0, height = 0;
   renderView = view => {
     if (view.width !== width || view.height !== height) {
       width = view.width; height = view.height;
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
+      // Keep the square preview's perspective and object-fit: contain framing.
+      camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(halfFov) / Math.min(1, camera.aspect)));
       camera.updateProjectionMatrix();
-      const halfFov = THREE.MathUtils.degToRad(camera.fov / 2);
-      const limitingFov = Math.min(halfFov, Math.atan(Math.tan(halfFov) * camera.aspect));
-      distance = radius / Math.sin(limitingFov) * .83;
     }
     camera.position.setFromSphericalCoords(distance, view.phi, view.theta).add(center);
     camera.lookAt(center);
