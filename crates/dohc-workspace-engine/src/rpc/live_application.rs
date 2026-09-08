@@ -533,10 +533,11 @@ mod tests {
         assert!(registration.retired.is_cancelled());
         assert!(!registration.host.owner.is_current());
         assert!(owner.handle().is_current());
-        let registry = lock(&service.live_applications);
-        assert!(registry.hosts.is_empty());
-        assert!(registry.registrations.is_empty());
-        drop(registry);
+        {
+            let registry = lock(&service.live_applications);
+            assert!(registry.hosts.is_empty());
+            assert!(registry.registrations.is_empty());
+        }
         drop(registration);
         assert!(old_open.upgrade().is_none());
         service.workspace_close(Some(rebound)).await.unwrap();
