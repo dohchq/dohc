@@ -16048,6 +16048,7 @@ describe("workbench render cost", () => {
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
