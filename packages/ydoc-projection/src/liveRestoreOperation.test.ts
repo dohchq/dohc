@@ -62,6 +62,29 @@ it("does not disclose whether another workspace has an operation ID", () => {
   } finally { f.close(); }
 });
 
+it.each([false, true])("refuses a foreign operation ID before grant mutation, trap=%s", trap => {
+  const f = fixture(), foreign = fixture();
+  try {
+    beginStopRestore(foreign.context, foreign.intent, 40);
+    f.write(db => {
+      db.prepare("INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms) VALUES('other','other-owner',0)").run();
+      const document = { ...foreign.rows().documents[0]!, workspace_id: "other" };
+      const operation = { ...foreign.rows().operations[0]!, workspace_id: "other", intent_json: JSON.stringify({
+        ...foreign.intent, ownerUserId: "other-owner", document: { ...foreign.intent.document, workspaceId: "other" },
+      }) };
+      for (const [table, row] of [["sync_relay_live_documents", document], ["sync_relay_live_restore_operations", operation]] as const) {
+        db.prepare(`INSERT INTO ${table}(${Object.keys(row).join(",")}) VALUES(${Object.keys(row).map(() => "?").join(",")})`)
+          .run(...Object.values(row));
+      }
+      if (trap) db.exec("CREATE TRIGGER trap_restore_revocation BEFORE UPDATE ON sync_relay_share_grants BEGIN SELECT RAISE(ABORT, 'Unexpected grant mutation'); END");
+    });
+    const before = f.rows();
+    expect(() => beginStopRestore(f.context, f.intent, 50)).toThrow("Live restore operation conflicts with current authority.");
+    expect(f.rows()).toEqual(before);
+    expect(f.storage.getShareGrant("grant")).toMatchObject({ status: "active", generation: 4 });
+  } finally { f.close(); foreign.close(); }
+});
+
 it("rolls back the document fence when its operation update is ignored", () => {
   const f = fixture();
   try {

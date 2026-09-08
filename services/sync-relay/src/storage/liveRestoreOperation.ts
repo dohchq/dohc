@@ -81,6 +81,7 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
     requireLiveJournalHistory(storage);
     const saved = read(storage, intent.operationId, intent.document.workspaceId);
     if (saved) { if (!isDeepStrictEqual(saved.intent, intent)) refuse(); return saved; }
+    if (storage.db.prepare(`SELECT 1 FROM ${table} WHERE operation_id=?`).get(intent.operationId)) refuse();
     requireAvailableJournalCursor(storage);
     const document = storage.db.prepare(`SELECT restore_fence_generation,baseline_digest,baseline_moment_relay_seq,current_path FROM sync_relay_live_documents
       WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current' AND admission_state='open'`).get(...key(intent.document));
@@ -127,8 +128,10 @@ export function readStopRestore(storage: StorageContext, input: { operationId: s
 export function advanceStopRestoreFence(storage: StorageContext, input: { operationId: string; workspaceId: string; ownerUserId: string }, now: number): StopRestoreOperation {
   const operationId = parseLiveUpdateIdentifier(input.operationId), workspaceId = parseLiveUpdateIdentifier(input.workspaceId), userId = parseLiveUpdateIdentifier(input.ownerUserId), at = integer(now);
   return storage.tx(() => {
-    owner(storage, workspaceId, userId); requireLiveJournalHistory(storage); const saved = read(storage, operationId, workspaceId);
-    if (!saved || saved.intent.document.workspaceId !== workspaceId) refuse();
+    owner(storage, workspaceId, userId);
+    requireLiveJournalHistory(storage);
+    const saved = read(storage, operationId, workspaceId);
+    if (!saved) refuse();
     if (saved.phase === "fenced") return saved;
     const { intent } = saved, grant = storage.getShareGrant(intent.grantId);
     if (at < saved.invalidatedAtMs || !grant || grant.status !== "revoked" || grant.generation !== saved.revokedGeneration || grant.revokedAtMs !== saved.invalidatedAtMs) refuse();
