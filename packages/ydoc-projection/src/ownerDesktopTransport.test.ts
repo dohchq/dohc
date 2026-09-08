@@ -27,6 +27,16 @@ import {yDocToMarkdown} from "./import-export.js";
 import {policy} from "./liveCommittedDeliveryTestSupport.js";
 
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
+function assertIndependentRelayReader(root: string,baseline: Uint8Array,expected: Y.Doc) {
+  const relay = new DatabaseSync(join(root,"relay","relay.sqlite"),{readOnly: true}), reader = new Y.Doc();
+  try {
+    Y.applyUpdate(reader,baseline);
+    for (const row of relay.prepare("SELECT update_bytes FROM sync_relay_live_update_journal ORDER BY journal_cursor").all()) Y.applyUpdate(reader,row.update_bytes as Uint8Array);
+    expect(reader.getMap("frontmatter").get("beforeConnection")).toBe("Owner edit before first connection");
+    expect(reader.getMap("frontmatter").get("duringHandoff")).toBe("Queued owner edit");
+    expect(yDocToMarkdown(reader)).toBe(yDocToMarkdown(expected));
+  } finally {reader.destroy(); relay.close();}
+}
 it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keeps the ordinary desktop owner through authenticated adoption, durable outbox delivery, remote apply and settlement (standalone=%s)", async standalone => {
   const binary = resolve(process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY!);
   const captures = vi.spyOn(LiveCommittedDeliveryStore.prototype,"captureOwnerCut");
@@ -182,6 +192,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
       await expect.poll(() => readFileSync(join(workspaceRoot,"docs/a.md"),"utf8"),{timeout: 30_000}).toContain("Reconnect owner edit");
       expect(lifecycle.currentClient()).toBe(singleton);
       expect(native.prepare("SELECT COUNT(*) AS count FROM live_device_bootstraps").get()!.count).toBe(0);
+      assertIndependentRelayReader(root,baseline,rendererDoc);
       writeFileSync(join(root,"result.json"),JSON.stringify({passed: true,standalone: true,binary,document,markdown: yDocToMarkdown(rendererDoc)},null,2)); remote.destroy();
       return;
     }
@@ -231,6 +242,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     expect(readFileSync(join(workspaceRoot,"docs/a.md"),"utf8")).toBe(yDocToMarkdown(remote));
     expect(lifecycle.currentClient()).toBe(singleton);
     expect(native.prepare("SELECT COUNT(*) AS count FROM live_device_bootstraps").get()!.count).toBe(0);
+    assertIndependentRelayReader(root,baseline,rendererDoc);
     writeFileSync(join(root,"result.json"),JSON.stringify({passed: true,binary,sha256: hash(readFileSync(binary)),document,markdown: yDocToMarkdown(remote)},null,2)); remote.destroy();
   } finally {
     captures.mockRestore();

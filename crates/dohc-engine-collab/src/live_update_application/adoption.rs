@@ -394,6 +394,7 @@ mod tests {
         assert!(f.doc.encode_full_state_bounded(0).is_none());
         let bytes = f.doc.encode_full_state_bounded(size).unwrap();
         assert_eq!(bytes.len(), size);
+        assert_eq!(bytes, f.doc.encode_full_state());
         let decoded = Ydoc::wire();
         decoded.apply(&bytes).unwrap();
         assert!(crate::replay_parity::structurally_equal_v2(&f.doc, &decoded).unwrap());
@@ -913,7 +914,11 @@ pub fn adopt_owner_committed(
             crate::owner_outbox::append_in_tx(tx,&b.workspace_id,crate::OwnerOutboxAppendInput {
                 binding:b.clone(),base_update:cut.baseline_bytes.clone(),append_key,update:seed,
                 limits:cut.outbox_limits.clone(),created_at_ms:now_ms,
-            }).map_err(|_| invalid("owner adoption local seed could not be retained"))?;
+            }).map_err(|error| match error {
+                crate::OwnerOutboxError::Storage(error) => ApplicationError::Storage(error),
+                crate::OwnerOutboxError::Corrupt => ApplicationError::Corrupt,
+                _ => invalid("owner adoption local seed could not be retained"),
+            })?;
         }
         let terminal_cursor = cut.terminal_receipt.as_ref().map_or(0,|r|r.journal_cursor);
         tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms)

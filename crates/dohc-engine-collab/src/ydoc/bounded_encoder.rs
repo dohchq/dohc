@@ -47,7 +47,7 @@ impl Write for BoundedEncoder {
 
 impl Encoder for BoundedEncoder {
     fn to_vec(self) -> Vec<u8> {
-        self.bytes
+        self.finish().unwrap_or_default()
     }
     fn reset_ds_cur_val(&mut self) {}
     fn write_ds_clock(&mut self, clock: u32) {
@@ -87,5 +87,17 @@ impl Encoder for BoundedEncoder {
     }
     fn write_key(&mut self, key: &str) {
         self.write_string(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trait_completion_cannot_return_truncated_bytes() {
+        let mut encoder = BoundedEncoder::new(1).unwrap();
+        encoder.write_all(&[1, 2]);
+        assert!(encoder.to_vec().is_empty());
     }
 }
