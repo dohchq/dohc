@@ -847,8 +847,6 @@ function initializeLiveJournalSchema(db: SqliteDb): void {
 }
 
 export function initializeSyncRelaySchema(db: SqliteDb): void {
-  db.exec("BEGIN IMMEDIATE");
-  try {
     db.exec(`
       CREATE TABLE IF NOT EXISTS sync_relay_workspaces (
         workspace_id TEXT PRIMARY KEY,
@@ -1327,13 +1325,6 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         );
       END;
     `);
-    db.exec("COMMIT");
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {}
-    throw error;
-  }
 }
 
 export const DEVICE_HOST_CREDENTIAL_TABLE = "sync_relay_device_host_credential";

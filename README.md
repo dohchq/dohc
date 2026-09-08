@@ -77,7 +77,8 @@ pnpm --filter @dohc/sync-relay dev
 ```
 
 For a self-hosted browser viewer, copy `.env.self-host.example` to
-`.env.self-host`, replace every `change-me` value, and run
+`.env.self-host` and replace every `change-me` value. Follow the
+[`relay initialization procedure`](services/share-web/README.md#storage-and-recovery) once for a fresh deployment, then run
 `docker compose --env-file .env.self-host -f docker-compose.self-host.yml up`.
 The deployment runs one `share-web` instance and keeps relay state in the
 `dohc_self_host_sync_relay` volume. Read the

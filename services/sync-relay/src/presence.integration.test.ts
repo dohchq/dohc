@@ -59,6 +59,7 @@ async function spawnRelay(dbPath: string): Promise<string> {
     cwd: packageRoot(),
     env: {
       ...process.env,
+      DOHC_RELAY_DEPLOYMENT_CONFIG: undefined,
       NODE_ENV: "test",
       SYNC_RELAY_TEST_AUTH: "1",
       SYNC_RELAY_PORT: "0",

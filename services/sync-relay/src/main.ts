@@ -18,6 +18,8 @@ import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
 import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 import { createDeviceControl } from "./deviceControl";
+import { openRelayDeployment } from "./relayDeployment";
+import { guardRelayResponses } from "./relayResponseStanding";
 
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
   process.env.NODE_ENV === "test" ? process.env.SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS : undefined,
@@ -145,7 +147,12 @@ if (!testAuthSeam && secret.length < 32) {
 
 const namedBrowserSessionLimits = loadNamedBrowserSessionLimits();
 const dbPath = process.env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay.sqlite");
-const storage = openSyncRelayStorage(dbPath, { workspaceQuotaBytes });
+const deploymentConfig = process.env.DOHC_RELAY_DEPLOYMENT_CONFIG;
+if (!isDevOrTest && !deploymentConfig) fatal("FATAL: DOHC_RELAY_DEPLOYMENT_CONFIG must name an initialized deployment outside development/test.");
+if (deploymentConfig && process.env.SYNC_RELAY_DB_PATH !== undefined) fatal("FATAL: The deployment config owns the relay database path. Remove SYNC_RELAY_DB_PATH.");
+const storage = deploymentConfig
+  ? openRelayDeployment(deploymentConfig, { workspaceQuotaBytes }).storage
+  : openSyncRelayStorage(dbPath, { workspaceQuotaBytes });
 
 // Production auth intentionally reuses workspace-api's Better Auth database
 // and BETTER_AUTH_SECRET. A bearer token minted by workspace-api's desktop
@@ -225,7 +232,7 @@ if (testAuthSeam) {
 // (by design — presence is not durable).
 const presence = new PresenceHub();
 
-const relayHandler = createSyncRelayHandler({
+const relayHandler = guardRelayResponses(storage, createSyncRelayHandler({
   storage,
   resolveActor,
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
@@ -237,17 +244,17 @@ const relayHandler = createSyncRelayHandler({
   shareWebOrigin,
   relayExchangeKey,
   namedBrowserSessionLimits,
-});
+}));
 const fetchHandler = async (request: Request): Promise<Response> => {
   if (new URL(request.url).pathname === "/health") {
     // The presence hub footprint is exposed only under the dev/test seam so
     // integration tests can assert parked waiters are released on disconnect;
     // production health stays a bare liveness probe.
     return Response.json({
-      ok: true,
+      ok: !storage.unavailable.aborted,
       service: "sync-relay",
       ...(testAuthSeam ? { presence: presence.stats() } : {}),
-    });
+    }, { status: storage.unavailable.aborted ? 503 : 200 });
   }
   return relayHandler(request);
 };

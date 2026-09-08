@@ -1,4 +1,5 @@
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
+import { RelayWriteOwner } from "./storage/writeOwner";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveJournalStoredUpdate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveJournalValidation, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult } from "./storage/types";
@@ -68,6 +69,7 @@ import type {
 import { createRequire } from "node:module";
 import { resolve, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import {
   DEFAULT_WORKSPACE_QUOTA_BYTES,
   DEFAULT_BLOB_GRACE_MS,
@@ -203,6 +205,7 @@ function nodeSqlite(): SqliteModule {
 export function openSyncRelayStorage(
   dbPath: string,
   options: OpenSyncRelayStorageOptions = {},
+  createOwner?: (db: SqliteDb) => RelayWriteOwner,
 ): SyncRelayStorage {
   const resolved = resolve(dbPath);
   mkdirSync(dirname(resolved), { recursive: true });
@@ -266,12 +269,21 @@ export function openSyncRelayStorage(
     }
     if (typeof liveTickets.now !== "function") throw new TypeError("Live tickets require a storage clock.");
   }
-  const db = new DatabaseSync(resolved);
+  const uri = pathToFileURL(resolved);
+  uri.searchParams.set("mode", "rw");
+  // A configured deployment must already exist; SQLite owns all file handles.
+  const db = new DatabaseSync(createOwner ? uri.href : resolved);
+  let owner: RelayWriteOwner | undefined;
   try {
     db.exec(`PRAGMA busy_timeout = ${SYNC_RELAY_BUSY_TIMEOUT_MS}`);
     db.exec("PRAGMA foreign_keys = ON");
     db.exec("PRAGMA journal_mode = WAL");
-    initializeSyncRelaySchema(db);
+    db.exec("PRAGMA synchronous = FULL");
+    if (!createOwner && db.prepare("SELECT 1 FROM sqlite_schema WHERE name='sync_relay_continuity'").get()) {
+      throw new Error("Use the configured relay deployment to open this database.");
+    }
+    owner = createOwner ? createOwner(db) : new RelayWriteOwner(db);
+    owner.write(() => initializeSyncRelaySchema(db));
     return new SqliteSyncRelayStorage(
       db,
       {
@@ -285,10 +297,11 @@ export function openSyncRelayStorage(
         newDiscussionId,
       },
       liveTickets as unknown as LiveTicketStoragePolicy | undefined,
+      owner,
     );
   } catch (error) {
     try {
-      db.close();
+      if (owner) owner.close(); else db.close();
     } catch {}
     throw error;
   }
@@ -301,13 +314,17 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     readonly db: SqliteDb,
     readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets">>,
     private readonly liveTickets: LiveTicketStoragePolicy | undefined,
+    private readonly owner: RelayWriteOwner,
   ) {
     this.newDiscussionId = options.newDiscussionId;
   }
 
   close(): void {
-    this.db.close();
+    this.owner.close();
   }
+
+  get unavailable(): AbortSignal { return this.owner.unavailable; }
+  captureStanding(): () => void { return this.owner.captureStanding(); }
 
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
     return liveDocumentAuthorityStorage.resolveCurrentLiveDocumentBinding(this, input);
@@ -836,20 +853,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   // One write transaction, so a caller states what it writes rather than the
   // BEGIN/COMMIT/ROLLBACK frame around it.
   tx<T>(run: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const result = run();
-      this.db.exec("COMMIT");
-      return result;
-    } catch (error) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    return this.owner.write(run);
   }
 
   readTx<T>(run: () => T): T {
+    this.captureStanding();
     this.db.exec("BEGIN");
     try {
       const result = run();

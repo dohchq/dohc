@@ -39,6 +39,7 @@ export async function spawnSyncRelay(input: {
       cwd: relayRoot,
       env: {
         ...process.env,
+        DOHC_RELAY_DEPLOYMENT_CONFIG: undefined,
         NODE_ENV: "test",
         SYNC_RELAY_TEST_AUTH: "1",
         SYNC_RELAY_PORT: String(input.port ?? 0),

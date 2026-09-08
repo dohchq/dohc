@@ -92,7 +92,7 @@ services:
       SYNC_RELAY_BIND: "0.0.0.0"
       SYNC_RELAY_PORT: "1788"
       SYNC_RELAY_AUTH_BASE_URL: ${WORKSPACE_API_BASE_URL:?Set WORKSPACE_API_BASE_URL in .env.self-host}
-      SYNC_RELAY_DB_PATH: /data/sync-relay.sqlite
+      DOHC_RELAY_DEPLOYMENT_CONFIG: /continuity/deployment.json
     command: >
       sh -lc "corepack enable &&
       corepack prepare pnpm@11.20.0 --activate &&
@@ -109,6 +109,7 @@ services:
     volumes:
       - .:/workspace
       - dohc_self_host_sync_relay:/data
+      - dohc_self_host_relay_continuity:/continuity
 
   share-web:
     image: node:24-bookworm-slim
@@ -142,3 +143,4 @@ services:
 volumes:
   dohc_self_host_postgres:
   dohc_self_host_sync_relay:
+  dohc_self_host_relay_continuity:
