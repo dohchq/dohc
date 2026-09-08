@@ -183,8 +183,10 @@ describe("markdown document opening state", () => {
     expect(screen.getByTestId("markdown-open-state").textContent).toBe(
       "Opening…",
     );
-    expect(screen.getByTestId("view-markdown").textContent).toContain(
-      "Base paragraph.",
+    await waitFor(() =>
+      expect(screen.getByTestId("view-markdown").textContent).toContain(
+        "Base paragraph.",
+      ),
     );
     expect(
       (screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement).disabled,
@@ -1899,6 +1901,7 @@ describe("markdown document opening state", () => {
       {},
       { timeout: 5_000 },
     );
+    await textEditorContent(editor);
     appendCodeEditorText(editor, " Late draft");
     const exactDraft = codeEditorText(editor);
     await waitFor(() => expect(flush).not.toBeNull());
@@ -2041,6 +2044,7 @@ describe("markdown document opening state", () => {
       {},
       { timeout: 5_000 },
     );
+    await textEditorContent(editor);
     appendCodeEditorText(editor, "One");
     // Autosave A issues and holds. It cleared `unsavedDraft` at issue time.
     await waitFor(
