@@ -143,6 +143,7 @@ fn printable(c: char) -> bool {
 }
 
 fn scalar(value: &str, indent: usize, key: bool) -> ProjectionResult<String> {
+    checked_projection_len(0, value.len())?;
     if value.chars().any(|c| !printable(c) && (key || c != '\n')) {
         return double(value);
     }
@@ -203,7 +204,18 @@ fn scalar(value: &str, indent: usize, key: bool) -> ProjectionResult<String> {
     if plain {
         ensure_projection_string(value.to_owned())
     } else {
-        ensure_projection_string(format!("'{}'", value.replace('\'', "''")))
+        let apostrophes = value.bytes().filter(|byte| *byte == b'\'').count();
+        let escaped_len = checked_projection_len(value.len(), apostrophes)?;
+        let mut out = ProjectionBuffer::with_capacity(checked_projection_len(escaped_len, 2)?)?;
+        out.push('\'')?;
+        for (index, part) in value.split('\'').enumerate() {
+            if index > 0 {
+                out.push_str("''")?;
+            }
+            out.push_str(part)?;
+        }
+        out.push('\'')?;
+        Ok(out.into_string())
     }
 }
 
@@ -243,4 +255,24 @@ fn double(value: &str) -> ProjectionResult<String> {
     }
     out.push('"')?;
     Ok(out.into_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_quoted_scalar_preserves_escaping_and_exact_byte_limit() {
+        assert_eq!(scalar("'a💡'", 0, true).unwrap(), "'''a💡'''");
+        let value = "'".repeat((MAX_PROJECTION_BYTES - 2) / 2);
+        let rendered = scalar(&value, 0, false).unwrap();
+        assert_eq!(rendered.len(), MAX_PROJECTION_BYTES);
+        assert!(rendered.bytes().all(|byte| byte == b'\''));
+        let overflow = format!("{value}x");
+        assert!(matches!(
+            scalar(&overflow, 0, false),
+            Err(CollabError::ProjectionTooLarge { actual, max })
+                if actual == MAX_PROJECTION_BYTES + 1 && max == MAX_PROJECTION_BYTES
+        ));
+    }
 }

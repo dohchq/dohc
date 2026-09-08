@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import { openSyncRelayStorage, type CurrentLiveBindingRequest, type SyncRelayStorage } from "./storage.js";
+import type { StorageContext } from "./storage/context.js";
+import { prepareLiveDeliveryWorkspace, registerLiveDeliveryBaseline } from "./storage/liveDeliveryReservations.js";
 
 interface RawDatabase {
   close(): void;
@@ -60,7 +62,7 @@ function removeAuthority(db: RawDatabase): void {
   db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id = ?").run(marker);
 }
 // These rows exercise SQLite representability, not validated Yjs admission.
-function baseline(db: RawDatabase, changed: Record<string, unknown> = {}): void {
+function baseline(db: Pick<RawDatabase, "prepare">, changed: Record<string, unknown> = {}): void {
   const row = {
     workspace_id: "workspace-1", main_version_id: "main", object_id: "object-1",
     lineage_claim_id: "a".repeat(64), replaces_lineage_claim_id: null, current_path: "docs/a.md",
@@ -287,8 +289,6 @@ async function withBindingFixture(run: (storage: SyncRelayStorage, path: string)
   raw(path, db => {
     workspace(db);
     seedReadMoment(db);
-    baseline(db, { lineage_claim_id: readLineage, baseline_digest: readLineage, baseline_bytes: readBaseline,
-      baseline_projected_byte_length: 1, restore_fence_generation: 7 });
     db.prepare("INSERT INTO sync_relay_shares (share_id, workspace_id, granter_user_id, selector_json, created_at_ms) VALUES (?, ?, ?, ?, ?)")
       .run("share-1", "workspace-1", "owner-1", JSON.stringify({ paths: ["docs"], versionId: null }), 0);
     seedReadGrant(db);
@@ -296,6 +296,13 @@ async function withBindingFixture(run: (storage: SyncRelayStorage, path: string)
   });
   const storage = openSyncRelayStorage(path);
   try {
+    const context = storage as StorageContext;
+    context.tx(() => {
+      prepareLiveDeliveryWorkspace(context, readDocument.workspaceId, readHost.hostId);
+      baseline(context.db, { lineage_claim_id: readLineage, baseline_digest: readLineage, baseline_bytes: readBaseline,
+        baseline_projected_byte_length: 1, restore_fence_generation: 7 });
+      registerLiveDeliveryBaseline(context, readDocument, readHost.hostId);
+    });
     expect(storage.provisionLiveHostControl({ mode: readHost.mode, hostId: readHost.hostId, updatedAtMs: 1, guard: () => undefined }).ok).toBe(true);
     expect(storage.registerLiveHost({ ...readHost, updatedAtMs: 2, guard: () => undefined }).ok).toBe(true);
     run(storage, path);
