@@ -246,15 +246,19 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     expect(lifecycle.currentClient()).toBe(singleton);
     expect(native.prepare("SELECT COUNT(*) AS count FROM live_device_bootstraps").get()!.count).toBe(0);
     assertIndependentRelayReader(root,baseline,rendererDoc);
-    rendererDoc.getMap("frontmatter").set("localRestoreTail","Unadmitted owner work");
-    await renderer.flushPendingLocalUpdates();
-    await expect.poll(() => native.prepare("SELECT COUNT(*) AS n FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.n).toBeGreaterThan(0);
-    const pendingTail = native.prepare("SELECT sequence,update_digest,pending FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence").all();
     const beforeStop = Y.encodeStateVector(remote); remote.getMap("frontmatter").set("restoreCut","Accepted before stopping");
     const stopBytes = Y.encodeStateAsUpdate(remote,beforeStop), stopAuthority = deployment.storage.resolveCurrentLiveDocumentBinding({document,actor}), stopCut = deployment.storage.readLiveUpdateJournalCut({document});
     if (stopAuthority.kind !== "current" || stopCut.kind !== "cut") throw new Error("Stop cut unavailable.");
     expect(deployment.storage.commitLiveUpdateJournal({host,actor,expectedAuthority: stopAuthority.authority,metadata: {deliveryId: "owner-stop-cut",updateDigest: hash(stopBytes),binding: stopAuthority.binding},
       cutToken: stopCut.cut,validation: createLiveMarkdownJournalValidator(policy)({document,currentPath: "docs/a.md",checkpoint: stopCut.cut.checkpoint.bytes,suffix: stopCut.cut.suffix.map(row => row.bytes),candidate: stopBytes}),updateBytes: stopBytes,receivedAtMs: Date.now()}).result.kind).toBe("accepted");
+    const lostApplication = vi.spyOn(LiveCommittedDeliveryStore.prototype,"acknowledgeOwnerDeliveryApplication")
+      .mockImplementationOnce(()=>{throw new Error("Lost owner application ACK before stop");});
+    try {await expect(drain()).rejects.toThrow("Lost owner application ACK before stop");}finally{lostApplication.mockRestore();}
+    const appliedSequence=Number(native.prepare("SELECT local_ydoc_sequence FROM live_device_update_applications WHERE delivery_id='owner-stop-cut'").get()!.local_ydoc_sequence);
+    rendererDoc.getMap("frontmatter").set("localRestoreTail","Unadmitted owner work");
+    await renderer.flushPendingLocalUpdates();
+    await expect.poll(() => native.prepare("SELECT COUNT(*) AS n FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.n).toBeGreaterThan(0);
+    const pendingTail = native.prepare("SELECT sequence,update_digest,pending FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence").all();
     const lookup = {operationId: "owner-stop",workspaceId: "workspace",ownerUserId: "owner"};
     beginStopRestore(deployment.storage as StorageContext,{deliveryKind: "owner",...lookup,document,shareId: "share",grantId: "grant",expectedGrantGeneration: 1,
       expectedDependentGrantIds: [],expectedFence: stopAuthority.binding.restoreFenceGeneration,restorePointCursor: 0,restorePointReceiptDigest: hash(baseline)},Date.now());
@@ -264,7 +268,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     },{timeout: 30_000}).toBe(true); if(failure) throw failure; return result!;};
     const oldConnection = deployment.storage.getLiveHostControl()!.registeredConnectionId;
     connection.stop(); await connection.closed; connection = connect();
-    await expect.poll(() => deployment!.storage.getLiveHostControl()?.registeredConnectionId,{timeout: 30_000}).not.toBe(oldConnection);
+    await expect.poll(() => {const current=deployment!.storage.getLiveHostControl();return current?.admissionState==="open" && current.registeredConnectionId!==oldConnection;},{timeout: 30_000}).toBe(true);
     const handoffsBeforeStop = handoffCount;
     const stoppedRequests = vi.spyOn(singleton,"sendRequest");
     const lostFence = vi.spyOn(LiveCommittedDeliveryStore.prototype,"acknowledgeStopRestoreFence").mockImplementationOnce(() => {throw new Error("Lost owner fence receipt");});
@@ -281,6 +285,9 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     const replayRequests = vi.spyOn(singleton,"sendRequest");
     const fenced = await stop();
     expect(fenced).toMatchObject({kind:"done",receipt:{operation:{operationId:"owner-stop",origin:{kind:"owner"},terminal:{deliveryId:"owner-stop-cut"}}}});
+    if(fenced.kind!=="done")throw new Error("Native owner fence must complete");
+    expect(fenced.receipt.operation.appliedSequence).toBe(appliedSequence);
+    expect(fenced.receipt.localHeadSequence).toBeGreaterThan(appliedSequence);
     expect(await stop()).toEqual(fenced);
     expect(readStopRestore(deployment.storage as StorageContext,lookup)?.phase).toBe("native-fenced");
     expect(replayRequests.mock.calls.map(call=>call[0].method)).not.toContain("liveApplication.register");
