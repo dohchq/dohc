@@ -613,6 +613,7 @@ impl From<CollabError> for TransactionError {
 
 /// Apply one owned committed event. No outbound origination signal escapes.
 /// Pending dependencies roll back this attempt, including a fresh append.
+/// A post-commit fold error is safely redeliverable at the original sequence.
 pub fn apply_committed(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -694,6 +695,7 @@ pub fn apply_committed(
                 None,
                 event.metadata.accepted.received_at_ms,
             )?;
+            // A new delivery can reuse old bytes and an older local sequence.
             compaction_due = append.seq.max(marker.head_update_seq) - marker.head_snapshot_seq
                 >= i64::from(DEFAULT_COMPACTION_THRESHOLD);
             // Content dedupe bypasses the append's parity gate. Always reconstruct.
@@ -1214,6 +1216,80 @@ mod tests {
                 .doc_for_consumer(conn, &key())
                 .map(|doc| doc.is_some()))
             .unwrap());
+    }
+
+    #[test]
+    fn application_compacts_at_threshold_and_retries_overdue_fold_with_old_bytes() {
+        for fail_fold in [false, true] {
+            let (dir, mut store, mut cache, _owner, handle) = fixture();
+            let source = Ydoc::wire();
+            let mut deliveries = Vec::new();
+            for cursor in 1..=64 {
+                let update = event(
+                    &format!("delivery-{cursor}"),
+                    cursor,
+                    source.plaintext_insert(cursor as u32 - 1, "x"),
+                );
+                if cursor == 64 {
+                    assert_eq!(count(&store, "ydoc_updates"), 63);
+                    if fail_fold {
+                        store.write_with(&NoFaults, |tx| {
+                            tx.execute_batch("CREATE TRIGGER refuse_fold BEFORE INSERT ON ydoc_snapshots WHEN NEW.up_to_seq>0 BEGIN SELECT RAISE(ABORT, 'fold failure'); END;").unwrap();
+                            Ok::<_, StorageError>(())
+                        }).unwrap();
+                    }
+                }
+                let result =
+                    apply_committed(&mut store, &mut cache, &handle, update.clone(), &NoFaults);
+                if cursor == 64 && fail_fold {
+                    assert!(matches!(result, Err(ApplicationError::Collab(_))));
+                } else {
+                    assert_eq!(ack(result.unwrap()).local_ydoc_sequence, cursor);
+                }
+                deliveries.push(update);
+            }
+            assert_eq!(
+                count(&store, "ydoc_updates"),
+                if fail_fold { 64 } else { 0 }
+            );
+            assert_eq!(count(&store, "live_device_update_applications"), 64);
+            let replay = ack(apply(
+                &mut store,
+                &mut cache,
+                &handle,
+                deliveries[63].clone(),
+            ));
+            assert!(replay.application_replayed);
+            assert_eq!(replay.local_ydoc_sequence, 64);
+            if fail_fold {
+                assert_eq!(count(&store, "ydoc_updates"), 64);
+                store
+                    .write_with(&NoFaults, |tx| {
+                        tx.execute_batch("DROP TRIGGER refuse_fold").unwrap();
+                        Ok::<_, StorageError>(())
+                    })
+                    .unwrap();
+                let mut old_bytes = deliveries[0].clone();
+                old_bytes.metadata.accepted.receipt.delivery_id = "delivery-65".into();
+                old_bytes.metadata.accepted.receipt.journal_cursor = 65;
+                let applied = ack(apply(&mut store, &mut cache, &handle, old_bytes));
+                assert!(!applied.application_replayed);
+                assert_eq!(applied.local_ydoc_sequence, 1);
+                assert_eq!(count(&store, "ydoc_updates"), 0);
+                assert_eq!(count(&store, "live_device_update_applications"), 65);
+            }
+            store = reopen(store, &dir);
+            assert!(crate::replay_parity::structurally_equal_v2_for_test(
+                &document(&store),
+                &source
+            )
+            .unwrap());
+            for (index, update) in deliveries.into_iter().enumerate() {
+                let replay = ack(apply(&mut store, &mut cache, &handle, update));
+                assert!(replay.application_replayed);
+                assert_eq!(replay.local_ydoc_sequence, index as i64 + 1);
+            }
+        }
     }
 
     #[test]
