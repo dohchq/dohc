@@ -129,6 +129,9 @@ Name the reader before adding a document to main. If nobody will use it to make 
 
 Write the root README for people deciding whether to use dohc. Link to code, configuration, and contributor guidance for technical details.
 
+Code and configuration are the source of truth for current behavior, dependencies, and commands. Verify them directly instead of relying on documentation summaries.
+Document intent, constraints, and decisions that the code cannot explain. Link to implementation details rather than duplicating them in prose.
+
 Read [`.agents/skills/dohc-writing/SKILL.md`](.agents/skills/dohc-writing/SKILL.md) before writing docs, specs, plans, PR bodies, commit messages, or skills. Use [`.agents/skills/dohc-interface/SKILL.md`](.agents/skills/dohc-interface/SKILL.md) for anything a person sees inside the app.
 
 Use one name for one thing. [`CONTEXT.md`](CONTEXT.md) is the canonical term list; check terms against it and the surrounding code before defining them. If a paragraph-long code comment is needed to defend a workaround, fix the code instead.
