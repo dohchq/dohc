@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import vectors from "../vectors/live-update-admission-vectors.json";
 import {
   LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
@@ -93,6 +94,28 @@ function withUnknown(value: object): Record<string, unknown> {
 }
 
 describe("live-update shared vectors", () => {
+  for (const row of vectors.jsonNumbers) {
+    it(`shares JSON numeric semantics: ${row.case}`, () => {
+      expect(vectorParser(row.parser)(JSON.parse(row.json))).toEqual(row.expected);
+    });
+  }
+
+  for (const row of vectors.applicationBytes) {
+    it(`shares the metadata and binary boundary: ${row.case}`, () => {
+      const bytes = Uint8Array.from(row.bytes);
+      if (!row.parserAccepted) {
+        expect(() => parseAdmittedLiveUpdate(row.metadata, bytes)).toThrow();
+        return;
+      }
+      const parsed = parseAdmittedLiveUpdate(row.metadata, bytes);
+      expect(Array.from(parsed.updateBytes)).toEqual(row.bytes);
+      // These vectors distinguish parser normalization from the Rust consumer's
+      // raw immutable-record check. The shared parser does not prove a commit.
+      const canonical = JSON.stringify(parsed.metadata) === JSON.stringify(row.metadata);
+      const digestMatches = createHash("sha256").update(bytes).digest("hex") === parsed.metadata.accepted.receipt.updateDigest;
+      expect(canonical && digestMatches).toBe(row.committedValid);
+    });
+  }
   it("pins every portable literal", () => {
     expect({
       identifierMaxBytes: LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
