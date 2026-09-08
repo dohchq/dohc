@@ -305,8 +305,8 @@ pub struct StoreCaptureSink {
     provenance: CaptureProvenance,
 }
 
-/// The sink's view of `.dohc/files.toml`, split by why there are no rules.
-enum PolicyState {
+/// Capture's view of `.dohc/files.toml`, split by why there are no rules.
+pub(crate) enum PolicyState {
     /// A real answer: absent (default policy), parsed rules, or a MALFORMED
     /// file — the last lands here as `Known(None)` under the ratified WS-F
     /// rule (writes are never dropped for a bad policy; search is where a
@@ -1297,13 +1297,10 @@ impl CaptureSink for StoreCaptureSink {
             // retire any stale head (TS: "Stopped tracking by policy") so
             // opted-out content is never left stale-but-authoritative.
             //
-            // Known gap, tracked as #1023. This branch only runs when
-            // the diff emitted an op for the path. A policy flip on an
-            // unchanged file emits none (`.dohc` is unwatched, so policy
-            // edits generate no events), so a path narrowed out of ownership
-            // keeps its stale head until the driver rebuilds the controller
-            // with an empty manifest on a policy-snapshot change and re-offers
-            // every path through here.
+            // The driver rebuilds from captured state after a policy change.
+            // Narrowed entries get a sentinel hash so unchanged files reach
+            // this branch. Retaining those entries also preserves deletion
+            // detection for files removed while the workspace was closed.
             //
             // A pending self-write identity must not outlive the exclusion:
             // if the path is tracked again later with the old settled bytes
