@@ -152,8 +152,8 @@ impl EngineService {
         let page = open
             .actor
             .search_page(
-                open.root,
-                open.workspace_id,
+                open.root.clone(),
+                open.workspace_id.clone(),
                 active_version_id.clone(),
                 params.query,
                 Some(i64::try_from(remaining).unwrap_or(i64::MAX)),
@@ -250,7 +250,7 @@ impl EngineService {
             &cancellation,
             "search.queryChatMessagesGranular",
             open.actor.search_query_chat_messages_granular(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.query,
                 params.limit,
                 GRANULAR_CHAT_RESPONSE_BYTE_BUDGET,
@@ -308,8 +308,8 @@ impl EngineService {
         }
         open.actor
             .ensure_search_index(
-                open.root,
-                open.workspace_id,
+                open.root.clone(),
+                open.workspace_id.clone(),
                 params.version_id,
                 now_ms()?,
                 Arc::new(NoFaults),
