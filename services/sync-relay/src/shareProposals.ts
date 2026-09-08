@@ -1,5 +1,10 @@
 import type { ObjectMomentRow, ShareProposalOpRow } from "./storage";
 
+// Inside a share's origin namespace (`share:<shareId>:…`), this
+// prefix belongs to the relay: it names the stream one accepted proposal
+// writes. A recipient's own push may not claim it.
+export const PROPOSAL_ORIGIN_PREFIX = "proposal:";
+
 // The accept door.
 //
 // A recipient proposes a NET CHANGE, never a moment: the served moment drops

@@ -2811,6 +2811,84 @@ describe("owner link inventory and impact preconditions", () => {
     },
   );
 
+  it.each(["rotate", "retune", "revoke"] as const)(
+    "returns a generic 404 when ownership is lost during the %s dependent lookup",
+    async (operation) => {
+      const { storage, dbPath } = await newStorageWithPath();
+      await seedFileShare(handler(storage), "edit");
+      const grantId = `link-lookup-${operation}`;
+      const dependentGrantId = `dependent-lookup-${operation}`;
+      const recipientUserId = `lookup-recipient-${operation}`;
+      seedStorageLink(storage, { grantId, access: "view" });
+      expect(
+        seedDependentGrant(storage, {
+          shareId: "share-existing",
+          parentGrantId: grantId,
+          grantId: dependentGrantId,
+          principalUserId: recipientUserId,
+          createdAtMs: 2_002,
+        }),
+      ).toMatchObject({ ok: true });
+      const beforeGrant = storage.getShareGrant(grantId);
+      const beforeDependent = storage.getShareGrant(dependentGrantId);
+      const beforeCredential = storage.getCurrentLinkCredential(grantId);
+      const missing = await denialBytes(
+        await handler(storage)(request(OWNER, "/sync/shares/share-missing")),
+      );
+      let markLookupStarted!: () => void;
+      const lookupStarted = new Promise<void>((resolve) => {
+        markLookupStarted = resolve;
+      });
+      let releaseLookup!: () => void;
+      const lookupGate = new Promise<void>((resolve) => {
+        releaseLookup = resolve;
+      });
+      const lookupUserEmail = vi.fn(async (userId: string) => {
+        markLookupStarted();
+        await lookupGate;
+        return `${userId}@example.test`;
+      });
+      const newLinkBearer = vi.fn(() => "r".repeat(43));
+      const h = handler(storage, { lookupUserEmail, newLinkBearer });
+      const route = operation === "revoke"
+        ? "/sync/shares/share-existing/revoke"
+        : `/sync/shares/share-existing/links/${grantId}/${operation}`;
+      const pending = h(
+        request(
+          OWNER,
+          route,
+          jsonBody({
+            workspaceId: WORKSPACE,
+            expectedDependentGrantIds: [],
+            ...(operation === "retune" ? { access: "comment" } : {}),
+            ...(operation === "revoke" ? { grantId } : {}),
+          }),
+        ),
+      );
+      await lookupStarted;
+      try {
+        expect(lookupUserEmail).toHaveBeenCalledExactlyOnceWith(recipientUserId);
+        const database = inspectDatabase(dbPath);
+        try {
+          database
+            .prepare("UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?")
+            .run("new-owner", WORKSPACE);
+        } finally {
+          database.close();
+        }
+        expect(storage.workspaceIsOwnedBy(WORKSPACE, OWNER)).toBe(false);
+      } finally {
+        releaseLookup();
+      }
+
+      expect(await denialBytes(await pending)).toBe(missing);
+      expect(storage.getShareGrant(grantId)).toEqual(beforeGrant);
+      expect(storage.getShareGrant(dependentGrantId)).toEqual(beforeDependent);
+      expect(storage.getCurrentLinkCredential(grantId)).toEqual(beforeCredential);
+      expect(newLinkBearer).not.toHaveBeenCalled();
+    },
+  );
+
   it("refuses a stale confirmation after promotion so the warning cannot overstate impact", async () => {
     const storage = await newStorage();
     const h = handler(storage);
