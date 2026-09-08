@@ -1,3 +1,5 @@
+import { DatabaseSync } from "node:sqlite";
+import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -18,9 +20,11 @@ const exchangeKey = "device-control-test-exchange-key-32";
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-async function setup(overrides: Partial<DeviceControlLimits> = {}) {
+async function setup(overrides: Partial<DeviceControlLimits> = {}, deployment = false) {
   const directory = await mkdtemp(join(tmpdir(), "dohc-device-control-"));
-  const storage = openSyncRelayStorage(join(directory, "relay.sqlite"));
+  const configPath = join(directory, "deployment.json");
+  if (deployment) initializeRelayDeployment({ configPath, relayPath: join(directory, "volume", "relay.sqlite"), continuityDirectory: join(directory, "continuity") });
+  const storage = deployment ? openRelayDeployment(configPath).storage : openSyncRelayStorage(join(directory, "relay.sqlite"));
   const credential = createDeviceHostCredential("device-test", parseHostEpoch(1));
   expect(storage.provisionDeviceHostCredential({ credential, updatedAtMs: Date.now() }).ok).toBe(true);
   const control = createDeviceControl({ storage, hosts: new Set(["relay.test"]), relayExchangeKey: exchangeKey,
@@ -131,4 +135,23 @@ describe("outbound device control authority", () => {
     const fixture = await setup();
     expect(() => createDeviceControl({ storage: fixture.storage, hosts: new Set(["relay.test"]), relayExchangeKey: "", limits })).toThrow();
   });
+});
+
+it("closes a live deployment socket immediately after an uncertain durable commit", async () => {
+  const fixture = await setup({ heartbeatIntervalMs: 60_000 }, true);
+  const current = await fixture.registered();
+  const exec = DatabaseSync.prototype.exec;
+  DatabaseSync.prototype.exec = function(sql: string) {
+    const relayCommit = sql === "COMMIT" && this.prepare("SELECT 1 FROM sqlite_schema WHERE name='sync_relay_continuity'").get();
+    const result = exec.call(this, sql);
+    if (relayCommit) throw new Error("lost COMMIT result");
+    return result;
+  };
+  try {
+    expect(() => fixture.storage.revokeDeviceHostCredential({ hostId: fixture.credential.hostId,
+      instanceId: fixture.credential.instanceId, updatedAtMs: Date.now() })).toThrow("lost COMMIT result");
+  } finally { DatabaseSync.prototype.exec = exec; }
+  expect(fixture.storage.unavailable.aborted).toBe(true);
+  await current.closed;
+  await fixture.connect().closed;
 });

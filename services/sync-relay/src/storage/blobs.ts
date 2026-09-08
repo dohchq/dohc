@@ -9,15 +9,13 @@ export function putBlob(storage: StorageContext, input: {
     createdAtMs: number;
   }): PutBlobResult {
     const byteLength = input.content.byteLength;
-    storage.db.exec("BEGIN IMMEDIATE");
-    try {
+    return storage.tx(() => {
       const existing = storage.db
         .prepare(
           "SELECT 1 AS ok FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?",
         )
         .get(input.workspaceId, input.sha256);
       if (existing !== undefined) {
-        storage.db.exec("COMMIT");
         return { byteLength, alreadyHad: true };
       }
       assertWorkspaceQuota(storage, input.workspaceId, byteLength);
@@ -33,14 +31,8 @@ export function putBlob(storage: StorageContext, input: {
           Buffer.from(input.content),
           Math.trunc(input.createdAtMs),
         );
-      storage.db.exec("COMMIT");
       return { byteLength, alreadyHad: false };
-    } catch (error) {
-      try {
-        storage.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    });
   }
 
 export async function collectUnreferencedBlobs(
@@ -112,8 +104,7 @@ export async function collectUnreferencedBlobs(
     const CHUNK = 200;
     for (let start = 0; start < candidates.length; start += CHUNK) {
       const chunk = candidates.slice(start, start + CHUNK);
-      storage.db.exec("BEGIN IMMEDIATE");
-      try {
+      storage.tx(() => {
         for (const sha256 of chunk) {
           const result = deleteStmt.run(
             workspaceId,
@@ -126,13 +117,7 @@ export async function collectUnreferencedBlobs(
           );
           if (result.changes > 0) removedSha256s.push(sha256);
         }
-        storage.db.exec("COMMIT");
-      } catch (error) {
-        try {
-          storage.db.exec("ROLLBACK");
-        } catch {}
-        throw error;
-      }
+      });
       if (start + CHUNK < candidates.length) {
         await new Promise<void>((resolve) => setImmediate(resolve));
       }

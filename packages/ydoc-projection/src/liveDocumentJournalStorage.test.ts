@@ -9,7 +9,10 @@ import { parseHostEpoch } from '@dohc/live-session-contract/host-control'
 import { markdownToYDoc } from './import-export.js'
 import { liveDeliveryBookkeepingBytes, liveDeliveryEventReservationBytes } from './liveDeliveryQuotaTestSupport.js'
 import { createLiveMarkdownRegistrationValidator, createLiveMarkdownJournalValidator } from './liveDocumentValidation.js'
+import { initializeRelayDeployment, openRelayDeployment } from '../../../services/sync-relay/src/relayDeployment.js'
 import { openSyncRelayStorage, type LiveUpdateJournalCommitInput } from '../../../services/sync-relay/src/storage.js'
+import type { StorageContext } from '../../../services/sync-relay/src/storage/context.js'
+import type { SqliteDb } from '../../../services/sync-relay/src/storage/types.js'
 
 const policy = {
   maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000,
@@ -39,13 +42,21 @@ function validated(bytes = checkpoint(), currentPath = 'docs/a.md', objectId = '
   expect(hash(baselineBytes)).toBe(result.evidence.checkpoint.updateDigest)
   return { host: { ...host }, evidence: result.evidence, baselineBytes, registeredAtMs: 10 }
 }
-function fixture(options: { workspaceQuotaBytes?: number } = {}) {
+function fixture(options: { workspaceQuotaBytes?: number; deployment?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'dohc-baseline-storage-')); roots.push(root)
-  const path = join(root, 'relay.sqlite')
-  const storage = openSyncRelayStorage(path, options)
-  const raw = new DatabaseSync(path)
+  const path = options.deployment ? join(root, 'volume', 'relay.sqlite') : join(root, 'relay.sqlite')
+  const configPath = join(root, 'deployment.json')
+  if (options.deployment) initializeRelayDeployment({ configPath, relayPath: path, continuityDirectory: join(root, 'continuity') })
+  const storage = options.deployment ? openRelayDeployment(configPath, options).storage : openSyncRelayStorage(path, options)
+  const raw = new DatabaseSync(path, { readOnly: options.deployment === true })
+  const write = (run: (db: SqliteDb | InstanceType<typeof DatabaseSync>) => void) => {
+    if (options.deployment) {
+      const context = storage as StorageContext
+      context.tx(() => run(context.db))
+    } else run(raw)
+  }
   try {
-    raw.prepare('INSERT INTO sync_relay_workspaces (workspace_id, owner_user_id, created_at_ms) VALUES (?, ?, ?)').run('workspace', 'owner', 0)
+    write(db => { db.prepare('INSERT INTO sync_relay_workspaces (workspace_id, owner_user_id, created_at_ms) VALUES (?, ?, ?)').run('workspace', 'owner', 0) })
     storage.provisionLiveHostControl({ mode: host.mode, hostId: host.hostId, updatedAtMs: 1, guard() {} })
     storage.registerLiveHost({ ...host, updatedAtMs: 2, guard() {} })
   } catch (error) { raw.close(); storage.close(); throw error }
@@ -53,21 +64,23 @@ function fixture(options: { workspaceQuotaBytes?: number } = {}) {
     const row = { workspace_id: 'workspace', object_id: input.evidence.document.objectId, relay_seq: sequence, moment_id: `moment-${sequence}`,
       version_id: 'main', path: input.evidence.currentPath, blob_sha256: input.evidence.projectedMarkdownSha256,
       content_kind: 'text', byte_length: input.evidence.projectedMarkdownByteLength, recorded_at_ms: sequence, ...changes }
-    raw.prepare(`INSERT INTO sync_relay_object_moments (${Object.keys(row).join(',')}) VALUES (${Object.keys(row).map(() => '?').join(',')})`)
-      .run(...Object.values(row) as Array<string | number | null>)
+    write(db => { db.prepare(`INSERT INTO sync_relay_object_moments (${Object.keys(row).join(',')}) VALUES (${Object.keys(row).map(() => '?').join(',')})`)
+      .run(...Object.values(row) as Array<string | number | null>) })
   }
   const rows = () => ({ documents: raw.prepare('SELECT * FROM sync_relay_live_documents ORDER BY lineage_claim_id').all(),
     ranges: raw.prepare('SELECT * FROM sync_relay_live_document_baseline_ranges ORDER BY client_id, start_clock').all() })
-  return { storage, raw, path, moment, rows, close() { raw.close(); storage.close() } }
+  return { storage, raw, path, write, moment, rows, close() { raw.close(); storage.close() } }
 }
 
-function registered(options: { workspaceQuotaBytes?: number; baselineBytes?: Uint8Array; journalPolicy?: typeof policy } = {}) {
+function registered(options: { workspaceQuotaBytes?: number; deployment?: boolean; baselineBytes?: Uint8Array; journalPolicy?: typeof policy } = {}) {
   const f = fixture(options), input = validated(options.baselineBytes); f.moment(input)
   expect(f.storage.registerLiveDocumentBaseline(input).kind).toBe('registered')
-  f.raw.prepare(`INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms)
-    VALUES ('share','workspace','owner',?,0)`).run(JSON.stringify({ paths: ['docs'], versionId: null }))
-  f.raw.exec(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
-    VALUES ('grant','share','user','reader',NULL,'edit',4,'active',0,NULL,NULL)`)
+  f.write(db => {
+    db.prepare(`INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms)
+      VALUES ('share','workspace','owner',?,0)`).run(JSON.stringify({ paths: ['docs'], versionId: null }))
+    db.exec(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+      VALUES ('grant','share','user','reader',NULL,'edit',4,'active',0,NULL,NULL)`)
+  })
   const doc = new Y.Doc(); Y.applyUpdate(doc, input.baselineBytes)
   const actor = { kind: 'owner', userId: 'owner', shareId: 'share' } as const
   const update = (key = 'title', value = 'Changed') => {
@@ -365,6 +378,8 @@ it('two connections resolve identical delivery races and retry stale refused cut
 
 it('does not reinterpret post-write COMMIT busy as a retry or expose an accepted event', () => {
   const f = registered()
+  let reopened: ReturnType<typeof openSyncRelayStorage> | undefined
+  let fixtureClosed = false
   try {
     const input = f.capture(f.update()), before = f.journalRows(), original = DatabaseSync.prototype.exec
     const fault = Object.assign(new Error('commit locked'), { code: 'ERR_SQLITE_ERROR', errcode: 5 })
@@ -375,8 +390,16 @@ it('does not reinterpret post-write COMMIT busy as a retry or expose an accepted
     expect(() => f.storage.commitLiveUpdateJournal(input)).toThrow(fault)
     spy.mockRestore()
     expect(f.journalRows()).toEqual(before)
-    expect(f.storage.commitLiveUpdateJournal(input).result).toMatchObject({ kind: 'accepted', receipt: { journalCursor: 1 } })
-  } finally { f.close() }
+    expect(f.storage.unavailable.aborted).toBe(true)
+    expect(() => f.storage.commitLiveUpdateJournal(input)).toThrow('unavailable')
+    f.close()
+    fixtureClosed = true
+    reopened = openSyncRelayStorage(f.path)
+    expect(reopened.commitLiveUpdateJournal(input).result).toMatchObject({ kind: 'accepted', receipt: { journalCursor: 1 } })
+  } finally {
+    reopened?.close()
+    if (!fixtureClosed) f.close()
+  }
 })
 
 it('rolls back a changed inserted row before any receipt escapes', () => {
@@ -925,5 +948,19 @@ it('preserves first authorship through the maximum portable clock', () => {
       .toEqual([{ clientId: 91, startClock: maximum - 1, endClock: maximum }])
     expect(f.storage.readCommittedLiveUpdate({ host, document: f.input.evidence.document, journalCursor: 2 }))
       .toMatchObject({ kind: 'committed', admitted: { metadata: { firstSeen: [{ clientId: 91, startClock: maximum - 1, endClock: maximum }] } } })
+  } finally { f.close() }
+})
+
+it('commits a journal update with continuity and replays without another mutation stamp', () => {
+  const f = registered({ deployment: true })
+  try {
+    const stamp = () => Number(f.raw.prepare('SELECT stamp FROM sync_relay_continuity WHERE singleton=1').get()!.stamp)
+    const before = stamp(), input = f.capture(f.update())
+    const accepted = f.storage.commitLiveUpdateJournal(input)
+    expect(accepted.result.kind).toBe('accepted')
+    expect(stamp()).toBeGreaterThan(before)
+    const committed = stamp()
+    expect(f.storage.commitLiveUpdateJournal(input).result).toMatchObject({ kind: 'accepted', replayed: true })
+    expect(stamp()).toBe(committed)
   } finally { f.close() }
 })

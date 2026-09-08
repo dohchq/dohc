@@ -11,8 +11,7 @@ export function putKeyEnvelope(storage: StorageContext, input: {
     expectedSha256: string | null;
   }): { sha256: string } {
     const nextSha256 = sha256Hex(input.envelopeJson);
-    storage.db.exec("BEGIN IMMEDIATE");
-    try {
+    return storage.tx(() => {
       const current = storage.db
         .prepare(
           "SELECT envelope_json FROM sync_relay_key_envelopes WHERE workspace_id = ?",
@@ -23,7 +22,6 @@ export function putKeyEnvelope(storage: StorageContext, input: {
       if (currentJson === input.envelopeJson) {
         // Byte-identical re-PUT: an idempotent retry (e.g. enroll after a
         // dropped response), not a replacement. No history entry.
-        storage.db.exec("COMMIT");
         return { sha256: nextSha256 };
       }
       // The envelope + its append-only history count toward the workspace
@@ -45,7 +43,6 @@ export function putKeyEnvelope(storage: StorageContext, input: {
              VALUES (?, ?, ?)`,
           )
           .run(input.workspaceId, input.envelopeJson, Math.trunc(input.updatedAtMs));
-        storage.db.exec("COMMIT");
         return { sha256: nextSha256 };
       }
       const currentSha256 = sha256Hex(currentJson);
@@ -80,14 +77,8 @@ export function putKeyEnvelope(storage: StorageContext, input: {
            WHERE workspace_id = ?`,
         )
         .run(input.envelopeJson, Math.trunc(input.updatedAtMs), input.workspaceId);
-      storage.db.exec("COMMIT");
       return { sha256: nextSha256 };
-    } catch (error) {
-      try {
-        storage.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    });
   }
 
 export function getKeyEnvelope(storage: StorageContext, workspaceId: string): KeyEnvelopeRow | null {

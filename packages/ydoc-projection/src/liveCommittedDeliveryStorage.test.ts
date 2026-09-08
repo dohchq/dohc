@@ -598,9 +598,11 @@ it("compares the complete predecessor identity on an exact repeated ACK", () => 
 });
 
 it.each(["before", "after"] as const)(
-  "recovers when relay edge COMMIT throws %s committing",
+  "reopens standalone storage when relay edge COMMIT throws %s committing",
   (phase) => {
     const f = registered();
+    let reopened: ReturnType<typeof openSyncRelayStorage> | undefined;
+    let originalClosed = false;
     try {
       expect(
         f.storage.commitLiveUpdateJournal(f.capture(f.update(), "event")).result
@@ -637,20 +639,36 @@ it.each(["before", "after"] as const)(
       );
       spy.mockRestore();
       expect(armed).toBe(false);
-      expect(store.next(d).kind).toBe(phase === "after" ? "done" : "next");
+      expect(f.storage.unavailable.aborted).toBe(true);
+      expect(() => store.next(d)).toThrow("unavailable");
+      f.storage.close();
+      originalClosed = true;
+      // This fixture uses standalone storage and has no deployment continuity marker.
+      reopened = openSyncRelayStorage(f.path);
+      const restarted = reopened.createLiveCommittedDeliveryStore(
+        createLiveJournalHistoryAuthority({ namespace: "history-one", reconciled: true }),
+      );
+      const resumed = restarted.open({ host, document: f.input.evidence.document });
+      expect(resumed.baseline.bootstrapId).toBe(d.baseline.bootstrapId);
+      expect(restarted.next(resumed).kind).toBe(phase === "after" ? "done" : "next");
       expect(
         f.raw
           .prepare("SELECT COUNT(*) n FROM sync_relay_live_delivery_edges")
           .get()!.n,
       ).toBe(phase === "after" ? 1 : 0);
       if (phase === "before") expect(f.journalRows().usage).toBe(usage);
-      store.acknowledge(d, step.predecessor, {
+      restarted.acknowledge(resumed, step.predecessor, {
         ...ack,
         applicationReplayed: true,
       });
-      expect(store.next(d).kind).toBe("done");
+      expect(restarted.next(resumed).kind).toBe("done");
     } finally {
-      f.close();
+      reopened?.close();
+      if (originalClosed) {
+        f.doc.destroy();
+        f.raw.close();
+      }
+      else f.close();
     }
   },
 );

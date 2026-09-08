@@ -70,6 +70,10 @@ test('share-web reaches the relay over the compose network and publishes one ori
 test('the relay keeps its database on a named volume', () => {
   assert.ok(relay.volumes.includes('dohc_self_host_sync_relay:/data'))
   assert.ok('dohc_self_host_sync_relay' in compose.volumes)
+  assert.equal(relay.environment.SYNC_RELAY_DB_PATH, undefined)
+  assert.equal(relay.environment.DOHC_RELAY_DEPLOYMENT_CONFIG, '/continuity/deployment.json')
+  assert.ok(relay.volumes.includes('dohc_self_host_relay_continuity:/continuity'))
+  assert.ok('dohc_self_host_relay_continuity' in compose.volumes)
 })
 
 test('share-web binds every interface so its published port is reachable', () => {

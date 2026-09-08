@@ -553,6 +553,8 @@ export type CommittedLiveUpdateResult =
   | { readonly kind: "retry"; readonly reason: "host-unavailable" };
 
 export interface SyncRelayStorage {
+  readonly unavailable: AbortSignal;
+  captureStanding(): () => void;
   createLiveCommittedDeliveryStore(history: LiveJournalHistoryAuthority): LiveCommittedDeliveryStore;
   readLiveUpdateJournalCut(input: { document: LiveDocumentKey }): LiveUpdateJournalCutResult;
   commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput): RelayLiveUpdateJournalResult;

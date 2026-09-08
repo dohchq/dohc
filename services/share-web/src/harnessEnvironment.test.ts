@@ -6,6 +6,7 @@ describe("buildHarnessEnvironment", () => {
     const environment = buildHarnessEnvironment(
       {
         DOHC_SHARE_WEB_PORT: "poisoned-share-port",
+        DOHC_RELAY_DEPLOYMENT_CONFIG: "poisoned-deployment-config",
         DOHC_UNRELATED_POISON: "poisoned-dohc-value",
         PATH: "C:\\tools",
         SYNC_RELAY_DB_PATH: "poisoned-relay-db",
@@ -28,5 +29,6 @@ describe("buildHarnessEnvironment", () => {
     });
     expect(Object.values(environment)).not.toContain("poisoned-dohc-value");
     expect(Object.values(environment)).not.toContain("poisoned-relay-db");
+    expect(Object.values(environment)).not.toContain("poisoned-deployment-config");
   });
 });
