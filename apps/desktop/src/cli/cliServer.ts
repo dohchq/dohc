@@ -165,13 +165,11 @@ export interface CliCollectionWriteSeam {
 }
 
 // Engine-backed collection access for the CLI verbs. Reads go to the engine
-// adapter; the two writes go through the write seam. `writes` is the seam's
-// injection point: main wires it when the seam exists, and the write verbs
-// answer with a failure naming the missing capability until it does.
+// adapter; the two writes go through the write seam.
 export interface CliCollectionsPort {
   query(params: CollectionQueryParams): Promise<CollectionQueryResult>;
   getRecord(params: CollectionGetRecordParams): Promise<CollectionGetRecordResult>;
-  writes?: CliCollectionWriteSeam;
+  writes: CliCollectionWriteSeam;
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
@@ -258,7 +256,6 @@ export interface CliServerOptions {
 export interface CliServerHandle {
   socketPath: string;
   tokenPath: string;
-  ready: Promise<void>;
   close(): Promise<void>;
 }
 
@@ -441,13 +438,6 @@ function collectionsUnavailable() {
   return {
     ok: false as const,
     reason: "collections are not available in this workspace",
-  };
-}
-
-function collectionWritesUnavailable() {
-  return {
-    ok: false as const,
-    reason: "collection writes are not available in this dohc build",
   };
 }
 
@@ -1910,7 +1900,6 @@ async function dispatch(
     case "collectionSetFields": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
-      if (!collections.writes) return collectionWritesUnavailable();
       // A write-mode check: the seam opens the record's live session, so
       // the path must clear the same floor every other CLI write clears.
       const validated = validateUserWritePath(request.args.recordPath);
@@ -1935,7 +1924,6 @@ async function dispatch(
     case "collectionCreateRecord": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
-      if (!collections.writes) return collectionWritesUnavailable();
       const collectionValidated = validateUserReadPath(
         request.args.collectionPath,
       );
@@ -2771,23 +2759,17 @@ export async function startCliServer(
   }
   server.unref();
   server.on("error", (error) => options.onError?.(error));
-  const ready = Promise.resolve();
 
   let closed = false;
   return {
     socketPath,
     tokenPath,
-    ready,
     async close() {
       if (closed) return;
       closed = true;
       const serverClosed = closeServer(server);
       for (const socket of sockets) socket.destroy();
-      await Promise.all([
-        serverClosed,
-        ready,
-        Promise.allSettled([...inFlight]),
-      ]);
+      await Promise.all([serverClosed, Promise.allSettled([...inFlight])]);
       await Promise.all([
         rm(endpointArtifactPath, { force: true }),
         rm(tokenPath, { force: true }),

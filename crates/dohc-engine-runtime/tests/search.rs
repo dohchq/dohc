@@ -23,8 +23,8 @@ use dohc_engine_storage::{
     EngineStore, FaultPoint, NoFaults, Preimage, TxnOutcome, hex_sha256, put_binary_blob,
 };
 use dohc_engine_sync::{
-    ApplyOutcome, ReplicationEnvelope, ShareBoundary, ShareSurface, apply_chat_envelope,
-    apply_shared_envelope,
+    ApplyDisposition, ApplyOutcome, ReplicationEnvelope, ShareBoundary, ShareSurface,
+    apply_chat_envelope, apply_shared_envelope,
 };
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use serde_json::json;
@@ -1641,15 +1641,27 @@ fn replicated_chat_apply_is_findable_through_the_real_search_reader() {
 
     assert!(matches!(
         apply_chat_envelope(&mut store, &thread, &NO_FAULTS),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
         apply_chat_envelope(&mut store, &message, &NO_FAULTS),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
         apply_chat_envelope(&mut store, &message, &NO_FAULTS),
-        Ok(ApplyOutcome::Skipped)
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let title_hits = store
@@ -1766,7 +1778,11 @@ fn shared_channel_replicated_chat_is_findable_through_the_real_search_reader() {
     for operation in [&channel, &thread, &message] {
         assert!(matches!(
             apply_shared_envelope(&mut store, &boundary, operation, &NO_FAULTS),
-            Ok(ApplyOutcome::Applied(_))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
     }
 

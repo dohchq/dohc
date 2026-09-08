@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Dispatch spawns the runner with the mode on argv and the prompt on stdin,
-// never argv (chatDispatchService.ts spawnConfiguredRunner). Read stdin the way
+// never argv (chatRunnerProcess.ts spawnConfiguredRunner). Read stdin the way
 // a real harness does, before branching on the mode, so both modes pin the
 // delivery.
 const mode = process.argv[2];

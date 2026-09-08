@@ -26,8 +26,10 @@ afterEach(closeTestStorages);
 function handler(
   storage: SyncRelayStorage,
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null,
+  lookupVerifiedUserEmail?: (userId: string) => Promise<string | null> | string | null,
 ): SyncRelayHandler {
-  return testHandler(storage, { nowMs: () => 5555, ...(lookupUserEmail ? { lookupUserEmail } : {}) });
+  return testHandler(storage, { nowMs: () => 5555, ...(lookupUserEmail ? { lookupUserEmail } : {}),
+    ...(lookupVerifiedUserEmail ? { lookupVerifiedUserEmail } : {}) });
 }
 
 function countActiveRecipientGrantScans(storage: SyncRelayStorage): {
@@ -664,7 +666,7 @@ describe("share grants", () => {
     // first authenticated request claims the invite — but RECIPIENT's does not.
     const LATE = "late-user";
     const LATE_EMAIL = "late@corp.example";
-    const h = handler(storage, (userId) => (userId === LATE ? LATE_EMAIL : `${userId}@dohc.test`));
+    const h = handler(storage, undefined, (userId) => (userId === LATE ? LATE_EMAIL : `${userId}@dohc.test`));
     await createWorkspace(h);
     await putBlob(h, "shared body");
     await appendOps(h, [momentOp("docs/shared.md", "shared body")]);

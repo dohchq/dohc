@@ -1,3 +1,5 @@
+import { makeTriggerPlugin } from "./triggerPlugin";
+import { isCodeBlock, isCodeMark } from "./pmHelpers";
 // D4.8 (extended in D4.8b) — Wikilink rendering + autocomplete.
 //
 // Two coupled responsibilities in one plugin:
@@ -24,9 +26,9 @@
 //      to the editor to replace the `[[query` with the chosen
 //      path + close brackets.
 
-import { Plugin, PluginKey } from '@tiptap/pm/state'
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
+import { PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
-import type { PMDocLike, PMNodeLike } from './inlineAtomPlugin'
 
 export const wikilinkPluginKey = new PluginKey('dohc-wikilink')
 
@@ -69,30 +71,15 @@ const WIKILINK_RE = /\\?\[\\?\[(!?)([^\]\n[]+)\\?\]\\?\]/g
 // Exported so other trigger surfaces (e.g. mentionTrigger.ts's `@`
 // autocomplete) can reuse the same "don't fire inside code" rules
 // without re-deriving them.
-export function isCodeMark(m: { type: { name: string; spec?: { code?: boolean } } }) {
-  return (
-    m.type.name === 'inlineCode' ||
-    m.type.name === 'code' ||
-    m.type.spec?.code === true
-  )
-}
-export function isCodeBlock(node: PMNodeLike | null) {
-  return (
-    !!node &&
-    (node.type.name === 'code_block' ||
-      node.type.name === 'codeBlock' ||
-      node.type.spec?.code === true)
-  )
-}
 
 /** Pure: walk text nodes, return wikilink decoration ranges +
  *  resolved targets. Offsets are absolute doc coordinates. */
-export function computeWikilinkRanges(doc: PMDocLike): WikilinkRange[] {
+export function computeWikilinkRanges(doc: ProseMirrorNode): WikilinkRange[] {
   const ranges: WikilinkRange[] = []
   doc.descendants((node, pos, parent) => {
     if (!node.isText || !node.text) return
     if (isCodeBlock(parent)) return
-    if ((node.marks ?? []).some(isCodeMark)) return
+    if (node.marks.some(isCodeMark)) return
     const text = node.text
     WIKILINK_RE.lastIndex = 0
     let m: RegExpExecArray | null
@@ -114,14 +101,14 @@ export function computeWikilinkRanges(doc: PMDocLike): WikilinkRange[] {
  *  trailing characters match `\?[\?[query` (no closing `]]`), we
  *  emit the autocomplete state. */
 export function detectAutocomplete(
-  doc: PMDocLike,
+  doc: ProseMirrorNode,
   cursorPos: number,
 ): AutocompleteState {
   let found: AutocompleteState = { active: false }
   doc.descendants((node, pos, parent) => {
     if (!node.isText || !node.text) return
     if (isCodeBlock(parent)) return
-    if ((node.marks ?? []).some(isCodeMark)) return
+    if (node.marks.some(isCodeMark)) return
     const nodeStart = pos
     const nodeEnd = pos + node.text.length
     if (cursorPos < nodeStart || cursorPos > nodeEnd) return
@@ -196,11 +183,11 @@ function displayFor(
 }
 
 function buildWikilinkDecorations(
-  doc: unknown,
+  doc: ProseMirrorNode,
   knownFiles: ReadonlyMap<string, WikilinkFile>,
   cursorPos: number,
 ): DecorationSet {
-  const ranges = computeWikilinkRanges(doc as PMDocLike)
+  const ranges = computeWikilinkRanges(doc)
   const decorations: Decoration[] = []
   for (const r of ranges) {
     // D4.8c — Obsidian-style live preview toggle. When the cursor
@@ -237,7 +224,7 @@ function buildWikilinkDecorations(
       } as Record<string, string>),
     )
   }
-  return DecorationSet.create(doc as never, decorations)
+  return DecorationSet.create(doc, decorations)
 }
 
 /** Build the plugin.
@@ -249,17 +236,7 @@ export function makeWikilinkPlugin(
   getKnownFiles: () => ReadonlyMap<string, WikilinkFile>,
   onAutocompleteChange: (s: AutocompleteState) => void,
 ) {
-  let last: AutocompleteState = { active: false }
-  function notify(next: AutocompleteState) {
-    if (next.active && last.active) {
-      if (next.from === last.from && next.query === last.query) return
-    } else if (!next.active && !last.active) {
-      return
-    }
-    last = next
-    onAutocompleteChange(next)
-  }
-  return new Plugin({
+  return makeTriggerPlugin({
     key: wikilinkPluginKey,
     state: {
       init(_, instance) {
@@ -291,25 +268,6 @@ export function makeWikilinkPlugin(
     // We watch state in `view.update` rather than `apply` so we
     // also catch selection-only changes (the cursor moving over an
     // existing `[[query`).
-    view(view) {
-      function recompute() {
-        const state = view.state
-        const s = detectAutocomplete(
-          state.doc as unknown as PMDocLike,
-          state.selection.from,
-        )
-        notify(s)
-      }
-      recompute()
-      return {
-        update(v) {
-          recompute()
-        },
-        destroy() {
-          // Tell the React listener to dismiss when the editor unmounts.
-          notify({ active: false })
-        },
-      }
-    },
-  })
+
+  }, detectAutocomplete, onAutocompleteChange)
 }

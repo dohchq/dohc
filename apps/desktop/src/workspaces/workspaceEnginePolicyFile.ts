@@ -1,3 +1,4 @@
+import { errorMessage } from "./workspaceError";
 import {
   parseFilesPolicy,
   parseVisibilityPolicy,
@@ -108,9 +109,7 @@ export async function readWorkspaceEnginePolicy(
       filesPolicy: null,
       visibilityPolicy: null,
       errors: [
-        `workspace policy directory could not be resolved: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `workspace policy directory could not be resolved: ${errorMessage(error)}`,
       ],
     };
   }

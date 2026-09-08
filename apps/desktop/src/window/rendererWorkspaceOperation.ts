@@ -15,7 +15,7 @@ export interface PhysicalWorkspaceOperation<Workspace, State> {
 export type ExactRendererWorkspaceOperation<Workspace, State, Session> =
   PhysicalWorkspaceOperation<Workspace, State> & {
     readonly session: Session;
-    assertCurrent(): void;
+    isCurrent(): boolean;
   };
 
 export function createRendererWorkspaceOperationRunner<
@@ -68,6 +68,14 @@ export function createRendererWorkspaceOperationRunner<
           signal: physical.signal,
           session,
           assertCurrent,
+          isCurrent(): boolean {
+            try {
+              assertCurrent();
+              return true;
+            } catch {
+              return false;
+            }
+          },
         });
         const result = await work(operation);
         assertCurrent();

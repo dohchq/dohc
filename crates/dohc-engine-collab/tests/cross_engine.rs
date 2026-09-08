@@ -14,8 +14,8 @@ mod common;
 use common::*;
 use dohc_engine_collab::{
     apply_remote_update, load_persisted, maybe_compact, record_local_update, ydoc::OffsetMode,
-    CollabError, CompactOutcome, ContentKind, Regime, RemoteUpdate, ReplicationApplyOutcome,
-    WriterDocCache, Ydoc,
+    CollabError, CompactOutcome, ContentKind, LocalAppend, Regime, RemoteUpdate,
+    ReplicationApplyOutcome, WriterDocCache, Ydoc,
 };
 use dohc_engine_storage::{NoFaults, TxnOutcome};
 use dohc_engine_testkit::decode_hex;
@@ -66,8 +66,10 @@ fn ingest(fx: &Fixture) -> (TempStore, dohc_engine_collab::DocKey, i64) {
             &mut ts.cache,
             &key,
             &bytes,
+            LocalAppend::default(),
             &NoFaults,
             1_000 + i as i64,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("record");
         if let TxnOutcome::Committed(app) = outcome {
@@ -384,7 +386,17 @@ fn replay_parity_gate_rejects_surrogate_probe_bypass1_before_journal() {
     )
     .expect("marker");
     let base = decode_b64(&fx.updates[0]);
-    record_local_update(&mut ts.store, &mut ts.cache, &key, &base, &NoFaults, 1_001).expect("base");
+    record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &base,
+        LocalAppend::default(),
+        &NoFaults,
+        1_001,
+        |_tx, _outcome, _update_sha| Ok(()),
+    )
+    .expect("base");
 
     let bypass = decode_b64(&fx.updates[1]);
     let bypass_sha = dohc_engine_collab::hex_sha256(&bypass);
@@ -393,8 +405,10 @@ fn replay_parity_gate_rejects_surrogate_probe_bypass1_before_journal() {
         &mut ts.cache,
         &key,
         &bypass,
+        LocalAppend::default(),
         &NoFaults,
         1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect_err("surrogate split must fail closed");
     assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
@@ -479,8 +493,10 @@ fn assert_delete_boundary_rejected(tag: &str, base_hex: &str, candidate_hex: &st
         &mut local.cache,
         &lkey,
         &base,
+        LocalAppend::default(),
         &NoFaults,
         1_001,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("local base");
     let error = record_local_update(
@@ -488,8 +504,10 @@ fn assert_delete_boundary_rejected(tag: &str, base_hex: &str, candidate_hex: &st
         &mut local.cache,
         &lkey,
         &candidate,
+        LocalAppend::default(),
         &NoFaults,
         1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect_err("mid-pair delete must fail closed on the local path");
     assert!(
@@ -689,14 +707,32 @@ fn replay_parity_stays_fail_closed_on_multi_unit_pending_diff_inputs() {
 fn replay_parity_rejects_overlap_slice_divergence_on_local_path() {
     let (mut ts, key) = setup_parity_store("overlap-slice-local", Regime::LocalOnly);
     let u1 = decode_hex(OVERLAP_U1_HEX);
-    record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001)
-        .expect("clean U+FFFD base must be accepted");
+    record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &u1,
+        LocalAppend::default(),
+        &NoFaults,
+        1_001,
+        |_tx, _outcome, _update_sha| Ok(()),
+    )
+    .expect("clean U+FFFD base must be accepted");
     assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
 
     let u2 = decode_hex(OVERLAP_U2_HEX);
     let u2_sha = dohc_engine_collab::hex_sha256(&u2);
-    let error = record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_002)
-        .expect_err("overlap slice must fail closed");
+    let error = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &u2,
+        LocalAppend::default(),
+        &NoFaults,
+        1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
+    )
+    .expect_err("overlap slice must fail closed");
     assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
     assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
     assert!(
@@ -776,8 +812,10 @@ fn replay_parity_rejects_mixed_parked_and_discarded_clocks_on_both_paths() {
         &mut local.cache,
         &local_key,
         &overlap_base,
+        LocalAppend::default(),
         &NoFaults,
         1_001,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("overlap base");
     let local_error = record_local_update(
@@ -785,8 +823,10 @@ fn replay_parity_rejects_mixed_parked_and_discarded_clocks_on_both_paths() {
         &mut local.cache,
         &local_key,
         &mixed,
+        LocalAppend::default(),
         &NoFaults,
         1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect_err("mixed local candidate must fail closed");
     assert!(matches!(
@@ -854,16 +894,33 @@ fn replay_parity_accepts_clean_resend_and_sequential_append() {
     let (mut ts, key) = setup_parity_store("valid-resend-append", Regime::LocalOnly);
     let producer = Ydoc::wire();
     let first = producer.plaintext_insert(0, "a");
-    let first_outcome =
-        record_local_update(&mut ts.store, &mut ts.cache, &key, &first, &NoFaults, 1_001)
-            .expect("first insert");
+    let first_outcome = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &first,
+        LocalAppend::default(),
+        &NoFaults,
+        1_001,
+        |_tx, _outcome, _update_sha| Ok(()),
+    )
+    .expect("first insert");
     assert!(matches!(
         first_outcome,
         TxnOutcome::Committed(ref append) if !append.deduped
     ));
 
-    let resend = record_local_update(&mut ts.store, &mut ts.cache, &key, &first, &NoFaults, 1_002)
-        .expect("clean-boundary resend");
+    let resend = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &first,
+        LocalAppend::default(),
+        &NoFaults,
+        1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
+    )
+    .expect("clean-boundary resend");
     assert!(matches!(
         resend,
         TxnOutcome::Committed(ref append) if append.deduped
@@ -875,8 +932,10 @@ fn replay_parity_accepts_clean_resend_and_sequential_append() {
         &mut ts.cache,
         &key,
         &second,
+        LocalAppend::default(),
         &NoFaults,
         1_003,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("sequential append");
     assert!(matches!(
@@ -897,10 +956,28 @@ fn replay_parity_accepts_skip_gap_merge_when_gap_is_present() {
     let first = producer.plaintext_insert(0, "a");
     let gap = producer.plaintext_insert(1, "b");
     let last = producer.plaintext_insert(2, "c");
-    record_local_update(&mut ts.store, &mut ts.cache, &key, &first, &NoFaults, 1_001)
-        .expect("first");
-    record_local_update(&mut ts.store, &mut ts.cache, &key, &gap, &NoFaults, 1_002)
-        .expect("gap dependency");
+    record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &first,
+        LocalAppend::default(),
+        &NoFaults,
+        1_001,
+        |_tx, _outcome, _update_sha| Ok(()),
+    )
+    .expect("first");
+    record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &gap,
+        LocalAppend::default(),
+        &NoFaults,
+        1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
+    )
+    .expect("gap dependency");
 
     let skip_gap = dohc_engine_collab::merge_updates(&[first, last]).expect("skip-gap merge");
     let outcome = record_local_update(
@@ -908,8 +985,10 @@ fn replay_parity_accepts_skip_gap_merge_when_gap_is_present() {
         &mut ts.cache,
         &key,
         &skip_gap,
+        LocalAppend::default(),
         &NoFaults,
         1_003,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("skip-gap update with an integrated gap must be accepted");
     assert!(matches!(
@@ -1180,8 +1259,10 @@ fn validate_replay_parity_for_test(seeded: &Ydoc, hostile: &[u8]) -> Result<(), 
         &mut ts.cache,
         &key,
         &seeded.encode_full_state(),
+        LocalAppend::default(),
         &NoFaults,
         1_001,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("seed base into store");
     record_local_update(
@@ -1189,8 +1270,10 @@ fn validate_replay_parity_for_test(seeded: &Ydoc, hostile: &[u8]) -> Result<(), 
         &mut ts.cache,
         &key,
         hostile,
+        LocalAppend::default(),
         &NoFaults,
         1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .map(|_| ())
 }
@@ -1290,8 +1373,10 @@ fn replay_parity_rejects_cross_type_redefinition_on_both_paths() {
             &mut local.cache,
             &lkey,
             &base,
+            LocalAppend::default(),
             &NoFaults,
             1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect("string base accepted");
         let err = record_local_update(
@@ -1299,8 +1384,10 @@ fn replay_parity_rejects_cross_type_redefinition_on_both_paths() {
             &mut local.cache,
             &lkey,
             &candidate,
+            LocalAppend::default(),
             &NoFaults,
             1_002,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect_err(&format!("{name} local must reject the kind change"));
         assert!(
@@ -1395,8 +1482,10 @@ fn replay_parity_accepts_same_kind_same_payload_resend_for_each_content_kind() {
             &mut ts.cache,
             &key,
             &doc_update,
+            LocalAppend::default(),
             &NoFaults,
             1_001,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .unwrap_or_else(|e| panic!("{name} base must be accepted, got: {e:?}"));
         assert!(
@@ -1408,8 +1497,10 @@ fn replay_parity_accepts_same_kind_same_payload_resend_for_each_content_kind() {
             &mut ts.cache,
             &key,
             &doc_update,
+            LocalAppend::default(),
             &NoFaults,
             1_002,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .unwrap_or_else(|e| panic!("{name} same-kind same-payload resend must accept: {e:?}"));
         assert!(
@@ -1434,15 +1525,26 @@ fn replay_parity_accepts_embed_resend_with_reordered_map_keys() {
     let reordered = redefine_string_clock_as(&string_base, 5, &lib0_string("{\"b\":2,\"a\":1}"));
 
     let (mut ts, key) = setup_parity_store("embed-reordered-map", Regime::LocalOnly);
-    record_local_update(&mut ts.store, &mut ts.cache, &key, &base, &NoFaults, 1_001)
-        .expect("embed base accepted");
+    record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &base,
+        LocalAppend::default(),
+        &NoFaults,
+        1_001,
+        |_tx, _outcome, _update_sha| Ok(()),
+    )
+    .expect("embed base accepted");
     let outcome = record_local_update(
         &mut ts.store,
         &mut ts.cache,
         &key,
         &reordered,
+        LocalAppend::default(),
         &NoFaults,
         1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("a same-map different-key-order embed resend must not be false-rejected");
     // Same logical embed, re-encoded: the gate accepts. Whether yrs dedups the
@@ -1478,8 +1580,10 @@ fn replay_parity_accepts_honest_delete_gc_resend() {
         &mut ts.cache,
         &key,
         &insert,
+        LocalAppend::default(),
         &NoFaults,
         1_001,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("insert abc");
 
@@ -1492,8 +1596,10 @@ fn replay_parity_accepts_honest_delete_gc_resend() {
         &mut ts.cache,
         &key,
         &resend,
+        LocalAppend::default(),
         &NoFaults,
         1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("an honest delete+GC full-state resend must NOT be rejected");
     assert!(matches!(outcome, TxnOutcome::Committed(_)));
@@ -1562,8 +1668,10 @@ fn replay_parity_accepts_delete_delta_landing_deleted_content() {
         &mut ts.cache,
         &key,
         &insert,
+        LocalAppend::default(),
         &NoFaults,
         1_001,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("insert abc");
     let delete = producer.plaintext_delete(1, 1);
@@ -1572,8 +1680,10 @@ fn replay_parity_accepts_delete_delta_landing_deleted_content() {
         &mut ts.cache,
         &key,
         &delete,
+        LocalAppend::default(),
         &NoFaults,
         1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("delete b delta");
     let persisted = load_persisted(&ts.store, &key)
@@ -1598,8 +1708,10 @@ fn replay_parity_accepts_gc_disabled_resend_retaining_deleted_content() {
         &mut ts.cache,
         &key,
         &insert,
+        LocalAppend::default(),
         &NoFaults,
         1_001,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("insert abc");
     let gc_off_resend =
@@ -1609,8 +1721,10 @@ fn replay_parity_accepts_gc_disabled_resend_retaining_deleted_content() {
         &mut ts.cache,
         &key,
         &gc_off_resend,
+        LocalAppend::default(),
         &NoFaults,
         1_002,
+        |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("a GC-disabled resend retaining deleted content must accept");
     assert!(matches!(outcome, TxnOutcome::Committed(_)));

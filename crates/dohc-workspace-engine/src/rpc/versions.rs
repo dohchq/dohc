@@ -1,6 +1,7 @@
 use crate::EngineService;
 use crate::SelfWriteSuppression;
 use crate::capture_driver;
+use crate::capture_sink;
 use crate::events::EngineEvents;
 use crate::events::emit_record_events;
 use crate::lock;
@@ -972,7 +973,6 @@ impl EngineService {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::EngineService;
     use dohc_engine_protocol::transport::RequestContext;
     use dohc_engine_protocol::wire::Request;

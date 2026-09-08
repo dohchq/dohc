@@ -77,6 +77,24 @@ export {
   utf8ByteLength,
 } from "./limits.js";
 export {
+  LIVE_FRAME_HEADER_BYTES,
+  LIVE_FRAME_MINIMUM_MAX_BYTES,
+  LiveFrameError,
+  encodeLiveFrame,
+  decodeLiveFrame,
+  encodeLiveFrameSync,
+  decodeLiveFrameSync,
+  createLiveFrameSession,
+  type LiveFrame,
+  type LiveFrameBegin,
+  type LiveFrameReceivePolicy,
+  type LiveFrameSessionPolicy,
+  type LiveFrameSync,
+  type LiveFrameLease,
+  type LiveFrameTransfer,
+  type LiveFrameReceived,
+} from "./liveFrame.js";
+export {
   SETTLEMENT_END_TO_END_MAX_MS,
   SETTLEMENT_QUIET_MS,
   createSettlementScheduler,

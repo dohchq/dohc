@@ -8,7 +8,7 @@ import {
 
 // Mode lives on the workspace manifest and nowhere else: a workspace is
 // local-first, cloud-first, or cloud-only as a whole, never per file.
-export interface WorkspaceManifest {
+interface WorkspaceManifest {
   version: 1;
   workspaceId: string;
   mode: WorkspaceMode;

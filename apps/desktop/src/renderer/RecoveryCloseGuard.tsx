@@ -1,6 +1,5 @@
 import {
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -15,12 +14,24 @@ import {
   hasPendingCollectionFieldWrites,
   settleCollectionFieldWrites,
 } from "./collections/recordFieldWrites";
-import { isTopOverlay, pushOverlay, removeOverlay } from "./guestBlockingUi";
-import { trapModalTabKey } from "./modalFocus";
+import { Overlay } from "./Overlay";
 import { atRiskOrphanedDraftIds, useAllOrphanedDrafts } from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
 
 type UnloadKind = "close" | "reload" | "update" | "quit";
+
+// The warning dialog's copy, one row per unload kind so the title, body, and
+// confirm button can never name different actions. "update" reads as Restart
+// because Restart is the action the user clicked.
+const UNLOAD_COPY: Record<
+  UnloadKind,
+  { title: string; verb: string; confirm: string }
+> = {
+  close: { title: "Close", verb: "closes", confirm: "Close anyway" },
+  reload: { title: "Reload", verb: "reloads", confirm: "Reload anyway" },
+  update: { title: "Restart", verb: "restarts", confirm: "Restart anyway" },
+  quit: { title: "Quit", verb: "quits", confirm: "Quit anyway" },
+};
 
 // The guard cannot tell one unload's beforeunload from another's, but the
 // user asked for a specific action by name — confirming must resume that
@@ -266,7 +277,6 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
   const warningOpen = closeWarning !== null;
   const warningVisible = warningOpen && liveCount > 0;
   const warningRef = useRef<HTMLDivElement | null>(null);
-  const warningLayerId = useRef(Symbol("recovery-close-warning"));
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const showCloseWarning = (warning: {
     kind: UnloadKind;
@@ -284,30 +294,9 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
   useEffect(() => {
     if (warningOpen && liveCount === 0) setCloseWarning(null);
   }, [warningOpen, liveCount]);
-  useLayoutEffect(() => {
-    if (warningVisible) warningRef.current?.focus();
-  }, [warningVisible]);
-  // This warning paints above every ordinary Overlay. Register it in the
-  // same modal stack so an underlying Overlay's document listener stands
-  // down instead of briefly moving focus behind this dialog on every Tab.
-  // Registration also hides an open plugin guest while the warning is up.
   useEffect(() => {
     if (!warningVisible) return;
-    const id = warningLayerId.current;
-    pushOverlay(id);
-    return () => removeOverlay(id);
-  }, [warningVisible]);
-  useEffect(() => {
-    if (!warningVisible) return;
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!isTopOverlay(warningLayerId.current)) return;
-      trapModalTabKey(event, warningRef.current);
-    };
-
-    document.addEventListener("keydown", onKeyDown, true);
     return () => {
-      document.removeEventListener("keydown", onKeyDown, true);
       const returnTarget = returnFocusRef.current;
       if (returnTarget?.isConnected) returnTarget.focus();
       returnFocusRef.current = null;
@@ -439,41 +428,28 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     <>
       {props.children}
       {closeWarning !== null && liveCount > 0 ? (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-ink/20">
-          <div
-            ref={warningRef}
-            data-testid="recovery-close-warning"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="recovery-close-warning-title"
-            tabIndex={-1}
-            className="dohc-elevated w-[min(480px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5"
-          >
+        <Overlay
+          appearance="warning"
+          panelRef={warningRef}
+          panelProps={{
+            "data-testid": "recovery-close-warning",
+            role: "dialog",
+            "aria-modal": "true",
+            "aria-labelledby": "recovery-close-warning-title",
+            className: "dohc-elevated w-[min(480px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5",
+          }}
+        >
             <h3
               id="recovery-close-warning-title"
               className="m-0 text-sm font-semibold text-ink"
             >
-              {closeWarning.kind === "reload"
-                ? "Reload"
-                : closeWarning.kind === "update"
-                  ? "Restart"
-                  : closeWarning.kind === "quit"
-                    ? "Quit"
-                    : "Close"}{" "}
+              {UNLOAD_COPY[closeWarning.kind].title}{" "}
               without your set-aside {liveCount === 1 ? "edit" : "edits"}?
             </h3>
             <p className="mb-0 mt-2 text-xs leading-5 text-muted">
               {`${liveCount} set-aside ${
                 liveCount === 1 ? "edit is" : "edits are"
-              } lost when dohc ${
-                closeWarning.kind === "reload"
-                  ? "reloads"
-                  : closeWarning.kind === "update"
-                    ? "restarts"
-                    : closeWarning.kind === "quit"
-                      ? "quits"
-                      : "closes"
-              }.`}{" "}
+              } lost when dohc ${UNLOAD_COPY[closeWarning.kind].verb}.`}{" "}
               Copy {liveCount === 1 ? "it" : "them"} here to keep the text.
             </p>
             <div className="mt-3 max-h-60 overflow-y-auto">
@@ -540,17 +516,10 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                 }}
                 className="h-8 cursor-pointer rounded-md bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90"
               >
-                {closeWarning.kind === "reload"
-                  ? "Reload anyway"
-                  : closeWarning.kind === "update"
-                    ? "Restart anyway"
-                    : closeWarning.kind === "quit"
-                      ? "Quit anyway"
-                      : "Close anyway"}
+                {UNLOAD_COPY[closeWarning.kind].confirm}
               </button>
             </div>
-          </div>
-        </div>
+        </Overlay>
       ) : null}
     </>
   );

@@ -4,7 +4,7 @@ export function defaultWorkspaceRoot(homeDir: string): string {
   return `${homeDir.replace(/\/+$/, "")}/dohc`;
 }
 
-export type FolderValidation = { ok: true } | { ok: false; reason: string };
+type FolderValidation = { ok: true } | { ok: false; reason: string };
 
 // POSIX absolute, Windows drive-qualified (C:\ or C:/), or UNC (\\server).
 function isAbsolutePathLike(path: string): boolean {
@@ -315,7 +315,7 @@ export function normalizeAbsolutePath(path: string): string {
   return trimmed || (drive ? drive : "/");
 }
 
-export type RootChoiceValidation =
+type RootChoiceValidation =
   | { ok: true; normalized: string }
   | { ok: false; reason: string };
 
