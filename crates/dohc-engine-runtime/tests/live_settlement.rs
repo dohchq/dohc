@@ -421,6 +421,140 @@ async fn restore_fence_accepts_terminal_history_under_an_earlier_selector() {
 }
 
 #[tokio::test]
+async fn stopped_bootstrap_preserves_replay_after_file_mutation_attempts() {
+    use dohc_engine_domain::{DeleteTextFile, RenameTextFile, WriteBinary};
+    use dohc_engine_runtime::CancellationToken;
+    for mutation in ["rename", "delete", "binary"] {
+        let f = Fixture::new().await;
+        f.settle(None, 4, Arc::new(NoFaults)).await.unwrap();
+        let actor = f.supervisor.open(&f.db, 2).unwrap().actor;
+        let coordinate = ApplicationHostCoordinate {
+            host_id: "host".into(),
+            host_epoch: 1,
+            instance_id: "instance".into(),
+            connection_id: "connection".into(),
+        };
+        let input = NativeRestoreFence {
+            operation_id: "restore".into(),
+            relay_database_namespace: "relay".into(),
+            old_binding: f.binding.clone(),
+            host_id: "host".into(),
+            new_fence: 1,
+            origin: RestoreDeliveryOrigin::Bootstrap {
+                id: "bootstrap".into(),
+            },
+            terminal: None,
+            applied_sequence: 0,
+        };
+        let receipt = f
+            .owner
+            .fence_restore(input.clone(), coordinate.clone(), 3, Arc::new(NoFaults))
+            .await
+            .unwrap();
+        let snapshot = || {
+            let conn = rusqlite::Connection::open_with_flags(
+                &f.db,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            conn.query_row("SELECT (SELECT COUNT(*) FROM moments), (SELECT COUNT(*) FROM binary_blobs), (SELECT path FROM ydoc_docs WHERE object_id='object'), (SELECT COUNT(*) FROM live_restore_fences)", [], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?))).unwrap()
+        };
+        let before = snapshot();
+        let original = std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap();
+        let result = match mutation {
+            "rename" => actor
+                .versioned_text_rename(
+                    RenameTextFile {
+                        workspace_id: "workspace".into(),
+                        version_id: "main".into(),
+                        from_path: f.binding.current_path.clone(),
+                        to_path: "moved.md".into(),
+                        moment_id: "rename-stopped".into(),
+                        request_id: None,
+                        metadata_origin: "api".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 4,
+                    },
+                    f.root.path().to_owned(),
+                    Arc::new(()),
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await
+                .map(|_| ()),
+            "delete" => actor
+                .versioned_text_delete(
+                    DeleteTextFile {
+                        workspace_id: "workspace".into(),
+                        version_id: "main".into(),
+                        path: f.binding.current_path.clone(),
+                        moment_id: "delete-stopped".into(),
+                        request_id: None,
+                        metadata_origin: "api".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 4,
+                    },
+                    f.root.path().to_owned(),
+                    Arc::new(()),
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await
+                .map(|_| ()),
+            _ => actor
+                .versioned_binary_write(
+                    WriteBinary {
+                        workspace_id: "workspace".into(),
+                        version_id: "main".into(),
+                        object_id: "replacement".into(),
+                        path: f.binding.current_path.clone(),
+                        bytes: vec![0, 1, 2, 3],
+                        moment_id: "binary-stopped".into(),
+                        request_id: None,
+                        metadata_origin: "api".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 4,
+                    },
+                    f.root.path().to_owned(),
+                    Arc::new(()),
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await
+                .map(|_| ()),
+        };
+        let error = result.expect_err("file mutation must refuse a stopped bootstrap document");
+        assert!(
+            error.to_string().contains("live document is stopped"),
+            "{mutation}: {error}"
+        );
+        assert_eq!(
+            snapshot(),
+            before,
+            "{mutation} must not change durable state"
+        );
+        assert_eq!(
+            std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap(),
+            original
+        );
+        assert!(!f.root.path().join("moved.md").exists());
+        assert_eq!(
+            f.owner
+                .fence_restore(input, coordinate, 5, Arc::new(NoFaults))
+                .await
+                .unwrap(),
+            receipt
+        );
+    }
+}
+
+#[tokio::test]
 async fn configured_settlement_projects_baseline_updates_and_unchanged_coverage() {
     let f = Fixture::new().await;
     assert!(!f.root.path().join(&f.binding.current_path).exists());
