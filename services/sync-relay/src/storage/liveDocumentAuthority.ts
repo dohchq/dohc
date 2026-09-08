@@ -1,3 +1,4 @@
+import type { StoredLiveDocumentAuthority } from "./types";
 import type {
   CurrentLiveBindingRequest,
   LiveDocumentBaselineRegistrationInput,
@@ -61,7 +62,7 @@ import { authorizeNamedLiveEditShareGrant } from "../shareAuthorization";
 import { readLiveHostControl, parseHostControlTimestamp } from "./hostControl";
 import { assertWorkspaceQuota } from "./workspaces";
 
-function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest): CurrentLiveBindingRequest {
+export function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest): CurrentLiveBindingRequest {
   const outer = ticketRecord(input, ["document", "actor"]);
   const document = parseLiveDocumentKey(ticketRecord(outer.document,
     ["workspaceId", "mainVersionId", "objectId", "lineageClaimId"]));
@@ -82,7 +83,7 @@ function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest): Curren
     : { kind: "named", userId, grantId: parseLiveUpdateIdentifier(actor.grantId, "grant ID") } };
 }
 
-function baselineRecord(value: unknown, fields: readonly string[], allowExtra = false): Record<string, unknown> {
+export function baselineRecord(value: unknown, fields: readonly string[], allowExtra = false): Record<string, unknown> {
   if (typeof value !== "object" || value === null || nodeTypes.isProxy(value) || Array.isArray(value) ||
     (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
     throw new TypeError("Invalid baseline record.");
@@ -103,15 +104,15 @@ function baselineRecord(value: unknown, fields: readonly string[], allowExtra = 
 
 const baselineBytePrototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
 
-const baselineByteBuffer = Object.getOwnPropertyDescriptor(baselineBytePrototype, "buffer")!.get!;
+export const baselineByteBuffer = Object.getOwnPropertyDescriptor(baselineBytePrototype, "buffer")!.get!;
 
-const baselineByteOffset = Object.getOwnPropertyDescriptor(baselineBytePrototype, "byteOffset")!.get!;
+export const baselineByteOffset = Object.getOwnPropertyDescriptor(baselineBytePrototype, "byteOffset")!.get!;
 
-const baselineByteLength = Object.getOwnPropertyDescriptor(baselineBytePrototype, "byteLength")!.get!;
+export const baselineByteLength = Object.getOwnPropertyDescriptor(baselineBytePrototype, "byteLength")!.get!;
 
-const baselineBufferLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")!.get!;
+export const baselineBufferLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")!.get!;
 
-const baselineBufferResizable = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "resizable")?.get;
+export const baselineBufferResizable = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "resizable")?.get;
 
 function snapshotBaseline(outer: Record<string, unknown>, host: LiveHostConnectionCoordinate): LiveDocumentBaselineRegistrationInput {
   const evidence = baselineRecord(outer.evidence,
@@ -163,16 +164,16 @@ function snapshotBaseline(outer: Record<string, unknown>, host: LiveHostConnecti
     checkpoint: { updateDigest, ranges }, projectedMarkdownSha256, projectedMarkdownByteLength } };
 }
 
-function authorityIntegrity(condition: unknown): asserts condition {
+export function authorityIntegrity(condition: unknown): asserts condition {
   if (!condition) throw new Error("stored live document authority is damaged");
 }
 
-function authorityInteger(value: unknown, minimum = 0): number {
+export function authorityInteger(value: unknown, minimum = 0): number {
   authorityIntegrity(typeof value === "number" && Number.isSafeInteger(value) && value >= minimum);
   return value;
 }
 
-function assertCurrentAuthorityHost(db: SqliteDb, host: HostControlSnapshot): void {
+export function assertCurrentAuthorityHost(db: SqliteDb, host: HostControlSnapshot): void {
   authorityIntegrity(host.registeredConnectionId === null || host.registeredInstanceId !== null);
   authorityIntegrity(host.admissionState !== "closed" || host.registeredConnectionId === null);
   authorityIntegrity(host.admissionState !== "open" ||
@@ -201,20 +202,6 @@ function assertCurrentAuthorityHost(db: SqliteDb, host: HostControlSnapshot): vo
   }
 }
 
-interface StoredLiveDocumentAuthority {
-  binding: LiveObjectBinding;
-  current: boolean;
-  open: boolean;
-  replacesLineageClaimId: string | null;
-  baselineSequence: number;
-  baselineDigest: string;
-  baselineBytes: Uint8Array;
-  projectedDigest: string;
-  projectedLength: number;
-  ranges: LiveUpdateStructRange[];
-  registeredAtMs: number;
-}
-
 function readLiveDocumentAuthority(db: SqliteDb, document: LiveDocumentKey): StoredLiveDocumentAuthority | null {
   const row = db.prepare(`SELECT * FROM sync_relay_live_documents
     WHERE workspace_id = ? AND main_version_id = ? AND object_id = ?
@@ -225,7 +212,13 @@ function readLiveDocumentAuthority(db: SqliteDb, document: LiveDocumentKey): Sto
   return decodeLiveDocumentAuthority(db, document, row);
 }
 
-function decodeLiveDocumentAuthority(db: SqliteDb, document: LiveDocumentKey, row: Record<string, unknown>): StoredLiveDocumentAuthority {
+export function decodeLiveDocumentAuthority(db: SqliteDb, document: LiveDocumentKey, row: Record<string, unknown>): StoredLiveDocumentAuthority {
+  const stored = decodeLiveDocumentAuthorityStructure(db, document, row);
+  authorityIntegrity(createHash("sha256").update(stored.baselineBytes).digest("hex") === stored.baselineDigest);
+  return stored;
+}
+
+export function decodeLiveDocumentAuthorityStructure(db: SqliteDb, document: LiveDocumentKey, row: Record<string, unknown>): StoredLiveDocumentAuthority {
   const storedDocument = parseLiveDocumentKey({
     workspaceId: row.workspace_id, mainVersionId: row.main_version_id,
     objectId: row.object_id, lineageClaimId: row.lineage_claim_id,
@@ -247,7 +240,6 @@ function decodeLiveDocumentAuthority(db: SqliteDb, document: LiveDocumentKey, ro
   else { authorityInteger(row.retired_at_ms); authorityIntegrity(row.admission_state === "closed"); }
   const bytes = row.baseline_bytes;
   authorityIntegrity(bytes instanceof Uint8Array && bytes.byteLength > 0 && bytes.byteLength <= 20_971_520);
-  authorityIntegrity(createHash("sha256").update(bytes).digest("hex") === baselineDigest);
   const projectionDigest = parseLiveUpdateDigest(row.baseline_projected_sha256);
   const projectionLength = authorityInteger(row.baseline_projected_byte_length);
   authorityIntegrity(projectionLength <= 2_097_152);
@@ -489,7 +481,7 @@ export function registerLiveDocumentBaseline(storage: StorageContext, input: Liv
     });
   }
 
-function currentLiveDocumentMoment(storage: StorageContext, document: LiveDocumentKey, currentPath: string): Record<string, unknown> | undefined {
+export function currentLiveDocumentMoment(storage: StorageContext, document: LiveDocumentKey, currentPath: string): Record<string, unknown> | undefined {
     const latest = storage.db.prepare(`SELECT path, content_kind, blob_sha256, byte_length, relay_seq, recorded_at_ms FROM sync_relay_object_moments
       WHERE workspace_id = ? AND object_id = ? AND version_id = 'main' ORDER BY relay_seq DESC LIMIT 1`)
       .get(document.workspaceId, document.objectId);
@@ -510,6 +502,11 @@ export function currentLiveDocumentBinding(storage: StorageContext, { document, 
     }
     authorityIntegrity(host.registeredInstanceId !== null && host.registeredConnectionId !== null);
     const stored = readLiveDocumentAuthority(storage.db, document);
+    return authorizeLiveDocument(storage, { document, actor }, host, stored);
+  }
+
+export function authorizeLiveDocument(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest, host: HostControlSnapshot,
+    stored: StoredLiveDocumentAuthority | null): CurrentLiveBindingResult {
     if (!stored || !stored.current || !stored.open || stored.binding.lineageClaimId !== document.lineageClaimId ||
       stored.baselineSequence <= storage.getEpochLogFloor(document.workspaceId)) {
       return { kind: "refused", reason: "stale-document" };
@@ -549,5 +546,5 @@ export function currentLiveDocumentBinding(storage: StorageContext, { document, 
     catch { return { kind: "refused", reason: "stale-selector" }; }
     return { kind: "current", binding, authority,
       host: { mode: host.configuredMode, hostId: host.configuredHostId, hostEpoch: host.hostEpoch,
-        instanceId: host.registeredInstanceId, connectionId: host.registeredConnectionId } };
+        instanceId: host.registeredInstanceId!, connectionId: host.registeredConnectionId! } };
   }
