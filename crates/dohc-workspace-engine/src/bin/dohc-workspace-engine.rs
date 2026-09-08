@@ -1252,7 +1252,7 @@ mod tests {
         .unwrap();
         let reconstructed = reopened
             .read_with(|conn| {
-                dohc_engine_collab::durable::load_doc_from_connection(
+                dohc_engine_collab::durable::load_doc_in(
                     conn,
                     &dohc_engine_collab::DocKey::new("workspace", "main", "one").unwrap(),
                 )
