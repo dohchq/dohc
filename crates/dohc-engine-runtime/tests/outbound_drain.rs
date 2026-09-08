@@ -3363,7 +3363,7 @@ async fn an_enrolled_share_view_journals_a_file_write_and_no_ydoc_update() {
     // can actually fail: `only_the_file_moment_journal_reads_the_share_lane`
     // (both predicates, behaviourally) and
     // `the_ydoc_journal_reads_the_owner_lane_predicate` (the call site), both
-    // in `crates/dohc-engine-sync/src/tests.rs`.
+    // in `crates/dohc-engine-sync/src/tests/share_view.rs`.
     assert!(
         ops.iter().all(|op| op.op_kind != "version.create"),
         "a share view creates no versions, so none may journal: {ops:?}",

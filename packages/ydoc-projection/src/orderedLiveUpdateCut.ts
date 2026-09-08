@@ -108,6 +108,30 @@ export type OrderedLiveUpdateCutResult =
   | { readonly kind: 'accepted'; readonly cut: ValidatedLiveUpdateCut }
   | OrderedLiveUpdateCutRefusal
 
+export type ProjectionTopology =
+  | {
+      readonly kind: 'compatible'
+      readonly bodyHasActiveItem: boolean
+      readonly canonicalZeroStructSeed: boolean
+    }
+  | { readonly kind: 'incompatible' }
+
+export type RegistrationCutForProjectionResult =
+  | {
+      readonly kind: 'accepted'
+      readonly cut: Extract<ValidatedLiveUpdateCut, { mode: 'registration' }>
+      readonly topology: ProjectionTopology
+    }
+  | OrderedLiveUpdateCutRefusal
+
+export type JournalCutForProjectionResult =
+  | {
+      readonly kind: 'accepted'
+      readonly cut: Extract<ValidatedLiveUpdateCut, { mode: 'journal-candidate' }>
+      readonly topology: ProjectionTopology
+    }
+  | OrderedLiveUpdateCutRefusal
+
 const POLICY_FIELDS = [
   'maxStructVisits',
   'maxValueNodeVisits',
@@ -121,7 +145,7 @@ const REGISTRATION_FIELDS = ['mode', 'checkpoint'] as const
 const JOURNAL_FIELDS = ['mode', 'checkpoint', 'suffix', 'candidate'] as const
 const MAX_UPDATE_BYTES = 20 * 1024 * 1024
 const MAX_STATE_BYTES = 20 * 1024 * 1024
-const MAX_OLD_SUFFIX_ENTRIES = 4_094
+export const MAX_OLD_SUFFIX_ENTRIES = 4_094
 const MAX_TOTAL_CUT_BYTES = 62_914_559
 const MAX_DEPTH = 128
 const nativeJsonParse = JSON.parse
@@ -612,6 +636,7 @@ function snapshotSuffix(
 function snapshotInput(
   inputValue: unknown,
   budget: ValidationBudget,
+  expectedMode?: OwnedLiveUpdateCutInput['mode'],
 ): InputSnapshot {
   if (typeof inputValue !== 'object' || inputValue === null || Array.isArray(inputValue)) {
     fail('invalid-input', { kind: 'call' })
@@ -624,6 +649,7 @@ function snapshotInput(
   ) {
     fail('invalid-input', { kind: 'call' })
   }
+  if (expectedMode !== undefined && modeDescriptor.value !== expectedMode) fail('invalid-input', { kind: 'call' })
   if (modeDescriptor.value === 'registration') {
     const record = exactRecord(inputValue, REGISTRATION_FIELDS)
     const stage = { kind: 'input', role: 'checkpoint' } as const
@@ -3028,10 +3054,204 @@ function verifyStateVector(
   return vector
 }
 
+interface ProjectionTopologyCapture {
+  value?: ProjectionTopology
+}
+
+interface TopologyPlacement {
+  readonly parent: Exclude<ParentIdentity, { kind: 'none' }>
+  readonly parentSub: string | null
+}
+
+interface TopologyScope {
+  readonly active: boolean
+  readonly compatible: boolean
+}
+
+function proveProjectionTopology(
+  decoded: ReturnType<typeof Y.decodeUpdateV2>,
+  normalized: NormalizedInput,
+  budget: ValidationBudget,
+  stage: OrderedLiveUpdateCutFailureStage,
+): ProjectionTopology {
+  const providers = new Map<number, ProviderInterval[]>()
+  for (const node of stableSort(normalized.integrationNodes, rangeCompare, budget, stage)) {
+    budget.visitIndexOperation(stage)
+    const group = providers.get(node.clientId) ?? []
+    budget.visitIndexOperation(stage)
+    group.push({ startClock: node.startClock, endClock: node.endClock, nodeIndex: node.ordinal })
+    budget.visitIndexOperation(stage)
+    providers.set(node.clientId, group)
+  }
+  const deletes = new Map<number, NumericRange[]>()
+  for (const range of normalized.deleteRanges) {
+    budget.visitIndexOperation(stage)
+    const group = deletes.get(range.clientId) ?? []
+    budget.visitIndexOperation(stage)
+    group.push(range)
+    budget.visitIndexOperation(stage)
+    deletes.set(range.clientId, group)
+  }
+  const placements = new Map<number, TopologyPlacement | null>()
+  const provider = (id: ClosureDependency): number => {
+    const index = findProvider(providers, id.clientId, id.clock, budget, stage)
+    if (index === undefined) fail('invalid-update', stage)
+    return index
+  }
+  const placement = (start: number): TopologyPlacement | null => {
+    const chain: number[] = []
+    const pending = new Set<number>()
+    let index = start
+    let resolved: TopologyPlacement | null
+    while (true) {
+      budget.visitIndexOperation(stage)
+      if (placements.has(index)) {
+        budget.visitIndexOperation(stage)
+        resolved = placements.get(index) ?? null
+        break
+      }
+      budget.visitIndexOperation(stage)
+      if (pending.has(index)) fail('invalid-update', stage)
+      budget.visitIndexOperation(stage)
+      pending.add(index)
+      budget.visitIndexOperation(stage)
+      chain.push(index)
+      budget.visitIndexOperation(stage)
+      const node = normalized.integrationNodes[index]
+      if (node === undefined) fail('invalid-update', stage)
+      const own = node.placement
+      if (own === null) { resolved = null; break }
+      if (own.parent.kind !== 'none') {
+        resolved = { parent: own.parent, parentSub: own.parentSub }
+        break
+      }
+      const inherited = closureDependencyId(own.origin, stage)
+        ?? closureDependencyId(own.rightOrigin, stage)
+      if (inherited === undefined) { resolved = null; break }
+      index = provider(inherited)
+    }
+    for (const member of chain) {
+      budget.visitIndexOperation(stage)
+      budget.visitIndexOperation(stage)
+      placements.set(member, resolved)
+    }
+    return resolved
+  }
+  const xmlChild = (item: Y.Item): boolean => item.content instanceof Y.ContentType
+    && (item.content.type instanceof Y.XmlElement || item.content.type instanceof Y.XmlText)
+  const valueChild = (item: Y.Item): boolean => item.content instanceof Y.ContentAny
+    || (item.content instanceof Y.ContentType
+      && (item.content.type instanceof Y.Map || item.content.type instanceof Y.Array))
+  const compatibleChild = (
+    item: Y.Item,
+    parent: string | Y.AbstractType<unknown> | undefined,
+    keyed: boolean,
+  ): boolean => {
+    budget.visitIndexOperation(stage)
+    if (parent === 'body') return !keyed && xmlChild(item)
+    if (parent === 'meta') return keyed && item.content instanceof Y.ContentAny
+    if (parent === 'frontmatter' || parent instanceof Y.Map) return keyed && valueChild(item)
+    if (parent instanceof Y.Array) return !keyed && valueChild(item)
+    if (parent instanceof Y.XmlElement) {
+      return keyed ? item.content instanceof Y.ContentAny : xmlChild(item)
+    }
+    if (parent instanceof Y.XmlText) {
+      return !keyed && (item.content instanceof Y.ContentString || item.content instanceof Y.ContentFormat)
+    }
+    return false
+  }
+  const scopes = new Map<number, TopologyScope>()
+  const inactive: TopologyScope = { active: false, compatible: true }
+  const incompatible: TopologyScope = { active: true, compatible: false }
+  let bodyHasActiveItem = false
+  const scope = (start: number): TopologyScope => {
+    const chain: number[] = []
+    const pending = new Set<number>()
+    let index = start
+    while (true) {
+      budget.visitIndexOperation(stage)
+      if (scopes.has(index)) break
+      budget.visitIndexOperation(stage)
+      if (pending.has(index)) fail('invalid-update', stage)
+      budget.visitIndexOperation(stage)
+      pending.add(index)
+      budget.visitIndexOperation(stage)
+      const node = normalized.integrationNodes[index]
+      budget.visitIndexOperation(stage)
+      const item = decoded.structs[index]
+      if (node === undefined || item === undefined) fail('invalid-update', stage)
+      budget.visitIndexOperation(stage)
+      const deletedRanges = deletes.get(node.clientId) ?? []
+      if (!(item instanceof Y.Item) || item.content instanceof Y.ContentDeleted
+        || rangeCovered(deletedRanges, node.startClock, node.endClock, budget, stage)) {
+        budget.visitIndexOperation(stage)
+        scopes.set(index, inactive)
+        break
+      }
+      const own = placement(index)
+      budget.visitIndexOperation(stage)
+      if (own === null) { scopes.set(index, incompatible); break }
+      budget.visitIndexOperation(stage)
+      chain.push(index)
+      if (own.parent.kind === 'root') break
+      index = provider({ clientId: own.parent.client, clock: own.parent.clock })
+    }
+    while (chain.length > 0) {
+      budget.visitIndexOperation(stage)
+      const current = chain.pop() as number
+      budget.visitIndexOperation(stage)
+      const item = decoded.structs[current]
+      const own = placement(current)
+      if (!(item instanceof Y.Item) || own === null) fail('invalid-update', stage)
+      let parent: string | Y.AbstractType<unknown> | undefined
+      if (own.parent.kind === 'root') {
+        parent = own.parent.name
+        if (parent === 'body') bodyHasActiveItem = true
+      } else {
+        const parentIndex = provider({ clientId: own.parent.client, clock: own.parent.clock })
+        budget.visitIndexOperation(stage)
+        const parentScope = scopes.get(parentIndex)
+        if (parentScope === undefined) fail('invalid-update', stage)
+        if (!parentScope.active) {
+          budget.visitIndexOperation(stage)
+          scopes.set(current, inactive)
+          continue
+        }
+        if (!parentScope.compatible) {
+          budget.visitIndexOperation(stage)
+          scopes.set(current, incompatible)
+          continue
+        }
+        budget.visitIndexOperation(stage)
+        const parentItem = decoded.structs[parentIndex]
+        parent = parentItem instanceof Y.Item && parentItem.content instanceof Y.ContentType
+          ? parentItem.content.type : undefined
+      }
+      const compatible = compatibleChild(item, parent, own.parentSub !== null)
+      budget.visitIndexOperation(stage)
+      scopes.set(current, { active: true, compatible })
+    }
+    budget.visitIndexOperation(stage)
+    const result = scopes.get(start)
+    if (result === undefined) fail('invalid-update', stage)
+    return result
+  }
+  for (let index = 0; index < decoded.structs.length; index += 1) {
+    budget.visitIndexOperation(stage)
+    if (!scope(index).compatible) return Object.freeze({ kind: 'incompatible' })
+  }
+  return Object.freeze({
+    kind: 'compatible',
+    bodyHasActiveItem,
+    canonicalZeroStructSeed: decoded.structs.length === 0 && decoded.ds.clients.size === 0,
+  })
+}
+
 function decodeCompleteState(
   bytes: Uint8Array,
   budget: ValidationBudget,
   stage: OrderedLiveUpdateCutFailureStage,
+  topology?: ProjectionTopologyCapture,
 ): ReplayFrontier {
   budget.startDecoderPass(stage)
   const sink: DecoderEvidenceSink = {
@@ -3067,6 +3287,7 @@ function decodeCompleteState(
   )
   const frontier = new ReplayFrontier()
   frontier.apply(normalized, budget, stage)
+  if (topology !== undefined) topology.value = proveProjectionTopology(decoded, normalized, budget, stage)
   return frontier
 }
 
@@ -3080,6 +3301,7 @@ function completeProof(
   expected: ReplayFrontier,
   budget: ValidationBudget,
   stage: OrderedLiveUpdateCutFailureStage,
+  topology?: ProjectionTopologyCapture,
 ): CompleteProof {
   const stateVector = verifyStateVector(document, expected, budget, stage)
   const measured = measureState(document, budget, stage)
@@ -3087,7 +3309,7 @@ function completeProof(
   if (stateUpdate.byteLength !== measured || stateUpdate.byteLength > MAX_STATE_BYTES) {
     fail('invalid-update', stage)
   }
-  const decodedFrontier = decodeCompleteState(stateUpdate, budget, stage)
+  const decodedFrontier = decodeCompleteState(stateUpdate, budget, stage, topology)
   if (!expected.equivalent(decodedFrontier, budget, stage)) {
     fail('invalid-update', stage)
   }
@@ -3252,13 +3474,36 @@ export function validateOrderedLiveUpdateCut(
   input: OwnedLiveUpdateCutInput,
   policy: OrderedLiveUpdateCutPolicy,
 ): OrderedLiveUpdateCutResult {
+  return validateCut(input, policy)
+}
+
+export function validateRegistrationCutForProjection(
+  input: Extract<OwnedLiveUpdateCutInput, { mode: 'registration' }>,
+  policy: OrderedLiveUpdateCutPolicy,
+): RegistrationCutForProjectionResult {
+  return validateCut(input, policy, 'registration') as RegistrationCutForProjectionResult
+}
+
+export function validateJournalCutForProjection(
+  input: Extract<OwnedLiveUpdateCutInput, { mode: 'journal-candidate' }>,
+  policy: OrderedLiveUpdateCutPolicy,
+): JournalCutForProjectionResult {
+  return validateCut(input, policy, 'journal-candidate') as JournalCutForProjectionResult
+}
+
+function validateCut(
+  input: OwnedLiveUpdateCutInput,
+  policy: OrderedLiveUpdateCutPolicy,
+  projectionMode?: OwnedLiveUpdateCutInput['mode'],
+): OrderedLiveUpdateCutResult | RegistrationCutForProjectionResult | JournalCutForProjectionResult {
   const hostileInput: unknown = input
   const hostilePolicy: unknown = policy
   let budget: ValidationBudget | undefined
+  let projectionDocument: Y.Doc | undefined
   try {
     const ownedPolicy = snapshotPolicy(hostilePolicy)
     budget = new ValidationBudget(ownedPolicy)
-    const snapshot = snapshotInput(hostileInput, budget)
+    const snapshot = snapshotInput(hostileInput, budget, projectionMode)
     const preEvidenceUsage = budget.cappedSnapshot()
     let projectedUsage = { ...preEvidenceUsage }
     const frontier = new ReplayFrontier()
@@ -3322,6 +3567,7 @@ export function validateOrderedLiveUpdateCut(
     ) fail('invalid-update', lastStage)
 
     const document = new Y.Doc({ gc: false })
+    if (projectionMode !== undefined) projectionDocument = document
     document.getXmlFragment('body')
     document.getMap('frontmatter')
     document.getMap('meta')
@@ -3334,7 +3580,8 @@ export function validateOrderedLiveUpdateCut(
       )
     }
 
-    const initialProof = completeProof(document, frontier, budget, { kind: 'final' })
+    const topology: ProjectionTopologyCapture | undefined = projectionMode !== undefined ? {} : undefined
+    const initialProof = completeProof(document, frontier, budget, { kind: 'final' }, topology)
     const dirtyLatch: DirtyLatch = { dirty: false }
     const beforeTransactionListener: BeforeTransactionListener = () => {
       dirtyLatch.dirty = true
@@ -3356,27 +3603,20 @@ export function validateOrderedLiveUpdateCut(
       dirtyLatch,
     }, acceptedUsage)
 
+    let cut: ValidatedLiveUpdateCut
     if (snapshot.mode === 'registration') {
       const checkpoint = inputEvidence[0] as ValidatedCutInputEvidence
-      return Object.freeze({
-        kind: 'accepted',
-        cut: Object.freeze({
-          mode: 'registration',
-          document,
-          usage: acceptedUsage,
-          finishAfterProjection,
-          checkpoint: frozenInputEvidence(
-            checkpoint.updateDigest,
-            checkpoint.ranges,
-          ),
-        }),
+      cut = Object.freeze({
+        mode: 'registration' as const,
+        document,
+        usage: acceptedUsage,
+        finishAfterProjection,
+        checkpoint: frozenInputEvidence(checkpoint.updateDigest, checkpoint.ranges),
       })
-    }
-    const candidate = inputEvidence[inputEvidence.length - 1] as ValidatedCutInputEvidence
-    return Object.freeze({
-      kind: 'accepted',
-      cut: Object.freeze({
-        mode: 'journal-candidate',
+    } else {
+      const candidate = inputEvidence[inputEvidence.length - 1] as ValidatedCutInputEvidence
+      cut = Object.freeze({
+        mode: 'journal-candidate' as const,
         document,
         usage: acceptedUsage,
         finishAfterProjection,
@@ -3388,9 +3628,16 @@ export function validateOrderedLiveUpdateCut(
           candidate.updateDigest,
           candidate.ranges,
         ),
-      }),
-    })
+      })
+    }
+    if (topology !== undefined) {
+      if (topology.value === undefined) fail('invalid-update', { kind: 'final' })
+      projectionDocument = undefined
+      return Object.freeze({ kind: 'accepted', cut, topology: topology.value })
+    }
+    return Object.freeze({ kind: 'accepted', cut })
   } catch (error) {
+    projectionDocument?.destroy()
     const failure = error instanceof CutFailure
       ? error
       : new CutFailure('invalid-input', { kind: 'call' })

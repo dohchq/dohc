@@ -1,7 +1,7 @@
-use crate::{
-    AUTOMATION_CLAIM_MAX_ATTEMPTS, AUTOMATION_CLAIM_REAP_IDLE_MS, AUTOMATION_CLAIMED_EVENT,
-    EngineEventNotice, EngineEvents, automation_claim_json, lock,
+use crate::rpc::automations::{
+    AUTOMATION_CLAIM_MAX_ATTEMPTS, AUTOMATION_CLAIM_REAP_IDLE_MS, automation_claim_json,
 };
+use crate::{AUTOMATION_CLAIMED_EVENT, EngineEventNotice, EngineEvents, lock};
 use dohc_engine_domain::AutomationClaimAttempt;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_runtime::{ActorHandle, CancellationToken, NoFaults};
@@ -31,7 +31,7 @@ impl AutomationRecovery {
             attempts,
             events,
             cancel.clone(),
-            crate::now_ms,
+            crate::rpc::request::now_ms,
         ));
         Self {
             cancel,
@@ -170,7 +170,7 @@ mod tests {
         for shutdown in [false, true] {
             let events = EngineEvents::default();
             let mut notices = events.subscribe();
-            for _ in 0..crate::ENGINE_EVENT_QUEUE_CAPACITY {
+            for _ in 0..crate::events::ENGINE_EVENT_QUEUE_CAPACITY {
                 events.emit("capture.momentRecorded", serde_json::json!({}));
             }
             let cancel = CancellationToken::new();
@@ -192,7 +192,7 @@ mod tests {
                 notices.recv().await.expect("release one transport slot");
             }
             send.await;
-            for _ in 0..crate::ENGINE_EVENT_QUEUE_CAPACITY - usize::from(!shutdown) {
+            for _ in 0..crate::events::ENGINE_EVENT_QUEUE_CAPACITY - usize::from(!shutdown) {
                 assert_eq!(
                     notices.try_recv().expect("queued capture notice").name,
                     "capture.momentRecorded"

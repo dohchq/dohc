@@ -105,8 +105,8 @@ async fn read_text(
     }
 }
 
-/// Poll until the captured text for `path` matches `expected` (None =
-/// expect the head absent/retired).
+/// Poll until a successful read matches `expected`. Retirement requires a
+/// null result; an RPC failure cannot prove that a head is absent.
 async fn wait_for_text(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
@@ -117,8 +117,22 @@ async fn wait_for_text(
     let mut id = 10_000;
     loop {
         id += 1;
-        let current = read_text(transport, handle, id, path).await;
-        if current.as_deref() == expected {
+        let current = transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    id,
+                    "versionedText.read",
+                    Some(handle.clone()),
+                    json!({ "versionId": "main", "path": path }),
+                ),
+            )
+            .await;
+        let matches = current.as_ref().is_ok_and(|response| match expected {
+            Some(text) => response.result["text"].as_str() == Some(text),
+            None => response.result.is_null(),
+        });
+        if matches {
             return;
         }
         assert!(
@@ -499,6 +513,107 @@ async fn policy_flip_on_unchanged_files_retires_and_rewidens() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sink_policy_hold_recovers_when_the_original_policy_bytes_return() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let policy = b"[[rule]]\npath = \"private/**\"\ntracked = false\n";
+    write_file(scratch.path(), ".dohc/files.toml", policy);
+    write_file(scratch.path(), "kept.md", b"captured before hold");
+    let probe = CaptureApplyProbe::default();
+    let transport = Arc::new(InProcessTransport::new(Arc::new(
+        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    )));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_until_capture_ready(&transport, &handle, 2).await;
+    wait_for_text(&transport, &handle, "kept.md", Some("captured before hold")).await;
+    let starts_before = probe.layer_start_count();
+
+    probe.pause_next_apply_worker();
+    write_file(
+        scratch.path(),
+        "kept.md",
+        b"held edit without another disk change",
+    );
+    let flush_transport = Arc::clone(&transport);
+    let flush_handle = handle.clone();
+    let held_flush = tokio::spawn(async move {
+        tokio::time::timeout(WAIT, async {
+            for id in 20_000.. {
+                let flush = flush_transport
+                    .call(
+                        RequestContext::unbounded(),
+                        request(id, "capture.flush", Some(flush_handle.clone()), json!({})),
+                    )
+                    .await
+                    .expect("flush held capture");
+                if flush.result["degraded"] == json!(true) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("sink policy hold must surface as degraded");
+    });
+    tokio::time::timeout(WAIT, probe.wait_until_apply_worker_paused())
+        .await
+        .expect("pause before the sink reads its policy snapshot");
+    let policy_path = scratch.path().join(".dohc/files.toml");
+    std::fs::remove_file(&policy_path).expect("remove readable policy");
+    std::fs::create_dir(&policy_path).expect("make policy unreadable");
+    probe.release_apply_worker();
+    held_flush.await.expect("held flush task");
+    assert_eq!(
+        read_text(&transport, &handle, 30_000, "kept.md")
+            .await
+            .as_deref(),
+        Some("captured before hold"),
+        "an unreadable policy must preserve the previously captured head"
+    );
+
+    std::fs::remove_dir(&policy_path).expect("remove unreadable policy");
+    std::fs::write(&policy_path, policy).expect("restore exact original policy bytes");
+    assert_eq!(
+        std::fs::read(&policy_path).expect("restored policy"),
+        policy
+    );
+    tokio::time::timeout(WAIT, async {
+        for id in 40_000.. {
+            let flush = transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(id, "capture.flush", Some(handle.clone()), json!({})),
+                )
+                .await
+                .expect("flush policy recovery");
+            if flush.result["settled"] == json!(true)
+                && flush.result["degraded"] == json!(false)
+                && read_text(&transport, &handle, id + 100_000, "kept.md")
+                    .await
+                    .as_deref()
+                    == Some("held edit without another disk change")
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the same policy fingerprint must recover the held edit");
+    assert!(
+        probe.layer_start_count() > starts_before,
+        "policy recovery must rebuild even though its bytes did not change"
+    );
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(900_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_policy_retire_pass_emits_a_moment_event() {
     // A policy narrow retires an existing head through an ingest that settles
     // NotOwned. The "Stopped tracking by policy" delete moment is real, so
@@ -539,6 +654,14 @@ async fn a_policy_retire_pass_emits_a_moment_event() {
         )
         .await
         .expect("close");
+
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    let (summary, correlation) = moment_metadata(&db_path, "private/journal.md");
+    assert_eq!(summary.as_deref(), Some("Stopped tracking by policy"));
+    assert!(
+        correlation.is_some(),
+        "the policy retire must carry its reconcile pass's correlation id"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
