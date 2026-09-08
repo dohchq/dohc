@@ -193,6 +193,7 @@ impl EngineService {
         )?;
         let host = registration.host.clone();
         let cancellation = super::request::OperationCancellation::new(&ctx);
+        // Check synchronously too: the token's deadline bridge may not have run yet.
         let check_interruption = || {
             if ctx.cancel.is_cancelled() {
                 Err(WireError::new(
@@ -258,8 +259,8 @@ impl EngineService {
             }
             outcome = operation => outcome,
         };
-        check_interruption()?;
         retirement.0 = None;
+        check_interruption()?;
         let result = outcome
             .map_err(|_| WireError::new(ErrorCode::Internal, "live-application-interrupted"))?
             .map_err(map_runtime)?;
@@ -591,7 +592,9 @@ mod tests {
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(owner.handle());
         if deadline {
-            ctx.deadline = Some(Instant::now() + std::time::Duration::from_millis(20));
+            tokio::time::pause();
+            ctx.deadline =
+                Some(tokio::time::Instant::now().into_std() + std::time::Duration::from_secs(60));
         }
         let cancel = ctx.cancel.clone();
         let request = Request {
@@ -608,10 +611,15 @@ mod tests {
             std::task::Poll::Ready(())
         })
         .await;
-        if !deadline {
+        if deadline {
+            tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        } else {
             cancel.cancel();
         }
         let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiting).await;
+        if deadline {
+            tokio::time::resume();
+        }
         assert!(
             result.is_ok(),
             "queued settlement must stop before the serial is released"
@@ -752,7 +760,9 @@ mod tests {
         });
         started_rx.await.unwrap();
         if deadline {
-            ctx.deadline = Some(Instant::now() + std::time::Duration::from_millis(20));
+            tokio::time::pause();
+            ctx.deadline =
+                Some(tokio::time::Instant::now().into_std() + std::time::Duration::from_secs(60));
         }
         let cancel = ctx.cancel.clone();
         let request = Request {
@@ -769,10 +779,15 @@ mod tests {
             std::task::Poll::Ready(())
         })
         .await;
-        if !deadline {
+        if deadline {
+            tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        } else {
             cancel.cancel();
         }
         let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiting).await;
+        if deadline {
+            tokio::time::resume();
+        }
         let serial_held = open.session_ops.try_lock().is_err();
         let reservation_held = ingress.settlement_admission(4).unwrap().reserve().is_err();
         let host_retired = service
@@ -785,7 +800,14 @@ mod tests {
                 .await
                 .unwrap();
         drop(serial);
-        assert!(ingress.settlement_admission(4).unwrap().reserve().is_ok());
+        let admission = ingress.settlement_admission(4).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while admission.reserve().is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor completion releases admission");
         service.workspace_close(Some(workspace)).await.unwrap();
         assert!(
             result.is_ok(),
