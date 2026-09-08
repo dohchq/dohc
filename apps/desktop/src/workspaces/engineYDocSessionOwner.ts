@@ -384,6 +384,16 @@ export class EngineYDocSessionOwner<
     );
   }
 
+  documentSession(authorityId: symbol, path: string) {
+    const record = [...this.#records].find(row => row.authorityId === authorityId && row.path === path && row.state === "open" && row.session !== null && row.handoff === null);
+    if (!record) return undefined;
+    const caller = { sender: record.sender, generation: record.generation, sessionId: record.sessionId, lineageGeneration: record.lineageGeneration };
+    return { caller, session: record.session!, assertCurrent: () => {
+      const result = this.applyUpdate(caller, session => session === record.session);
+      if (result.kind !== "applied" || !result.value) throw new Error("Owner session changed.");
+    } };
+  }
+
   forEachSessionUnderPath(
     authorityId: symbol,
     pathOrPrefix: string,

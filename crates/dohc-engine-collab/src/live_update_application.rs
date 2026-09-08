@@ -12,23 +12,25 @@
 
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
 use crate::live_object_binding::LiveObjectBinding;
-use crate::{durable, CollabError, DocKey, Regime, WriterDocCache};
+use crate::{CollabError, DocKey, Regime, WriterDocCache, durable};
 use dohc_engine_storage::{
-    get_binary_blob, hex_sha256, EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome,
+    EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome, get_binary_blob, hex_sha256,
 };
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
 const SAFE: i64 = 9_007_199_254_740_991;
 
+mod adoption;
 mod bootstrap;
+pub use adoption::{OwnerAdoptionAck, OwnerAdoptionCut, adopt_owner_committed};
 mod settlement;
 pub use bootstrap::{
-    bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
+    BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck, bootstrap_committed,
 };
-pub use settlement::{with_settlement, LiveSettlementAudit, LiveSettlementResult};
+pub use settlement::{LiveSettlementAudit, LiveSettlementResult, with_settlement};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApplicationError {
@@ -42,6 +44,8 @@ pub enum ApplicationError {
     Corrupt,
     #[error("live application delivery or cursor conflicts with retained evidence")]
     Conflict,
+    #[error("owner outbox configured budget is below the persisted adoption budget")]
+    ConfiguredBudgetMismatch,
     #[error("live application commit acknowledgement was interrupted")]
     Interrupted,
     #[error(transparent)]
@@ -659,7 +663,7 @@ pub fn apply_committed(
         faults,
         |tx| -> Result<ApplicationResult, TransactionError> {
             require_workspace(tx, &held)?;
-            if b != &held.binding {
+            if settlement::validate_historical_binding(b, &held.binding).is_err() {
                 return Ok(ApplicationResult::Pending(
                     ApplicationPending::BindingMismatch,
                 ));
@@ -703,6 +707,15 @@ pub fn apply_committed(
                 ));
             }
             check_provenance(tx, &held.namespace, &event)?;
+            if adoption::read_origin(tx, &held)?.is_some_and(|origin| {
+                event.metadata.accepted.receipt.journal_cursor
+                    <= origin
+                        .terminal
+                        .as_ref()
+                        .map_or(0, |receipt| receipt.journal_cursor)
+            }) {
+                return Err(ApplicationError::Conflict.into());
+            }
             mutation_attempted = true;
             let append = durable::record_update_in_tx(
                 tx,
@@ -1228,11 +1241,13 @@ mod tests {
             |_, _, _| Ok(()),
         )
         .unwrap();
-        assert!(store
-            .read_with(|conn| cache
-                .doc_for_consumer(conn, &key())
-                .map(|doc| doc.is_some()))
-            .unwrap());
+        assert!(
+            store
+                .read_with(|conn| cache
+                    .doc_for_consumer(conn, &key())
+                    .map(|doc| doc.is_some()))
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1296,11 +1311,10 @@ mod tests {
                 assert_eq!(count(&store, "live_device_update_applications"), 65);
             }
             store = reopen(store, &dir);
-            assert!(crate::replay_parity::structurally_equal_v2_for_test(
-                &document(&store),
-                &source
-            )
-            .unwrap());
+            assert!(
+                crate::replay_parity::structurally_equal_v2_for_test(&document(&store), &source)
+                    .unwrap()
+            );
             for (index, update) in deliveries.into_iter().enumerate() {
                 let replay = ack(apply(&mut store, &mut cache, &handle, update));
                 assert!(replay.application_replayed);
@@ -1321,11 +1335,13 @@ mod tests {
             apply(&mut store, &mut cache, &handle, update),
             ApplicationResult::Pending(ApplicationPending::DependenciesUnresolved)
         );
-        assert!(store
-            .read_with(|conn| cache
-                .doc_for_consumer(conn, &key())
-                .map(|doc| doc.is_none()))
-            .unwrap());
+        assert!(
+            store
+                .read_with(|conn| cache
+                    .doc_for_consumer(conn, &key())
+                    .map(|doc| doc.is_none()))
+                .unwrap()
+        );
         assert_eq!(count(&store, "ydoc_updates"), 1);
         store = reopen(store, &dir);
         assert_eq!(document(&store).encode_full_state(), before);
@@ -1415,7 +1431,7 @@ mod tests {
 
     #[test]
     fn populated_verified_backup_restores_application_fragments_and_compacted_replay() {
-        use dohc_engine_storage::backup::{create_verified_backup, BackupOutcome, FreeSpaceProbe};
+        use dohc_engine_storage::backup::{BackupOutcome, FreeSpaceProbe, create_verified_backup};
         struct Space;
         impl FreeSpaceProbe for Space {
             fn available_bytes(&self, _: &std::path::Path) -> Result<u64, StorageError> {
@@ -1536,6 +1552,35 @@ mod tests {
     }
 
     #[test]
+    fn historical_byte_delivery_preserves_its_original_update_sequence() {
+        let (_dir, mut store, mut cache, _owner, handle) = fixture();
+        let producer = Ydoc::wire();
+        let first_bytes = producer.plaintext_insert(0, "first");
+        let first = event("first", 1, first_bytes.clone());
+        let initial = ack(apply(&mut store, &mut cache, &handle, first.clone()));
+        let later = producer.plaintext_insert(5, " later");
+        let head = ack(apply(
+            &mut store,
+            &mut cache,
+            &handle,
+            event("later", 2, later),
+        ));
+        assert!(head.local_ydoc_sequence > initial.local_ydoc_sequence);
+        let deduped = ack(apply(
+            &mut store,
+            &mut cache,
+            &handle,
+            event("historical", 3, first_bytes),
+        ));
+        assert_eq!(deduped.local_ydoc_sequence, initial.local_ydoc_sequence);
+        assert!(!deduped.application_replayed);
+        let replay = ack(apply(&mut store, &mut cache, &handle, first));
+        assert!(replay.application_replayed);
+        assert_eq!(replay.local_ydoc_sequence, initial.local_ydoc_sequence);
+        assert_eq!(count(&store, "ydoc_updates"), 2);
+    }
+
+    #[test]
     fn missing_insert_and_delete_roll_back_fresh_and_parked_deduped_attempts() {
         for delete in [false, true] {
             for parked in [false, true] {
@@ -1587,11 +1632,13 @@ mod tests {
                     apply(&mut store, &mut cache, &handle, update.clone()),
                     ApplicationResult::Pending(ApplicationPending::DependenciesUnresolved)
                 );
-                assert!(store
-                    .read_with(|conn| cache
-                        .doc_for_consumer(conn, &key())
-                        .map(|doc| doc.is_none()))
-                    .unwrap());
+                assert!(
+                    store
+                        .read_with(|conn| cache
+                            .doc_for_consumer(conn, &key())
+                            .map(|doc| doc.is_none()))
+                        .unwrap()
+                );
                 store = reopen(store, &dir);
                 assert_eq!(count(&store, "ydoc_updates"), before);
                 assert_eq!(count(&store, "live_device_update_applications"), 0);
@@ -1618,11 +1665,13 @@ mod tests {
                         ),
                         Err(ApplicationError::Interrupted)
                     ));
-                    assert!(store
-                        .read_with(|conn| cache
-                            .doc_for_consumer(conn, &key())
-                            .map(|doc| doc.is_none()))
-                        .unwrap());
+                    assert!(
+                        store
+                            .read_with(|conn| cache
+                                .doc_for_consumer(conn, &key())
+                                .map(|doc| doc.is_none()))
+                            .unwrap()
+                    );
                     store = reopen(store, &dir);
                     let persisted_sequence = store
                         .read_with(|conn| {
@@ -1750,20 +1799,70 @@ mod tests {
         ] {
             let (_dir, mut store, mut cache, _owner, handle) = fixture();
             let mut first = event("first", 1, vec![0, 0]);
-            first.metadata.first_seen = vec![LiveUpdateStructRange { client_id: 2, start_clock: 0, end_clock: 1 }, LiveUpdateStructRange { client_id: 4, start_clock: 0, end_clock: 1 }];
+            first.metadata.first_seen = vec![
+                LiveUpdateStructRange {
+                    client_id: 2,
+                    start_clock: 0,
+                    end_clock: 1,
+                },
+                LiveUpdateStructRange {
+                    client_id: 4,
+                    start_clock: 0,
+                    end_clock: 1,
+                },
+            ];
             let mut second = event("second", 2, vec![0, 0]);
-            second.metadata.first_seen = vec![LiveUpdateStructRange { client_id: 2, start_clock: 1, end_clock: 2 }, LiveUpdateStructRange { client_id: 3, start_clock: 0, end_clock: 1 }];
+            second.metadata.first_seen = vec![
+                LiveUpdateStructRange {
+                    client_id: 2,
+                    start_clock: 1,
+                    end_clock: 2,
+                },
+                LiveUpdateStructRange {
+                    client_id: 3,
+                    start_clock: 0,
+                    end_clock: 1,
+                },
+            ];
             ack(apply(&mut store, &mut cache, &handle, first.clone()));
             ack(apply(&mut store, &mut cache, &handle, second));
             let mut conflict = event("conflict", 3, vec![0, 0]);
-            conflict.metadata.first_seen = vec![LiveUpdateStructRange { client_id: 3, start_clock: 0, end_clock: 1 }];
-            assert!(matches!(apply_committed(&mut store, &mut cache, &handle, conflict, &NoFaults), Err(ApplicationError::Conflict)));
-            store.read_with(|conn| conn.execute_batch(&format!("PRAGMA foreign_keys=OFF; {damage}; PRAGMA foreign_keys=ON"))).unwrap();
+            conflict.metadata.first_seen = vec![LiveUpdateStructRange {
+                client_id: 3,
+                start_clock: 0,
+                end_clock: 1,
+            }];
+            assert!(matches!(
+                apply_committed(&mut store, &mut cache, &handle, conflict, &NoFaults),
+                Err(ApplicationError::Conflict)
+            ));
+            store
+                .read_with(|conn| {
+                    conn.execute_batch(&format!(
+                        "PRAGMA foreign_keys=OFF; {damage}; PRAGMA foreign_keys=ON"
+                    ))
+                })
+                .unwrap();
             let before = count(&store, "ydoc_updates");
-            assert!(matches!(apply_committed(&mut store, &mut cache, &handle, event("noop", 3, vec![0, 0]), &NoFaults), Err(ApplicationError::Corrupt)), "{damage}");
+            assert!(
+                matches!(
+                    apply_committed(
+                        &mut store,
+                        &mut cache,
+                        &handle,
+                        event("noop", 3, vec![0, 0]),
+                        &NoFaults
+                    ),
+                    Err(ApplicationError::Corrupt)
+                ),
+                "{damage}"
+            );
             assert_eq!(count(&store, "ydoc_updates"), before);
             if damage.contains("workspace_id='damaged'") {
-                assert!(matches!(apply_committed(&mut store, &mut cache, &handle, first, &NoFaults), Err(ApplicationError::Corrupt)));
+                assert!(matches!(
+                    apply_committed(&mut store, &mut cache, &handle, first, &NoFaults),
+                    Err(ApplicationError::Corrupt)
+                ));
             }
         }
     }
@@ -1875,8 +1974,19 @@ mod tests {
             let (_dir, mut store, mut cache, _owner, handle) = fixture();
             let update = event("stored", 1, vec![0, 0]);
             ack(apply(&mut store, &mut cache, &handle, update.clone()));
-            store.write_with(&NoFaults, |tx| { tx.execute_batch(damage).unwrap(); Ok::<_, StorageError>(()) }).unwrap();
-            assert!(!matches!(apply_committed(&mut store, &mut cache, &handle, update, &NoFaults), Ok(ApplicationResult::Applied(_))), "{damage}");
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute_batch(damage).unwrap();
+                    Ok::<_, StorageError>(())
+                })
+                .unwrap();
+            assert!(
+                !matches!(
+                    apply_committed(&mut store, &mut cache, &handle, update, &NoFaults),
+                    Ok(ApplicationResult::Applied(_))
+                ),
+                "{damage}"
+            );
             assert_eq!(count(&store, "live_device_update_applications"), 1);
         }
     }
@@ -1907,12 +2017,25 @@ mod tests {
 
     #[test]
     fn raw_audit_damage_cannot_disappear_through_normalization() {
-        for damage in ["UPDATE live_device_update_applications SET selector_paths_json='[\"notes/a.md\",\"notes/a.md\"]'", "UPDATE live_device_update_applications SET first_seen_count=1", "UPDATE live_device_update_applications SET update_byte_length=999", "UPDATE live_device_update_applications SET principal_kind='named',grant_id='g',grant_generation=1"] {
-            let (_dir,mut store,mut cache,_owner,handle)=fixture();
-            let update=event("stored",1,Ydoc::wire().plaintext_insert(0,"x"));
-            ack(apply(&mut store,&mut cache,&handle,update.clone()));
-            store.write_with(&NoFaults,|tx| {tx.execute_batch(damage).unwrap();Ok::<_,StorageError>(())}).unwrap();
-            assert!(apply_committed(&mut store,&mut cache,&handle,update,&NoFaults).is_err(),"{damage}");
+        for damage in [
+            "UPDATE live_device_update_applications SET selector_paths_json='[\"notes/a.md\",\"notes/a.md\"]'",
+            "UPDATE live_device_update_applications SET first_seen_count=1",
+            "UPDATE live_device_update_applications SET update_byte_length=999",
+            "UPDATE live_device_update_applications SET principal_kind='named',grant_id='g',grant_generation=1",
+        ] {
+            let (_dir, mut store, mut cache, _owner, handle) = fixture();
+            let update = event("stored", 1, Ydoc::wire().plaintext_insert(0, "x"));
+            ack(apply(&mut store, &mut cache, &handle, update.clone()));
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute_batch(damage).unwrap();
+                    Ok::<_, StorageError>(())
+                })
+                .unwrap();
+            assert!(
+                apply_committed(&mut store, &mut cache, &handle, update, &NoFaults).is_err(),
+                "{damage}"
+            );
         }
     }
 
@@ -1937,11 +2060,13 @@ mod tests {
                 ),
                 Err(ApplicationError::Interrupted)
             ));
-            assert!(store
-                .read_with(|conn| cache
-                    .doc_for_consumer(conn, &key())
-                    .map(|doc| doc.is_none()))
-                .unwrap());
+            assert!(
+                store
+                    .read_with(|conn| cache
+                        .doc_for_consumer(conn, &key())
+                        .map(|doc| doc.is_none()))
+                    .unwrap()
+            );
             store = reopen(store, &dir);
             let committed = point == FaultPoint::StorageAfterCommitBeforeAck;
             assert_eq!(

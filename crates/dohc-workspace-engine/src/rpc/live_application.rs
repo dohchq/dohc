@@ -68,6 +68,7 @@ pub(crate) struct Registration {
     host: Arc<Host>,
     handle: ActorLiveApplicationHandle,
     object_id: String,
+    binding: LiveObjectBinding,
     retired: CancelSignal,
 }
 
@@ -109,6 +110,13 @@ pub struct LiveApplicationInput {
 pub(crate) enum LiveApplicationOperation {
     Apply(AdmittedLiveUpdate),
     Bootstrap(LiveApplicationBootstrap, Vec<u8>),
+    AdoptOwner {
+        registration_id: u64,
+        session_id: String,
+        cut: dohc_engine_collab::live_update_application::OwnerAdoptionCut,
+        max_bytes: usize,
+        max_events: usize,
+    },
 }
 
 struct ApplicationOutputGuard {
@@ -165,6 +173,136 @@ impl OutputGuard for ApplicationOutputGuard {
 }
 
 impl EngineService {
+    pub(super) async fn live_owner_state(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            registration_id: u64,
+            session_id: String,
+        }
+        let params: Params = serde_json::from_value(params)
+            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid owner state request"))?;
+        if self.ordinary_live_host.get().is_none() {
+            return Err(workspace_unavailable());
+        }
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        let registration = self.live_application_registration(
+            connection,
+            workspace.as_ref(),
+            params.registration_id,
+        )?;
+        let _serial = registration.host.open.session_ops.lock().await;
+        let (open, session) = self.ydoc_session(workspace.as_ref(), &params.session_id)?;
+        let b = &registration.binding;
+        if !Arc::ptr_eq(&open, &registration.host.open)
+            || session.key.workspace_id != b.workspace_id
+            || session.key.version_id != b.main_version_id
+            || session.key.object_id != b.object_id
+            || session.path != b.current_path
+            || session.lineage_claim_id.as_deref() != Some(&b.lineage_claim_id)
+            || session.first_update_pending
+            || !registration.host.current(connection)
+            || registration.retired.is_cancelled()
+        {
+            return Err(workspace_unavailable());
+        }
+        let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path)
+            .map_err(|_| workspace_unavailable())?;
+        let state = store.read_with(|conn| -> Result<Value,dohc_engine_storage::StorageError> {
+            use rusqlite::OptionalExtension;
+            let prior: Option<(String,i64,i64)> = conn.query_row("SELECT adoption_id,local_ydoc_sequence,terminal_cursor FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
+                rusqlite::params![registration.host.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(dohc_engine_storage::StorageError::persist_public)?;
+            let outbox_id: Option<String> = conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",rusqlite::params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|r|r.get(0)).optional().map_err(dohc_engine_storage::StorageError::persist_public)?;
+            let backlog: Option<(i64,String)> = conn.query_row("SELECT pending_bytes,state FROM owner_ydoc_outboxes WHERE outbox_id=?1",[outbox_id.as_deref()],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(dohc_engine_storage::StorageError::persist_public)?;
+            let (pending_bytes,outbox_state) = backlog.map_or((0,None),|(bytes,state)|(bytes,Some(state)));
+            if let Some((id,sequence,cursor)) = prior { return Ok(json!({"adoptionId":id,"expectedLocalSequence":sequence,"throughCursor":cursor,"outboxId":outbox_id,"pendingBytes":pending_bytes,"outboxState":outbox_state})); }
+            let sequence: i64 = conn.query_row("SELECT head_update_seq FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",rusqlite::params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|r|r.get(0)).map_err(dohc_engine_storage::StorageError::persist_public)?;
+            let identity = serde_json::to_vec(&(&registration.host.namespace,&b.workspace_id,&b.main_version_id,&b.object_id,&b.lineage_claim_id)).map_err(dohc_engine_storage::StorageError::persist_public)?;
+            Ok(json!({"adoptionId":format!("owner-adoption-{}",dohc_engine_storage::hex_sha256(&identity)),"expectedLocalSequence":sequence,"throughCursor":Value::Null,"outboxId":outbox_id,"pendingBytes":pending_bytes,"outboxState":outbox_state}))
+        }).map_err(|_|workspace_unavailable())?;
+        Ok(state)
+    }
+
+    /// Trusted owner transport entry. Evidence and budgets come from the
+    /// authenticated journal reader, never from an ordinary renderer RPC.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn adopt_live_application_owner(
+        &self,
+        ctx: RequestContext,
+        request_id: u64,
+        workspace: WorkspaceHandle,
+        registration_id: u64,
+        session_id: String,
+        cut: dohc_engine_collab::live_update_application::OwnerAdoptionCut,
+        max_bytes: usize,
+        max_events: usize,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<ServiceResponse, WireError> {
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        let registration =
+            self.live_application_registration(connection, Some(&workspace), registration_id)?;
+        let host = registration.host.clone();
+        let cancellation = super::request::OperationCancellation::new(&ctx);
+        let serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => return Err(cancellation.interruption("owner adoption (queued)")),
+            serial = Arc::clone(&host.open.session_ops).lock_owned() => serial,
+        };
+        let (open, session) = self.ydoc_session(Some(&workspace), &session_id)?;
+        let b = &registration.binding;
+        if !host.current(connection)
+            || registration.retired.is_cancelled()
+            || !Arc::ptr_eq(&open, &host.open)
+            || session.key.workspace_id != b.workspace_id
+            || session.key.version_id != b.main_version_id
+            || session.key.object_id != b.object_id
+            || session.path != b.current_path
+            || session.lineage_claim_id.as_deref() != Some(&b.lineage_claim_id)
+            || session.content_kind != dohc_engine_collab::ContentKind::Richdoc
+            || session.first_update_pending
+        {
+            return Err(workspace_unavailable());
+        }
+        let guard = Arc::new(ApplicationOutputGuard {
+            registration: registration.clone(),
+            cancel: ctx.cancel,
+            deadline: ctx.deadline,
+            _reservation: reservation.clone(),
+        });
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        let mut retirement = RetireOnCancellation(Some(host));
+        let operation = tokio::spawn(async move {
+            let _serial = serial;
+            registration
+                .handle
+                .adopt_owner(cut, max_bytes, max_events, Arc::new(NoFaults), reservation)
+                .await
+        });
+        let outcome = operation.await;
+        retirement.0 = None;
+        let result = outcome
+            .map_err(|_| WireError::new(ErrorCode::Internal, "owner-adoption-interrupted"))?
+            .map_err(map_runtime)?;
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        Ok(ServiceResponse {
+            response: Response {
+                id: request_id,
+                result: json!({"status":"adopted","adoption":result}),
+            },
+            blob_egress: None,
+            output_guard: Some(guard),
+        })
+    }
     pub(super) async fn live_application_settle(
         &self,
         ctx: RequestContext,
@@ -378,6 +516,7 @@ impl EngineService {
             ));
         }
         let object_id = params.binding.object_id.clone();
+        let binding = params.binding.clone();
         let handle = host
             .owner
             .register(
@@ -401,6 +540,7 @@ impl EngineService {
             host: host.clone(),
             handle,
             object_id,
+            binding,
             retired: CancelSignal::new(),
         });
         {
@@ -439,10 +579,39 @@ impl EngineService {
         request: Request,
         input: LiveApplicationInput,
     ) -> Result<ServiceResponse, WireError> {
+        if let LiveApplicationOperation::AdoptOwner {
+            registration_id,
+            session_id,
+            cut,
+            max_bytes,
+            max_events,
+        } = input.operation
+        {
+            if request.method != "liveApplication.adoptOwner" {
+                return Err(workspace_unavailable());
+            }
+            let workspace = request.workspace.ok_or_else(workspace_unavailable)?;
+            return self
+                .adopt_live_application_owner(
+                    ctx,
+                    request.id,
+                    workspace,
+                    registration_id,
+                    session_id,
+                    cut,
+                    max_bytes,
+                    max_events,
+                    input.reservation,
+                )
+                .await;
+        }
         let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
         let method = match &input.operation {
             LiveApplicationOperation::Apply(_) => "liveApplication.apply",
             LiveApplicationOperation::Bootstrap(..) => "liveApplication.bootstrap",
+            LiveApplicationOperation::AdoptOwner { .. } => {
+                unreachable!("adoption dispatched above")
+            }
         };
         if request.method != method
             || !input.registration.host.current(connection)
@@ -478,6 +647,9 @@ impl EngineService {
         let operation = tokio::spawn(async move {
             let _serial = serial;
             match input.operation {
+                LiveApplicationOperation::AdoptOwner { .. } => {
+                    unreachable!("adoption dispatched above")
+                }
                 LiveApplicationOperation::Apply(event) => input
                     .registration
                     .handle

@@ -121,6 +121,9 @@ impl RuntimeError {
                     }
                     ApplicationError::Corrupt => "live-application-corrupt",
                     ApplicationError::Conflict => "live-application-conflict",
+                    ApplicationError::ConfiguredBudgetMismatch => {
+                        "owner-outbox-configured-budget-mismatch"
+                    }
                     ApplicationError::Interrupted => "operation-crashed",
                 }
             }

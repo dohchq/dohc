@@ -46,8 +46,10 @@ use std::path::{Path, PathBuf};
 /// The durable tables whose row counts a restore test compares source-vs-copy.
 /// A mismatch means the copy is not a faithful snapshot — the backup fails.
 const COMPARED_TABLES: &[&str] = &[
+    "live_owner_adoptions",
     "live_device_bootstraps",
     "live_device_settlements",
+    "ydoc_owner_base_sources",
     "live_device_application_bindings",
     "live_device_update_applications",
     "live_device_application_first_seen",
@@ -485,9 +487,13 @@ mod tests {
             tx.execute("INSERT INTO live_device_update_applications VALUES ('relay','workspace','delivery','main','object','lineage','a.md','[\"a.md\"]',0,?1,2,1,1,'owner','person',NULL,NULL,0,1,1,'host',1,'instance','connection')", [&sha]).unwrap();
             tx.execute("INSERT INTO live_device_application_first_seen VALUES ('relay','workspace','delivery',0,1,0,1)", []).unwrap();
             tx.execute("INSERT INTO live_device_settlements VALUES ('settlement','relay','workspace','main','object','lineage',0,1,0,1,1,?1,'moment',?1,?1,'{}','{}',0)",[&sha]).unwrap();
+            let source=crate::hex_sha256(b"");
+            tx.execute("INSERT INTO blobs(sha256,text,byte_length) VALUES (?1,'',0)",[&source]).unwrap();
+            tx.execute("INSERT INTO live_owner_adoptions VALUES ('relay','adoption','workspace','main','owner',?1,'{}','source',?2,0,1,0,?1,?1,0,0,0,'null','{}')",rusqlite::params![sha,source]).unwrap();
             Ok::<_, StorageError>(())
         }).unwrap();
         for (index, table) in [
+            "live_owner_adoptions",
             "live_device_bootstraps",
             "live_device_settlements",
             "live_device_application_bindings",
@@ -524,6 +530,7 @@ mod tests {
     #[test]
     fn backup_compares_live_application_tables() {
         for table in [
+            "live_owner_adoptions",
             "live_device_bootstraps",
             "live_device_settlements",
             "live_device_application_bindings",
@@ -565,7 +572,11 @@ mod tests {
 
     #[test]
     fn backup_compares_owner_ydoc_outbox_tables() {
-        for table in ["owner_ydoc_outboxes", "owner_ydoc_outbox_entries"] {
+        for table in [
+            "owner_ydoc_outboxes",
+            "owner_ydoc_outbox_entries",
+            "ydoc_owner_base_sources",
+        ] {
             assert!(
                 COMPARED_TABLES.contains(&table),
                 "backup restore verification must compare {table}"

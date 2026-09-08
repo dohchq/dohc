@@ -31,7 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use yrs::encoding::write::Write as _;
 use yrs::types::text::{TextDiffChunk, YChange};
@@ -45,6 +45,7 @@ use yrs::{
 use crate::error::CollabError;
 use crate::limits::{MAX_PROJECTION_BYTES, MAX_PROJECTION_DEPTH, MAX_PROJECTION_NODES};
 
+mod bounded_encoder;
 mod frontmatter_yaml;
 
 /// The declared dohc root schema. The Yjs v1 wire format does not carry
@@ -532,7 +533,11 @@ impl Ydoc {
                 ("schemaVersion", Out::Any(Any::Number(1.0)))
                     | (MARKDOWN_CRLF_META_KEY, Out::Any(Any::Bool(true)))
                     | (
-                        TAGGED_FRONTMATTER_PREFIX_META_KEY | TAGGED_FRONTMATTER_BASELINE_META_KEY,
+                        TAGGED_FRONTMATTER_PREFIX_META_KEY
+                            | TAGGED_FRONTMATTER_BASELINE_META_KEY
+                            | MARKDOWN_SOURCE_META_KEY
+                            | MARKDOWN_SOURCE_SHA_META_KEY
+                            | MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
                         Out::Any(Any::String(_)),
                     )
             );
@@ -547,6 +552,29 @@ impl Ydoc {
             != meta.contains_key(&txn, TAGGED_FRONTMATTER_BASELINE_META_KEY)
         {
             return Err(invalid());
+        }
+        let source_fields = [
+            MARKDOWN_SOURCE_META_KEY,
+            MARKDOWN_SOURCE_SHA_META_KEY,
+            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+        ]
+        .iter()
+        .filter(|key| meta.contains_key(&txn, key))
+        .count();
+        if source_fields != 0 && source_fields != 3 {
+            return Err(invalid());
+        }
+        drop(txn);
+        if source_fields == 3 {
+            let reference = self.markdown_source_reference().ok_or_else(invalid)?;
+            let source = self.markdown_source(&reference).ok_or_else(invalid)?;
+            let canonical = self.project_richdoc()?;
+            if reference.projection_sha256 == crate::hex_sha256(canonical.as_bytes())
+                && (source.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES
+                    || self.preserved_markdown_source(&canonical).is_none())
+            {
+                return Err(invalid());
+            }
         }
         Ok(())
     }
@@ -608,6 +636,14 @@ impl Ydoc {
     pub fn encode_full_state(&self) -> Vec<u8> {
         let txn = self.doc.transact();
         txn.encode_state_as_update_v1(&StateVector::default())
+    }
+
+    pub(crate) fn encode_full_state_bounded(&self, max_bytes: usize) -> Option<Vec<u8>> {
+        let mut encoder = bounded_encoder::BoundedEncoder::new(max_bytes)?;
+        self.doc
+            .transact()
+            .encode_state_as_update(&StateVector::default(), &mut encoder);
+        encoder.finish()
     }
 
     /// The state vector, v1-encoded in ascending client-id order — the
@@ -3666,11 +3702,7 @@ fn render_inline(
                             leading_whitespace.iter().enumerate()
                         {
                             let replacement = if index == 0 {
-                                if whitespace == b' ' {
-                                    "&#32;"
-                                } else {
-                                    "&#9;"
-                                }
+                                if whitespace == b' ' { "&#32;" } else { "&#9;" }
                             } else if whitespace == b' ' {
                                 " "
                             } else {
@@ -4219,8 +4251,8 @@ mod projection_tests {
     use std::sync::Arc;
 
     use crate::limits::MAX_PROJECTION_BYTES;
-    use yrs::types::xml::XmlIn;
     use yrs::types::Attrs;
+    use yrs::types::xml::XmlIn;
 
     fn scene_map_set(doc: &Ydoc, root: &str, key: &str, value: &str) -> Vec<u8> {
         let map = doc.doc.get_or_insert_map(root);
@@ -5931,6 +5963,53 @@ fn main() {}
             assert_eq!(
                 projected.content, chosen,
                 "a {levels}-level quote must roundtrip byte-identically"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod owner_source_public_limits {
+    use super::*;
+    #[test]
+    fn active_owner_source_obeys_public_output_limit_but_stale_source_remains_historical() {
+        let seed: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/owner-source/owner-source-seed.json"))
+                .unwrap();
+        let bytes: Vec<u8> = serde_json::from_value(seed["bytes"].clone()).unwrap();
+        for stale in [false, true] {
+            let doc = Ydoc::wire();
+            doc.apply(&bytes).unwrap();
+            let canonical = doc.project(ContentKind::Richdoc).unwrap().content;
+            let source = format!(
+                "{canonical}{}",
+                "\n".repeat(crate::limits::MAX_PUBLIC_MARKDOWN_BYTES)
+            );
+            {
+                let meta = doc.doc.get_or_insert_map(ROOT_META);
+                let mut tx = doc.doc.transact_mut();
+                meta.insert(&mut tx, MARKDOWN_SOURCE_META_KEY, source.as_str());
+                meta.insert(
+                    &mut tx,
+                    MARKDOWN_SOURCE_SHA_META_KEY,
+                    crate::hex_sha256(source.as_bytes()),
+                );
+                if stale {
+                    meta.insert(
+                        &mut tx,
+                        MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+                        crate::hex_sha256(b"old canonical state"),
+                    );
+                }
+            }
+            assert_eq!(
+                doc.validate_public_baseline(&doc.encode_full_state())
+                    .is_ok(),
+                stale
+            );
+            assert_eq!(
+                doc.project(ContentKind::Richdoc).unwrap().content,
+                canonical
             );
         }
     }

@@ -516,7 +516,7 @@ export function currentLiveDocumentBinding(storage: StorageContext, { document, 
   }
 
 export function authorizeLiveDocument(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest, host: HostControlSnapshot,
-    stored: StoredLiveDocumentAuthority | null): CurrentLiveBindingResult {
+    stored: Pick<StoredLiveDocumentAuthority,"binding"|"current"|"open"|"baselineSequence"> | null): CurrentLiveBindingResult {
     if (!stored || !stored.current || !stored.open || stored.binding.lineageClaimId !== document.lineageClaimId ||
       stored.baselineSequence <= storage.getEpochLogFloor(document.workspaceId)) {
       return { kind: "refused", reason: "stale-document" };

@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./device-host": "./src/deviceHost.ts",
     ".": "./src/server.ts",
     "./storage": "./src/storage.ts",
     "./testing": "./src/testing/index.ts"
@@ -25,6 +26,7 @@
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@dohc/workspace-engine-client": "workspace:*",
+    "@dohc/ydoc-projection": "workspace:*",
     "better-auth": "^1.6.26",
     "pg": "^8.22.0",
     "ws": "8.21.3"

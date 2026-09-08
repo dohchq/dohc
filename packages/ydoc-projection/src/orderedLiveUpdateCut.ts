@@ -2466,12 +2466,14 @@ function retireSpans(
 ): LiveSpan[] {
   const result: LiveSpan[] = []
   for (const span of spans) {
-    result.push(...subtractFromSpan(
+    for (const fragment of subtractFromSpan(
       span,
       deletes.get(span.clientId) ?? [],
       budget,
       stage,
-    ))
+    )) {
+      result.push(fragment)
+    }
   }
   return stableSort(result, rangeCompare, budget, stage)
 }
@@ -2686,7 +2688,9 @@ class ReplayFrontier {
       ], budget, stage)
       const additions: LiveSpan[] = []
       for (const span of candidates) {
-        additions.push(...subtractFromSpan(span, blocked, budget, stage))
+        for (const fragment of subtractFromSpan(span, blocked, budget, stage)) {
+          additions.push(fragment)
+        }
       }
       this.live.set(
         clientId,

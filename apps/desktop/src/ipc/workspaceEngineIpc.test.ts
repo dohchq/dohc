@@ -170,6 +170,7 @@ const channels = [
   CHANNELS.getSyncStatus, CHANNELS.rebuildEngineStore,
   CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
   CHANNELS.engineYDocAcknowledgeLineageReplacement, CHANNELS.engineYDocClose,
+  CHANNELS.engineYDocPrepareOwnerHandoff,
 ];
 
 describe("workspace engine IPC registrations", () => {

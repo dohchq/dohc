@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
+import type { LiveOwnerAdoptionCut } from "@dohc/workspace-engine-client/daemon";
 import { isDeepStrictEqual } from "node:util";
 import {
   parseLiveUpdateDigest,
@@ -23,6 +24,8 @@ import {
   authorityInteger,
   baselineRecord,
   decodeLiveDocumentAuthorityStructure,
+  currentLiveDocumentBinding,
+  authorizeLiveDocument,
 } from "./liveDocumentAuthority";
 import {
   attachLiveJournalHistory,
@@ -32,6 +35,7 @@ import {
 import {
   LIVE_DELIVERY_BOOTSTRAPS as BOOTSTRAPS,
   LIVE_DELIVERY_EDGES as EDGES,
+  LIVE_DELIVERY_OWNERS as OWNERS,
 } from "./liveCommittedDeliverySchema";
 import { LIVE_JOURNAL_TABLE } from "./schema";
 import {
@@ -68,6 +72,16 @@ export interface CommittedBootstrapAck {
 export interface CommittedDeliveryDrain {
   readonly baseline: CommittedBootstrap;
   readonly terminalReceipt: LiveUpdateReceipt | null;
+}
+
+export interface OwnerCutCapture {
+  binding: LiveObjectBinding;
+  cut: LiveOwnerAdoptionCut;
+  assertCurrent(): void;
+}
+export interface OwnerDeliveryCapture {
+  binding: LiveObjectBinding;
+  assertCurrent(): void;
 }
 export type CommittedDeliveryStep =
   | { kind: "bootstrap"; baseline: CommittedBootstrap }
@@ -154,15 +168,192 @@ function copiedBaseline(value: CommittedBootstrap): CommittedBootstrap {
   };
 }
 
+function ownerCutDigest(capture: OwnerCutCapture): string {
+  const { baselineBytes,events,...header } = capture.cut;
+  const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+  return digest(Buffer.from(JSON.stringify({ binding: capture.binding,...header,baselineDigest: digest(baselineBytes),
+    events: events.map(event => ({ metadata: event.metadata,digest: digest(event.updateBytes) })) })));
+}
+
 /** Internal storage consumer. Authentication and namespace provisioning belong to its caller. */
 export class LiveCommittedDeliveryStore {
   readonly #drains = new WeakMap<CommittedDeliveryDrain, DrainCapture>();
   readonly #storage: StorageContext;
   readonly #history: LiveJournalHistoryAuthority;
+  readonly #ownerCuts = new WeakMap<OwnerCutCapture,{ host: LiveHostConnectionCoordinate; document: LiveDocumentKey; digest: string }>();
+  readonly #ownerDeliveries = new WeakMap<OwnerDeliveryCapture,{host: LiveHostConnectionCoordinate;document: LiveDocumentKey;highWater: number}>();
   constructor(storage: StorageContext, history: LiveJournalHistoryAuthority) {
     this.#storage = storage;
     this.#history = history;
     attachLiveJournalHistory(storage, history);
+  }
+
+  nextOwnerDocument(workspaceId: string, afterObject: string): LiveDocumentKey | undefined {
+    parseLiveUpdateIdentifier(workspaceId, "workspace ID");
+    return this.#storage.readTx(() => {
+      const row = this.#storage.db.prepare("SELECT workspace_id,main_version_id,object_id,lineage_claim_id FROM sync_relay_live_documents WHERE workspace_id=? AND lineage_state='current' AND admission_state='open' AND object_id>? ORDER BY object_id LIMIT 1").get(workspaceId, afterObject);
+      return row ? journalDocument({ workspaceId: row.workspace_id, mainVersionId: row.main_version_id,
+        objectId: row.object_id, lineageClaimId: row.lineage_claim_id }) : undefined;
+    });
+  }
+  openOwnerDelivery(input: {host: LiveHostConnectionCoordinate;document: LiveDocumentKey;actor: import("./types").CurrentLiveBindingRequest["actor"]}): OwnerDeliveryCapture {
+    const host = snapshotHostCoordinate(input.host), document = journalDocument(input.document);
+    const read = () => {
+      this.#standing(host);
+      const owner = this.#ownerRow(host,document); integrity(owner);
+      const origin = JSON.parse(String(owner.origin_json));
+      const row = this.#storage.db.prepare(`SELECT workspace_id,main_version_id,object_id,lineage_claim_id,current_path,restore_fence_generation,lineage_state,admission_state,baseline_digest,baseline_projected_sha256,baseline_projected_byte_length,baseline_moment_relay_seq,registered_at_ms FROM sync_relay_live_documents WHERE ${WHERE_DOCUMENT}`).get(...documentParams(document));
+      integrity(row && row.lineage_state === "current" && row.admission_state === "open" && row.baseline_digest === document.lineageClaimId &&
+        row.baseline_projected_sha256 === origin.sourceDigest && row.baseline_projected_byte_length === origin.sourceByteLength &&
+        row.baseline_moment_relay_seq === origin.baselineMomentRelaySequence && row.registered_at_ms === origin.baselineRegisteredAtMs);
+      const binding = parseLiveObjectBinding({...document,currentPath: row.current_path,selectorPaths: [row.current_path],restoreFenceGeneration: row.restore_fence_generation});
+      const source = this.#storage.db.prepare("SELECT moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND relay_seq=?")
+        .get(document.workspaceId,document.objectId,row.baseline_moment_relay_seq);
+      integrity(source && source.moment_id === origin.sourceMomentId && source.version_id === document.mainVersionId && source.path === binding.currentPath &&
+        source.content_kind === "text" && source.blob_sha256 === origin.sourceDigest && source.byte_length === origin.sourceByteLength);
+      const hostState = this.#storage.getLiveHostControl(); integrity(hostState);
+      const current = authorizeLiveDocument(this.#storage,{document,actor: input.actor},hostState,{binding,current: true,open: true,baselineSequence: authorityInteger(row.baseline_moment_relay_seq,1)});
+      integrity(current.kind === "current" && isDeepStrictEqual(current.host,host));
+      integrity(createHash("sha256").update(JSON.stringify(current.binding)).digest("hex") === origin.bindingDigest);
+      return {row,origin: String(owner.origin_json),binding: current.binding};
+    };
+    const initial = this.#storage.readTx(read);
+    const assertCurrent = () => {const current = read(); integrity(isDeepStrictEqual(current,initial));};
+    const high = this.#storage.db.prepare(`SELECT MAX(journal_cursor) AS cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT}`).get(...documentParams(document))!;
+    const capture = {binding: initial.binding,assertCurrent};
+    this.#ownerDeliveries.set(capture,{host,document,highWater: high.cursor === null ? 0 : authorityInteger(high.cursor,1)});
+    return capture;
+  }
+  #ownerDelivery(capture: OwnerDeliveryCapture) {
+    const saved = this.#ownerDeliveries.get(capture); integrity(saved); capture.assertCurrent(); return saved;
+  }
+  ownerDeliveryProgress(capture: OwnerDeliveryCapture): {terminal: LiveUpdateReceipt | null;sequence: number} {
+    const {host,document} = this.#ownerDelivery(capture), row = this.#ownerRow(host,document); integrity(row);
+    const terminal = JSON.parse(String(row.tip_receipt_json)), parsed = terminal === null ? null : parseLiveUpdateReceipt(terminal);
+    integrity((parsed?.journalCursor ?? 0) === row.tip_cursor);
+    return {terminal: parsed,sequence: authorityInteger(row.tip_sequence)};
+  }
+  nextOwnerApplication(capture: OwnerDeliveryCapture): AdmittedLiveUpdate | undefined {
+    const {document,highWater} = this.#ownerDelivery(capture), progress = this.ownerDeliveryProgress(capture);
+    const raw = this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor>? AND journal_cursor<=? ORDER BY journal_cursor LIMIT 1`)
+      .get(...documentParams(document),progress.terminal?.journalCursor ?? 0,highWater);
+    if (!raw) {integrity((progress.terminal?.journalCursor ?? 0) === highWater); return undefined;}
+    const row = decodeJournalRow(this.#storage.db,raw); assertJournalCheckpointPosition(this.#storage.db,row); verifyJournalRow(row);
+    return row.admitted;
+  }
+  acknowledgeOwnerDeliveryApplication(capture: OwnerDeliveryCapture,value: unknown): void {
+    const ack = parseLiveUpdateHostApplicationAck(value), {host,document} = this.#ownerDelivery(capture);
+    this.#storage.tx(() => {
+      const next = this.nextOwnerApplication(capture); integrity(next);
+      const receipt = next.metadata.accepted.receipt;
+      integrity(sameReceipt(receipt,{deliveryId: ack.deliveryId,updateDigest: ack.updateDigest,journalCursor: ack.journalCursor,acceptingHostEpoch: ack.acceptingHostEpoch}));
+      const row = this.#ownerRow(host,document); integrity(row);
+      // Content dedupe reports the original native update sequence. Retain the
+      // greatest sequence already proved by an authenticated application ACK.
+      const sequence = Math.max(authorityInteger(row.tip_sequence),ack.localYDocSequence);
+      const tip = JSON.stringify(receipt), values = [this.#history.namespace,...documentParams(document),host.hostId,row.origin_json,tip,ack.journalCursor,sequence];
+      const charge = Buffer.byteLength(JSON.stringify(values)), previousCharge = authorityInteger(row.accounted_bytes,1), delta = Math.max(1,charge-previousCharge);
+      consumeLiveDeliveryReservation(this.#storage,document,host.hostId,ack.journalCursor,delta,true);
+      const refund = previousCharge + delta - charge; if (refund) this.#refundOwner(document.workspaceId,refund);
+      this.#storage.db.prepare(`UPDATE ${OWNERS} SET tip_receipt_json=?,tip_cursor=?,tip_sequence=?,accounted_bytes=? WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id=?`)
+        .run(tip,ack.journalCursor,sequence,charge,this.#history.namespace,...documentParams(document),host.hostId);
+    });
+  }
+  captureOwnerCut(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; adoptionId: string;
+    expectedLocalSequence: number; maxBytes: number; maxEvents: number; throughCursor?: number;
+    actor?: import("./types").CurrentLiveBindingRequest["actor"] }): OwnerCutCapture {
+    const host = snapshotHostCoordinate(input.host), document = journalDocument(input.document);
+    const adoptionId = parseLiveUpdateIdentifier(input.adoptionId, "adoption ID");
+    const sequence = authorityInteger(input.expectedLocalSequence), maxBytes = authorityInteger(input.maxBytes, 1), maxEvents = authorityInteger(input.maxEvents, 1);
+    const requestedCursor = input.throughCursor === undefined ? undefined : authorityInteger(input.throughCursor);
+    const captured = this.#storage.readTx(() => {
+      this.#standing(host);
+      const count = this.#storage.db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(length(update_bytes)),0) AS bytes FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=?`).get(...documentParams(document),requestedCursor ?? Number.MAX_SAFE_INTEGER)!;
+      if (authorityInteger(count.count) > maxEvents || authorityInteger(count.bytes) > maxBytes) throw new Error(`Owner adoption cut exceeds configured bounds: ${count.count} journal events / ${maxEvents} allowed; ${count.bytes} journal bytes / ${maxBytes} allowed.`);
+      const result = liveJournalCut(this.#storage, document);
+      if (result.kind !== "cut") throw new Error(`Owner adoption ${result.reason}.`);
+      const authority = result.cut.authorityHistory.find(row => row.current)!;
+      const authorized = input.actor ? currentLiveDocumentBinding(this.#storage,{document,actor: input.actor}) : undefined;
+      if (authorized && (authorized.kind !== "current" || !isDeepStrictEqual(authorized.host,host))) throw new Error("Owner standing changed.");
+      const binding = authorized?.kind === "current" ? authorized.binding : authority.binding;
+      const source = this.#storage.db.prepare(`SELECT moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND relay_seq=?`)
+        .get(document.workspaceId, document.objectId, authority.baselineSequence);
+      integrity(source && source.version_id === document.mainVersionId && source.path === authority.binding.currentPath && source.content_kind === "text" &&
+        source.blob_sha256 === authority.projectedDigest && source.byte_length === authority.projectedLength);
+      const events: AdmittedLiveUpdate[] = [];
+      let bytes = authority.baselineBytes.byteLength;
+      for (const raw of this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=? ORDER BY journal_cursor`).iterate(...documentParams(document),requestedCursor ?? Number.MAX_SAFE_INTEGER)) {
+        const row = decodeJournalRow(this.#storage.db, raw);
+        assertJournalCheckpointPosition(this.#storage.db, row);
+        verifyJournalRow(row);
+        bytes += row.admitted.updateBytes.byteLength + Buffer.byteLength(JSON.stringify(row.admitted.metadata)) + 8;
+        if (bytes > maxBytes || events.length === maxEvents) throw new Error("Owner adoption cut exceeds its configured bounds.");
+        events.push(row.admitted);
+      }
+      const terminal = events.at(-1)?.metadata.accepted.receipt ?? null;
+      integrity((terminal?.journalCursor ?? 0) === (requestedCursor ?? result.cut.highWater ?? 0) && events.length === count.count);
+      const cut: LiveOwnerAdoptionCut = { relayDatabaseNamespace: this.#history.namespace, adoptionId,
+        sourceMomentId: parseLiveUpdateIdentifier(source.moment_id, "source moment ID"), sourceDigest: authority.projectedDigest,
+        sourceByteLength: authority.projectedLength, baselineMomentRelaySequence: authority.baselineSequence,
+        baselineRegisteredAtMs: authority.registeredAtMs, expectedLocalSequence: sequence,
+        terminalReceipt: terminal, baselineBytes: new Uint8Array(authority.baselineBytes), events };
+      const { events: _events, baselineBytes: _baseline, ...header } = cut;
+      if (bytes + Buffer.byteLength(JSON.stringify({ ...header, eventCount: events.length })) + 8 > maxBytes) throw new Error("Owner adoption cut exceeds its configured bounds.");
+      return { journal: result.cut, authority: structuredClone(authority), binding: structuredClone(binding), source: { ...source }, cut };
+    });
+    verifyJournalCut(captured.journal);
+    const assertCurrent = (): void => {
+      this.#standing(host);
+      const raw = this.#storage.db.prepare(`SELECT * FROM sync_relay_live_documents WHERE ${WHERE_DOCUMENT}`).get(...documentParams(document));
+      integrity(raw && isDeepStrictEqual(decodeLiveDocumentAuthorityStructure(this.#storage.db, document, raw), captured.authority));
+      const source = this.#storage.db.prepare(`SELECT moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND relay_seq=?`)
+        .get(document.workspaceId, document.objectId, captured.authority.baselineSequence);
+      integrity(source && isDeepStrictEqual({ ...source }, captured.source));
+      if (input.actor) {
+        const authorized = currentLiveDocumentBinding(this.#storage,{document,actor: input.actor});
+        integrity(authorized.kind === "current" && isDeepStrictEqual(authorized.binding,captured.binding) && isDeepStrictEqual(authorized.host,host));
+      }
+    };
+    assertCurrent();
+    const capture = { binding: structuredClone(captured.binding), cut: captured.cut, assertCurrent };
+    this.#ownerCuts.set(capture,{ host,document,digest: ownerCutDigest(capture) });
+    return capture;
+  }
+  #ownerCapture(capture: OwnerCutCapture) {
+    const saved = this.#ownerCuts.get(capture);
+    integrity(saved && saved.digest === ownerCutDigest(capture));
+    capture.assertCurrent();
+    return saved;
+  }
+  #ownerRow(host: LiveHostConnectionCoordinate,document: LiveDocumentKey) {
+    return this.#storage.db.prepare(`SELECT * FROM ${OWNERS} WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id=?`)
+      .get(this.#history.namespace,...documentParams(document),host.hostId);
+  }
+  acknowledgeOwnerAdoption(capture: OwnerCutCapture, value: unknown): void {
+    const { host,document } = this.#ownerCapture(capture), cut = capture.cut;
+    const ack = baselineRecord(value,["adoptionId","localYDocSequence","terminalCursor","adoptionReplayed"]);
+    integrity(ack.adoptionId === cut.adoptionId && ack.localYDocSequence === cut.expectedLocalSequence && ack.terminalCursor === (cut.terminalReceipt?.journalCursor ?? 0) && typeof ack.adoptionReplayed === "boolean");
+    const { baselineBytes: _baseline,events: _events,...header } = cut;
+    const origin = JSON.stringify({ ...header,bindingDigest: createHash("sha256").update(JSON.stringify(capture.binding)).digest("hex") });
+    this.#storage.tx(() => {
+      this.#ownerCapture(capture);
+      bindLiveDeliveryHostNamespace(this.#storage,document.workspaceId,host.hostId,this.#history.namespace);
+      integrity(!this.#storage.db.prepare(`SELECT 1 FROM ${BOOTSTRAPS} WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id=?`).get(this.#history.namespace,...documentParams(document),host.hostId));
+      const previous = this.#ownerRow(host,document);
+      if (previous) { integrity(previous.origin_json === origin && Number(previous.tip_cursor) >= Number(ack.terminalCursor)); return; }
+      const tip = JSON.stringify(cut.terminalReceipt), cursor = cut.terminalReceipt?.journalCursor ?? 0;
+      const values = [this.#history.namespace,...documentParams(document),host.hostId,origin,tip,cursor,cut.expectedLocalSequence];
+      const charge = Buffer.byteLength(JSON.stringify(values));
+      consumeLiveDeliveryReservation(this.#storage,document,host.hostId,0,charge,true);
+      for (const event of cut.events) {
+        consumeLiveDeliveryReservation(this.#storage,document,host.hostId,event.metadata.accepted.receipt.journalCursor,1,true);
+        this.#refundOwner(document.workspaceId,1);
+      }
+      this.#storage.db.prepare(`INSERT INTO ${OWNERS}(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,host_id,origin_json,tip_receipt_json,tip_cursor,tip_sequence,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(...values,charge);
+    });
+  }
+  #refundOwner(workspaceId: string, amount: number) {
+    integrity(this.#storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=? AND usage_bytes>=?").run(amount,workspaceId,amount).changes === 1);
   }
   #standing(host: LiveHostConnectionCoordinate): void {
     requireLiveJournalHistory(this.#storage, this.#history);

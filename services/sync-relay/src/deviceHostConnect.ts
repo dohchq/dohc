@@ -4,15 +4,18 @@ import { DEVICE_CONTROL_PATH, DEVICE_CONTROL_PROTOCOL, parseDeviceControlLimits,
 import { parseDeviceHostCredential, type DeviceHostCredential } from "./deviceHostCredential.js";
 import { readDeviceLiveHostConfig } from "./deviceLiveHostConfig.js";
 import { startDeviceNativeTransport } from "./deviceNativeTransport.js";
+import { startExistingOwnerDeviceTransport, type ExistingOwnerDeviceConfig } from "./deviceExistingOwnerTransport.js";
 
 export function connectDeviceHost(options: {
   url: string; credential: DeviceHostCredential; limits: DeviceControlLimits;
   onRegistered: (registration: DeviceControlRegistration) => void;
   deliveryConfigPath?: string;
+  existingOwner?: ExistingOwnerDeviceConfig;
 }) {
   const limits = parseDeviceControlLimits(options.limits);
   const credential = parseDeviceHostCredential(options.credential);
   const config = options.deliveryConfigPath ? readDeviceLiveHostConfig(options.deliveryConfigPath, limits) : undefined;
+  if (config && options.existingOwner) throw new TypeError("Choose one device host owner.");
   if (config && (config.hostId !== credential.hostId || config.hostEpoch !== credential.hostEpoch || config.instanceId !== credential.instanceId)) {
     throw new TypeError("Device delivery configuration does not match the credential.");
   }
@@ -62,11 +65,11 @@ export function connectDeviceHost(options: {
           native.receive(Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data));
         } else {
           if (native) { native.credit(parseDeviceLiveHostCredit(JSON.parse(data.toString()))); return; }
-          if (!config) throw new Error("Unexpected device control.");
+          if (!config && !options.existingOwner) throw new Error("Unexpected device control.");
           const start = parseDeviceLiveHostStart(JSON.parse(data.toString()));
           if (start.host.hostId !== registration!.hostId || start.host.hostEpoch !== registration!.hostEpoch ||
             start.host.instanceId !== registration!.instanceId || start.host.connectionId !== registration!.connectionId) throw new Error("Device start identity mismatch.");
-          native = startDeviceNativeTransport({ config, start, ws, limits, stop });
+          native = options.existingOwner ? startExistingOwnerDeviceTransport({ config: options.existingOwner,start,ws,limits,stop }) : startDeviceNativeTransport({ config: config!, start, ws, limits, stop });
         }
         return;
       }

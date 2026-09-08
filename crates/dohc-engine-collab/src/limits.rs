@@ -45,6 +45,9 @@
 /// mixed together. A second number would be a second thing to keep true.
 pub const MAX_YDOC_UPDATE_BYTES: usize = 20 * 1024 * 1024;
 
+/// Existing public Markdown output bound, shared with live-session-contract.
+pub const MAX_PUBLIC_MARKDOWN_BYTES: usize = 2 * 1024 * 1024;
+
 /// Fold the append-only update log into a full-state snapshot (and prune the
 /// folded updates) once this many updates accumulate past the latest snapshot.
 /// Matches the TS driver's `DEFAULT_COMPACTION_THRESHOLD`. This retention bound

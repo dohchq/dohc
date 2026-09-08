@@ -32,6 +32,7 @@ import {
   DesktopUserSettingsResult,
   EngineYDocLineageReplacementEvent,
   EngineYDocRemoteUpdateEvent,
+  EngineYDocOwnerHandoff,
   EngineYDocSaveStateEvent,
   ExplorerMenuCommand,
   ListPluginsResult,
@@ -672,6 +673,10 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.engineYDocApplyUpdate, payload),
   acknowledgeEngineYDocLineageReplacement: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocAcknowledgeLineageReplacement, payload),
+  prepareEngineYDocOwnerHandoff: (payload) =>
+    ipcRenderer.invoke(CHANNELS.engineYDocPrepareOwnerHandoff, payload),
+  onEngineYDocOwnerHandoff: (listener) =>
+    onEvent(CHANNELS.engineYDocOwnerHandoff, EngineYDocOwnerHandoff, listener),
   closeEngineYDocSession: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocClose, payload),
   onEngineYDocRemoteUpdate: (listener) =>

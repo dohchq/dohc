@@ -57,6 +57,8 @@ function engineBridge(
     applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
     closeEngineYDocSession: vi.fn(async () => undefined),
     onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+    onEngineYDocOwnerHandoff: () => () => undefined,
+    prepareEngineYDocOwnerHandoff: async () => undefined,
     onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
     onEngineYDocSaveState: vi.fn(() => () => undefined),
     exportDocumentFile: vi.fn(

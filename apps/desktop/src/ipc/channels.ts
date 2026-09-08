@@ -348,6 +348,8 @@ export const CHANNELS = {
   engineYDocOpen: "desktop:engine-ydoc-open",
   engineYDocReadArtifactAsset: "desktop:engine-ydoc-read-artifact-asset",
   engineYDocApplyUpdate: "desktop:engine-ydoc-apply-update",
+  engineYDocOwnerHandoff: "desktop:engine-ydoc-owner-handoff",
+  engineYDocPrepareOwnerHandoff: "desktop:engine-ydoc-prepare-owner-handoff",
   engineYDocAcknowledgeLineageReplacement:
     "desktop:engine-ydoc-acknowledge-lineage-replacement",
   engineYDocClose: "desktop:engine-ydoc-close",
@@ -378,4 +380,3 @@ export const CHANNELS = {
   getLaunchMarks: "desktop:test:get-launch-marks",
   getDesktopMarks: "desktop:test:get-desktop-marks",
 } as const;
-

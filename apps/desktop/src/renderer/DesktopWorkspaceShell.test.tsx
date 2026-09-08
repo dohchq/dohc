@@ -2243,6 +2243,8 @@ describe("collection folders", () => {
       applyEngineYDocUpdate,
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(
         (listener: (event: EngineYDocSaveStateEvent) => void) => {
@@ -3702,6 +3704,8 @@ describe("editor groups", () => {
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
         accepted: true as const,
@@ -3995,6 +3999,8 @@ describe("workspace admission over collection writes", () => {
       applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(
         (listener: (event: EngineYDocSaveStateEvent) => void) => {
@@ -6971,6 +6977,8 @@ describe("engine store recovery", () => {
         closeEngineYDocSession,
         onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
         onEngineYDocSaveState: vi.fn(() => () => undefined),
+        onEngineYDocOwnerHandoff: () => () => undefined,
+        prepareEngineYDocOwnerHandoff: async () => undefined,
         onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
         acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
           accepted: true as const,
@@ -7064,6 +7072,8 @@ describe("engine store recovery", () => {
       closeEngineYDocSession,
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
         accepted: true as const,
@@ -7176,6 +7186,8 @@ describe("engine store recovery", () => {
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
         accepted: true as const,
@@ -7241,6 +7253,8 @@ describe("engine store recovery", () => {
       closeEngineYDocSession,
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
         accepted: true as const,
@@ -15465,6 +15479,8 @@ describe("set-aside draft recovery", () => {
       applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(
         (listener: (event: EngineYDocSaveStateEvent) => void) => {

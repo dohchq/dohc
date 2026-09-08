@@ -23,6 +23,7 @@ const RANGE_BYTES: usize = 16;
 // Worst-case canonical request with 100 selectors and six-byte JSON escapes.
 const MAX_HEADER_BYTES: usize = 643_576;
 const MAX_CHUNK_BYTES: usize = 256 * 1024;
+mod adoption;
 
 #[derive(Clone)]
 pub struct LiveApplicationIngressConfig {
@@ -74,9 +75,26 @@ struct BootstrapParams {
     baseline: LiveApplicationBootstrap,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AdoptionParams {
+    registration_id: u64,
+    session_id: String,
+    stream_id: u64,
+    byte_length: usize,
+    digest: String,
+}
+
 enum Metadata {
     Apply(RelayAcceptedLiveUpdate),
     Bootstrap(LiveApplicationBootstrap),
+    Adoption {
+        registration_id: u64,
+        session_id: String,
+        max_bytes: usize,
+        max_events: usize,
+        outbox_limits: dohc_engine_collab::OwnerOutboxLimits,
+    },
 }
 
 struct Stream {
@@ -207,6 +225,28 @@ pub struct LiveApplicationIngress {
 }
 
 impl LiveApplicationIngress {
+    pub(crate) fn validate_adoption_budget(
+        &self,
+        bytes: usize,
+        events: usize,
+    ) -> Result<(), WireError> {
+        if events == 0
+            || self.adoption_reservation(bytes).is_none_or(|charge| {
+                charge > self.config.aggregate_bytes || charge > u32::MAX as usize
+            })
+        {
+            return Err(invalid("invalid-owner-adoption-budget"));
+        }
+        Ok(())
+    }
+
+    fn adoption_reservation(&self, bytes: usize) -> Option<usize> {
+        // Charge raw upload, typed evidence, JSON parsing, and actor scratch together.
+        bytes
+            .checked_mul(32)?
+            .checked_add(self.config.application_working_reserve_bytes)?
+            .checked_add(MAX_CHUNK_BYTES * 2)
+    }
     pub(crate) fn settlement_admission(
         &self,
         max_applications: usize,
@@ -262,7 +302,7 @@ impl LiveApplicationIngress {
     ) -> Result<(), WireError> {
         if !matches!(
             request.method.as_str(),
-            "liveApplication.apply" | "liveApplication.bootstrap"
+            "liveApplication.apply" | "liveApplication.bootstrap" | "liveApplication.adoptOwner"
         ) || request.idempotency_key.is_some()
         {
             return Err(invalid("invalid-live-application-request"));
@@ -276,8 +316,41 @@ impl LiveApplicationIngress {
             .try_acquire_owned()
             .map_err(|_| overloaded())?;
         let (metadata, registration_id, update, ranges, range_count) = if request.method
-            == "liveApplication.bootstrap"
+            == "liveApplication.adoptOwner"
         {
+            let config = self
+                .service
+                .ordinary_live_host
+                .get()
+                .ok_or_else(|| invalid("owner-adoption-not-configured"))?;
+            if !config.connection.same_connection(connection) || !connection.is_current() {
+                return Err(invalid("owner-adoption-connection-retired"));
+            }
+            let params: AdoptionParams =
+                serde_json::from_value(std::mem::take(&mut request.params))
+                    .map_err(|_| invalid("invalid-owner-adoption-upload"))?;
+            if params.byte_length == 0
+                || params.byte_length > config.max_adoption_bytes
+                || params.session_id.is_empty()
+                || params.session_id.len() > 256
+            {
+                return Err(invalid("invalid-owner-adoption-bounds"));
+            }
+            let stream = Stream::new(params.stream_id, params.byte_length, params.digest)?;
+            (
+                Metadata::Adoption {
+                    registration_id: params.registration_id,
+                    session_id: params.session_id,
+                    max_bytes: config.max_adoption_bytes,
+                    max_events: config.max_adoption_events,
+                    outbox_limits: config.owner_outbox.clone(),
+                },
+                params.registration_id,
+                stream,
+                None,
+                0,
+            )
+        } else if request.method == "liveApplication.bootstrap" {
             let params: BootstrapParams =
                 serde_json::from_value(std::mem::take(&mut request.params))
                     .map_err(|_| invalid("invalid-live-bootstrap-header"))?;
@@ -341,11 +414,14 @@ impl LiveApplicationIngress {
             request.workspace.as_ref(),
             registration_id,
         )?;
-        let reserved = self
-            .config
-            .reservation_bytes(update.expected, range_count)
-            .and_then(|bytes| u32::try_from(bytes).ok())
-            .ok_or_else(overloaded)?;
+        let reserved = if let Metadata::Adoption { max_bytes, .. } = &metadata {
+            // First adoption can seed a native head larger than the relay baseline.
+            self.adoption_reservation(*max_bytes)
+        } else {
+            self.config.reservation_bytes(update.expected, range_count)
+        }
+        .and_then(|bytes| u32::try_from(bytes).ok())
+        .ok_or_else(overloaded)?;
         let permit = Arc::new(Reservation {
             _upload: upload_slot,
             _bytes: self
@@ -490,6 +566,19 @@ impl LiveApplicationIngress {
             Metadata::Bootstrap(metadata) => {
                 LiveApplicationOperation::Bootstrap(metadata, upload.bytes)
             }
+            Metadata::Adoption {
+                registration_id,
+                session_id,
+                max_bytes,
+                max_events,
+                outbox_limits,
+            } => LiveApplicationOperation::AdoptOwner {
+                registration_id,
+                session_id,
+                cut: adoption::decode(&upload.bytes, max_events, outbox_limits)?,
+                max_bytes,
+                max_events,
+            },
         };
         // Preserve the upload's original deadline after time spent assembling.
         let remaining = upload

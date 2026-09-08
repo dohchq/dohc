@@ -75,13 +75,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
+    if std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG").is_some()
+        && std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG").is_some()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "dedicated and ordinary live host configurations are mutually exclusive",
+        )
+        .into());
+    }
     let (service, live) = match std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG") {
         Some(path) => {
             let config = ConfiguredLiveHostConfig::read(std::path::Path::new(&path))?;
             let (service, owner, ingress) = EngineService::configured_live_host(config).await?;
             (service, Some((owner, ingress)))
         }
-        None => (Arc::new(EngineService::new()), None),
+        None => match std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG") {
+            Some(path) => {
+                let config = dohc_workspace_engine::OrdinaryLiveHostConfig::read(
+                    std::path::Path::new(&path),
+                )?;
+                let (service, owner, ingress) = EngineService::ordinary_live_host(config)?;
+                (service, Some((owner, ingress)))
+            }
+            None => (Arc::new(EngineService::new()), None),
+        },
     };
     let supervisor = Arc::new(Supervisor::new(
         SupervisorConfig::default(),
@@ -405,7 +423,9 @@ where
                         Envelope::Request(request)
                             if matches!(
                                 request.method.as_str(),
-                                "liveApplication.apply" | "liveApplication.bootstrap"
+                                "liveApplication.apply"
+                                    | "liveApplication.bootstrap"
+                                    | "liveApplication.adoptOwner"
                             ) =>
                         {
                             let id = request.id;

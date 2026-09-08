@@ -32,7 +32,7 @@ export interface CommittedSettlement {
   materialized: boolean;
 }
 
-function settlementResult(value: unknown, terminal: LiveUpdateReceipt | null): CommittedSettlement {
+export function settlementResult(value: unknown, terminal: LiveUpdateReceipt | null): CommittedSettlement {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid native settlement response.");
   const response = value as Record<string, unknown>;
   if (Object.keys(response).sort().join() !== "settlement,status" || response.status !== "settled" || !response.settlement || typeof response.settlement !== "object" || Array.isArray(response.settlement)) throw new Error("Invalid native settlement response.");

@@ -588,7 +588,7 @@ fn cleanup_collection_relation_on_store(
             None,
             lineage_claim_id,
             true,
-            state.head_blob_sha256.clone(),
+            state.owner_seed_source.clone(),
             None,
             false,
             now_ms,

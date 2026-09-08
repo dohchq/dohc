@@ -38,8 +38,10 @@ const SYNCHRONOUS_NORMAL: i64 = 1;
 /// The tables every valid v2 store must contain. Missing any of these on an
 /// otherwise-v2-stamped database is `state-corrupt`.
 const REQUIRED_TABLES: &[&str] = &[
+    "live_owner_adoptions",
     "live_device_bootstraps",
     "live_device_settlements",
+    "ydoc_owner_base_sources",
     "live_device_application_bindings",
     "live_device_update_applications",
     "live_device_application_first_seen",
@@ -387,6 +389,7 @@ mod tests {
     #[test]
     fn current_schema_rejects_each_missing_live_application_table() {
         for table in [
+            "live_owner_adoptions",
             "live_device_bootstraps",
             "live_device_application_bindings",
             "live_device_update_applications",
@@ -415,7 +418,11 @@ mod tests {
 
     #[test]
     fn current_schema_rejects_missing_owner_outbox_tables() {
-        for table in ["owner_ydoc_outboxes", "owner_ydoc_outbox_entries"] {
+        for table in [
+            "owner_ydoc_outboxes",
+            "owner_ydoc_outbox_entries",
+            "ydoc_owner_base_sources",
+        ] {
             let directory =
                 dohc_test_scratch::ScratchDir::new_named("owner-outbox-schema").unwrap();
             let path = directory.path().join("store.sqlite");

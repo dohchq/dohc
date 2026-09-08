@@ -1,3 +1,4 @@
+import {readRelayDeviceDeliveryConfig} from "../../../services/sync-relay/src/deviceLiveHostConfig.js";
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
@@ -86,7 +87,7 @@ syncBuiltinESMExports();\n`);
     relay = createServer(); relay.listen(0, "127.0.0.1"); await once(relay, "listening");
     const relayAddress = relay.address(); if (!relayAddress || typeof relayAddress === "string") throw new Error();
     control = createDeviceControl({ storage: deployment.storage, hosts: new Set([`127.0.0.1:${relayAddress.port}`]), relayExchangeKey: exchangeKey,
-      limits, delivery: { configPath: relayConfig, history: deployment.history } });
+      limits, delivery: { config: readRelayDeviceDeliveryConfig(relayConfig,limits), history: deployment.history } });
     relay.on("upgrade", control.handleUpgrade);
     share = createTlsServer({ cert: readFileSync(certificate), key: readFileSync(key) });
     share.listen(0, "127.0.0.1"); await once(share, "listening");

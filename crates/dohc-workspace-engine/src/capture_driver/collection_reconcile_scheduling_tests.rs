@@ -83,7 +83,7 @@ async fn seed_plain_richdoc_lineage(actor: &ActorHandle, path: &str, markdown: &
             None,
             state.lineage_claim_id,
             true,
-            state.head_blob_sha256,
+            state.owner_seed_source,
             None,
             wall_now_ms(),
             Arc::new(NoFaults),

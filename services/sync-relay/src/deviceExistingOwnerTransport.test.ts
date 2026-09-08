@@ -1,0 +1,89 @@
+import { expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+import type { WebSocket } from "ws";
+import { EngineClient } from "@dohc/workspace-engine-client/daemon";
+import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
+import type { DeviceControlLimits } from "@dohc/live-session-contract/device-control";
+import { DeviceEngineConnection } from "./deviceEngineConnection.js";
+import { startExistingOwnerDeviceTransport } from "./deviceExistingOwnerTransport.js";
+
+it("uses an existing client for bounded owner adoption and refuses ordinary remote methods", async () => {
+  let transport!: ReturnType<typeof startExistingOwnerDeviceTransport>, peerConnection: DeviceEngineConnection | undefined, peer: EngineClient | undefined;
+  let ready!: () => void;
+  const started = new Promise<void>(resolve => { ready = resolve; });
+  const limits = { maxPayloadBytes: 4096,maxPendingBytes: 2_000_000 } as DeviceControlLimits;
+  const start = { type: "liveHost.start" as const,version: 1 as const,relayNamespace: "namespace",authToken: "A".repeat(43),
+    host: { hostId: "host",hostEpoch: parseHostEpoch(1),instanceId: "instance",connectionId: "connection" },receive: { maxPayloadBytes: 4096,maxPendingBytes: 2_000_000 } };
+  const deviceSocket = { readyState: 1,bufferedAmount: 0,send(bytes: Buffer,options: {binary: boolean},done: () => void) {
+    setImmediate(() => {
+      if (options.binary) peerConnection!.receive(bytes);
+      else {
+        const value = JSON.parse(bytes.toString());
+        if (value.type === "liveHost.transport") {
+          peerConnection = new DeviceEngineConnection(relaySocket,limits,value.receive,2_000_000,() => undefined);
+          peer = new EngineClient(peerConnection,{ authToken: start.authToken,protocolVersion: 2,capabilities: ["blobs"],maxFrameBytes: 1_048_576,
+            privateLiveApplication: { aggregateBytes: 200_000_000,maxUploads: 2 } });
+          ready();
+        } else peerConnection!.credit(value.receivedBytes);
+      }
+      done();
+    });
+  } } as unknown as WebSocket;
+  const relaySocket = { readyState: 1,bufferedAmount: 0,send(bytes: Buffer,options: {binary: boolean},done: () => void) {
+    queueMicrotask(() => { if (options.binary) transport.receive(bytes); else transport.credit(JSON.parse(bytes.toString()).receivedBytes); done(); });
+  } } as unknown as WebSocket;
+  const owner = { nativeSessionId: "ordinary-session",assertCurrent: vi.fn(),prepareHandoff: vi.fn(async () => undefined),finishHandoff: vi.fn(async () => undefined),remoteApplied: vi.fn(async () => undefined) };
+  const singleton = { ready: vi.fn(async () => undefined),close: vi.fn(),sendRequest: vi.fn(async (request: {method: string}) => ({ result:
+    request.method === "liveApplication.provisionOwner" ? { provisioned: true } : request.method === "liveApplication.register" ? { registrationId: 9 } : { adoptionId: "adoption",expectedLocalSequence: 0,throughCursor: null,outboxId: null,pendingBytes: 0,outboxState: null } })),
+    forwardLiveOwnerAdoption: vi.fn(async (_request: { sessionId: string }) => ({ result: { status: "adopted",adoption: { adoptionId: "adoption",localYDocSequence: 0,terminalCursor: 0,adoptionReplayed: false } } })),
+    sendLiveApplication: vi.fn(async (_request: unknown,_event: unknown) => ({result: {status: "applied",ack: {}}})) };
+  transport = startExistingOwnerDeviceTransport({ config: { client: singleton as unknown as EngineClient,workspaces: [{workspaceId: "workspace",workspaceHandle: "ws-ordinary"}],ownerFor: () => owner,
+    maxQueuedBytes: 2_000_000,maxFrameBytes: 1_048_576,maxUploads: 2,maxRegistrations: 10,aggregateBytes: 200_000_000,maxAdoptionBytes: 1_000_000,maxAdoptionEvents: 10,requestDeadlineMs: 30_000 },start,ws: deviceSocket,limits,stop: () => peerConnection?.close() });
+  try {
+    await started; await peer!.ready();
+    const discovery = await peer!.sendRequest({id: 1,method: "liveApplication.hosts",params: {}});
+    expect(discovery.result).toMatchObject({ownerSessions: {maxEvents: 10}});
+    await peer!.sendRequest({id: 2,method: "liveApplication.register",workspace: "ws-ordinary",params: {binding: {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1}}});
+    owner.prepareHandoff.mockRejectedValueOnce(new Error("renderer refused"));
+    await expect(peer!.sendRequest({id: 3,method: "liveApplication.ownerState",workspace: "ws-ordinary",params: {registrationId: 9}})).rejects.toThrow();
+    let release!: () => void;
+    owner.prepareHandoff.mockImplementationOnce(() => new Promise<undefined>(resolve => {release = () => resolve(undefined);}));
+    const pendingState = peer!.sendRequest({id: 4,method: "liveApplication.ownerState",workspace: "ws-ordinary",params: {registrationId: 9}});
+    await expect.poll(() => owner.prepareHandoff.mock.calls.length).toBe(2);
+    const finished = owner.finishHandoff.mock.calls.length;
+    await expect(peer!.sendRequest({id: 5,method: "liveApplication.ownerState",workspace: "ws-ordinary",params: {registrationId: 9}})).rejects.toThrow();
+    expect(owner.finishHandoff.mock.calls.length).toBe(finished);
+    release();
+    const state = await pendingState;
+    expect(state.result).toMatchObject({throughCursor: 0});
+    let completeAdoption!: () => void;
+    singleton.forwardLiveOwnerAdoption.mockImplementationOnce(() => new Promise(resolve => {
+      completeAdoption = () => resolve({result: {status: "adopted",adoption: {adoptionId: "adoption",localYDocSequence: 0,terminalCursor: 0,adoptionReplayed: false}}});
+    }));
+    const adopt = (id: number) => peer!.sendLiveOwnerAdoption({id,workspace: "ws-ordinary",registrationId: 9,sessionId: "9",deadlineMs: 30_000},
+      { relayDatabaseNamespace: "namespace",adoptionId: "adoption",sourceMomentId: "source",sourceDigest: "b".repeat(64),sourceByteLength: 0,baselineMomentRelaySequence: 1,
+        baselineRegisteredAtMs: 0,expectedLocalSequence: 0,terminalReceipt: null,baselineBytes: new Uint8Array([0,0]),events: [] },{maxBytes: 1_000_000,maxEvents: 10});
+    const firstAdoption = adopt(6);
+    await expect.poll(() => singleton.forwardLiveOwnerAdoption.mock.calls.length).toBe(1);
+    const beforeDuplicate = owner.finishHandoff.mock.calls.length;
+    await expect(adopt(7)).rejects.toThrow();
+    expect(owner.finishHandoff.mock.calls.length).toBe(beforeDuplicate);
+    expect(singleton.forwardLiveOwnerAdoption).toHaveBeenCalledTimes(1);
+    completeAdoption();
+    const result = await firstAdoption;
+    expect(result.result).toMatchObject({status: "adopted"});
+    expect(singleton.forwardLiveOwnerAdoption.mock.calls[0]![0]).toMatchObject({sessionId: "ordinary-session"});
+    const updateBytes = new Uint8Array(1_100_000).fill(1);
+    await peer!.sendLiveApplication({id: 8,workspace: "ws-ordinary",registrationId: 9,deadlineMs: 30_000},{updateBytes,metadata: {firstSeen: [],accepted: {
+      receipt: {deliveryId: "large",updateDigest: createHash("sha256").update(updateBytes).digest("hex"),journalCursor: 1,acceptingHostEpoch: parseHostEpoch(1)},
+      binding: {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1},
+      authority: {principalKind: "owner",principalId: "owner",grantId: null,grantGeneration: null},receivedAtMs: 1,
+    }}});
+    expect(singleton.sendLiveApplication).toHaveBeenCalledTimes(1);
+    const received = singleton.sendLiveApplication.mock.calls[0]![1] as {updateBytes: Uint8Array};
+    expect(Buffer.from(received.updateBytes).equals(Buffer.from(updateBytes))).toBe(true);
+    await expect(peer!.sendRequest({id: 9,method: "workspace.close",workspace: "ws-ordinary",params: {}})).rejects.toThrow();
+    expect(singleton.sendRequest.mock.calls.map(call => call[0].method)).not.toContain("workspace.close");
+    expect(singleton.close).not.toHaveBeenCalled();
+  } finally { await transport.close(); peer?.close(); }
+});

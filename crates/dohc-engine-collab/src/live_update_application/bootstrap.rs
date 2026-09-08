@@ -1,6 +1,6 @@
 use super::*;
 use crate::{ContentKind, Ydoc};
-use dohc_engine_domain::{write_text_in_tx, DomainError, WriteResult, WriteText};
+use dohc_engine_domain::{DomainError, WriteResult, WriteText, write_text_in_tx};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -161,7 +161,8 @@ where
             return Ok(BootstrapResult::Pending(ApplicationPending::DependenciesUnresolved));
         }
         doc.validate_public_baseline(&bytes).map_err(ApplicationError::from).map_err(E::from)?;
-        let projection = doc.project(ContentKind::Richdoc).map_err(ApplicationError::from).map_err(E::from)?;
+        let mut projection = doc.project(ContentKind::Richdoc).map_err(ApplicationError::from).map_err(E::from)?;
+        projection.content = doc.preserved_markdown_source(&projection.content).unwrap_or(projection.content);
         if projection.content.len() as i64 != input.projected_markdown_byte_length
             || hex_sha256(projection.content.as_bytes()) != input.projected_markdown_digest {
             return Err(E::from(invalid("bootstrap Markdown projection mismatch")));
@@ -327,6 +328,27 @@ mod tests {
     }
     fn counts(store: &EngineStore) -> (i64, i64, i64, i64) {
         store.read_with(|conn| conn.query_row("SELECT (SELECT COUNT(*) FROM live_device_bootstraps),(SELECT COUNT(*) FROM moments),(SELECT COUNT(*) FROM ydoc_docs),(SELECT COUNT(*) FROM snapshots)",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))).unwrap()
+    }
+    #[test]
+    fn owner_source_bootstrap_preserves_valid_lexical_markdown() {
+        let source: Value = serde_json::from_str(include_str!(
+            "../../tests/owner-source/owner-source-seed.json"
+        ))
+        .unwrap();
+        let vector = Vector {
+            name: "original-owner-source".into(),
+            bytes: serde_json::from_value(source["bytes"].clone()).unwrap(),
+            markdown: source["markdown"].as_str().unwrap().into(),
+            registration_accepted: true,
+        };
+        let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+        assert!(matches!(
+            run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap(),
+            BootstrapResult::Bootstrapped(_)
+        ));
+        let text:String=store.read_with(|conn|conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id='object'",[],|r|r.get(0))).unwrap();
+        assert_eq!(text, vector.markdown);
+        assert_ne!(text, source["canonical"].as_str().unwrap());
     }
     #[test]
     fn shared_projections_preserve_tagged_prefix_and_change_fallback() {
@@ -524,12 +546,13 @@ mod tests {
         store
             .write_with(&NoFaults, |tx| {
                 tx.execute("DELETE FROM ydoc_snapshots", []).unwrap();
-                assert!(tx
-                    .execute(
+                assert!(
+                    tx.execute(
                         "DELETE FROM binary_blobs WHERE sha256=?1",
                         [hex_sha256(&vector.bytes)]
                     )
-                    .is_err());
+                    .is_err()
+                );
                 tx.execute(
                     "DELETE FROM versioned_workspaces WHERE workspace_id='workspace'",
                     [],

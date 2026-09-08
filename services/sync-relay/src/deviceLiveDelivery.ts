@@ -10,15 +10,18 @@ import { DeviceEngineConnection } from "./deviceEngineConnection.js";
 import { configRecord, type RelayDeviceDeliveryConfig } from "./deviceLiveHostConfig.js";
 import { LiveCommittedDelivery, type LiveJournalHistoryAuthority } from "./liveCommittedDelivery.js";
 import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
+import { OwnerCommittedDelivery } from "./ownerCommittedDelivery.js";
+import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 
 export function createDeviceLiveDelivery(options: {
   ws: WebSocket; limits: DeviceControlLimits; config: RelayDeviceDeliveryConfig;
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; host: LiveHostConnectionCoordinate;
   isCurrent: () => boolean; stop: () => void;
+  ownerAdmission?: OwnerOutboxAdmission;
 }) {
   const { ws, limits, config, storage, history, host } = options;
   const invalidated = new AbortController();
-  const consumers = new Map<string, LiveCommittedDelivery>();
+  const consumers = new Map<string, LiveCommittedDelivery | OwnerCommittedDelivery>();
   const authToken = randomBytes(32).toString("base64url");
   let connection: DeviceEngineConnection | undefined, client: EngineClient | undefined;
   let ready = false, closed = false, requestId = 0, active = 0;
@@ -50,7 +53,14 @@ export function createDeviceLiveDelivery(options: {
     check();
     const response = await client.sendRequest({ id: nextRequestId(), method: "liveApplication.hosts", params: {}, deadlineMs: config.client.requestDeadlineMs });
     check();
-    const discovery = configRecord(response.result, ["relayNamespace", "host", "workspaces"]);
+    const discovery = configRecord(response.result, ["relayNamespace", "host", "workspaces"],["ownerSessions"]);
+    let ownerBounds: { maxBytes: number; maxEvents: number } | undefined;
+    if (discovery.ownerSessions !== undefined) {
+      const bounds = configRecord(discovery.ownerSessions,["maxBytes","maxEvents"]);
+      if (typeof bounds.maxBytes !== "number" || !Number.isSafeInteger(bounds.maxBytes) || bounds.maxBytes < 1 || bounds.maxBytes * 3 > config.client.aggregateBytes ||
+        typeof bounds.maxEvents !== "number" || !Number.isSafeInteger(bounds.maxEvents) || bounds.maxEvents < 1) throw new Error("Invalid device owner bounds.");
+      ownerBounds = { maxBytes: bounds.maxBytes,maxEvents: bounds.maxEvents };
+    }
     if (discovery.relayNamespace !== history.namespace || !isDeepStrictEqual(discovery.host, nativeHost) || !Array.isArray(discovery.workspaces) ||
       discovery.workspaces.length !== config.workspaceIds.length) throw new Error("Device discovery identity mismatch.");
     const handles = new Set<string>();
@@ -59,8 +69,9 @@ export function createDeviceLiveDelivery(options: {
       if (typeof row.workspaceId !== "string" || !config.workspaceIds.includes(row.workspaceId) || consumers.has(row.workspaceId) ||
         typeof row.workspaceHandle !== "string" || !row.workspaceHandle || handles.has(row.workspaceHandle)) throw new Error("Device workspace discovery mismatch.");
       handles.add(row.workspaceHandle);
-      consumers.set(row.workspaceId, new LiveCommittedDelivery(storage, history, { client, workspace: row.workspaceHandle,
-        host, deadlineMs: config.client.requestDeadlineMs, nextRequestId }));
+      const ownerConnection = { client,workspace: row.workspaceHandle,host,deadlineMs: config.client.requestDeadlineMs,nextRequestId };
+      if (ownerBounds && !options.ownerAdmission) throw new Error("Owner admission is not configured.");
+      consumers.set(row.workspaceId, ownerBounds ? new OwnerCommittedDelivery(storage,history,{ ...ownerConnection,bounds: ownerBounds,ownerAdmission: options.ownerAdmission! }) : new LiveCommittedDelivery(storage,history,ownerConnection));
     }
     clearTimeout(timer);
     ready = true;

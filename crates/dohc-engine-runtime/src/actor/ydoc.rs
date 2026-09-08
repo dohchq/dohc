@@ -50,6 +50,7 @@ pub struct YdocOpenState {
     /// The text head's blob sha at open time (None for an absent head) —
     /// the session's settle preimage expectation until its first settle.
     pub head_blob_sha256: Option<String>,
+    pub owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     pub lineage_existing: bool,
     pub lineage_claim_id: Option<String>,
     pub seed_content: Option<String>,
@@ -354,7 +355,7 @@ impl ActorHandle {
         attribution: Option<ChangeAttribution>,
         expected_lineage_claim_id: Option<String>,
         require_empty_lineage: bool,
-        seed_source_sha256: Option<String>,
+        seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
         request_id: Option<String>,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
@@ -373,7 +374,7 @@ impl ActorHandle {
                 attribution,
                 expected_lineage_claim_id,
                 require_empty_lineage,
-                seed_source_sha256,
+                seed_source,
                 request_id,
                 true,
                 now_ms,
@@ -1324,6 +1325,12 @@ pub(super) fn ydoc_open_state_on_store(
         Vec::new()
     };
     Ok(YdocOpenState {
+        owner_seed_source: head.as_ref().map(|snapshot| {
+            dohc_engine_collab::owner_base_source::OwnerSeedSource {
+                moment_id: snapshot.latest_moment_id.clone(),
+                blob_sha256: snapshot.blob_sha256.clone(),
+            }
+        }),
         head_blob_sha256: head_sha,
         key,
         content_kind,
@@ -1353,7 +1360,7 @@ pub(super) fn ydoc_record_update_on_store(
     attribution: Option<ChangeAttribution>,
     expected_lineage_claim_id: Option<String>,
     require_empty_lineage: bool,
-    seed_source_sha256: Option<String>,
+    seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     request_id: Option<String>,
     claim_triggers: bool,
     now_ms: i64,
@@ -1404,12 +1411,22 @@ pub(super) fn ydoc_record_update_on_store(
             // refusing seed-onto-existing-lineage.
             ensure_parent_row: true,
             require_empty_lineage,
-            seed_source_sha256: seed_source_sha256.as_deref(),
+            seed_source_sha256: seed_source
+                .as_ref()
+                .map(|source| source.blob_sha256.as_str()),
             request_id: request_id.as_deref(),
         },
         faults,
         now_ms,
         |tx, outcome, update_sha| {
+            dohc_engine_collab::owner_outbox::append_adopted_local_update_in_tx(
+                tx,
+                &journal_key,
+                &journal_path,
+                outcome.seq,
+                update,
+                now_ms,
+            )?;
             // Origination is asked first and owns the base-once decision: it
             // originates only a lineage that has no base yet. The base is a
             // full state, so it already carries this append and every row the
@@ -1426,7 +1443,18 @@ pub(super) fn ydoc_record_update_on_store(
             .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
                 reason: format!("outbound ydoc.update base origination failed: {error}"),
             })? {
-                dohc_engine_sync::BaseOrigination::Originated { .. } => true,
+                dohc_engine_sync::BaseOrigination::Originated { base_snapshot_sha } => {
+                    if let Some(source) = &seed_source {
+                        dohc_engine_collab::owner_base_source::retain_owner_base_source_in_tx(
+                            tx,
+                            &journal_key,
+                            &journal_path,
+                            &base_snapshot_sha,
+                            source,
+                        )?;
+                    }
+                    true
+                }
                 dohc_engine_sync::BaseOrigination::Declined(reason) => {
                     sharing_declined = Some(reason);
                     false

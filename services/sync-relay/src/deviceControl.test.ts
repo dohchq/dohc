@@ -1,3 +1,4 @@
+import {readRelayDeviceDeliveryConfig} from "./deviceLiveHostConfig.js";
 import { DatabaseSync } from "node:sqlite";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { createServer } from "node:http";
@@ -32,7 +33,7 @@ async function setup(overrides: Partial<DeviceControlLimits> = {}, deployment = 
   const credential = createDeviceHostCredential("device-test", parseHostEpoch(1));
   expect(storage.provisionDeviceHostCredential({ credential, updatedAtMs: Date.now() }).ok).toBe(true);
   const control = createDeviceControl({ storage, hosts: new Set(["relay.test"]), relayExchangeKey: exchangeKey,
-    limits: { ...limits, ...overrides }, ...(delivery && owner ? { delivery: { configPath: deliveryConfig, history: owner.history } } : {}) });
+    limits: { ...limits, ...overrides }, ...(delivery && owner ? { delivery: { config: readRelayDeviceDeliveryConfig(deliveryConfig,{...limits,...overrides}), history: owner.history } } : {}) });
   const server = createServer();
   server.on("upgrade", control.handleUpgrade);
   server.listen(0, "127.0.0.1");

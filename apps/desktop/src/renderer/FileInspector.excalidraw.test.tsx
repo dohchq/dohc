@@ -195,6 +195,8 @@ function bridgeFor(
       throw new Error("The scene has no artifact assets.");
     }),
     onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+    onEngineYDocOwnerHandoff: () => () => undefined,
+    prepareEngineYDocOwnerHandoff: async () => undefined,
     onEngineYDocLineageReplacement: vi.fn(
       (listener: (event: EngineYDocLineageReplacementEvent) => void) => {
         lineageReplacementListeners.add(listener);

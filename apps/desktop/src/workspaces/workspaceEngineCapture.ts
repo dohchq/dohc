@@ -2161,6 +2161,19 @@ export function createWorkspaceEngineCapture(
     const openedLineage = current.lineage;
 
     const restartSafeSession: RestartSafeYDocSession = {
+      get nativeOwner() {
+        const captured = current;
+        if (!captured?.nativeOwner || closed) return undefined;
+        const owner = captured.nativeOwner;
+        const assertCurrent = () => {
+          if (current !== captured || closed) throw closedError();
+        };
+        return {
+          sessionId: owner.sessionId,
+          flush: () => append(async () => { assertCurrent(); await owner.flush(); assertCurrent(); }),
+          refresh: () => append(async () => { assertCurrent(); await owner.refresh(); assertCurrent(); }),
+        };
+      },
       get doc() {
         if (canonicalDoc === null) throw closedError();
         return canonicalDoc;
@@ -4322,6 +4335,7 @@ export function createWorkspaceEngineCapture(
         // keeps that session and something must still be able to close it.
         liveYDocSessions.set(input.path, liveEntry);
         return {
+          get nativeOwner() { return session.nativeOwner; },
           get doc() {
             return session.doc;
           },

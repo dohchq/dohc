@@ -178,6 +178,44 @@ const openPayload = {
 };
 
 describe("engine Y.Doc IPC adapter", () => {
+  it("hands the existing session to main only after its journal flush and keeps the renderer held until completion", async () => {
+    const flush = deferred<void>();
+    const nativeOwner = {sessionId: "native-existing",flush: vi.fn(() => flush.promise),refresh: vi.fn(async () => undefined)};
+    const h = harness(providerSession({nativeOwner,objectId: "object",versionId: "main",lineageClaimId: "a".repeat(64)}));
+    const sender = new FakeSender(7);
+    await h.ipc.open(sender,openPayload);
+    const owner = h.ipc.existingOwner({workspaceId: "workspace-1",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "notes/a.md",selectorPaths: ["notes/a.md"],restoreFenceGeneration: 1});
+    const payload = {sessionId: openPayload.sessionId,lineageGeneration: 1};
+    const prepared = owner.prepareHandoff(new AbortController().signal);
+    expect(sender.sent.at(-1)?.payload).toEqual(payload);
+    await expect(h.ipc.prepareOwnerHandoff(new FakeSender(9),payload)).rejects.toThrow();
+    await expect(h.ipc.prepareOwnerHandoff(sender,{...payload,lineageGeneration: 2})).rejects.toThrow();
+    let released = false;
+    const holding = h.ipc.prepareOwnerHandoff(sender,payload).then(() => { released = true; });
+    expect(nativeOwner.flush).toHaveBeenCalledOnce();
+    flush.resolve(); await prepared;
+    expect(released).toBe(false);
+    await owner.finishHandoff(true); await holding;
+    expect(released).toBe(true);
+    await owner.remoteApplied(new Uint8Array([0,0]));
+    expect(nativeOwner.refresh).toHaveBeenCalledOnce();
+    h.setGeneration(2);
+    expect(() => owner.assertCurrent()).toThrow();
+  });
+
+  it("releases a prepared renderer when relay acquisition is cancelled", async () => {
+    const nativeOwner = {sessionId: "native-existing",flush: vi.fn(async () => undefined),refresh: vi.fn(async () => undefined)};
+    const h = harness(providerSession({nativeOwner,objectId: "object",versionId: "main",lineageClaimId: "a".repeat(64)}));
+    const sender = new FakeSender(7); await h.ipc.open(sender,openPayload);
+    const owner = h.ipc.existingOwner({workspaceId: "workspace-1",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "notes/a.md",selectorPaths: ["notes/a.md"],restoreFenceGeneration: 1});
+    const signal = new AbortController();
+    const prepared = owner.prepareHandoff(signal.signal);
+    const holding = h.ipc.prepareOwnerHandoff(sender,{sessionId: openPayload.sessionId,lineageGeneration: 1});
+    await prepared;
+    signal.abort(new Error("disconnected"));
+    await holding;
+    await expect(h.ipc.prepareOwnerHandoff(sender,{sessionId: openPayload.sessionId,lineageGeneration: 1})).rejects.toThrow("not requested");
+  });
   it("opens the canonical session and applies updates through its save sequence", async () => {
     const sender = new FakeSender(7);
     const h = harness();

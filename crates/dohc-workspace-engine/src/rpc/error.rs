@@ -155,6 +155,9 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Collab(CollabError::UnsettledClose) => {
             return WireError::new(ErrorCode::InvalidParams, "ydoc-unsettled-close");
         }
+        RuntimeError::Collab(CollabError::OwnerOutboxFrozen) => {
+            return WireError::new(ErrorCode::InvalidParams, "owner-outbox-frozen");
+        }
         RuntimeError::Relay(RelayError::OriginDiverged) => {
             return WireError::new(ErrorCode::InvalidParams, "relay-origin-diverged");
         }
@@ -180,7 +183,9 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
             ApplicationError::InvalidInput(_)
             | ApplicationError::WorkspaceMismatch
             | ApplicationError::MainVersionMismatch => ErrorCode::InvalidParams,
-            ApplicationError::Conflict => ErrorCode::Conflict,
+            ApplicationError::Conflict | ApplicationError::ConfiguredBudgetMismatch => {
+                ErrorCode::Conflict
+            }
             _ => ErrorCode::Internal,
         };
         return WireError::new(code, error.code());
@@ -357,6 +362,7 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::MissingDependencies
         | CollabError::ObjectAliasCollision
         | CollabError::SeedOntoExistingLineage
+        | CollabError::OwnerOutboxFrozen
         | CollabError::UnsettledClose => ErrorCode::InvalidParams,
     }
 }

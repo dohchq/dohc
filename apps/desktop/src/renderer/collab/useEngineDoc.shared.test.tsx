@@ -74,6 +74,8 @@ function sharedBridge() {
       saveStateListeners.add(listener);
       return () => saveStateListeners.delete(listener);
     },
+    onEngineYDocOwnerHandoff: () => () => undefined,
+    prepareEngineYDocOwnerHandoff: async () => undefined,
     onEngineYDocLineageReplacement: () => () => undefined,
     acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
       accepted: true as const,
