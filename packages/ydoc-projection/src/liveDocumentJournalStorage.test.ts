@@ -123,7 +123,15 @@ function probeJournalCharge(f: ReturnType<typeof registered>, input: LiveUpdateJ
   try {
     const before = Number(f.journalRows().usage);
     expect(probe.commitLiveUpdateJournal(input).result.kind).toBe('accepted');
-    return Number(raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes) - before;
+    const delta = Number(raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes) - before;
+    const committed = raw.prepare('SELECT journal_cursor, length(validation_checkpoint_bytes) AS checkpoint_bytes FROM sync_relay_live_update_journal WHERE delivery_id=?').get(input.metadata.deliveryId)!;
+    expect(delta).toBe(input.updateBytes.byteLength + Number(committed.checkpoint_bytes ?? 0)
+      + journalMetadataBytes(raw) - journalMetadataBytes(f.raw)
+      + liveDeliveryEventReservationBytes(input.cutToken.document, host.hostId, {
+        journalCursor: Number(committed.journal_cursor), deliveryId: input.metadata.deliveryId,
+        updateDigest: input.metadata.updateDigest, acceptingHostEpoch: host.hostEpoch,
+      }));
+    return delta;
   } finally { raw.close(); probe.close(); }
 }
 
