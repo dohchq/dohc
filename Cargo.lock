@@ -311,6 +311,7 @@ name = "dohc-engine-collab"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "dohc-engine-collab",
  "dohc-engine-domain",
  "dohc-engine-storage",
  "dohc-engine-testkit",
