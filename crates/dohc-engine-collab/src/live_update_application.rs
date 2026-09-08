@@ -24,9 +24,11 @@ use std::sync::{Arc, Mutex};
 const SAFE: i64 = 9_007_199_254_740_991;
 
 mod bootstrap;
+mod settlement;
 pub use bootstrap::{
     bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
 };
+pub use settlement::{with_settlement, LiveSettlementAudit, LiveSettlementResult};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApplicationError {
@@ -404,7 +406,7 @@ pub struct ApplicationHostCoordinate {
     pub connection_id: String,
 }
 impl ApplicationHostCoordinate {
-    fn validate(&self) -> Result<(), ApplicationError> {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
         identifier(&self.host_id, 1024)?;
         integer(self.host_epoch, 1, SAFE)?;
         identifier(&self.instance_id, 1024)?;

@@ -5,7 +5,8 @@ use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, ApplicationError, ApplicationHandle, ApplicationHostCoordinate,
     ApplicationOwner, ApplicationResult, BootstrapResult, LiveApplicationBootstrap,
-    apply_committed, bootstrap_committed, validate_application_binding,
+    LiveSettlementResult, LiveUpdateReceipt, apply_committed, bootstrap_committed,
+    validate_application_binding, with_settlement,
 };
 use dohc_engine_collab::{CollabError, WriterDocCache};
 use dohc_engine_storage::{EngineStore, FaultInjector};
@@ -158,6 +159,42 @@ impl ActorLiveApplicationOwner {
 }
 
 impl ActorLiveApplicationHandle {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn settle(
+        &self,
+        terminal: Option<LiveUpdateReceipt>,
+        max_applications: usize,
+        root: std::path::PathBuf,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: tokio_util::sync::CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<LiveSettlementResult, RuntimeError> {
+        current(&self.actor, &self.token)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(Request::Settle {
+                workspace_id: self.workspace_id.clone(),
+                token: self.token.clone(),
+                application: self.application.clone(),
+                terminal,
+                max_applications,
+                root,
+                now_ms,
+                faults,
+                cancel: token,
+                reservation,
+                reply,
+            })))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        let result = receive
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        current(&self.actor, &self.token)?;
+        Ok(result)
+    }
     /// Install an original baseline through the same captured actor and owner.
     pub async fn bootstrap(
         &self,
@@ -274,6 +311,19 @@ impl Registry {
 }
 
 pub(super) enum Request {
+    Settle {
+        workspace_id: String,
+        token: Token,
+        application: ApplicationHandle,
+        terminal: Option<LiveUpdateReceipt>,
+        max_applications: usize,
+        root: std::path::PathBuf,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        cancel: tokio_util::sync::CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+        reply: Reply<LiveSettlementResult>,
+    },
     Bootstrap {
         workspace_id: String,
         token: Token,
@@ -322,6 +372,67 @@ impl Request {
         cache: &mut WriterDocCache,
     ) {
         match self {
+            Self::Settle {
+                workspace_id,
+                token,
+                application,
+                terminal,
+                max_applications,
+                root,
+                now_ms,
+                faults,
+                cancel,
+                reservation: _reservation,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|_| {
+                    if cancel.is_cancelled() {
+                        return Err(RuntimeError::ActorUnavailable);
+                    }
+                    with_settlement(
+                        store,
+                        &application,
+                        terminal,
+                        max_applications,
+                        |store, audit| {
+                            let binding = audit.binding();
+                            let key = dohc_engine_collab::DocKey::new(
+                                &binding.workspace_id,
+                                &binding.main_version_id,
+                                &binding.object_id,
+                            )?;
+                            let outcome = super::ydoc::ydoc_settle_on_store(
+                                store,
+                                cache,
+                                &root,
+                                &key,
+                                &binding.current_path,
+                                dohc_engine_collab::ContentKind::Richdoc,
+                                false,
+                                Some(&binding.lineage_claim_id),
+                                Some(audit.expected_head().to_owned()),
+                                None,
+                                "configured-live-application",
+                                &(),
+                                now_ms,
+                                faults.as_ref(),
+                                &cancel,
+                                None,
+                                Some(audit),
+                            )?;
+                            let settled = outcome.into_settlement_for_internal_caller()?;
+                            let id = audit.stored_id(store, &settled.moment_id, &settled.sha256)?;
+                            Ok(audit.result(
+                                id,
+                                settled.moment_id,
+                                settled.sha256,
+                                settled.materialized,
+                            ))
+                        },
+                    )
+                });
+                let _ = reply.send(result);
+            }
             Self::Bootstrap {
                 workspace_id,
                 token,

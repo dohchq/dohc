@@ -249,10 +249,16 @@ export class LiveCommittedDeliveryStore {
     }
     return row;
   }
-  open(input: {
+  open(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey }): CommittedDeliveryDrain {
+    return this.#open(input, true);
+  }
+  openSettlement(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey }): CommittedDeliveryDrain {
+    return this.#open(input, false);
+  }
+  #open(input: {
     host: LiveHostConnectionCoordinate;
     document: LiveDocumentKey;
-  }): CommittedDeliveryDrain {
+  }, createBootstrap: boolean): CommittedDeliveryDrain {
     const host = snapshotHostCoordinate(input.host),
       document = journalDocument(input.document);
     const read = this.#storage.readTx(() => {
@@ -330,6 +336,7 @@ export class LiveCommittedDeliveryStore {
           this.#bootstrapRow(capture);
           return;
         }
+        if (!createBootstrap) throw new Error("Committed delivery must finish before settlement.");
         const values = [
           baseline.bootstrapId,
           baseline.bootstrapMomentId,
@@ -502,6 +509,16 @@ export class LiveCommittedDeliveryStore {
       admitted: result.row.admitted,
       predecessor: result.predecessor ? { ...result.predecessor } : null,
     };
+  }
+
+  settlement(drain: CommittedDeliveryDrain): {
+    binding: LiveObjectBinding;
+    terminalReceipt: LiveUpdateReceipt | null;
+  } {
+    const next = this.next(drain);
+    if (next.kind !== "done") throw new Error("Committed delivery must finish before settlement.");
+    const capture = this.#drains.get(drain)!;
+    return { binding: structuredClone(capture.authority.binding), terminalReceipt: next.terminalReceipt };
   }
   acknowledgeBootstrap(drain: CommittedDeliveryDrain, input: unknown): void {
     const ack = parseBootstrapAck(input);

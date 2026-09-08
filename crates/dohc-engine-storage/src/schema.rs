@@ -39,6 +39,7 @@ const SYNCHRONOUS_NORMAL: i64 = 1;
 /// otherwise-v2-stamped database is `state-corrupt`.
 const REQUIRED_TABLES: &[&str] = &[
     "live_device_bootstraps",
+    "live_device_settlements",
     "live_device_application_bindings",
     "live_device_update_applications",
     "live_device_application_first_seen",
@@ -390,6 +391,7 @@ mod tests {
             "live_device_application_bindings",
             "live_device_update_applications",
             "live_device_application_first_seen",
+            "live_device_settlements",
         ] {
             assert!(REQUIRED_TABLES.contains(&table));
             let directory =

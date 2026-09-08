@@ -2,6 +2,8 @@ import { isDeepStrictEqual } from "node:util";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import {
   parseLiveDocumentKey,
+  parseLiveUpdateDigest,
+  parseLiveUpdateIdentifier,
   type LiveDocumentKey,
   type LiveUpdateReceipt,
 } from "@dohc/live-session-contract/live-update-admission";
@@ -18,6 +20,30 @@ export { createLiveJournalHistoryAuthority, type LiveJournalHistoryAuthority };
 export type CommittedDeliveryOutcome =
   | { kind: "done"; terminalReceipt: LiveUpdateReceipt | null }
   | { kind: "pending"; reason: string };
+
+export interface CommittedSettlement {
+  settlementId: string;
+  previousCursor: number;
+  terminalCursor: number;
+  applicationCount: number;
+  localYDocSequence: number;
+  momentId: string;
+  markdownDigest: string;
+  materialized: boolean;
+}
+
+function settlementResult(value: unknown, terminal: LiveUpdateReceipt | null): CommittedSettlement {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid native settlement response.");
+  const response = value as Record<string, unknown>;
+  if (Object.keys(response).sort().join() !== "settlement,status" || response.status !== "settled" || !response.settlement || typeof response.settlement !== "object" || Array.isArray(response.settlement)) throw new Error("Invalid native settlement response.");
+  const row = response.settlement as Record<string, unknown>;
+  if (Object.keys(row).sort().join() !== "applicationCount,localYDocSequence,markdownDigest,materialized,momentId,previousCursor,settlementId,terminalCursor") throw new Error("Invalid native settlement fields.");
+  for (const key of ["previousCursor", "terminalCursor", "applicationCount", "localYDocSequence"]) {
+    if (typeof row[key] !== "number" || !Number.isSafeInteger(row[key]) || row[key] < 0) throw new Error("Invalid native settlement integer.");
+  }
+  if (row.terminalCursor !== (terminal?.journalCursor ?? 0) || Number(row.previousCursor) > Number(row.terminalCursor) || Number(row.applicationCount) > Number(row.terminalCursor) - Number(row.previousCursor) || typeof row.materialized !== "boolean") throw new Error("Native settlement coverage mismatch.");
+  return { settlementId: parseLiveUpdateIdentifier(row.settlementId,"settlement ID"), previousCursor: Number(row.previousCursor), terminalCursor: Number(row.terminalCursor), applicationCount: Number(row.applicationCount), localYDocSequence: Number(row.localYDocSequence), momentId: parseLiveUpdateIdentifier(row.momentId,"moment ID"), markdownDigest: parseLiveUpdateDigest(row.markdownDigest), materialized: row.materialized };
+}
 
 /** Private configured-host consumer; the caller supplies an authenticated, provisioned connection. */
 export class LiveCommittedDelivery {
@@ -154,6 +180,32 @@ export class LiveCommittedDelivery {
           this.#store.acknowledge(drain, next.predecessor, result.ack);
         }
       }
+    } finally {
+      if (drain) this.#store.close(drain);
+      this.#active.delete(key);
+    }
+  }
+
+  async settle(document: LiveDocumentKey, signal?: AbortSignal): Promise<CommittedSettlement> {
+    document = parseLiveDocumentKey(document);
+    const key = JSON.stringify([document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId]);
+    if (this.#active.has(key)) throw new Error("A committed delivery operation already owns this document.");
+    this.#active.add(key);
+    let drain;
+    const aborted = () => { if (signal?.aborted) throw signal.reason; };
+    try {
+      aborted();
+      drain = this.#store.openSettlement({ host: this.#connection.host, document });
+      const captured = this.#store.settlement(drain);
+      const registration = await this.#connection.client.sendRequest({ id: this.#connection.nextRequestId(), method: "liveApplication.register", workspace: this.#connection.workspace, params: { binding: { ...captured.binding, selectorPaths: [...captured.binding.selectorPaths] } }, deadlineMs: this.#connection.deadlineMs }, signal);
+      aborted();
+      this.#store.settlement(drain);
+      const registrationId = (registration.result as {registrationId?: unknown})?.registrationId;
+      if (typeof registrationId !== "number" || !Number.isSafeInteger(registrationId) || registrationId < 1) throw new Error("Invalid committed settlement registration.");
+      const response = await this.#connection.client.sendRequest({ id: this.#connection.nextRequestId(), method: "liveApplication.settle", workspace: this.#connection.workspace, params: { registrationId, terminalReceipt: captured.terminalReceipt ? { ...captured.terminalReceipt } : null }, deadlineMs: this.#connection.deadlineMs }, signal);
+      aborted();
+      this.#store.settlement(drain);
+      return settlementResult(response.result, captured.terminalReceipt);
     } finally {
       if (drain) this.#store.close(drain);
       this.#active.delete(key);

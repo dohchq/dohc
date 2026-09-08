@@ -7,6 +7,7 @@ describe("buildHarnessEnvironment", () => {
       {
         DOHC_SHARE_WEB_PORT: "poisoned-share-port",
         DOHC_RELAY_DEPLOYMENT_CONFIG: "poisoned-deployment-config",
+        DOHC_RELAY_SERVICE_HOST_CONFIG: "poisoned-service-host-config",
         DOHC_UNRELATED_POISON: "poisoned-dohc-value",
         PATH: "C:\\tools",
         SYNC_RELAY_DB_PATH: "poisoned-relay-db",

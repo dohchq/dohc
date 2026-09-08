@@ -1499,6 +1499,29 @@ CREATE TABLE live_device_bootstraps (
     FOREIGN KEY (baseline_digest) REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
 ) STRICT;
 
+CREATE TABLE live_device_settlements (
+    settlement_id TEXT NOT NULL PRIMARY KEY,
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL CHECK (length(CAST(workspace_id AS BLOB)) BETWEEN 1 AND 512),
+    main_version_id TEXT NOT NULL CHECK (length(CAST(main_version_id AS BLOB)) BETWEEN 1 AND 512),
+    object_id TEXT NOT NULL CHECK (length(CAST(object_id AS BLOB)) BETWEEN 1 AND 512),
+    lineage_claim_id TEXT NOT NULL CHECK (length(CAST(lineage_claim_id AS BLOB)) BETWEEN 1 AND 512),
+    previous_cursor INTEGER NOT NULL CHECK (previous_cursor BETWEEN 0 AND 9007199254740991),
+    terminal_cursor INTEGER NOT NULL CHECK (terminal_cursor BETWEEN previous_cursor AND 9007199254740991),
+    previous_ydoc_sequence INTEGER NOT NULL CHECK (previous_ydoc_sequence BETWEEN 0 AND 9007199254740991),
+    local_ydoc_sequence INTEGER NOT NULL CHECK (local_ydoc_sequence BETWEEN previous_ydoc_sequence AND 9007199254740991),
+    application_count INTEGER NOT NULL CHECK (application_count BETWEEN 0 AND 9007199254740991),
+    interval_digest TEXT NOT NULL CHECK (length(interval_digest)=64 AND interval_digest NOT GLOB '*[^0-9a-f]*'),
+    moment_id TEXT NOT NULL CHECK (length(CAST(moment_id AS BLOB)) BETWEEN 1 AND 512),
+    markdown_digest TEXT NOT NULL CHECK (length(markdown_digest)=64 AND markdown_digest NOT GLOB '*[^0-9a-f]*'),
+    source_state_vector_digest TEXT NOT NULL CHECK (length(source_state_vector_digest)=64 AND source_state_vector_digest NOT GLOB '*[^0-9a-f]*'),
+    binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+    host_coordinate_json TEXT NOT NULL CHECK (json_valid(host_coordinate_json)),
+    recorded_at_ms INTEGER NOT NULL CHECK (recorded_at_ms BETWEEN 0 AND 9007199254740991),
+    UNIQUE (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, terminal_cursor),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+
 CREATE TABLE live_device_application_bindings (
     relay_database_namespace TEXT NOT NULL CHECK (length(CAST(relay_database_namespace AS BLOB)) > 0),
     workspace_id TEXT NOT NULL CHECK (length(CAST(workspace_id AS BLOB)) BETWEEN 1 AND 512),
