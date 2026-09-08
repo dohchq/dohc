@@ -15,10 +15,10 @@ import { parseCursor, parseString, readJsonObject } from "./requestInputs";
 import { badRequest, notFound, relayError } from "./errors";
 
 // Presence (ephemeral awareness) transport limits.
-export const MAX_PRESENCE_TOPIC_CHARS = 1024;
-export const MAX_CLIENT_ID_CHARS = 128;
-export const MAX_PRESENCE_STATE_BYTES = 8 * 1024;
-export const DEFAULT_PRESENCE_HOLD_MS = 25_000;
+const MAX_PRESENCE_TOPIC_CHARS = 1024;
+const MAX_CLIENT_ID_CHARS = 128;
+const MAX_PRESENCE_STATE_BYTES = 8 * 1024;
+const DEFAULT_PRESENCE_HOLD_MS = 25_000;
 const MAX_PRESENCE_HOLD_MS = 30_000;
 
 function parsePresenceTopic(value: string | null): string {

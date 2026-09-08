@@ -31,13 +31,13 @@ export function createKeyEnvelopeRoutes(
       // for the wrapped workspace key. Replaced envelopes are retained in
       // the history table by storage.putKeyEnvelope.
       const result = storage.putKeyEnvelope({
-        workspaceId: workspaceId,
+        workspaceId,
         envelopeJson,
         updatedAtMs: nowMs(),
         expectedSha256: parseIfMatchSha256(request.headers.get("if-match")),
       });
       return jsonResponse(
-        { ok: true, workspaceId: workspaceId, sha256: result.sha256 },
+        { ok: true, workspaceId, sha256: result.sha256 },
         200,
         { etag: `"${result.sha256}"` },
       );
