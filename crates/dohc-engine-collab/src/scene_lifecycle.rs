@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use dohc_engine_storage::{hex_sha256, StorageError};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
-use crate::durable::{load_for_replay_gate, query_marker};
+use crate::durable::{load_doc_in, read_marker_in};
 use crate::{scene_asset_directory, scene_asset_ref_is_owned, CollabError, ContentKind, DocKey};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,7 +60,7 @@ pub fn freeze_scene_asset_delete_authority_in_tx(
         let scoped_key = DocKey::new(&key.workspace_id, version_id, &key.object_id)?;
         Ok::<_, CollabError>(
             found
-                || query_marker(tx, &scoped_key)?
+                || read_marker_in(tx, &scoped_key)?
                     .is_some_and(|marker| marker.content_kind == ContentKind::Scene),
         )
     })?;
@@ -212,7 +212,7 @@ fn canonical_scene_assets(
     let mut assets = BTreeMap::new();
     for (version_id, directory) in scopes {
         let scoped_key = DocKey::new(&key.workspace_id, version_id, &key.object_id)?;
-        let Some(marker) = query_marker(conn, &scoped_key)? else {
+        let Some(marker) = read_marker_in(conn, &scoped_key)? else {
             continue;
         };
         if marker.content_kind != ContentKind::Scene
@@ -222,7 +222,7 @@ fn canonical_scene_assets(
         {
             continue;
         }
-        let doc = load_for_replay_gate(conn, &scoped_key)?;
+        let doc = load_doc_in(conn, &scoped_key)?;
         if doc.has_pending_dependencies() {
             return Err(CollabError::MissingDependencies);
         }
