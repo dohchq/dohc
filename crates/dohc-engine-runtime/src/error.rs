@@ -135,6 +135,7 @@ impl RuntimeError {
             RuntimeError::ThreadSpawn(_) => "thread-spawn-failed",
             RuntimeError::ActorUnavailable => "actor-unavailable",
             RuntimeError::WorkspaceOwned => "workspace-owned",
+            RuntimeError::WorkspaceHardlinked => "workspace-hardlinked",
             RuntimeError::WorkerPanicked => "worker-panicked",
             RuntimeError::Cancelled => "cancelled",
             RuntimeError::OperationCrashed => "operation-crashed",
