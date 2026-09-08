@@ -30,18 +30,22 @@ function absolute(path: string): string {
 function canonicalDirectory(path: string): void {
   if (normalized(realpathSync(path)) !== normalized(path)) throw unavailable();
 }
+function validateLayout(configPath: string, relayPath: string, continuityDirectory: string): void {
+  absolute(configPath); absolute(relayPath); absolute(continuityDirectory);
+  const relayDirectory = dirname(relayPath);
+  if (contained(relayDirectory, continuityDirectory) ||
+      contained(continuityDirectory, relayDirectory) || contained(relayDirectory, configPath)) {
+    throw new Error("Deployment config and continuity must be outside the relay database directory; neither data directory may contain the other.");
+  }
+}
 function validate(configPath: string, value: unknown): DeploymentConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw unavailable();
   const config = value as DeploymentConfig;
   if (Object.keys(config).sort().join() !== "continuityDirectory,generation,namespace,relayPath,version" ||
       config.version !== 1 || !/^[a-f0-9-]{36}$/.test(config.namespace) ||
       !Number.isSafeInteger(config.generation) || config.generation < 1) throw unavailable();
-  absolute(configPath); absolute(config.relayPath); absolute(config.continuityDirectory);
+  validateLayout(configPath, config.relayPath, config.continuityDirectory);
   const relayDirectory = dirname(config.relayPath);
-  // A normal relay-volume restore cannot include the independent authority files.
-  if (contained(relayDirectory, config.continuityDirectory) ||
-      contained(config.continuityDirectory, relayDirectory) ||
-      contained(relayDirectory, configPath)) throw unavailable();
   canonicalDirectory(relayDirectory);
   canonicalDirectory(config.continuityDirectory);
   canonicalDirectory(dirname(configPath));
@@ -103,6 +107,7 @@ class DeploymentContinuity implements RelayContinuity {
 export function initializeRelayDeployment(input: { configPath: string; relayPath: string; continuityDirectory: string }): void {
   const configPath = absolute(input.configPath), relayPath = absolute(input.relayPath);
   const continuityDirectory = absolute(input.continuityDirectory);
+  validateLayout(configPath, relayPath, continuityDirectory);
   if (existsSync(configPath) || existsSync(relayPath) || existsSync(continuityDirectory)) throw unavailable();
   mkdirSync(dirname(relayPath), { recursive: true });
   mkdirSync(dirname(configPath), { recursive: true });
@@ -150,8 +155,9 @@ export function openRelayDeployment(configPath: string, options: OpenSyncRelaySt
       if (!Number.isSafeInteger(marker.stamp) || (marker.stamp as number) < 0 || marker.stamp !== current.expected_stamp ||
           !Number.isSafeInteger(current.next_stamp) || (current.next_stamp as number) <= (marker.stamp as number)) throw unavailable();
       const continuity = new DeploymentContinuity(lock, side!, config);
+      const owner = new RelayWriteOwner(db, continuity, marker.stamp as number);
       transferred = true;
-      return new RelayWriteOwner(db, continuity, marker.stamp as number);
+      return owner;
     });
     const history = createLiveJournalHistoryAuthority({ namespace: config.namespace, reconciled: true });
     attachLiveJournalHistory(storage as StorageContext, history);
