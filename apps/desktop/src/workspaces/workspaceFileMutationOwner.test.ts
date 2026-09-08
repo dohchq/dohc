@@ -1236,7 +1236,7 @@ describe("WorkspaceFileMutationOwner", () => {
     test.setCapture({
       beginFileRename: vi.fn(async () => vi.fn(async () => undefined)),
       settleAndCloseLiveSessionsForPath: vi.fn(async () => {
-        throw new Error("dohc could not delete notes. Shared live files must keep their current location.");
+        throw new Error("dohc could not delete notes. This action is unavailable for shared live files.");
       }),
     });
     await expect(test.owner.deletePath(trustedEvent, {

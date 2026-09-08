@@ -987,11 +987,46 @@ describe("workspaceEngineCapture batch capture", () => {
     const created = await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "shared.md", text: "original", metadata: { origin: "api" } });
     if (artifact === "present") await write(root, "shared.md", "original");
     const engine = capture(root, { store, rustEngineSessions: sessions });
-    await expect(engine.restoreFileToBeforeMoment(created.moment.id)).rejects.toThrow("dohc could not restore shared.md. Shared live files must keep their current location.");
+    await expect(engine.restoreFileToBeforeMoment(created.moment.id)).rejects.toThrow("dohc could not restore shared.md. This action is unavailable for shared live files.");
     expect(deletionAttempts).toBe(1);
     expect((await store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "shared.md" }))?.text).toBe("original");
     if (artifact === "present") expect(await readFile(join(root, "shared.md"), "utf8")).toBe("original");
     else expect(existsSync(join(root, "shared.md"))).toBe(false);
+    await engine.stop();
+  });
+
+  it.each(["binary source", "current binary artifact"])("explains a restore refusal from a %s", async route => {
+    const root = await createTestScratch("dohc-live-binary-restore-refusal-");
+    const binary = Uint8Array.of(0xff, 0x00, 0xfe);
+    const refusal = new DaemonRefusalError(
+      { code: "INVALID_PARAMS", message: "live-document-binding-active", retry: "no" },
+      new Error("daemon response"),
+    );
+    let refuseBinaryWrites = false;
+    let binaryAttempts = 0;
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine(), undefined, undefined, request => {
+      if (refuseBinaryWrites && (request.method === VERSIONED_METHOD.binaryWrite || request.method === VERSIONED_METHOD.binaryWriteBlob)) {
+        binaryAttempts += 1;
+        throw refusal;
+      }
+    });
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    const target = { workspaceId: WORKSPACE_ID, versionId: "main", path: "shared.md", metadata: { origin: "api" as const } };
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    if (route === "binary source") await store.writeBinaryFile({ ...target, bytes: binary });
+    else await store.writeTextFile({ ...target, text: "original" });
+    const changed = await store.writeTextFile({ ...target, text: "current" });
+    const disk = route === "binary source" ? Buffer.from("current") : Buffer.from(binary);
+    await write(root, target.path, disk);
+    refuseBinaryWrites = true;
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+    await expect(engine.restoreFileToBeforeMoment(changed.moment.id)).rejects.toMatchObject({
+      message: "dohc could not restore shared.md. This action is unavailable for shared live files. Continue editing at the current location.",
+      cause: refusal,
+    });
+    expect(binaryAttempts).toBe(1);
+    expect((await store.readTextFile(target))?.text).toBe("current");
+    expect(await readFile(join(root, target.path))).toEqual(disk);
     await engine.stop();
   });
 
