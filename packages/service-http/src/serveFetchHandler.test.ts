@@ -1,6 +1,6 @@
 import { request as httpRequest, type IncomingMessage, type Server } from "node:http";
 import { connect } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { serveFetchHandler, type ServeFetchHandlerOptions } from "./serveFetchHandler";
 
 const servers: Server[] = [];
@@ -43,9 +43,9 @@ function firstChunk(response: IncomingMessage): Promise<Buffer> {
 
 describe("serveFetchHandler", () => {
   it("disposes an errored response returned after its client disconnected", async () => {
-    let entered!: () => void, returned!: () => void;
+    let entered!: () => void, cancellationAwaited!: () => void;
     const started = new Promise<void>(resolve => { entered = resolve; });
-    const completed = new Promise<void>(resolve => { returned = resolve; });
+    const completed = new Promise<void>(resolve => { cancellationAwaited = resolve; });
     const { port } = await serve({ handler: async request => {
       if (new URL(request.url).pathname === "/health") return Response.json({ ok: true });
       await new Promise<void>(resolve => {
@@ -53,7 +53,12 @@ describe("serveFetchHandler", () => {
         entered();
       });
       const response = new Response(new ReadableStream({ start(controller) { controller.error(new Error("retired response")); } }));
-      returned();
+      vi.spyOn(response.body!, "cancel").mockImplementation(() => ({
+        catch(onRejected: (error: Error) => void) {
+          onRejected(new Error("retired response"));
+          return { then(resolve: () => void) { cancellationAwaited(); resolve(); } };
+        },
+      }) as unknown as Promise<void>);
       return response;
     } });
     const request = httpRequest(`http://127.0.0.1:${port}/park`);
