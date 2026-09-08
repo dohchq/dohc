@@ -11,6 +11,7 @@ const WORKER_CAP = Math.min(8, Math.max(2, Math.floor(availableParallelism() / 4
 export default defineConfig({
   test: {
     include: ["src/**/*.test.{ts,tsx}", "plugins/**/src/**/*.test.ts"],
+    css: { include: [/[?&]raw(?:&|$)/] },
     // Fills jsdom's missing hit-testing APIs. See the file for why an absent
     // document.elementFromPoint failed whole runs rather than single tests.
     // `testSetup.ts` registers the scratch-directory cleanup every suite needs.

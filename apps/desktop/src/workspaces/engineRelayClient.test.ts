@@ -2156,7 +2156,7 @@ describe("EngineRelayClient", () => {
 });
 
 describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
-  it("preserves the inner client's optional capabilities through the wrap", () => {
+  it("preserves the inner client's optional workspace-session capabilities through the wrap", () => {
     const seen: string[] = [];
     const unsubscribe = () => undefined;
     const inner: EngineDaemonClient = {
@@ -2174,9 +2174,6 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
         seen.push("onEvent");
         return unsubscribe;
       },
-      waitForExit: async () => {
-        seen.push("waitForExit");
-      },
     };
     const source = new RelayConfiguredDaemonClientSource(
       { currentClient: () => inner },
@@ -2192,8 +2189,7 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
     expect(wrapped.onEvent?.(() => undefined)).toBe(unsubscribe);
     expect(wrapped.onBlob?.(() => undefined)).toBe(unsubscribe);
     void wrapped.cancelRequest?.(7);
-    void wrapped.waitForExit?.();
-    expect(seen).toEqual(["onEvent", "onBlob", "cancel:7", "waitForExit"]);
+    expect(seen).toEqual(["onEvent", "onBlob", "cancel:7"]);
   });
 
   it("does not invent capabilities the inner client lacks", () => {
@@ -2210,7 +2206,6 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
     expect(wrapped.onEvent).toBeUndefined();
     expect(wrapped.onBlob).toBeUndefined();
     expect(wrapped.cancelRequest).toBeUndefined();
-    expect(wrapped.waitForExit).toBeUndefined();
   });
 });
 

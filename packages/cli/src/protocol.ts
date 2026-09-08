@@ -7,7 +7,7 @@ import { z } from "zod";
 export const CLI_PROTOCOL_VERSION = 2;
 export const CLI_JSON_SCHEMA_VERSION = 1;
 
-export const cliActorSchema = z.enum(["human", "agent"]);
+const cliActorSchema = z.enum(["human", "agent"]);
 export type CliActor = z.infer<typeof cliActorSchema>;
 
 const requestBase = {
@@ -20,15 +20,15 @@ const argsBase = {
   actor: cliActorSchema,
 };
 
-export const channelsArgsSchema = z.object(argsBase).strict();
-export const threadsArgsSchema = z
+const channelsArgsSchema = z.object(argsBase).strict();
+const threadsArgsSchema = z
   .object({ ...argsBase, channel: z.string().min(1) })
   .strict();
-export const inboxArgsSchema = z.object(argsBase).strict();
-export const showArgsSchema = z
+const inboxArgsSchema = z.object(argsBase).strict();
+const showArgsSchema = z
   .object({ ...argsBase, target: z.string().min(1), peek: z.boolean() })
   .strict();
-export const postArgsSchema = z
+const postArgsSchema = z
   .object({
     ...argsBase,
     runId: z.string().min(1).optional(),
@@ -39,7 +39,7 @@ export const postArgsSchema = z
     body: z.string().min(1),
   })
   .strict();
-export const replyArgsSchema = z
+const replyArgsSchema = z
   .object({
     ...argsBase,
     runId: z.string().min(1).optional(),
@@ -51,7 +51,7 @@ export const replyArgsSchema = z
     body: z.string().min(1),
   })
   .strict();
-export const reactArgsSchema = z
+const reactArgsSchema = z
   .object({
     ...argsBase,
     runId: z.string().min(1).optional(),
@@ -59,7 +59,7 @@ export const reactArgsSchema = z
     emoji: z.string().min(1),
   })
   .strict();
-export const grepArgsSchema = z
+const grepArgsSchema = z
   .object({
     ...argsBase,
     pattern: z.string().min(1),
@@ -74,19 +74,19 @@ export const grepArgsSchema = z
     regex: z.boolean(),
   })
   .strict();
-export const exportScopeSchema = z.discriminatedUnion("kind", [
+const exportScopeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("all") }).strict(),
   z.object({ kind: z.literal("channel"), channel: z.string().min(1) }).strict(),
   z.object({ kind: z.literal("thread"), thread: z.string().min(1) }).strict(),
 ]);
-export const exportArgsSchema = z
+const exportArgsSchema = z
   .object({
     ...argsBase,
     scope: exportScopeSchema,
     outDir: z.string().min(1),
   })
   .strict();
-export const momentsArgsSchema = z
+const momentsArgsSchema = z
   .object({
     ...argsBase,
     sinceMs: z.number().int().nonnegative().optional(),
@@ -94,17 +94,17 @@ export const momentsArgsSchema = z
     includeFiles: z.boolean().optional(),
   })
   .strict();
-export const momentArgsSchema = z
+const momentArgsSchema = z
   .object({ ...argsBase, id: z.string().min(1).max(500) })
   .strict();
-export const fileChatsArgsSchema = z
+const fileChatsArgsSchema = z
   .object({ ...argsBase, path: z.string().min(1).max(4096) })
   .strict();
-export const chatArgsSchema = z
+const chatArgsSchema = z
   .object({ ...argsBase, threadId: z.string().min(1).max(200) })
   .strict();
-export const channelsFullArgsSchema = z.object(argsBase).strict();
-export const startChannelChatArgsSchema = z
+const channelsFullArgsSchema = z.object(argsBase).strict();
+const startChannelChatArgsSchema = z
   .object({
     ...argsBase,
     channel: z.string().min(1).max(200),
@@ -112,7 +112,7 @@ export const startChannelChatArgsSchema = z
     title: z.string().min(1).max(200).optional(),
   })
   .strict();
-export const replyToChatArgsSchema = z
+const replyToChatArgsSchema = z
   .object({
     ...argsBase,
     threadId: z.string().min(1).max(200),
@@ -124,7 +124,7 @@ export const replyToChatArgsSchema = z
 // encoding: an integer outside the safe double range rides a `$dohcInt64` /
 // `$dohcFloat64` marker object. The desktop translates with the
 // workspace-engine-client codec; this schema only bounds the JSON shape.
-export type CliCollectionWireValue =
+type CliCollectionWireValue =
   | null
   | boolean
   | number
@@ -132,7 +132,7 @@ export type CliCollectionWireValue =
   | CliCollectionWireValue[]
   | { [key in string]?: CliCollectionWireValue };
 
-export const collectionWireValueSchema: z.ZodType<CliCollectionWireValue> =
+const collectionWireValueSchema: z.ZodType<CliCollectionWireValue> =
   z.lazy(() =>
     z.union([
       z.null(),
@@ -175,7 +175,7 @@ export const collectionQueryCursorSchema = z
   })
   .strict();
 export type CliCollectionQueryCursor = z.infer<typeof collectionQueryCursorSchema>;
-export const collectionQueryArgsSchema = z
+const collectionQueryArgsSchema = z
   .object({
     ...argsBase,
     collectionPath: collectionPathArg,
@@ -187,7 +187,7 @@ export const collectionQueryArgsSchema = z
     cursor: collectionQueryCursorSchema.optional(),
   })
   .strict();
-export const collectionRecordArgsSchema = z
+const collectionRecordArgsSchema = z
   .object({
     ...argsBase,
     collectionPath: collectionPathArg,
@@ -219,14 +219,14 @@ function boundedCollectionFields(minimumFields: number) {
 }
 export const collectionSetFieldsFieldsSchema = boundedCollectionFields(1);
 export const collectionCreateFieldsSchema = boundedCollectionFields(0);
-export const collectionSetFieldsArgsSchema = z
+const collectionSetFieldsArgsSchema = z
   .object({
     ...argsBase,
     recordPath: collectionPathArg,
     fields: collectionSetFieldsFieldsSchema,
   })
   .strict();
-export const collectionCreateRecordArgsSchema = z
+const collectionCreateRecordArgsSchema = z
   .object({
     ...argsBase,
     collectionPath: collectionPathArg,
@@ -303,7 +303,7 @@ export type CliRequestWithoutToken = CliRequest extends infer Request
     : never
   : never;
 
-export const cliChannelSchema = z
+const cliChannelSchema = z
   .object({
     id: z.string().min(1),
     name: z.string().min(1),
@@ -313,7 +313,7 @@ export const cliChannelSchema = z
   .strict();
 export type CliChannel = z.infer<typeof cliChannelSchema>;
 
-export const cliAuthorSchema = z
+const cliAuthorSchema = z
   .object({
     kind: cliActorSchema,
     displayName: z.string().min(1),
@@ -321,7 +321,7 @@ export const cliAuthorSchema = z
   .strict();
 export type CliAuthor = z.infer<typeof cliAuthorSchema>;
 
-export const cliThreadSummarySchema = z
+const cliThreadSummarySchema = z
   .object({
     id: z.string().min(1),
     title: z.string(),
@@ -331,13 +331,12 @@ export const cliThreadSummarySchema = z
     updatedAtMs: z.number().int().nonnegative(),
   })
   .strict();
-export type CliThreadSummary = z.infer<typeof cliThreadSummarySchema>;
 
-export const cliInboxThreadSchema = cliThreadSummarySchema
+const cliInboxThreadSchema = cliThreadSummarySchema
   .extend({ channel: cliChannelSchema })
   .strict();
 
-export const cliInboxMentionSchema = z
+const cliInboxMentionSchema = z
   .object({
     threadId: z.string().min(1),
     messageId: z.string().min(1),
@@ -348,14 +347,14 @@ export const cliInboxMentionSchema = z
   })
   .strict();
 
-export const cliAttachmentSchema = z
+const cliAttachmentSchema = z
   .object({
     objectId: z.string().min(1).optional(),
     pathHint: z.string().min(1).optional(),
   })
   .strict();
 
-export const cliShowMessageSchema = z
+const cliShowMessageSchema = z
   .object({
     id: z.string().min(1),
     author: cliAuthorSchema,
@@ -369,7 +368,7 @@ export const cliShowMessageSchema = z
   .strict();
 export type CliShowMessage = z.infer<typeof cliShowMessageSchema>;
 
-export const cliShowThreadSchema = z
+const cliShowThreadSchema = z
   .object({
     id: z.string().min(1),
     title: z.string(),
@@ -379,7 +378,7 @@ export const cliShowThreadSchema = z
   })
   .strict();
 
-export const cliGrepContextMessageSchema = z
+const cliGrepContextMessageSchema = z
   .object({
     messageId: z.string().min(1),
     author: cliAuthorSchema,
@@ -389,7 +388,7 @@ export const cliGrepContextMessageSchema = z
   .strict();
 export type CliGrepContextMessage = z.infer<typeof cliGrepContextMessageSchema>;
 
-export const cliGrepMatchSchema = z
+const cliGrepMatchSchema = z
   .object({
     channel: cliChannelSchema,
     threadId: z.string().min(1),
@@ -403,28 +402,28 @@ export const cliGrepMatchSchema = z
   .strict();
 export type CliGrepMatch = z.infer<typeof cliGrepMatchSchema>;
 
-export const channelsResultSchema = z
+const channelsResultSchema = z
   .object({ channels: z.array(cliChannelSchema) })
   .strict();
-export const threadsResultSchema = z
+const threadsResultSchema = z
   .object({
     channel: cliChannelSchema,
     threads: z.array(cliThreadSummarySchema),
   })
   .strict();
-export const inboxResultSchema = z
+const inboxResultSchema = z
   .object({
     threads: z.array(cliInboxThreadSchema),
     mentions: z.array(cliInboxMentionSchema),
   })
   .strict();
-export const showResultSchema = z
+const showResultSchema = z
   .object({
     thread: cliShowThreadSchema,
     messages: z.array(cliShowMessageSchema),
   })
   .strict();
-export const postResultSchema = z
+const postResultSchema = z
   .object({
     channel: cliChannelSchema,
     threadId: z.string().min(1),
@@ -433,7 +432,7 @@ export const postResultSchema = z
     warning: z.string().min(1).optional(),
   })
   .strict();
-export const replyResultSchema = z
+const replyResultSchema = z
   .object({
     threadId: z.string().min(1),
     messageId: z.string().min(1),
@@ -442,7 +441,7 @@ export const replyResultSchema = z
     warning: z.string().min(1).optional(),
   })
   .strict();
-export const reactResultSchema = z
+const reactResultSchema = z
   .object({
     threadId: z.string().min(1),
     messageId: z.string().min(1),
@@ -450,11 +449,11 @@ export const reactResultSchema = z
     state: z.enum(["added", "removed"]),
   })
   .strict();
-export const grepResultSchema = z.union([
+const grepResultSchema = z.union([
   z.object({ matches: z.array(cliGrepMatchSchema) }).strict(),
   z.object({ threadIds: z.array(z.string().min(1)) }).strict(),
 ]);
-export const exportResultSchema = z
+const exportResultSchema = z
   .object({
     files: z.array(
       z
@@ -506,7 +505,7 @@ const rawMomentPayloadSnapshotSchema = z
   })
   .strict();
 
-export const momentsResultSchema = z
+const momentsResultSchema = z
   .object({
     changes: z.array(rawMomentSummarySchema),
     count: z.number().int().nonnegative(),
@@ -515,7 +514,7 @@ export const momentsResultSchema = z
     cursorMs: z.number(),
   })
   .strict();
-export const momentResultSchema = z.discriminatedUnion("ok", [
+const momentResultSchema = z.discriminatedUnion("ok", [
   z
     .object({
       ok: z.literal(true),
@@ -555,7 +554,7 @@ const rawFailureSchema = z
   .object({ ok: z.literal(false), reason: z.string().min(1) })
   .strict();
 
-export const fileChatsResultSchema = z.discriminatedUnion("ok", [
+const fileChatsResultSchema = z.discriminatedUnion("ok", [
   z
     .object({
       ok: z.literal(true),
@@ -566,7 +565,7 @@ export const fileChatsResultSchema = z.discriminatedUnion("ok", [
     .strict(),
   rawFailureSchema,
 ]);
-export const chatResultSchema = z.discriminatedUnion("ok", [
+const chatResultSchema = z.discriminatedUnion("ok", [
   z
     .object({
       ok: z.literal(true),
@@ -583,7 +582,7 @@ export const chatResultSchema = z.discriminatedUnion("ok", [
     .strict(),
   rawFailureSchema,
 ]);
-export const channelsFullResultSchema = z.discriminatedUnion("ok", [
+const channelsFullResultSchema = z.discriminatedUnion("ok", [
   z
     .object({
       ok: z.literal(true),
@@ -612,7 +611,7 @@ export const channelsFullResultSchema = z.discriminatedUnion("ok", [
     .strict(),
   rawFailureSchema,
 ]);
-export const startChannelChatResultSchema = z.discriminatedUnion("ok", [
+const startChannelChatResultSchema = z.discriminatedUnion("ok", [
   z
     .object({
       ok: z.literal(true),
@@ -629,7 +628,7 @@ export const startChannelChatResultSchema = z.discriminatedUnion("ok", [
     .strict(),
   rawFailureSchema,
 ]);
-export const replyToChatResultSchema = z.discriminatedUnion("ok", [
+const replyToChatResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), message: rawChatMessageSchema }).strict(),
   rawFailureSchema,
 ]);
@@ -678,7 +677,7 @@ const rawCollectionRecordSchema = z
   })
   .strict();
 
-export const collectionQueryResultSchema = z.discriminatedUnion("ok", [
+const collectionQueryResultSchema = z.discriminatedUnion("ok", [
   z
     .object({
       ok: z.literal(true),
@@ -699,7 +698,7 @@ export const collectionQueryResultSchema = z.discriminatedUnion("ok", [
     .strict(),
   rawFailureSchema,
 ]);
-export const collectionRecordResultSchema = z.discriminatedUnion("ok", [
+const collectionRecordResultSchema = z.discriminatedUnion("ok", [
   z
     .object({
       ok: z.literal(true),
@@ -724,11 +723,11 @@ export const collectionRecordResultSchema = z.discriminatedUnion("ok", [
     .strict(),
   rawFailureSchema,
 ]);
-export const collectionSetFieldsResultSchema = z.discriminatedUnion("ok", [
+const collectionSetFieldsResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), recordPath: z.string().min(1) }).strict(),
   rawFailureSchema,
 ]);
-export const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
+const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
   z
     .object({
       ok: z.literal(true),
@@ -739,7 +738,7 @@ export const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
-export const cliResultSchemas = {
+const cliResultSchemas = {
   channels: channelsResultSchema,
   threads: threadsResultSchema,
   inbox: inboxResultSchema,

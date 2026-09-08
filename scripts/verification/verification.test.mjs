@@ -197,6 +197,136 @@ test("standalone preparation installs frozen dependencies before building, seali
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("verification prepares the engine after Rust without changing gate scope", async (t) => {
+  for (const [mode, job, fault] of [
+    ["pr", null, null], ["pr", "rust", null], ["pr", "js", null],
+    ["smoke", null, null], ["e2e", null, null],
+    ["pr", null, "rust-verdict"], ["pr", null, "source"],
+  ]) await t.test([mode, job, fault].filter(Boolean).join(" "), () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-verify-build-order-"));
+    const put = (path, contents) => {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      writeFileSync(join(root, path), contents);
+    };
+    const git = (args) => execFileSync("git", ["-c", `core.hooksPath=${join(root, "no-hooks")}`,
+      "-c", "commit.gpgsign=false", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", ...args],
+    { cwd: root, encoding: "utf8" }).trim();
+    try {
+      createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+      git(["config", "core.logAllRefUpdates", "true"]);
+      mkdirSync(join(root, ".dohc-dev"), { recursive: true });
+      for (const path of ["scripts/verification/verify.mjs", "tools/rust-engine-program/tree-provenance.mjs",
+        "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml"]) {
+        put(path, readFileSync(join(repoRoot, path)));
+      }
+      put(".gitignore", readFileSync(join(root, ".gitignore"), "utf8") + ".agent-artifacts/\napps/desktop/.env.local\n");
+      put("apps/desktop/package.json", "{}");
+      for (const name of ["dohc", "dohc-mcp"]) {
+        put(`apps/desktop/resources/cli-bin/${name}`, "fixture launcher");
+        chmodSync(join(root, "apps/desktop/resources/cli-bin", name), 0o755);
+      }
+      put("scripts/verification/doctor.mjs", `
+        import {readFileSync} from 'node:fs';
+        export function doctor() {
+          if(process.env.FIXTURE_MODE==='pr' && readFileSync('node_modules/installed.txt','utf8')!=='gate-lock')
+            throw Error('doctor ran before verifier installation');
+          return {checks:[]};
+        }
+      `);
+      const adapterPath = "scripts/verification/process.mjs";
+      put(adapterPath, readFileSync(join(root, adapterPath), "utf8").replace("export async function run(", "async function prepareRun(") + `
+        export async function run(command,args,options={}) {
+          const {enginePath,assertPrepared}=await import('./build.mjs');
+          if(command==='pnpm' && args[0]==='install' && !existsSync(join(repoRoot,'.dohc-dev/verification/build.json.lock'))) {
+            assert.deepEqual(args,['install','--frozen-lockfile']);
+            writeFileSync(join(repoRoot,'node_modules/installed.txt'),readFileSync(join(repoRoot,'pnpm-lock.yaml')));
+            return {stdout:''};
+          }
+          if(command==='cargo' && args[1]==='--version') {
+            const {createRequire}=await import('node:module');
+            const pins=createRequire(import.meta.url)('js-yaml').load(readFileSync(join(repoRoot,'.github/workflows/pr-checks.yml'),'utf8')).env;
+            return {stdout:'cargo-'+args[0]+' '+pins['CARGO_'+args[0].toUpperCase()+'_VERSION']};
+          }
+          if(args[0]==='tools/rust-engine-program/run-rust-checks.mjs') {
+            mkdirSync(dirname(enginePath),{recursive:true});writeFileSync(enginePath,'workspace engine');chmodSync(enginePath,0o755);
+            if(process.env.FIXTURE_FAULT==='source')writeFileSync(join(repoRoot,'apps/desktop/.env.local'),'VITE_CHANGED=during-Rust');
+            return {stdout:'fixture Rust'};
+          }
+          if(args[0]==='tools/rust-engine-program/require-ci-pass-verdict.mjs') {
+            if(process.env.FIXTURE_FAULT==='rust-verdict')throw Error('fixture Rust verdict rejected');
+            return {stdout:'PASS'};
+          }
+          if(command==='docker') {
+            if(args[0]==='run')return {stdout:'a'.repeat(64)};
+            if(args[0]==='inspect')return {stdout:'healthy'};
+            if(args[0]==='port')return {stdout:'127.0.0.1:1234'};
+            assert.deepEqual(args,['rm','--force','a'.repeat(64)]);
+            writeFileSync(join(repoRoot,'.dohc-dev/database-stopped'),'yes');return {stdout:''};
+          }
+          if(command==='pnpm' && args[0]==='run') {
+            assert.ok(['typecheck','test'].includes(args[1]));
+            for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E','DOHC_REQUIRE_PLUGIN_INSTALL_E2E'])assert.equal(options.env[flag],'1');
+            return {stdout:''};
+          }
+          if(args[0]==='apps/desktop/scripts/run-playwright.mjs') {
+            assertPrepared();
+            const receipt=JSON.parse(readFileSync(join(repoRoot,'.dohc-dev/verification/build.json'),'utf8'));
+            assert.ok(receipt.engine.artifact);
+            const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep','@verification-smoke'];
+            assert.ok(args.some((arg,index)=>arg===expected[0] && args[index+1]===expected[1]));
+            writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({stats:{expected:1,unexpected:0,flaky:0,skipped:0}}));
+            return {stdout:''};
+          }
+          return prepareRun(command,args,options);
+        }
+      `);
+      git(["add", "."]); git(["commit", "-m", "Verification fixture"]);
+      const base = git(["rev-parse", "HEAD"]);
+      put("pnpm-lock.yaml", "gate-lock"); git(["add", "."]); git(["commit", "-m", "Select both gates"]);
+      const args = mode === "pr" ? [mode, "--base", base, ...(job ? ["--job", job] : [])]
+        : mode === "e2e" ? [mode, "--", "--project", "fixture"] : [mode];
+      const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+        import cp from 'node:child_process';
+        import {syncBuiltinESMExports} from 'node:module';
+        import {readFileSync,readdirSync,writeFileSync} from 'node:fs';
+        const exec=cp.execFileSync;
+        cp.execFileSync=(command,...args)=>command==='rustc'?Buffer.from('fixture rustc'):exec(command,...args);
+        syncBuiltinESMExports();
+        const {verify}=await import('./scripts/verification/verify.mjs');
+        try {
+          await verify(process.argv.slice(1));
+          const output='.agent-artifacts/verification';
+          writeFileSync('.dohc-dev/report.json',readFileSync(output+'/'+readdirSync(output)[0]+'/result.json'));
+        }
+        catch(error) {console.error(error.message);process.exitCode=1;}
+      `, ...args], { cwd: root, encoding: "utf8", timeout: 120_000, env: { ...process.env,
+        NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), FIXTURE_MODE: mode, FIXTURE_FAULT: fault ?? "" } });
+      assert.equal(result.error, undefined, result.stderr);
+      if (fault) {
+        assert.equal(result.status, 1, result.stderr);
+        assert.match(result.stderr, fault === "source" ? /Source changed during verification/ : /fixture Rust verdict rejected/);
+        assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json")), false);
+        assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), false);
+      } else {
+        assert.equal(result.status, 0, result.stderr);
+        const report = JSON.parse(readFileSync(join(root, ".dohc-dev/report.json"), "utf8"));
+        const rust = mode === "pr" && job !== "js";
+        const js = mode === "pr" && job !== "rust";
+        assert.deepEqual(report.steps.map(({name})=>name), [
+          ...(mode === "pr" ? ["install"] : []),
+          ...(rust ? ["cargo-deny-version", "cargo-audit-version", "cargo-nextest-version", "rust", "rust-verdict"] : []),
+          ...(js ? ["typecheck", "tests"] : []), ...(job !== "rust" ? ["desktop"] : []),
+        ]);
+        assert.equal(report.verdict, "PASS");
+        assert.equal(report.provenance.status, "PASS");
+        assert.equal(Boolean(report.build), job !== "rust");
+        assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), js);
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
 test("POSIX prepared desktop rejects CLI execute drift and restages unchanged launcher bytes", { skip: process.platform === "win32" }, () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-cli-mode-"));
   try {
@@ -488,7 +618,7 @@ test("gate selection follows workflow inputs, including shared and gate implemen
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
   assert.deepEqual(selectedGates(["docs/guide.md"], workflow), { rust: false, js: false });
   assert.deepEqual(selectedGates(["apps/desktop/src/main.ts"], workflow), { rust: false, js: true });
-  for (const file of ["crates/example/src/lib.rs", "pnpm-lock.yaml", ".github/workflows/pr-checks.yml", ".gitignore", "tools/rust-engine-program/build-slot.mjs", ".cargo/config.toml", "package.json", "pnpm-workspace.yaml", ".npmrc", "packages/security-contract/src/effectivePolicy.ts", "packages/workspace-contracts/src/collections.ts", "packages/workspace-core/src/paths.ts", "apps/desktop/package.json", "tsconfig.base.json"]) {
+  for (const file of ["crates/example/src/lib.rs", "pnpm-lock.yaml", ".github/workflows/pr-checks.yml", ".gitignore", "tools/rust-engine-program/build-slot.mjs", "scripts/verification/verify.mjs", ".cargo/config.toml", "package.json", "pnpm-workspace.yaml", ".npmrc", "packages/security-contract/src/effectivePolicy.ts", "packages/workspace-contracts/src/collections.ts", "packages/workspace-core/src/paths.ts", "apps/desktop/package.json", "tsconfig.base.json"]) {
     assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
   }
 });

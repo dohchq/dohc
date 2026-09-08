@@ -6,7 +6,7 @@
 import type {
   SearchResultsEvent,
   SearchResultsEventEntry,
-} from "../../ipc/channels";
+} from "../../ipc/bridgeContract";
 
 export interface SearchGroup {
   path: string;

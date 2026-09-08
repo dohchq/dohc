@@ -424,7 +424,7 @@ mod dedupe_hoist_tests {
 
     use super::*;
     use crate::durable::{
-        claim_base, record_local_update, record_local_update_creating_marker, CompactOutcome,
+        claim_base, record_local_update, CompactOutcome, LocalAppend, MarkerCreation,
     };
     use crate::replay_parity::with_armed_gate;
     use crate::ydoc::{ContentKind, Ydoc};
@@ -587,17 +587,22 @@ mod dedupe_hoist_tests {
         let update = doc.plaintext_insert(0, "hello ");
 
         let first = committed(
-            record_local_update_creating_marker(
+            record_local_update(
                 &mut store,
                 &mut crate::WriterDocCache::new(),
                 &key,
-                None,
-                ContentKind::Plaintext,
-                crate::durable::Regime::LocalOnly,
                 &update,
-                None,
+                LocalAppend {
+                    marker: Some(MarkerCreation {
+                        path: None,
+                        content_kind: ContentKind::Plaintext,
+                        regime: crate::durable::Regime::LocalOnly,
+                    }),
+                    ..Default::default()
+                },
                 &NoFaults,
                 1_000,
+                |_tx, _outcome, _update_sha| Ok(()),
             )
             .expect("first append"),
         );
@@ -609,8 +614,10 @@ mod dedupe_hoist_tests {
                 &mut crate::WriterDocCache::new(),
                 &key,
                 &update,
+                LocalAppend::default(),
                 &NoFaults,
                 1_100,
+                |_tx, _outcome, _update_sha| Ok(()),
             )
         })
         .expect("a duplicate local append must dedupe without invoking the gate");
@@ -658,17 +665,22 @@ mod dedupe_hoist_tests {
         let doc = Ydoc::wire();
         let update = doc.plaintext_insert(0, "hello ");
         let first = committed(
-            record_local_update_creating_marker(
+            record_local_update(
                 &mut store,
                 &mut crate::WriterDocCache::new(),
                 &key,
-                None,
-                ContentKind::Plaintext,
-                crate::durable::Regime::LocalOnly,
                 &update,
-                None,
+                LocalAppend {
+                    marker: Some(MarkerCreation {
+                        path: None,
+                        content_kind: ContentKind::Plaintext,
+                        regime: crate::durable::Regime::LocalOnly,
+                    }),
+                    ..Default::default()
+                },
                 &NoFaults,
                 1_000,
+                |_tx, _outcome, _update_sha| Ok(()),
             )
             .expect("first append"),
         );
@@ -680,8 +692,10 @@ mod dedupe_hoist_tests {
             &mut crate::WriterDocCache::new(),
             &key,
             &update,
+            LocalAppend::default(),
             &NoFaults,
             1_100,
+            |_tx, _outcome, _update_sha| Ok(()),
         )
         .expect_err("a duplicate append over a rotted blob must surface Corrupt");
         assert!(

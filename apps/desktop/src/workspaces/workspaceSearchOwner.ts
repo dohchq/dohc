@@ -1,10 +1,6 @@
 import type { SearchResult } from "@dohc/workspace-engine-client";
-import type { WorkspaceSearchPayload } from "../ipc/bridgeContract";
-import {
-  CHANNELS,
-  parseSearchResultsEvent,
-  SEARCH_EVENT_MAX_ENTRIES,
-} from "../ipc/channels";
+import { SearchResultsEvent, type WorkspaceSearchPayload } from "../ipc/bridgeContract";
+import { CHANNELS, SEARCH_EVENT_MAX_ENTRIES } from "../ipc/channels";
 import type { OwnedWorkspaceSearchView } from "./ownedWorkspaceSdkReadPort";
 import { usableShareMountRecord } from "./shareMounts";
 import { storedShareMounts } from "./shareViewFilesTarget";
@@ -432,17 +428,17 @@ export class WorkspaceSearchOwner<
     source: string,
   ): boolean {
     if (!isCurrent()) return false;
-    const parsed = parseSearchResultsEvent(event);
-    if (!parsed) {
+    const parsed = SearchResultsEvent.safeParse(event);
+    if (!parsed.success) {
       this.#dependencies.logError(
         `Workspace search dropped an invalid ${source}.`,
-        new Error("Search result event failed the preload boundary parser."),
+        parsed.error,
       );
       return false;
     }
     if (!isCurrent()) return false;
     try {
-      sender.send(CHANNELS.searchResults, parsed);
+      sender.send(CHANNELS.searchResults, parsed.data);
       return true;
     } catch (error) {
       this.#dependencies.logError(

@@ -1,3 +1,4 @@
+import { isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
 import { Fragment, useEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
 import { serializeRichdocBody } from "@dohc/ydoc-projection";
@@ -12,38 +13,7 @@ import {
 } from "./floatingMenuPosition";
 import { escapeHighlightMarkdown } from "./extensions";
 
-type TopLevelDocLike = {
-  forEach: (
-    cb: (
-      node: {
-        type: { name: string };
-        attrs?: Record<string, unknown>;
-        nodeSize: number;
-        textContent?: string;
-      },
-      offset: number,
-      index: number,
-    ) => void,
-  ) => void;
-};
-
 const blockControlsKey = new PluginKey("dohc-block-controls");
-
-function isEditableEditor(editor: Editor | null | undefined): boolean {
-  if (!editor) return false;
-  if ((editor as { isEditable?: boolean }).isEditable === false) return false;
-  if ((editor.view as { editable?: boolean }).editable === false) return false;
-  return true;
-}
-
-function isEditableView(view: EditorView): boolean {
-  return (view as { editable?: boolean }).editable !== false;
-}
-
-function stopEditorMouseEvent(event: Event) {
-  event.preventDefault();
-  event.stopPropagation();
-}
 
 // ── drag payload ──────────────────────────────────────────────────────────
 
@@ -123,14 +93,14 @@ function removeBlockDragGhost(slot: DragGhostSlot): void {
 }
 
 function buildBlockControlDecorations(
-  doc: unknown,
+  doc: ProseMirrorNode,
   onInsertRef: RefObject<(pos: number) => void>,
   onOpenMenuRef: RefObject<(pos: number, rect: DOMRect) => void>,
   ghostSlot: DragGhostSlot,
 ): DecorationSet {
   const decorations: Decoration[] = [];
 
-  (doc as TopLevelDocLike).forEach((node, offset, index) => {
+  doc.forEach((node, offset, index) => {
     const pos = offset;
     decorations.push(
       Decoration.node(pos, pos + node.nodeSize, {
@@ -171,7 +141,7 @@ function buildBlockControlDecorations(
           handle.addEventListener("dragstart", (event) => {
             const dragEvent = event as DragEvent;
             dragEvent.stopPropagation();
-            if (!isEditableView(view) || !dragEvent.dataTransfer) {
+            if (view.editable === false || !dragEvent.dataTransfer) {
               dragEvent.preventDefault();
               return;
             }
@@ -214,7 +184,7 @@ function buildBlockControlDecorations(
     );
   });
 
-  return DecorationSet.create(doc as never, decorations);
+  return DecorationSet.create(doc, decorations);
 }
 
 function setVisibleBlockControl(
@@ -438,18 +408,6 @@ export function resolveBlockMenuState(pos: number, rect: DOMRect): BlockMenuStat
   };
 }
 
-type BlockTurnIntoChain = {
-  focus: () => BlockTurnIntoChain;
-  setTextSelection: (pos: number) => BlockTurnIntoChain;
-  setParagraph: () => BlockTurnIntoChain;
-  toggleHeading: (attrs: { level: 1 | 2 | 3 }) => BlockTurnIntoChain;
-  toggleBulletList: () => BlockTurnIntoChain;
-  toggleOrderedList: () => BlockTurnIntoChain;
-  toggleTaskList: () => BlockTurnIntoChain;
-  toggleBlockquote: () => BlockTurnIntoChain;
-  run: () => boolean;
-};
-
 export function duplicateBlock(editor: Editor | null, pos: number): void {
   const view = editor?.view;
   if (!view || !isEditableEditor(editor)) return;
@@ -486,10 +444,7 @@ export function turnBlockInto(
   if (!node) return;
 
   const inside = pos + 1;
-  const chain = editor
-    .chain()
-    .focus()
-    .setTextSelection(inside) as unknown as BlockTurnIntoChain;
+  const chain = editor.chain().focus().setTextSelection(inside);
 
   switch (id) {
     case "paragraph":

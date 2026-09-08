@@ -1,4 +1,5 @@
 import { sha256Hex } from "@dohc/workspace-core/hash";
+import { escapeHtml } from "@dohc/workspace-core/html";
 import { isRecord } from "@dohc/workspace-core/records";
 // Pure MCP tool implementations. Each operates on a workspace ROOT dir and a
 // state HOME (the desktop registry/state location). Every workspace-relative
@@ -2095,15 +2096,6 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
     files: resolvedFiles.map((file) => file.normalized),
     ...RECORDED_BY_ENGINE,
   };
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }
 
 async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {

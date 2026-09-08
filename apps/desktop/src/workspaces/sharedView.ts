@@ -1,3 +1,4 @@
+import { errorMessage } from "./workspaceError";
 import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
@@ -143,7 +144,7 @@ function standaloneShareViewFailureOutcome(
   return {
     ok: false,
     changedPaths,
-    errorMessage: error instanceof Error ? error.message : String(error),
+    errorMessage: errorMessage(error),
   };
 }
 

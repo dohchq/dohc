@@ -1,6 +1,12 @@
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { describe, expect, it } from "vitest";
-import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "./channels";
+import {
+  ENGINE_YDOC_UPDATE_MAX_BYTES,
+  EXPLORER_MENU_COMMANDS,
+  MENU_COMMANDS,
+  WORKBENCH_MENU_COMMANDS,
+} from "./channels";
+import { UPDATE_STATUSES } from "../updates/updateMachine";
 import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
 import { DohcPluginManifest } from "../plugins/pluginManifestSchema";
 import { pluginViewId } from "../renderer/workbench/workbenchState";
@@ -97,6 +103,13 @@ import {
   UpdateActionResult,
   UpdateCheckResult,
   UpdateStateEvent,
+  EngineYDocRemoteUpdateEvent,
+  EngineYDocSaveStateEvent,
+  ExplorerMenuCommand,
+  isSafeRelativePath,
+  MenuCommand,
+  SearchResultsEvent,
+  WorkbenchMenuCommand,
   WriteClipboardTextPayload,
   ReadWorkspaceTextResult,
   WriteWorkspaceTextPayload,
@@ -2397,6 +2410,292 @@ describe("clipboard IPC contract", () => {
     expect(
       WriteClipboardTextPayload.safeParse({ text: "copy", secret: "nope" }).success,
     ).toBe(false);
+  });
+});
+
+// The preload boundary for main→renderer events. These cases are the review
+// attack set: a schema must accept only exact primitive members of its closed
+// set — not String objects, toString tricks, case variants, or lookalikes —
+// because the parse is all that stands between an ipc payload and renderer code.
+describe("menu command boundaries", () => {
+  it("accept every member of their closed tuples", () => {
+    for (const command of MENU_COMMANDS) expect(MenuCommand.parse(command)).toBe(command);
+    for (const command of EXPLORER_MENU_COMMANDS) {
+      expect(ExplorerMenuCommand.parse(command)).toBe(command);
+    }
+    for (const command of WORKBENCH_MENU_COMMANDS) {
+      expect(WorkbenchMenuCommand.parse(command)).toBe(command);
+    }
+  });
+
+  it("reject case variants, unknown ids, and non-primitive impostors", () => {
+    for (const value of [
+      "NEW-FILE",
+      "New-File",
+      "new-file ",
+      "delete-everything",
+      "",
+      new String("new-file"),
+      { toString: () => "new-file" },
+      Object.assign(Object.create(null), { valueOf: () => "new-file" }),
+      ["new-file"],
+      null,
+      undefined,
+      0,
+      Symbol("new-file"),
+    ]) {
+      expect(MenuCommand.safeParse(value).success).toBe(false);
+    }
+    for (const value of ["RENAME", "rename ", "rm -rf", "", new String("rename"), ["rename"]]) {
+      expect(ExplorerMenuCommand.safeParse(value).success).toBe(false);
+    }
+    for (const value of ["CLOSE-TAB", "close-tab ", "open-terminal", new String("close-tab")]) {
+      expect(WorkbenchMenuCommand.safeParse(value).success).toBe(false);
+    }
+  });
+});
+
+describe("workspace activated event boundary", () => {
+  const activated = {
+    workspaceId: "ws-123",
+    rootPath: "/home/ice/dohc",
+    kind: "personal",
+    mode: "local-first",
+  };
+
+  it("accepts a workspace summary and strips extra fields", () => {
+    expect(WorkspaceSummary.parse({ ...activated, extra: "ignored" })).toEqual(activated);
+  });
+
+  it("rejects malformed ids, kinds, modes, and impostors", () => {
+    expect(WorkspaceSummary.safeParse({ ...activated, workspaceId: "WS-123" }).success).toBe(
+      false,
+    );
+    expect(WorkspaceSummary.safeParse({ ...activated, kind: "admin" }).success).toBe(false);
+    expect(
+      WorkspaceSummary.safeParse({ ...activated, mode: "remote-code-exec" }).success,
+    ).toBe(false);
+    expect(WorkspaceSummary.safeParse(["ws-123"]).success).toBe(false);
+    expect(WorkspaceSummary.safeParse(new String("ws-123")).success).toBe(false);
+  });
+});
+
+describe("update state event boundary", () => {
+  it("accepts every closed-tuple status and strips unknown fields", () => {
+    for (const status of UPDATE_STATUSES) {
+      expect(UpdateStateEvent.parse({ status, message: "m" })).toEqual({ status, message: "m" });
+    }
+    expect(UpdateStateEvent.parse({ status: "ready", message: "m", evil: "x" })).toEqual({
+      status: "ready",
+      message: "m",
+    });
+  });
+
+  it("rejects unknown/case-variant statuses and non-primitive impostors", () => {
+    for (const status of ["READY", "pwn", new String("ready"), { toString: () => "ready" }]) {
+      expect(UpdateStateEvent.safeParse({ status, message: "m" }).success).toBe(false);
+    }
+  });
+
+  it("rejects missing, empty, oversized, or non-string messages", () => {
+    expect(UpdateStateEvent.safeParse({ status: "ready" }).success).toBe(false);
+    expect(UpdateStateEvent.safeParse({ status: "ready", message: "" }).success).toBe(false);
+    expect(
+      UpdateStateEvent.safeParse({ status: "ready", message: "x".repeat(501) }).success,
+    ).toBe(false);
+    expect(UpdateStateEvent.safeParse({ status: "ready", message: 42 }).success).toBe(false);
+  });
+
+  it("rejects malformed public update metadata", () => {
+    const base = { status: "ready", message: "m" };
+    for (const bad of [
+      { currentVersion: "" },
+      { currentVersion: "x".repeat(201) },
+      { version: "" },
+      { channel: "beta" },
+      { canCheck: "true" },
+      { canInstall: 1 },
+      { percent: -1 },
+      { percent: 101 },
+      { percent: Infinity },
+      { percent: Number.NaN },
+    ]) {
+      expect(UpdateStateEvent.safeParse({ ...base, ...bad }).success, JSON.stringify(bad)).toBe(
+        false,
+      );
+    }
+    expect(UpdateStateEvent.parse({ ...base, percent: 0 })).toEqual({ ...base, percent: 0 });
+  });
+
+  it("rejects non-objects, null, and arrays", () => {
+    expect(UpdateStateEvent.safeParse(null).success).toBe(false);
+    expect(UpdateStateEvent.safeParse("ready").success).toBe(false);
+    expect(UpdateStateEvent.safeParse([{ status: "ready", message: "m" }]).success).toBe(false);
+  });
+
+  it("requires the action and check envelopes to carry a boolean and a state", () => {
+    expect(UpdateCheckResult.safeParse({ checked: "yes", state: null }).success).toBe(false);
+    expect(UpdateActionResult.safeParse({ accepted: true }).success).toBe(false);
+  });
+});
+
+describe("search results event boundary", () => {
+  const entry = {
+    path: "notes/a.md",
+    line: 3,
+    column: 5,
+    preview: "one needle two",
+    matchStart: 4,
+    matchEnd: 10,
+  };
+  const batch = { searchId: "s1", entries: [entry], done: false, limitHit: false };
+
+  it("accepts a well-formed batch and keeps only the validated fields", () => {
+    const parsed = SearchResultsEvent.parse({
+      ...batch,
+      entries: [{ ...entry, extra: "dropped" }],
+      injected: true,
+    });
+    expect(parsed).toEqual(batch);
+    expect(parsed.entries[0]).not.toHaveProperty("extra");
+    expect(parsed).not.toHaveProperty("injected");
+  });
+
+  it("accepts optional engine result fields", () => {
+    const engineEntry = {
+      ...entry,
+      surface: "chat",
+      threadId: "thread-1",
+      objectId: "object-1",
+      title: "Planning chat",
+    };
+    const engineBatch = { searchId: "s-engine", entries: [engineEntry], done: true, limitHit: false };
+    expect(SearchResultsEvent.parse(engineBatch)).toEqual(engineBatch);
+  });
+
+  it("accepts an empty done batch (the final flush)", () => {
+    const flush = { searchId: "s2", entries: [], done: true, limitHit: true };
+    expect(SearchResultsEvent.parse(flush)).toEqual(flush);
+  });
+
+  it("accepts an optional fail-closed notice and rejects a bad one", () => {
+    const noticed = { ...batch, entries: [], done: true, notice: "Search paused: policy error" };
+    expect(SearchResultsEvent.parse(noticed)).toEqual(noticed);
+    expect(SearchResultsEvent.safeParse({ ...batch, notice: "" }).success).toBe(false);
+    expect(SearchResultsEvent.safeParse({ ...batch, notice: "x".repeat(501) }).success).toBe(
+      false,
+    );
+    expect(SearchResultsEvent.safeParse({ ...batch, notice: 7 }).success).toBe(false);
+  });
+
+  it("rejects unsafe paths: absolute, traversal, backslash, null byte, drive letter", () => {
+    for (const path of [
+      "/etc/passwd",
+      "../escape.md",
+      "a/../b.md",
+      "a\\b.md",
+      "a\0b.md",
+      "C:evil.md",
+      "",
+      "x".repeat(5000),
+    ]) {
+      expect(
+        SearchResultsEvent.safeParse({ ...batch, entries: [{ ...entry, path }] }).success,
+        JSON.stringify(path),
+      ).toBe(false);
+    }
+  });
+
+  it("rejects out-of-bounds offsets, non-integer lines, oversized previews", () => {
+    for (const bad of [
+      { matchEnd: 999 },
+      { matchStart: -1 },
+      { matchEnd: 2, matchStart: 4 },
+      { line: 0 },
+      { line: 1.5 },
+      { preview: "x".repeat(251), matchStart: 0, matchEnd: 1 },
+      { surface: "agent" },
+      { threadId: "" },
+    ]) {
+      expect(
+        SearchResultsEvent.safeParse({ ...batch, entries: [{ ...entry, ...bad }] }).success,
+        JSON.stringify(bad),
+      ).toBe(false);
+    }
+  });
+
+  it("rejects oversized batches, bad ids, and non-primitive impostors", () => {
+    for (const bad of [
+      { entries: Array.from({ length: 51 }, () => entry) },
+      { searchId: "" },
+      { searchId: "x".repeat(65) },
+      { searchId: new String("s1") },
+      { done: "false" },
+      { entries: entry },
+    ]) {
+      expect(SearchResultsEvent.safeParse({ ...batch, ...bad }).success).toBe(false);
+    }
+    expect(SearchResultsEvent.safeParse(null).success).toBe(false);
+    expect(SearchResultsEvent.safeParse([batch]).success).toBe(false);
+    expect(SearchResultsEvent.safeParse("batch").success).toBe(false);
+  });
+});
+
+describe("isSafeRelativePath", () => {
+  it("accepts plain relative forward-slashed paths", () => {
+    expect(isSafeRelativePath("a.md")).toBe(true);
+    expect(isSafeRelativePath("notes/deep/file.txt")).toBe(true);
+    expect(isSafeRelativePath(".hidden.md")).toBe(true);
+  });
+
+  it("rejects traversal, absolute, and separators in disguise", () => {
+    for (const path of ["..", "a//b", "a/./b", "/a", "D:stuff", "a\\b", "a\0b"]) {
+      expect(isSafeRelativePath(path), path).toBe(false);
+    }
+  });
+});
+
+describe("engine Y.Doc event boundaries", () => {
+  it("accept a bounded sessionId, real Uint8Array, and lineage generation", () => {
+    const update = new Uint8Array([1, 2, 3]);
+    const parsed = EngineYDocRemoteUpdateEvent.parse({
+      sessionId: "s-1",
+      update,
+      lineageGeneration: 2,
+      evil: "drop me",
+    });
+    expect(parsed).toEqual({ sessionId: "s-1", update, lineageGeneration: 2 });
+    expect(parsed).not.toHaveProperty("evil");
+  });
+
+  it("reject a missing field, a bad sessionId, and a non-Uint8Array update", () => {
+    const update = new Uint8Array([1]);
+    for (const bad of [
+      { update, lineageGeneration: 1 },
+      { sessionId: "s", update: [1, 2, 3], lineageGeneration: 1 },
+      { sessionId: "s", update: update.buffer, lineageGeneration: 1 },
+      { sessionId: "", update, lineageGeneration: 1 },
+      { sessionId: "s", update, lineageGeneration: 0 },
+      null,
+      [{ sessionId: "s", update }],
+    ]) {
+      expect(EngineYDocRemoteUpdateEvent.safeParse(bad).success).toBe(false);
+    }
+  });
+
+  it("reject an empty or over-bound update", () => {
+    for (const update of [new Uint8Array(0), new Uint8Array(ENGINE_YDOC_UPDATE_MAX_BYTES + 1)]) {
+      expect(
+        EngineYDocRemoteUpdateEvent.safeParse({ sessionId: "s", update, lineageGeneration: 1 })
+          .success,
+      ).toBe(false);
+    }
+  });
+
+  it("accept the deleted state that turns a live editor read-only", () => {
+    expect(
+      EngineYDocSaveStateEvent.parse({ sessionId: "session-1", state: "deleted", seq: 4 }),
+    ).toEqual({ sessionId: "session-1", state: "deleted", seq: 4 });
   });
 });
 

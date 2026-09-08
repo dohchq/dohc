@@ -14,6 +14,7 @@ await build({
   platform: "node",
   format: "esm",
   target: "node24",
+  external: ["ws"],
   sourcemap: true,
   logLevel: "info",
 });
