@@ -14,7 +14,7 @@ function fixture(bootstrap = true) {
     store.close(drain);
   }
   const settlement={settlementId:"audit",previousCursor:0,terminalCursor:0,applicationCount:0,localYDocSequence:0,momentId:"moment",markdownDigest:hash(new Uint8Array()),materialized:true};
-  const sendRequest=vi.fn(async (request:{method:string})=>({result:request.method==="liveApplication.register"?{registrationId:1}:{status:"settled",settlement}}));
+  const sendRequest=vi.fn(async (request:{method:string}, _signal?:AbortSignal)=>({result:request.method==="liveApplication.register"?{registrationId:1}:{status:"settled",settlement}}));
   let id=0;
   const consumer=new LiveCommittedDelivery(f.storage,history,{client:{sendRequest} as unknown as EngineClient,workspace:"workspace-handle",host,deadlineMs:1000,nextRequestId:()=>++id});
   return {f,consumer,sendRequest,settlement,document:f.input.evidence.document};
@@ -46,6 +46,36 @@ it("rechecks cancellation after registration and excludes concurrent document op
 
 it("refuses a native result for another terminal cursor",async()=>{
   const t=fixture();try {t.settlement.terminalCursor=1;await expect(t.consumer.settle(t.document)).rejects.toThrow("coverage mismatch");} finally {t.f.close();}
+});
+
+it.each(["liveApplication.register", "liveApplication.settle"])("cancels a delayed %s request and releases document ownership", async method => {
+  const t = fixture(), controller = new AbortController();
+  const original = t.sendRequest.getMockImplementation()!;
+  let entered!: () => void, release!: () => void, receivedSignal: AbortSignal | undefined;
+  const called = new Promise<void>(resolve => { entered = resolve; });
+  t.sendRequest.mockImplementation((request, signal) => {
+    if (request.method !== method) return original(request, signal);
+    receivedSignal = signal;
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(signal!.reason);
+      release = () => { signal?.removeEventListener("abort", abort); resolve(original(request, signal)); };
+      signal?.addEventListener("abort", abort, { once: true });
+      entered();
+    });
+  });
+  const settling = t.consumer.settle(t.document, controller.signal);
+  const outcome = settling.catch(error => error);
+  try {
+    await called;
+    expect(receivedSignal).toBe(controller.signal);
+    const stopped = new Error("caller stopped before delayed response");
+    controller.abort(stopped);
+    expect(await outcome).toBe(stopped);
+    t.sendRequest.mockImplementation(original);
+    expect(await t.consumer.settle(t.document)).toEqual(t.settlement);
+    release();
+    expect(await t.consumer.settle(t.document)).toEqual(t.settlement);
+  } finally { release?.(); await outcome; t.f.close(); }
 });
 
 it("rechecks retained authority after native settlement before reporting success",async()=>{
