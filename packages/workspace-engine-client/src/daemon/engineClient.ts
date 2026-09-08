@@ -859,10 +859,20 @@ export class EngineClient implements EngineTransport {
     this.liveUploads += 1;
     let stopped = false;
     let uploaded = false;
+    let uploadWireId: number | undefined;
     const abort = (): void => {
       stopped = true;
       if (!uploaded) this.close();
-      else void this.cancelRequest(request.id).catch(() => undefined);
+      else if (uploadWireId !== undefined) {
+        const pending = this.pending.get(uploadWireId);
+        if (!pending) return;
+        this.pending.delete(uploadWireId);
+        this.abandonedRequestIds.add(uploadWireId);
+        if (pending.deadlineTimer) clearTimeout(pending.deadlineTimer);
+        pending.reject(new EngineClientError("closed", "Live application request was cancelled."));
+        // A retired daemon may suppress the reply. Settle locally before sending cancel.
+        void this.writeEnvelope({ type: "cancel", id: uploadWireId }).catch(() => undefined);
+      }
     };
     // The reply timer ends when a response arrives. Keep the upload deadline
     // through the final drain so an early reply cannot strand retained input.
@@ -894,6 +904,7 @@ export class EngineClient implements EngineTransport {
       const rangeStreamId = this.nextLiveStreamId++;
       if (!Number.isSafeInteger(rangeStreamId)) throw new TypeError("Live stream identifiers exhausted.");
       const writeInput = async (wireId: number): Promise<void> => {
+        uploadWireId = wireId;
         const current = (): void => {
           if (stopped || signal?.aborted || !this.pending.has(wireId) || this.closed) {
             throw new EngineClientError("closed", "Live application upload is no longer current.");
