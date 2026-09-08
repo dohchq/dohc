@@ -39,13 +39,17 @@ it.each([false, true])("reports temporary cleanup failure without replacing the 
   try {
     await lifecycle.start();
     await vi.waitFor(() => expect(failures).toHaveLength(unhealthy ? 2 : 1));
-    expect(failures).toContain(cleanupError);
+    expect(failures.some((error) => error.cause === cleanupError &&
+      error.message === "Could not delete the engine startup smoke directory.")).toBe(true);
     if (unhealthy) {
       expect(failures).toContain(healthError);
       expect(client.closeUnresponsive).toHaveBeenCalledOnce();
     } else {
       expect(client.closeUnresponsive).not.toHaveBeenCalled();
       expect(lifecycle.currentClient()).toBe(client);
+      await expect(lifecycle.currentClient()!.sendRequest({
+        id: 99, method: "engine.ping", params: {},
+      })).resolves.toEqual({ id: 99, result: null });
     }
   } finally {
     await lifecycle.stop();

@@ -697,7 +697,10 @@ export class EngineDaemonLifecycle {
     return await runEngineDaemonSmoke(
       async (rootDir, workspaceId) =>
         await this.smokeWorkspaceWithClient(client, rootDir, workspaceId),
-      (error) => this.reportFailure(asError(error), false),
+      (error) => this.reportFailure(
+        new Error("Could not delete the engine startup smoke directory.", { cause: error }),
+        false,
+      ),
     );
   }
 
