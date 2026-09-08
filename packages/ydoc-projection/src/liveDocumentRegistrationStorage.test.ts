@@ -8,6 +8,7 @@ import * as Y from 'yjs'
 import { parseHostEpoch } from '@dohc/live-session-contract/host-control'
 import { markdownToYDoc } from './import-export.js'
 import { liveDeliveryBookkeepingBytes } from './liveDeliveryQuotaTestSupport.js'
+import { liveBaselineStoredBytes } from './liveBaselineQuotaTestSupport.js'
 import { createLiveMarkdownRegistrationValidator } from './liveDocumentValidation.js'
 import { openSyncRelayStorage, type LiveDocumentBaselineRegistrationInput } from '../../../services/sync-relay/src/storage.js'
 
@@ -255,7 +256,7 @@ it.each([0, 1, 2, 3])('rolls back a failure after parent/range write %s', write 
     expect(usage(f)).toBe(0)
     f.raw.exec('DROP TRIGGER fail_registration')
     expect(f.storage.registerLiveDocumentBaseline(input)).toMatchObject({ kind: 'registered', replayed: false })
-    expect(usage(f)).toBe(input.baselineBytes.byteLength + liveDeliveryBookkeepingBytes(f.raw))
+    expect(usage(f)).toBe(liveBaselineStoredBytes(f.raw) + liveDeliveryBookkeepingBytes(f.raw))
   } finally { f.close() }
 })
 
@@ -456,7 +457,7 @@ it.each(['owner', 'named'] as const)('does not revive pre-reset %s authority aft
   } finally { f.close() }
 })
 
-it('charges original baseline and delivery bytes exactly once, preserves quota on replay and refuses excess atomically', () => {
+it('charges baseline payload, metadata, ranges and delivery once, preserving quota on replay', () => {
   const first = validated(), second = validated(checkpoint('Second'), 'docs/b.md', 'second-object')
   const probe = fixture()
   let total: number
@@ -464,7 +465,7 @@ it('charges original baseline and delivery bytes exactly once, preserves quota o
     probe.moment(first); probe.moment(second, 2)
     expect(probe.storage.registerLiveDocumentBaseline(first).kind).toBe('registered')
     expect(probe.storage.registerLiveDocumentBaseline(second).kind).toBe('registered')
-    total = first.baselineBytes.byteLength + second.baselineBytes.byteLength + liveDeliveryBookkeepingBytes(probe.raw)
+    total = liveBaselineStoredBytes(probe.raw) + liveDeliveryBookkeepingBytes(probe.raw)
     expect(usage(probe)).toBe(total)
     expect(probe.raw.prepare('SELECT COUNT(*) n FROM sync_relay_live_delivery_reservations').get()!.n).toBe(2)
   } finally { probe.close() }
@@ -472,7 +473,7 @@ it('charges original baseline and delivery bytes exactly once, preserves quota o
   try {
     f.moment(first); f.moment(second, 2)
     expect(f.storage.registerLiveDocumentBaseline(first).kind).toBe('registered')
-    expect(usage(f)).toBe(first.baselineBytes.byteLength + liveDeliveryBookkeepingBytes(f.raw))
+    expect(usage(f)).toBe(liveBaselineStoredBytes(f.raw) + liveDeliveryBookkeepingBytes(f.raw))
     expect(f.storage.registerLiveDocumentBaseline(second).kind).toBe('registered')
     expect(usage(f)).toBe(total)
     const before = f.rows(), reopened = openSyncRelayStorage(f.path, { workspaceQuotaBytes: total })
@@ -496,6 +497,42 @@ it('refuses a first baseline one byte below its original payload charge', () => 
   } finally { f.close() }
 })
 
+it('refuses one byte below the full baseline charge without leaving metadata or reservations', () => {
+  const input = validated(checkpoint('Unicode', doc => {
+    for (let client = 1; client <= 24; client++) {
+      doc.clientID = client
+      doc.getMap('frontmatter').set(`field${client}`, 'é\\value')
+    }
+  }), `docs/${'é'.repeat(100)}.md`)
+  expect(input.evidence.checkpoint.ranges.length).toBeGreaterThanOrEqual(24)
+  const probe = fixture()
+  let total: number
+  try {
+    probe.moment(input)
+    expect(probe.storage.registerLiveDocumentBaseline(input).kind).toBe('registered')
+    const stored = liveBaselineStoredBytes(probe.raw)
+    expect(stored).toBeGreaterThan(input.baselineBytes.byteLength + 2000)
+    total = stored + liveDeliveryBookkeepingBytes(probe.raw)
+    expect(usage(probe)).toBe(total)
+  } finally { probe.close() }
+  for (const shortBy of [1, 0]) {
+    const f = fixture({ workspaceQuotaBytes: total - shortBy })
+    try {
+      f.moment(input)
+      const beforeUsage = usage(f), beforeBookkeeping = liveDeliveryBookkeepingBytes(f.raw)
+      if (shortBy) {
+        expect(() => f.storage.registerLiveDocumentBaseline(input)).toThrow(/workspace storage quota exceeded/)
+        expect(f.rows()).toEqual({ documents: [], ranges: [] })
+        expect(usage(f)).toBe(beforeUsage)
+        expect(liveDeliveryBookkeepingBytes(f.raw)).toBe(beforeBookkeeping)
+      } else {
+        expect(f.storage.registerLiveDocumentBaseline(input).kind).toBe('registered')
+        expect(usage(f)).toBe(total)
+      }
+    } finally { f.close() }
+  }
+})
+
 it('rolls back baseline and range inserts when the usage charge fails', () => {
   const f = fixture()
   try {
@@ -506,7 +543,7 @@ it('rolls back baseline and range inserts when the usage charge fails', () => {
     expect(usage(f)).toBe(0); expect(f.rows()).toEqual({ documents: [], ranges: [] })
     f.raw.exec('DROP TRIGGER fail_baseline_usage')
     expect(f.storage.registerLiveDocumentBaseline(input)).toMatchObject({ kind: 'registered', replayed: false })
-    expect(usage(f)).toBe(input.baselineBytes.byteLength + liveDeliveryBookkeepingBytes(f.raw))
+    expect(usage(f)).toBe(liveBaselineStoredBytes(f.raw) + liveDeliveryBookkeepingBytes(f.raw))
   } finally { f.close() }
 })
 
