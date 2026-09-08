@@ -4,7 +4,7 @@ use dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, ApplicationError, ApplicationHandle, ApplicationHostCoordinate,
-    ApplicationOwner, ApplicationResult, apply_committed,
+    ApplicationOwner, ApplicationResult, apply_committed, validate_application_binding,
 };
 use dohc_engine_collab::{CollabError, WriterDocCache};
 use dohc_engine_storage::{EngineStore, FaultInjector};
@@ -81,6 +81,31 @@ impl ActorHandle {
 }
 
 impl ActorLiveApplicationOwner {
+    /// Retire handles synchronously at the transport's close boundary.
+    pub fn retire(&self) {
+        self.token.store(false, Ordering::Release);
+    }
+
+    pub fn is_current(&self) -> bool {
+        current(&self.actor, &self.token).is_ok()
+    }
+
+    /// Check durable binding identity before the transport retires output guards.
+    pub async fn validate_binding(&self, binding: LiveObjectBinding) -> Result<(), RuntimeError> {
+        current(&self.actor, &self.token)?;
+        let workspace_id = self.workspace_id.clone();
+        let token = self.token.clone();
+        self.actor
+            .run(move |store, _| {
+                if !token.load(Ordering::Acquire) {
+                    return Err(RuntimeError::ActorUnavailable);
+                }
+                validate_application_binding(store, &workspace_id, &binding).map_err(Into::into)
+            })
+            .await?;
+        current(&self.actor, &self.token)
+    }
+
     /// Register an authenticated coordinate and prepared document binding.
     pub async fn register(
         &self,
@@ -139,6 +164,17 @@ impl ActorLiveApplicationHandle {
         event: AdmittedLiveUpdate,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<ApplicationResult, RuntimeError> {
+        self.apply_with_reservation(event, faults, None).await
+    }
+
+    /// Keep input memory charged while its command remains on the writer queue,
+    /// even when the caller stops awaiting the result.
+    pub async fn apply_with_reservation(
+        &self,
+        event: AdmittedLiveUpdate,
+        faults: Arc<dyn FaultInjector>,
+        reservation: Option<Arc<dyn Send + Sync>>,
+    ) -> Result<ApplicationResult, RuntimeError> {
         current(&self.actor, &self.token)?;
         if event.update_bytes.len() > MAX_YDOC_UPDATE_BYTES {
             return Err(ApplicationError::Collab(CollabError::UpdateTooLarge {
@@ -156,6 +192,7 @@ impl ActorLiveApplicationHandle {
                 application: self.application.clone(),
                 event,
                 faults,
+                reservation,
                 reply,
             })))
             .await
@@ -214,6 +251,7 @@ pub(super) enum Request {
         application: ApplicationHandle,
         event: AdmittedLiveUpdate,
         faults: Arc<dyn FaultInjector>,
+        reservation: Option<Arc<dyn Send + Sync>>,
         reply: Reply<ApplicationResult>,
     },
     Close {
@@ -273,6 +311,7 @@ impl Request {
                 application,
                 event,
                 faults,
+                reservation: _reservation,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {

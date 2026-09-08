@@ -22,3 +22,9 @@ export class SyncRelayBlobMissingError extends RelayError {
     super("blob_missing", message);
   }
 }
+
+export class LiveJournalAdmittedCapacityError extends Error {
+  readonly source = "admitted-cut";
+  readonly reason = "capacity-refused";
+  constructor() { super("Admitted live update journal cut exceeds the validation policy."); }
+}
