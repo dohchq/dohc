@@ -2232,17 +2232,7 @@ async fn manifest_seed(
     // in neither the listing nor the manifest).
     let policy = dohc_engine_runtime::search::read_engine_search_policy(root).files_policy;
     let manifest = ScanManifest::from_entries(entries.into_iter().map(|entry| {
-        let narrowed = policy.as_ref().is_some_and(|rules| {
-            !matches!(
-                dohc_engine_files::policy::classify_engine_file_path(&entry.path),
-                dohc_engine_files::policy::PathClassification::Secret
-            ) && !dohc_engine_runtime::search::resolve_effective_policy(
-                &entry.path,
-                Some(rules.as_slice()),
-                None,
-            )
-            .tracked
-        });
+        let narrowed = policy_excludes(&policy, &entry.path);
         let sha256 = if narrowed {
             NARROWED_SEED_SENTINEL_SHA.to_owned()
         } else {
