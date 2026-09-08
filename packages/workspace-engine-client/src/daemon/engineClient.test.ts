@@ -746,6 +746,50 @@ describe("private admitted-update upload", () => {
   });
 });
 
+describe("request cancellation", () => {
+  it("cancels a pending registration locally and keeps the connection usable", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const controller = new AbortController();
+    const cancelled = new Error("registration cancelled");
+    const registered = Promise.withResolvers<number>();
+    const wireCancelled = Promise.withResolvers<number>();
+    peer.onEnvelope = envelope => {
+      if (envelope.type === "request") registered.resolve(envelope.id);
+      if (envelope.type === "cancel") wireCancelled.resolve(envelope.id);
+    };
+    try {
+      const request = transport.sendRequest({ id: 91, method: "liveApplication.register", workspace: "ws-0000000000000001", params: {}, deadlineMs: 30_000 }, controller.signal);
+      const rejected = expect(request).rejects.toBe(cancelled);
+      const wireId = await registered.promise;
+      controller.abort(cancelled);
+      await rejected;
+      expect(await wireCancelled.promise).toBe(wireId);
+      peer.send({ type: "response", id: wireId, result: { registrationId: 7 } });
+      peer.onEnvelope = envelope => {
+        if (envelope.type === "request") peer.send({ type: "response", id: envelope.id, result: { ok: true } });
+      };
+      await expect(transport.sendRequest({ id: 92, method: "engine.ping", params: {} })).resolves.toMatchObject({ result: { ok: true } });
+    } finally { transport.close(); }
+  });
+
+  it("does not send an already cancelled registration", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const controller = new AbortController();
+    const cancelled = new Error("already cancelled");
+    controller.abort(cancelled);
+    try {
+      await expect(transport.sendRequest({ id: 93, method: "liveApplication.register", params: {}, deadlineMs: 30_000 }, controller.signal)).rejects.toBe(cancelled);
+      expect(peer.received.filter(envelope => envelope.type === "request")).toEqual([]);
+    } finally { transport.close(); }
+  });
+});
+
 describe("private application range ordering", () => {
   it.each([
     ["separated ranges from one client", [{ clientId: 7, startClock: 0, endClock: 3 }, { clientId: 7, startClock: 5, endClock: 10 }], true],

@@ -318,6 +318,17 @@ describe('Y.Doc markdown import/export', () => {
   })
 
   it.each([
+    '---\npriority: !custom foreign\n---\n\n',
+    '---\npriority: !custom high\n---\n\ninjected body\n',
+  ])('refuses forged tagged-frontmatter prefix %s', prefix => {
+    const doc = markdownToYDoc('---\npriority: !custom high\n---\n\nReal body')
+    doc.getMap('meta').set('dohcTaggedFrontmatterPrefix', prefix)
+    try {
+      expect(yDocToMarkdown(doc)).toBe('---\npriority: high\n---\n\nReal body')
+    } finally { doc.destroy() }
+  })
+
+  it.each([
     {
       name: 'out-of-safe-range integer',
       source: '9007199254740993',

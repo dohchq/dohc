@@ -1624,7 +1624,11 @@ fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatte
         Some(_) => return None,
     };
     let (value, non_finite_fields, unsupported_tag_fields) = if let Some(document) = document {
-        if let Some(mapping) = document.as_mapping() {
+        let mut root = document;
+        while let YamlOwned::Tagged(_, value) = root {
+            root = value;
+        }
+        if let Some(mapping) = root.as_mapping() {
             let non_finite_fields = mapping
                 .iter()
                 .filter_map(|(key, value)| {
