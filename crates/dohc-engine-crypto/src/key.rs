@@ -315,39 +315,20 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
         let _ = std::fs::remove_file(&temp);
         return Err(CryptoError::KeyFileMalformed);
     }
-    // NO-CLOBBER publish: `hard_link` fails atomically when the destination
-    // exists, so a concurrent minter can never REPLACE an already-published
-    // key (a replaced key would instantly orphan every row sealed under it);
-    // the losing racer adopts the winner instead. `rename` cannot give this
-    // guarantee — it replaces the destination on both Unix and Windows.
-    match std::fs::hard_link(&temp, &path) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&temp);
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            let _ = std::fs::remove_file(&temp);
-            let content = Zeroizing::new(
-                read_key_file_no_follow(&path).map_err(|_| CryptoError::KeyFileMalformed)?,
-            );
-            return SecretDataKey::parse_key_file(&content);
-        }
-        Err(_) => {
-            // Filesystems without hard links (FAT/exFAT): best-effort
-            // exists-check + rename. Non-atomic, documented — the engine's
-            // single-actor-per-workspace locking makes one minter the
-            // operating reality; this branch only serves exotic mounts.
-            if path.exists() {
-                let _ = std::fs::remove_file(&temp);
-                let content = Zeroizing::new(
-                    read_key_file_no_follow(&path).map_err(|_| CryptoError::KeyFileMalformed)?,
-                );
-                return SecretDataKey::parse_key_file(&content);
-            }
-            if std::fs::rename(&temp, &path).is_err() {
-                let _ = std::fs::remove_file(&temp);
-                return Err(CryptoError::KeyFileMalformed);
-            }
-        }
+    let publication = std::fs::hard_link(&temp, &path);
+    finish_key_publication(&path, &temp, publication)
+}
+
+fn finish_key_publication(
+    path: &std::path::Path,
+    temp: &std::path::Path,
+    publication: std::io::Result<()>,
+) -> Result<SecretDataKey, CryptoError> {
+    // Hard links publish atomically without replacing a concurrent winner.
+    // Refuse filesystems that cannot provide that guarantee.
+    let _ = std::fs::remove_file(temp);
+    if publication.is_err_and(|err| err.kind() != std::io::ErrorKind::AlreadyExists) {
+        return Err(CryptoError::KeyFileMalformed);
     }
     // Durability of the publish itself: fsync the parent directory where the
     // platform allows it (std cannot open directories on Windows; NTFS
@@ -363,7 +344,7 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
     // Return what is durably at the path — under any interleaving the
     // published file is the single source of truth.
     let content =
-        Zeroizing::new(read_key_file_no_follow(&path).map_err(|_| CryptoError::KeyFileMalformed)?);
+        Zeroizing::new(read_key_file_no_follow(path).map_err(|_| CryptoError::KeyFileMalformed)?);
     SecretDataKey::parse_key_file(&content)
 }
 
@@ -500,5 +481,76 @@ mod tests {
         assert_eq!(loaded, key);
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "a restored/hand-copied key is re-tightened");
+    }
+
+    #[test]
+    fn failed_atomic_publication_never_installs_or_replaces_a_key() {
+        for kind in [
+            std::io::ErrorKind::Unsupported,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            for has_winner in [false, true] {
+                let dir = dohc_test_scratch::ScratchDir::new_named("key-publish-failure").unwrap();
+                let path = dir.join("key");
+                let temp = dir.join("pending-key");
+                let candidate = SecretDataKey::from_bytes(&[1; SECRET_KEY_BYTES]).unwrap();
+                let winner = SecretDataKey::from_bytes(&[2; SECRET_KEY_BYTES]).unwrap();
+                std::fs::write(&temp, candidate.to_key_file()).unwrap();
+                if has_winner {
+                    std::fs::write(&path, winner.to_key_file()).unwrap();
+                }
+
+                let result = finish_key_publication(&path, &temp, Err(std::io::Error::from(kind)));
+
+                assert_eq!(result.unwrap_err(), CryptoError::KeyFileMalformed);
+                assert!(
+                    !temp.exists(),
+                    "failed attempt must release its temporary file"
+                );
+                if has_winner {
+                    assert_eq!(
+                        std::fs::read_to_string(&path).unwrap(),
+                        winner.to_key_file()
+                    );
+                } else {
+                    assert!(
+                        !path.exists(),
+                        "failed atomic publication must not install a key"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_minters_all_adopt_the_published_key() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("key-publish-race").unwrap();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let keys = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    let start = std::sync::Arc::clone(&start);
+                    let root = &dir;
+                    scope.spawn(move || {
+                        start.wait();
+                        create_key_file(root).expect("mint or adopt the winner")
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let published = load_key_file(&dir).unwrap().expect("published key");
+        for key in keys {
+            assert_eq!(key, published);
+        }
+        let directory = dir
+            .join(SECRET_KEY_FILE_RELATIVE)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert_eq!(std::fs::read_dir(directory).unwrap().count(), 1);
     }
 }
