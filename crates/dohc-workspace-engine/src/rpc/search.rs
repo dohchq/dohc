@@ -1,7 +1,6 @@
 use crate::EngineService;
 use crate::rpc::chats::chat_cursor_binding;
 use crate::rpc::error::map_runtime;
-use crate::rpc::error::wire;
 use crate::rpc::reads::byte_budget_cut_serialized;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::now_ms;
@@ -42,8 +41,8 @@ struct SearchPageCursor {
 }
 
 fn encode_search_cursor(cursor: &SearchPageCursor) -> Result<String, WireError> {
-    let bytes =
-        serde_json::to_vec(cursor).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+    let bytes = serde_json::to_vec(cursor)
+        .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
@@ -55,7 +54,7 @@ fn decode_search_cursor(
     let Some(encoded) = encoded else {
         return Ok(None);
     };
-    let invalid = || wire(ErrorCode::InvalidParams, "invalid-cursor");
+    let invalid = || WireError::new(ErrorCode::InvalidParams, "invalid-cursor");
     let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| invalid())?;
     let cursor: SearchPageCursor = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
     if cursor.version != 3
@@ -107,10 +106,13 @@ impl EngineService {
         if !(1..=i64::try_from(dohc_engine_runtime::search::MAX_RESULT_LIMIT).unwrap_or(i64::MAX))
             .contains(&limit)
         {
-            return Err(wire(ErrorCode::InvalidParams, "invalid-parameters"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid-parameters",
+            ));
         }
         let limit = usize::try_from(limit)
-            .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-parameters"))?;
+            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-parameters"))?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let active_version_id = Self::read_under_ctx(
@@ -192,7 +194,7 @@ impl EngineService {
             .collect();
         let included = byte_budget_cut_serialized(&row_values, SEARCH_PAGE_BYTE_BUDGET);
         if included == 0 && !row_values.is_empty() {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::LimitExceeded,
                 "search-result-exceeds-wire-limit",
             ));
@@ -208,7 +210,7 @@ impl EngineService {
             } else {
                 page.continuation
             }
-            .ok_or_else(|| wire(ErrorCode::Internal, "search-page-made-no-progress"))?;
+            .ok_or_else(|| WireError::new(ErrorCode::Internal, "search-page-made-no-progress"))?;
             Some(encode_search_cursor(&SearchPageCursor {
                 version: 3,
                 binding,
@@ -271,7 +273,7 @@ impl EngineService {
             .collect();
         let included = byte_budget_cut_serialized(&row_values, GRANULAR_CHAT_RESPONSE_BYTE_BUDGET);
         if included == 0 && !row_values.is_empty() {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::LimitExceeded,
                 "granular-chat-row-exceeds-wire-limit",
             ));
@@ -304,7 +306,10 @@ impl EngineService {
             .iter()
             .any(|version| version.version_id == params.version_id)
         {
-            return Err(wire(ErrorCode::InvalidParams, "version-not-found"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "version-not-found",
+            ));
         }
         open.actor
             .ensure_search_index(

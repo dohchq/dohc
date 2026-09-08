@@ -1,5 +1,4 @@
 use crate::EngineService;
-use crate::rpc::error::wire;
 use crate::rpc::reads::byte_budget_cut_serialized;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::parse;
@@ -122,7 +121,7 @@ fn decode_collection_wire_numbers(value: &mut Value) -> Result<(), WireError> {
                     .get(COLLECTION_INTEGER_MARKER)
                     .and_then(Value::as_str)
                     .ok_or_else(|| {
-                        wire(
+                        WireError::new(
                             ErrorCode::InvalidParams,
                             "collection-integer-marker-invalid",
                         )
@@ -146,7 +145,7 @@ fn decode_collection_wire_numbers(value: &mut Value) -> Result<(), WireError> {
                     None
                 }
                 .ok_or_else(|| {
-                    wire(
+                    WireError::new(
                         ErrorCode::InvalidParams,
                         "collection-integer-marker-invalid",
                     )
@@ -157,7 +156,7 @@ fn decode_collection_wire_numbers(value: &mut Value) -> Result<(), WireError> {
                     .get(COLLECTION_FLOAT_MARKER)
                     .and_then(Value::as_str)
                     .ok_or_else(|| {
-                        wire(ErrorCode::InvalidParams, "collection-float-marker-invalid")
+                        WireError::new(ErrorCode::InvalidParams, "collection-float-marker-invalid")
                     })?;
                 let number = canonical_collection_decimal(decimal)
                     .then(|| decimal.parse::<f64>().ok())
@@ -171,7 +170,7 @@ fn decode_collection_wire_numbers(value: &mut Value) -> Result<(), WireError> {
                     .and_then(serde_json::Number::from_f64)
                     .map(Value::Number)
                     .ok_or_else(|| {
-                        wire(ErrorCode::InvalidParams, "collection-float-marker-invalid")
+                        WireError::new(ErrorCode::InvalidParams, "collection-float-marker-invalid")
                     })?;
                 *value = number;
             } else {
@@ -224,8 +223,8 @@ fn elide_overdepth_collection_values(value: &mut Value) {
 }
 
 fn collection_response_value(response: impl Serialize) -> Result<Value, WireError> {
-    let mut response =
-        serde_json::to_value(response).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+    let mut response = serde_json::to_value(response)
+        .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
     elide_overdepth_collection_values(&mut response);
     encode_collection_wire_numbers(&mut response);
     Ok(response)
@@ -247,8 +246,8 @@ fn collection_query_response_value(
             }
         }
     }
-    let mut response =
-        serde_json::to_value(response).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+    let mut response = serde_json::to_value(response)
+        .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
     elide_overdepth_collection_values(&mut response);
     encode_collection_wire_numbers(&mut response);
     Ok(response)
@@ -337,10 +336,10 @@ pub(super) fn collection_in_band_cap(ctx: &RequestContext) -> usize {
 
 fn in_band_collection_response(response: Value, cap: usize) -> Result<Value, WireError> {
     let encoded_len = serde_json::to_vec(&response)
-        .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?
+        .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?
         .len();
     if encoded_len > cap {
-        return Err(wire(
+        return Err(WireError::new(
             ErrorCode::LimitExceeded,
             "collection-response-exceeds-wire-limit",
         ));
@@ -424,18 +423,18 @@ impl EngineService {
     ) -> Result<(Value, Option<BlobEgress>), WireError> {
         let cap = collection_in_band_cap(ctx);
         let bytes = serde_json::to_vec(&response)
-            .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+            .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
         if bytes.len() <= cap {
             return Ok((response, None));
         }
         if bytes.len() > dohc_engine_storage::MAX_BLOB_BYTES || !ctx.has_capability("blobs") {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::LimitExceeded,
                 "collection-response-exceeds-wire-limit",
             ));
         }
-        let byte_length =
-            i64::try_from(bytes.len()).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+        let byte_length = i64::try_from(bytes.len())
+            .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
         let byte_permit = self
             .blob_egress_budget
             .reserve(byte_length, cancellation, operation)
@@ -469,7 +468,7 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: CollectionsListParams = parse(params)?;
         if params.limit == 0 || params.limit > MAX_COLLECTION_QUERY_LIMIT {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "collection-list-limit-out-of-range",
             ));
@@ -498,7 +497,7 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: CollectionsListPendingAdoptionsParams = parse(params)?;
         if params.limit == 0 || params.limit > MAX_COLLECTION_QUERY_LIMIT {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "collection-pending-adoptions-limit-out-of-range",
             ));
@@ -535,7 +534,7 @@ impl EngineService {
                 .collections_get(open.workspace_id.clone(), params.collection_path),
         )
         .await?
-        .ok_or_else(|| wire(ErrorCode::InvalidParams, "collection-not-found"))?;
+        .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "collection-not-found"))?;
         self.collection_response_with_blob(
             ctx,
             &cancellation,
@@ -555,13 +554,13 @@ impl EngineService {
     ) -> Result<(Value, Option<BlobEgress>), WireError> {
         let mut params: CollectionsQueryParams = parse(params)?;
         if params.limit == 0 || params.limit > MAX_COLLECTION_QUERY_LIMIT {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "collection-query-limit-out-of-range",
             ));
         }
         if params.sort.len() > MAX_COLLECTION_QUERY_SORTS {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "collection-query-sort-limit-exceeded",
             ));
@@ -586,7 +585,7 @@ impl EngineService {
             ),
         )
         .await?
-        .ok_or_else(|| wire(ErrorCode::InvalidParams, "collection-not-found"))?;
+        .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "collection-not-found"))?;
         self.collection_response_with_blob(
             ctx,
             &cancellation,
@@ -606,7 +605,7 @@ impl EngineService {
     ) -> Result<(Value, Option<BlobEgress>), WireError> {
         let params: CollectionsGetRecordParams = parse(params)?;
         if params.history_limit == 0 || params.history_limit > MAX_COLLECTION_HISTORY_LIMIT {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "collection-history-limit-out-of-range",
             ));
@@ -625,7 +624,7 @@ impl EngineService {
             ),
         )
         .await?
-        .ok_or_else(|| wire(ErrorCode::InvalidParams, "collection-record-not-found"))?;
+        .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "collection-record-not-found"))?;
         let mut response = collection_response_value(result)?;
         bound_collection_history_page(&mut response);
         self.collection_response_with_blob(
