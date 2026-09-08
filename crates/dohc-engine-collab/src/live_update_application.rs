@@ -23,6 +23,11 @@ use std::sync::{Arc, Mutex};
 
 const SAFE: i64 = 9_007_199_254_740_991;
 
+mod bootstrap;
+pub use bootstrap::{
+    bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApplicationError {
     #[error("invalid live application input: {0}")]
@@ -282,12 +287,6 @@ impl LiveUpdateHostApplicationAck {
     }
 }
 
-fn canonical_binding(binding: &LiveObjectBinding) -> Result<(), ApplicationError> {
-    if binding.clone().normalized().map_err(invalid)? != *binding {
-        return Err(invalid("noncanonical binding"));
-    }
-    Ok(())
-}
 fn canonical_ranges(ranges: &[LiveUpdateStructRange]) -> Result<(), ApplicationError> {
     let mut previous: Option<&LiveUpdateStructRange> = None;
     for range in ranges {
@@ -320,7 +319,7 @@ impl AdmittedLiveUpdate {
     pub fn validate(&self) -> Result<(), ApplicationError> {
         let accepted = &self.metadata.accepted;
         accepted.receipt.validate()?;
-        canonical_binding(&accepted.binding)?;
+        accepted.binding.validate_canonical().map_err(invalid)?;
         accepted.authority.validate()?;
         integer(accepted.received_at_ms, 0, SAFE)?;
         canonical_ranges(&self.metadata.first_seen)?;
@@ -396,7 +395,8 @@ pub fn parse_application_ack(
     Ok(ack)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApplicationHostCoordinate {
     pub host_id: String,
     pub host_epoch: i64,
@@ -463,7 +463,7 @@ impl ApplicationOwner {
             return Err(invalid("relay namespace is empty"));
         }
         coordinate.validate()?;
-        canonical_binding(&binding)?;
+        binding.validate_canonical().map_err(invalid)?;
         if binding.workspace_id != self.workspace_id {
             return Err(ApplicationError::WorkspaceMismatch);
         }
@@ -586,7 +586,7 @@ fn read_binding(
             let available: i64 = row.get(8)?;
             Ok((binding,coordinate,available))
         }).optional().map_err(read_sql)?.map(|(binding,coordinate,available)| {
-            canonical_binding(&binding).map_err(|_| ApplicationError::Corrupt)?;
+            binding.validate_canonical().map_err(|_| ApplicationError::Corrupt)?;
             coordinate.validate().map_err(|_| ApplicationError::Corrupt)?;
             if !matches!(available,0|1) { return Err(ApplicationError::Corrupt); }
             Ok((binding,coordinate,available==1))
@@ -657,7 +657,7 @@ pub fn apply_committed(
                     ApplicationPending::ApplicabilityUnavailable,
                 ));
             }
-            let Some(marker) = durable::read_marker_in_tx(tx, &key)? else {
+            let Some(marker) = durable::read_marker_in(tx, &key)? else {
                 return Ok(ApplicationResult::Pending(
                     ApplicationPending::BaselineUnavailable,
                 ));
@@ -699,7 +699,7 @@ pub fn apply_committed(
             compaction_due = append.seq.max(marker.head_update_seq) - marker.head_snapshot_seq
                 >= i64::from(DEFAULT_COMPACTION_THRESHOLD);
             // Content dedupe bypasses the append's parity gate. Always reconstruct.
-            if durable::load_doc_in_tx(tx, &key)?.has_missing_updates() {
+            if durable::load_doc_in(tx, &key)?.has_missing_updates() {
                 return Err(TransactionError::DependenciesUnresolved);
             }
             integer(append.seq, 1, SAFE)?;
@@ -1191,7 +1191,7 @@ mod tests {
     }
     fn document(store: &EngineStore) -> Ydoc {
         store
-            .read_with(|conn| durable::load_doc_from_connection(conn, &key()))
+            .read_with(|conn| durable::load_doc_in(conn, &key()))
             .unwrap()
     }
     fn reopen(store: EngineStore, dir: &ScratchDir) -> EngineStore {

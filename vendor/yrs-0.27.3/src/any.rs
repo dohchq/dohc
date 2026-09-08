@@ -41,7 +41,14 @@ impl Any {
             // CASE 126: null
             126 => Any::Null,
             // CASE 125: integer
-            125 => Any::Number(decoder.read_var::<i64>()? as f64),
+            125 => {
+                let value = decoder.read_var_signed::<i64>()?;
+                Any::Number(if value.value() == 0 && value.is_negative() {
+                    -0.0
+                } else {
+                    value.value() as f64
+                })
+            }
             // CASE 124: float32
             124 => Any::Number(decoder.read_f32()? as f64),
             // CASE 123: float64
@@ -141,7 +148,10 @@ impl Any {
                 {
                     // TYPE 125: INTEGER
                     encoder.write_u8(125);
-                    encoder.write_var(num_truncated as i64)
+                    encoder.write_var_signed(&crate::encoding::varint::Signed::new(
+                        num_truncated as i64,
+                        num.is_sign_negative(),
+                    ))
                 } else if ((*num as f32) as f64) == *num {
                     // TYPE 124: FLOAT32
                     encoder.write_u8(124);

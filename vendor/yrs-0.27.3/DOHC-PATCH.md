@@ -1,4 +1,4 @@
-# Yrs source for bounded text projection
+# Local Yrs changes
 
 For maintainers updating the Yrs dependency: this directory contains the
 `yrs` 0.27.3 crates.io archive, with SHA-256
@@ -19,3 +19,8 @@ Visitor regression tests live in `crates/yrs-spike/tests/text_diff_visitor.rs`;
 projection budget tests live in `crates/dohc-engine-collab/src/ydoc.rs`.
 Both run in the canonical workspace Rust gate. This dependency is excluded
 from workspace membership and selected through the root Cargo patch.
+
+`src/any.rs` uses the existing signed-varint reader and writer for Any integers.
+This preserves negative zero across Yjs import, snapshot encoding, and reopen.
+Ordinary integer values keep their existing bytes. Regression tests cover
+signed zero, safe integer extrema, and the shared bootstrap projection vectors.

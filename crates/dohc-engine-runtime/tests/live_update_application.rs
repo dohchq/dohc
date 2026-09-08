@@ -255,10 +255,7 @@ async fn committed_application_compacts_and_preserves_replay_through_fold_failur
         let store = EngineStore::open(&db, 99).unwrap();
         let restored = store
             .read_with(|conn| {
-                durable::load_doc_from_connection(
-                    conn,
-                    &DocKey::new("workspace", "main", "one").unwrap(),
-                )
+                durable::load_doc_in(conn, &DocKey::new("workspace", "main", "one").unwrap())
             })
             .unwrap();
         assert!(
@@ -581,10 +578,7 @@ async fn dependencies_and_commit_crashes_recover_through_the_real_actor() {
             );
             let doc = store
                 .read_with(|conn| {
-                    durable::load_doc_from_connection(
-                        conn,
-                        &DocKey::new("workspace", "main", "one").unwrap(),
-                    )
+                    durable::load_doc_in(conn, &DocKey::new("workspace", "main", "one").unwrap())
                 })
                 .unwrap();
             assert!(
@@ -673,6 +667,61 @@ async fn owner_drop_suppresses_a_committed_ack_and_a_queued_request() {
 }
 
 struct PanicCommit;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_caller_keeps_queued_input_memory_reserved_until_writer_disposal() {
+    struct Reservation(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Reservation {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let (_scratch, db, supervisor, actor) = fixture();
+    let (owner, handle) = registered(&actor).await;
+    let (entered, at_commit) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let held = Arc::new(HoldCommit {
+        entered: Mutex::new(Some(entered)),
+        release: Mutex::new(wait),
+    });
+    let in_flight = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .apply(event("held", 1, "one", vec![0, 0]), held)
+                .await
+        }
+    });
+    at_commit.await.unwrap();
+    let disposed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reservation = Arc::new(Reservation(disposed.clone()));
+    let mut queued = Box::pin(handle.apply_with_reservation(
+        event("queued", 2, "one", vec![0, 0]),
+        Arc::new(NoFaults),
+        Some(reservation),
+    ));
+    assert!(
+        std::future::poll_fn(|context| std::task::Poll::Ready(
+            queued.as_mut().poll(context).is_pending()
+        ))
+        .await
+    );
+    drop(queued);
+    assert!(!disposed.load(std::sync::atomic::Ordering::SeqCst));
+    owner.retire();
+    release.send(()).unwrap();
+    assert!(matches!(
+        in_flight.await.unwrap(),
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    let _replacement = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    assert!(disposed.load(std::sync::atomic::Ordering::SeqCst));
+    supervisor.close(&db).unwrap();
+}
+
 impl FaultInjector for PanicCommit {
     fn poll(&self, point: FaultPoint) -> FaultAction {
         assert_ne!(

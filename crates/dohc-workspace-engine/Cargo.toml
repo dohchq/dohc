@@ -40,15 +40,15 @@ tokio = { version = "1", features = [
 libc = "0.2"
 
 [features]
-# Compiles the test-only probe and marker hooks (`CaptureApplyProbe`,
-# `*_for_harness`); production builds must not enable it.
+# Enables capture probe state and controls plus marker hooks (`*_for_harness`).
+# The probe type exists in all builds; production builds must not enable this feature.
 harness = []
 
 [dev-dependencies]
 # `test-util` gives the driver-loop tests paused virtual time, so they can
 # assert what the supervision loop actually WAITS on (a 30s terminal probe
 # costs the suite nothing) instead of asserting on the tracker beside it.
-tokio = { version = "1", features = ["test-util"] }
+tokio = { version = "1", features = ["test-util", "net"] }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 proptest = "1"
 # Self-dependency so integration tests compile the library with the

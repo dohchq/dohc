@@ -25,6 +25,7 @@
 
 use crate::capture_sink::{
     CaptureProvenance, CapturedRoot, PolicyState, SelfWriteSuppression, StoreCaptureSink,
+    StoreCaptureSinkParams,
 };
 use crate::{CAPTURE_MOMENT_RECORDED_EVENT, EngineEvents};
 use dohc_engine_collab::LeaseRegistry;
@@ -51,13 +52,34 @@ pub(crate) type ApplyGate = Arc<tokio::sync::Mutex<()>>;
 /// actor work is large enough for the background tail to be user-visible.
 pub const EARLY_IMPORT_MIN_ADDED_FILES: usize = 1_000;
 
-/// Deterministic integration-test seam for proving a switch drains an apply
-/// that has already prepared a reconcile plan. Production builds do not
-/// compile the seam.
-#[cfg(feature = "harness")]
-#[derive(Clone, Default)]
+/// Test controls for capture, workspace lifecycle, and version fences.
+/// The type exists in every build; production builds allocate no probe state.
+#[derive(Clone)]
+#[cfg_attr(any(test, feature = "harness"), derive(Default))]
 pub struct CaptureApplyProbe {
+    #[cfg(feature = "harness")]
     inner: Arc<CaptureApplyProbeInner>,
+    #[cfg(any(test, feature = "harness"))]
+    open_install_armed: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(any(test, feature = "harness"))]
+    open_install_reached: Arc<tokio::sync::Notify>,
+    #[cfg(any(test, feature = "harness"))]
+    open_install_release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(any(test, feature = "harness"))]
+impl CaptureApplyProbe {
+    pub fn pause_next_open_install(&self) {
+        self.open_install_armed.store(true, Ordering::Release);
+    }
+
+    pub async fn wait_until_open_install_paused(&self) {
+        self.open_install_reached.notified().await;
+    }
+
+    pub fn release_open_install(&self) {
+        self.open_install_release.notify_one();
+    }
 }
 
 #[cfg(feature = "harness")]
@@ -249,115 +271,164 @@ impl CaptureApplyProbe {
     pub fn layer_start_count(&self) -> u64 {
         self.inner.layer_start_count.load(Ordering::Acquire)
     }
+}
 
-    async fn pause_if_armed(&self) {
-        if self.inner.armed.swap(false, Ordering::AcqRel) {
-            self.inner.entered.add_permits(1);
-            self.inner
-                .release
-                .acquire()
-                .await
-                .expect("capture apply probe remains open")
-                .forget();
+impl CaptureApplyProbe {
+    pub(crate) fn pause_open_install_if_armed(&self) {
+        #[cfg(any(test, feature = "harness"))]
+        if self.open_install_armed.swap(false, Ordering::AcqRel) {
+            self.open_install_reached.notify_one();
+            // The open guard must stay owned here after caller cancellation.
+            tokio::runtime::Handle::current().block_on(self.open_install_release.notified());
         }
     }
 
-    async fn pause_initial_if_armed(&self, cancel: &CancellationToken) {
-        if self.inner.armed.swap(false, Ordering::AcqRel) {
-            self.inner.entered.add_permits(1);
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => {}
-                permit = self.inner.release.acquire() => {
-                    permit.expect("capture apply probe remains open").forget();
+    async fn pause_if_armed(&self) {
+        #[cfg(feature = "harness")]
+        {
+            if self.inner.armed.swap(false, Ordering::AcqRel) {
+                self.inner.entered.add_permits(1);
+                self.inner
+                    .release
+                    .acquire()
+                    .await
+                    .expect("capture apply probe remains open")
+                    .forget();
+            }
+        }
+    }
+
+    async fn pause_initial_if_armed(&self, _cancel: &CancellationToken) {
+        #[cfg(feature = "harness")]
+        {
+            if self.inner.armed.swap(false, Ordering::AcqRel) {
+                self.inner.entered.add_permits(1);
+                tokio::select! {
+                    biased;
+                    () = _cancel.cancelled() => {}
+                    permit = self.inner.release.acquire() => {
+                        permit.expect("capture apply probe remains open").forget();
+                    }
                 }
             }
         }
     }
 
     pub(crate) async fn pause_version_fence_if_armed(&self) {
-        if self.inner.fence_armed.swap(false, Ordering::AcqRel) {
-            self.inner.fence_entered.add_permits(1);
-            self.inner
-                .fence_release
-                .acquire()
-                .await
-                .expect("version fence probe remains open")
-                .forget();
+        #[cfg(feature = "harness")]
+        {
+            if self.inner.fence_armed.swap(false, Ordering::AcqRel) {
+                self.inner.fence_entered.add_permits(1);
+                self.inner
+                    .fence_release
+                    .acquire()
+                    .await
+                    .expect("version fence probe remains open")
+                    .forget();
+            }
         }
     }
 
     pub(crate) fn observe_version_fence_wait_if_armed(&self) {
-        if self.inner.fence_wait_armed.swap(false, Ordering::AcqRel) {
-            self.inner.fence_wait_entered.add_permits(1);
+        #[cfg(feature = "harness")]
+        {
+            if self.inner.fence_wait_armed.swap(false, Ordering::AcqRel) {
+                self.inner.fence_wait_entered.add_permits(1);
+            }
         }
     }
 
     pub(crate) async fn pause_version_commit_if_armed(&self) {
-        if self.inner.commit_armed.swap(false, Ordering::AcqRel) {
-            self.inner.commit_entered.add_permits(1);
-            self.inner
-                .commit_release
-                .acquire()
-                .await
-                .expect("version commit probe remains open")
-                .forget();
+        #[cfg(feature = "harness")]
+        {
+            if self.inner.commit_armed.swap(false, Ordering::AcqRel) {
+                self.inner.commit_entered.add_permits(1);
+                self.inner
+                    .commit_release
+                    .acquire()
+                    .await
+                    .expect("version commit probe remains open")
+                    .forget();
+            }
         }
     }
 
     pub(crate) fn observe_gate_wait_if_armed(&self) {
-        if self.inner.gate_wait_armed.swap(false, Ordering::AcqRel) {
-            self.inner.gate_wait_entered.add_permits(1);
+        #[cfg(feature = "harness")]
+        {
+            if self.inner.gate_wait_armed.swap(false, Ordering::AcqRel) {
+                self.inner.gate_wait_entered.add_permits(1);
+            }
         }
     }
 
     fn pause_worker_if_armed(&self) {
-        if !self.inner.worker_armed.swap(false, Ordering::AcqRel) {
-            return;
-        }
-        self.inner.worker_entered.add_permits(1);
-        let (release, wake) = &self.inner.worker_release;
-        let mut released = release
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while !*released {
-            released = wake
-                .wait(released)
+        #[cfg(feature = "harness")]
+        {
+            if !self.inner.worker_armed.swap(false, Ordering::AcqRel) {
+                return;
+            }
+            self.inner.worker_entered.add_permits(1);
+            let (release, wake) = &self.inner.worker_release;
+            let mut released = release
+                .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = wake
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            *released = false;
         }
-        *released = false;
     }
 
     fn fail_before_worker_if_armed(&self) -> bool {
-        self.inner
-            .fail_before_worker_armed
-            .swap(false, Ordering::AcqRel)
+        #[cfg(feature = "harness")]
+        {
+            self.inner
+                .fail_before_worker_armed
+                .swap(false, Ordering::AcqRel)
+        }
+        #[cfg(not(feature = "harness"))]
+        {
+            false
+        }
     }
 
-    async fn initial_settle_deadline(&self) {
+    async fn take_manual_initial_deadline(&self) -> bool {
+        #[cfg(feature = "harness")]
         if self
             .inner
             .manual_initial_deadline_armed
             .swap(false, Ordering::AcqRel)
         {
             self.inner.manual_initial_deadline.notified().await;
-        } else {
-            tokio::time::sleep(EARLY_IMPORT_APPLY_DEADLINE).await;
+            return true;
         }
+        false
     }
 
     pub(crate) fn record_version_scan(&self) {
-        self.inner.version_scan_count.fetch_add(1, Ordering::AcqRel);
+        #[cfg(feature = "harness")]
+        {
+            self.inner.version_scan_count.fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     fn record_manifest_refresh(&self) {
-        self.inner
-            .manifest_refresh_count
-            .fetch_add(1, Ordering::AcqRel);
+        #[cfg(feature = "harness")]
+        {
+            self.inner
+                .manifest_refresh_count
+                .fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     fn record_layer_start(&self) {
-        self.inner.layer_start_count.fetch_add(1, Ordering::AcqRel);
+        #[cfg(feature = "harness")]
+        {
+            self.inner.layer_start_count.fetch_add(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -756,359 +827,13 @@ fn may_publish_early_import(status: &DriverStatus) -> bool {
 }
 
 #[cfg(test)]
-mod startup_contract_tests {
-    use super::*;
-
-    fn plan_with_ops(ops: Vec<CaptureOp>) -> ReconcileRun {
-        ReconcileRun::Completed(ReconcilePlan {
-            from_generation: ScanGeneration(0),
-            to_generation: ScanGeneration(1),
-            ops,
-            retained_over_cap: Vec::new(),
-            unconfirmed_removed: Vec::new(),
-            degraded: false,
-            degraded_paths: Vec::new(),
-            prepared_from_dirty: true,
-            dirty_epoch: 1,
-        })
-    }
-
-    fn ingest(index: usize, reason: IngestReason) -> CaptureOp {
-        CaptureOp::Ingest {
-            path: format!("note-{index}.md"),
-            size: 4,
-            sha256: "a".repeat(64),
-            mtime_ms: 1,
-            media_type: "text/markdown",
-            reason,
-        }
-    }
-
-    fn added_plan(count: usize) -> ReconcileRun {
-        plan_with_ops(
-            (0..count)
-                .map(|index| ingest(index, IngestReason::Added))
-                .collect(),
-        )
-    }
-
-    #[test]
-    fn early_import_starts_at_the_named_file_count_boundary() {
-        assert!(!is_safe_fresh_import_plan(&added_plan(
-            EARLY_IMPORT_MIN_ADDED_FILES - 1
-        )));
-        assert!(is_safe_fresh_import_plan(&added_plan(
-            EARLY_IMPORT_MIN_ADDED_FILES
-        )));
-        assert!(is_safe_fresh_import_plan(&added_plan(
-            EARLY_IMPORT_MIN_ADDED_FILES + 1
-        )));
-    }
-
-    #[test]
-    fn only_a_large_all_added_clean_plan_can_import_early() {
-        let changed = (0..EARLY_IMPORT_MIN_ADDED_FILES)
-            .map(|index| ingest(index, IngestReason::Changed))
-            .collect();
-        assert!(!is_safe_fresh_import_plan(&plan_with_ops(changed)));
-        assert!(!is_safe_fresh_import_plan(&plan_with_ops(vec![
-            CaptureOp::Retire {
-                path: "note.md".to_owned(),
-            }
-        ])));
-        assert!(!is_safe_fresh_import_plan(&ReconcileRun::Converged));
-
-        let ReconcileRun::Completed(mut degraded) = added_plan(EARLY_IMPORT_MIN_ADDED_FILES) else {
-            unreachable!();
-        };
-        degraded.degraded = true;
-        assert!(!is_safe_fresh_import_plan(&ReconcileRun::Completed(
-            degraded
-        )));
-    }
-
-    #[test]
-    fn ready_is_a_one_way_startup_barrier() {
-        let status = DriverStatus::default();
-        status.set_initial_phase(CapturePhase::Importing);
-        status.mark_initial_ready();
-        status.mark_initial_degraded();
-        let snapshot = status.snapshot();
-        assert_eq!(snapshot.phase, CapturePhase::Ready);
-        assert!(snapshot.degraded);
-    }
-
-    #[test]
-    fn a_restarted_layer_cannot_republish_the_startup_import_phase() {
-        let status = DriverStatus::default();
-        assert!(may_publish_early_import(&status));
-        status.mark_initial_degraded();
-        assert!(!may_publish_early_import(&status));
-        status.set_initial_phase(CapturePhase::Importing);
-        assert!(!may_publish_early_import(&status));
-        status.mark_initial_ready();
-        assert!(!may_publish_early_import(&status));
-    }
-}
+mod startup_contract_tests;
 
 #[cfg(test)]
-mod restart_schedule_tests {
-    use super::*;
-
-    #[test]
-    fn a_healthy_driver_polls_at_the_fast_cadence() {
-        assert_eq!(restart_delay(0), DRIVE_INTERVAL);
-        assert!(!is_terminal(0));
-    }
-
-    #[test]
-    fn the_backoff_doubles_and_then_caps() {
-        let schedule: Vec<_> = (1..=7).map(restart_delay).collect();
-        assert_eq!(
-            schedule,
-            vec![
-                std::time::Duration::from_millis(500),
-                std::time::Duration::from_secs(1),
-                std::time::Duration::from_secs(2),
-                std::time::Duration::from_secs(4),
-                std::time::Duration::from_secs(8),
-                // Capped from here on: 16s would exceed the cap.
-                RESTART_BACKOFF_CAP,
-                RESTART_BACKOFF_CAP,
-            ]
-        );
-        // Strictly non-decreasing everywhere, so no schedule edit can
-        // accidentally make a later failure retry sooner than an earlier one.
-        for failures in 1..64u32 {
-            assert!(
-                restart_delay(failures + 1) >= restart_delay(failures),
-                "delay went backwards at {failures}"
-            );
-        }
-    }
-
-    #[test]
-    fn escalation_is_bounded_and_the_terminal_probe_still_runs() {
-        assert!(!is_terminal(MAX_RESTART_ATTEMPTS - 1));
-        assert!(is_terminal(MAX_RESTART_ATTEMPTS));
-        assert!(is_terminal(u32::MAX));
-        // A terminal driver keeps probing: the interval must be finite and
-        // slow, never zero (a hot loop) and never absent (a graveyard).
-        assert_eq!(restart_delay(MAX_RESTART_ATTEMPTS), TERMINAL_PROBE_INTERVAL);
-        assert_eq!(restart_delay(u32::MAX), TERMINAL_PROBE_INTERVAL);
-        assert!(TERMINAL_PROBE_INTERVAL > DRIVE_INTERVAL);
-        // The terminal probe must be distinguishable from the capped backoff,
-        // or deleting the terminal branch of `restart_delay` would leave every
-        // assertion above satisfied by the cap alone — which is exactly what
-        // an earlier revision of this test did.
-        assert_ne!(
-            TERMINAL_PROBE_INTERVAL, RESTART_BACKOFF_CAP,
-            "a terminal probe indistinguishable from the cap is untestable"
-        );
-        assert_eq!(restart_delay(MAX_RESTART_ATTEMPTS - 1), RESTART_BACKOFF_CAP);
-    }
-
-    #[test]
-    fn the_whole_escalation_stays_within_a_couple_of_minutes() {
-        // The point of the bound: reaching terminal must take long enough that
-        // no transient blip gets there, and short enough to be reported while
-        // the user is still at their desk.
-        let total: std::time::Duration = (1..MAX_RESTART_ATTEMPTS).map(restart_delay).sum();
-        assert!(
-            total >= std::time::Duration::from_secs(25),
-            "escalation too eager: {total:?}"
-        );
-        assert!(
-            total <= std::time::Duration::from_secs(150),
-            "escalation too slow to report: {total:?}"
-        );
-    }
-}
+mod restart_schedule_tests;
 
 #[cfg(test)]
-mod supervision_tests {
-    use super::*;
-
-    /// Drive a sequence of tick observations the way `drive` does, returning
-    /// the delay the loop would wait before each subsequent pass. This is the
-    /// layer the real defects lived at: asserting on `RestartTracker` alone
-    /// missed both, because the loop chose its delay independently.
-    fn run(observations: &[TickObservation]) -> (Vec<std::time::Duration>, DriverStatus, u32) {
-        let status = DriverStatus::default();
-        let mut restart = RestartTracker::default();
-        let mut delays = Vec::new();
-        for observation in observations {
-            let _ = restart.observe(*observation, &status);
-            delays.push(restart.delay());
-        }
-        let failures = restart.failures();
-        (delays, status, failures)
-    }
-
-    #[test]
-    fn a_watch_that_dies_every_tick_backs_off_instead_of_rescanning_hot() {
-        // The regression: a watch that dies right after every start used to
-        // rebuild the layer (actor + watcher + full baseline scan) every
-        // 500ms forever, because the drop-and-restart path skipped the sleep.
-        let (delays, status, _) = run(&[TickObservation::WatchLost; 4]);
-        assert_eq!(
-            delays,
-            vec![
-                std::time::Duration::from_millis(500),
-                std::time::Duration::from_secs(1),
-                std::time::Duration::from_secs(2),
-                std::time::Duration::from_secs(4),
-            ],
-            "each repeated watch loss must widen the gap before the rebuild"
-        );
-        assert!(status.degraded());
-    }
-
-    #[test]
-    fn a_files_actor_that_dies_every_tick_also_escalates() {
-        // The other uncounted path: a reconcile returning ActorUnavailable
-        // dropped the layer without recording a failure at all, so the streak
-        // sat at zero and the driver never slowed down or reported terminal.
-        let (delays, status, failures) =
-            run(&[TickObservation::ActorLost; MAX_RESTART_ATTEMPTS as usize]);
-        assert_eq!(failures, MAX_RESTART_ATTEMPTS);
-        assert!(
-            status.terminal(),
-            "a permanently dead actor reports terminal"
-        );
-        assert_eq!(delays.last().copied(), Some(TERMINAL_PROBE_INTERVAL));
-    }
-
-    #[test]
-    fn a_reconcile_that_fails_every_tick_escalates_while_keeping_the_layer() {
-        let status = DriverStatus::default();
-        let mut restart = RestartTracker::default();
-        // While the failure might still be transient the layer is kept: a
-        // reconcile error does not mean its threads are dead.
-        for _ in 1..MAX_RESTART_ATTEMPTS {
-            assert_eq!(
-                restart.observe(TickObservation::ReconcileFailed, &status),
-                LayerAction::Keep,
-                "a live layer is not torn down for one failed reconcile"
-            );
-        }
-        // But a layer that has failed every tick to the terminal threshold is
-        // wedged: rebuild it rather than polling it forever, which also stops
-        // the driver reporting "running" while it reports "terminal".
-        assert_eq!(
-            restart.observe(TickObservation::ReconcileFailed, &status),
-            LayerAction::Drop,
-            "a persistently failing layer is rebuilt, not polled forever"
-        );
-        assert!(
-            status.terminal(),
-            "and it must escalate rather than retry hot forever"
-        );
-        assert_eq!(restart.delay(), TERMINAL_PROBE_INTERVAL);
-    }
-
-    #[test]
-    fn only_a_completed_reconcile_counts_as_healthy() {
-        // Health is claimed after the reconcile, not at the watcher check:
-        // an actor that dies on every reconcile would otherwise reset the
-        // streak mid-tick and never escalate.
-        let status = DriverStatus::default();
-        let mut restart = RestartTracker::default();
-        for _ in 0..MAX_RESTART_ATTEMPTS * 2 {
-            restart.observe(TickObservation::ActorLost, &status);
-        }
-        assert!(status.terminal());
-        assert_eq!(
-            restart.observe(TickObservation::Healthy { clean: true }, &status),
-            LayerAction::Keep
-        );
-        assert!(!status.terminal(), "a completed tick recovers the driver");
-        assert_eq!(restart.delay(), DRIVE_INTERVAL);
-        assert_eq!(restart.failures(), 0);
-    }
-
-    #[test]
-    fn a_policy_edit_neither_escalates_nor_forgives() {
-        let status = DriverStatus::default();
-        let mut restart = RestartTracker::default();
-        restart.observe(TickObservation::WatchLost, &status);
-        let after_failure = restart.delay();
-
-        // A deliberate restart drops the layer but must not count as a
-        // failure...
-        assert_eq!(
-            restart.observe(TickObservation::PolicyChanged, &status),
-            LayerAction::Drop
-        );
-        assert_eq!(
-            restart.delay(),
-            after_failure,
-            "policy edits do not escalate"
-        );
-        // ...nor launder an existing streak into a clean bill of health.
-        assert_eq!(
-            restart.failures(),
-            1,
-            "policy edits do not reset the streak"
-        );
-    }
-
-    #[test]
-    fn an_isolated_failure_between_healthy_ticks_never_escalates() {
-        let (_, status, failures) = run(&[
-            TickObservation::WatchLost,
-            TickObservation::Healthy { clean: true },
-            TickObservation::ActorLost,
-            TickObservation::Healthy { clean: true },
-            TickObservation::ReconcileFailed,
-            TickObservation::Healthy { clean: true },
-        ]);
-        assert_eq!(failures, 0);
-        assert!(!status.terminal(), "recovered blips are not terminal");
-    }
-
-    #[test]
-    fn degradation_is_not_cleared_by_a_start_that_has_not_proven_itself() {
-        // The status triple must never read (degraded=false, terminal=true).
-        // It did, twice a second, while a watch flapped: a bare successful
-        // start cleared `degraded` but only a healthy TICK clears `terminal`.
-        let status = DriverStatus::default();
-        let mut restart = RestartTracker::default();
-        for _ in 0..MAX_RESTART_ATTEMPTS {
-            restart.observe(TickObservation::WatchLost, &status);
-        }
-        assert!(status.terminal());
-        // This is the condition the loop consults before clearing `degraded`
-        // on a successful start.
-        assert!(
-            restart.failures() > 0,
-            "a driver mid-streak must not advertise a clean start"
-        );
-        restart.observe(TickObservation::Healthy { clean: true }, &status);
-        assert!(!status.terminal());
-        assert!(
-            !status.degraded(),
-            "a clean tick must clear degradation, or one blip latches it forever"
-        );
-    }
-
-    #[test]
-    fn a_tick_whose_apply_failed_does_not_clear_its_own_degradation() {
-        let status = DriverStatus::default();
-        let mut restart = RestartTracker::default();
-        // apply_run reported failures: the driver marks degraded, then the
-        // very same tick reports Healthy (watch alive, reconcile completed).
-        status.mark_degraded();
-        restart.observe(TickObservation::Healthy { clean: false }, &status);
-        assert!(
-            status.degraded(),
-            "an apply failure must stay visible past the tick that raised it"
-        );
-        // The next fully clean tick is what clears it.
-        restart.observe(TickObservation::Healthy { clean: true }, &status);
-        assert!(!status.degraded());
-    }
-}
+mod supervision_tests;
 
 /// Loop-level tests. These drive the real `drive_loop` against a scripted
 /// environment under paused time, so they observe what the loop actually
@@ -1116,746 +841,19 @@ mod supervision_tests {
 /// alone and stayed green when the loop's cadence was reverted to the very
 /// bug it was written for; every test here fails under that mutation.
 #[cfg(test)]
-mod drive_loop_tests {
-    use super::*;
-    use std::sync::Mutex;
+mod drive_loop_tests;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Script {
-        StartFails,
-        WatchLost,
-        ActorLost,
-        ReconcileFails,
-        Healthy,
-        /// Nothing dirty: the reconcile round-trips CONVERGED.
-        Idle,
-        /// The reconcile is cancelled mid-scan (teardown racing the tick).
-        CancelledTick,
-        HealthyButDirtyApply,
-        /// A healthy tick during which the watcher records one more
-        /// disruption (backend error / root-identity blip that re-attached).
-        Disrupted,
-        /// The root's policy fingerprint differs from the layer's.
-        PolicyChanged,
-        /// The fingerprint differs and the tick converges — the exact pass
-        /// where a flush could settle over a mid-debounce policy edit.
-        PolicyChangedIdle,
-        /// The policy files cannot be read right now (transient lock).
-        PolicyUnreadable,
-    }
-
-    struct FakeLayer {
-        fingerprint: Option<u64>,
-        /// The global disruption count when this watcher was built — a fresh
-        /// watcher counts from zero, exactly like the real one.
-        base_disruptions: u64,
-    }
-
-    /// Records what the loop did and when, in virtual time.
-    #[derive(Default)]
-    struct Journal {
-        starts: Vec<std::time::Duration>,
-        ticks: Vec<std::time::Duration>,
-        stops: usize,
-        /// `status.degraded` / `status.running` sampled during each tick —
-        /// what a `watcher.status` RPC arriving at that moment would see.
-        degraded_seen: Vec<bool>,
-        running_seen: Vec<bool>,
-    }
-
-    struct FakeEnv {
-        script: Vec<Script>,
-        step: usize,
-        origin: tokio::time::Instant,
-        journal: Arc<Mutex<Journal>>,
-        policy: u64,
-        /// Disruptions emitted so far. Bumped at TICK END, so a `Disrupted`
-        /// entry becomes visible at the next pass's check — like a real
-        /// watcher whose events land between polls.
-        emitted: u64,
-        /// The real `apply_run` marks the driver degraded when an apply
-        /// fails; the fake mirrors that, or a test asserting on degradation
-        /// would only be testing the fake.
-        status: Arc<DriverStatus>,
-    }
-
-    impl FakeEnv {
-        fn new(
-            script: Vec<Script>,
-            journal: Arc<Mutex<Journal>>,
-            status: Arc<DriverStatus>,
-        ) -> Self {
-            FakeEnv {
-                script,
-                step: 0,
-                origin: tokio::time::Instant::now(),
-                journal,
-                policy: 1,
-                emitted: 0,
-                status,
-            }
-        }
-        /// The script entry governing the current pass; the last entry repeats
-        /// so a script can describe a steady state.
-        fn current(&self) -> Script {
-            let index = self.step.min(self.script.len().saturating_sub(1));
-            self.script[index]
-        }
-        fn elapsed(&self) -> std::time::Duration {
-            tokio::time::Instant::now().duration_since(self.origin)
-        }
-    }
-
-    impl DriverEnv for FakeEnv {
-        type Layer = FakeLayer;
-
-        fn policy_fingerprint(&self) -> Option<u64> {
-            match self.current() {
-                Script::PolicyChanged | Script::PolicyChangedIdle => Some(self.policy + 1),
-                Script::PolicyUnreadable => None,
-                _ => Some(self.policy),
-            }
-        }
-        fn layer_fingerprint(&self, layer: &FakeLayer) -> Option<u64> {
-            layer.fingerprint
-        }
-        fn watch_lost(&self, _layer: &FakeLayer) -> bool {
-            self.current() == Script::WatchLost
-        }
-        fn watch_disruptions(&self, layer: &FakeLayer) -> u64 {
-            self.emitted - layer.base_disruptions
-        }
-
-        async fn start_layer(&mut self, _cancel: &CancellationToken) -> Result<FakeLayer, ()> {
-            self.journal
-                .lock()
-                .expect("journal")
-                .starts
-                .push(self.elapsed());
-            if self.current() == Script::StartFails {
-                self.step += 1;
-                return Err(());
-            }
-            // Adopt the current fingerprint, as RealEnv does (it reads the
-            // policy before building the seed). A fake that pinned the old
-            // value here rebuilt forever after a settled edit, which forced
-            // the exactly-once test down to `>= 2` — masking a real
-            // adopt-the-fingerprint regression.
-            Ok(FakeLayer {
-                fingerprint: self.policy_fingerprint(),
-                base_disruptions: self.emitted,
-            })
-        }
-
-        async fn tick(&mut self, _layer: &FakeLayer, _cancel: &CancellationToken) -> TickIo {
-            {
-                let mut journal = self.journal.lock().expect("journal");
-                journal.ticks.push(self.elapsed());
-                // What a status RPC arriving mid-tick would observe.
-                let snapshot = self.status.snapshot();
-                journal.degraded_seen.push(snapshot.degraded);
-                journal.running_seen.push(snapshot.running);
-            }
-            let script = self.current();
-            self.step += 1;
-            match script {
-                Script::ActorLost => TickIo::ActorLost,
-                Script::ReconcileFails => TickIo::Failed,
-                Script::HealthyButDirtyApply => {
-                    self.status.mark_degraded();
-                    TickIo::Applied { clean: false }
-                }
-                Script::PolicyUnreadable => {
-                    // Fidelity: while the policy is unknown the sink holds
-                    // its ops (POLICY_UNAVAILABLE), so the apply reports
-                    // failures — the tick is degraded, not clean.
-                    self.status.mark_degraded();
-                    TickIo::Applied { clean: false }
-                }
-                Script::Disrupted => {
-                    // The disruption lands during this tick's window; the
-                    // watcher's counter reflects it at the next check.
-                    self.emitted += 1;
-                    TickIo::Applied { clean: true }
-                }
-                Script::Idle | Script::PolicyChangedIdle => TickIo::Converged,
-                Script::CancelledTick => TickIo::Cancelled,
-                _ => TickIo::Applied { clean: true },
-            }
-        }
-
-        async fn stop_layer(&mut self, _layer: FakeLayer) {
-            self.journal.lock().expect("journal").stops += 1;
-            self.step += 1;
-        }
-    }
-
-    type FlushSender = tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<FlushOutcome>>;
-
-    /// Spawn the loop under paused time; the caller drives, flushes, then
-    /// finishes to collect the journal.
-    fn spawn_loop(
-        script: Vec<Script>,
-    ) -> (
-        tokio::task::JoinHandle<()>,
-        CancellationToken,
-        Arc<Mutex<Journal>>,
-        Arc<DriverStatus>,
-        FlushSender,
-    ) {
-        let journal = Arc::new(Mutex::new(Journal::default()));
-        let status = Arc::new(DriverStatus::default());
-        let cancel = CancellationToken::new();
-        let (baseline_tx, _baseline_rx) = tokio::sync::watch::channel(false);
-        let (flush_tx, flush_rx) = tokio::sync::mpsc::channel(8);
-        let mut env = FakeEnv::new(script, Arc::clone(&journal), Arc::clone(&status));
-        let loop_status = Arc::clone(&status);
-        let loop_cancel = cancel.clone();
-        let handle = tokio::spawn(async move {
-            drive_loop(&mut env, loop_cancel, loop_status, baseline_tx, flush_rx).await
-        });
-        (handle, cancel, journal, status, flush_tx)
-    }
-
-    /// Run the loop under paused time for `budget` of virtual time.
-    async fn drive_for(
-        script: Vec<Script>,
-        budget: std::time::Duration,
-    ) -> (Journal, Arc<DriverStatus>) {
-        let (handle, cancel, journal, status, _flush_tx) = spawn_loop(script);
-        tokio::time::sleep(budget).await;
-        cancel.cancel();
-        handle.await.expect("driver loop");
-
-        let journal = Arc::try_unwrap(journal)
-            .map(|m| m.into_inner().expect("journal"))
-            .unwrap_or_else(|_| panic!("journal still shared"));
-        (journal, status)
-    }
-
-    /// Send one flush after `lead` of virtual time and return its outcome
-    /// plus how much virtual time the answer took.
-    async fn flush_after(
-        script: Vec<Script>,
-        lead: std::time::Duration,
-    ) -> (FlushOutcome, std::time::Duration) {
-        let (handle, cancel, _journal, _status, flush_tx) = spawn_loop(script);
-        tokio::time::sleep(lead).await;
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        flush_tx.send(reply_tx).await.expect("flush queued");
-        let asked = tokio::time::Instant::now();
-        let outcome = reply_rx.await.expect("flush answered");
-        let waited = tokio::time::Instant::now().duration_since(asked);
-        cancel.cancel();
-        handle.await.expect("driver loop");
-        (outcome, waited)
-    }
-
-    /// Gaps between successive timestamps.
-    fn gaps(stamps: &[std::time::Duration]) -> Vec<std::time::Duration> {
-        stamps.windows(2).map(|w| w[1] - w[0]).collect()
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_timed_out_initial_apply_waits_for_a_healthy_tick_to_claim_running() {
-        let (handle, cancel, journal, status, _flush_tx) = spawn_loop(vec![Script::Healthy]);
-        status.mark_initial_apply_timed_out();
-
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        let running_during_first_tick = journal
-            .lock()
-            .expect("journal")
-            .running_seen
-            .first()
-            .copied();
-
-        assert_eq!(
-            running_during_first_tick,
-            Some(false),
-            "the successful start must preserve the timeout's not-running claim"
-        );
-        assert!(
-            status.running(),
-            "the first healthy tick must recover the running claim"
-        );
-
-        cancel.cancel();
-        handle.await.expect("driver loop");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_failing_start_is_retried_on_the_escalating_backoff() {
-        let (journal, status) =
-            drive_for(vec![Script::StartFails], std::time::Duration::from_secs(20)).await;
-        assert_eq!(
-            gaps(&journal.starts),
-            vec![
-                std::time::Duration::from_millis(500),
-                std::time::Duration::from_secs(1),
-                std::time::Duration::from_secs(2),
-                std::time::Duration::from_secs(4),
-                std::time::Duration::from_secs(8),
-            ],
-            "rebuild attempts must widen, not repeat at the drive interval"
-        );
-        assert!(status.degraded());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_watch_that_dies_every_tick_rebuilds_on_the_backoff_not_hot() {
-        // The regression this shard exists for. The layer starts fine every
-        // time and then loses its watch, so a naive loop rebuilds — full
-        // actor + watcher + baseline scan — every drive interval forever.
-        let (journal, status) =
-            drive_for(vec![Script::WatchLost], std::time::Duration::from_secs(20)).await;
-        assert!(
-            journal.starts.len() >= 2,
-            "the layer must actually be rebuilt"
-        );
-        assert_eq!(
-            gaps(&journal.starts),
-            vec![
-                std::time::Duration::from_millis(500),
-                std::time::Duration::from_secs(1),
-                std::time::Duration::from_secs(2),
-                std::time::Duration::from_secs(4),
-                std::time::Duration::from_secs(8),
-            ],
-            "a flapping watch must back off between rebuilds"
-        );
-        assert_eq!(
-            journal.stops,
-            journal.starts.len(),
-            "every layer is stopped — the rebuilt ones before their successor, \
-             the last one at shutdown. Any shortfall is a leaked watcher thread."
-        );
-        assert!(status.degraded());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_dead_files_actor_also_backs_off_and_reports_terminal() {
-        let (journal, status) =
-            drive_for(vec![Script::ActorLost], std::time::Duration::from_secs(60)).await;
-        assert_eq!(
-            gaps(&journal.starts)[..5],
-            [
-                std::time::Duration::from_millis(500),
-                std::time::Duration::from_secs(1),
-                std::time::Duration::from_secs(2),
-                std::time::Duration::from_secs(4),
-                std::time::Duration::from_secs(8),
-            ],
-            "a dead actor must escalate exactly like a dead watch"
-        );
-        let snapshot = status.snapshot();
-        assert!(
-            snapshot.terminal,
-            "a permanently dead actor is reported terminal"
-        );
-        assert!(!snapshot.running, "terminal must never claim running");
-        // ...and not just at the end: each recovery probe starts a layer that
-        // then dies. A bare start mid-streak must not claim `running` — a
-        // status RPC landing in that window would read running && terminal.
-        assert!(
-            journal.running_seen[1..].iter().all(|running| !running),
-            "a probe-window start must not claim running: {:?}",
-            journal.running_seen
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_healthy_driver_polls_at_the_drive_interval() {
-        let (journal, status) =
-            drive_for(vec![Script::Healthy], std::time::Duration::from_secs(5)).await;
-        assert!(
-            gaps(&journal.ticks)
-                .iter()
-                .all(|gap| *gap == DRIVE_INTERVAL),
-            "healthy polling must stay at the drive interval: {:?}",
-            gaps(&journal.ticks)
-        );
-        assert_eq!(journal.starts.len(), 1, "a healthy layer is never rebuilt");
-        assert_eq!(
-            journal.starts.first().copied(),
-            Some(std::time::Duration::ZERO),
-            "the first start happens immediately — workspace.open pays no \
-             sleep before the startup baseline"
-        );
-        assert!(!status.degraded());
-        assert!(!status.terminal());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_permanently_failing_reconcile_slows_down_and_is_finally_rebuilt() {
-        // Some reconcile errors are structural (a workspace over the scan
-        // cap) and no amount of retrying fixes them. The driver must not poll
-        // a wedged layer at the fast cadence forever, and must not advertise
-        // `running` while it reports `terminal`.
-        let (journal, status) = drive_for(
-            vec![Script::ReconcileFails],
-            // Long enough to escalate to terminal (~31s) and wait out one
-            // terminal probe (30s), which is when the rebuild happens.
-            std::time::Duration::from_secs(90),
-        )
-        .await;
-        let tick_gaps = gaps(&journal.ticks);
-        assert!(
-            tick_gaps.iter().any(|gap| *gap > DRIVE_INTERVAL),
-            "a repeatedly failing reconcile must back off: {tick_gaps:?}"
-        );
-        assert!(status.terminal(), "and eventually report terminal");
-        assert!(
-            journal.starts.len() >= 2,
-            "a wedged layer is finally rebuilt rather than polled forever"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_recovered_watch_disruption_does_not_latch_degraded_forever() {
-        // `watch_degraded` is sticky for the life of the layer, so folding it
-        // into every tick's cleanliness would leave `degraded` true forever
-        // after one recovered blip — with a live watch and every reconcile
-        // succeeding, and no path to clear it.
-        let (_, status) = drive_for(
-            vec![Script::Disrupted, Script::Healthy],
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-        assert!(
-            !status.degraded(),
-            "a recovered disruption must be reported once, not latched"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_failing_apply_keeps_degraded_visible() {
-        let (_, status) = drive_for(
-            vec![Script::HealthyButDirtyApply],
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-        assert!(
-            status.degraded(),
-            "an apply that keeps failing must stay visible"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_rapidly_rewritten_policy_file_does_not_rebuild_every_tick() {
-        // A full rebuild per tick is the same pathology as the hot restart
-        // loop: fresh actor, fresh watcher, full baseline rescan. The
-        // fingerprint must hold for a tick before it costs one.
-        let (journal, _) = drive_for(
-            vec![
-                Script::Healthy,
-                Script::PolicyChanged,
-                Script::Healthy,
-                Script::PolicyChanged,
-                Script::Healthy,
-            ],
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-        assert_eq!(
-            journal.starts.len(),
-            1,
-            "an unstable fingerprint must not trigger a rebuild at all"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_settled_policy_edit_does_rebuild_exactly_once() {
-        // One healthy tick on the base policy, then the edit appears and
-        // HOLDS. Exactly one rebuild: the debounce absorbs the first sighting,
-        // the second confirms, and the rebuilt layer adopts the new
-        // fingerprint so it must never rebuild again. `>= 2` here would hide
-        // a rebuild-forever regression.
-        let (journal, _) = drive_for(
-            vec![Script::Healthy, Script::PolicyChanged],
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-        assert_eq!(
-            journal.starts.len(),
-            2,
-            "a held policy edit costs exactly one rebuild, then settles"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_second_disruption_on_the_same_layer_is_rereported() {
-        // The counter seam exists for exactly this: a sticky bool can be
-        // edge-triggered once per layer, so after the first report-and-clear
-        // every later disruption on the same live watch was silently
-        // swallowed — a status reader saw "healthy" through a genuinely new
-        // root-swap. With the count, each new disruption re-raises degraded
-        // and a clean tick still clears it afterwards.
-        let (journal, _) = drive_for(
-            vec![
-                Script::Healthy,
-                Script::Disrupted,
-                Script::Healthy,
-                Script::Disrupted,
-                Script::Healthy,
-                Script::Healthy,
-                Script::Healthy,
-            ],
-            std::time::Duration::from_secs(4),
-        )
-        .await;
-        // A disruption during tick N is visible at tick N+1's check, and a
-        // report raised at N+1 clears after the clean tick N+2 — so the
-        // observable pattern lags the script by one.
-        let seen = &journal.degraded_seen;
-        assert!(seen[2], "the first disruption is reported: {seen:?}");
-        assert!(
-            seen[3],
-            "the report must OUTLIVE the tick that raised it — the detecting              tick reports itself unclean, so only the NEXT clean tick clears:              {seen:?}"
-        );
-        assert!(
-            seen[4],
-            "the SECOND disruption on the same layer must be re-reported: {seen:?}"
-        );
-        assert!(
-            !seen[6],
-            "and degradation still clears once disruptions stop: {seen:?}"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_rebuilt_layer_rereports_disruptions_from_its_own_baseline() {
-        // A fresh watcher counts from zero. If the loop kept the old layer's
-        // seen-count across a rebuild, the new layer's first disruptions
-        // would compare equal to the stale baseline and be swallowed.
-        let (journal, _) = drive_for(
-            vec![
-                Script::Healthy,
-                Script::Disrupted,
-                Script::Healthy,
-                Script::WatchLost,
-                Script::Healthy,
-                Script::Disrupted,
-                Script::Healthy,
-                Script::Healthy,
-            ],
-            std::time::Duration::from_secs(6),
-        )
-        .await;
-        // Tick samples: indices 0-2 are layer 1 (the WatchLost pass has no
-        // tick), then 3,4,5,… are layer 2. The layer-2 disruption lands
-        // during sample 4's tick and is reported at sample 5.
-        let seen = &journal.degraded_seen;
-        assert!(
-            !seen[4],
-            "the rebuilt layer's clean ticks must not inherit a stale \
-             baseline (a spurious report here means the seen-count was not \
-             re-baselined at start): {seen:?}"
-        );
-        assert!(
-            seen[5],
-            "a disruption on the REBUILT layer must be reported: {seen:?}"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn an_intermittently_unreadable_policy_file_still_applies_the_edit() {
-        // A transiently-locked policy file must hold the debounce, not feed
-        // it a distinct error-hash: with the error hashed as content, the
-        // fingerprint alternated edit/error/edit, the same value never held
-        // two consecutive ticks, and a real edit was ignored forever.
-        let (journal, _) = drive_for(
-            vec![
-                Script::Healthy,
-                Script::PolicyChanged,
-                Script::PolicyUnreadable,
-                Script::PolicyChanged,
-                Script::Healthy,
-            ],
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-        assert_eq!(
-            journal.starts.len(),
-            2,
-            "the held edit must rebuild exactly once despite unreadable ticks"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn policy_recovery_after_an_unknown_window_reoffers_held_paths() {
-        // While the policy is unreadable the sink holds ops; the failures
-        // land in the quarantine and stop self-forcing scans. If the policy
-        // then recovers with the same bytes, the equality branch never
-        // rebuilds — so the recovery itself must trigger one rebuild (whose
-        // baseline re-offers everything held) whenever status is degraded.
-        let (journal, _) = drive_for(
-            vec![Script::Healthy, Script::PolicyUnreadable, Script::Healthy],
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-        assert!(
-            journal.starts.len() >= 2,
-            "recovering from an unknown policy while degraded must rebuild: {} starts",
-            journal.starts.len()
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_flush_racing_teardown_never_claims_settled() {
-        // A cancelled reconcile commits nothing (dirty stays put), so a
-        // flush answered off one must say settled:false — reading the
-        // cancelled scan as quiescence would hand the differential a
-        // half-captured workspace as "clean".
-        let (outcome, waited) = flush_after(
-            vec![Script::CancelledTick],
-            std::time::Duration::from_secs(2),
-        )
-        .await;
-        assert!(
-            !outcome.settled,
-            "a teardown-raced flush must never claim quiescence"
-        );
-        assert!(
-            waited < std::time::Duration::from_secs(1),
-            "and it answers promptly, waited {waited:?}"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn cancellation_is_not_delayed_by_a_terminal_backoff() {
-        // The slow probe must never hold up workspace close.
-        let (handle, cancel, _journal, _status, _flush_tx) = spawn_loop(vec![Script::StartFails]);
-        // Let it escalate deep into the backoff.
-        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
-        let before = tokio::time::Instant::now();
-        cancel.cancel();
-        handle.await.expect("driver loop");
-        assert!(
-            tokio::time::Instant::now().duration_since(before) < std::time::Duration::from_secs(1),
-            "cancel must cut the backoff sleep short"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_flush_on_a_quiescent_layer_settles() {
-        let (outcome, _) = flush_after(vec![Script::Idle], std::time::Duration::from_secs(2)).await;
-        assert!(outcome.settled, "an idle layer is already at quiescence");
-        assert!(outcome.running);
-        assert!(!outcome.degraded);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_flush_during_a_backoff_answers_promptly_and_honestly() {
-        // The caller must not sit out the escalating backoff (up to the 30s
-        // terminal probe) — that is indistinguishable from a hang. It gets an
-        // immediate honest "not settled, not running".
-        let (outcome, waited) = flush_after(
-            vec![Script::StartFails],
-            std::time::Duration::from_millis(5300),
-        )
-        .await;
-        assert!(!outcome.settled);
-        assert!(!outcome.running);
-        assert!(
-            waited < std::time::Duration::from_secs(1),
-            "flush must skip the remaining backoff sleep, waited {waited:?}"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_flush_does_not_settle_over_a_pending_policy_rebuild() {
-        // Pass 1 sees a new policy fingerprint for the first time (debounce
-        // arms) and the tick converges — without the guard, the flush would
-        // certify deterministic ownership state the very pass before the
-        // rebuild/re-offer runs. It must answer settled:false until the
-        // debounce confirms and the rebuild completes.
-        // Pass 1 (Idle) builds the layer under the original policy — the
-        // edit lands after the build, as it does in life (a build adopts
-        // the fingerprint it reads, so a pre-build change never debounces).
-        let (handle, cancel, journal, _status, flush_tx) =
-            spawn_loop(vec![Script::Idle, Script::PolicyChangedIdle]);
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let mut settled = Vec::new();
-        for pass in 0..3 {
-            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-            flush_tx.send(reply_tx).await.expect("flush queued");
-            let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), reply_rx)
-                .await
-                .expect("flush answered")
-                .expect("flush channel");
-            settled.push(outcome.settled);
-            // Flush 2 fires immediately so it drives the confirm/rebuild
-            // pass itself (a sleep would let the loop's own cadence finish
-            // the rebuild first and the middle answer would race to true).
-            if pass != 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-            }
-        }
-        cancel.cancel();
-        handle.await.expect("driver loop");
-
-        assert_eq!(
-            settled,
-            vec![false, false, true],
-            "flush must stay unsettled while the policy edit is mid-debounce \
-             (pass 1) and during the rebuild pass (pass 2), then settle on \
-             the rebuilt layer"
-        );
-        let starts = journal.lock().expect("journal").starts.len();
-        assert_eq!(starts, 2, "exactly the initial build plus ONE rebuild");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn flush_polling_does_not_defeat_the_restart_backoff() {
-        // A client polling capture.flush must neither drive start attempts
-        // at its poll rate (each early pass would rebuild hot) nor push the
-        // scheduled rebuild out by resetting the wait (the deadline is an
-        // Instant that flush interruptions leave standing). Both mutations
-        // are killed by the start-count window below: poll-rate rebuilds
-        // overshoot it, a reset-on-poll deadline starves it to one start.
-        let (handle, cancel, journal, _status, flush_tx) = spawn_loop(vec![Script::StartFails]);
-        // First pass fails immediately; a backoff is armed.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        // Poll every 100ms for 4s of virtual time — far faster than the
-        // 500ms -> 8s backoff schedule.
-        for _ in 0..40 {
-            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-            flush_tx.send(reply_tx).await.expect("flush queued");
-            let outcome = tokio::time::timeout(std::time::Duration::from_millis(100), reply_rx)
-                .await
-                .expect("a mid-backoff flush answers promptly")
-                .expect("flush answered");
-            assert!(!outcome.settled, "a down layer must never settle a flush");
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        cancel.cancel();
-        handle.await.expect("driver loop");
-        let starts = journal.lock().expect("journal").starts.len();
-        assert!(
-            (3..=5).contains(&starts),
-            "4s of failing starts under the backoff schedule means 3-5 \
-             attempts; saw {starts} (more = flush polling defeats the \
-             backoff, fewer = polling starves the rebuild)"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_flush_that_never_converges_is_bounded() {
-        // A workspace under continuous mutation never reaches quiescence;
-        // flush must return an honest not-settled rather than spin forever.
-        let (outcome, waited) = flush_after(
-            vec![Script::HealthyButDirtyApply],
-            std::time::Duration::from_secs(2),
-        )
-        .await;
-        assert!(!outcome.settled, "an unconverged flush must say so");
-        assert!(outcome.degraded, "the failing applies stay visible");
-        assert!(
-            waited < std::time::Duration::from_secs(1),
-            "the cycle bound answers without further sleeps, waited {waited:?}"
-        );
-    }
+pub(crate) struct CaptureDriverSpawnParams {
+    pub(crate) root: PathBuf,
+    pub(crate) actor: ActorHandle,
+    pub(crate) workspace_id: String,
+    pub(crate) leases: LeaseRegistry,
+    pub(crate) self_writes: SelfWriteSuppression,
+    pub(crate) apply_gate: ApplyGate,
+    pub(crate) store_freshly_created: bool,
+    pub(crate) initial_author_json: Option<String>,
+    pub(crate) events: EngineEvents,
+    pub(crate) apply_probe: Option<CaptureApplyProbe>,
 }
 
 /// The daemon-side handle to one workspace's capture driver.
@@ -1876,7 +874,6 @@ pub(crate) struct CaptureDriver {
     /// The epoch is sampled into each layer; a mismatch makes the old layer
     /// restart before it may apply again.
     refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
-    #[cfg(feature = "harness")]
     apply_probe: Option<CaptureApplyProbe>,
 }
 
@@ -1892,45 +889,55 @@ impl CaptureDriver {
     /// Spawn the files layer for a ROOT-BOUND workspace. Must only be
     /// called after `bind_root` succeeded: the sink writes through the bound
     /// store actor, and an unbound root must never spawn a watcher.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn spawn(
-        root: PathBuf,
-        actor: ActorHandle,
-        workspace_id: String,
-        leases: LeaseRegistry,
-        self_writes: SelfWriteSuppression,
-        apply_gate: ApplyGate,
-        store_freshly_created: bool,
-        initial_author_json: Option<String>,
-        events: EngineEvents,
-        #[cfg(feature = "harness")] apply_probe: Option<CaptureApplyProbe>,
-    ) -> CaptureDriver {
+    pub(crate) fn spawn(params: CaptureDriverSpawnParams) -> CaptureDriver {
+        let CaptureDriverSpawnParams {
+            root,
+            actor,
+            workspace_id,
+            leases,
+            self_writes,
+            apply_gate,
+            store_freshly_created,
+            initial_author_json,
+            events,
+            apply_probe,
+        } = params;
         let cancel = CancellationToken::new();
         let status = Arc::new(DriverStatus::default());
         let author_json = Arc::new(Mutex::new(initial_author_json));
         let (open_ready_tx, open_ready) = tokio::sync::watch::channel(false);
         let (flush_tx, flush_rx) = tokio::sync::mpsc::channel(8);
         let refresh_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        #[cfg(feature = "harness")]
         let driver_probe = apply_probe.clone();
-        let task = tokio::spawn(drive(
-            root,
-            actor,
-            workspace_id,
-            leases,
-            self_writes,
-            cancel.clone(),
-            Arc::clone(&status),
-            Arc::clone(&author_json),
-            open_ready_tx,
-            flush_rx,
-            apply_gate,
-            store_freshly_created,
-            Arc::clone(&refresh_epoch),
-            events,
-            #[cfg(feature = "harness")]
-            apply_probe,
-        ));
+        let drive_cancel = cancel.clone();
+        let drive_status = Arc::clone(&status);
+        let drive_author_json = Arc::clone(&author_json);
+        let drive_refresh_epoch = Arc::clone(&refresh_epoch);
+        let task = tokio::spawn(async move {
+            let mut env = RealEnv {
+                root,
+                actor,
+                workspace_id,
+                leases,
+                status: Arc::clone(&drive_status),
+                author_json: drive_author_json,
+                self_writes,
+                apply_gate,
+                store_freshly_created,
+                open_ready_tx: open_ready_tx.clone(),
+                refresh_epoch: drive_refresh_epoch,
+                events,
+                apply_probe,
+            };
+            drive_loop(
+                &mut env,
+                drive_cancel,
+                drive_status,
+                open_ready_tx,
+                flush_rx,
+            )
+            .await;
+        });
         CaptureDriver {
             cancel,
             task: Some(task),
@@ -1939,7 +946,6 @@ impl CaptureDriver {
             flush_tx,
             open_ready,
             refresh_epoch,
-            #[cfg(feature = "harness")]
             apply_probe: driver_probe,
         }
     }
@@ -1988,7 +994,6 @@ impl CaptureDriver {
     /// held, so the epoch change is ordered before that next apply.
     pub(crate) fn request_manifest_refresh(&self) {
         self.refresh_epoch.fetch_add(1, Ordering::AcqRel);
-        #[cfg(feature = "harness")]
         if let Some(probe) = &self.apply_probe {
             probe.record_manifest_refresh();
         }
@@ -2775,7 +1780,6 @@ struct RealEnv {
     open_ready_tx: tokio::sync::watch::Sender<bool>,
     refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
     events: EngineEvents,
-    #[cfg(feature = "harness")]
     apply_probe: Option<CaptureApplyProbe>,
 }
 
@@ -2804,15 +1808,14 @@ impl RealEnv {
             author_json: self.capture_author(),
             provenance,
             events: self.events.clone(),
-            #[cfg(feature = "harness")]
             apply_probe: self.apply_probe.clone(),
         }
     }
 
     async fn initial_settle_deadline(&self) {
-        #[cfg(feature = "harness")]
-        if let Some(probe) = &self.apply_probe {
-            probe.initial_settle_deadline().await;
+        if let Some(probe) = &self.apply_probe
+            && probe.take_manual_initial_deadline().await
+        {
             return;
         }
         tokio::time::sleep(EARLY_IMPORT_APPLY_DEADLINE).await;
@@ -2904,7 +1907,6 @@ impl DriverEnv for RealEnv {
             let _ = self.open_ready_tx.send(true);
         }
 
-        #[cfg(feature = "harness")]
         if matches!(&initial.run, ReconcileRun::Completed(_))
             && let Some(probe) = &self.apply_probe
         {
@@ -3002,7 +2004,6 @@ impl DriverEnv for RealEnv {
         // Unsafe starts release only here, after the bounded settle attempt.
         // An early import already sent this edge; watch::Sender coalesces it.
         let _ = self.open_ready_tx.send(true);
-        #[cfg(feature = "harness")]
         if let Some(probe) = &self.apply_probe {
             probe.record_layer_start();
         }
@@ -3010,7 +2011,6 @@ impl DriverEnv for RealEnv {
     }
 
     async fn tick(&mut self, layer: &FilesLayer, cancel: &CancellationToken) -> TickIo {
-        #[cfg(feature = "harness")]
         if let Some(probe) = &self.apply_probe {
             probe.observe_gate_wait_if_armed();
         }
@@ -3024,7 +2024,6 @@ impl DriverEnv for RealEnv {
         }
         let run =
             reconcile_if_dirty_bound(&self.root, &layer.files.handle(), cancel.child_token()).await;
-        #[cfg(feature = "harness")]
         if matches!(
             &run,
             Ok(RootBoundRun {
@@ -3108,43 +2107,6 @@ impl DriverEnv for RealEnv {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn drive(
-    root: PathBuf,
-    actor: ActorHandle,
-    workspace_id: String,
-    leases: LeaseRegistry,
-    self_writes: SelfWriteSuppression,
-    cancel: CancellationToken,
-    status: Arc<DriverStatus>,
-    author_json: Arc<Mutex<Option<String>>>,
-    open_ready_tx: tokio::sync::watch::Sender<bool>,
-    flush_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<FlushOutcome>>,
-    apply_gate: ApplyGate,
-    store_freshly_created: bool,
-    refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
-    events: EngineEvents,
-    #[cfg(feature = "harness")] apply_probe: Option<CaptureApplyProbe>,
-) {
-    let mut env = RealEnv {
-        root,
-        actor,
-        workspace_id,
-        leases,
-        status: Arc::clone(&status),
-        author_json,
-        self_writes,
-        apply_gate,
-        store_freshly_created,
-        open_ready_tx: open_ready_tx.clone(),
-        refresh_epoch,
-        events,
-        #[cfg(feature = "harness")]
-        apply_probe,
-    };
-    drive_loop(&mut env, cancel, status, open_ready_tx, flush_rx).await;
-}
-
 /// Force the oracle-equivalent pre-switch full scan while the caller owns the
 /// workspace's [`ApplyGate`]. A fresh files actor is seeded from the active
 /// version so deletions are visible, but no watcher is attached: the normal
@@ -3212,7 +2174,6 @@ pub(crate) async fn reconcile_full_for_switch(
                 author_json,
                 provenance,
                 events,
-                #[cfg(feature = "harness")]
                 apply_probe: None,
             };
             if apply_bound_run_with_handle(
@@ -3291,7 +2252,6 @@ struct ApplyRunContext<'a> {
     /// Moment provenance stamped on every capture write of this run.
     provenance: CaptureProvenance,
     events: EngineEvents,
-    #[cfg(feature = "harness")]
     apply_probe: Option<CaptureApplyProbe>,
 }
 
@@ -3379,7 +2339,6 @@ async fn apply_bound_run_with_handle(
         author_json,
         provenance,
         events,
-        #[cfg(feature = "harness")]
         apply_probe,
     } = context;
     let now_ms = wall_now_ms();
@@ -3405,18 +2364,18 @@ async fn apply_bound_run_with_handle(
                         let thread = std::thread::Builder::new()
                             .name("dohc-capture-collection-reconcile".to_owned())
                             .spawn(move || {
-                                let sink = StoreCaptureSink::new_with_bound_root(
-                                    collection_actor,
-                                    collection_workspace,
+                                let sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+                                    actor: collection_actor,
+                                    workspace_id: collection_workspace,
                                     version_id,
-                                    collection_root,
-                                    captured_root,
+                                    shadow_root: collection_root,
+                                    captured_root: Ok(captured_root),
                                     now_ms,
-                                    collection_author_json,
-                                    collection_leases,
-                                    collection_self_writes,
-                                    collection_provenance,
-                                );
+                                    author_json: collection_author_json,
+                                    leases: collection_leases,
+                                    self_writes: collection_self_writes,
+                                    provenance: collection_provenance,
+                                });
                                 let _ = done_tx.send(sink.reconcile_collections());
                             });
                         match thread {
@@ -3481,7 +2440,6 @@ async fn apply_bound_run_with_handle(
         }
         ReconcileRun::Cancelled => return true,
     };
-    #[cfg(feature = "harness")]
     if apply_probe
         .as_ref()
         .is_some_and(CaptureApplyProbe::fail_before_worker_if_armed)
@@ -3538,25 +2496,24 @@ async fn apply_bound_run_with_handle(
     let apply_thread = std::thread::Builder::new()
         .name("dohc-capture-apply".to_owned())
         .spawn(move || {
-            #[cfg(feature = "harness")]
             if let Some(probe) = &apply_probe {
                 probe.pause_worker_if_armed();
             }
             // A fresh sink per run: the policy snapshot and (lazily loaded)
             // secret key are re-read per reconcile task, matching the TS
             // one-policy-snapshot-per-task rule.
-            let mut sink = StoreCaptureSink::new_with_bound_root(
-                apply_actor,
-                apply_workspace,
+            let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+                actor: apply_actor,
+                workspace_id: apply_workspace,
                 version_id,
-                apply_root,
-                apply_captured_root,
+                shadow_root: apply_root,
+                captured_root: Ok(apply_captured_root),
                 now_ms,
-                apply_author_json,
-                apply_leases,
-                apply_self_writes,
-                apply_provenance,
-            );
+                author_json: apply_author_json,
+                leases: apply_leases,
+                self_writes: apply_self_writes,
+                provenance: apply_provenance,
+            });
             let result =
                 apply_reconcile_plan_cancellable(&apply_plan, &mut sink, &NoFaults, &apply_cancel);
             let collections =
@@ -3672,18 +2629,18 @@ async fn apply_bound_run_with_handle(
             let retire_thread = std::thread::Builder::new()
                 .name("dohc-capture-overcap-retire".to_owned())
                 .spawn(move || {
-                    let mut sink = StoreCaptureSink::new_with_bound_root(
-                        retire_actor,
-                        retire_workspace,
-                        retire_version,
-                        retire_root,
-                        retire_captured_root,
+                    let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+                        actor: retire_actor,
+                        workspace_id: retire_workspace,
+                        version_id: retire_version,
+                        shadow_root: retire_root,
+                        captured_root: Ok(retire_captured_root),
                         now_ms,
-                        retire_author_json,
-                        retire_leases,
-                        retire_self_writes,
-                        retire_pass_provenance,
-                    );
+                        author_json: retire_author_json,
+                        leases: retire_leases,
+                        self_writes: retire_self_writes,
+                        provenance: retire_pass_provenance,
+                    });
                     let _ = retire_tx.send(sink.retire_policy_excluded(&retire_path));
                 });
             let retired = match retire_thread {
@@ -3834,1531 +2791,10 @@ async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<D
 }
 
 #[cfg(test)]
-mod root_bound_run_tests {
-    use super::*;
-    use dohc_engine_files::CaptureSink;
-    use dohc_engine_runtime::WorkspaceSupervisor;
-    use dohc_engine_testkit::ScratchDir;
-
-    const WORKSPACE_ID: &str = "ws-root-bound-run";
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn seeded_deletes_survive_an_over_cap_policy_hold_and_recovery() {
-        let store_scratch = ScratchDir::new().expect("store scratch");
-        let capture_scratch = ScratchDir::new().expect("capture scratch");
-        let root = capture_scratch.path().to_path_buf();
-        for path in ["big.md", "gone.md", ".env"] {
-            std::fs::write(root.join(path), b"captured content").expect("write captured file");
-        }
-        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
-        let supervisor = WorkspaceSupervisor::new();
-        let actor = supervisor.open(&db, 1).expect("open actor").actor;
-        let seed_actor = actor.clone();
-        let seed_root = root.clone();
-        std::thread::spawn(move || {
-            let mut sink =
-                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 1, None);
-            for path in ["big.md", "gone.md", ".env"] {
-                assert!(matches!(
-                    sink.ingest(path, 0, "advisory-sha", "text/plain", IngestReason::Added)
-                        .expect("seed captured head"),
-                    dohc_engine_files::IngestOutcome::Captured { .. }
-                ));
-            }
-        })
-        .join()
-        .expect("workspace seed thread");
-
-        let bounds = ScanBounds::builder().max_file_bytes(64).build();
-        std::fs::write(root.join("big.md"), [b'x'; 65]).expect("grow beyond scan cap");
-        let policy_path = root.join(".dohc/files.toml");
-        let policy = b"[[rule]]\npath = \"**\"\ntracked = false\n";
-        std::fs::write(&policy_path, policy).expect("narrow all ordinary files");
-        let fingerprint = policy_fingerprint(&root);
-        assert!(fingerprint.is_some());
-        let (manifest, generation) = manifest_seed(&root, &actor, WORKSPACE_ID)
-            .await
-            .expect("captured-state seed")
-            .into_scan_seed()
-            .expect("existing captured entries");
-        for path in ["big.md", "gone.md"] {
-            let entry = manifest.get(path).expect("narrowed identity stays seeded");
-            assert_eq!(entry.sha256, NARROWED_SEED_SENTINEL_SHA);
-            assert_eq!(entry.mtime_ms, 0);
-        }
-        assert_ne!(
-            manifest
-                .get(".env")
-                .expect("secret identity stays seeded")
-                .sha256,
-            NARROWED_SEED_SENTINEL_SHA,
-            "the secret floor cannot be narrowed by policy"
-        );
-        std::fs::remove_file(root.join("gone.md")).expect("delete after seed and before scan");
-
-        let leases = LeaseRegistry::new();
-        let status = Arc::new(DriverStatus::default());
-        let self_writes = SelfWriteSuppression::default();
-        let events = EngineEvents::default();
-        let mut notices = events.subscribe();
-        let mut seed = Some((manifest, generation));
-        for recovery in [false, true] {
-            if recovery {
-                std::fs::remove_dir(&policy_path).expect("remove unreadable policy");
-                std::fs::write(&policy_path, policy).expect("restore narrowing policy");
-                assert_eq!(policy_fingerprint(&root), fingerprint);
-                seed = manifest_seed(&root, &actor, WORKSPACE_ID)
-                    .await
-                    .expect("recovery seed")
-                    .into_scan_seed();
-            }
-            let files = FilesActor::spawn_async_with_manifest(root.clone(), bounds, seed.take())
-                .await
-                .expect("seeded files actor");
-            let files = FilesActorCloseGuard::new(files);
-            let captured_root = Arc::new(CapturedRoot::bind(&root).expect("bind capture root"));
-            let run = files
-                .handle()
-                .reconcile(CancellationToken::new())
-                .await
-                .expect("scan");
-            let ReconcileRun::Completed(plan) = &run else {
-                panic!("a seeded scan must produce a plan");
-            };
-            assert_eq!(plan.retained_over_cap, ["big.md"]);
-            assert!(!plan.ops.iter().any(|op| op.path() == "big.md"));
-            assert!(
-                plan.ops.iter().any(|op| matches!(op,
-                    CaptureOp::Ingest { path, .. } if path == ".env"
-                )),
-                "secret seed entries re-offer through their own sentinel"
-            );
-            let ordinary_ops: Vec<_> = plan.ops.iter().filter(|op| op.path() != ".env").collect();
-            if recovery {
-                assert!(
-                    ordinary_ops.is_empty(),
-                    "the confirmed delete was already acknowledged"
-                );
-            } else {
-                assert_eq!(
-                    ordinary_ops,
-                    [&CaptureOp::Retire {
-                        path: "gone.md".to_owned()
-                    }]
-                );
-                std::fs::remove_file(&policy_path).expect("remove readable policy");
-                std::fs::create_dir(&policy_path).expect("make policy unreadable before apply");
-            }
-            let clean = apply_bound_run_with_handle(
-                ApplyRunContext {
-                    root: &root,
-                    actor: &actor,
-                    workspace_id: WORKSPACE_ID,
-                    leases: &leases,
-                    status: &status,
-                    self_writes: &self_writes,
-                    author_json: None,
-                    provenance: CaptureProvenance {
-                        summary: Some("Reconciled offline edits".to_owned()),
-                        correlation_id: Some("policy-recovery-pass".to_owned()),
-                    },
-                    events: events.clone(),
-                    #[cfg(feature = "harness")]
-                    apply_probe: None,
-                },
-                &files.handle(),
-                RootBoundRun { captured_root, run },
-                &CancellationToken::new(),
-            )
-            .await;
-            assert_eq!(clean, recovery);
-            assert!(
-                actor
-                    .versioned_text_read(
-                        WORKSPACE_ID.to_owned(),
-                        "main".to_owned(),
-                        "gone.md".to_owned(),
-                        CancellationToken::new()
-                    )
-                    .await
-                    .expect("read confirmed delete")
-                    .is_none(),
-                "confirmed deletion is independent of policy availability"
-            );
-            let head = actor
-                .versioned_text_read(
-                    WORKSPACE_ID.to_owned(),
-                    "main".to_owned(),
-                    "big.md".to_owned(),
-                    CancellationToken::new(),
-                )
-                .await
-                .expect("read over-cap head");
-            if recovery {
-                assert!(
-                    head.is_none(),
-                    "the over-cap loop must retire the narrowed head"
-                );
-                let notice = notices.try_recv().expect("policy retirement event");
-                assert_eq!(notice.name, CAPTURE_MOMENT_RECORDED_EVENT);
-                assert_eq!(notice.payload["notOwnedCount"], serde_json::json!(1));
-            } else {
-                assert_eq!(head.expect("held head survives").text, "captured content");
-                assert!(status.degraded());
-                assert!(
-                    status.take_policy_hold(),
-                    "the over-cap hold must arm recovery"
-                );
-                assert!(
-                    files
-                        .handle()
-                        .stats()
-                        .await
-                        .expect("held files stats")
-                        .dirty
-                );
-                while notices.try_recv().is_ok() {}
-            }
-            files.close().await;
-        }
-        supervisor.close(&db).expect("close actor");
-        let connection = rusqlite::Connection::open(&db).expect("open store observer");
-        let (summary, correlation): (Option<String>, Option<String>) = connection
-            .query_row(
-                "SELECT metadata_summary, metadata_correlation_id FROM moments
-             WHERE workspace_id = ?1 AND path = 'big.md' ORDER BY moment_order DESC LIMIT 1",
-                [WORKSPACE_ID],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("policy retire metadata");
-        assert_eq!(summary.as_deref(), Some("Stopped tracking by policy"));
-        assert_eq!(correlation.as_deref(), Some("policy-recovery-pass"));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn prepared_and_converged_runs_refuse_a_replacement_workspace_root() {
-        let store_scratch = ScratchDir::new().expect("store scratch");
-        let capture_scratch = ScratchDir::new().expect("capture scratch");
-        let root = capture_scratch.path().join("workspace");
-        let moved_root = capture_scratch.path().join("workspace-moved");
-        std::fs::create_dir(&root).expect("create capture root");
-        std::fs::write(root.join("seed.md"), b"seed workspace content")
-            .expect("write seed content");
-        std::fs::write(root.join("plan.md"), b"original workspace content")
-            .expect("write original content");
-
-        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
-        let supervisor = WorkspaceSupervisor::new();
-        let actor = supervisor.open(&db, 1).expect("open actor").actor;
-        let seed_actor = actor.clone();
-        let seed_root = root.clone();
-        std::thread::spawn(move || {
-            StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 1, None)
-                .ingest(
-                    "seed.md",
-                    0,
-                    "advisory-sha",
-                    "text/markdown",
-                    IngestReason::Added,
-                )
-                .expect("seed workspace");
-        })
-        .join()
-        .expect("workspace seed thread");
-        let files = FilesActor::spawn_async(root.clone(), ScanBounds::default())
-            .await
-            .expect("files actor");
-        let files = FilesActorCloseGuard::new(files);
-        let captured_root = Arc::new(CapturedRoot::bind(&root).expect("bind plan root"));
-        let converged_root = Arc::clone(&captured_root);
-        let run = files
-            .handle()
-            .reconcile(CancellationToken::new())
-            .await
-            .expect("prepare reconcile plan");
-        assert!(matches!(&run, ReconcileRun::Completed(plan) if !plan.ops.is_empty()));
-
-        std::fs::rename(&root, &moved_root).expect("move planned workspace root");
-        std::fs::create_dir(&root).expect("install replacement workspace root");
-        std::fs::write(root.join("plan.md"), b"replacement workspace content")
-            .expect("write replacement content");
-
-        let leases = LeaseRegistry::new();
-        let status = Arc::new(DriverStatus::default());
-        let self_writes = SelfWriteSuppression::default();
-        let clean = apply_bound_run_with_handle(
-            ApplyRunContext {
-                root: &root,
-                actor: &actor,
-                workspace_id: WORKSPACE_ID,
-                leases: &leases,
-                status: &status,
-                self_writes: &self_writes,
-                author_json: None,
-                provenance: CaptureProvenance::default(),
-                events: EngineEvents::default(),
-                #[cfg(feature = "harness")]
-                apply_probe: None,
-            },
-            &files.handle(),
-            RootBoundRun { captured_root, run },
-            &CancellationToken::new(),
-        )
-        .await;
-
-        assert!(!clean, "a plan cannot adopt a replacement directory");
-        assert!(
-            files.handle().stats().await.expect("files stats").dirty,
-            "the refused plan stays dirty for a fresh scan"
-        );
-
-        status.request_collection_reconcile();
-        let converged_clean = apply_bound_run_with_handle(
-            ApplyRunContext {
-                root: &root,
-                actor: &actor,
-                workspace_id: WORKSPACE_ID,
-                leases: &leases,
-                status: &status,
-                self_writes: &self_writes,
-                author_json: None,
-                provenance: CaptureProvenance::default(),
-                events: EngineEvents::default(),
-                #[cfg(feature = "harness")]
-                apply_probe: None,
-            },
-            &files.handle(),
-            RootBoundRun {
-                captured_root: converged_root,
-                run: ReconcileRun::Converged,
-            },
-            &CancellationToken::new(),
-        )
-        .await;
-        assert!(
-            !converged_clean,
-            "pending collection work must carry the same root identity"
-        );
-        assert!(
-            status.collection_reconcile_pending(),
-            "a refused collection reconcile stays pending"
-        );
-
-        files.close().await;
-        supervisor.close(&db).expect("close actor");
-        let connection = rusqlite::Connection::open(&db).expect("open store observer");
-        let moments = connection
-            .query_row(
-                "SELECT COUNT(*) FROM moments WHERE workspace_id = ?1 AND path = 'plan.md'",
-                [WORKSPACE_ID],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count captured moments");
-        assert_eq!(moments, 0, "replacement bytes must never enter the store");
-
-        std::fs::remove_dir_all(&root).expect("remove replacement workspace root");
-        std::fs::rename(&moved_root, &root).expect("restore planned workspace root");
-    }
-}
+mod root_bound_run_tests;
 
 #[cfg(test)]
-mod collection_reconcile_scheduling_tests {
-    use super::*;
-    use dohc_engine_collab::{ContentKind, DocKey, Ydoc};
-    use dohc_engine_files::{CaptureApplyResult, CaptureSink, CapturedIngest};
-    use dohc_engine_runtime::WorkspaceSupervisor;
-    use dohc_engine_testkit::ScratchDir;
-
-    const WORKSPACE_ID: &str = "ws-idle-collection-reconcile";
-
-    fn plan_with(op: CaptureOp) -> ReconcilePlan {
-        ReconcilePlan {
-            from_generation: ScanGeneration(0),
-            to_generation: ScanGeneration(1),
-            ops: vec![op],
-            retained_over_cap: Vec::new(),
-            unconfirmed_removed: Vec::new(),
-            degraded: false,
-            degraded_paths: Vec::new(),
-            prepared_from_dirty: true,
-            dirty_epoch: 1,
-        }
-    }
-
-    fn ingest(path: &str, reason: IngestReason) -> CaptureOp {
-        CaptureOp::Ingest {
-            path: path.to_owned(),
-            size: 1,
-            sha256: "advisory-sha".to_owned(),
-            mtime_ms: 0,
-            media_type: "text/markdown",
-            reason,
-        }
-    }
-
-    async fn wait_for_watcher_dirty(files: &FilesHandle) {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if files.stats().await.expect("watcher stats").dirty {
-                return;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "native watcher did not mark the collection edit dirty"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-        }
-    }
-
-    async fn seed_plain_richdoc_lineage(actor: &ActorHandle, path: &str, markdown: &str) {
-        let state = actor
-            .ydoc_open_state(
-                WORKSPACE_ID.to_owned(),
-                wall_now_ms(),
-                false,
-                None,
-                "main".to_owned(),
-                path.to_owned(),
-                Some(ContentKind::Richdoc),
-                CancellationToken::new(),
-            )
-            .await
-            .expect("open absent rich-document lineage");
-        assert!(
-            !state.lineage_existing,
-            "test fixture starts without lineage"
-        );
-
-        // These scheduling tests use a plain paragraph fixture. Production
-        // adoption seeds through the desktop's shared Markdown importer.
-        let doc = Ydoc::wire();
-        doc.apply(&state.initial_update)
-            .expect("apply initial rich-document state");
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
-            .expect("seed plain rich-document fixture");
-        actor
-            .ydoc_record_update(
-                state.key,
-                path.to_owned(),
-                ContentKind::Richdoc,
-                state.regime,
-                doc.encode_full_state(),
-                None,
-                None,
-                state.lineage_claim_id,
-                true,
-                state.head_blob_sha256,
-                None,
-                wall_now_ms(),
-                Arc::new(NoFaults),
-                CancellationToken::new(),
-            )
-            .await
-            .expect("record rich-document seed");
-    }
-
-    fn seed_collection_capture(actor: &ActorHandle, root: &Path, paths: &[&str]) {
-        let seed_actor = actor.clone();
-        let seed_root = root.to_path_buf();
-        let paths = paths
-            .iter()
-            .map(|path| (*path).to_owned())
-            .collect::<Vec<_>>();
-        std::thread::spawn(move || {
-            let mut sink =
-                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 2, None);
-            for path in paths {
-                sink.ingest(
-                    &path,
-                    0,
-                    "advisory-sha",
-                    "text/markdown",
-                    IngestReason::Added,
-                )
-                .unwrap_or_else(|_| panic!("capture {path}"));
-            }
-        })
-        .join()
-        .expect("collection seed thread");
-    }
-
-    fn collection_apply_context<'a>(
-        root: &'a Path,
-        actor: &'a ActorHandle,
-        leases: &'a LeaseRegistry,
-        status: &'a Arc<DriverStatus>,
-        self_writes: &'a SelfWriteSuppression,
-    ) -> ApplyRunContext<'a> {
-        ApplyRunContext {
-            root,
-            actor,
-            workspace_id: WORKSPACE_ID,
-            leases,
-            status,
-            self_writes,
-            author_json: None,
-            provenance: CaptureProvenance::default(),
-            events: EngineEvents::default(),
-            #[cfg(feature = "harness")]
-            apply_probe: None,
-        }
-    }
-
-    #[test]
-    fn collection_reconcile_predicate_tracks_only_detection_and_membership_changes() {
-        let scratch = ScratchDir::new().expect("scratch");
-        let collection_dir = scratch.path().join("tasks");
-        std::fs::create_dir_all(&collection_dir).expect("collection directory");
-        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
-            .expect("collection schema");
-
-        assert!(collection_reconcile_required(
-            scratch.path(),
-            &plan_with(ingest("collection.yaml", IngestReason::Changed)),
-        ));
-        assert!(collection_reconcile_required(
-            scratch.path(),
-            &plan_with(ingest("tasks/collection.yaml", IngestReason::Changed)),
-        ));
-        assert!(collection_reconcile_required(
-            scratch.path(),
-            &plan_with(ingest("tasks/alpha.md", IngestReason::Added)),
-        ));
-        assert!(collection_reconcile_required(
-            scratch.path(),
-            &plan_with(CaptureOp::Retire {
-                path: "tasks/alpha.md".to_owned(),
-            }),
-        ));
-        assert!(!collection_reconcile_required(
-            scratch.path(),
-            &plan_with(ingest("tasks/alpha.md", IngestReason::Changed)),
-        ));
-        assert!(!collection_reconcile_required(
-            scratch.path(),
-            &plan_with(ingest("notes/alpha.md", IngestReason::Added)),
-        ));
-        assert!(!collection_reconcile_required(
-            scratch.path(),
-            &plan_with(ingest("root.md", IngestReason::Added)),
-        ));
-    }
-
-    #[test]
-    fn collection_reconcile_predicate_matches_the_markdown_extension_case_insensitively() {
-        let scratch = ScratchDir::new().expect("scratch");
-        let collection_dir = scratch.path().join("tasks");
-        std::fs::create_dir_all(&collection_dir).expect("collection directory");
-        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
-            .expect("collection schema");
-
-        // The watcher path: adding NOTE.MD to a live collection must schedule
-        // the reconciliation that adopts it, exactly like note.md.
-        assert!(collection_reconcile_required(
-            scratch.path(),
-            &plan_with(ingest("tasks/NOTE.MD", IngestReason::Added)),
-        ));
-        assert!(collection_reconcile_required(
-            scratch.path(),
-            &plan_with(CaptureOp::Retire {
-                path: "tasks/NOTE.MD".to_owned(),
-            }),
-        ));
-        assert!(!collection_reconcile_required(
-            scratch.path(),
-            &plan_with(ingest("notes/NOTE.MD", IngestReason::Added)),
-        ));
-    }
-
-    #[test]
-    fn collection_reconcile_request_take_preserves_a_concurrent_request() {
-        let status = DriverStatus::default();
-        assert!(!status.collection_reconcile_pending());
-        status.request_collection_reconcile();
-        assert!(status.collection_reconcile_pending());
-        assert!(status.take_collection_reconcile_request());
-        assert!(!status.collection_reconcile_pending());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn lease_blocked_collection_adoption_retries_after_release_without_a_file_change() {
-        let scratch = ScratchDir::new().expect("scratch");
-        let collection_dir = scratch.path().join("tasks");
-        std::fs::create_dir_all(&collection_dir).expect("collection directory");
-        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
-            .expect("collection schema");
-        std::fs::write(collection_dir.join("alpha.md"), b"Alpha task\n")
-            .expect("collection record");
-
-        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
-        let supervisor = WorkspaceSupervisor::new();
-        let actor = supervisor.open(&db, 1).expect("open actor").actor;
-        seed_collection_capture(
-            &actor,
-            scratch.path(),
-            &["tasks/collection.yaml", "tasks/alpha.md"],
-        );
-
-        let object_id = rusqlite::Connection::open(&db)
-            .expect("open database observer")
-            .query_row(
-                "SELECT object_id FROM path_aliases \
-                 WHERE workspace_id = ?1 AND version_id = 'main' \
-                   AND path = 'tasks/alpha.md'",
-                [WORKSPACE_ID],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("captured record object id");
-        seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", "Alpha task\n").await;
-        let leases = LeaseRegistry::new();
-        let key = DocKey::new(WORKSPACE_ID, "main", &object_id).expect("record key");
-        let lease = leases.acquire(&key).expect("hold record lease");
-
-        let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
-            .await
-            .expect("files actor");
-        let files = FilesActorCloseGuard::new(files);
-        let status = Arc::new(DriverStatus::default());
-        let self_writes = SelfWriteSuppression::default();
-        status.request_collection_reconcile();
-        let first_root = bind_capture_root(scratch.path()).expect("bind first run root");
-        let first_clean = apply_bound_run_with_handle(
-            collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
-            &files.handle(),
-            RootBoundRun {
-                captured_root: first_root,
-                run: ReconcileRun::Converged,
-            },
-            &CancellationToken::new(),
-        )
-        .await;
-        assert!(!first_clean, "the held lease makes this pass retryable");
-        assert!(
-            status.collection_reconcile_pending(),
-            "a held lease must leave another collection pass scheduled"
-        );
-        assert_eq!(
-            std::fs::read_to_string(collection_dir.join("alpha.md"))
-                .expect("read lease-blocked record"),
-            "Alpha task\n"
-        );
-
-        drop(lease);
-        let second_root = bind_capture_root(scratch.path()).expect("bind second run root");
-        let second_clean = apply_bound_run_with_handle(
-            collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
-            &files.handle(),
-            RootBoundRun {
-                captured_root: second_root,
-                run: ReconcileRun::Converged,
-            },
-            &CancellationToken::new(),
-        )
-        .await;
-        assert!(second_clean, "the scheduled retry adopts after release");
-        assert!(!status.collection_reconcile_pending());
-        assert!(
-            std::fs::read_to_string(collection_dir.join("alpha.md"))
-                .expect("read adopted record")
-                .contains("id: rec_")
-        );
-        let adoption_state = rusqlite::Connection::open(&db)
-            .expect("open adopted-state observer")
-            .query_row(
-                "SELECT adoption_state FROM collection_records \
-                 WHERE workspace_id = ?1 AND version_id = 'main' \
-                   AND file_path = 'tasks/alpha.md'",
-                [WORKSPACE_ID],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("adopted collection record");
-        assert_eq!(adoption_state, "adopted");
-
-        files.close().await;
-        supervisor.close(&db).expect("close actor");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
-        let scratch = ScratchDir::new().expect("scratch");
-        let collection_dir = scratch.path().join("tasks");
-        std::fs::create_dir_all(&collection_dir).expect("collection directory");
-        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
-            .expect("collection schema");
-        std::fs::write(collection_dir.join("alpha.md"), b"Alpha task\n")
-            .expect("first collection record");
-        std::fs::write(collection_dir.join("beta.md"), b"Beta task\n")
-            .expect("second collection record");
-
-        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
-        let supervisor = WorkspaceSupervisor::new();
-        let actor = supervisor.open(&db, 1).expect("open actor").actor;
-        seed_collection_capture(
-            &actor,
-            scratch.path(),
-            &["tasks/collection.yaml", "tasks/alpha.md", "tasks/beta.md"],
-        );
-
-        let object_id = rusqlite::Connection::open(&db)
-            .expect("open database observer")
-            .query_row(
-                "SELECT object_id FROM path_aliases \
-                 WHERE workspace_id = ?1 AND version_id = 'main' \
-                   AND path = 'tasks/alpha.md'",
-                [WORKSPACE_ID],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("first captured record object id");
-        seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", "Alpha task\n").await;
-        seed_plain_richdoc_lineage(&actor, "tasks/beta.md", "Beta task\n").await;
-        let leases = LeaseRegistry::new();
-        let key = DocKey::new(WORKSPACE_ID, "main", &object_id).expect("first record key");
-        let lease = leases.acquire(&key).expect("hold first record lease");
-
-        let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
-            .await
-            .expect("files actor");
-        let files = FilesActorCloseGuard::new(files);
-        let status = Arc::new(DriverStatus::default());
-        let self_writes = SelfWriteSuppression::default();
-        status.request_collection_reconcile();
-        let first_root = bind_capture_root(scratch.path()).expect("bind first run root");
-        let first_clean = apply_bound_run_with_handle(
-            collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
-            &files.handle(),
-            RootBoundRun {
-                captured_root: first_root,
-                run: ReconcileRun::Converged,
-            },
-            &CancellationToken::new(),
-        )
-        .await;
-        assert!(!first_clean, "the held lease keeps its retry scheduled");
-        assert!(status.collection_reconcile_pending());
-        assert_eq!(
-            std::fs::read_to_string(collection_dir.join("alpha.md"))
-                .expect("read lease-blocked record"),
-            "Alpha task\n"
-        );
-        let beta_after_first =
-            std::fs::read_to_string(collection_dir.join("beta.md")).expect("read second record");
-        assert!(
-            beta_after_first.contains("id: rec_"),
-            "an unrelated candidate must adopt in the same pass"
-        );
-        let (alpha_state, beta_state) = rusqlite::Connection::open(&db)
-            .expect("open first-pass state observer")
-            .query_row(
-                "SELECT \
-                    MAX(CASE WHEN file_path = 'tasks/alpha.md' THEN adoption_state END), \
-                    MAX(CASE WHEN file_path = 'tasks/beta.md' THEN adoption_state END) \
-                 FROM collection_records \
-                 WHERE workspace_id = ?1 AND version_id = 'main'",
-                [WORKSPACE_ID],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .expect("first-pass adoption states");
-        assert_eq!(alpha_state, "pending-lossless");
-        assert_eq!(beta_state, "adopted");
-
-        drop(lease);
-        let second_root = bind_capture_root(scratch.path()).expect("bind second run root");
-        let second_clean = apply_bound_run_with_handle(
-            collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
-            &files.handle(),
-            RootBoundRun {
-                captured_root: second_root,
-                run: ReconcileRun::Converged,
-            },
-            &CancellationToken::new(),
-        )
-        .await;
-        assert!(second_clean, "the scheduled retry adopts after release");
-        assert!(!status.collection_reconcile_pending());
-        assert!(
-            std::fs::read_to_string(collection_dir.join("alpha.md"))
-                .expect("read adopted first record")
-                .contains("id: rec_")
-        );
-        assert_eq!(
-            std::fs::read_to_string(collection_dir.join("beta.md"))
-                .expect("read adopted second record"),
-            beta_after_first,
-            "the retry must not rewrite the already-adopted candidate"
-        );
-
-        files.close().await;
-        supervisor.close(&db).expect("close actor");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn watcher_edit_stripping_adopted_record_id_reasserts_the_binding() {
-        let scratch = ScratchDir::new().expect("scratch");
-        let collection_dir = scratch.path().join("tasks");
-        let record_path = collection_dir.join("alpha.md");
-        std::fs::create_dir_all(&collection_dir).expect("collection directory");
-
-        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
-        let supervisor = WorkspaceSupervisor::new();
-        let actor = supervisor.open(&db, 1).expect("open actor").actor;
-        let leases = LeaseRegistry::new();
-        let self_writes = SelfWriteSuppression::default();
-        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
-            .expect("collection schema");
-        std::fs::write(&record_path, b"Alpha task").expect("collection record");
-        let seed_actor = actor.clone();
-        let seed_root = scratch.path().to_path_buf();
-        let seed_leases = leases.clone();
-        let seed_self_writes = self_writes.clone();
-        std::thread::spawn(move || {
-            let mut sink = StoreCaptureSink::new_with_self_writes(
-                seed_actor,
-                WORKSPACE_ID,
-                "main",
-                seed_root,
-                2,
-                None,
-                seed_leases,
-                seed_self_writes,
-                CaptureProvenance::default(),
-            );
-            for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
-                sink.ingest(
-                    path,
-                    0,
-                    "advisory-sha",
-                    "text/markdown",
-                    IngestReason::Added,
-                )
-                .unwrap_or_else(|_| panic!("capture {path}"));
-            }
-            assert!(
-                sink.reconcile_collections()
-                    .expect("bind pending collection record")
-                    .is_empty()
-            );
-        })
-        .join()
-        .expect("collection capture setup thread");
-        seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", "Alpha task").await;
-        let adopt_actor = actor.clone();
-        let adopt_root = scratch.path().to_path_buf();
-        let adopt_leases = leases.clone();
-        let adopt_self_writes = self_writes.clone();
-        std::thread::spawn(move || {
-            assert_eq!(
-                StoreCaptureSink::new_with_self_writes(
-                    adopt_actor,
-                    WORKSPACE_ID,
-                    "main",
-                    adopt_root,
-                    3,
-                    None,
-                    adopt_leases,
-                    adopt_self_writes,
-                    CaptureProvenance::default(),
-                )
-                .reconcile_collections()
-                .expect("adopt shared-imported record"),
-                ["tasks/alpha.md"]
-            );
-        })
-        .join()
-        .expect("collection adoption setup thread");
-        let record_id = rusqlite::Connection::open(&db)
-            .expect("open binding observer")
-            .query_row(
-                "SELECT record_id FROM collection_records \
-                 WHERE workspace_id = ?1 AND version_id = 'main' \
-                   AND file_path = 'tasks/alpha.md'",
-                [WORKSPACE_ID],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("adopted record binding");
-        let adopted = std::fs::read_to_string(&record_path).expect("read adopted record");
-        assert!(adopted.contains(&format!("id: {record_id}")));
-
-        let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
-            .await
-            .expect("files actor");
-        let files = FilesActorCloseGuard::new(files);
-        let handle = files.handle();
-        let ready = NativeWatcher::start(
-            scratch.path().to_path_buf(),
-            handle.clone(),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("watcher start");
-        let mut watcher = ready.watcher;
-        let status = Arc::new(DriverStatus::default());
-
-        let ReconcileRun::Completed(baseline_plan) = ready.initial_reconcile else {
-            panic!("the watcher must prepare its adopted-file baseline");
-        };
-        assert!(!baseline_plan.degraded);
-        let captured = baseline_plan
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                CaptureOp::Ingest {
-                    path, size, sha256, ..
-                } => Some(CapturedIngest {
-                    path: path.clone(),
-                    size: *size,
-                    sha256: sha256.clone(),
-                }),
-                CaptureOp::Retire { .. } => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(captured.len(), baseline_plan.ops.len());
-        handle
-            .acknowledge_capture(
-                baseline_plan.clone(),
-                CaptureApplyResult {
-                    applied_paths: baseline_plan
-                        .ops
-                        .iter()
-                        .map(|op| op.path().to_owned())
-                        .collect(),
-                    captured,
-                    not_owned_paths: Vec::new(),
-                    failed_applies: Vec::new(),
-                    crashed_after_durable_boundary: None,
-                    degraded: false,
-                },
-            )
-            .await
-            .expect("acknowledge the already-captured adopted-file baseline");
-
-        std::fs::write(&record_path, b"Alpha task").expect("strip adopted record id");
-        wait_for_watcher_dirty(&handle).await;
-        let changed_root = bind_capture_root(scratch.path()).expect("bind changed run root");
-        let changed = handle
-            .reconcile_if_dirty(CancellationToken::new())
-            .await
-            .expect("reconcile stripped id");
-        let ReconcileRun::Completed(changed_plan) = changed else {
-            panic!("the watcher edit must produce a completed capture plan");
-        };
-        assert!(
-            changed_plan.ops.iter().any(|op| matches!(
-                op,
-                CaptureOp::Ingest {
-                    path,
-                    reason: IngestReason::Changed,
-                    ..
-                } if path == "tasks/alpha.md"
-            )),
-            "stripping the id must travel through the ordinary Changed path"
-        );
-        assert!(
-            apply_bound_run_with_handle(
-                ApplyRunContext {
-                    root: scratch.path(),
-                    actor: &actor,
-                    workspace_id: WORKSPACE_ID,
-                    leases: &leases,
-                    status: &status,
-                    self_writes: &self_writes,
-                    author_json: None,
-                    provenance: CaptureProvenance::default(),
-                    events: EngineEvents::default(),
-                    #[cfg(feature = "harness")]
-                    apply_probe: None,
-                },
-                &handle,
-                RootBoundRun {
-                    captured_root: changed_root,
-                    run: ReconcileRun::Completed(changed_plan),
-                },
-                &CancellationToken::new(),
-            )
-            .await,
-            "the changed record capture settles cleanly"
-        );
-        let restored = std::fs::read_to_string(&record_path).expect("read restored record");
-
-        watcher.stop().expect("stop watcher");
-        files.close().await;
-        supervisor.close(&db).expect("close actor");
-
-        assert_eq!(
-            restored, adopted,
-            "the established binding must reassert its id after an ordinary edit strips it"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
-        const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
-        const MALFORMED: &str = concat!(
-            "---\n",
-            "id: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n",
-            "title: [\n",
-            "---\n",
-            "\n",
-            "Body\n",
-        );
-        const REPAIRED: &str = concat!(
-            "---\n",
-            "id: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n",
-            "title: Repaired\n",
-            "---\n",
-            "\n",
-            "Body\n",
-        );
-
-        let scratch = ScratchDir::new().expect("scratch");
-        let collection_dir = scratch.path().join("tasks");
-        let record_path = collection_dir.join("alpha.md");
-        std::fs::create_dir_all(&collection_dir).expect("collection directory");
-        std::fs::write(
-            collection_dir.join("collection.yaml"),
-            b"fields:\n  title:\n    type: text\n",
-        )
-        .expect("collection schema");
-        std::fs::write(&record_path, MALFORMED).expect("malformed collection record");
-
-        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
-        let supervisor = WorkspaceSupervisor::new();
-        let actor = supervisor.open(&db, 1).expect("open actor").actor;
-        let leases = LeaseRegistry::new();
-        let self_writes = SelfWriteSuppression::default();
-        let seed_actor = actor.clone();
-        let seed_root = scratch.path().to_path_buf();
-        std::thread::spawn(move || {
-            let mut sink =
-                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 2, None);
-            for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
-                sink.ingest(
-                    path,
-                    0,
-                    "advisory-sha",
-                    "text/markdown",
-                    IngestReason::Added,
-                )
-                .unwrap_or_else(|_| panic!("capture {path}"));
-            }
-            assert!(
-                sink.reconcile_collections()
-                    .expect("exclude malformed collection record")
-                    .is_empty()
-            );
-        })
-        .join()
-        .expect("malformed collection capture setup thread");
-        let binding_count = rusqlite::Connection::open(&db)
-            .expect("open binding observer")
-            .query_row(
-                "SELECT COUNT(*) FROM collection_records \
-                 WHERE workspace_id = ?1 AND version_id = 'main' \
-                   AND file_path = 'tasks/alpha.md'",
-                [WORKSPACE_ID],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count malformed record bindings");
-        assert_eq!(binding_count, 0, "malformed Markdown starts unbound");
-
-        let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
-            .await
-            .expect("files actor");
-        let files = FilesActorCloseGuard::new(files);
-        let handle = files.handle();
-        let ready = NativeWatcher::start(
-            scratch.path().to_path_buf(),
-            handle.clone(),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("watcher start");
-        let mut watcher = ready.watcher;
-        let status = Arc::new(DriverStatus::default());
-
-        let ReconcileRun::Completed(baseline_plan) = ready.initial_reconcile else {
-            panic!("the watcher must prepare its malformed-file baseline");
-        };
-        assert!(!baseline_plan.degraded);
-        let captured = baseline_plan
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                CaptureOp::Ingest {
-                    path, size, sha256, ..
-                } => Some(CapturedIngest {
-                    path: path.clone(),
-                    size: *size,
-                    sha256: sha256.clone(),
-                }),
-                CaptureOp::Retire { .. } => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(captured.len(), baseline_plan.ops.len());
-        handle
-            .acknowledge_capture(
-                baseline_plan.clone(),
-                CaptureApplyResult {
-                    applied_paths: baseline_plan
-                        .ops
-                        .iter()
-                        .map(|op| op.path().to_owned())
-                        .collect(),
-                    captured,
-                    not_owned_paths: Vec::new(),
-                    failed_applies: Vec::new(),
-                    crashed_after_durable_boundary: None,
-                    degraded: false,
-                },
-            )
-            .await
-            .expect("acknowledge the already-captured malformed-file baseline");
-
-        std::fs::write(&record_path, REPAIRED).expect("repair collection record frontmatter");
-        wait_for_watcher_dirty(&handle).await;
-        let changed_root = bind_capture_root(scratch.path()).expect("bind changed run root");
-        let changed = handle
-            .reconcile_if_dirty(CancellationToken::new())
-            .await
-            .expect("reconcile repaired frontmatter");
-        let ReconcileRun::Completed(changed_plan) = changed else {
-            panic!("the watcher repair must produce a completed capture plan");
-        };
-        assert!(
-            changed_plan.ops.iter().any(|op| matches!(
-                op,
-                CaptureOp::Ingest {
-                    path,
-                    reason: IngestReason::Changed,
-                    ..
-                } if path == "tasks/alpha.md"
-            )),
-            "repairing malformed frontmatter must travel through the Changed path"
-        );
-        assert!(
-            apply_bound_run_with_handle(
-                ApplyRunContext {
-                    root: scratch.path(),
-                    actor: &actor,
-                    workspace_id: WORKSPACE_ID,
-                    leases: &leases,
-                    status: &status,
-                    self_writes: &self_writes,
-                    author_json: None,
-                    provenance: CaptureProvenance::default(),
-                    events: EngineEvents::default(),
-                    #[cfg(feature = "harness")]
-                    apply_probe: None,
-                },
-                &handle,
-                RootBoundRun {
-                    captured_root: changed_root,
-                    run: ReconcileRun::Completed(changed_plan),
-                },
-                &CancellationToken::new(),
-            )
-            .await,
-            "the repaired collection record capture settles cleanly"
-        );
-        let pending = rusqlite::Connection::open(&db)
-            .expect("open pending record observer")
-            .query_row(
-                "SELECT record_id,adoption_state,index_initialized FROM collection_records \
-                 WHERE workspace_id=?1 AND version_id='main' \
-                   AND file_path='tasks/alpha.md'",
-                [WORKSPACE_ID],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, bool>(2)?,
-                    ))
-                },
-            )
-            .expect("load repaired pending record");
-        assert_eq!(
-            pending,
-            (RECORD_ID.to_owned(), "pending".to_owned(), true),
-            "the Changed watcher pass must bind and index the repaired record"
-        );
-
-        // The desktop imports pending collection records into canonical
-        // rich-document lineage, then asks capture to reconcile again.
-        seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", REPAIRED).await;
-        status.request_collection_reconcile();
-        let converged_root = bind_capture_root(scratch.path()).expect("bind converged run root");
-        assert!(
-            apply_bound_run_with_handle(
-                ApplyRunContext {
-                    root: scratch.path(),
-                    actor: &actor,
-                    workspace_id: WORKSPACE_ID,
-                    leases: &leases,
-                    status: &status,
-                    self_writes: &self_writes,
-                    author_json: None,
-                    provenance: CaptureProvenance::default(),
-                    events: EngineEvents::default(),
-                    #[cfg(feature = "harness")]
-                    apply_probe: None,
-                },
-                &handle,
-                RootBoundRun {
-                    captured_root: converged_root,
-                    run: ReconcileRun::Converged,
-                },
-                &CancellationToken::new(),
-            )
-            .await,
-            "the imported repaired record adopts cleanly"
-        );
-        let indexed = rusqlite::Connection::open(&db)
-            .expect("open indexed record observer")
-            .query_row(
-                "SELECT r.record_id,r.adoption_state,r.index_initialized,f.value_json \
-                 FROM collection_records r \
-                 JOIN collection_record_fields f ON f.workspace_id=r.workspace_id \
-                   AND f.version_id=r.version_id AND f.record_id=r.record_id \
-                 WHERE r.workspace_id=?1 AND r.version_id='main' \
-                   AND r.file_path='tasks/alpha.md' AND f.field_name='title'",
-                [WORKSPACE_ID],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, bool>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )
-            .expect("load adopted indexed record");
-
-        watcher.stop().expect("stop watcher");
-        files.close().await;
-        supervisor.close(&db).expect("close actor");
-
-        assert_eq!(
-            indexed,
-            (
-                RECORD_ID.to_owned(),
-                "adopted".to_owned(),
-                true,
-                "\"Repaired\"".to_owned(),
-            )
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_converged_watcher_scan_does_not_rewrite_collection_state() {
-        let scratch = ScratchDir::new().expect("scratch");
-        let collection_dir = scratch.path().join("tasks");
-        std::fs::create_dir_all(&collection_dir).expect("collection directory");
-        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
-            .expect("collection schema");
-        std::fs::write(collection_dir.join("alpha.md"), b"Alpha task\n")
-            .expect("collection record");
-
-        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
-        let supervisor = WorkspaceSupervisor::new();
-        let actor = supervisor.open(&db, 1).expect("open actor").actor;
-        let seed_actor = actor.clone();
-        let seed_root = scratch.path().to_path_buf();
-        std::thread::spawn(move || {
-            let mut sink =
-                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 2, None);
-            for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
-                sink.ingest(
-                    path,
-                    0,
-                    "advisory-sha",
-                    "text/markdown",
-                    IngestReason::Added,
-                )
-                .unwrap_or_else(|_| panic!("capture {path}"));
-            }
-            sink.reconcile_collections().expect("bind pending record");
-        })
-        .join()
-        .expect("collection seed thread");
-        seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", "Alpha task\n").await;
-        let adopt_actor = actor.clone();
-        let adopt_root = scratch.path().to_path_buf();
-        std::thread::spawn(move || {
-            StoreCaptureSink::new(adopt_actor, WORKSPACE_ID, "main", adopt_root, 3, None)
-                .reconcile_collections()
-                .expect("adopt seeded record");
-        })
-        .join()
-        .expect("collection adoption thread");
-
-        let observer = rusqlite::Connection::open(&db).expect("open database observer");
-        let adoption_state = observer
-            .query_row(
-                "SELECT adoption_state FROM collection_records \
-                 WHERE workspace_id = ?1 AND version_id = 'main' \
-                   AND file_path = 'tasks/alpha.md'",
-                [WORKSPACE_ID],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("collection adoption state");
-        assert_eq!(adoption_state, "adopted");
-        let data_version = |connection: &rusqlite::Connection| {
-            connection
-                .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
-                .expect("database version")
-        };
-        let before = data_version(&observer);
-
-        let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
-            .await
-            .expect("files actor");
-        let files = FilesActorCloseGuard::new(files);
-        let status = Arc::new(DriverStatus::default());
-        let self_writes = SelfWriteSuppression::default();
-        let leases = LeaseRegistry::new();
-        let captured_root = bind_capture_root(scratch.path()).expect("bind converged run root");
-        let clean = apply_bound_run_with_handle(
-            ApplyRunContext {
-                root: scratch.path(),
-                actor: &actor,
-                workspace_id: WORKSPACE_ID,
-                leases: &leases,
-                status: &status,
-                self_writes: &self_writes,
-                author_json: None,
-                provenance: CaptureProvenance::default(),
-                events: EngineEvents::default(),
-                #[cfg(feature = "harness")]
-                apply_probe: None,
-            },
-            &files.handle(),
-            RootBoundRun {
-                captured_root,
-                run: ReconcileRun::Converged,
-            },
-            &CancellationToken::new(),
-        )
-        .await;
-        assert!(clean, "an idle converged pass stays healthy");
-        assert_eq!(
-            data_version(&observer),
-            before,
-            "an idle converged pass must not schedule collection writes"
-        );
-
-        files.close().await;
-        supervisor.close(&db).expect("close actor");
-    }
-
-    // The collection reconcile commits its adoptions before the recovery
-    // repair runs. An unrelated repair failure in the same converged tick must
-    // not drop the committed paths from the capture event, or the renderer
-    // stays stale on state the engine already holds.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_failed_recovery_repair_still_announces_committed_adoptions() {
-        let scratch = ScratchDir::new().expect("scratch");
-        let collection_dir = scratch.path().join("tasks");
-        std::fs::create_dir_all(&collection_dir).expect("collection directory");
-        std::fs::write(
-            collection_dir.join("collection.yaml"),
-            b"name: Tasks
-",
-        )
-        .expect("collection schema");
-        std::fs::write(
-            collection_dir.join("alpha.md"),
-            b"Alpha task
-",
-        )
-        .expect("collection record");
-
-        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
-        let supervisor = WorkspaceSupervisor::new();
-        let actor = supervisor.open(&db, 1).expect("open actor").actor;
-        seed_collection_capture(
-            &actor,
-            scratch.path(),
-            &["tasks/collection.yaml", "tasks/alpha.md"],
-        );
-        seed_plain_richdoc_lineage(
-            &actor,
-            "tasks/alpha.md",
-            "Alpha task
-",
-        )
-        .await;
-
-        // An unrelated conflicted recovery whose decision carries an object id
-        // no DocKey accepts (a control byte): the repair pass fails after the
-        // collection reconcile above has committed its adoption.
-        let sha = "a".repeat(64);
-        rusqlite::Connection::open(&db)
-            .expect("open database seeder")
-            .execute_batch(&format!(
-                "INSERT INTO binary_blobs (sha256,byte_length,bytes)                  VALUES ('{sha}',1,X'00');
-                 INSERT INTO ydoc_recovery_decisions (                      workspace_id,origin_id,origin_seq,version_id,object_id,original_path,                      incoming_content_kind,incoming_update_blob_sha256,                      incoming_lineage_claim_id,incoming_is_base_state,losing_claim_id,                      recovered_path,recovery_collision_ordinal,recovery_object_id,                      recovery_moment_id,recorded_at_ms                  ) VALUES (                      '{WORKSPACE_ID}','origin-broken',0,'main','bad'||char(10)||'object',                      'doc.md','plaintext','{sha}','{sha}',1,'{sha}',                      'doc.recovered.md','0','recovery-object','recovery-moment',1                  );
-                 INSERT INTO materialization_jobs                      (job_id,target_path,content_sha256,preimage_present,                       target_generation,status,created_at_ms)                  VALUES ('sync-mat_recovery-moment','doc.recovered.md','{sha}',0,1,'conflict',1);"
-            ))
-            .expect("seed broken recovery decision");
-
-        let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
-            .await
-            .expect("files actor");
-        let files = FilesActorCloseGuard::new(files);
-        let status = Arc::new(DriverStatus::default());
-        let self_writes = SelfWriteSuppression::default();
-        let leases = LeaseRegistry::new();
-        status.request_collection_reconcile();
-        let events = EngineEvents::default();
-        let mut notices = events.subscribe();
-        let captured_root = bind_capture_root(scratch.path()).expect("bind run root");
-        let clean = apply_bound_run_with_handle(
-            ApplyRunContext {
-                root: scratch.path(),
-                actor: &actor,
-                workspace_id: WORKSPACE_ID,
-                leases: &leases,
-                status: &status,
-                self_writes: &self_writes,
-                author_json: None,
-                provenance: CaptureProvenance::default(),
-                events,
-                #[cfg(feature = "harness")]
-                apply_probe: None,
-            },
-            &files.handle(),
-            RootBoundRun {
-                captured_root,
-                run: ReconcileRun::Converged,
-            },
-            &CancellationToken::new(),
-        )
-        .await;
-        assert!(!clean, "the failed repair keeps the tick degraded");
-        assert!(
-            std::fs::read_to_string(collection_dir.join("alpha.md"))
-                .expect("read adopted record")
-                .contains("id: rec_"),
-            "the adoption committed before the repair failed"
-        );
-        let notice = notices
-            .try_recv()
-            .expect("the committed adoption paths reach the renderer despite the failed repair");
-        assert_eq!(notice.name, CAPTURE_MOMENT_RECORDED_EVENT);
-        assert_eq!(notice.payload["workspaceId"], WORKSPACE_ID);
-        assert!(
-            notice.payload["paths"]
-                .as_array()
-                .is_some_and(|paths| paths.iter().any(|path| path == "tasks/alpha.md")),
-            "the event carries the adopted path: {:?}",
-            notice.payload
-        );
-
-        files.close().await;
-        supervisor.close(&db).expect("close actor");
-    }
-}
+mod collection_reconcile_scheduling_tests;
 
 #[cfg(test)]
-mod selected_recovery_replay_tests {
-    use super::*;
-    use dohc_engine_runtime::WorkspaceSupervisor;
-    use dohc_engine_storage::{EngineStore, MaterializationJobSpec, Preimage, enqueue_job};
-    use dohc_engine_testkit::ScratchDir;
-
-    const WORKSPACE_ID: &str = "ws-selected-recovery-replay";
-    const RECOVERY_PATH: &str = "notes/recovered.md";
-    const RECOVERY_JOB: &str = "sync-mat_ydoc-recovery-moment-selected";
-    const UNRELATED_PATH: &str = "unrelated.md";
-    const UNRELATED_JOB: &str = "unrelated-older-pending";
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn recovery_replay_ignores_an_older_unrelated_failing_pending_job() {
-        let scratch = ScratchDir::new().expect("scratch");
-        std::fs::write(scratch.path().join(UNRELATED_PATH), b"external occupant")
-            .expect("unrelated occupant");
-        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
-        let mut store = EngineStore::open(&db, 1).expect("open fixture store");
-        let unrelated_sha = store
-            .put_binary_blob(b"unrelated intended bytes")
-            .expect("unrelated blob");
-        let recovery_sha = store
-            .put_binary_blob(b"recovered lineage")
-            .expect("recovery blob");
-        store
-            .write_with(&NoFaults, |tx| {
-                enqueue_job(
-                    tx,
-                    &MaterializationJobSpec {
-                        job_id: UNRELATED_JOB.to_owned(),
-                        workspace_id: WORKSPACE_ID.to_owned(),
-                        target_path: UNRELATED_PATH.to_owned(),
-                        content_sha256: unrelated_sha.clone(),
-                        preimage: Preimage::Absent,
-                        target_generation: 1,
-                        now_ms: 1,
-                    },
-                )?;
-                enqueue_job(
-                    tx,
-                    &MaterializationJobSpec {
-                        job_id: RECOVERY_JOB.to_owned(),
-                        workspace_id: WORKSPACE_ID.to_owned(),
-                        target_path: RECOVERY_PATH.to_owned(),
-                        content_sha256: recovery_sha.clone(),
-                        preimage: Preimage::Absent,
-                        target_generation: 2,
-                        now_ms: 2,
-                    },
-                )?;
-                Ok::<_, dohc_engine_storage::StorageError>(())
-            })
-            .expect("seed pending jobs");
-        drop(store);
-
-        let supervisor = WorkspaceSupervisor::new();
-        let actor = supervisor.open(&db, 3).expect("open actor").actor;
-        let paths = materialize_ydoc_recoveries(
-            scratch.path(),
-            &actor,
-            WORKSPACE_ID,
-            &SelfWriteSuppression::default(),
-            4,
-            vec![dohc_engine_sync::YdocRecoveryMaterialization {
-                path: RECOVERY_PATH.to_owned(),
-                materialization_job_id: RECOVERY_JOB.to_owned(),
-            }],
-        )
-        .await
-        .expect("selected recovery materializes");
-        assert_eq!(paths, vec![RECOVERY_PATH]);
-        assert_eq!(
-            std::fs::read(scratch.path().join(RECOVERY_PATH)).expect("recovery bytes"),
-            b"recovered lineage"
-        );
-        assert_eq!(
-            std::fs::read(scratch.path().join(UNRELATED_PATH)).expect("unrelated bytes"),
-            b"external occupant",
-            "selected recovery replay must not touch an unrelated target"
-        );
-
-        let read_only = EngineStore::open_read_only(&db).expect("open read-only store");
-        let statuses: (String, String) = read_only
-            .read_with(|conn| {
-                Ok::<_, rusqlite::Error>((
-                    conn.query_row(
-                        "SELECT status FROM materialization_jobs WHERE job_id=?1",
-                        [RECOVERY_JOB],
-                        |row| row.get(0),
-                    )?,
-                    conn.query_row(
-                        "SELECT status FROM materialization_jobs WHERE job_id=?1",
-                        [UNRELATED_JOB],
-                        |row| row.get(0),
-                    )?,
-                ))
-            })
-            .expect("materialization statuses");
-        assert_eq!(statuses, ("complete".to_owned(), "pending".to_owned()));
-        supervisor.close(&db).expect("close actor");
-    }
-}
+mod selected_recovery_replay_tests;

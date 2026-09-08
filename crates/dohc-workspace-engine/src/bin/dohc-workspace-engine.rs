@@ -8,14 +8,18 @@ use dohc_engine_protocol::{
     frame::{Frame, FrameDecoder, blob_chunks, encode_blob_chunk_frame},
     limits::WireLimits,
     supervisor::{Supervisor, SupervisorConfig},
-    transport::{BlobEgress, EngineService as ProtocolEngineService},
+    transport::{
+        BlobEgress, ConnectionHandle, ConnectionOwner, EngineService as ProtocolEngineService,
+        OutputGuard,
+    },
     wire::{
         BlobStart, Envelope, ErrorEnvelope, Event, Hello, HelloAck, PROTOCOL_VERSION, Response,
         decode_control, encode_control,
     },
 };
 use dohc_engine_runtime::{RuntimeError, WorkspaceSupervisor};
-use dohc_workspace_engine::{EngineEventNotice, EngineService};
+use dohc_workspace_engine::live_application_ingress::LiveApplicationIngress;
+use dohc_workspace_engine::{EngineEventNotice, EngineService, LiveApplicationInput};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
@@ -31,8 +35,20 @@ const OUTPUT_QUEUE_CAPACITY: usize = 64;
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 static NEXT_SESSION_GENERATION: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(test)]
+#[path = "../../tests/support/live_application.rs"]
+mod live_test_support;
+
+#[cfg(test)]
+#[path = "../../tests/support/ordered_consumer.rs"]
+mod ordered_consumer_support;
+
 enum OutputItem {
     Envelope(Envelope),
+    Guarded {
+        response: Response,
+        guard: Arc<dyn OutputGuard>,
+    },
     Blob {
         response: Response,
         egress: BlobEgress,
@@ -81,18 +97,50 @@ async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
 
 async fn run_transport<R, W, S, C>(
     auth_token: String,
-    mut input: R,
+    input: R,
     output: W,
     supervisor: Arc<Supervisor<S>>,
-    mut events_rx: tokio::sync::mpsc::Receiver<EngineEventNotice>,
+    events_rx: tokio::sync::mpsc::Receiver<EngineEventNotice>,
     close_workspaces: C,
 ) -> Result<(), io::Error>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
-    S: ProtocolEngineService + 'static,
+    S: ProtocolEngineService<Input = LiveApplicationInput> + 'static,
     C: FnOnce() -> Result<(), RuntimeError> + Send + 'static,
 {
+    run_transport_with_live(
+        auth_token,
+        input,
+        output,
+        supervisor,
+        events_rx,
+        close_workspaces,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_transport_with_live<R, W, S, C>(
+    auth_token: String,
+    mut input: R,
+    output: W,
+    supervisor: Arc<Supervisor<S>>,
+    mut events_rx: tokio::sync::mpsc::Receiver<EngineEventNotice>,
+    close_workspaces: C,
+    live: Option<(ConnectionOwner, LiveApplicationIngress)>,
+) -> Result<(), io::Error>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+    S: ProtocolEngineService<Input = LiveApplicationInput> + 'static,
+    C: FnOnce() -> Result<(), RuntimeError> + Send + 'static,
+{
+    let (connection, mut ingress) = match live {
+        Some((owner, ingress)) => (Arc::new(owner), Some(ingress)),
+        None => (Arc::new(ConnectionOwner::authenticated()), None),
+    };
     let limits = WireLimits::default();
     let (output_tx, mut output_rx) =
         tokio::sync::mpsc::channel::<OutputItem>(OUTPUT_QUEUE_CAPACITY);
@@ -101,9 +149,11 @@ where
     let writer_limits = limits.clone();
     let writer_signal = writer_gone_tx.clone();
     let writer_active_egress = Arc::clone(&active_egress);
+    let writer_connection = Arc::clone(&connection);
     let writer = tokio::spawn(async move {
         let result =
             write_output(output, &mut output_rx, &writer_limits, writer_active_egress).await;
+        writer_connection.retire();
         let _ = writer_signal.send(true);
         result
     });
@@ -162,7 +212,26 @@ where
         // retain one handle per request for the whole session (bounded memory
         // in a long-lived daemon). `try_join_next` is cheap and non-blocking.
         reap_completed(&mut request_tasks);
+        let upload_deadline = ingress
+            .as_ref()
+            .and_then(LiveApplicationIngress::next_deadline);
         let read = tokio::select! {
+            () = async {
+                match upload_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(ingress) = &mut ingress {
+                    for id in ingress.expire() {
+                        lock(&active_requests).remove(&id);
+                        if !send_error(&output_tx, Some(id), ErrorCode::DeadlineExceeded, "live-upload-expired").await {
+                            keep_running = false;
+                        }
+                    }
+                }
+                continue;
+            }
             changed = writer_gone_rx.changed() => {
                 let _ = changed;
                 break;
@@ -184,7 +253,7 @@ where
             break;
         }
         decoder.push(&read_buf[..read]);
-        loop {
+        'frames: loop {
             let frame = match decoder.next_frame() {
                 Ok(Some(frame)) => frame,
                 Ok(None) => break,
@@ -203,19 +272,68 @@ where
                     break;
                 }
             };
-            let Frame::Control(payload) = frame else {
-                if !send_error(
-                    &output_tx,
-                    None,
-                    ErrorCode::InvalidEnvelope,
-                    "blob streams are not supported by this method surface",
-                )
-                .await
+            let payload = match frame {
+                Frame::Control(payload) => payload,
+                Frame::BlobChunk {
+                    stream_id,
+                    fin,
+                    bytes,
+                } if authenticated
+                    && negotiated_capabilities.contains("blobs")
+                    && ingress.is_some() =>
                 {
-                    let _ = writer_gone_tx.send(true);
+                    match ingress
+                        .as_mut()
+                        .expect("configured ingress")
+                        .chunk(stream_id, fin, &bytes)
+                    {
+                        Ok(Some((request, input))) => {
+                            lock(&active_requests).remove(&request.id);
+                            if !dispatch_authenticated(
+                                Envelope::Request(request),
+                                &supervisor,
+                                &output_tx,
+                                &writer_gone_tx,
+                                &active_requests,
+                                &active_egress,
+                                &mut request_tasks,
+                                true,
+                                negotiated_max_frame_bytes,
+                                Some(connection.handle()),
+                                Some(input),
+                            )
+                            .await
+                            {
+                                keep_running = false;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            let _ = output_tx
+                                .send(Envelope::Error(ErrorEnvelope { id: None, error }).into())
+                                .await;
+                            keep_running = false;
+                        }
+                    }
+                    if !keep_running {
+                        break;
+                    }
+                    continue;
                 }
-                keep_running = false;
-                break;
+                Frame::BlobChunk { .. } => {
+                    if !send_error(
+                        &output_tx,
+                        None,
+                        ErrorCode::InvalidEnvelope,
+                        "blob streams are not supported by this method surface",
+                    )
+                    .await
+                    {
+                        let _ = writer_gone_tx.send(true);
+                    }
+                    keep_running = false;
+                    break;
+                }
             };
             let envelope = match decode_control(&payload, &WireLimits::default()) {
                 Ok(envelope) => envelope,
@@ -271,6 +389,70 @@ where
                 other => vec![other],
             };
             for envelope in envelopes {
+                if let Some(ingress) = &mut ingress {
+                    match &envelope {
+                        Envelope::Request(request)
+                            if matches!(
+                                request.method.as_str(),
+                                "liveApplication.apply" | "liveApplication.bootstrap"
+                            ) =>
+                        {
+                            let id = request.id;
+                            let result = if !negotiated_capabilities.contains("blobs")
+                                || lock(&active_requests).contains(&id)
+                                || lock(&active_egress).contains_key(&id)
+                            {
+                                Err(WireError::new(
+                                    ErrorCode::InvalidParams,
+                                    "invalid-live-upload-request",
+                                ))
+                            } else {
+                                ingress.begin(request.clone(), &connection.handle())
+                            };
+                            match result {
+                                Ok(()) => {
+                                    lock(&active_requests).insert(id);
+                                }
+                                Err(error) => {
+                                    if output_tx
+                                        .send(
+                                            Envelope::Error(ErrorEnvelope {
+                                                id: Some(id),
+                                                error,
+                                            })
+                                            .into(),
+                                        )
+                                        .await
+                                        .is_err()
+                                    {
+                                        keep_running = false;
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        Envelope::BlobStart(start) => {
+                            if let Err(error) = ingress.start(start.clone()) {
+                                let _ = output_tx
+                                    .send(
+                                        Envelope::Error(ErrorEnvelope {
+                                            id: Some(start.request_id),
+                                            error,
+                                        })
+                                        .into(),
+                                    )
+                                    .await;
+                                keep_running = false;
+                                break 'frames;
+                            }
+                            continue;
+                        }
+                        Envelope::Cancel(cancel) if ingress.cancel(cancel.id) => {
+                            lock(&active_requests).remove(&cancel.id);
+                        }
+                        _ => {}
+                    }
+                }
                 if !dispatch_authenticated(
                     envelope,
                     &supervisor,
@@ -281,16 +463,22 @@ where
                     &mut request_tasks,
                     negotiated_capabilities.contains("blobs"),
                     negotiated_max_frame_bytes,
+                    Some(connection.handle()),
+                    None,
                 )
                 .await
                 {
                     keep_running = false;
-                    break;
+                    break 'frames;
                 }
             }
         }
     }
 
+    connection.retire();
+    if let Some(ingress) = &mut ingress {
+        ingress.clear();
+    }
     if *writer_gone_rx.borrow() {
         cancel_active_requests(&supervisor, &active_requests);
     }
@@ -327,8 +515,99 @@ async fn write_output<W: AsyncWrite + Unpin>(
     limits: &WireLimits,
     active_egress: Arc<Mutex<HashMap<u64, CancelSignal>>>,
 ) -> Result<(), io::Error> {
-    while let Some(item) = output_rx.recv().await {
+    'items: while let Some(item) = output_rx.recv().await {
         match item {
+            OutputItem::Guarded { response, guard } => {
+                let request_id = response.id;
+                let frame = encode_control(&Envelope::Response(response), limits)
+                    .map_err(|error| io::Error::other(format!("response encode: {error:?}")))?;
+                let cancel = guard.cancel_signal();
+                let retired = guard.retirement_signal();
+                let deadline = guard.deadline();
+                let mut offset = 0;
+                while offset < frame.len() {
+                    let write = std::future::poll_fn(|cx| {
+                        let mut result = std::task::Poll::Pending;
+                        if !guard.with_current(&mut || {
+                            result = std::pin::Pin::new(&mut output)
+                                .poll_write(cx, &frame[offset..])
+                                .map(|result| result.map(Some));
+                        }) {
+                            return std::task::Poll::Ready(Ok(None));
+                        }
+                        result
+                    });
+                    let mut interruption_kind = io::ErrorKind::ConnectionAborted;
+                    let count = tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => None,
+                        () = retired.cancelled() => None,
+                        () = async {
+                            match deadline {
+                                Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                                None => std::future::pending().await,
+                            }
+                        } => { interruption_kind = io::ErrorKind::TimedOut; None },
+                        count = write => count?,
+                    };
+                    let Some(count) = count else {
+                        if offset == 0 {
+                            lock(&active_egress).remove(&request_id);
+                            continue 'items;
+                        }
+                        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                            interruption_kind = io::ErrorKind::TimedOut;
+                        }
+                        return Err(io::Error::new(
+                            interruption_kind,
+                            if interruption_kind == io::ErrorKind::TimedOut {
+                                "live acknowledgement expired"
+                            } else {
+                                "live acknowledgement retired"
+                            },
+                        ));
+                    };
+                    if count == 0 {
+                        return Err(io::Error::new(io::ErrorKind::WriteZero, "stdout closed"));
+                    }
+                    offset += count;
+                }
+                let flush = std::future::poll_fn(|cx| {
+                    let mut result = std::task::Poll::Pending;
+                    if !guard.with_current(&mut || {
+                        result = std::pin::Pin::new(&mut output).poll_flush(cx);
+                    }) {
+                        let expired =
+                            deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline);
+                        return std::task::Poll::Ready(Err(io::Error::new(
+                            if expired {
+                                io::ErrorKind::TimedOut
+                            } else {
+                                io::ErrorKind::ConnectionAborted
+                            },
+                            if expired {
+                                "live acknowledgement expired"
+                            } else {
+                                "live acknowledgement retired"
+                            },
+                        )));
+                    }
+                    result
+                });
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "live acknowledgement retired")),
+                    () = retired.cancelled() => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "live acknowledgement retired")),
+                    () = async {
+                        match deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                            None => std::future::pending().await,
+                        }
+                    } => return Err(io::Error::new(io::ErrorKind::TimedOut, "live acknowledgement expired")),
+                    result = flush => result?,
+                }
+                lock(&active_egress).remove(&request_id);
+            }
             OutputItem::Envelope(envelope) => {
                 // A service-initiated event the wire cannot carry is dropped
                 // here, with its name on stderr, instead of ending the
@@ -500,7 +779,9 @@ fn authenticate(envelope: Envelope, auth_token: &str) -> Result<HelloAck, WireEr
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
+async fn dispatch_authenticated<
+    S: ProtocolEngineService<Input = LiveApplicationInput> + 'static,
+>(
     envelope: Envelope,
     supervisor: &Arc<Supervisor<S>>,
     output: &tokio::sync::mpsc::Sender<OutputItem>,
@@ -510,6 +791,8 @@ async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
     request_tasks: &mut JoinSet<()>,
     blobs_negotiated: bool,
     max_frame_bytes: u32,
+    connection: Option<ConnectionHandle>,
+    input: Option<LiveApplicationInput>,
 ) -> bool {
     if *writer_gone.borrow() {
         return false;
@@ -517,17 +800,34 @@ async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
     match envelope {
         Envelope::Request(request) => {
             let id = request.id;
+            if lock(active_requests).contains(&id) || lock(active_egress).contains_key(&id) {
+                return send_error(
+                    output,
+                    Some(id),
+                    ErrorCode::InvalidParams,
+                    "duplicate-request-id",
+                )
+                .await;
+            }
             let capabilities: Arc<[String]> = if blobs_negotiated {
                 Arc::from(["blobs".to_owned()])
             } else {
                 Arc::from([])
             };
             let completion_egress = Arc::clone(active_egress);
-            match supervisor.try_submit_with(
+            match supervisor.try_submit_input(
                 request,
                 capabilities,
                 max_frame_bytes,
+                connection,
+                input,
                 move |outcome| {
+                    if let Ok(service_response) = outcome
+                        && let Some(guard) = &service_response.output_guard
+                    {
+                        debug_assert!(service_response.blob_egress.is_none());
+                        lock(&completion_egress).insert(id, guard.cancel_signal());
+                    }
                     // The handoff runs before the supervisor drops its cancel
                     // registration. Cancel therefore always reaches either the
                     // request signal, this egress signal, or both.
@@ -548,30 +848,39 @@ async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
                     request_tasks.spawn(async move {
                         let item = match receiver.await {
                             Ok(Ok(mut service_response)) => {
-                                match service_response.blob_egress.take() {
-                                    Some(egress) => {
-                                        if blobs_negotiated {
-                                            OutputItem::Blob {
-                                                response: service_response.response,
-                                                egress,
-                                            }
-                                        } else {
-                                            // An attached blob is part of this
-                                            // successful result. Never turn it
-                                            // into a metadata-only success for
-                                            // a client that cannot receive it.
-                                            OutputItem::Envelope(Envelope::Error(ErrorEnvelope {
-                                                id: Some(service_response.response.id),
-                                                error: WireError::new(
-                                                    ErrorCode::InvalidParams,
-                                                    "blob-capability-required",
-                                                ),
-                                            }))
-                                        }
+                                if let Some(guard) = service_response.output_guard.take() {
+                                    OutputItem::Guarded {
+                                        response: service_response.response,
+                                        guard,
                                     }
-                                    None => OutputItem::Envelope(Envelope::Response(
-                                        service_response.response,
-                                    )),
+                                } else {
+                                    match service_response.blob_egress.take() {
+                                        Some(egress) => {
+                                            if blobs_negotiated {
+                                                OutputItem::Blob {
+                                                    response: service_response.response,
+                                                    egress,
+                                                }
+                                            } else {
+                                                // An attached blob is part of this
+                                                // successful result. Never turn it
+                                                // into a metadata-only success for
+                                                // a client that cannot receive it.
+                                                OutputItem::Envelope(Envelope::Error(
+                                                    ErrorEnvelope {
+                                                        id: Some(service_response.response.id),
+                                                        error: WireError::new(
+                                                            ErrorCode::InvalidParams,
+                                                            "blob-capability-required",
+                                                        ),
+                                                    },
+                                                ))
+                                            }
+                                        }
+                                        None => OutputItem::Envelope(Envelope::Response(
+                                            service_response.response,
+                                        )),
+                                    }
                                 }
                             }
                             Ok(Err(error)) => {
@@ -756,6 +1065,477 @@ mod tests {
     use tokio::sync::Notify;
 
     const TEST_AUTH_TOKEN: &str = "r14-test-token";
+
+    #[tokio::test]
+    #[ignore = "requires an owned external consumer fixture"]
+    async fn ordered_consumer_fixture() {
+        ordered_consumer_support::run().await;
+    }
+
+    #[tokio::test]
+    async fn live_transport_applies_client_frames_before_ack_and_recovers_the_record() {
+        use dohc_engine_collab::Ydoc;
+        use dohc_engine_storage::hex_sha256;
+        let (scratch, service, owner, workspace, registration, binding) =
+            live_test_support::fixture().await;
+        let fixture = std::env::var_os("DOHC_LIVE_APPLICATION_CLIENT_FIXTURE");
+        let (frames, expected_digest, expected_bytes, expected_ranges, auth) =
+            if let Some(path) = fixture {
+                let frames = std::fs::read(path).unwrap();
+                let mut decoder = FrameDecoder::new(WireLimits::default());
+                decoder.push(&frames);
+                let mut expected = None;
+                while let Some(frame) = decoder.next_frame().unwrap() {
+                    if let Frame::Control(payload) = frame
+                        && let Envelope::Request(request) =
+                            decode_control(&payload, &WireLimits::default()).unwrap()
+                    {
+                        assert_eq!(request.workspace.as_ref().unwrap().0, workspace);
+                        assert_eq!(request.params["registrationId"], registration);
+                        assert_eq!(
+                            request.params["accepted"]["binding"],
+                            serde_json::to_value(&binding).unwrap()
+                        );
+                        assert_eq!(request.params["updateByteLength"], 20 * 1024 * 1024);
+                        assert_eq!(request.params["rangeCount"], 16_385);
+                        expected = Some(
+                            request.params["accepted"]["receipt"]["updateDigest"]
+                                .as_str()
+                                .unwrap()
+                                .to_owned(),
+                        );
+                    }
+                }
+                (
+                    frames,
+                    expected.unwrap(),
+                    20 * 1024 * 1024,
+                    16_385,
+                    "parent-secret",
+                )
+            } else {
+                let bytes = Ydoc::wire().plaintext_insert(0, "real framed update");
+                let request =
+                    live_test_support::request(&workspace, registration, &binding, &bytes, &[]);
+                let mut frames = encode_envelope(&Envelope::Hello(Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    auth_token: TEST_AUTH_TOKEN.into(),
+                    capabilities: vec!["blobs".into()],
+                    last_session_generation: None,
+                    max_frame_bytes: None,
+                }));
+                frames.extend(encode_envelope(&Envelope::Request(request)));
+                for (id, bytes) in [(1, bytes.as_slice()), (2, &[][..])] {
+                    frames.extend(encode_envelope(&Envelope::BlobStart(BlobStart {
+                        request_id: 3,
+                        stream_id: id,
+                        total_bytes: Some(bytes.len() as u64),
+                        sha256: Some(hex_sha256(bytes)),
+                    })));
+                    frames.extend(
+                        encode_blob_chunk_frame(id, true, bytes, &WireLimits::default()).unwrap(),
+                    );
+                }
+                (frames, hex_sha256(&bytes), bytes.len(), 0, TEST_AUTH_TOKEN)
+            };
+        let mut source_decoder = FrameDecoder::new(WireLimits::default());
+        source_decoder.push(&frames);
+        let mut source_update = Vec::new();
+        while let Some(frame) = source_decoder.next_frame().unwrap() {
+            if let Frame::BlobChunk {
+                stream_id: 1,
+                bytes,
+                ..
+            } = frame
+            {
+                source_update.extend(bytes);
+            }
+        }
+        assert_eq!(source_update.len(), expected_bytes);
+        let source_doc = Ydoc::wire();
+        source_doc.apply(&source_update).unwrap();
+        let expected_content = source_doc.canonical_content_sha256();
+        drop(source_doc);
+        drop(source_update);
+        let ingress =
+            LiveApplicationIngress::new(service.clone(), live_test_support::config()).unwrap();
+        let supervisor = Arc::new(Supervisor::new(
+            SupervisorConfig::default(),
+            service.clone(),
+        ));
+        let (mut sender, input) = tokio::io::duplex(64 * 1024);
+        let (output, mut receiver) = tokio::io::duplex(64 * 1024);
+        let service_for_close = service.clone();
+        let workspace_for_close = workspace.clone();
+        let task = tokio::spawn(async move {
+            run_transport_with_live(
+                auth.into(),
+                input,
+                output,
+                supervisor,
+                no_events(),
+                || Ok(()),
+                Some((owner, ingress)),
+            )
+            .await
+        });
+        let send = tokio::spawn(async move {
+            sender.write_all(&frames).await.unwrap();
+            sender
+        });
+        let mut decoder = FrameDecoder::new(WireLimits::default());
+        let mut read = [0; 8192];
+        let response = tokio::time::timeout(Duration::from_secs(60), async {
+            'response: loop {
+                let count = receiver.read(&mut read).await.unwrap();
+                assert_ne!(
+                    count, 0,
+                    "transport closed before application acknowledgement"
+                );
+                decoder.push(&read[..count]);
+                while let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() {
+                    match decode_control(&payload, &WireLimits::default()).unwrap() {
+                        Envelope::Response(response) => break 'response response,
+                        Envelope::Error(error) => {
+                            panic!("transport refused valid application: {error:?}")
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(response.result["status"], "applied");
+        let ack = dohc_engine_collab::live_update_application::parse_application_ack(
+            response.result["ack"].clone(),
+        )
+        .unwrap();
+        let raw =
+            rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).unwrap();
+        let digest: String = raw
+            .query_row(
+                "SELECT update_digest FROM live_device_update_applications",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(digest, expected_digest);
+        let stored_ranges: i64 = raw
+            .query_row(
+                "SELECT COUNT(*) FROM live_device_application_first_seen",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_ranges, expected_ranges);
+        let receipt: (String, String, i64, i64, i64) = raw.query_row("SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch,local_ydoc_sequence FROM live_device_update_applications", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).unwrap();
+        assert_eq!(
+            receipt,
+            (
+                ack.delivery_id,
+                ack.update_digest,
+                ack.journal_cursor,
+                ack.accepting_host_epoch,
+                ack.local_ydoc_sequence
+            )
+        );
+        assert!(!ack.application_replayed);
+        drop(raw);
+        drop(send.await.unwrap());
+        task.await.unwrap().unwrap();
+        service_for_close
+            .call(
+                RequestContext::unbounded(),
+                WireRequest {
+                    id: 99,
+                    method: "workspace.close".into(),
+                    workspace: Some(dohc_engine_protocol::wire::WorkspaceHandle(
+                        workspace_for_close,
+                    )),
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    params: serde_json::Value::Null,
+                },
+            )
+            .await
+            .unwrap();
+        let reopened = dohc_engine_storage::EngineStore::open(
+            &scratch.path().join(".dohc/engine/engine.db"),
+            0,
+        )
+        .unwrap();
+        let reconstructed = reopened
+            .read_with(|conn| {
+                dohc_engine_collab::durable::load_doc_in(
+                    conn,
+                    &dohc_engine_collab::DocKey::new("workspace", "main", "one").unwrap(),
+                )
+            })
+            .unwrap();
+        assert!(!reconstructed.has_pending_dependencies());
+        assert_eq!(reconstructed.canonical_content_sha256(), expected_content);
+        let recovered_sequence = reopened
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT local_ydoc_sequence FROM live_device_update_applications",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(recovered_sequence, ack.local_ydoc_sequence);
+        drop(reopened);
+    }
+
+    #[derive(Debug)]
+    struct TestOutputGuard {
+        cancel: CancelSignal,
+        retired: CancelSignal,
+        deadline: Option<std::time::Instant>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Drop for TestOutputGuard {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl OutputGuard for TestOutputGuard {
+        fn is_current(&self) -> bool {
+            !self.cancel.is_cancelled() && !self.retired.is_cancelled()
+        }
+        fn cancel_signal(&self) -> CancelSignal {
+            self.cancel.clone()
+        }
+        fn retirement_signal(&self) -> CancelSignal {
+            self.retired.clone()
+        }
+        fn deadline(&self) -> Option<std::time::Instant> {
+            self.deadline
+        }
+    }
+
+    struct BlockedWriter {
+        polled: Arc<Notify>,
+        flush_only: bool,
+        bytes: Arc<AtomicUsize>,
+    }
+
+    impl AsyncWrite for BlockedWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.flush_only {
+                self.bytes.fetch_add(bytes.len(), Ordering::SeqCst);
+                Poll::Ready(Ok(bytes.len()))
+            } else {
+                self.polled.notify_one();
+                Poll::Pending
+            }
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            self.polled.notify_one();
+            Poll::Pending
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn unwritten_retired_or_expired_acknowledgements_preserve_following_output() {
+        for expired in [false, true] {
+            let retired = CancelSignal::new();
+            if !expired {
+                retired.cancel();
+            }
+            let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+            tx.send(OutputItem::Guarded {
+                response: WireResponse {
+                    id: 9,
+                    result: serde_json::Value::Null,
+                },
+                guard: Arc::new(TestOutputGuard {
+                    cancel: CancelSignal::new(),
+                    retired,
+                    deadline: expired.then(|| std::time::Instant::now() - Duration::from_secs(1)),
+                    dropped: Arc::new(AtomicBool::new(false)),
+                }),
+            })
+            .await
+            .unwrap();
+            tx.send(OutputItem::Envelope(Envelope::Response(WireResponse {
+                id: 10,
+                result: serde_json::Value::Null,
+            })))
+            .await
+            .unwrap();
+            drop(tx);
+            let active = Arc::new(Mutex::new(HashMap::from([(9, CancelSignal::new())])));
+            let mut output = Vec::new();
+            let limits = WireLimits::default();
+            write_output(&mut output, &mut rx, &limits, active.clone())
+                .await
+                .unwrap();
+            assert!(!lock(&active).contains_key(&9));
+            let mut decoder = FrameDecoder::new(limits.clone());
+            decoder.push(&output);
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("following response missing");
+            };
+            assert!(
+                matches!(decode_control(&payload, &limits).unwrap(), Envelope::Response(response) if response.id == 10)
+            );
+            assert!(decoder.next_frame().unwrap().is_none());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partially_written_acknowledgement_expiry_closes_output() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.send(OutputItem::Guarded {
+            response: WireResponse {
+                id: 9,
+                result: serde_json::json!({"content":"larger than the output buffer"}),
+            },
+            guard: Arc::new(TestOutputGuard {
+                cancel: CancelSignal::new(),
+                retired: CancelSignal::new(),
+                deadline: Some(std::time::Instant::now() + Duration::from_secs(10)),
+                dropped: Arc::new(AtomicBool::new(false)),
+            }),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        let (writer, mut reader) = tokio::io::duplex(8);
+        let task = tokio::spawn(async move {
+            write_output(
+                writer,
+                &mut rx,
+                &WireLimits::default(),
+                Arc::new(Mutex::new(HashMap::new())),
+            )
+            .await
+        });
+        let mut prefix = [0; 8];
+        reader.read_exact(&mut prefix).await.unwrap();
+        tokio::time::advance(Duration::from_secs(11)).await;
+        assert_eq!(
+            task.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
+
+    #[tokio::test]
+    async fn guarded_output_retires_while_write_or_flush_is_blocked() {
+        for flush_only in [false, true] {
+            for retire_owner in [false, true] {
+                let cancel = CancelSignal::new();
+                let retired = CancelSignal::new();
+                let dropped = Arc::new(AtomicBool::new(false));
+                let polled = Arc::new(Notify::new());
+                let bytes = Arc::new(AtomicUsize::new(0));
+                let guard = Arc::new(TestOutputGuard {
+                    cancel: cancel.clone(),
+                    retired: retired.clone(),
+                    deadline: None,
+                    dropped: dropped.clone(),
+                });
+                let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+                tx.send(OutputItem::Guarded {
+                    response: WireResponse {
+                        id: 9,
+                        result: serde_json::json!({"status":"applied"}),
+                    },
+                    guard,
+                })
+                .await
+                .unwrap();
+                drop(tx);
+                let writer = BlockedWriter {
+                    polled: polled.clone(),
+                    flush_only,
+                    bytes: bytes.clone(),
+                };
+                let task = tokio::spawn(async move {
+                    write_output(
+                        writer,
+                        &mut rx,
+                        &WireLimits::default(),
+                        Arc::new(Mutex::new(HashMap::new())),
+                    )
+                    .await
+                });
+                polled.notified().await;
+                if retire_owner {
+                    retired.cancel();
+                } else {
+                    cancel.cancel();
+                }
+                let result = tokio::time::timeout(Duration::from_secs(2), task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if flush_only {
+                    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+                } else {
+                    result.unwrap();
+                }
+                assert!(
+                    dropped.load(Ordering::SeqCst),
+                    "response disposal releases its reservation"
+                );
+                if !flush_only {
+                    assert_eq!(bytes.load(Ordering::SeqCst), 0);
+                }
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guarded_output_deadline_wakes_a_blocked_writer() {
+        let polled = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.send(OutputItem::Guarded {
+            response: WireResponse {
+                id: 1,
+                result: serde_json::Value::Null,
+            },
+            guard: Arc::new(TestOutputGuard {
+                cancel: CancelSignal::new(),
+                retired: CancelSignal::new(),
+                deadline: Some(std::time::Instant::now() + Duration::from_secs(10)),
+                dropped: dropped.clone(),
+            }),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        let writer = BlockedWriter {
+            polled: polled.clone(),
+            flush_only: false,
+            bytes: Arc::new(AtomicUsize::new(0)),
+        };
+        let task = tokio::spawn(async move {
+            write_output(
+                writer,
+                &mut rx,
+                &WireLimits::default(),
+                Arc::new(Mutex::new(HashMap::new())),
+            )
+            .await
+        });
+        polled.notified().await;
+        tokio::time::advance(Duration::from_secs(11)).await;
+        task.await.unwrap().unwrap();
+        assert!(dropped.load(Ordering::SeqCst));
+    }
 
     /// A pre-closed events channel for transports whose test does not
     /// exercise event delivery.
@@ -956,7 +1736,52 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    #[tokio::test]
+    async fn a_reserved_upload_id_cannot_dispatch_an_ordinary_request() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let supervisor = Arc::new(Supervisor::new(
+            SupervisorConfig::default(),
+            Arc::new(CountingService {
+                calls: calls.clone(),
+            }),
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (gone, _) = tokio::sync::watch::channel(false);
+        let active = Arc::new(Mutex::new(HashSet::from([7])));
+        let egress = Arc::new(Mutex::new(HashMap::new()));
+        let mut tasks = JoinSet::new();
+        assert!(
+            dispatch_authenticated(
+                Envelope::Request(WireRequest {
+                    id: 7,
+                    method: "test.echo".into(),
+                    workspace: None,
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    params: serde_json::Value::Null
+                }),
+                &supervisor,
+                &tx,
+                &gone,
+                &active,
+                &egress,
+                &mut tasks,
+                true,
+                WireLimits::default().max_frame_bytes,
+                None,
+                None
+            )
+            .await
+        );
+        assert!(
+            matches!(rx.recv().await, Some(OutputItem::Envelope(Envelope::Error(error))) if error.error.message == "duplicate-request-id")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(lock(&active).contains(&7));
+    }
+
     impl ProtocolEngineService for CountingService {
+        type Input = LiveApplicationInput;
         async fn call(
             &self,
             _ctx: RequestContext,
@@ -973,6 +1798,7 @@ mod tests {
     struct BlobService;
 
     impl ProtocolEngineService for BlobService {
+        type Input = LiveApplicationInput;
         async fn call(
             &self,
             _ctx: RequestContext,
@@ -980,6 +1806,7 @@ mod tests {
         ) -> Result<ServiceResponse, WireError> {
             let bytes = vec![0x7a; 64 * 1024];
             Ok(ServiceResponse {
+                output_guard: None,
                 response: WireResponse {
                     id: request.id,
                     result: serde_json::json!({
@@ -1008,6 +1835,7 @@ mod tests {
     }
 
     impl ProtocolEngineService for GatedService {
+        type Input = LiveApplicationInput;
         async fn call(
             &self,
             _ctx: RequestContext,
@@ -1048,6 +1876,8 @@ mod tests {
             &mut request_tasks,
             false,
             WireLimits::default().max_frame_bytes,
+            None,
+            None,
         )
         .await;
         assert!(!keep_running);
@@ -1503,6 +2333,37 @@ mod tests {
         assert_eq!(ack_for(Some(2 * 1024 * 1024)), 2 * 1024 * 1024);
         assert_eq!(ack_for(Some(1024)), floor);
         assert_eq!(ack_for(Some(u32::MAX)), default);
+    }
+
+    #[tokio::test]
+    async fn fatal_envelope_stops_requests_in_the_same_read() {
+        for fatal in [
+            hello_bytes(),
+            encode_envelope(&Envelope::Response(WireResponse {
+                id: 1,
+                result: serde_json::Value::Null,
+            })),
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let service = Arc::new(CountingService {
+                calls: calls.clone(),
+            });
+            let supervisor = Arc::new(Supervisor::new(SupervisorConfig::default(), service));
+            let mut bytes = hello_bytes();
+            bytes.extend(fatal);
+            bytes.extend(request_bytes(2));
+            run_transport(
+                TEST_AUTH_TOKEN.to_owned(),
+                HelloThenRequests { bytes, pos: 0 },
+                SinkWriter,
+                supervisor,
+                no_events(),
+                || Ok(()),
+            )
+            .await
+            .expect("fatal response is written");
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

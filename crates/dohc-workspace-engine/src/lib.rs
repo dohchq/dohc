@@ -6,6 +6,8 @@ mod automation_recovery;
 pub(crate) mod capture_driver;
 pub mod capture_sink;
 mod events;
+#[doc(hidden)]
+pub mod live_application_ingress;
 pub mod root_binding;
 mod rpc;
 
@@ -20,6 +22,8 @@ pub use events::RECORD_CREATED_EVENT;
 pub use events::RECORD_FIELD_CHANGED_EVENT;
 pub use events::RECORD_UPDATED_EVENT;
 pub use rpc::conflicts::RESOLVE_ANSWER_SCAFFOLDING_BYTES;
+#[doc(hidden)]
+pub use rpc::live_application::{LiveApplicationHostConfig, LiveApplicationInput};
 
 use crate::rpc::reads::BLOB_EGRESS_BYTE_BUDGET;
 use crate::rpc::reads::BlobEgressBudget;
@@ -50,6 +54,7 @@ use std::sync::MutexGuard;
 pub struct EngineService {
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, Arc<OpenWorkspace>>>,
+    live_applications: Mutex<rpc::live_application::Registry>,
     pending_cursors: Mutex<HashMap<String, PendingCursor>>,
     open_lock: Arc<tokio::sync::Mutex<()>>,
     next_handle: std::sync::atomic::AtomicU64,
@@ -64,14 +69,7 @@ pub struct EngineService {
     session_epoch: String,
     self_writes: SelfWriteSuppression,
     events: EngineEvents,
-    #[cfg(feature = "harness")]
     capture_apply_probe: Option<capture_driver::CaptureApplyProbe>,
-    #[cfg(test)]
-    open_install_probe: Option<(
-        Arc<tokio::sync::Notify>,
-        Arc<tokio::sync::Notify>,
-        Arc<std::sync::atomic::AtomicBool>,
-    )>,
     #[cfg(test)]
     owner_outbox_append_probe: Option<(
         Arc<tokio::sync::Notify>,
@@ -98,6 +96,19 @@ impl Default for EngineService {
 }
 
 impl ProtocolEngineService for EngineService {
+    type Input = LiveApplicationInput;
+
+    async fn call_with_input(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+        input: Option<Self::Input>,
+    ) -> Result<ServiceResponse, WireError> {
+        match input {
+            Some(input) => self.dispatch_input(ctx, request, input).await,
+            None => self.dispatch(ctx, request).await,
+        }
+    }
     async fn call(
         &self,
         ctx: RequestContext,
@@ -131,6 +142,7 @@ impl EngineService {
         EngineService {
             supervisor,
             handles: Mutex::new(HashMap::new()),
+            live_applications: Mutex::new(rpc::live_application::Registry::default()),
             pending_cursors: Mutex::new(HashMap::new()),
             open_lock: Arc::new(tokio::sync::Mutex::new(())),
             next_handle: std::sync::atomic::AtomicU64::new(1),
@@ -168,10 +180,7 @@ impl EngineService {
                 GLOBAL_SELF_WRITES.clone()
             },
             events: EngineEvents::default(),
-            #[cfg(feature = "harness")]
             capture_apply_probe: None,
-            #[cfg(test)]
-            open_install_probe: None,
             #[cfg(test)]
             owner_outbox_append_probe: None,
             #[cfg(test)]

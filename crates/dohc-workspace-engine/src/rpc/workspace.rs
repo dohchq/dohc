@@ -445,6 +445,7 @@ impl EngineService {
                 }
                 return Ok(json!({ "workspace": handle }));
             }
+            lock(&self.live_applications).retire_workspace(&open);
             lock(&self.handles).remove(&handle);
             let attached_handles = {
                 let mut handles = lock(&self.handles);
@@ -489,8 +490,7 @@ impl EngineService {
         let supervisor = self.supervisor;
         let actor_path = db_path.clone();
         let now_ms = now_ms()?;
-        #[cfg(test)]
-        let open_install_probe = self.open_install_probe.clone();
+        let capture_apply_probe = self.capture_apply_probe.clone();
         #[cfg(test)]
         let bind_root_faults: Arc<dyn FaultInjector> = self
             .bind_root_faults
@@ -560,13 +560,10 @@ impl EngineService {
                 })();
                 (open, bound)
             });
-            #[cfg(test)]
             if open_guard.db_path.is_some()
-                && let Some((reached, release, armed)) = open_install_probe
-                && armed.swap(false, std::sync::atomic::Ordering::AcqRel)
+                && let Some(probe) = capture_apply_probe
             {
-                reached.notify_one();
-                tokio::runtime::Handle::current().block_on(release.notified());
+                probe.pause_open_install_if_armed();
             }
             (opened, open_guard)
         });
@@ -657,19 +654,18 @@ impl EngineService {
             // succeeded, so an unbound or mismatched root can never grow a
             // watcher or files actor.
             let capture = capture_enabled.then(|| {
-                capture_driver::CaptureDriver::spawn(
-                    root.clone(),
-                    actor.clone(),
-                    params.workspace_id.clone(),
-                    self.leases.scoped(&root),
-                    self.self_writes.scoped(&root),
-                    Arc::clone(&capture_apply_gate),
-                    actor_open.store_freshly_created,
-                    capture_author_json.flatten(),
-                    self.events.clone(),
-                    #[cfg(feature = "harness")]
-                    self.capture_apply_probe.clone(),
-                )
+                capture_driver::CaptureDriver::spawn(capture_driver::CaptureDriverSpawnParams {
+                    root: root.clone(),
+                    actor: actor.clone(),
+                    workspace_id: params.workspace_id.clone(),
+                    leases: self.leases.scoped(&root),
+                    self_writes: self.self_writes.scoped(&root),
+                    apply_gate: Arc::clone(&capture_apply_gate),
+                    store_freshly_created: actor_open.store_freshly_created,
+                    initial_author_json: capture_author_json.flatten(),
+                    events: self.events.clone(),
+                    apply_probe: self.capture_apply_probe.clone(),
+                })
             });
             // STARTUP ORDERING BARRIER: existing stores and uncertain scans
             // apply the closed-period baseline before the handle is handed
@@ -803,6 +799,7 @@ impl EngineService {
                 }
                 (removed, attached)
             };
+            lock(&self.live_applications).retire_workspace(&open);
             lock(&self.pending_cursors).retain(|_, pending| {
                 pending.handle != handle && !attached_handles.contains(&pending.handle)
             });
@@ -826,10 +823,8 @@ impl EngineService {
         // owns the gate can still read the driver and finish. Cancellation is
         // idempotent when the detached task takes the driver below.
         removed.request_capture_shutdown();
-        #[cfg(feature = "harness")]
         let probe = self.capture_apply_probe.clone();
         let close_task = tokio::spawn(async move {
-            #[cfg(feature = "harness")]
             if let Some(probe) = &probe {
                 probe.observe_gate_wait_if_armed();
             }
@@ -1492,14 +1487,10 @@ mod tests {
         drop(store);
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
-        let reached = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
+        let probe = capture_driver::CaptureApplyProbe::default();
+        probe.pause_next_open_install();
         let mut service = EngineService::with_supervisor(supervisor);
-        service.open_install_probe = Some((
-            Arc::clone(&reached),
-            release,
-            Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        ));
+        service.capture_apply_probe = Some(probe.clone());
         let service = Arc::new(service);
         let params = json!({
             "rootDir": scratch.path().to_string_lossy(),
@@ -1516,7 +1507,7 @@ mod tests {
                 .workspace_open(&opening_context, opening_params)
                 .await
         });
-        reached.notified().await;
+        probe.wait_until_open_install_paused().await;
         assert_eq!(supervisor.actor_count(), 1, "the supervisor actor exists");
         assert!(
             lock(&service.handles).is_empty(),
@@ -1532,7 +1523,7 @@ mod tests {
                 .workspace_open(&RequestContext::unbounded(), params)
                 .await
         });
-        service.open_install_probe.as_ref().unwrap().1.notify_one();
+        probe.release_open_install();
         let cancelled_open = cancelled_open
             .expect("cancelled workspace.open resolved promptly")
             .expect("workspace.open task completed")

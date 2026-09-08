@@ -4,7 +4,8 @@ use dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, ApplicationError, ApplicationHandle, ApplicationHostCoordinate,
-    ApplicationOwner, ApplicationResult, apply_committed,
+    ApplicationOwner, ApplicationResult, BootstrapResult, LiveApplicationBootstrap,
+    apply_committed, bootstrap_committed,
 };
 use dohc_engine_collab::{CollabError, WriterDocCache};
 use dohc_engine_storage::{EngineStore, FaultInjector};
@@ -81,6 +82,15 @@ impl ActorHandle {
 }
 
 impl ActorLiveApplicationOwner {
+    /// Retire handles synchronously at the transport's close boundary.
+    pub fn retire(&self) {
+        self.token.store(false, Ordering::Release);
+    }
+
+    pub fn is_current(&self) -> bool {
+        current(&self.actor, &self.token).is_ok()
+    }
+
     /// Register an authenticated coordinate and prepared document binding.
     pub async fn register(
         &self,
@@ -132,12 +142,64 @@ impl ActorLiveApplicationOwner {
 }
 
 impl ActorLiveApplicationHandle {
+    /// Install an original baseline through the same captured actor and owner.
+    pub async fn bootstrap(
+        &self,
+        input: LiveApplicationBootstrap,
+        bytes: Vec<u8>,
+        root: std::path::PathBuf,
+        faults: Arc<dyn FaultInjector>,
+        reservation: Option<Arc<dyn Send + Sync>>,
+    ) -> Result<BootstrapResult, RuntimeError> {
+        current(&self.actor, &self.token)?;
+        input.validate()?;
+        if bytes.len() > MAX_YDOC_UPDATE_BYTES {
+            return Err(ApplicationError::Collab(CollabError::UpdateTooLarge {
+                actual: bytes.len(),
+                max: MAX_YDOC_UPDATE_BYTES,
+            })
+            .into());
+        }
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(Request::Bootstrap {
+                workspace_id: self.workspace_id.clone(),
+                token: self.token.clone(),
+                application: self.application.clone(),
+                input,
+                bytes,
+                root,
+                faults,
+                reservation,
+                reply,
+            })))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        let result = receive
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        current(&self.actor, &self.token)?;
+        Ok(result)
+    }
+
     /// Apply committed bytes through the actor-owned store and cache.
     /// The transport must still suppress replies after its connection closes.
     pub async fn apply(
         &self,
         event: AdmittedLiveUpdate,
         faults: Arc<dyn FaultInjector>,
+    ) -> Result<ApplicationResult, RuntimeError> {
+        self.apply_with_reservation(event, faults, None).await
+    }
+
+    /// Keep input memory charged while its command remains on the writer queue,
+    /// even when the caller stops awaiting the result.
+    pub async fn apply_with_reservation(
+        &self,
+        event: AdmittedLiveUpdate,
+        faults: Arc<dyn FaultInjector>,
+        reservation: Option<Arc<dyn Send + Sync>>,
     ) -> Result<ApplicationResult, RuntimeError> {
         current(&self.actor, &self.token)?;
         if event.update_bytes.len() > MAX_YDOC_UPDATE_BYTES {
@@ -156,6 +218,7 @@ impl ActorLiveApplicationHandle {
                 application: self.application.clone(),
                 event,
                 faults,
+                reservation,
                 reply,
             })))
             .await
@@ -195,6 +258,17 @@ impl Registry {
 }
 
 pub(super) enum Request {
+    Bootstrap {
+        workspace_id: String,
+        token: Token,
+        application: ApplicationHandle,
+        input: LiveApplicationBootstrap,
+        bytes: Vec<u8>,
+        root: std::path::PathBuf,
+        faults: Arc<dyn FaultInjector>,
+        reservation: Option<Arc<dyn Send + Sync>>,
+        reply: Reply<BootstrapResult>,
+    },
     Open {
         workspace_id: String,
         token: Token,
@@ -214,6 +288,7 @@ pub(super) enum Request {
         application: ApplicationHandle,
         event: AdmittedLiveUpdate,
         faults: Arc<dyn FaultInjector>,
+        reservation: Option<Arc<dyn Send + Sync>>,
         reply: Reply<ApplicationResult>,
     },
     Close {
@@ -231,6 +306,41 @@ impl Request {
         cache: &mut WriterDocCache,
     ) {
         match self {
+            Self::Bootstrap {
+                workspace_id,
+                token,
+                application,
+                input,
+                bytes,
+                root,
+                faults,
+                reservation: _reservation,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|_| {
+                    bootstrap_committed(
+                        store,
+                        cache,
+                        &application,
+                        input,
+                        bytes,
+                        faults.as_ref(),
+                        |tx, written| {
+                            crate::search::upsert_file_search_index(
+                                tx,
+                                &root,
+                                &workspace_id,
+                                &written.snapshot.version_id,
+                                &written.snapshot.object_id,
+                                &written.snapshot.path,
+                                &written.snapshot.text,
+                            )
+                            .map_err(RuntimeError::from)
+                        },
+                    )
+                });
+                let _ = reply.send(result);
+            }
             Self::Open {
                 workspace_id,
                 token,
@@ -273,6 +383,7 @@ impl Request {
                 application,
                 event,
                 faults,
+                reservation: _reservation,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {

@@ -19,6 +19,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || method.starts_with("share.")
         || method.starts_with("search.")
         || method.starts_with("collections.")
+        || method.starts_with("liveApplication.")
         || (method.starts_with("versions.") && method != "versions.ensureMain")
         || method.starts_with("conflicts.")
         || (method.starts_with("secrets.") && method != "secrets.write")
@@ -59,6 +60,17 @@ fn engine_ping() -> Value {
 }
 
 impl EngineService {
+    pub(crate) async fn dispatch_input(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+        input: crate::LiveApplicationInput,
+    ) -> Result<ServiceResponse, WireError> {
+        self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
+        self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
+        self.live_application_apply(ctx, request, input).await
+    }
+
     pub(crate) async fn dispatch(
         &self,
         ctx: RequestContext,
@@ -72,6 +84,7 @@ impl EngineService {
                 .versioned_binary_read_blob(&ctx, request.workspace, request.params, id)
                 .await?;
             return Ok(ServiceResponse {
+                output_guard: None,
                 response: Response { id, result },
                 blob_egress,
             });
@@ -81,6 +94,7 @@ impl EngineService {
                 .versioned_text_read_blob(&ctx, request.workspace, request.params, id)
                 .await?;
             return Ok(ServiceResponse {
+                output_guard: None,
                 response: Response { id, result },
                 blob_egress,
             });
@@ -90,6 +104,7 @@ impl EngineService {
                 .ydoc_open(&ctx, request.workspace, request.params, id)
                 .await?;
             return Ok(ServiceResponse {
+                output_guard: None,
                 response: Response { id, result },
                 blob_egress: Some(blob_egress),
             });
@@ -99,6 +114,7 @@ impl EngineService {
                 .ydoc_resync(&ctx, request.workspace, request.params, id)
                 .await?;
             return Ok(ServiceResponse {
+                output_guard: None,
                 response: Response { id, result },
                 blob_egress: Some(blob_egress),
             });
@@ -108,6 +124,7 @@ impl EngineService {
                 .collections_get(&ctx, request.workspace, request.params, id)
                 .await?;
             return Ok(ServiceResponse {
+                output_guard: None,
                 response: Response { id, result },
                 blob_egress,
             });
@@ -117,6 +134,7 @@ impl EngineService {
                 .collections_query(&ctx, request.workspace, request.params, id)
                 .await?;
             return Ok(ServiceResponse {
+                output_guard: None,
                 response: Response { id, result },
                 blob_egress,
             });
@@ -126,11 +144,16 @@ impl EngineService {
                 .collections_get_record(&ctx, request.workspace, request.params, id)
                 .await?;
             return Ok(ServiceResponse {
+                output_guard: None,
                 response: Response { id, result },
                 blob_egress,
             });
         }
         let result = match request.method.as_str() {
+            "liveApplication.register" => {
+                self.live_application_register(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "engine.ping" => engine_ping(),
             "workspace.open" => self.workspace_open(&ctx, request.params).await?,
             "workspace.close" => self.workspace_close(request.workspace).await?,

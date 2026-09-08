@@ -2,6 +2,7 @@ use crate::capture_driver;
 use crate::root_binding;
 use dohc_engine_collab::CollabError;
 use dohc_engine_collab::OwnerOutboxError;
+use dohc_engine_collab::live_update_application::ApplicationError;
 use dohc_engine_domain::DomainError;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
@@ -104,6 +105,15 @@ fn store_busy(error: &RuntimeError) -> bool {
 }
 
 pub(super) fn map_runtime(error: RuntimeError) -> WireError {
+    let error = match error {
+        RuntimeError::LiveApplication(ApplicationError::Storage(error)) => {
+            RuntimeError::Storage(error)
+        }
+        RuntimeError::LiveApplication(ApplicationError::Collab(error)) => {
+            RuntimeError::Collab(error)
+        }
+        error => error,
+    };
     // A materialization that exhausted its replace retries against a lock an
     // external program holds on the ARTIFACT. The settle committed and the
     // write job is durably pending, so the only missing piece is a later
@@ -476,6 +486,45 @@ mod tests {
     use dohc_engine_sync::RelayError;
     use dohc_engine_sync::SyncError;
 
+    #[test]
+    fn live_application_wrappers_preserve_storage_and_collaboration_refusals() {
+        use dohc_engine_storage::StorageError;
+        for error in [
+            RuntimeError::LiveApplication(ApplicationError::Storage(StorageError::ForeignDatabase)),
+            RuntimeError::LiveApplication(ApplicationError::Storage(
+                StorageError::UnsupportedFingerprint {
+                    found: 1,
+                    expected: 2,
+                },
+            )),
+        ] {
+            let expected = match &error {
+                RuntimeError::LiveApplication(ApplicationError::Storage(inner)) => inner.code(),
+                _ => unreachable!(),
+            };
+            assert_eq!(map_runtime(error).message, expected);
+        }
+        let error = map_runtime(RuntimeError::LiveApplication(ApplicationError::Collab(
+            CollabError::ObjectAliasCollision,
+        )));
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(error.message, "ydoc-object-alias-collision");
+        for refusal in [
+            CollabError::MalformedUpdate {
+                reason: "incomplete update".into(),
+            },
+            CollabError::ProjectionTooLarge { actual: 3, max: 2 },
+        ] {
+            assert_eq!(
+                map_runtime(RuntimeError::LiveApplication(ApplicationError::Collab(
+                    refusal
+                )))
+                .code,
+                ErrorCode::InvalidParams,
+            );
+        }
+    }
+
     /// The artifact lock and a busy engine database are two
     /// different contentions, and only the first may be reported as
     /// `file-locked` — the desktop turns that message into "another program
@@ -510,7 +559,7 @@ mod tests {
     }
 
     /// A busy SQLite handle is transient wherever it appears, and it appears
-    /// under seven wrappers. Answering it under one and standing down under the
+    /// through several wrappers. Answering it under one and standing down under the
     /// next would leave the same condition retryable or terminal by accident
     /// of which layer noticed it first.
     ///
@@ -528,6 +577,10 @@ mod tests {
             )),
             RuntimeError::Domain(DomainError::Storage(StorageError::FileLocked)),
             RuntimeError::Collab(CollabError::Storage(StorageError::FileLocked)),
+            RuntimeError::LiveApplication(ApplicationError::Storage(StorageError::FileLocked)),
+            RuntimeError::LiveApplication(ApplicationError::Collab(CollabError::Storage(
+                StorageError::FileLocked,
+            ))),
             RuntimeError::Sync(SyncError::Storage(StorageError::FileLocked)),
             RuntimeError::Search(SearchError::Store(StorageError::FileLocked)),
             // The search index's other carrier: a raw rusqlite failure that

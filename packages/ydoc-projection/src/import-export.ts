@@ -1219,8 +1219,8 @@ function normalizeFrontmatterValue(value: unknown): unknown {
   if (!isFrontmatterMap(value)) return value
 
   const normalized = nullPrototypeRecord()
-  for (const [key, child] of Object.entries(value)) {
-    normalized[key] = normalizeFrontmatterValue(child)
+  for (const key of Object.keys(value).sort()) {
+    normalized[key] = normalizeFrontmatterValue(value[key])
   }
   return normalized
 }
@@ -1337,7 +1337,7 @@ function mapToObject(
     Array.from(map.entries(), ([key, child]) => [
       unescapeSharedBigIntKeys ? unescapeSharedBigIntKey(key) : key,
       yFrontmatterValueToPlain(child),
-    ]),
+    ] as const).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
   )
 }
 
