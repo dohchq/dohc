@@ -1253,12 +1253,24 @@ fn ensure_adopted_owner_binding_unchanged(
     Ok(())
 }
 
+fn require_unfenced_lineage(conn: &Connection, key: &DocKey) -> Result<(), SyncError> {
+    dohc_engine_collab::live_update_application::require_restore_open(conn, key).map_err(|error| {
+        match error {
+            CollabError::RestoreFenced => SyncError::InvalidInput {
+                reason: "live document is stopped",
+            },
+            other => map_collab_hard_error(other),
+        }
+    })
+}
+
 pub(crate) fn retire_complete_ydoc_lineage_in_tx(
     tx: &rusqlite::Transaction<'_>,
     complete: &CompleteYdocLineage,
 ) -> Result<(), SyncError> {
     let key = &complete.key;
     ensure_adopted_owner_binding_unchanged(tx, key, None)?;
+    require_unfenced_lineage(tx, key)?;
     for statement in [
         "DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         "DELETE FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -1521,6 +1533,7 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
         ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, complete),
         ResultingHead::Text { path, text } => {
             ensure_adopted_owner_binding_unchanged(tx, &complete.key, Some(path))?;
+            require_unfenced_lineage(tx, &complete.key)?;
             let Some((marker, doc)) = complete.state.as_ref() else {
                 return Ok(());
             };
@@ -1617,6 +1630,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
 ) -> Result<(), SyncError> {
     let key = &complete.key;
     ensure_adopted_owner_binding_unchanged(tx, key, Some(path))?;
+    require_unfenced_lineage(tx, key)?;
     let Some((marker, doc)) = complete.state.as_ref() else {
         return Ok(());
     };
