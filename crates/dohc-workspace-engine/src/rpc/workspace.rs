@@ -862,28 +862,13 @@ impl EngineService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::EngineService;
-    use crate::automation_recovery;
-    use crate::lock;
-    use crate::root_binding;
     use crate::rpc::relay::IssuedCursor;
     use crate::rpc::relay::PendingCursor;
-    use crate::rpc::request::now_ms;
     use dohc_engine_domain::WriteText;
-    use dohc_engine_protocol::error::ErrorCode;
-    use dohc_engine_protocol::error::WireError;
-    use dohc_engine_protocol::transport::RequestContext;
-    use dohc_engine_protocol::wire::WorkspaceHandle;
-    use dohc_engine_runtime::FaultInjector;
     use dohc_engine_runtime::FaultPoint;
-    use dohc_engine_runtime::LifecycleState;
-    use dohc_engine_runtime::NoFaults;
-    use dohc_engine_runtime::WorkspaceSupervisor;
     use dohc_engine_testkit::GateFaults;
     use dohc_engine_testkit::ScratchDir;
     use dohc_engine_testkit::ScriptedFaults;
-    use serde_json::json;
-    use std::sync::Arc;
     use std::time::Duration;
 
     /// #874 repro shape: a July-era `engine.db` — user tables, `user_version`
