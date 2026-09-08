@@ -1,30 +1,10 @@
 use super::*;
+use crate::capture_sink::bound_sink_params;
 use dohc_engine_files::CaptureSink;
 use dohc_engine_runtime::WorkspaceSupervisor;
 use dohc_engine_testkit::ScratchDir;
 
 const WORKSPACE_ID: &str = "ws-root-bound-run";
-
-fn sink_params(
-    actor: ActorHandle,
-    shadow_root: impl Into<PathBuf>,
-    now_ms: i64,
-) -> StoreCaptureSinkParams {
-    let shadow_root = shadow_root.into();
-    let captured_root = CapturedRoot::bind(&shadow_root).map(Arc::new);
-    StoreCaptureSinkParams {
-        actor,
-        workspace_id: WORKSPACE_ID.to_owned(),
-        version_id: "main".to_owned(),
-        shadow_root,
-        captured_root,
-        now_ms,
-        author_json: None,
-        leases: LeaseRegistry::new(),
-        self_writes: SelfWriteSuppression::default(),
-        provenance: CaptureProvenance::default(),
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn seeded_deletes_survive_an_over_cap_policy_hold_and_recovery() {
@@ -40,7 +20,13 @@ async fn seeded_deletes_survive_an_over_cap_policy_hold_and_recovery() {
     let seed_actor = actor.clone();
     let seed_root = root.clone();
     std::thread::spawn(move || {
-        let mut sink = StoreCaptureSink::new(sink_params(seed_actor, seed_root, 1));
+        let mut sink = StoreCaptureSink::new(bound_sink_params(
+            seed_actor,
+            WORKSPACE_ID,
+            "main",
+            seed_root,
+            1,
+        ));
         for path in ["big.md", "gone.md", ".env"] {
             assert!(matches!(
                 sink.ingest(path, 0, "advisory-sha", "text/plain", IngestReason::Added)
@@ -208,7 +194,7 @@ async fn seeded_deletes_survive_an_over_cap_policy_hold_and_recovery() {
     let (summary, correlation): (Option<String>, Option<String>) = connection
         .query_row(
             "SELECT metadata_summary, metadata_correlation_id FROM moments
-             WHERE workspace_id = ?1 AND path = 'big.md' ORDER BY moment_order DESC LIMIT 1",
+         WHERE workspace_id = ?1 AND path = 'big.md' ORDER BY moment_order DESC LIMIT 1",
             [WORKSPACE_ID],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -234,15 +220,21 @@ async fn prepared_and_converged_runs_refuse_a_replacement_workspace_root() {
     let seed_actor = actor.clone();
     let seed_root = root.clone();
     std::thread::spawn(move || {
-        StoreCaptureSink::new(sink_params(seed_actor, seed_root, 1))
-            .ingest(
-                "seed.md",
-                0,
-                "advisory-sha",
-                "text/markdown",
-                IngestReason::Added,
-            )
-            .expect("seed workspace");
+        StoreCaptureSink::new(bound_sink_params(
+            seed_actor,
+            WORKSPACE_ID,
+            "main",
+            seed_root,
+            1,
+        ))
+        .ingest(
+            "seed.md",
+            0,
+            "advisory-sha",
+            "text/markdown",
+            IngestReason::Added,
+        )
+        .expect("seed workspace");
     })
     .join()
     .expect("workspace seed thread");

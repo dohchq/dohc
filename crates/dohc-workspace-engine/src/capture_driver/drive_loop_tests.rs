@@ -304,7 +304,7 @@ async fn a_watch_that_dies_every_tick_rebuilds_on_the_backoff_not_hot() {
         journal.stops,
         journal.starts.len(),
         "every layer is stopped — the rebuilt ones before their successor, \
-             the last one at shutdown. Any shortfall is a leaked watcher thread."
+         the last one at shutdown. Any shortfall is a leaked watcher thread."
     );
     assert!(status.degraded());
 }
@@ -356,7 +356,7 @@ async fn a_healthy_driver_polls_at_the_drive_interval() {
         journal.starts.first().copied(),
         Some(std::time::Duration::ZERO),
         "the first start happens immediately — workspace.open pays no \
-             sleep before the startup baseline"
+         sleep before the startup baseline"
     );
     assert!(!status.degraded());
     assert!(!status.terminal());
@@ -525,8 +525,8 @@ async fn a_rebuilt_layer_rereports_disruptions_from_its_own_baseline() {
     assert!(
         !seen[4],
         "the rebuilt layer's clean ticks must not inherit a stale \
-             baseline (a spurious report here means the seen-count was not \
-             re-baselined at start): {seen:?}"
+         baseline (a spurious report here means the seen-count was not \
+         re-baselined at start): {seen:?}"
     );
     assert!(
         seen[5],
@@ -676,8 +676,8 @@ async fn a_flush_does_not_settle_over_a_pending_policy_rebuild() {
         settled,
         vec![false, false, true],
         "flush must stay unsettled while the policy edit is mid-debounce \
-             (pass 1) and during the rebuild pass (pass 2), then settle on \
-             the rebuilt layer"
+         (pass 1) and during the rebuild pass (pass 2), then settle on \
+         the rebuilt layer"
     );
     let starts = journal.lock().expect("journal").starts.len();
     assert_eq!(starts, 2, "exactly the initial build plus ONE rebuild");
@@ -712,8 +712,8 @@ async fn flush_polling_does_not_defeat_the_restart_backoff() {
     assert!(
         (3..=5).contains(&starts),
         "4s of failing starts under the backoff schedule means 3-5 \
-             attempts; saw {starts} (more = flush polling defeats the \
-             backoff, fewer = polling starves the rebuild)"
+         attempts; saw {starts} (more = flush polling defeats the \
+         backoff, fewer = polling starves the rebuild)"
     );
 }
 

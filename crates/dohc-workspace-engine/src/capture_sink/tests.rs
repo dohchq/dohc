@@ -20,33 +20,18 @@ use std::time::Duration;
 const WORKSPACE_ID: &str = "ws-capture-sink";
 const VERSION_ID: &str = "main";
 
-fn sink_params(
-    actor: ActorHandle,
-    shadow_root: impl Into<PathBuf>,
-    now_ms: i64,
-) -> StoreCaptureSinkParams {
-    let shadow_root = shadow_root.into();
-    let captured_root = CapturedRoot::bind(&shadow_root).map(Arc::new);
-    StoreCaptureSinkParams {
-        actor,
-        workspace_id: WORKSPACE_ID.to_owned(),
-        version_id: VERSION_ID.to_owned(),
-        shadow_root,
-        captured_root,
-        now_ms,
-        author_json: None,
-        leases: LeaseRegistry::new(),
-        self_writes: SelfWriteSuppression::default(),
-        provenance: CaptureProvenance::default(),
-    }
-}
-
 fn sink_for(scratch: &ScratchDir, supervisor: &WorkspaceSupervisor) -> (PathBuf, StoreCaptureSink) {
     let db = dohc_engine_testkit::engine_db_path(scratch).expect("engine db path");
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     (
         db,
-        StoreCaptureSink::new(sink_params(actor, scratch.path(), 10)),
+        StoreCaptureSink::new(bound_sink_params(
+            actor,
+            WORKSPACE_ID,
+            VERSION_ID,
+            scratch.path(),
+            10,
+        )),
     )
 }
 

@@ -319,6 +319,30 @@ pub(crate) struct StoreCaptureSinkParams {
     pub(crate) provenance: CaptureProvenance,
 }
 
+#[cfg(test)]
+pub(crate) fn bound_sink_params(
+    actor: ActorHandle,
+    workspace_id: &str,
+    version_id: &str,
+    shadow_root: impl Into<PathBuf>,
+    now_ms: i64,
+) -> StoreCaptureSinkParams {
+    let shadow_root = shadow_root.into();
+    let captured_root = CapturedRoot::bind(&shadow_root).map(Arc::new);
+    StoreCaptureSinkParams {
+        actor,
+        workspace_id: workspace_id.to_owned(),
+        version_id: version_id.to_owned(),
+        shadow_root,
+        captured_root,
+        now_ms,
+        author_json: None,
+        leases: LeaseRegistry::new(),
+        self_writes: SelfWriteSuppression::default(),
+        provenance: CaptureProvenance::default(),
+    }
+}
+
 /// Capture's view of `.dohc/files.toml`, split by why there are no rules.
 pub(crate) enum PolicyState {
     /// A real answer: absent (default policy), parsed rules, or a MALFORMED

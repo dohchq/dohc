@@ -1475,6 +1475,76 @@ CREATE UNIQUE INDEX idx_automation_claims_trigger_history
 CREATE INDEX idx_automation_claims_state
     ON automation_claims(workspace_id, state, created_at_ms, claim_id);
 
+CREATE TABLE live_device_application_bindings (
+    relay_database_namespace TEXT NOT NULL CHECK (length(CAST(relay_database_namespace AS BLOB)) > 0),
+    workspace_id TEXT NOT NULL CHECK (length(CAST(workspace_id AS BLOB)) BETWEEN 1 AND 512),
+    main_version_id TEXT NOT NULL CHECK (length(CAST(main_version_id AS BLOB)) BETWEEN 1 AND 512),
+    object_id TEXT NOT NULL CHECK (length(CAST(object_id AS BLOB)) BETWEEN 1 AND 512),
+    lineage_claim_id TEXT NOT NULL CHECK (length(CAST(lineage_claim_id AS BLOB)) BETWEEN 1 AND 512),
+    current_path TEXT NOT NULL CHECK (length(CAST(current_path AS BLOB)) BETWEEN 1 AND 1024),
+    selector_paths_json TEXT NOT NULL CHECK (json_valid(selector_paths_json)),
+    restore_fence_generation INTEGER NOT NULL CHECK (restore_fence_generation BETWEEN 0 AND 9007199254740991),
+    host_id TEXT NOT NULL CHECK (length(CAST(host_id AS BLOB)) BETWEEN 1 AND 1024),
+    host_epoch INTEGER NOT NULL CHECK (host_epoch BETWEEN 1 AND 9007199254740991),
+    instance_id TEXT NOT NULL CHECK (length(CAST(instance_id AS BLOB)) BETWEEN 1 AND 1024),
+    connection_id TEXT NOT NULL CHECK (length(CAST(connection_id AS BLOB)) BETWEEN 1 AND 1024),
+    available INTEGER NOT NULL CHECK (available IN (0, 1)),
+    PRIMARY KEY (relay_database_namespace, workspace_id, main_version_id, object_id)
+) STRICT;
+
+CREATE TABLE live_device_update_applications (
+    relay_database_namespace TEXT NOT NULL CHECK (length(CAST(relay_database_namespace AS BLOB)) > 0),
+    workspace_id TEXT NOT NULL CHECK (length(CAST(workspace_id AS BLOB)) BETWEEN 1 AND 512),
+    delivery_id TEXT NOT NULL CHECK (length(CAST(delivery_id AS BLOB)) BETWEEN 1 AND 512),
+    main_version_id TEXT NOT NULL CHECK (length(CAST(main_version_id AS BLOB)) BETWEEN 1 AND 512),
+    object_id TEXT NOT NULL CHECK (length(CAST(object_id AS BLOB)) BETWEEN 1 AND 512),
+    lineage_claim_id TEXT NOT NULL CHECK (length(CAST(lineage_claim_id AS BLOB)) BETWEEN 1 AND 512),
+    current_path TEXT NOT NULL CHECK (length(CAST(current_path AS BLOB)) BETWEEN 1 AND 1024),
+    selector_paths_json TEXT NOT NULL CHECK (json_valid(selector_paths_json)),
+    restore_fence_generation INTEGER NOT NULL CHECK (restore_fence_generation BETWEEN 0 AND 9007199254740991),
+    update_digest TEXT NOT NULL CHECK (length(update_digest) = 64 AND update_digest NOT GLOB '*[^0-9a-f]*'),
+    update_byte_length INTEGER NOT NULL CHECK (update_byte_length BETWEEN 1 AND 9007199254740991),
+    journal_cursor INTEGER NOT NULL CHECK (journal_cursor BETWEEN 1 AND 9007199254740991),
+    accepting_host_epoch INTEGER NOT NULL CHECK (accepting_host_epoch BETWEEN 1 AND 9007199254740991),
+    principal_kind TEXT NOT NULL CHECK (principal_kind IN ('owner', 'named', 'link')),
+    principal_id TEXT NOT NULL CHECK (length(CAST(principal_id AS BLOB)) BETWEEN 1 AND 512),
+    grant_id TEXT CHECK (grant_id IS NULL OR length(CAST(grant_id AS BLOB)) BETWEEN 1 AND 512),
+    grant_generation INTEGER CHECK (grant_generation IS NULL OR grant_generation BETWEEN 1 AND 9007199254740991),
+    received_at_ms INTEGER NOT NULL CHECK (received_at_ms BETWEEN 0 AND 9007199254740991),
+    first_seen_count INTEGER NOT NULL CHECK (first_seen_count BETWEEN 0 AND 9007199254740991),
+    local_ydoc_sequence INTEGER NOT NULL CHECK (local_ydoc_sequence BETWEEN 1 AND 9007199254740991),
+    applied_host_id TEXT NOT NULL CHECK (length(CAST(applied_host_id AS BLOB)) BETWEEN 1 AND 1024),
+    applied_host_epoch INTEGER NOT NULL CHECK (applied_host_epoch BETWEEN 1 AND 9007199254740991),
+    applied_instance_id TEXT NOT NULL CHECK (length(CAST(applied_instance_id AS BLOB)) BETWEEN 1 AND 1024),
+    applied_connection_id TEXT NOT NULL CHECK (length(CAST(applied_connection_id AS BLOB)) BETWEEN 1 AND 1024),
+    CHECK ((principal_kind = 'owner' AND grant_id IS NULL AND grant_generation IS NULL)
+        OR (principal_kind IN ('named', 'link') AND grant_id IS NOT NULL AND grant_generation IS NOT NULL)),
+    PRIMARY KEY (relay_database_namespace, workspace_id, delivery_id),
+    UNIQUE (relay_database_namespace, delivery_id),
+    UNIQUE (relay_database_namespace, journal_cursor),
+    FOREIGN KEY (update_digest) REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX live_device_applications_document_cursor
+    ON live_device_update_applications(relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, journal_cursor);
+
+CREATE TABLE live_device_application_first_seen (
+    relay_database_namespace TEXT NOT NULL CHECK (length(CAST(relay_database_namespace AS BLOB)) > 0),
+    workspace_id TEXT NOT NULL,
+    delivery_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND 9007199254740991),
+    client_id INTEGER NOT NULL CHECK (client_id BETWEEN 0 AND 9007199254740991),
+    start_clock INTEGER NOT NULL CHECK (start_clock BETWEEN 0 AND 4294967294),
+    end_clock INTEGER NOT NULL CHECK (end_clock BETWEEN 1 AND 4294967295),
+    CHECK (start_clock < end_clock),
+    PRIMARY KEY (relay_database_namespace, workspace_id, delivery_id, ordinal),
+    FOREIGN KEY (relay_database_namespace, workspace_id, delivery_id)
+        REFERENCES live_device_update_applications(relay_database_namespace, workspace_id, delivery_id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX live_device_application_delivery_ranges
+    ON live_device_application_first_seen(relay_database_namespace, delivery_id, ordinal);
+
 -- Owner update recovery stays independent of live document and version rows.
 CREATE TABLE owner_ydoc_outboxes (
     outbox_id                 TEXT NOT NULL PRIMARY KEY,

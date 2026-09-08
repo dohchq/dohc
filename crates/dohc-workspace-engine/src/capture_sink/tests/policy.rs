@@ -104,7 +104,13 @@ fn files_toml_tracked_false_narrows_and_retires() {
     );
     // The policy snapshot is read at construction: a fresh sink sees it.
     let actor = supervisor.open(&db, 1).expect("reopen actor").actor;
-    let mut sink = StoreCaptureSink::new(sink_params(actor, scratch.path(), 20));
+    let mut sink = StoreCaptureSink::new(bound_sink_params(
+        actor,
+        WORKSPACE_ID,
+        VERSION_ID,
+        scratch.path(),
+        20,
+    ));
     assert_eq!(
         ingest(&mut sink, "private/journal.md").expect("narrowed"),
         IngestOutcome::NotOwned

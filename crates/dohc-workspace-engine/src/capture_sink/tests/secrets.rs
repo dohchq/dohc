@@ -69,7 +69,13 @@ fn secret_key_is_not_minted_in_a_replacement_root_after_plaintext_read() {
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     write_file(&root, ".env", b"TOKEN=original");
-    let mut sink = StoreCaptureSink::new(sink_params(actor, &root, 10));
+    let mut sink = StoreCaptureSink::new(bound_sink_params(
+        actor,
+        WORKSPACE_ID,
+        VERSION_ID,
+        &root,
+        10,
+    ));
 
     let content = sink
         .read_current_secret(".env")
@@ -126,7 +132,7 @@ fn secret_changed_ingest_consumes_an_engine_self_write() {
     self_writes.record(WORKSPACE_ID, ".env", &hex_sha256(b"MODE=feature\n"));
     let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
         self_writes,
-        ..sink_params(actor, scratch.path(), 4)
+        ..bound_sink_params(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 4)
     });
     let observed_sha = match sink.read_current_secret(".env").expect("read secret") {
         SecretContent::Text(text) => hex_sha256(text.as_bytes()),
@@ -203,7 +209,13 @@ fn missing_key_over_existing_secret_state_fails_closed_instead_of_reminting() {
     std::fs::remove_file(scratch.path().join(".dohc/engine/secret.key")).expect("lose key");
 
     let actor = supervisor.open(&db, 1).expect("reopen actor").actor;
-    let mut fresh = StoreCaptureSink::new(sink_params(actor, scratch.path(), 30));
+    let mut fresh = StoreCaptureSink::new(bound_sink_params(
+        actor,
+        WORKSPACE_ID,
+        VERSION_ID,
+        scratch.path(),
+        30,
+    ));
     write_file(scratch.path(), ".env", b"TOKEN=changed");
     let err = ingest(&mut fresh, ".env").expect_err("must not mint over live secret state");
     assert_eq!(err.reason, "workspace secret key unavailable");

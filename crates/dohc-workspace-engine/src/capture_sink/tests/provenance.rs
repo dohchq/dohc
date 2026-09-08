@@ -61,7 +61,7 @@ fn a_reconcile_run_stamps_its_summary_and_correlation_on_every_moment() {
             summary: Some("Reconciled offline edits".to_owned()),
             correlation_id: Some("reconcile-test-pass".to_owned()),
         },
-        ..sink_params(actor, scratch.path(), 10)
+        ..bound_sink_params(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 10)
     });
     assert!(matches!(
         ingest(&mut sink, "notes/a.md").expect("text ingest"),

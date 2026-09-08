@@ -4,6 +4,12 @@ A local-first file sync and collaboration workspace for humans and agents. This 
 
 ## Language
 
+### Offering
+
+**dohc Drive**:
+The optional managed sync and sharing offering for dohc workspaces. It extends the local workspace while users retain ownership of their work.
+_Avoid_: dohc Cloud
+
 ### Collections
 
 **Collection**:

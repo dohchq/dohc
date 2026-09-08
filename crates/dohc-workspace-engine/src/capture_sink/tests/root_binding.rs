@@ -259,7 +259,13 @@ fn cached_canonical_root_refuses_a_root_symlink_swap() {
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     write_file(&root, "first.md", b"first");
     write_file(&root, "second.md", b"second");
-    let mut sink = StoreCaptureSink::new(sink_params(actor, &root, 10));
+    let mut sink = StoreCaptureSink::new(bound_sink_params(
+        actor,
+        WORKSPACE_ID,
+        VERSION_ID,
+        &root,
+        10,
+    ));
 
     // The first read fixes this reconcile generation's canonical root.
     ingest(&mut sink, "first.md").expect("seed canonical root");
@@ -299,7 +305,13 @@ fn captured_root_refuses_a_different_directory_at_the_same_path() {
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     write_file(&root, "first.md", b"first");
-    let mut sink = StoreCaptureSink::new(sink_params(actor, &root, 10));
+    let mut sink = StoreCaptureSink::new(bound_sink_params(
+        actor,
+        WORKSPACE_ID,
+        VERSION_ID,
+        &root,
+        10,
+    ));
 
     // The first read binds this reconcile generation to the original
     // directory object, not merely to its canonical pathname.
@@ -358,7 +370,13 @@ fn collection_reconcile_refuses_replacement_root_before_dispatch() {
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     write_file(&root, "tasks/collection.yaml", b"name: Tasks\n");
     write_file(&root, "tasks/alpha.md", b"original task\n");
-    let mut sink = StoreCaptureSink::new(sink_params(actor, &root, 10));
+    let mut sink = StoreCaptureSink::new(bound_sink_params(
+        actor,
+        WORKSPACE_ID,
+        VERSION_ID,
+        &root,
+        10,
+    ));
     ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
     ingest(&mut sink, "tasks/alpha.md").expect("capture record");
     seed_captured_richdoc_lineage(&sink, "tasks/alpha.md");
@@ -404,7 +422,13 @@ fn queued_collection_reconcile_refuses_replacement_root_before_db_changes() {
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     write_file(&root, "tasks/collection.yaml", b"name: Tasks\n");
     write_file(&root, "tasks/alpha.md", b"original task\n");
-    let mut sink = StoreCaptureSink::new(sink_params(actor.clone(), &root, 10));
+    let mut sink = StoreCaptureSink::new(bound_sink_params(
+        actor.clone(),
+        WORKSPACE_ID,
+        VERSION_ID,
+        &root,
+        10,
+    ));
     ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
     ingest(&mut sink, "tasks/alpha.md").expect("capture record");
     seed_captured_richdoc_lineage(&sink, "tasks/alpha.md");
@@ -478,7 +502,13 @@ fn post_commit_root_refusal_leaves_no_self_write_suppression() {
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     write_file(&root, "tasks/collection.yaml", b"name: Tasks\n");
     write_file(&root, "tasks/alpha.md", b"original task\n");
-    let mut sink = StoreCaptureSink::new(sink_params(actor.clone(), &root, 10));
+    let mut sink = StoreCaptureSink::new(bound_sink_params(
+        actor.clone(),
+        WORKSPACE_ID,
+        VERSION_ID,
+        &root,
+        10,
+    ));
     ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
     ingest(&mut sink, "tasks/alpha.md").expect("capture record");
     seed_captured_richdoc_lineage(&sink, "tasks/alpha.md");
@@ -552,7 +582,13 @@ fn queued_materialized_retire_refuses_replacement_root_before_db_changes() {
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     write_file(&root, "first.md", b"first");
-    let mut sink = StoreCaptureSink::new(sink_params(actor.clone(), &root, 10));
+    let mut sink = StoreCaptureSink::new(bound_sink_params(
+        actor.clone(),
+        WORKSPACE_ID,
+        VERSION_ID,
+        &root,
+        10,
+    ));
     ingest(&mut sink, "first.md").expect("capture first head");
     let durable_before = durable_row_counts(&db);
 
@@ -623,13 +659,25 @@ fn present_root_binding_failure_cannot_adopt_a_later_replacement() {
     let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
-    let mut seed = StoreCaptureSink::new(sink_params(actor.clone(), &root, 10));
+    let mut seed = StoreCaptureSink::new(bound_sink_params(
+        actor.clone(),
+        WORKSPACE_ID,
+        VERSION_ID,
+        &root,
+        10,
+    ));
     ingest(&mut seed, "first.md").expect("seed captured head");
     drop(seed);
 
     std::fs::rename(&root, &moved_root).expect("move original capture root");
     std::fs::write(&root, b"not a directory").expect("install refused root");
-    let mut refused = StoreCaptureSink::new(sink_params(actor, &root, 20));
+    let mut refused = StoreCaptureSink::new(bound_sink_params(
+        actor,
+        WORKSPACE_ID,
+        VERSION_ID,
+        &root,
+        20,
+    ));
     std::fs::remove_file(&root).expect("remove refused root");
     std::fs::create_dir(&root).expect("install replacement directory");
     let retire = refused.retire_policy_excluded("first.md");
@@ -653,7 +701,13 @@ fn initially_absent_root_rejects_generation_and_fresh_sink_reads_policy() {
     let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
-    let mut stale = StoreCaptureSink::new(sink_params(actor.clone(), &root, 10));
+    let mut stale = StoreCaptureSink::new(bound_sink_params(
+        actor.clone(),
+        WORKSPACE_ID,
+        VERSION_ID,
+        &root,
+        10,
+    ));
 
     std::fs::create_dir(&root).expect("create recovered root");
     write_file(
@@ -666,7 +720,13 @@ fn initially_absent_root_rejects_generation_and_fresh_sink_reads_policy() {
     assert_eq!(ingest(&mut stale, "private/journal.md"), Err(ESCAPES_ROOT));
     drop(stale);
 
-    let mut fresh = StoreCaptureSink::new(sink_params(actor, &root, 20));
+    let mut fresh = StoreCaptureSink::new(bound_sink_params(
+        actor,
+        WORKSPACE_ID,
+        VERSION_ID,
+        &root,
+        20,
+    ));
     assert_eq!(
         ingest(&mut fresh, "private/journal.md").expect("fresh policy snapshot"),
         IngestOutcome::NotOwned

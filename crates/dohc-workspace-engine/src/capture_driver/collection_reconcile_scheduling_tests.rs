@@ -1,31 +1,11 @@
 use super::*;
+use crate::capture_sink::bound_sink_params;
 use dohc_engine_collab::{ContentKind, DocKey, Ydoc};
 use dohc_engine_files::{CaptureApplyResult, CaptureSink, CapturedIngest};
 use dohc_engine_runtime::WorkspaceSupervisor;
 use dohc_engine_testkit::ScratchDir;
 
 const WORKSPACE_ID: &str = "ws-idle-collection-reconcile";
-
-fn sink_params(
-    actor: ActorHandle,
-    shadow_root: impl Into<PathBuf>,
-    now_ms: i64,
-) -> StoreCaptureSinkParams {
-    let shadow_root = shadow_root.into();
-    let captured_root = CapturedRoot::bind(&shadow_root).map(Arc::new);
-    StoreCaptureSinkParams {
-        actor,
-        workspace_id: WORKSPACE_ID.to_owned(),
-        version_id: "main".to_owned(),
-        shadow_root,
-        captured_root,
-        now_ms,
-        author_json: None,
-        leases: LeaseRegistry::new(),
-        self_writes: SelfWriteSuppression::default(),
-        provenance: CaptureProvenance::default(),
-    }
-}
 
 fn plan_with(op: CaptureOp) -> ReconcilePlan {
     ReconcilePlan {
@@ -121,7 +101,13 @@ fn seed_collection_capture(actor: &ActorHandle, root: &Path, paths: &[&str]) {
         .map(|path| (*path).to_owned())
         .collect::<Vec<_>>();
     std::thread::spawn(move || {
-        let mut sink = StoreCaptureSink::new(sink_params(seed_actor, seed_root, 2));
+        let mut sink = StoreCaptureSink::new(bound_sink_params(
+            seed_actor,
+            WORKSPACE_ID,
+            "main",
+            seed_root,
+            2,
+        ));
         for path in paths {
             sink.ingest(
                 &path,
@@ -256,8 +242,8 @@ async fn lease_blocked_collection_adoption_retries_after_release_without_a_file_
         .expect("open database observer")
         .query_row(
             "SELECT object_id FROM path_aliases \
-                 WHERE workspace_id = ?1 AND version_id = 'main' \
-                   AND path = 'tasks/alpha.md'",
+             WHERE workspace_id = ?1 AND version_id = 'main' \
+               AND path = 'tasks/alpha.md'",
             [WORKSPACE_ID],
             |row| row.get::<_, String>(0),
         )
@@ -319,8 +305,8 @@ async fn lease_blocked_collection_adoption_retries_after_release_without_a_file_
         .expect("open adopted-state observer")
         .query_row(
             "SELECT adoption_state FROM collection_records \
-                 WHERE workspace_id = ?1 AND version_id = 'main' \
-                   AND file_path = 'tasks/alpha.md'",
+             WHERE workspace_id = ?1 AND version_id = 'main' \
+               AND file_path = 'tasks/alpha.md'",
             [WORKSPACE_ID],
             |row| row.get::<_, String>(0),
         )
@@ -356,8 +342,8 @@ async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
         .expect("open database observer")
         .query_row(
             "SELECT object_id FROM path_aliases \
-                 WHERE workspace_id = ?1 AND version_id = 'main' \
-                   AND path = 'tasks/alpha.md'",
+             WHERE workspace_id = ?1 AND version_id = 'main' \
+               AND path = 'tasks/alpha.md'",
             [WORKSPACE_ID],
             |row| row.get::<_, String>(0),
         )
@@ -403,10 +389,10 @@ async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
         .expect("open first-pass state observer")
         .query_row(
             "SELECT \
-                    MAX(CASE WHEN file_path = 'tasks/alpha.md' THEN adoption_state END), \
-                    MAX(CASE WHEN file_path = 'tasks/beta.md' THEN adoption_state END) \
-                 FROM collection_records \
-                 WHERE workspace_id = ?1 AND version_id = 'main'",
+                MAX(CASE WHEN file_path = 'tasks/alpha.md' THEN adoption_state END), \
+                MAX(CASE WHEN file_path = 'tasks/beta.md' THEN adoption_state END) \
+             FROM collection_records \
+             WHERE workspace_id = ?1 AND version_id = 'main'",
             [WORKSPACE_ID],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
@@ -467,7 +453,7 @@ async fn watcher_edit_stripping_adopted_record_id_reasserts_the_binding() {
         let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
             leases: seed_leases,
             self_writes: seed_self_writes,
-            ..sink_params(seed_actor, seed_root, 2)
+            ..bound_sink_params(seed_actor, WORKSPACE_ID, "main", seed_root, 2)
         });
         for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
             sink.ingest(
@@ -497,7 +483,7 @@ async fn watcher_edit_stripping_adopted_record_id_reasserts_the_binding() {
             StoreCaptureSink::new(StoreCaptureSinkParams {
                 leases: adopt_leases,
                 self_writes: adopt_self_writes,
-                ..sink_params(adopt_actor, adopt_root, 3)
+                ..bound_sink_params(adopt_actor, WORKSPACE_ID, "main", adopt_root, 3)
             })
             .reconcile_collections()
             .expect("adopt shared-imported record"),
@@ -510,8 +496,8 @@ async fn watcher_edit_stripping_adopted_record_id_reasserts_the_binding() {
         .expect("open binding observer")
         .query_row(
             "SELECT record_id FROM collection_records \
-                 WHERE workspace_id = ?1 AND version_id = 'main' \
-                   AND file_path = 'tasks/alpha.md'",
+             WHERE workspace_id = ?1 AND version_id = 'main' \
+               AND file_path = 'tasks/alpha.md'",
             [WORKSPACE_ID],
             |row| row.get::<_, String>(0),
         )
@@ -668,7 +654,13 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
     let seed_actor = actor.clone();
     let seed_root = scratch.path().to_path_buf();
     std::thread::spawn(move || {
-        let mut sink = StoreCaptureSink::new(sink_params(seed_actor, seed_root, 2));
+        let mut sink = StoreCaptureSink::new(bound_sink_params(
+            seed_actor,
+            WORKSPACE_ID,
+            "main",
+            seed_root,
+            2,
+        ));
         for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
             sink.ingest(
                 path,
@@ -691,8 +683,8 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
         .expect("open binding observer")
         .query_row(
             "SELECT COUNT(*) FROM collection_records \
-                 WHERE workspace_id = ?1 AND version_id = 'main' \
-                   AND file_path = 'tasks/alpha.md'",
+             WHERE workspace_id = ?1 AND version_id = 'main' \
+               AND file_path = 'tasks/alpha.md'",
             [WORKSPACE_ID],
             |row| row.get::<_, i64>(0),
         )
@@ -801,8 +793,8 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
         .expect("open pending record observer")
         .query_row(
             "SELECT record_id,adoption_state,index_initialized FROM collection_records \
-                 WHERE workspace_id=?1 AND version_id='main' \
-                   AND file_path='tasks/alpha.md'",
+             WHERE workspace_id=?1 AND version_id='main' \
+               AND file_path='tasks/alpha.md'",
             [WORKSPACE_ID],
             |row| {
                 Ok((
@@ -852,11 +844,11 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
         .expect("open indexed record observer")
         .query_row(
             "SELECT r.record_id,r.adoption_state,r.index_initialized,f.value_json \
-                 FROM collection_records r \
-                 JOIN collection_record_fields f ON f.workspace_id=r.workspace_id \
-                   AND f.version_id=r.version_id AND f.record_id=r.record_id \
-                 WHERE r.workspace_id=?1 AND r.version_id='main' \
-                   AND r.file_path='tasks/alpha.md' AND f.field_name='title'",
+             FROM collection_records r \
+             JOIN collection_record_fields f ON f.workspace_id=r.workspace_id \
+               AND f.version_id=r.version_id AND f.record_id=r.record_id \
+             WHERE r.workspace_id=?1 AND r.version_id='main' \
+               AND r.file_path='tasks/alpha.md' AND f.field_name='title'",
             [WORKSPACE_ID],
             |row| {
                 Ok((
@@ -899,7 +891,13 @@ async fn a_converged_watcher_scan_does_not_rewrite_collection_state() {
     let seed_actor = actor.clone();
     let seed_root = scratch.path().to_path_buf();
     std::thread::spawn(move || {
-        let mut sink = StoreCaptureSink::new(sink_params(seed_actor, seed_root, 2));
+        let mut sink = StoreCaptureSink::new(bound_sink_params(
+            seed_actor,
+            WORKSPACE_ID,
+            "main",
+            seed_root,
+            2,
+        ));
         for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
             sink.ingest(
                 path,
@@ -918,9 +916,15 @@ async fn a_converged_watcher_scan_does_not_rewrite_collection_state() {
     let adopt_actor = actor.clone();
     let adopt_root = scratch.path().to_path_buf();
     std::thread::spawn(move || {
-        StoreCaptureSink::new(sink_params(adopt_actor, adopt_root, 3))
-            .reconcile_collections()
-            .expect("adopt seeded record");
+        StoreCaptureSink::new(bound_sink_params(
+            adopt_actor,
+            WORKSPACE_ID,
+            "main",
+            adopt_root,
+            3,
+        ))
+        .reconcile_collections()
+        .expect("adopt seeded record");
     })
     .join()
     .expect("collection adoption thread");
@@ -929,8 +933,8 @@ async fn a_converged_watcher_scan_does_not_rewrite_collection_state() {
     let adoption_state = observer
         .query_row(
             "SELECT adoption_state FROM collection_records \
-                 WHERE workspace_id = ?1 AND version_id = 'main' \
-                   AND file_path = 'tasks/alpha.md'",
+             WHERE workspace_id = ?1 AND version_id = 'main' \
+               AND file_path = 'tasks/alpha.md'",
             [WORKSPACE_ID],
             |row| row.get::<_, String>(0),
         )
@@ -1029,8 +1033,8 @@ async fn a_failed_recovery_repair_still_announces_committed_adoptions() {
         .expect("open database seeder")
         .execute_batch(&format!(
             "INSERT INTO binary_blobs (sha256,byte_length,bytes)                  VALUES ('{sha}',1,X'00');
-                 INSERT INTO ydoc_recovery_decisions (                      workspace_id,origin_id,origin_seq,version_id,object_id,original_path,                      incoming_content_kind,incoming_update_blob_sha256,                      incoming_lineage_claim_id,incoming_is_base_state,losing_claim_id,                      recovered_path,recovery_collision_ordinal,recovery_object_id,                      recovery_moment_id,recorded_at_ms                  ) VALUES (                      '{WORKSPACE_ID}','origin-broken',0,'main','bad'||char(10)||'object',                      'doc.md','plaintext','{sha}','{sha}',1,'{sha}',                      'doc.recovered.md','0','recovery-object','recovery-moment',1                  );
-                 INSERT INTO materialization_jobs                      (job_id,target_path,content_sha256,preimage_present,                       target_generation,status,created_at_ms)                  VALUES ('sync-mat_recovery-moment','doc.recovered.md','{sha}',0,1,'conflict',1);"
+             INSERT INTO ydoc_recovery_decisions (                      workspace_id,origin_id,origin_seq,version_id,object_id,original_path,                      incoming_content_kind,incoming_update_blob_sha256,                      incoming_lineage_claim_id,incoming_is_base_state,losing_claim_id,                      recovered_path,recovery_collision_ordinal,recovery_object_id,                      recovery_moment_id,recorded_at_ms                  ) VALUES (                      '{WORKSPACE_ID}','origin-broken',0,'main','bad'||char(10)||'object',                      'doc.md','plaintext','{sha}','{sha}',1,'{sha}',                      'doc.recovered.md','0','recovery-object','recovery-moment',1                  );
+             INSERT INTO materialization_jobs                      (job_id,target_path,content_sha256,preimage_present,                       target_generation,status,created_at_ms)                  VALUES ('sync-mat_recovery-moment','doc.recovered.md','{sha}',0,1,'conflict',1);"
         ))
         .expect("seed broken recovery decision");
 

@@ -28,6 +28,10 @@ pub enum RuntimeError {
     #[error("collaboration error: {0}")]
     Collab(#[from] dohc_engine_collab::CollabError),
 
+    /// Application of a relay-committed live update failed.
+    #[error("live application error: {0}")]
+    LiveApplication(#[from] dohc_engine_collab::live_update_application::ApplicationError),
+
     /// A replicated operation failed on the actor-owned store.
     #[error("synchronization error: {0}")]
     Sync(#[from] dohc_engine_sync::SyncError),
@@ -97,6 +101,21 @@ impl RuntimeError {
             RuntimeError::Storage(err) => err.code(),
             RuntimeError::Domain(err) => err.code(),
             RuntimeError::Collab(err) => err.code(),
+            RuntimeError::LiveApplication(err) => {
+                use dohc_engine_collab::live_update_application::ApplicationError;
+                match err {
+                    ApplicationError::Storage(err) => err.code(),
+                    ApplicationError::Collab(err) => err.code(),
+                    ApplicationError::InvalidInput(_) => "live-application-invalid-input",
+                    ApplicationError::WorkspaceMismatch => "live-application-workspace-mismatch",
+                    ApplicationError::MainVersionMismatch => {
+                        "live-application-main-version-mismatch"
+                    }
+                    ApplicationError::Corrupt => "live-application-corrupt",
+                    ApplicationError::Conflict => "live-application-conflict",
+                    ApplicationError::Interrupted => "operation-crashed",
+                }
+            }
             RuntimeError::Sync(err) => err.code(),
             RuntimeError::Relay(_) => "relay-failed",
             RuntimeError::Search(err) => err.code(),

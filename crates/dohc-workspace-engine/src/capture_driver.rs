@@ -52,9 +52,8 @@ pub(crate) type ApplyGate = Arc<tokio::sync::Mutex<()>>;
 /// actor work is large enough for the background tail to be user-visible.
 pub const EARLY_IMPORT_MIN_ADDED_FILES: usize = 1_000;
 
-/// Deterministic integration-test seam for proving a switch drains an apply
-/// that has already prepared a reconcile plan. Production builds do not
-/// allocate probe state. The optional probe has one type in every build.
+/// Test controls for capture, workspace lifecycle, and version fences.
+/// The type exists in every build; production builds allocate no probe state.
 #[derive(Clone)]
 #[cfg_attr(any(test, feature = "harness"), derive(Default))]
 pub struct CaptureApplyProbe {
@@ -396,7 +395,7 @@ impl CaptureApplyProbe {
         }
     }
 
-    async fn initial_settle_deadline(&self) {
+    async fn take_manual_initial_deadline(&self) -> bool {
         #[cfg(feature = "harness")]
         if self
             .inner
@@ -404,9 +403,9 @@ impl CaptureApplyProbe {
             .swap(false, Ordering::AcqRel)
         {
             self.inner.manual_initial_deadline.notified().await;
-            return;
+            return true;
         }
-        tokio::time::sleep(EARLY_IMPORT_APPLY_DEADLINE).await;
+        false
     }
 
     pub(crate) fn record_version_scan(&self) {
@@ -910,23 +909,35 @@ impl CaptureDriver {
         let (flush_tx, flush_rx) = tokio::sync::mpsc::channel(8);
         let refresh_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let driver_probe = apply_probe.clone();
-        let task = tokio::spawn(drive(
-            root,
-            actor,
-            workspace_id,
-            leases,
-            self_writes,
-            cancel.clone(),
-            Arc::clone(&status),
-            Arc::clone(&author_json),
-            open_ready_tx,
-            flush_rx,
-            apply_gate,
-            store_freshly_created,
-            Arc::clone(&refresh_epoch),
-            events,
-            apply_probe,
-        ));
+        let drive_cancel = cancel.clone();
+        let drive_status = Arc::clone(&status);
+        let drive_author_json = Arc::clone(&author_json);
+        let drive_refresh_epoch = Arc::clone(&refresh_epoch);
+        let task = tokio::spawn(async move {
+            let mut env = RealEnv {
+                root,
+                actor,
+                workspace_id,
+                leases,
+                status: Arc::clone(&drive_status),
+                author_json: drive_author_json,
+                self_writes,
+                apply_gate,
+                store_freshly_created,
+                open_ready_tx: open_ready_tx.clone(),
+                refresh_epoch: drive_refresh_epoch,
+                events,
+                apply_probe,
+            };
+            drive_loop(
+                &mut env,
+                drive_cancel,
+                drive_status,
+                open_ready_tx,
+                flush_rx,
+            )
+            .await;
+        });
         CaptureDriver {
             cancel,
             task: Some(task),
@@ -1226,17 +1237,7 @@ async fn manifest_seed(
     // in neither the listing nor the manifest).
     let policy = dohc_engine_runtime::search::read_engine_search_policy(root).files_policy;
     let manifest = ScanManifest::from_entries(entries.into_iter().map(|entry| {
-        let narrowed = policy.as_ref().is_some_and(|rules| {
-            !matches!(
-                dohc_engine_files::policy::classify_engine_file_path(&entry.path),
-                dohc_engine_files::policy::PathClassification::Secret
-            ) && !dohc_engine_runtime::search::resolve_effective_policy(
-                &entry.path,
-                Some(rules.as_slice()),
-                None,
-            )
-            .tracked
-        });
+        let narrowed = policy_excludes(&policy, &entry.path);
         let sha256 = if narrowed {
             NARROWED_SEED_SENTINEL_SHA.to_owned()
         } else {
@@ -1812,8 +1813,9 @@ impl RealEnv {
     }
 
     async fn initial_settle_deadline(&self) {
-        if let Some(probe) = &self.apply_probe {
-            probe.initial_settle_deadline().await;
+        if let Some(probe) = &self.apply_probe
+            && probe.take_manual_initial_deadline().await
+        {
             return;
         }
         tokio::time::sleep(EARLY_IMPORT_APPLY_DEADLINE).await;
@@ -2103,42 +2105,6 @@ impl DriverEnv for RealEnv {
     async fn stop_layer(&mut self, layer: FilesLayer) {
         layer.stop().await;
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn drive(
-    root: PathBuf,
-    actor: ActorHandle,
-    workspace_id: String,
-    leases: LeaseRegistry,
-    self_writes: SelfWriteSuppression,
-    cancel: CancellationToken,
-    status: Arc<DriverStatus>,
-    author_json: Arc<Mutex<Option<String>>>,
-    open_ready_tx: tokio::sync::watch::Sender<bool>,
-    flush_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<FlushOutcome>>,
-    apply_gate: ApplyGate,
-    store_freshly_created: bool,
-    refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
-    events: EngineEvents,
-    apply_probe: Option<CaptureApplyProbe>,
-) {
-    let mut env = RealEnv {
-        root,
-        actor,
-        workspace_id,
-        leases,
-        status: Arc::clone(&status),
-        author_json,
-        self_writes,
-        apply_gate,
-        store_freshly_created,
-        open_ready_tx: open_ready_tx.clone(),
-        refresh_epoch,
-        events,
-        apply_probe,
-    };
-    drive_loop(&mut env, cancel, status, open_ready_tx, flush_rx).await;
 }
 
 /// Force the oracle-equivalent pre-switch full scan while the caller owns the
