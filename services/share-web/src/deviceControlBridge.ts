@@ -2,8 +2,9 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import { DEVICE_CONTROL_PATH, DEVICE_CONTROL_PROTOCOL, parseDeviceControlLimits,
-  parseDeviceControlRegistration, type DeviceControlLimits } from "@dohc/live-session-contract/device-control";
-import { createDeviceControlRequestParser, refuseDeviceControl, TokenBucketLimiter } from "@dohc/service-http";
+  parseDeviceControlRegistration, parseDeviceLiveHostStart, parseDeviceLiveHostTransport, parseDeviceLiveHostCredit,
+  deviceLiveHostReceive, type DeviceControlLimits } from "@dohc/live-session-contract/device-control";
+import { BoundedSendQueue, DeviceControlWriter, DeviceCreditWindow, createDeviceControlRequestParser, refuseDeviceControl, TokenBucketLimiter } from "@dohc/service-http";
 import { clientAddress } from "./clientAddress.js";
 
 export function createDeviceControlBridge(options: {
@@ -53,12 +54,24 @@ export function createDeviceControlBridge(options: {
     if (!limiter.allow(address, now())) { refuseDeviceControl(socket, limits.closeTimeoutMs); return; }
     let device: WebSocket | undefined, upstream: WebSocket | undefined;
     let done = false, registered = false;
+    let started = false, attached = false;
+    let toDevice: BoundedSendQueue | undefined, toRelay: BoundedSendQueue | undefined;
+    let deviceWriter: DeviceControlWriter | undefined, relayWriter: DeviceControlWriter | undefined;
+    let fromDevice: DeviceCreditWindow | undefined, fromRelay: DeviceCreditWindow | undefined;
+    const relayCredit = { forwarded: 0, received: 0, advertised: 0 };
+    const deviceCredit = { forwarded: 0, received: 0, advertised: 0 };
+    const releaseCredit = (credit: typeof relayCredit, target: DeviceControlWriter | undefined) => {
+      const total = Math.min(credit.forwarded, credit.received);
+      if (total > credit.advertised) { credit.advertised = total; target!.acknowledge(total); }
+    };
     let expectedPong: Buffer | undefined;
     let timer: ReturnType<typeof setTimeout>;
     const stop = () => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      toDevice?.close(); toRelay?.close();
+      deviceWriter?.close(); relayWriter?.close();
       connections.delete(stop);
       socket.removeListener("data", earlyData);
       upstream?.terminate();
@@ -71,13 +84,23 @@ export function createDeviceControlBridge(options: {
     };
     const writable = (target: WebSocket | undefined, bytes: number): target is WebSocket =>
       target?.readyState === WebSocket.OPEN && target.bufferedAmount + bytes <= limits.maxPendingBytes;
+    const writer = (target: WebSocket) => new DeviceControlWriter({
+      send(bytes, binary, callback) {
+        if (bytes.length > limits.maxPayloadBytes || !writable(target, bytes.length + 16)) throw new Error("Device bridge is full.");
+        target.send(bytes, { binary }, callback);
+      }, onError: stop });
+    const sendQueue = (target: DeviceControlWriter, credit: typeof relayCredit, source: DeviceControlWriter) =>
+      new BoundedSendQueue({ maxBytes: limits.maxPendingBytes, maxSegmentBytes: limits.maxPayloadBytes,
+        send: (bytes, binary, callback) => target.write(bytes, binary, error => {
+          callback(error);
+          if (binary && !error && !done) { credit.forwarded += bytes.length + 16; releaseCredit(credit, source); }
+        }), onDrain() {}, onError: stop });
     const earlyData = () => stop();
     connections.add(stop);
     socket.once("close", stop);
     socket.once("end", stop);
     socket.once("error", stop);
-    // No device application frames exist in this protocol. Observe cancellation
-    // while the relay authenticates, and refuse bytes sent before the upgrade.
+    // Observe cancellation during relay authentication and refuse pre-upgrade bytes.
     socket.on("data", earlyData);
     socket.resume();
     timer = setTimeout(stop, limits.handshakeTimeoutMs);
@@ -90,17 +113,62 @@ export function createDeviceControlBridge(options: {
       upstream.on("error", stop);
       upstream.on("close", stop);
       upstream.on("message", (data, binary) => {
-        if (done || registered || binary) { stop(); return; }
+        if (done) return;
         try {
+          if (registered) {
+            if (binary) {
+              if (!attached) throw new Error("Early relay bytes.");
+              const bytes = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
+              fromRelay!.receive(bytes.length);
+              toDevice!.write(bytes, true);
+            } else {
+              if (attached) {
+                const total = parseDeviceLiveHostCredit(JSON.parse(data.toString()));
+                fromDevice!.acknowledge(total); deviceCredit.received = total; releaseCredit(deviceCredit, deviceWriter); return;
+              }
+              if (started) throw new Error("Unexpected relay control.");
+              const parsed = parseDeviceLiveHostStart(JSON.parse(data.toString()));
+              const receive = deviceLiveHostReceive(limits, parsed.receive);
+              fromDevice = new DeviceCreditWindow(receive.maxPendingBytes, receive.maxPayloadBytes);
+              const start = JSON.stringify({ ...parsed, receive });
+              started = true;
+              toDevice!.write(Buffer.from(start), false);
+            }
+            return;
+          }
+          if (binary) throw new Error("Early relay bytes.");
           const notice = JSON.stringify(parseDeviceControlRegistration(JSON.parse(data.toString())));
           if (Buffer.byteLength(notice) > limits.maxPayloadBytes) { stop(); return; }
           socket.removeListener("data", earlyData);
           socket.pause();
           server.handleUpgrade(request, socket, head, accepted => {
             device = accepted;
+            deviceWriter = writer(device); relayWriter = writer(upstream!);
+            toDevice = sendQueue(deviceWriter, relayCredit, relayWriter); toRelay = sendQueue(relayWriter, deviceCredit, deviceWriter);
             device.on("error", stop);
             device.on("close", stop);
-            device.on("message", stop);
+            device.on("message", (bytes, isBinary) => {
+              try {
+                if (!registered || !started) throw new Error("Early device bytes.");
+                if (isBinary) {
+                  if (!attached) throw new Error("Early native bytes.");
+                  const segment = Buffer.isBuffer(bytes) ? bytes : Array.isArray(bytes) ? Buffer.concat(bytes) : Buffer.from(bytes);
+                  fromDevice!.receive(segment.length);
+                  toRelay!.write(segment, true);
+                } else {
+                  if (attached) {
+                    const total = parseDeviceLiveHostCredit(JSON.parse(bytes.toString()));
+                    fromRelay!.acknowledge(total); relayCredit.received = total; releaseCredit(relayCredit, relayWriter); return;
+                  }
+                  const parsed = parseDeviceLiveHostTransport(JSON.parse(bytes.toString()));
+                  const receive = deviceLiveHostReceive(limits, parsed.receive);
+                  fromRelay = new DeviceCreditWindow(receive.maxPendingBytes, receive.maxPayloadBytes);
+                  const transport = JSON.stringify({ ...parsed, receive });
+                  attached = true;
+                  toRelay!.write(Buffer.from(transport), false);
+                }
+              } catch { stop(); }
+            });
             device.on("ping", stop);
             device.on("pong", pong => {
               if (!expectedPong || !pong.equals(expectedPong) || !writable(upstream, pong.length + 16)) { stop(); return; }
@@ -109,7 +177,7 @@ export function createDeviceControlBridge(options: {
             });
             if (done || !writable(device, Buffer.byteLength(notice) + 16)) { stop(); return; }
             registered = true;
-            device.send(notice, error => { if (error) stop(); });
+            toDevice.write(Buffer.from(notice), false);
             touch();
             device.resume();
           });

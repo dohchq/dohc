@@ -168,6 +168,17 @@ ownership. After revocation, the next relay process refuses the revoked
 credential. A runtime continuity failure closes active device connections before
 the storage owner releases its lock.
 
+The optional `--delivery-config` file enables the configured native document host.
+It must include a positive integer `shutdownGraceMs`. On disconnect, the connector
+closes native stdin and drains stdout. After that grace period, it sends `SIGTERM`.
+If the child remains alive for another grace period, it sends `SIGKILL`.
+The connector waits for child stdio to close before reporting shutdown.
+
+Document transport advertises the configured receive limits in its startup messages.
+The bridge reduces each advertisement to its own limits. Senders retain bounded queues
+and wait for byte credit when the receiver is full. Byte credit reports consumed
+transport bytes; durable document acknowledgements still come from the native engine.
+
 ## Configured service-host integration
 
 This private integration applies the relay's committed journal through a dedicated

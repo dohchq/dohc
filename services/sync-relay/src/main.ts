@@ -335,15 +335,18 @@ const server = serveFetchHandler({
 
 const host = testAuthSeam ? "127.0.0.1" : (process.env.SYNC_RELAY_BIND ?? "0.0.0.0");
 let deviceControl: ReturnType<typeof createDeviceControl> | undefined;
+const deviceDeliveryConfig = process.env.DOHC_RELAY_DEVICE_DELIVERY_CONFIG;
+if (deviceDeliveryConfig && (!deployment || process.env.DOHC_DEVICE_CONTROL_LIMITS === undefined)) fatal("FATAL: Device delivery requires an initialized deployment and device control limits.");
 if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
   try {
     deviceControl = createDeviceControl({
       storage, relayExchangeKey: relayExchangeKey ?? "",
       hosts: new Set((process.env.DOHC_RELAY_DEVICE_CONTROL_HOSTS ?? "").split(",")),
       limits: JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS),
+      ...(deviceDeliveryConfig && deployment ? { delivery: { configPath: deviceDeliveryConfig, history: deployment.history } } : {}),
     });
   } catch {
-    fatal("FATAL: Invalid device control configuration. Check DOHC_DEVICE_CONTROL_LIMITS, DOHC_RELAY_DEVICE_CONTROL_HOSTS, and relay exchange key.");
+    fatal("FATAL: Invalid device control configuration. Check DOHC_DEVICE_CONTROL_LIMITS, DOHC_RELAY_DEVICE_CONTROL_HOSTS, DOHC_RELAY_DEVICE_DELIVERY_CONFIG, and relay exchange key.");
   }
 }
 if (deviceControl) {

@@ -5,6 +5,7 @@ import { connectDeviceHost } from "./deviceHostConnect.js";
 
 const usage = `Connect this device outbound to share-web. No inbound listener or relay database is needed.
 --url wss://HOST/api/device-control --credential-directory PRIVATE_DIRECTORY --limits-json JSON
+Use --delivery-config ABSOLUTE_FILE to enable a dedicated configured native document host.
 Credential-file reading and this connector are unavailable on macOS until ACL validation is implemented.
 Use an existing operator-provisioned credential directory. This command does not provision or renew credentials.
 Limits must explicitly set maxConnections, maxHeaderBytes, maxCredentialBytes, maxPayloadBytes, maxPendingBytes,
@@ -20,13 +21,15 @@ async function main(args: string[]): Promise<void> {
     if (fields.has(key) || !value || value.startsWith("--")) throw new Error();
     fields.set(key, value);
   }
-  if (fields.size !== 3 || ["--url", "--credential-directory", "--limits-json"].some(key => !fields.has(key))) throw new Error();
+  if (![3, 4].includes(fields.size) || ["--url", "--credential-directory", "--limits-json"].some(key => !fields.has(key)) ||
+    [...fields.keys()].some(key => !["--url", "--credential-directory", "--limits-json", "--delivery-config"].includes(key))) throw new Error();
   const directory = fields.get("--credential-directory")!;
   if (!isAbsolute(directory)) throw new Error();
   const limits = parseDeviceControlLimits(JSON.parse(fields.get("--limits-json")!));
   const credential = await readDeviceHostCredentialFile(directory);
   let registered = false, requestedStop = false;
-  const connection = connectDeviceHost({ url: fields.get("--url")!, credential, limits, onRegistered(notice) {
+  const connection = connectDeviceHost({ url: fields.get("--url")!, credential, limits,
+    ...(fields.has("--delivery-config") ? { deliveryConfigPath: fields.get("--delivery-config")! } : {}), onRegistered(notice) {
     registered = true;
     console.log(JSON.stringify(notice));
   } });

@@ -8,6 +8,9 @@ export { WaiterRegistry, type WaiterCaps } from "./waiterRegistry";
 export { readBoundedJson } from "./readBoundedJson";
 export { closeServer, fatal, installShutdown, parseGracePeriodMs } from "./process";
 export { createDeviceControlRequestParser, refuseDeviceControl } from "./deviceControlRequest";
+export { BoundedSendQueue } from "./boundedSendQueue";
+export { DeviceCreditSender } from "./deviceCreditSender";
+export { DeviceControlWriter, DeviceCreditWindow } from "./deviceControlWriter";
 
 export function jsonResponse(
   body: unknown,
