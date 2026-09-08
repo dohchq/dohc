@@ -854,6 +854,9 @@ export class EngineClient implements EngineTransport {
     this.liveUploads += 1;
     let stopped = false;
     const abort = (): void => { stopped = true; this.close(); };
+    // The reply timer ends when a response arrives. Keep the upload deadline
+    // through the final drain so an early reply cannot strand retained input.
+    const uploadDeadline = setTimeout(abort, request.deadlineMs);
     signal?.addEventListener("abort", abort, { once: true });
     try {
       // Capture bytes once. Caller mutations cannot change a queued upload.
@@ -905,6 +908,7 @@ export class EngineClient implements EngineTransport {
         params: JSON.parse(JSON.stringify({ accepted, registrationId: request.registrationId, rangeCount: ranges.length, rangeStreamId, rangeDigest, updateStreamId, updateByteLength: byteLength })) as Request["params"],
       }, writeInput);
     } finally {
+      clearTimeout(uploadDeadline);
       signal?.removeEventListener("abort", abort);
       this.liveUploadBytes -= charge;
       this.liveUploads -= 1;

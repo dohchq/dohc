@@ -276,11 +276,13 @@ describe("outbound backpressure", () => {
 });
 
 describe("private admitted-update upload", () => {
-  it.each(["abort", "early-response"])("bounds concurrent uploads and closes partial streams after %s", async mode => {
+  it.each(["abort", "early-response", "early-response-no-drain", "final-response-no-drain"])("bounds concurrent uploads and closes partial streams after %s", async mode => {
     const peer = new FakePeerConnection();
     const transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
     peer.acknowledge();
     await transport.ready();
+    vi.useFakeTimers();
+    try {
     const bytes = new Uint8Array([0, 0]);
     const accepted = parseRelayAcceptedLiveUpdate({
       receipt: { deliveryId: "delivery", updateDigest: createHash("sha256").update(bytes).digest("hex"), journalCursor: 1, acceptingHostEpoch: 1 },
@@ -290,9 +292,16 @@ describe("private admitted-update upload", () => {
     const reached = Promise.withResolvers<void>();
     let chunks = 0;
     peer.onEnvelope = envelope => {
-      if (envelope.type === "blobStart") { peer.backpressured = true; reached.resolve(); }
+      if (mode !== "final-response-no-drain" && envelope.type === "blobStart") { peer.backpressured = true; reached.resolve(); }
     };
-    peer.onBlobChunk = () => { chunks++; };
+    peer.onBlobChunk = () => {
+      chunks++;
+      if (mode === "final-response-no-drain" && chunks === 2) {
+        peer.backpressured = true;
+        reached.resolve();
+        peer.send({ type: "response", id: 1, result: { status: "applied" } });
+      }
+    };
     const signal = new AbortController();
     const event = { metadata: { accepted, firstSeen: [] }, updateBytes: bytes };
     const pending = transport.sendLiveApplication({ id: 1, workspace: "ws-0000000000000001", registrationId: 1, deadlineMs: 30_000 }, event, signal.signal).catch((error: unknown) => error);
@@ -300,13 +309,16 @@ describe("private admitted-update upload", () => {
     await expect(transport.sendLiveApplication({ id: 2, workspace: "ws-0000000000000001", registrationId: 1, deadlineMs: 30_000 }, event)).rejects.toThrow("capacity is full");
     if (mode === "abort") signal.abort();
     else {
-      peer.send({ type: "response", id: 1, result: { status: "applied" } });
-      peer.drain();
+      if (mode !== "final-response-no-drain") peer.send({ type: "response", id: 1, result: { status: "applied" } });
+      if (mode === "early-response") peer.drain();
+      else await vi.advanceTimersByTimeAsync(30_000);
     }
     expect(await pending).toBeInstanceOf(EngineClientError);
     peer.drain();
-    expect(chunks).toBe(0);
+    expect(chunks).toBe(mode === "final-response-no-drain" ? 2 : 0);
     await expect(transport.sendRequest(request(99, "after.partial"))).rejects.toThrow("is closed");
+    await expect(transport.sendLiveApplication({ id: 3, workspace: "ws-0000000000000001", registrationId: 1, deadlineMs: 30_000 }, event)).rejects.toThrow("is closed");
+    } finally { transport.close(); vi.useRealTimers(); }
   });
   it("captures a valid maximum-size Yjs update through the real client", async () => {
     const maximum = 20 * 1024 * 1024;

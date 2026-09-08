@@ -600,6 +600,25 @@ mod tests {
         );
         assert!(response.output_guard.as_ref().unwrap().is_current());
         assert!(ingress.budget.available_permits() < capacity);
+        let mut second = request(&workspace, registration, &binding, &bytes, &[]);
+        second.id = 4;
+        second.params["updateStreamId"] = json!(3);
+        second.params["rangeStreamId"] = json!(4);
+        ingress.begin(second.clone(), &owner.handle()).unwrap();
+        let mut third = second;
+        third.id = 5;
+        third.params["updateStreamId"] = json!(5);
+        third.params["rangeStreamId"] = json!(6);
+        assert_eq!(
+            ingress.begin(third, &owner.handle()).unwrap_err().code,
+            ErrorCode::Overloaded
+        );
+        ingress.clear();
+        assert_eq!(
+            ingress.upload_slots.available_permits(),
+            1,
+            "queued response still holds its slot"
+        );
         let old_guard = response.output_guard.as_ref().unwrap();
         let retirement = old_guard.retirement_signal();
         let mut last_registration = registration;
