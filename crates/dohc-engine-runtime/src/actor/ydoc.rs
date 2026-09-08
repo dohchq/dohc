@@ -1433,7 +1433,7 @@ pub(super) fn ydoc_record_update_on_store(
                 dohc_engine_sync::BaseOrigination::NothingToDo => false,
             };
             if !base_originated && outcome.emit_outbound {
-                let lineage_claim_id = dohc_engine_collab::read_marker_in_tx(tx, &journal_key)?
+                let lineage_claim_id = dohc_engine_collab::read_marker_in(tx, &journal_key)?
                     .and_then(|marker| marker.lineage_claim_id)
                     .ok_or_else(|| dohc_engine_collab::CollabError::Corrupt {
                         reason: "exact Y.Doc lineage has no claim id".to_owned(),
