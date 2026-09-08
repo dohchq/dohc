@@ -460,7 +460,7 @@ where
                 .await
                 {
                     keep_running = false;
-                    break;
+                    break 'frames;
                 }
             }
         }
@@ -545,6 +545,9 @@ async fn write_output<W: AsyncWrite + Unpin>(
                         if offset == 0 {
                             lock(&active_egress).remove(&request_id);
                             continue 'items;
+                        }
+                        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                            interruption_kind = io::ErrorKind::TimedOut;
                         }
                         return Err(io::Error::new(
                             interruption_kind,

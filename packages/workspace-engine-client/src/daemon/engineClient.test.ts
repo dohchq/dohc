@@ -276,7 +276,7 @@ describe("outbound backpressure", () => {
 });
 
 describe("private admitted-update upload", () => {
-  it.each(["busy", "deadline", "abort"])("keeps the connection after a fully drained upload reaches %s", async mode => {
+  it.each(["busy", "deadline", "abort", "abort-without-reply"])("keeps the connection after a fully drained upload reaches %s", async mode => {
     const peer = new FakePeerConnection();
     const transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
     peer.acknowledge();
@@ -295,17 +295,21 @@ describe("private admitted-update upload", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
     const signal = new AbortController();
-    const pending = transport.sendLiveApplication({ id: 1, workspace: "ws-0000000000000001", registrationId: 1, deadlineMs: 30_000 }, { metadata: { accepted, firstSeen: [] }, updateBytes: bytes }, signal.signal).catch((error: unknown) => error);
+    const pending = transport.sendLiveApplication({ id: 77, workspace: "ws-0000000000000001", registrationId: 1, deadlineMs: 30_000 }, { metadata: { accepted, firstSeen: [] }, updateBytes: bytes }, signal.signal).catch((error: unknown) => error);
     await uploaded.promise;
     if (mode === "busy") peer.send({ type: "error", id: 1, error: { code: "OVERLOADED", message: "store-busy", retry: "afterBackoff" } });
     else if (mode === "deadline") await vi.advanceTimersByTimeAsync(30_000);
     else {
-      peer.onEnvelope = envelope => { if (envelope.type === "cancel") peer.send({ type: "error", id: envelope.id, error: { code: "CANCELLED", message: "cancelled", retry: "no" } }); };
+      peer.onEnvelope = envelope => { if (mode === "abort" && envelope.type === "cancel") peer.send({ type: "error", id: envelope.id, error: { code: "CANCELLED", message: "cancelled", retry: "no" } }); };
       signal.abort();
     }
     expect(await pending).toBeInstanceOf(EngineClientError);
     peer.onEnvelope = envelope => { if (envelope.type === "request") peer.send({ type: "response", id: envelope.id, result: {} }); };
     await expect(transport.sendRequest(request(2, "after.upload"))).resolves.toMatchObject({ result: {} });
+    if (mode.startsWith("abort")) {
+      expect(peer.received).toContainEqual({ type: "cancel", id: 1 });
+      expect(vi.getTimerCount()).toBe(0);
+    }
     } finally { transport.close(); vi.useRealTimers(); }
   });
   it.each(["abort", "early-response", "early-response-no-drain", "final-response-no-drain"])("bounds concurrent uploads and closes partial streams after %s", async mode => {
