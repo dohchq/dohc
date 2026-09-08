@@ -146,23 +146,25 @@ GitHub PR checks stay dispatch-only and require self-hosted runners. Do not enab
 Keep one concern per PR. Keep required contract, caller, and test changes together.
 Finish implementation, self-simplification, and focused checks before requesting independent review.
 
-### Verify the final commit
+### Verify the change
 
 The canonical local runner selects JavaScript and Rust gates from the [`PR checks` workflow's filters](.github/workflows/pr-checks.yml).
 Use `pnpm verify:plan --base <target-ref>` to inspect that selection locally.
 
 - One agent owns verification and the PR's evidence. Other agents run focused checks for their changes.
-- Before merging, require passing local evidence for the final head against the current target branch.
+- Before merging, require passing local evidence that covers the PR's changes.
+- After a rebase or merge, inspect the delta and reuse passing evidence when it still covers the change.
+- Rerun only checks affected by source, dependency, configuration, or conflict-resolution changes. Advancing main alone does not require another gate run.
 - Require every selected job to pass. A missing, cancelled, or failed run is not a pass.
 - If a job reads a changed file outside its filter, correct the filter and run that job.
 - When impact is unclear, run both jobs with explicit `--job js` and `--job rust` invocations.
-- Record the commit, target ref, selected gates, result, and evidence location in the PR.
+- Record the tested commit, target ref, selected gates, result, and evidence location. Explain any reuse across commits.
 - If no code gate applies, record the runner's selection and reason.
 - Add focused platform verification when changed behavior depends on Windows or macOS.
 
 Use `pnpm verify:pr --base <target-ref>` as the single full-verification entry point.
 It owns the service setup, prebuilds, gate selection, and evidence. Follow [the verification procedure](docs/how-to/verify-agent-work.md#verify-a-pull-request).
-Preserve every applicable check. Accept its `result.json` only for the final, unchanged commit.
+Keep the checkout unchanged during each run. Preserve the original commit and target in its `result.json`.
 The Rust gate retains its build budget and mandatory summary-verdict checks.
 
 ### Select reviewers
