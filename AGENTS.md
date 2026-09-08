@@ -11,8 +11,7 @@ We are building the MVP and have not launched with users.
 The product sections below are decision boundaries, not a feature checklist. Use them to reject work that would turn dohc into the wrong product.
 
 - If a task conflicts with product commitments or invariants, explain the conflict. Obtain approval before changing those boundaries.
-- Treat workflow and design instructions as defaults. An explicit developer request can override them.
-- Resolve routine implementation choices within the authorized task without another approval request.
+- Treat the remaining instructions as repository defaults. An explicit developer request can override them.
 - Ask when progress requires unavailable access, an unresolved product decision, or authorization beyond the task. Name the specific dependency.
 
 ## Product model
@@ -118,7 +117,6 @@ Understand the constraint before building. Choose the smallest model that makes 
 Craft includes layout, interaction, loading, failure, and recovery. Evaluate the complete experience, including transitions between states.
 - Choose layouts for their content. Give comparisons enough room, with consistent spacing and varied composition.
 - For broad redesigns, develop one representative section before extending the treatment.
-- On the marketing site, reuse existing tokens and apply metallic depth selectively. Keep product demos recognizable as dohc.
 - Inspect affected layouts, both themes, keyboard access, reduced motion, loading transitions, and failure states in the browser.
 - Match preview and live visuals. Keep content useful while visuals load, and suspend animation offscreen.
 - Measure startup and interaction when changing rendering or loading. Judge the experience alongside automated performance scores.
@@ -126,11 +124,6 @@ Craft includes layout, interaction, loading, failure, and recovery. Evaluate the
 ## Documentation and writing
 
 Name the reader before adding a document to main. If nobody will use it to make a decision or perform work, do not add it. Git records what happened. Tests should enforce rules that code can break.
-
-Write the root README for people deciding whether to use dohc. Link to code, configuration, and contributor guidance for technical details.
-
-Code and configuration are the source of truth for current behavior, dependencies, and commands. Verify them directly instead of relying on documentation summaries.
-Document intent, constraints, and decisions that the code cannot explain. Link to implementation details rather than duplicating them in prose.
 
 Read [`.agents/skills/dohc-writing/SKILL.md`](.agents/skills/dohc-writing/SKILL.md) before writing docs, specs, plans, PR bodies, commit messages, or skills. Use [`.agents/skills/dohc-interface/SKILL.md`](.agents/skills/dohc-interface/SKILL.md) for anything a person sees inside the app.
 
