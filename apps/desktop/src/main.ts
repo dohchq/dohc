@@ -267,12 +267,11 @@ import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import { createTryInVersionSessions } from "./agents/tryInVersion";
 import {
   createChatDispatchService,
-  isAppImageBoot,
-  resolveDohcCliBinDirectory,
-  resolveDohcMcpCommand,
   type ChatDispatchPresenceInput,
   type ChatDispatchWorkspace,
 } from "./agents/chatDispatchService";
+import { isAppImageBoot, resolveDohcMcpCommand } from "./agents/dohcMcpCommand";
+import { resolveDohcCliBinDirectory } from "./agents/chatRunnerProcess";
 import { refreshLinuxStableCliBin } from "./agents/linuxStableCliBin";
 import { CHAT_AGENT_PRESENCE_TOPIC } from "./collab/agentPresence";
 import {
@@ -336,7 +335,7 @@ import {
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
-import { createWorkspaceSearchDaemonQuery } from "./workspaces/workspaceSearchDaemonAdapter";
+import { createWorkspaceSearchDaemonQuery } from "./workspaces/workspaceSearchDaemon";
 import { rgPath } from "@vscode/ripgrep";
 import { createDesktopCliServer } from "./cli/desktopCliServer";
 import {

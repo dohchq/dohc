@@ -10,11 +10,14 @@ import {
   serveFetchHandler,
 } from "@dohc/service-http";
 import { Pool } from "pg";
+import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
 import { errorBody } from "./errors";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
+import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
+import { createDeviceControl } from "./deviceControl";
 
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
   process.env.NODE_ENV === "test" ? process.env.SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS : undefined,
@@ -140,6 +143,7 @@ if (!testAuthSeam && secret.length < 32) {
   );
 }
 
+const namedBrowserSessionLimits = loadNamedBrowserSessionLimits();
 const dbPath = process.env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay.sqlite");
 const storage = openSyncRelayStorage(dbPath, { workspaceQuotaBytes });
 
@@ -155,6 +159,7 @@ let pool: Pool | undefined;
 const TEST_EMAIL_SUFFIX = "@dohc.test";
 let resolveUserIdByEmail: (email: string) => Promise<string | null> | string | null;
 let lookupUserEmail: (userId: string) => Promise<string | null> | string | null;
+let lookupVerifiedUserEmail: (userId: string) => Promise<string | null> | string | null;
 let lookupUserDisplayName: (
   userId: string,
 ) => Promise<string | null> | string | null;
@@ -194,16 +199,11 @@ if (testAuthSeam) {
       ? email.slice(0, -TEST_EMAIL_SUFFIX.length)
       : null;
   lookupUserEmail = (userId) => `${userId}${TEST_EMAIL_SUFFIX}`;
+  lookupVerifiedUserEmail = lookupUserEmail;
   lookupUserDisplayName = (userId) => userId;
 } else {
   // Better Auth's canonical table/column names on the shared Postgres.
-  resolveUserIdByEmail = async (email) => {
-    const result = await pool!.query<{ id: string }>(
-      'SELECT id FROM "user" WHERE lower(email) = lower($1) LIMIT 1',
-      [email],
-    );
-    return result.rows[0]?.id ?? null;
-  };
+  ({ resolveUserIdByEmail, lookupVerifiedUserEmail } = createVerifiedEmailLookups(pool!));
   lookupUserEmail = async (userId) => {
     const result = await pool!.query<{ email: string }>(
       'SELECT email FROM "user" WHERE id = $1 LIMIT 1',
@@ -230,11 +230,13 @@ const relayHandler = createSyncRelayHandler({
   resolveActor,
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
   lookupUserEmail: (userId) => lookupUserEmail(userId),
+  lookupVerifiedUserEmail: (userId) => lookupVerifiedUserEmail(userId),
   lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
   presence,
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
+  namedBrowserSessionLimits,
 });
 const fetchHandler = async (request: Request): Promise<Response> => {
   if (new URL(request.url).pathname === "/health") {
@@ -254,6 +256,23 @@ const fetchHandler = async (request: Request): Promise<Response> => {
 // adapter refuses anything larger as it arrives, before it is buffered.
 const MAX_BODY_BYTES = MAX_BLOB_BYTES + 1024 * 1024;
 const MAX_LINK_EXCHANGE_BODY_BYTES = 4096;
+
+function loadNamedBrowserSessionLimits(): NamedLiveBrowserHttpLimits | undefined {
+  const value = process.env.DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS;
+  if (value === undefined) return undefined;
+  if (!shareWebOrigin || !shareWebOrigin.startsWith("https://")) {
+    fatal("FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must be an HTTPS origin when named browser sessions are enabled.");
+  }
+  if (!relayExchangeKey) {
+    fatal("FATAL: DOHC_RELAY_EXCHANGE_KEY must be set when named browser sessions are enabled.");
+  }
+  try { return parseNamedLiveBrowserHttpLimits(JSON.parse(value)); }
+  catch { fatal("FATAL: DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS must be valid JSON with all required positive limits within their supported bounds, a safe expiry timestamp, and capacity for the named session envelopes."); }
+}
+
+function isNamedBrowserSessionPath(pathname: string): boolean {
+  return pathname === "/sync/live/named-sessions" || pathname === "/sync/live/named-sessions/resolve";
+}
 
 function isLinkExchangePath(pathname: string): boolean {
   try {
@@ -284,11 +303,12 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
 const server = serveFetchHandler({
   handler: fetchHandler,
   maxBodyBytes: (url) =>
+    isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? MAX_LINK_EXCHANGE_BODY_BYTES
       : MAX_BODY_BYTES,
   oversized: (url) =>
-    isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
+    isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? errorBody("not_found")
       : errorBody("payload_too_large"),
   // Never echo internal error details (or anything derived from the request)
@@ -307,6 +327,24 @@ const server = serveFetchHandler({
 });
 
 const host = testAuthSeam ? "127.0.0.1" : (process.env.SYNC_RELAY_BIND ?? "0.0.0.0");
+let deviceControl: ReturnType<typeof createDeviceControl> | undefined;
+if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
+  try {
+    deviceControl = createDeviceControl({
+      storage, relayExchangeKey: relayExchangeKey ?? "",
+      hosts: new Set((process.env.DOHC_RELAY_DEVICE_CONTROL_HOSTS ?? "").split(",")),
+      limits: JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS),
+    });
+  } catch {
+    fatal("FATAL: Invalid device control configuration. Check DOHC_DEVICE_CONTROL_LIMITS, DOHC_RELAY_DEVICE_CONTROL_HOSTS, and relay exchange key.");
+  }
+}
+if (deviceControl) {
+  server.on("upgrade", deviceControl.handleUpgrade);
+  process.once("SIGINT", deviceControl.close);
+  process.once("SIGTERM", deviceControl.close);
+  server.once("close", deviceControl.close);
+}
 server.listen(requestedPort, host, () => {
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : requestedPort;

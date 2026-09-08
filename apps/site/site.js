@@ -1,3 +1,8 @@
+import { createSyncDemo } from './src/sync-demo.js';
+import { createReaderFlip } from './src/reader-flip.js';
+import { createGraphFlow } from './src/graph-flow.js';
+import { releaseAssets } from './release-assets.ts';
+
 // dohc marketing site: downloads, theme toggle, and scroll reveals.
 
 const root = document.documentElement;
@@ -8,6 +13,7 @@ function syncThemeToggle() {
   const dark = root.dataset.theme === 'dark';
   themeToggle.setAttribute('aria-pressed', String(dark));
   themeToggle.setAttribute('aria-label', dark ? 'Switch to light theme' : 'Switch to dark theme');
+  themeToggle.title = themeToggle.getAttribute('aria-label');
 }
 
 themeToggle?.addEventListener('click', () => {
@@ -78,8 +84,7 @@ async function preferredDownloadKey() {
   } catch {
     // Safari and privacy-hardened browsers do not expose architecture.
   }
-  // Apple silicon is the current default; Intel remains one click away.
-  return 'mac-arm64';
+  return null;
 }
 
 const downloadControls = Array.from(document.querySelectorAll('[data-download-control]'));
@@ -102,11 +107,12 @@ function configureDownloadControl(control, preferredKey) {
 
   const updatePrimary = () => {
     const build = preferredKey ? downloadBuilds[preferredKey] : null;
+    primary.dataset.downloadBuild = preferredKey ?? '';
     primary.href = build?.url ?? RELEASES_URL;
     primaryLabel.textContent = build ? `Download for ${build.label}` : 'Download dohc';
     primaryIcon.setAttribute('href', `#os-${build?.icon ?? 'download'}`);
     primary.closest('[data-download-control]').dataset.detectedPlatform = build?.platform ?? 'unknown';
-    primary.setAttribute('aria-label', build ? `Download dohc for ${build.label}, ${build.detail}` : 'View dohc downloads');
+    primary.setAttribute('aria-label', build ? `Download for ${build.label}, ${build.detail}` : 'Download dohc');
   };
 
   control.updateResolvedDownloads = updatePrimary;
@@ -115,27 +121,66 @@ function configureDownloadControl(control, preferredKey) {
 
 preferredDownloadKey().then((key) => {
   downloadControls.forEach((control) => configureDownloadControl(control, key));
+  const platform = key ? downloadBuilds[key].platform : null;
+  standaloneDownloadLinks.forEach((link) => {
+    const cardPlatform = link.dataset.downloadCard === 'mac' ? 'mac' : downloadBuilds[link.dataset.downloadCard]?.platform;
+    const matches = platform !== null && cardPlatform === platform;
+    link.classList.toggle('is-preferred', matches);
+    if (matches) {
+      link.dataset.downloadCard = key;
+      const badge = document.createElement('span');
+      badge.className = 'download-card-match';
+      badge.textContent = 'For your device';
+      link.appendChild(badge);
+    }
+  });
+  updateStandaloneDownloadLinks();
 });
 
-if (downloadControls.length) {
-  fetch('https://api.github.com/repos/dohc-ai/dohc/releases?per_page=10', {
-    headers: { Accept: 'application/vnd.github+json' },
-  })
-    .then((response) => response.ok ? response.json() : Promise.reject(new Error('No published release')))
-    .then((releases) => {
-      const available = releases.filter((release) => !release.draft && release.assets?.length);
-      const release = available.find((candidate) => !candidate.prerelease) ?? available[0];
-      if (!release) return;
-      Object.values(downloadBuilds).forEach((build) => {
-        const asset = release.assets.find((candidate) => build.matches(candidate.name));
-        if (asset?.browser_download_url) build.url = asset.browser_download_url;
-      });
-      downloadControls.forEach((control) => control.updateResolvedDownloads?.());
-      updateStandaloneDownloadLinks();
-    })
-    .catch(() => {
-      // The releases page remains a useful fallback before the first public build.
-    });
+let resolvingDownloads;
+let downloadPending = false;
+const resolveDownloads = () => resolvingDownloads ??= releaseAssets().then((assets) => {
+  Object.values(downloadBuilds).forEach((build) => {
+    const asset = assets.find((candidate) => build.matches(candidate.name));
+    if (asset?.browser_download_url) build.url = asset.browser_download_url;
+  });
+  updateStandaloneDownloadLinks();
+  downloadControls.forEach(control => control.updateResolvedDownloads?.());
+});
+for (const link of document.querySelectorAll('[data-download-primary], [data-download-card]')) {
+  const canResolve = () => Boolean(downloadBuilds[link.dataset.downloadCard ?? link.dataset.downloadBuild]);
+  const prepare = () => { if (canResolve()) void resolveDownloads(); };
+  link.addEventListener('pointerenter', prepare, { once: true });
+  link.addEventListener('focus', prepare, { once: true });
+  link.addEventListener('click', async event => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || link.target === '_blank') return;
+    event.preventDefault();
+    if (downloadPending) return;
+    if (!canResolve()) { location.assign(RELEASES_URL); return; }
+    downloadPending = true;
+    const label = link.querySelector('[data-download-primary-label], .download-card-action');
+    const originalText = label?.firstChild?.textContent;
+    const status = document.createElement('span');
+    status.className = 'visually-hidden';
+    status.setAttribute('role', 'status');
+    link.parentElement.append(status);
+    link.setAttribute('aria-busy', 'true');
+    link.setAttribute('aria-disabled', 'true');
+    if (label?.firstChild) label.firstChild.textContent = 'Checking release…';
+    status.textContent = 'Checking the latest release…';
+    try {
+      await resolveDownloads();
+    } catch {
+      link.href = RELEASES_URL;
+    } finally {
+      link.removeAttribute('aria-busy');
+      link.removeAttribute('aria-disabled');
+      if (label?.firstChild) label.firstChild.textContent = originalText;
+      status.remove();
+      downloadPending = false;
+    }
+    location.assign(link.href);
+  });
 }
 
 const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -247,6 +292,7 @@ if (principlesGraph) {
   document.addEventListener('visibilitychange', startSelectionRotation);
 
   if (principleCanvas && principleSvg && principleCore) {
+    const graphFlow = createGraphFlow(principlesGraph);
     const percent = (element, property) =>
       Number.parseFloat(element.style.getPropertyValue(property)) / 100;
     const scatter = [
@@ -329,6 +375,7 @@ if (principlesGraph) {
         edge.element.setAttribute('x2', target.x);
         edge.element.setAttribute('y2', target.y);
       });
+      graphFlow.render();
     };
 
     const settleAtAnchors = () => {
@@ -342,7 +389,11 @@ if (principlesGraph) {
       renderGraph();
     };
 
+    let lastStep = 0;
     const step = (time) => {
+      if (document.hidden || !graphIsVisible) { frame = null; return; }
+      if (time - lastStep < 1000 / 60 - 1) { frame = requestAnimationFrame(step); return; }
+      lastStep = time;
       const activeAlpha = points.some((point) => point.dragging)
         ? Math.max(alpha, 0.22)
         : Math.max(alpha, 0.06);
@@ -552,10 +603,17 @@ if (principlesGraph) {
     layoutGraph();
     const graphResizeObserver = new ResizeObserver(layoutGraph);
     graphResizeObserver.observe(principleCanvas);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        if (frame !== null) cancelAnimationFrame(frame);
+        frame = null;
+      } else restartPhysics(0.16);
+    });
 
     if ('IntersectionObserver' in window) {
       const graphObserver = new IntersectionObserver(([entry]) => {
         graphIsVisible = entry.isIntersecting;
+        graphFlow.setVisible(graphIsVisible);
         selectionVisible = entry.isIntersecting;
         if (graphIsVisible) {
           launchGraph();
@@ -569,6 +627,7 @@ if (principlesGraph) {
       graphObserver.observe(principleCanvas);
     } else {
       graphIsVisible = true;
+      graphFlow.setVisible(true);
       selectionVisible = true;
       launchGraph();
       startSelectionRotation();
@@ -589,6 +648,304 @@ if (principlesGraph) {
 
   const initialPrinciple = principleNodes.find((node) => node.getAttribute('aria-pressed') === 'true');
   if (initialPrinciple) selectPrinciple(initialPrinciple);
+}
+
+// Agent chat demo: friends ask, you @ your own agent, and the split app it
+// built sits beside the conversation. The picker swaps which model the
+// agent runs on; the split app is a small working calculator.
+const agentDemo = document.querySelector('[data-agent-demo]');
+
+if (agentDemo) {
+  const AGENTS = {
+    claude: {
+      name: 'Claude',
+      color: '#D97757',
+    },
+    codex: {
+      name: 'Codex',
+      color: 'var(--ink)',
+    },
+    gemini: {
+      name: 'Gemini',
+      color: '#4285F4',
+    },
+  };
+  const chips = Array.from(agentDemo.querySelectorAll('[data-agent]'));
+  const names = Array.from(agentDemo.querySelectorAll('[data-agent-name]'));
+  const logos = Array.from(agentDemo.querySelectorAll('[data-agent-logo]'));
+
+  const selectAgent = (chip) => {
+    const agent = AGENTS[chip.dataset.agent];
+    if (!agent) return;
+    chips.forEach((candidate) => {
+      candidate.setAttribute('aria-pressed', String(candidate === chip));
+    });
+    agentDemo.style.setProperty('--agent-color', agent.color);
+    names.forEach((el) => { el.textContent = agent.name; });
+    logos.forEach((el) => el.setAttribute('href', `#logo-${chip.dataset.agent}`));
+  };
+
+  chips.forEach((chip) => chip.addEventListener('click', () => selectAgent(chip)));
+
+  // The Split app: everyone ticks what they had; each item's price divides
+  // between whoever ticked it, and the izakaya service charge follows the
+  // same shares. Ticks are demo state only.
+  const split = agentDemo.querySelector('[data-split]');
+
+  if (split) {
+    const PEOPLE = { you: 'you', maya: 'Maya', sam: 'Sam' };
+    // Each receipt's total (with service) is what its payer put down.
+    const PAID = { you: 4500, maya: 7568, sam: 1080 };
+    const RECEIPTS = [
+      {
+        name: 'izakaya', paidBy: 'maya', service: 0.1,
+        items: [
+          { name: 'sashimi platter', price: 2400, had: ['you', 'sam'] },
+          { name: 'yakitori × 12', price: 1800, had: ['you', 'maya', 'sam'] },
+          { name: 'beer × 4', price: 2000, had: ['you', 'maya'] },
+          { name: 'karaage', price: 680, had: ['maya', 'sam'] },
+        ],
+      },
+      {
+        name: 'ramen', paidBy: 'you',
+        items: [
+          { name: 'tonkotsu × 3', price: 3300, had: ['you', 'maya', 'sam'] },
+          { name: 'gyoza × 2', price: 1200, had: ['you', 'sam'] },
+        ],
+      },
+      {
+        name: 'konbini', paidBy: 'sam',
+        items: [
+          { name: 'onigiri × 4', price: 720, had: ['you', 'maya', 'sam'] },
+          { name: 'ice cream', price: 360, had: ['sam'] },
+        ],
+      },
+    ];
+    const yen = (amount) => `¥${Math.round(amount).toLocaleString('en-US')}`;
+    const list = split.querySelector('[data-split-receipts]');
+    const personButtons = Array.from(split.querySelectorAll('[data-person]'));
+    const label = split.querySelector('[data-split-label]');
+    const amount = split.querySelector('[data-split-amount]');
+    const meta = split.querySelector('[data-split-meta]');
+    const transfersHost = split.querySelector('[data-split-transfers]');
+    // Sam already paid Maya back, so the app opens with one settled row.
+    const settled = new Set(['sam>maya']);
+    let person = 'you';
+
+    const receiptTotal = (receipt) =>
+      receipt.items.reduce((sum, item) => sum + item.price, 0) * (1 + (receipt.service || 0));
+
+    // Render the receipts once, then keep the DOM and only update state.
+    RECEIPTS.forEach((receipt, index) => {
+      const disclosure = document.createElement('details');
+      disclosure.className = 'app-receipt';
+      disclosure.open = index === 0;
+      const group = document.createElement('summary');
+      group.className = 'app-group';
+      group.innerHTML = `<span>${receipt.name}</span><span>${PEOPLE[receipt.paidBy]} paid ${yen(receiptTotal(receipt))}</span>`;
+      disclosure.appendChild(group);
+      list.appendChild(disclosure);
+      receipt.items.forEach((item) => {
+        const row = document.createElement('label');
+        row.className = 'app-item';
+        row.innerHTML = `<input type="checkbox" /><span class="app-check" aria-hidden="true"></span><span>${item.name}</span><span class="app-price"><small></small><span></span></span>`;
+        item.row = row;
+        item.box = row.querySelector('input');
+        item.box.addEventListener('change', () => {
+          const set = new Set(item.had);
+          if (item.box.checked) set.add(person); else set.delete(person);
+          item.had = Array.from(set);
+          settled.clear();
+          render();
+        });
+        disclosure.appendChild(row);
+      });
+    });
+
+    const shareOf = (who) => {
+      let total = 0;
+      RECEIPTS.forEach((receipt) => {
+        receipt.items.forEach((item) => {
+          if (!item.had.includes(who)) return;
+          total += (item.price / item.had.length) * (1 + (receipt.service || 0));
+        });
+      });
+      return total;
+    };
+
+    // Pairwise settlement: whoever owes most pays whoever is owed most.
+    const settle = () => {
+      const nets = Object.keys(PEOPLE).map((who) => ({ who, net: shareOf(who) - PAID[who] }));
+      const debtors = nets.filter((n) => n.net > 0.5).sort((a, b) => b.net - a.net);
+      const creditors = nets.filter((n) => n.net < -0.5).map((n) => ({ who: n.who, net: -n.net })).sort((a, b) => b.net - a.net);
+      const transfers = [];
+      let d = 0;
+      let k = 0;
+      while (d < debtors.length && k < creditors.length) {
+        const value = Math.min(debtors[d].net, creditors[k].net);
+        transfers.push({ from: debtors[d].who, to: creditors[k].who, value, key: `${debtors[d].who}>${creditors[k].who}` });
+        debtors[d].net -= value;
+        creditors[k].net -= value;
+        if (debtors[d].net < 0.5) d += 1;
+        if (creditors[k].net < 0.5) k += 1;
+      }
+      return transfers;
+    };
+
+    transfersHost.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-settle]');
+      if (!button) return;
+      const key = button.dataset.settle;
+      if (settled.has(key)) settled.delete(key); else settled.add(key);
+      render();
+      transfersHost.querySelector(`[data-settle="${key}"]`)?.focus({ preventScroll: true });
+    });
+
+    const render = () => {
+      personButtons.forEach((button) => {
+        button.setAttribute('aria-selected', String(button.dataset.person === person));
+      });
+      RECEIPTS.forEach((receipt) => {
+        receipt.items.forEach((item) => {
+          const mine = item.had.includes(person);
+          item.box.checked = mine;
+          item.box.disabled = mine && item.had.length === 1;
+          item.box.setAttribute('aria-label', `${item.name}${item.box.disabled ? '. Assign another person before removing this share.' : ''}`);
+          item.row.title = item.box.disabled ? 'Assign another person before removing this share.' : '';
+          item.row.classList.toggle('is-mine', mine);
+          const shared = mine && item.had.length > 1;
+          item.row.querySelector('small').textContent = shared ? `÷${item.had.length}` : '';
+          item.row.querySelector('.app-price > span').textContent =
+            shared ? yen(item.price / item.had.length) : yen(item.price);
+        });
+      });
+
+      const name = PEOPLE[person];
+      const me = person === 'you';
+      const transfers = settle();
+      const open = transfers.filter((t) => !settled.has(t.key));
+      const outgoing = open.filter((t) => t.from === person);
+      const incoming = open.filter((t) => t.to === person);
+      const names = (list) => list.map((t) => `<b>${PEOPLE[t.from === person ? t.to : t.from]}</b>`).join(' and ');
+      const sum = (list) => list.reduce((acc, t) => acc + t.value, 0);
+
+      const hero = split.querySelector('.app-hero');
+      hero.classList.toggle('is-clear', !outgoing.length && !incoming.length);
+      if (outgoing.length) {
+        label.innerHTML = `${me ? 'you owe' : `${name} owes`} ${names(outgoing)}`;
+        amount.textContent = yen(sum(outgoing));
+      } else if (incoming.length) {
+        label.innerHTML = `${names(incoming)} ${incoming.length > 1 || incoming[0].from === 'you' ? 'owe' : 'owes'} ${me ? 'you' : name}`;
+        amount.textContent = yen(sum(incoming));
+      } else {
+        label.textContent = me ? "you're all settled" : `${name} is all settled`;
+        amount.textContent = yen(0);
+      }
+      meta.textContent = `had ${yen(shareOf(person))} · paid ${yen(PAID[person])}`;
+
+      transfersHost.innerHTML = transfers
+        .map((t) => {
+          const done = settled.has(t.key);
+          const verb = t.from === 'you' ? 'pay' : 'pays';
+          const action = done
+            ? `<span class="app-settled">settled &#10003;</span><button class="app-settle is-undo" type="button" data-settle="${t.key}" aria-label="Undo settlement from ${PEOPLE[t.from]} to ${PEOPLE[t.to]}">Undo</button>`
+            : `<button class="app-settle" type="button" data-settle="${t.key}" aria-label="Settle payment from ${PEOPLE[t.from]} to ${PEOPLE[t.to]}">Settle</button>`;
+          return `<div class="app-transfer${done ? ' is-settled' : ''}"><span><b>${PEOPLE[t.from]}</b> ${verb} <b>${PEOPLE[t.to]}</b></span><span class="amt">${yen(t.value)}</span>${action}</div>`;
+        })
+        .join('');
+    };
+
+    personButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        person = button.dataset.person;
+        render();
+      });
+    });
+    render();
+  }
+
+}
+
+const syncDemo = document.querySelector('[data-sync-demo]');
+if (syncDemo) createSyncDemo(syncDemo);
+
+// Two readers: files and read-only projections on the agent's side,
+// rendered documents and chat on yours.
+const readers = document.querySelector('[data-readers]');
+
+if (readers) {
+  const AGENT_WHO = '<span class="reader-who is-agent" aria-hidden="true">A</span>';
+  const WHO = (letter) => `<span class="reader-who" aria-hidden="true">${letter}</span>`;
+  const FILES = {
+    plan: {
+      name: 'Plan',
+      view: '<h3>Launch plan</h3><p>Beta on the 24th. Three things gate it: the pricing page, the payment sandbox, and the invite flow. Maya owns pricing, Sam owns the sandbox.</p>',
+      foot: 'Markdown on disk. A live document while it\'s open, so edits from both of you merge.',
+    },
+    tasks: {
+      name: 'Tasks',
+      view: '<div class="reader-board"><div class="reader-col"><h4>todo <span>2</span></h4><div class="reader-task">Invite flow</div><div class="reader-task">Launch email</div></div><div class="reader-col"><h4>doing <span>3</span></h4><div class="reader-task">Pricing page</div><div class="reader-task">Payment sandbox</div><div class="reader-task">Copy review</div></div><div class="reader-col"><h4>done <span>1</span></h4><div class="reader-task">Beta day</div></div></div>',
+      foot: 'A folder with a schema. One markdown file per task; the board, table, and calendar are views of the same files.',
+    },
+    drawing: {
+      name: 'Flow sketch',
+      view: '<div class="reader-drawing"><svg viewBox="0 0 400 170" aria-hidden="true"><rect x="20" y="60" width="110" height="44" rx="6"/><text x="75" y="86" text-anchor="middle">Sign up</text><rect x="250" y="20" width="130" height="44" rx="6"/><text x="315" y="46" text-anchor="middle">Has account</text><rect x="250" y="106" width="130" height="44" rx="6"/><text x="315" y="132" text-anchor="middle">New user</text><path d="M130 82 C 190 82, 190 42, 250 42"/><path d="M130 82 C 190 82, 190 128, 250 128"/></svg></div>',
+      foot: 'JSON with an id on every shape, so your agent can add a branch or move one without redrawing.',
+    },
+    chat: {
+      name: '#launch',
+      view: `<div class="reader-msg">${WHO('S')}<span><b>Sam</b> sandbox is on track for the 19th, so the 24th is fine by me.</span></div><div class="reader-msg">${WHO('M')}<span><b>Maya</b> <span class="chat-mention">@My Agent</span> can you add the three gates as tasks?</span></div><div class="reader-msg">${AGENT_WHO}<span><b>My Agent</b> done. three tasks in tasks/, due the 21st.</span></div>`,
+      foot: 'Chat is available as a read-only Markdown projection. Your agent replies through dohc\'s chat tools.',
+    },
+    app: {
+      name: 'Split',
+      view: '<div class="reader-app"><div class="reader-app-row"><span>Maya</span><span>owes ¥2,140</span></div><div class="reader-app-row"><span>Sam</span><span class="is-clear">settled</span></div><div class="reader-app-row"><span>you</span><span class="is-clear">paid</span></div></div>',
+      foot: 'Source in the folder. The app reads only the data it lists, and your agent can change the source like any other file.',
+    },
+    history: {
+      name: 'History',
+      view: `<ul class="reader-history"><li>${WHO('M')}<span><b>Maya</b> moved Pricing page to doing</span><small>12:30</small></li><li>${AGENT_WHO}<span><b>My Agent</b> added 3 tasks</span><small>9:06</small></li><li>${WHO('Y')}<span><b>you</b> edited Plan</span><small>9:04</small></li></ul>`,
+      foot: '',
+    },
+  };
+
+  const picks = Array.from(readers.querySelectorAll('[data-reader-pick]'));
+  const name = readers.querySelector('[data-reader-name]');
+  const view = readers.querySelector('[data-reader-view]');
+  const foot = readers.querySelector('[data-reader-foot]');
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)');
+  let current = 'plan';
+  let swapTimer = 0;
+
+  const render = (key) => {
+    const file = FILES[key];
+    name.textContent = file.name;
+    view.innerHTML = file.view;
+    foot.textContent = file.foot;
+    foot.hidden = !file.foot;
+  };
+
+  const show = (key, pick) => {
+    picks.forEach((candidate) => {
+      candidate.setAttribute('aria-pressed', String(candidate === pick));
+    });
+    if (key === current) return;
+    current = key;
+    clearTimeout(swapTimer);
+    if (reduced.matches) { render(key); return; }
+    view.classList.add('is-swapping');
+    swapTimer = setTimeout(() => { render(key); view.classList.remove('is-swapping'); }, 160);
+  };
+
+  const flip = createReaderFlip(readers.closest('[data-reader-showcase]'));
+  picks.forEach((pick) => {
+    pick.addEventListener('click', () => {
+      show(pick.dataset.readerPick, pick);
+      flip.show('human', true);
+    });
+  });
+  render(current);
+  show(current, picks[0]);
 }
 
 const year = document.getElementById('year');

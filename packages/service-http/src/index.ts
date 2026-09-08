@@ -5,7 +5,9 @@ export { serveFetchHandler, type ServeFetchHandlerOptions } from "./serveFetchHa
 export { pipeResponseBody } from "./pipeResponseBody";
 export { TokenBucketLimiter } from "./tokenBucketLimiter";
 export { WaiterRegistry, type WaiterCaps } from "./waiterRegistry";
+export { readBoundedJson } from "./readBoundedJson";
 export { closeServer, fatal, installShutdown, parseGracePeriodMs } from "./process";
+export { createDeviceControlRequestParser, refuseDeviceControl } from "./deviceControlRequest";
 
 export function jsonResponse(
   body: unknown,

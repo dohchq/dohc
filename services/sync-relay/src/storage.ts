@@ -2,6 +2,8 @@ import { LIVE_TICKET_LIFETIME_MS, parseLiveTicketAudience, parseLiveTicketClaims
 import type { NamedLiveBrowserContext } from "./namedLiveBrowserAuth.js";
 import { ticketRecord, snapshotNamedTicketScope, snapshotTicketHostReport, parseTicketHash } from "./liveTicketInputs.js";
 import { createHash, randomUUID } from "node:crypto";
+import { DeviceHostCredentialRefused, parseDeviceHostCredential, deviceHostCredentialDigest,
+  verifyDeviceHostCredentialDigest, type DeviceHostCredential } from "./deviceHostCredential.js";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
@@ -84,6 +86,9 @@ export type LiveHostControlRefusalReason =
 export type LiveHostControlResult =
   | { readonly ok: true; readonly snapshot: HostControlSnapshot }
   | { readonly ok: false; readonly reason: LiveHostControlRefusalReason };
+
+export type DeviceHostCredentialResult = LiveHostControlResult |
+  { readonly ok: false; readonly reason: "credential-refused" };
 
 export interface LiveHostConnectionCoordinate {
   readonly mode: HostMode;
@@ -537,6 +542,12 @@ export interface SyncRelayStorage {
   readNamedLiveTicketTarget(input: NamedLiveTicketLookup): { workspaceId: string; objectId: string } | null;
   redeemNamedLiveTicket(input: NamedLiveTicketRedemption): RedeemedLiveTicket | null;
   getLiveHostControl(): HostControlSnapshot | null;
+  // Local deployment-operator operations. Account and device requests cannot call these.
+  provisionDeviceHostCredential(input: { credential: DeviceHostCredential; updatedAtMs: number }): DeviceHostCredentialResult;
+  revokeDeviceHostCredential(input: { hostId: string; instanceId: string; updatedAtMs: number }): DeviceHostCredentialResult;
+  // The authenticated transport supplies a fresh connection ID, never the device.
+  registerDeviceHost(input: { credential: DeviceHostCredential; connectionId: string; updatedAtMs: number }): DeviceHostCredentialResult;
+  disconnectDeviceHost(input: { credential: DeviceHostCredential; connectionId: string; updatedAtMs: number }): DeviceHostCredentialResult;
   provisionLiveHostControl(input: {
     mode: HostMode;
     hostId: string;
@@ -1484,6 +1495,49 @@ function initializeSessionHostControlSchema(db: SqliteDb): void {
   ).run(SESSION_HOST_CONTROL_MIGRATION_ID, Date.now());
 }
 
+const DEVICE_HOST_CREDENTIAL_TABLE = "sync_relay_device_host_credential";
+const DEVICE_HOST_CREDENTIAL_MIGRATION = "device-host-credential-v1";
+const DEVICE_HOST_CREDENTIAL_SCHEMA = `
+CREATE TABLE sync_relay_device_host_credential (
+  singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+  host_id TEXT NOT NULL CHECK (length(CAST(host_id AS BLOB)) BETWEEN 1 AND 1024),
+  instance_id TEXT NOT NULL CHECK (length(CAST(instance_id AS BLOB)) BETWEEN 1 AND 1024),
+  host_epoch INTEGER NOT NULL CHECK (host_epoch BETWEEN 1 AND 9007199254740991),
+  verifier TEXT NOT NULL CHECK (length(verifier) = 64 AND verifier NOT GLOB '*[^0-9a-f]*'),
+  created_at_ms INTEGER NOT NULL CHECK (created_at_ms BETWEEN 0 AND 9007199254740991),
+  revoked_at_ms INTEGER CHECK (revoked_at_ms BETWEEN created_at_ms AND 9007199254740991)
+) STRICT;`;
+
+function initializeDeviceHostCredentialSchema(db: SqliteDb): void {
+  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(DEVICE_HOST_CREDENTIAL_MIGRATION);
+  const existing = db.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?").get(DEVICE_HOST_CREDENTIAL_TABLE);
+  if (marked) {
+    if (typeof existing?.sql !== "string" || normalizedSchemaSql(existing.sql) !== normalizedSchemaSql(DEVICE_HOST_CREDENTIAL_SCHEMA)) {
+      throw new Error("Device host credential schema is missing or damaged.");
+    }
+    return;
+  }
+  if (existing) throw new Error("Unmarked device host credential table exists.");
+  db.exec(DEVICE_HOST_CREDENTIAL_SCHEMA);
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
+    .run(DEVICE_HOST_CREDENTIAL_MIGRATION, Date.now());
+}
+
+function requireDeviceHostCredential(db: SqliteDb, credential: DeviceHostCredential): void {
+  const record = db.prepare(`SELECT * FROM ${DEVICE_HOST_CREDENTIAL_TABLE} WHERE singleton_id = 1`).get();
+  if (!record || record.revoked_at_ms !== null || record.host_id !== credential.hostId ||
+    record.instance_id !== credential.instanceId || record.host_epoch !== credential.hostEpoch) throw new DeviceHostCredentialRefused();
+  verifyDeviceHostCredentialDigest(credential, record.verifier);
+}
+
+function deviceCredentialResult(operation: () => LiveHostControlResult): DeviceHostCredentialResult {
+  try { return operation(); }
+  catch (error) {
+    if (error instanceof DeviceHostCredentialRefused) return { ok: false, reason: "credential-refused" };
+    throw error;
+  }
+}
+
 const LIVE_DOCUMENT_AUTHORITY_MIGRATION_ID = "live-document-authority-v1";
 const LIVE_DOCUMENT_AUTHORITY_SCHEMA = {
   sync_relay_live_documents: `
@@ -2116,6 +2170,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       ) STRICT;
     `);
     initializeSessionHostControlSchema(db);
+    initializeDeviceHostCredentialSchema(db);
     initializeLiveDocumentAuthoritySchema(db);
     initializeLiveTicketSchema(db);
     db.exec(`
@@ -2308,7 +2363,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
 
 // Where a `moment.append` payload says its object is after the op: the
 // destination path of a write or a rename (a rename carries the destination in
-// both `path` and `payloadAfterPath`, `crates/dohc-engine-domain/src/store.rs`
+// both `path` and `payloadAfterPath`, `crates/dohc-engine-domain/src/store/delete_rename.rs`
 // `rename`), or NULL for a delete.
 //
 // NULL is also the answer for a moment that names an object but no readable
@@ -3249,6 +3304,62 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return { kind: "current", binding, authority,
       host: { mode: host.configuredMode, hostId: host.configuredHostId, hostEpoch: host.hostEpoch,
         instanceId: host.registeredInstanceId, connectionId: host.registeredConnectionId } };
+  }
+
+  provisionDeviceHostCredential(input: { credential: DeviceHostCredential; updatedAtMs: number }): DeviceHostCredentialResult {
+    return deviceCredentialResult(() => {
+      const credential = parseDeviceHostCredential(input.credential);
+      const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "device credential creation time");
+      return this.provisionLiveHostControl({ mode: "device", hostId: credential.hostId, updatedAtMs, guard: () => {
+        const host = readLiveHostControl(this.db);
+        if (host?.transition || (host?.hostEpoch ?? 1) !== credential.hostEpoch ||
+          (host?.registeredInstanceId !== null && host?.registeredInstanceId !== undefined && host.registeredInstanceId !== credential.instanceId)) {
+          throw new DeviceHostCredentialRefused();
+        }
+        const record = this.db.prepare(`SELECT 1 FROM ${DEVICE_HOST_CREDENTIAL_TABLE} WHERE singleton_id = 1`).get();
+        if (record) { requireDeviceHostCredential(this.db, credential); return; }
+        this.db.prepare(`INSERT INTO ${DEVICE_HOST_CREDENTIAL_TABLE}
+          (singleton_id, host_id, instance_id, host_epoch, verifier, created_at_ms) VALUES (1, ?, ?, ?, ?, ?)`)
+          .run(credential.hostId, credential.instanceId, credential.hostEpoch, deviceHostCredentialDigest(credential), updatedAtMs);
+      } });
+    });
+  }
+
+  registerDeviceHost(input: { credential: DeviceHostCredential; connectionId: string; updatedAtMs: number }): DeviceHostCredentialResult {
+    return deviceCredentialResult(() => {
+      const credential = parseDeviceHostCredential(input.credential);
+      return this.registerLiveHost({ mode: "device", hostId: credential.hostId, hostEpoch: credential.hostEpoch,
+        instanceId: credential.instanceId, connectionId: input.connectionId, updatedAtMs: input.updatedAtMs,
+        guard: () => requireDeviceHostCredential(this.db, credential) });
+    });
+  }
+
+  disconnectDeviceHost(input: { credential: DeviceHostCredential; connectionId: string; updatedAtMs: number }): DeviceHostCredentialResult {
+    return deviceCredentialResult(() => {
+      const credential = parseDeviceHostCredential(input.credential);
+      return this.disconnectLiveHost({ mode: "device", hostId: credential.hostId, hostEpoch: credential.hostEpoch,
+        instanceId: credential.instanceId, connectionId: input.connectionId, updatedAtMs: input.updatedAtMs,
+        guard: () => requireDeviceHostCredential(this.db, credential) });
+    });
+  }
+
+  revokeDeviceHostCredential(input: { hostId: string; instanceId: string; updatedAtMs: number }): DeviceHostCredentialResult {
+    const hostId = parseHostControlIdentifier(input.hostId, "host ID"), instanceId = parseHostControlIdentifier(input.instanceId, "instance ID");
+    const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "device credential revocation time");
+    return deviceCredentialResult(() => this.tx(() => {
+      const record = this.db.prepare(`SELECT * FROM ${DEVICE_HOST_CREDENTIAL_TABLE} WHERE singleton_id = 1`).get();
+      if (!record || record.host_id !== hostId || record.instance_id !== instanceId) throw new DeviceHostCredentialRefused();
+      const host = readRequiredLiveHostControl(this.db);
+      if (record.revoked_at_ms === null) {
+        this.db.prepare(`UPDATE ${DEVICE_HOST_CREDENTIAL_TABLE} SET revoked_at_ms = MAX(?, created_at_ms) WHERE singleton_id = 1`).run(updatedAtMs);
+      }
+      if (host.configuredMode === "device" && host.configuredHostId === hostId && host.hostEpoch === record.host_epoch &&
+        host.registeredInstanceId === instanceId && host.transition === null && host.admissionState === "open") {
+        this.db.prepare(`UPDATE ${SESSION_HOST_CONTROL_TABLE} SET admission_state = 'closed', registered_connection_id = NULL,
+          last_completed_transition_id = NULL, updated_at_ms = ? WHERE singleton_id = 1`).run(updatedAtMs);
+      }
+      return liveHostSuccess(readRequiredLiveHostControl(this.db));
+    }));
   }
 
   provisionLiveHostControl(input: {
