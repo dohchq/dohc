@@ -16,7 +16,7 @@ export function mountEngine(host: HTMLElement) {
   canvas.setAttribute('aria-label', 'DOHC inline-six engine model. Grab and hold to pause. Drag or use arrow keys to rotate.');
   host.append(canvas);
   const motion = matchMedia('(prefers-reduced-motion: reduce)');
-  let ready = false, disposed = false, visible = true, dragging = false;
+  let ready = false, presented = false, disposed = false, visible = true, dragging = false;
   let frame = 0, last = 0, lastDraw = 0;
   let width = host.clientWidth, height = host.clientHeight;
 
@@ -25,10 +25,10 @@ export function mountEngine(host: HTMLElement) {
     if (!ready || disposed || !visible || document.hidden || !width || !height) return;
     if (now - lastDraw < 1000 / 60 - 1) { frame = requestAnimationFrame(draw); return; }
     lastDraw = now;
-    if (!motion.matches && !dragging) theta -= Math.PI * 2 / 60 * .28 * Math.min((now - last) / 1000, .05);
+    if (presented && !motion.matches && !dragging) theta -= Math.PI * 2 / 60 * .28 * Math.min((now - last) / 1000, .05);
     last = now;
     send({ type: 'view', view: { width, height, theta, phi } });
-    if (!motion.matches && !dragging) frame = requestAnimationFrame(draw);
+    if (presented && !motion.matches && !dragging) frame = requestAnimationFrame(draw);
   }
   function requestDraw() {
     if (!frame && ready && !disposed && visible && !document.hidden) {
@@ -90,7 +90,11 @@ export function mountEngine(host: HTMLElement) {
     if (data.type === 'ready') {
       ready = true;
       fit();
-    } else if (data.type === 'rendered') host.classList.add('engine-loaded');
+    } else if (data.type === 'rendered') {
+      presented = true;
+      host.classList.add('engine-loaded');
+      requestDraw();
+    }
     else {
       console.error('Unable to render the dohc engine', data.message, data.stack ?? '');
       dispose();
