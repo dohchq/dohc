@@ -15,6 +15,7 @@ use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
+use crate::rpc::request::required_idempotency_key;
 use dohc_engine_domain::ChannelThreadSummary;
 use dohc_engine_domain::ChatActorKind;
 use dohc_engine_domain::ChatProjectionFileAccess;
@@ -266,9 +267,7 @@ impl EngineService {
         request_id: Option<String>,
     ) -> Result<Value, WireError> {
         let params: ChatThreadCreateParams = parse(params)?;
-        let request_id = request_id
-            .filter(|request_id| !request_id.is_empty())
-            .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "idempotency-key-required"))?;
+        let request_id = required_idempotency_key(request_id)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let thread = Self::read_under_ctx(

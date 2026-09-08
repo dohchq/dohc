@@ -40,35 +40,21 @@ pub(super) fn map_switch_reconcile_error(
 }
 
 pub(super) fn map_owner_outbox(error: OwnerOutboxError) -> WireError {
-    match error {
-        OwnerOutboxError::InvalidInput(_) => {
-            WireError::new(ErrorCode::InvalidParams, "invalid-owner-outbox-input")
-        }
-        OwnerOutboxError::WorkspaceMismatch => {
-            WireError::new(ErrorCode::InvalidParams, "owner-outbox-workspace-mismatch")
-        }
-        OwnerOutboxError::MainVersionMismatch => WireError::new(
-            ErrorCode::InvalidParams,
-            "owner-outbox-main-version-mismatch",
-        ),
-        OwnerOutboxError::ParentMismatch => {
-            WireError::new(ErrorCode::InvalidParams, "owner-outbox-parent-mismatch")
-        }
-        OwnerOutboxError::AppendKeyMismatch => {
-            WireError::new(ErrorCode::InvalidParams, "owner-outbox-append-key-mismatch")
-        }
-        OwnerOutboxError::Frozen => WireError::new(ErrorCode::InvalidParams, "owner-outbox-frozen"),
-        OwnerOutboxError::NotFound => {
-            WireError::new(ErrorCode::InvalidParams, "owner-outbox-not-found")
-        }
-        OwnerOutboxError::ReceiptMismatch => {
-            WireError::new(ErrorCode::InvalidParams, "owner-outbox-receipt-mismatch")
-        }
+    let message = match error {
+        OwnerOutboxError::InvalidInput(_) => "invalid-owner-outbox-input",
+        OwnerOutboxError::WorkspaceMismatch => "owner-outbox-workspace-mismatch",
+        OwnerOutboxError::MainVersionMismatch => "owner-outbox-main-version-mismatch",
+        OwnerOutboxError::ParentMismatch => "owner-outbox-parent-mismatch",
+        OwnerOutboxError::AppendKeyMismatch => "owner-outbox-append-key-mismatch",
+        OwnerOutboxError::Frozen => "owner-outbox-frozen",
+        OwnerOutboxError::NotFound => "owner-outbox-not-found",
+        OwnerOutboxError::ReceiptMismatch => "owner-outbox-receipt-mismatch",
         OwnerOutboxError::Corrupt => {
-            WireError::new(ErrorCode::Internal, "owner-outbox-state-corrupt")
+            return WireError::new(ErrorCode::Internal, "owner-outbox-state-corrupt");
         }
-        OwnerOutboxError::Storage(error) => map_runtime(RuntimeError::Storage(error)),
-    }
+        OwnerOutboxError::Storage(error) => return map_runtime(RuntimeError::Storage(error)),
+    };
+    WireError::new(ErrorCode::InvalidParams, message)
 }
 
 /// The transient store lock, through every wrapper that carries it to this
@@ -146,51 +132,33 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
     {
         return WireError::new(ErrorCode::Internal, refused.code());
     }
-    if matches!(
-        &error,
-        RuntimeError::Collab(CollabError::ReplayParityViolation { .. })
-    ) {
-        return WireError::new(ErrorCode::InvalidParams, "Y.Doc replay parity violation");
-    }
-    if matches!(
-        &error,
-        RuntimeError::Collab(CollabError::LineageWriteStale { .. })
-    ) {
-        return WireError::new(ErrorCode::InvalidParams, "ydoc-lineage-stale");
-    }
-    if matches!(
-        &error,
-        RuntimeError::Collab(CollabError::ObjectAliasCollision)
-    ) {
-        return WireError::new(ErrorCode::InvalidParams, "ydoc-object-alias-collision");
-    }
-    if matches!(&error, RuntimeError::Collab(CollabError::UnsettledClose)) {
-        return WireError::new(ErrorCode::InvalidParams, "ydoc-unsettled-close");
-    }
-    if matches!(&error, RuntimeError::Relay(RelayError::OriginDiverged)) {
-        return WireError::new(ErrorCode::InvalidParams, "relay-origin-diverged");
-    }
-    if matches!(&error, RuntimeError::Relay(RelayError::ShareReadOnly)) {
-        return WireError::new(ErrorCode::InvalidParams, "share-read-only");
-    }
-    if matches!(&error, RuntimeError::SceneAssetDeletePending) {
-        return WireError::new(
-            ErrorCode::Overloaded,
-            "Sync has not delivered every drawing asset delete. Retry the rollback after sync completes.",
-        );
-    }
-    // Preserve measured limits and observed sizes before the static-message mappings.
     match &error {
+        RuntimeError::Collab(CollabError::ReplayParityViolation { .. }) => {
+            return WireError::new(ErrorCode::InvalidParams, "Y.Doc replay parity violation");
+        }
+        RuntimeError::Collab(CollabError::LineageWriteStale { .. }) => {
+            return WireError::new(ErrorCode::InvalidParams, "ydoc-lineage-stale");
+        }
+        RuntimeError::Collab(CollabError::ObjectAliasCollision) => {
+            return WireError::new(ErrorCode::InvalidParams, "ydoc-object-alias-collision");
+        }
+        RuntimeError::Collab(CollabError::UnsettledClose) => {
+            return WireError::new(ErrorCode::InvalidParams, "ydoc-unsettled-close");
+        }
+        RuntimeError::Relay(RelayError::OriginDiverged) => {
+            return WireError::new(ErrorCode::InvalidParams, "relay-origin-diverged");
+        }
+        RuntimeError::Relay(RelayError::ShareReadOnly) => {
+            return WireError::new(ErrorCode::InvalidParams, "share-read-only");
+        }
+        RuntimeError::SceneAssetDeletePending => {
+            return WireError::new(
+                ErrorCode::Overloaded,
+                "Sync has not delivered every drawing asset delete. Retry the rollback after sync completes.",
+            );
+        }
         RuntimeError::Relay(relay @ RelayError::BlobTooLarge { .. }) => {
             return WireError::new(ErrorCode::PayloadTooLarge, relay.to_string());
-        }
-        RuntimeError::Domain(
-            domain @ (DomainError::PayloadTooLarge { .. }
-            | DomainError::ConflictMetadataTooLarge { .. }
-            | DomainError::ConflictResolveAnswerTooLarge { .. }
-            | DomainError::IdentifierTooLong { .. }),
-        ) => {
-            return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
         }
         RuntimeError::Sync(sync @ SyncError::ProjectionTooLarge { .. }) => {
             return WireError::new(ErrorCode::PayloadTooLarge, sync.to_string());
@@ -278,6 +246,12 @@ fn map_domain(error: DomainError) -> WireError {
     use dohc_engine_crypto::CryptoError;
 
     let (code, message) = match error {
+        error @ (DomainError::PayloadTooLarge { .. }
+        | DomainError::ConflictMetadataTooLarge { .. }
+        | DomainError::ConflictResolveAnswerTooLarge { .. }
+        | DomainError::IdentifierTooLong { .. }) => {
+            return WireError::new(ErrorCode::PayloadTooLarge, error.to_string());
+        }
         DomainError::IdempotencyKeyReuseMismatch => {
             (InvalidParams, "idempotency-key-reuse-mismatch")
         }
