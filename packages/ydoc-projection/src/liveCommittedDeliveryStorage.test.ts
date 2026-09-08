@@ -500,6 +500,34 @@ it.each(["mode", "hostId", "hostEpoch", "instanceId", "connectionId"] as const)(
   },
 );
 
+it.each(["device", "service"] as const)("persists bootstrap and event acknowledgements for a %s host", (mode) => {
+  const configuredHost = { ...host, mode }, f = registered({ host: configuredHost });
+  let reopened: ReturnType<typeof openSyncRelayStorage> | undefined;
+  try {
+    expect(f.storage.commitLiveUpdateJournal(f.capture(f.update(), "host-mode-event")).result.kind).toBe("accepted");
+    const { store } = delivery(f), d = store.open({ host: configuredHost, document: f.input.evidence.document });
+    ackBaseline(store, d);
+    const step = store.next(d);
+    if (step.kind !== "next") throw Error("next");
+    store.acknowledge(d, step.predecessor, {
+      ...step.admitted.metadata.accepted.receipt,
+      localYDocSequence: 1,
+      applicationReplayed: false,
+    });
+    expect(store.next(d).kind).toBe("done");
+    expect(f.raw.prepare("SELECT ack_host_mode FROM sync_relay_live_delivery_bootstraps").all()).toEqual([{ ack_host_mode: mode }]);
+    expect(f.raw.prepare("SELECT ack_host_mode FROM sync_relay_live_delivery_edges").all()).toEqual([{ ack_host_mode: mode }]);
+    reopened = openSyncRelayStorage(f.path);
+    const resumed = reopened.createLiveCommittedDeliveryStore(createLiveJournalHistoryAuthority({ namespace: "history-one", reconciled: true }));
+    const drain = resumed.open({ host: configuredHost, document: f.input.evidence.document });
+    expect(drain.baseline.bootstrapId).toBe(d.baseline.bootstrapId);
+    expect(resumed.next(drain).kind).toBe("done");
+  } finally {
+    reopened?.close();
+    f.close();
+  }
+});
+
 it("does not reinterpret a historical admission after the original client grant is revoked", () => {
   const f = registered();
   try {
