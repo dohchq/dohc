@@ -1,117 +1,39 @@
 # dohc
 
-dohc is a local-first file sync and collaboration workspace for humans and agents. It syncs your files across your devices and lets you share your work with your team and your agents.
+dohc is a local-first workspace for you and your agents. Bring files, documents, data, chat, and apps together in one place, with your work on your computer and under your control.
 
-At a glance, it is a text editor, chat, and app runner in one. The important part is underneath: your files stay on your computer, multiplayer editing comes standard, and whenever you or your agents need history, access control, or storage, it's already there.
+[Download a build](https://github.com/dohc-ai/dohc/releases) · [Report a problem or suggest an improvement](https://github.com/dohc-ai/dohc/issues)
 
-[Download a build](https://github.com/dohc-ai/dohc/releases) or [run it from source](#run-it-from-source).
+dohc is pre-launch and under active development. Expect rough edges and breaking changes. Check the release notes for what is available in each build.
 
-## Why this exists
+## One folder. Everything connected.
 
-This whole AI thing is still new and we're still trying to figure out how agents should fit into real work. So far, we mostly end up trying to bolt agents onto our old workflows with mixed success. We built dohc to help us figure this out by staying out of the way, assuming nothing about how you work, and building on the tools you already use.
+An agent can help you write a plan, organize information, or build an app. Keeping that work useful means keeping its files, conversations, and changes together, too.
 
-Instead of a fixed CRM, project process, or agent-team template, dohc provides building blocks. It handles the boring parts: file sync, history, identity, permissions, storage, hosting, and app isolation. With those parts handled, you and your agents go straight to the work itself.
+dohc provides the foundations for that work: files, documents, data, chat, and apps, with sync, sharing, permissions, and history. You and your agents decide what to build and how to work. Each project should not have to recreate the infrastructure around it.
 
-Lastly, working with an agent resembles collaborating with another person: communicating with natural language and building on shared context. That is why dohc is multiplayer by design: humans and agents share one workspace. One person can use dohc as a personal workspace and can easily share their work when they're ready.
+Start with your own work on one device. Bring other people and their agents into the same work when you need to collaborate.
 
-## Agents and workspace apps
+## Your work, your tools
 
-dohc is agent agnostic. It does not provide an agent or prescribe how agents should work. A human, agent, or script can change the same workspace through the access each user configures.
+Your local workspace does not need an account or a server. Sync and sharing extend it across devices and collaborators. Your files remain yours.
 
-Workspace apps are web apps whose source lives in the workspace. An app can read and update only the files and data its owner exposes. Collaborators can inspect and edit the source with their own tools and agents.
+dohc does not provide an agent. Use the agents you already work with. Anything that can read and write files can contribute; dohc adds ways to collaborate on the work itself.
 
-The plan is to make published apps available through normal web URLs, including for people who do not use dohc. App publishing and its permission model are still under development.
+Apps are web apps with their source in the workspace. You and your collaborators can inspect and change them with your own tools and agents. Each app can use only the files and data its owner exposes.
 
-## Where it is today
+## Make it fit the work
 
-dohc is pre-launch and under active development. Expect missing pieces, rough edges, and breaking changes.
+For a trip, keep the plan, bookings, and group conversation together. Ask your agent to build the itinerary or expense tracker that fits your group.
 
-The desktop app currently includes:
+For a project, keep notes and data beside the tools you build from them. A collaborator should be able to understand the work and continue it without reconstructing the context from scattered messages.
 
-- Local workspaces that open ordinary folders on your computer.
-- A rich Markdown editor with wikilinks, backlinks, and a graph view.
-- Search across workspace files and chats.
-- Version history with diffs and restore.
-- Workspace chat that humans and external agents can use.
-- Source-visible plugins and local web project previews.
-- Optional self-hosted sync, sharing, presence, and live co-editing.
+These examples describe what dohc is being built for. The workflow is yours to choose.
 
-dohc Cloud has not shipped yet.
+## Try it and help shape it
 
-## Run it from source
+Choose a build from [Releases](https://github.com/dohc-ai/dohc/releases) and read its notes before getting started. If something gets in your way, [open an issue](https://github.com/dohc-ai/dohc/issues) with what you tried and what happened.
 
-You need Node.js 24.14 or newer, pnpm 11.20.0, and the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
+For running from source or contributing, start with [AGENTS.md](AGENTS.md) and the [development setup procedure](docs/how-to/verify-agent-work.md#prepare-the-checkout). The code and configuration are the source of truth for dependencies, commands, and implementation details.
 
-```bash
-pnpm install
-pnpm dev
-```
-
-The development command builds the Rust workspace engine before Electron starts. The desktop app runs without an account, server, or environment file.
-
-Run the marketing site separately:
-
-```bash
-pnpm dev:site
-```
-
-## Run the collaboration services
-
-Multi-device sync, sharing, presence, and live co-editing use two optional services:
-
-- `services/workspace-api` provides authentication.
-- `services/sync-relay` carries engine operations, files, shares, and presence.
-
-Postgres stores authentication data. The relay stores its own data in SQLite. Start Postgres and apply the migrations:
-
-```bash
-pnpm dev:postgres
-pnpm migrate
-```
-
-In both service terminals, set `NODE_ENV=development` and the same `BETTER_AUTH_SECRET`, at least 32 characters. Then start each service:
-
-```bash
-pnpm dev:workspace-api
-pnpm --filter @dohc/sync-relay dev
-```
-
-For a self-hosted browser viewer, copy `.env.self-host.example` to
-`.env.self-host`, replace every `change-me` value, and run
-`docker compose --env-file .env.self-host -f docker-compose.self-host.yml up`.
-The deployment runs one `share-web` instance and keeps relay state in the
-`dohc_self_host_sync_relay` volume. Read the
-[`share-web` operations contract](services/share-web/README.md) before making
-the viewer public. It defines the HTTPS proxy, exact Host and trusted-proxy
-settings, backup and restore procedure, log hygiene, retention, and v1 restart
-behavior.
-
-## Repository map
-
-```text
-apps/desktop          Electron desktop app
-apps/site             marketing site and interactive product demo
-crates                Rust workspace engine and supporting crates
-docs                  ADRs and implementation plans
-fixtures              workspace fixtures the engine crates read
-packages              shared TypeScript contracts, clients, tools, and UI code
-services              optional authentication, sync, and share viewer services
-tools/rust-engine-program   the Rust gate and its fixture goldens
-tools/perf-profiling  renderer and engine profiling harnesses
-```
-
-## Checks
-
-Run the smallest check that covers your change. Common checks are:
-
-```bash
-pnpm typecheck
-pnpm test:desktop
-pnpm test
-```
-
-Run Rust checks through [`rust-gate`](.agents/skills/rust-gate/SKILL.md), never a bare `cargo` command. Contributors and agents should read [`AGENTS.md`](AGENTS.md) before changing the codebase, and [`CONTEXT.md`](CONTEXT.md) for the vocabulary.
-
-## Stack
-
-Electron, React, Vite, Tailwind CSS, Tiptap, Yjs, Rust, SQLite, Better Auth, Postgres, Vitest, and Playwright.
+For self-hosting, see the [deployment configuration](docker-compose.self-host.yml), [environment example](.env.self-host.example), and [operator guidance](services/share-web/README.md).
