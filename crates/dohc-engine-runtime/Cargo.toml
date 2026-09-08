@@ -40,6 +40,9 @@ tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
 # is checked BETWEEN bounded units, never inside a transaction.
 tokio-util = "0.7"
 
+[target.'cfg(any(windows, target_vendor = "apple"))'.dependencies]
+file-guard = "=0.2.0"
+
 [dev-dependencies]
 dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }
 yrs = "=0.27.3"

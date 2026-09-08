@@ -21,6 +21,7 @@ members = [
 ]
 exclude = [
     "vendor/yrs-0.27.3",
+    "vendor/file-guard-0.2.0",
     # Agent worktrees check the repo out inside it. Without this, a crate in
     # a nested checkout walks up past its own workspace root and tries to
     # attach to this one, and cargo fails with "believes it's in a workspace
@@ -31,6 +32,7 @@ exclude = [
 
 [patch.crates-io]
 yrs = { path = "vendor/yrs-0.27.3" }
+file-guard = { path = "vendor/file-guard-0.2.0" }
 
 # Shared package metadata. Members opt in per field via `field.workspace = true`.
 # `edition` is intentionally NOT centralized here: dohc-engine-protocol is

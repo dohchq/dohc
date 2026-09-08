@@ -495,7 +495,7 @@ fn ordinary_and_configured_processes_share_writer_exclusion_and_crash_release() 
     assert!(matches!(reopened.read(), Envelope::HelloAck(_)));
     reopened.0.stdin.take();
     assert!(reopened.0.wait().unwrap().success());
-    assert!(root.join(".dohc/engine/engine.db.owner-lock").exists());
+    assert!(!root.join(".dohc/engine/engine.db.owner-lock").exists());
     let other_root = scratch.path().join("other-root");
     std::fs::create_dir_all(other_root.join(".dohc/engine")).unwrap();
     std::fs::hard_link(
@@ -510,4 +510,24 @@ fn ordinary_and_configured_processes_share_writer_exclusion_and_crash_release() 
         unbound_alias.stdout.is_empty(),
         "a hardlinked database cannot adopt another root"
     );
+
+    // A copied binding makes this alias valid. It must still share the lock.
+    std::fs::copy(
+        root.join(".dohc/engine/ROOT_BINDING"),
+        other_root.join(".dohc/engine/ROOT_BINDING"),
+    )
+    .unwrap();
+    let mut owner = Daemon(command(Some(&path)).spawn().unwrap());
+    owner.hello("configured-test-secret");
+    assert!(matches!(owner.read(), Envelope::HelloAck(_)));
+    let bound_alias = command(Some(&alias_config)).output().unwrap();
+    assert!(!bound_alias.status.success());
+    assert!(String::from_utf8_lossy(&bound_alias.stderr).contains("workspace-owned"));
+    owner.0.kill().unwrap();
+    owner.0.wait().unwrap();
+    let mut alias_owner = Daemon(command(Some(&alias_config)).spawn().unwrap());
+    alias_owner.hello("configured-test-secret");
+    assert!(matches!(alias_owner.read(), Envelope::HelloAck(_)));
+    alias_owner.0.stdin.take();
+    assert!(alias_owner.0.wait().unwrap().success());
 }

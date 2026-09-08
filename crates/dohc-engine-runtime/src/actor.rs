@@ -396,7 +396,7 @@ fn worker_main(
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
     startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
-    writer_lock: Option<std::fs::File>,
+    writer_lock: Option<WriterLock>,
 ) {
     // Publish Closed on any exit — normal return OR a panic unwind (e.g. a
     // panicking fault injector). Declared before `store` so `store` (and its
@@ -467,35 +467,52 @@ fn worker_main(
     drop(store);
 }
 
-fn acquire_writer_lock(db_path: &std::path::Path) -> Result<std::fs::File, RuntimeError> {
-    // Canonical path aliases share this lock. Workspace ROOT_BINDING validation
-    // separately refuses databases copied or hardlinked into an unbound root.
-    let canonical = std::fs::canonicalize(db_path).map_err(|error| RuntimeError::Identity {
-        reason: "could not resolve workspace writer lock",
-        source: Some(error),
-    })?;
-    let mut lock_path = canonical.into_os_string();
-    lock_path.push(".owner-lock");
-    // A separate persistent inode avoids disturbing SQLite's POSIX record locks.
-    // Never unlink it: a replacement inode would admit another owner.
+#[cfg(any(windows, target_vendor = "apple"))]
+type WriterLock = file_guard::FileGuard<Box<std::fs::File>>;
+#[cfg(not(any(windows, target_vendor = "apple")))]
+type WriterLock = std::fs::File;
+
+fn acquire_writer_lock(db_path: &std::path::Path) -> Result<WriterLock, RuntimeError> {
+    // Lock the physical database: hard links can have different canonical paths.
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)
-        .truncate(false)
-        .open(std::path::PathBuf::from(lock_path))
+        .open(db_path)
         .map_err(|error| RuntimeError::Identity {
             reason: "could not open workspace writer lock",
             source: Some(error),
         })?;
-    fs4::FileExt::try_lock(&file).map_err(|error| match error {
-        fs4::TryLockError::WouldBlock => RuntimeError::WorkspaceOwned,
-        fs4::TryLockError::Error(error) => RuntimeError::Identity {
-            reason: "could not acquire workspace writer lock",
-            source: Some(error),
-        },
-    })?;
-    Ok(file)
+    #[cfg(any(windows, target_vendor = "apple"))]
+    {
+        // One byte beyond SQLite's maximum database size and its locking bytes.
+        // Windows LockFileEx and Darwin OFD locks survive unrelated file closes.
+        const OWNER_LOCK_OFFSET: usize = 1usize << 48;
+        file_guard::try_lock(
+            Box::new(file),
+            file_guard::Lock::Exclusive,
+            OWNER_LOCK_OFFSET,
+            1,
+        )
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::WouldBlock => RuntimeError::WorkspaceOwned,
+            _ => RuntimeError::Identity {
+                reason: "could not acquire workspace writer lock",
+                source: Some(error),
+            },
+        })
+    }
+    #[cfg(not(any(windows, target_vendor = "apple")))]
+    {
+        // Linux local flock locks do not overlap SQLite's POSIX record locks.
+        fs4::FileExt::try_lock(&file).map_err(|error| match error {
+            fs4::TryLockError::WouldBlock => RuntimeError::WorkspaceOwned,
+            fs4::TryLockError::Error(error) => RuntimeError::Identity {
+                reason: "could not acquire workspace writer lock",
+                source: Some(error),
+            },
+        })?;
+        Ok(file)
+    }
 }
 
 #[cfg(test)]
@@ -507,6 +524,27 @@ mod saturation_tests {
     use std::task::Poll;
     use std::time::{Duration, Instant};
     use tokio::sync::Semaphore;
+
+    #[test]
+    fn writer_lock_survives_sqlite_descriptor_close_and_hard_link_aliases() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = engine_db_path(&scratch).expect("database path");
+        EngineDbIdentity::resolve_or_create(&db).expect("identity");
+        let alias = db.with_file_name("alias.db");
+        std::fs::hard_link(&db, &alias).expect("hard link");
+        let owner = acquire_writer_lock(&db).expect("owner");
+        // Both a SQLite connection and an independent File open/close must
+        // leave the owner's lock intact. POSIX process locks fail this test.
+        drop(EngineStore::open(&db, 1).expect("SQLite opens under owner lock"));
+        drop(EngineStore::open_read_only(&db).expect("read-only SQLite opens"));
+        drop(std::fs::File::open(&alias).expect("independent descriptor"));
+        assert!(matches!(
+            acquire_writer_lock(&alias),
+            Err(RuntimeError::WorkspaceOwned)
+        ));
+        drop(owner);
+        drop(acquire_writer_lock(&alias).expect("release permits alias owner"));
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn close_returns_promptly_under_sustained_submission() {
