@@ -1,4 +1,5 @@
 import type { StorageContext } from "./context";
+import { assertWorkspaceQuota } from "./workspaces";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { SyncRelayConflictError } from "./errors";
 import type { KeyEnvelopeRow } from "./types";
@@ -37,7 +38,7 @@ export function putKeyEnvelope(storage: StorageContext, input: {
             "key envelope does not exist; a conditional replace has nothing to match",
           );
         }
-        storage.assertWorkspaceQuota(input.workspaceId, envelopeAddedBytes);
+        assertWorkspaceQuota(storage, input.workspaceId, envelopeAddedBytes);
         storage.db
           .prepare(
             `INSERT INTO sync_relay_key_envelopes (workspace_id, envelope_json, updated_at_ms)
@@ -58,7 +59,7 @@ export function putKeyEnvelope(storage: StorageContext, input: {
           "key envelope was replaced concurrently; refresh and retry with the current sha256",
         );
       }
-      storage.assertWorkspaceQuota(input.workspaceId, envelopeAddedBytes);
+      assertWorkspaceQuota(storage, input.workspaceId, envelopeAddedBytes);
       storage.db
         .prepare(
           `INSERT INTO sync_relay_key_envelope_history (

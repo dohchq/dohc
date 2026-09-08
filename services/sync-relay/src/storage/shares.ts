@@ -15,6 +15,7 @@ import {
   type SyncRelayIndependentGrantInventoryPage,
 } from "./types";
 import { type StorageContext } from "./context";
+import { nextShareDiscussionRevision } from "./discussion";
 import {
   rowToShareGrantRow,
   rowToLinkCredentialRow,
@@ -51,8 +52,8 @@ export function createShare(storage: StorageContext, input: {
       throw new Error("a link grant requires an existing share and a credential");
     }
     storage.tx(() => {
-      storage.insertShare(input.share);
-      storage.insertShareGrant(input.grant);
+      insertShare(storage, input.share);
+      insertShareGrant(storage, input.grant);
     });
   }
 
@@ -84,9 +85,9 @@ export function createFileLinkShare(storage: StorageContext, input: {
     }
     return storage.tx(() => {
       input.guard();
-      storage.insertShare(share);
-      storage.insertShareGrant(grant);
-      storage.insertLinkCredential(credential);
+      insertShare(storage, share);
+      insertShareGrant(storage, grant);
+      insertLinkCredential(storage, credential);
       return true;
     });
   }
@@ -121,8 +122,8 @@ export function createLinkGrant(storage: StorageContext, input: {
         )
         .get(grant.shareId);
       if (!storage.getShare(grant.shareId) || !activeShare) return false;
-      storage.insertShareGrant(grant);
-      storage.insertLinkCredential(credential);
+      insertShareGrant(storage, grant);
+      insertLinkCredential(storage, credential);
       return true;
     });
   }
@@ -198,7 +199,7 @@ export function rotateLinkGrant(storage: StorageContext, input: {
       ) {
         return { ok: false };
       }
-      const dependents = storage.activeDependentGrants(grant.grantId);
+      const dependents = activeDependentGrants(storage, grant.grantId);
       if (!dependentGrantIdsMatch(dependents, input.expectedDependentGrantIds)) {
         return { ok: false, reason: "dependents-changed", dependents };
       }
@@ -212,8 +213,8 @@ export function rotateLinkGrant(storage: StorageContext, input: {
       storage.db
         .prepare("UPDATE sync_relay_share_grants SET generation = ? WHERE grant_id = ?")
         .run(generation, grant.grantId);
-      storage.retireCurrentLinkCredential(grant.grantId, input.rotatedAtMs);
-      storage.insertLinkCredential({
+      retireCurrentLinkCredential(storage, grant.grantId, input.rotatedAtMs);
+      insertLinkCredential(storage, {
         credentialId: credential.credentialId,
         grantId: grant.grantId,
         secretHash: credential.secretHash,
@@ -224,8 +225,8 @@ export function rotateLinkGrant(storage: StorageContext, input: {
       storage.db
         .prepare("DELETE FROM sync_relay_link_usage WHERE grant_id = ?")
         .run(grant.grantId);
-      storage.pruneRetiredLinkCredentials(grant.grantId);
-      storage.incrementActiveDependentGenerations(grant.grantId);
+      pruneRetiredLinkCredentials(storage, grant.grantId);
+      incrementActiveDependentGenerations(storage, grant.grantId);
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
     });
   }
@@ -257,7 +258,7 @@ export function retuneShareGrant(storage: StorageContext, input: {
         return { ok: false };
       }
 
-      const dependents = storage.activeDependentGrants(grant.grantId);
+      const dependents = activeDependentGrants(storage, grant.grantId);
       if (!dependentGrantIdsMatch(dependents, input.expectedDependentGrantIds)) {
         return { ok: false, reason: "dependents-changed", dependents };
       }
@@ -290,8 +291,8 @@ export function retuneShareGrant(storage: StorageContext, input: {
         .run(input.access, generation, grant.grantId);
 
       if (wideningCredential) {
-        storage.retireCurrentLinkCredential(grant.grantId, input.changedAtMs);
-        storage.insertLinkCredential({
+        retireCurrentLinkCredential(storage, grant.grantId, input.changedAtMs);
+        insertLinkCredential(storage, {
           credentialId: wideningCredential.credentialId,
           grantId: grant.grantId,
           secretHash: wideningCredential.secretHash,
@@ -302,10 +303,10 @@ export function retuneShareGrant(storage: StorageContext, input: {
         storage.db
           .prepare("DELETE FROM sync_relay_link_usage WHERE grant_id = ?")
           .run(grant.grantId);
-        storage.pruneRetiredLinkCredentials(grant.grantId);
-        storage.incrementActiveDependentGenerations(grant.grantId);
+        pruneRetiredLinkCredentials(storage, grant.grantId);
+        incrementActiveDependentGenerations(storage, grant.grantId);
       } else {
-        storage.nextShareDiscussionRevision(grant.shareId);
+        nextShareDiscussionRevision(storage, grant.shareId);
         for (const dependent of dependents) {
           const dependentRank = shareAccessRank(dependent.access);
           if (dependentRank > to) {
@@ -318,7 +319,7 @@ export function retuneShareGrant(storage: StorageContext, input: {
               .run(input.access, dependent.grantId);
           }
         }
-        storage.incrementActiveDependentGenerations(grant.grantId);
+        incrementActiveDependentGenerations(storage, grant.grantId);
       }
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
     });
@@ -343,7 +344,7 @@ export function revokeShareGrant(storage: StorageContext, input: {
         return { ok: false };
       }
       if (grant.principalKind === "link" && input.expectedDependentGrantIds !== undefined) {
-        const dependents = storage.activeDependentGrants(grant.grantId);
+        const dependents = activeDependentGrants(storage, grant.grantId);
         if (!dependentGrantIdsMatch(dependents, input.expectedDependentGrantIds)) {
           return { ok: false, reason: "dependents-changed", dependents };
         }
@@ -357,7 +358,7 @@ export function revokeShareGrant(storage: StorageContext, input: {
         )
         .run(revokedAtMs, grant.grantId);
       if (grant.principalKind === "link") {
-        storage.retireCurrentLinkCredential(grant.grantId, revokedAtMs);
+        retireCurrentLinkCredential(storage, grant.grantId, revokedAtMs);
         storage.db
           .prepare(
             `UPDATE sync_relay_share_grants
@@ -475,7 +476,7 @@ export function mintLinkSession(storage: StorageContext, input: {
           Math.trunc(session.mintedAtMs),
           Math.trunc(session.expiresAtMs),
         );
-      storage.upsertLinkUsage(session.grantId, session.mintedAtMs);
+      upsertLinkUsage(storage, session.grantId, session.mintedAtMs);
       return true;
     });
   }
@@ -553,7 +554,7 @@ export function replaceLinkSession(storage: StorageContext, input: {
           Math.trunc(session.expiresAtMs),
           storedCurrent.principal_id ?? null,
         );
-      storage.upsertLinkUsage(session.grantId, session.mintedAtMs);
+      upsertLinkUsage(storage, session.grantId, session.mintedAtMs);
       return true;
     });
   }

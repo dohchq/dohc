@@ -10,6 +10,7 @@ import {
 } from "./limits";
 import { createHash } from "node:crypto";
 import { type StorageContext } from "./context";
+import { workspaceUsageBytes } from "./workspaces";
 import {
   type AppendLinkDiscussionMessageResult,
   type AppendAuthenticatedDiscussionMessageResult,
@@ -329,12 +330,12 @@ export function appendLinkDiscussionMessage(storage: StorageContext, input: {
         body,
       });
       if (
-        storage.workspaceUsageBytes(workspaceId) + principalAddedBytes + messageStorageBytes >
+        workspaceUsageBytes(storage, workspaceId) + principalAddedBytes + messageStorageBytes >
         storage.options.workspaceQuotaBytes
       ) {
         return { ok: false, reason: "workspace-quota" };
       }
-      const discussionRevision = storage.nextShareDiscussionRevision(shareId);
+      const discussionRevision = nextShareDiscussionRevision(storage, shareId);
 
       if (!principal) {
         storage.db
@@ -564,12 +565,12 @@ export function appendAuthenticatedDiscussionMessage(storage: StorageContext, in
         body,
       });
       if (
-        storage.workspaceUsageBytes(String(share.workspace_id)) + messageStorageBytes >
+        workspaceUsageBytes(storage, String(share.workspace_id)) + messageStorageBytes >
         storage.options.workspaceQuotaBytes
       ) {
         return { ok: false, reason: "workspace-quota" };
       }
-      const discussionRevision = storage.nextShareDiscussionRevision(input.shareId);
+      const discussionRevision = nextShareDiscussionRevision(storage, input.shareId);
 
       storage.db
         .prepare(
@@ -911,7 +912,7 @@ export function setLinkPrincipalBlocked(storage: StorageContext, input: {
           input.actorUserId,
         );
       if (!principal) return false;
-      const discussionRevision = storage.nextShareDiscussionRevision(input.shareId);
+      const discussionRevision = nextShareDiscussionRevision(storage, input.shareId);
       storage.db
         .prepare(
           `UPDATE sync_relay_link_principals
@@ -1003,7 +1004,7 @@ export function deleteShareDiscussionMessage(storage: StorageContext, input: {
         );
       if (!message) return null;
       const deletedAtMs = Math.trunc(input.deletedAtMs);
-      const discussionRevision = storage.nextShareDiscussionRevision(input.shareId);
+      const discussionRevision = nextShareDiscussionRevision(storage, input.shareId);
       const deleted = storage.db
         .prepare(
           `UPDATE sync_relay_share_discussion_messages

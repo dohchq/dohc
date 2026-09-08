@@ -1,4 +1,5 @@
 import { type StorageContext } from "./context";
+import { assertWorkspaceQuota } from "./workspaces";
 import { type PutBlobResult, type CollectUnreferencedBlobsResult } from "./types";
 
 export function putBlob(storage: StorageContext, input: {
@@ -19,7 +20,7 @@ export function putBlob(storage: StorageContext, input: {
         storage.db.exec("COMMIT");
         return { byteLength, alreadyHad: true };
       }
-      storage.assertWorkspaceQuota(input.workspaceId, byteLength);
+      assertWorkspaceQuota(storage, input.workspaceId, byteLength);
       storage.db
         .prepare(
           `INSERT INTO sync_relay_blobs (workspace_id, sha256, byte_length, content, created_at_ms)

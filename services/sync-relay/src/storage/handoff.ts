@@ -1,4 +1,5 @@
 import { type StorageContext } from "./context";
+import { insertShareGrant } from "./shares";
 import { type SyncRelayLinkHandoffCodeRow, type LinkHandoffRedeemResult, type SyncRelayShareGrantRow } from "./types";
 import { LINK_HANDOFF_CODES_PER_GRANT_LIMIT, constantTimeHashEqual } from "../linkSecurity";
 import { rowToLinkHandoffCodeRow, rowToShareGrantRow } from "./rows";
@@ -242,7 +243,7 @@ export function redeemLinkHandoffCode(storage: StorageContext, input: {
         parentGrantId: parent.grantId,
       };
       if (!recordResultGrant(grant.grantId)) return { ok: false };
-      storage.insertShareGrant(grant);
+      insertShareGrant(storage, grant);
       return { ok: true, shareId: share.shareId, grant };
     });
   }

@@ -80,7 +80,7 @@ export function getShareProposal(
       )
       .get(proposalId);
     if (!row) return null;
-    return { ...rowToProposalRow(row), ops: storage.proposalOps(proposalId) };
+    return { ...rowToProposalRow(row), ops: proposalOps(storage, proposalId) };
   }
 
 export function listShareProposalsForShare(storage: StorageContext, shareId: string): Array<ShareProposalRow & { opCount: number }> {

@@ -14,7 +14,6 @@ import type {
   VerifyWorkspaceIdentityResult,
   ClaimWorkspaceIdentityResult,
   RotateWorkspaceIdentityResult,
-  EnforceWorkspaceIdentityResult,
   PutBlobResult,
   CollectUnreferencedBlobsResult,
   KeyEnvelopeRow,
@@ -52,7 +51,6 @@ import type {
   ShareProposalState,
   FetchLogPageResult,
   CurrentFileStateSnapshot,
-  TicketHostReport,
   NamedLiveTicketLookup,
   NamedLiveTicketMint,
   NamedLiveTicketRedemption,
@@ -74,7 +72,7 @@ import { LINK_SESSIONS_PER_GRANT_LIMIT } from "./linkSecurity";
 import { randomUUID } from "node:crypto";
 import { ticketRecord } from "./liveTicketInputs";
 import { initializeSyncRelaySchema } from "./storage/schema";
-import { resolveCurrentLiveDocumentBinding, LIVE_TICKET_REFUSED } from "./storage/liveDocumentAuthority";
+import { LIVE_TICKET_REFUSED } from "./storage/liveDocumentAuthority";
 import type { HostControlSnapshot, HostMode, HostTransitionGeneration } from "@dohc/live-session-contract/host-control";
 import * as hostControlStorage from "./storage/hostControl";
 import * as workspacesStorage from "./storage/workspaces";
@@ -87,9 +85,8 @@ import * as handoffStorage from "./storage/handoff";
 import * as objectIndexStorage from "./storage/objectIndex";
 import * as proposalsStorage from "./storage/proposals";
 import * as currentFilesStorage from "./storage/currentFiles";
-import type { NamedLiveBrowserContext } from "./namedLiveBrowserAuth";
 import * as liveDocumentAuthorityStorage from "./storage/liveDocumentAuthority";
-import type { LiveTicketClaims, RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
+import type { RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
 import type { DeviceHostCredential } from "./deviceHostCredential";
 
 export {
@@ -162,6 +159,14 @@ export {
   type SyncRelayStorage,
   type ThreadFileBinding,
   type OpenSyncRelayStorageOptions,
+  type CurrentLiveBindingRequest,
+  type CurrentLiveBindingResult,
+  type DeviceHostCredentialResult,
+  type TicketHostReport,
+  type NamedLiveTicketLookup,
+  type NamedLiveTicketMint,
+  type NamedLiveTicketRedemption,
+  type LiveTicketStoragePolicy,
 } from "./storage/types";
 export { initializeSyncRelaySchema } from "./storage/schema";
 export {
@@ -294,7 +299,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
-    return resolveCurrentLiveDocumentBinding(this, input);
+    return liveDocumentAuthorityStorage.resolveCurrentLiveDocumentBinding(this, input);
   }
 
   getLiveHostControl(): HostControlSnapshot | null {
@@ -394,21 +399,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return workspacesStorage.rotateWorkspaceIdentity(this, input);
   }
 
-  classifyWorkspaceIdentity(
-    workspaceId: string,
-    current: WorkspaceSyncIdentity,
-    presented: WorkspaceSyncIdentity,
-  ): VerifyWorkspaceIdentityResult {
-    return workspacesStorage.classifyWorkspaceIdentity(this, workspaceId, current, presented);
-  }
-
-  enforceWorkspaceIdentityInTransaction(
-    workspaceId: string,
-    presented: WorkspaceSyncIdentity | null,
-  ): EnforceWorkspaceIdentityResult {
-    return workspacesStorage.enforceWorkspaceIdentityInTransaction(this, workspaceId, presented);
-  }
-
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean {
     return workspacesStorage.workspaceIsOwnedBy(this, workspaceId, ownerUserId);
   }
@@ -457,14 +447,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult {
     return logStorage.appendLogBatch(this, input);
-  }
-
-  workspaceUsageBytes(workspaceId: string): number {
-    return workspacesStorage.workspaceUsageBytes(this, workspaceId);
-  }
-
-  assertWorkspaceQuota(workspaceId: string, addedBytes: number): void {
-    return workspacesStorage.assertWorkspaceQuota(this, workspaceId, addedBytes);
   }
 
   createShare(input: {
@@ -676,42 +658,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return handoffStorage.redeemLinkHandoffCode(this, input);
   }
 
-  insertShareGrant(grant: SyncRelayShareGrantRow): void {
-    return sharesStorage.insertShareGrant(this, grant);
-  }
-
-  nextShareDiscussionRevision(shareId: string): number {
-    return discussionStorage.nextShareDiscussionRevision(this, shareId);
-  }
-
-  insertShare(share: SyncRelayShareRow): void {
-    return sharesStorage.insertShare(this, share);
-  }
-
-  insertLinkCredential(credential: SyncRelayLinkCredentialRow): void {
-    return sharesStorage.insertLinkCredential(this, credential);
-  }
-
-  upsertLinkUsage(grantId: string, lastUsedAtMs: number): void {
-    return sharesStorage.upsertLinkUsage(this, grantId, lastUsedAtMs);
-  }
-
-  retireCurrentLinkCredential(grantId: string, retiredAtMs: number): boolean {
-    return sharesStorage.retireCurrentLinkCredential(this, grantId, retiredAtMs);
-  }
-
-  pruneRetiredLinkCredentials(grantId: string): void {
-    return sharesStorage.pruneRetiredLinkCredentials(this, grantId);
-  }
-
-  activeDependentGrants(parentGrantId: string): SyncRelayShareGrantRow[] {
-    return sharesStorage.activeDependentGrants(this, parentGrantId);
-  }
-
-  incrementActiveDependentGenerations(parentGrantId: string): void {
-    return sharesStorage.incrementActiveDependentGenerations(this, parentGrantId);
-  }
-
   claimPendingSharesForEmail(email: string, userId: string): number {
     return sharesStorage.claimPendingSharesForEmail(this, email, userId);
   }
@@ -898,17 +844,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return logStorage.maxOriginSeq(this, workspaceId, originId);
   }
 
-  proposalOps(proposalId: string): ShareProposalOpRow[] {
-    return proposalsStorage.proposalOps(this, proposalId);
-  }
-
-  threadCreateRows(
-    workspaceId: string,
-    threadId: string,
-  ): Array<Record<string, unknown>> {
-    return objectIndexStorage.threadCreateRows(this, workspaceId, threadId);
-  }
-
   fetchLogPage(input: {
     workspaceId: string;
     sinceRelaySeq: number;
@@ -967,19 +902,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     }
   }
 
-  ticketScopeIsCurrent(scope: NamedLiveBrowserContext): boolean {
-    return liveDocumentAuthorityStorage.ticketScopeIsCurrent(this, scope);
-  }
-
-  currentTicketAuthority(scope: NamedLiveBrowserContext, objectId: string, report: TicketHostReport):
-    Extract<CurrentLiveBindingResult, { kind: "current" }> {
-    return liveDocumentAuthorityStorage.currentTicketAuthority(this, scope, objectId, report);
-  }
-
-  matchingTicket(input: NamedLiveTicketLookup, now: number): LiveTicketClaims {
-    return liveDocumentAuthorityStorage.matchingTicket(this, input, now);
-  }
-
   readNamedLiveTicketTarget(input: NamedLiveTicketLookup): { workspaceId: string; objectId: string } | null {
     return liveDocumentAuthorityStorage.readNamedLiveTicketTarget(this, input);
   }
@@ -990,10 +912,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   redeemNamedLiveTicket(input: NamedLiveTicketRedemption): RedeemedLiveTicket | null {
     return liveDocumentAuthorityStorage.redeemNamedLiveTicket(this, input);
-  }
-
-  currentLiveDocumentBinding({ document, actor }: CurrentLiveBindingRequest): CurrentLiveBindingResult {
-    return liveDocumentAuthorityStorage.currentLiveDocumentBinding(this, { document, actor });
   }
 
   provisionDeviceHostCredential(input: { credential: DeviceHostCredential; updatedAtMs: number }): DeviceHostCredentialResult {
@@ -1012,7 +930,3 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return hostControlStorage.revokeDeviceHostCredential(this, input);
   }
 }
-
-export type { CurrentLiveBindingRequest, CurrentLiveBindingResult } from "./storage/types";
-
-export type { DeviceHostCredentialResult, TicketHostReport, NamedLiveTicketLookup, NamedLiveTicketMint, NamedLiveTicketRedemption, LiveTicketStoragePolicy } from "./storage/types";

@@ -1,4 +1,5 @@
 import { type StorageContext } from "./context";
+import { enforceWorkspaceIdentityInTransaction, assertWorkspaceQuota } from "./workspaces";
 import {
   type SyncRelayLogInput,
   type AppendLogBatchGuardContext,
@@ -38,7 +39,7 @@ export function appendLogBatch(storage: StorageContext, input: {
       // rolls back) or must wait for this COMMIT — there is no in-between.
       input.guard?.({
         enforceWorkspaceIdentity: (identity) =>
-          storage.enforceWorkspaceIdentityInTransaction(input.workspaceId, identity),
+          enforceWorkspaceIdentityInTransaction(storage, input.workspaceId, identity),
       });
       let inserted = 0;
       let skipped = 0;
@@ -90,7 +91,7 @@ export function appendLogBatch(storage: StorageContext, input: {
         addedLogBytes += Buffer.byteLength(op.payloadJson, "utf8");
       }
 
-      storage.assertWorkspaceQuota(input.workspaceId, addedLogBytes);
+      assertWorkspaceQuota(storage, input.workspaceId, addedLogBytes);
 
       // Data-integrity gate (0P sync-hardening): a log op must never be made
       // durable while it references a blob the relay does not hold. The blob

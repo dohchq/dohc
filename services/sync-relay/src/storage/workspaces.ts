@@ -133,7 +133,7 @@ export function verifyWorkspaceIdentity(storage: StorageContext, input: {
     // Reads never establish identity. An identity-bearing GET against an
     // unset workspace has no coordinate to match and is therefore unknown.
     if (current === null) return "epoch-unknown";
-    return storage.classifyWorkspaceIdentity(input.workspaceId, current, input);
+    return classifyWorkspaceIdentity(storage, input.workspaceId, current, input);
   }
 
 export function claimWorkspaceIdentity(storage: StorageContext, input: {
@@ -156,7 +156,7 @@ export function claimWorkspaceIdentity(storage: StorageContext, input: {
     }
     const initialIdentity = workspaceIdentityFromRow(initial);
     if (initialIdentity !== null) {
-      return storage.classifyWorkspaceIdentity(
+      return classifyWorkspaceIdentity(storage,
         input.workspaceId,
         initialIdentity,
         input,
@@ -189,7 +189,7 @@ export function claimWorkspaceIdentity(storage: StorageContext, input: {
         storage.db.exec("COMMIT");
         return "claimed";
       }
-      const result = storage.classifyWorkspaceIdentity(input.workspaceId, current, input);
+      const result = classifyWorkspaceIdentity(storage, input.workspaceId, current, input);
       storage.db.exec("COMMIT");
       return result;
     } catch (error) {
@@ -268,7 +268,7 @@ export function rotateWorkspaceIdentity(storage: StorageContext, input: {
             )
             .get(input.workspaceId, replicationEpoch, streamIdentity) !== undefined;
         if (!alreadyRecorded) {
-          storage.assertWorkspaceQuota(
+          assertWorkspaceQuota(storage,
             input.workspaceId,
             Buffer.byteLength(replicationEpoch, "utf8") +
               Buffer.byteLength(streamIdentity, "utf8"),
@@ -370,7 +370,7 @@ export function enforceWorkspaceIdentityInTransaction(
       return current === null ? "matched" : "identity-required";
     }
     if (current !== null) {
-      return storage.classifyWorkspaceIdentity(workspaceId, current, presented);
+      return classifyWorkspaceIdentity(storage, workspaceId, current, presented);
     }
     storage.db
       .prepare(
@@ -409,7 +409,7 @@ export function workspaceUsageBytes(storage: StorageContext, workspaceId: string
 
 export function assertWorkspaceQuota(storage: StorageContext, workspaceId: string, addedBytes: number): void {
     if (addedBytes <= 0) return;
-    const currentUsage = storage.workspaceUsageBytes(workspaceId);
+    const currentUsage = workspaceUsageBytes(storage, workspaceId);
     if (currentUsage + addedBytes > storage.options.workspaceQuotaBytes) {
       throw new SyncRelayQuotaExceededError(
         `workspace storage quota exceeded: ${currentUsage + addedBytes} bytes would exceed quota ${storage.options.workspaceQuotaBytes}`,

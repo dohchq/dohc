@@ -181,7 +181,7 @@ function canonicalLiveSelector(share: SyncRelayShareRow, selector: ShareSelector
 
 export function resolveCurrentLiveDocumentBinding(storage: StorageContext, input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
     const request = snapshotCurrentBindingRequest(input);
-    return storage.tx(() => storage.currentLiveDocumentBinding(request));
+    return storage.tx(() => currentLiveDocumentBinding(storage, request));
   }
 
 function parseStoredLiveTicket(row: Record<string, unknown>): { claims: LiveTicketClaims; redeemedAtMs: number | null } {
@@ -231,8 +231,8 @@ export function ticketScopeIsCurrent(storage: StorageContext, scope: NamedLiveBr
 export function currentTicketAuthority(storage: StorageContext, scope: NamedLiveBrowserContext, objectId: string, report: TicketHostReport):
     Extract<CurrentLiveBindingResult, { kind: "current" }> {
     if (report.binding.workspaceId !== scope.workspaceId || report.binding.objectId !== objectId ||
-      !storage.ticketScopeIsCurrent(scope)) throw LIVE_TICKET_REFUSED;
-    const current = storage.currentLiveDocumentBinding({
+      !ticketScopeIsCurrent(storage, scope)) throw LIVE_TICKET_REFUSED;
+    const current = currentLiveDocumentBinding(storage, {
       document: { workspaceId: scope.workspaceId, objectId, mainVersionId: "main", lineageClaimId: report.binding.lineageClaimId },
       actor: { kind: "named", userId: scope.userId, grantId: scope.grantId },
     });
@@ -249,14 +249,14 @@ export function matchingTicket(storage: StorageContext, input: NamedLiveTicketLo
     if (redeemedAtMs !== null || now < claims.mintedAtMs || now >= claims.expiresAtMs || claims.audience !== input.audience ||
       claims.binding.workspaceId !== input.scope.workspaceId || claims.authority.principalKind !== "named" ||
       claims.authority.principalId !== input.scope.userId || claims.authority.grantId !== input.scope.grantId ||
-      !storage.ticketScopeIsCurrent(input.scope)) throw LIVE_TICKET_REFUSED;
+      !ticketScopeIsCurrent(storage, input.scope)) throw LIVE_TICKET_REFUSED;
     return claims;
   }
 
 export function readNamedLiveTicketTarget(storage: StorageContext, input: NamedLiveTicketLookup): { workspaceId: string; objectId: string } | null {
     const owned = snapshotTicketLookup(ticketRecord(input, ["tokenHash", "scope", "audience"]));
     return storage.ticketTransaction(now => {
-      const claims = storage.matchingTicket(owned, now);
+      const claims = matchingTicket(storage, owned, now);
       return { workspaceId: claims.binding.workspaceId, objectId: claims.binding.objectId };
     });
   }
@@ -269,7 +269,7 @@ export function mintNamedLiveTicket(storage: StorageContext, input: NamedLiveTic
     const report = snapshotTicketHostReport(raw.report);
     return storage.ticketTransaction((now, policy) => {
       if (now > Number.MAX_SAFE_INTEGER - LIVE_TICKET_LIFETIME_MS) throw LIVE_TICKET_REFUSED;
-      const current = storage.currentTicketAuthority(owned.scope, objectId, report);
+      const current = currentTicketAuthority(storage, owned.scope, objectId, report);
       const claims = parseLiveTicketClaims({ ticketId, audience: owned.audience, authority: current.authority,
         binding: current.binding, hostEpoch: current.host.hostEpoch, mintedAtMs: now, expiresAtMs: now + LIVE_TICKET_LIFETIME_MS });
       if (storage.db.prepare(`SELECT 1 FROM ${LIVE_TICKET_TABLE} WHERE ticket_id = ? OR token_hash = ? LIMIT 1`).get(ticketId, owned.tokenHash)) {
@@ -300,8 +300,8 @@ export function redeemNamedLiveTicket(storage: StorageContext, input: NamedLiveT
     const owned = snapshotTicketLookup(raw);
     const report = snapshotTicketHostReport(raw.report);
     return storage.ticketTransaction(now => {
-      const claims = storage.matchingTicket(owned, now);
-      const current = storage.currentTicketAuthority(owned.scope, claims.binding.objectId, report);
+      const claims = matchingTicket(storage, owned, now);
+      const current = currentTicketAuthority(storage, owned.scope, claims.binding.objectId, report);
       if (JSON.stringify(current.binding) !== JSON.stringify(claims.binding) ||
         JSON.stringify(current.authority) !== JSON.stringify(claims.authority) || current.host.hostEpoch !== claims.hostEpoch) {
         throw LIVE_TICKET_REFUSED;

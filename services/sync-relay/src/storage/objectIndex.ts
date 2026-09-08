@@ -123,7 +123,7 @@ export function findThreadCreateChannelWireId(
     threadId: string,
   ): string | null | undefined {
     if (!threadId) return undefined;
-    for (const row of storage.threadCreateRows(workspaceId, threadId)) {
+    for (const row of threadCreateRows(storage, workspaceId, threadId)) {
       let payload: unknown;
       try {
         payload = JSON.parse(String(row.payload_json));
@@ -205,7 +205,7 @@ export function findThreadCreateFileBinding(
     threadId: string,
   ): ThreadFileBinding | null | undefined {
     if (!threadId) return undefined;
-    for (const row of storage.threadCreateRows(workspaceId, threadId)) {
+    for (const row of threadCreateRows(storage, workspaceId, threadId)) {
       let payload: unknown;
       try {
         payload = JSON.parse(String(row.payload_json));
