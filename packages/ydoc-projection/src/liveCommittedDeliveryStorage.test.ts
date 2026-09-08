@@ -400,9 +400,11 @@ it("compares the complete predecessor identity on an exact repeated ACK", () => 
 });
 
 it.each(["before", "after"] as const)(
-  "recovers when relay edge COMMIT throws %s committing",
+  "reopens standalone storage when relay edge COMMIT throws %s committing",
   (phase) => {
     const f = registered();
+    let reopened: ReturnType<typeof openSyncRelayStorage> | undefined;
+    let originalClosed = false;
     try {
       expect(
         f.storage.commitLiveUpdateJournal(f.capture(f.update(), "event")).result
@@ -439,20 +441,36 @@ it.each(["before", "after"] as const)(
       );
       spy.mockRestore();
       expect(armed).toBe(false);
-      expect(store.next(d).kind).toBe(phase === "after" ? "done" : "next");
+      expect(f.storage.unavailable.aborted).toBe(true);
+      expect(() => store.next(d)).toThrow("unavailable");
+      f.storage.close();
+      originalClosed = true;
+      // This fixture uses standalone storage and has no deployment continuity marker.
+      reopened = openSyncRelayStorage(f.path);
+      const restarted = reopened.createLiveCommittedDeliveryStore(
+        createLiveJournalHistoryAuthority({ namespace: "history-one", reconciled: true }),
+      );
+      const resumed = restarted.open({ host, document: f.input.evidence.document });
+      expect(resumed.baseline.bootstrapId).toBe(d.baseline.bootstrapId);
+      expect(restarted.next(resumed).kind).toBe(phase === "after" ? "done" : "next");
       expect(
         f.raw
           .prepare("SELECT COUNT(*) n FROM sync_relay_live_delivery_edges")
           .get()!.n,
       ).toBe(phase === "after" ? 1 : 0);
       if (phase === "before") expect(f.journalRows().usage).toBe(usage);
-      store.acknowledge(d, step.predecessor, {
+      restarted.acknowledge(resumed, step.predecessor, {
         ...ack,
         applicationReplayed: true,
       });
-      expect(store.next(d).kind).toBe("done");
+      expect(restarted.next(resumed).kind).toBe("done");
     } finally {
-      f.close();
+      reopened?.close();
+      if (originalClosed) {
+        f.doc.destroy();
+        f.raw.close();
+      }
+      else f.close();
     }
   },
 );
@@ -481,6 +499,34 @@ it.each(["mode", "hostId", "hostEpoch", "instanceId", "connectionId"] as const)(
     }
   },
 );
+
+it.each(["device", "service"] as const)("persists bootstrap and event acknowledgements for a %s host", (mode) => {
+  const configuredHost = { ...host, mode }, f = registered({ host: configuredHost });
+  let reopened: ReturnType<typeof openSyncRelayStorage> | undefined;
+  try {
+    expect(f.storage.commitLiveUpdateJournal(f.capture(f.update(), "host-mode-event")).result.kind).toBe("accepted");
+    const { store } = delivery(f), d = store.open({ host: configuredHost, document: f.input.evidence.document });
+    ackBaseline(store, d);
+    const step = store.next(d);
+    if (step.kind !== "next") throw Error("next");
+    store.acknowledge(d, step.predecessor, {
+      ...step.admitted.metadata.accepted.receipt,
+      localYDocSequence: 1,
+      applicationReplayed: false,
+    });
+    expect(store.next(d).kind).toBe("done");
+    expect(f.raw.prepare("SELECT ack_host_mode FROM sync_relay_live_delivery_bootstraps").all()).toEqual([{ ack_host_mode: mode }]);
+    expect(f.raw.prepare("SELECT ack_host_mode FROM sync_relay_live_delivery_edges").all()).toEqual([{ ack_host_mode: mode }]);
+    reopened = openSyncRelayStorage(f.path);
+    const resumed = reopened.createLiveCommittedDeliveryStore(createLiveJournalHistoryAuthority({ namespace: "history-one", reconciled: true }));
+    const drain = resumed.open({ host: configuredHost, document: f.input.evidence.document });
+    expect(drain.baseline.bootstrapId).toBe(d.baseline.bootstrapId);
+    expect(resumed.next(drain).kind).toBe("done");
+  } finally {
+    reopened?.close();
+    f.close();
+  }
+});
 
 it("does not reinterpret a historical admission after the original client grant is revoked", () => {
   const f = registered();

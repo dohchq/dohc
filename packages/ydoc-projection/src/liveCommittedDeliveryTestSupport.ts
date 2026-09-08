@@ -86,7 +86,7 @@ function validated(
     registeredAtMs: 10,
   };
 }
-function fixture(options: { workspaceQuotaBytes?: number } = {}) {
+function fixture(options: { workspaceQuotaBytes?: number } = {}, configuredHost: LiveHostConnectionCoordinate = host) {
   const root = mkdtempSync(join(tmpdir(), "dohc-baseline-storage-"));
   roots.push(root);
   const path = join(root, "relay.sqlite");
@@ -99,19 +99,19 @@ function fixture(options: { workspaceQuotaBytes?: number } = {}) {
       )
       .run("workspace", "owner", 0);
     storage.provisionLiveHostControl({
-      mode: host.mode,
-      hostId: host.hostId,
+      mode: configuredHost.mode,
+      hostId: configuredHost.hostId,
       updatedAtMs: 1,
       guard() {},
     });
-    storage.registerLiveHost({ ...host, updatedAtMs: 2, guard() {} });
+    storage.registerLiveHost({ ...configuredHost, updatedAtMs: 2, guard() {} });
   } catch (error) {
     raw.close();
     storage.close();
     throw error;
   }
   const moment = (
-    input: ReturnType<typeof validated>,
+    input: Pick<ReturnType<typeof validated>, "evidence">,
     sequence = 1,
     changes: Record<string, unknown> = {},
   ) => {
@@ -168,10 +168,11 @@ export function registered(
     workspaceQuotaBytes?: number;
     baselineBytes?: Uint8Array;
     journalPolicy?: typeof policy;
+    host?: LiveHostConnectionCoordinate;
   } = {},
 ) {
-  const f = fixture(options),
-    input = validated(options.baselineBytes);
+  const f = fixture(options, options.host),
+    input = { ...validated(options.baselineBytes), host: { ...(options.host ?? host) } };
   f.moment(input);
   expect(f.storage.registerLiveDocumentBaseline(input).kind).toBe("registered");
   f.raw
