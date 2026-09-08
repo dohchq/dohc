@@ -196,7 +196,6 @@ impl EngineService {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::EngineService;
     use crate::lock;
     use dohc_engine_protocol::transport::RequestContext;

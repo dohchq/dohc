@@ -1415,7 +1415,6 @@ mod tests {
     use crate::rpc::error::map_owner_outbox;
     use crate::rpc::error::wire;
     use crate::rpc::request::OperationCancellation;
-    use base64::Engine as _;
     use dohc_engine_collab::DocKey;
     use dohc_engine_collab::LeaseRegistry;
     use dohc_engine_collab::OwnerOutboxError;
