@@ -551,7 +551,11 @@ async fn write_output<W: AsyncWrite + Unpin>(
                         }
                         return Err(io::Error::new(
                             interruption_kind,
-                            "live acknowledgement retired",
+                            if interruption_kind == io::ErrorKind::TimedOut {
+                                "live acknowledgement expired"
+                            } else {
+                                "live acknowledgement retired"
+                            },
                         ));
                     };
                     if count == 0 {
@@ -564,9 +568,19 @@ async fn write_output<W: AsyncWrite + Unpin>(
                     if !guard.with_current(&mut || {
                         result = std::pin::Pin::new(&mut output).poll_flush(cx);
                     }) {
+                        let expired =
+                            deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline);
                         return std::task::Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::ConnectionAborted,
-                            "live acknowledgement retired",
+                            if expired {
+                                io::ErrorKind::TimedOut
+                            } else {
+                                io::ErrorKind::ConnectionAborted
+                            },
+                            if expired {
+                                "live acknowledgement expired"
+                            } else {
+                                "live acknowledgement retired"
+                            },
                         )));
                     }
                     result
@@ -2304,6 +2318,37 @@ mod tests {
         assert_eq!(ack_for(Some(2 * 1024 * 1024)), 2 * 1024 * 1024);
         assert_eq!(ack_for(Some(1024)), floor);
         assert_eq!(ack_for(Some(u32::MAX)), default);
+    }
+
+    #[tokio::test]
+    async fn fatal_envelope_stops_requests_in_the_same_read() {
+        for fatal in [
+            hello_bytes(),
+            encode_envelope(&Envelope::Response(WireResponse {
+                id: 1,
+                result: serde_json::Value::Null,
+            })),
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let service = Arc::new(CountingService {
+                calls: calls.clone(),
+            });
+            let supervisor = Arc::new(Supervisor::new(SupervisorConfig::default(), service));
+            let mut bytes = hello_bytes();
+            bytes.extend(fatal);
+            bytes.extend(request_bytes(2));
+            run_transport(
+                TEST_AUTH_TOKEN.to_owned(),
+                HelloThenRequests { bytes, pos: 0 },
+                SinkWriter,
+                supervisor,
+                no_events(),
+                || Ok(()),
+            )
+            .await
+            .expect("fatal response is written");
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
