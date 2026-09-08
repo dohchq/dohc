@@ -109,7 +109,6 @@ Understand the constraint before building. Choose the smallest model that makes 
 - Treat approved behavior and design choices as the working baseline. Interpret feedback at the requested scope.
 - Preserve a recoverable comparison before a broad redesign.
 - When a direction is rejected, restore the affected change while preserving unrelated work. Carry the correction into subsequent work.
-- Update existing guidance for durable decisions. Keep experimental values and conversation history out of instructions.
 
 ### Finish the experience
 
