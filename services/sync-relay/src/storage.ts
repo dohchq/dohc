@@ -3455,7 +3455,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     }
     authorityIntegrity(host.registeredInstanceId !== null && host.registeredConnectionId !== null);
     const stored = readLiveDocumentAuthority(this.db, document);
-    if (!stored || !stored.current || !stored.open || stored.binding.lineageClaimId !== document.lineageClaimId) {
+    if (!stored || !stored.current || !stored.open || stored.binding.lineageClaimId !== document.lineageClaimId ||
+      stored.baselineSequence <= this.getEpochLogFloor(document.workspaceId)) {
       return { kind: "refused", reason: "stale-document" };
     }
     if (!this.currentLiveDocumentMoment(document, stored.binding.currentPath)) {

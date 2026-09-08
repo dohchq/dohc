@@ -415,6 +415,46 @@ function usage(f: ReturnType<typeof fixture>): number {
   return Number(f.raw.prepare('SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id = ?').get('workspace')!.usage_bytes)
 }
 
+it.each(['owner', 'named'] as const)('does not revive pre-reset %s authority after the same object is republished', kind => {
+  const f = fixture()
+  try {
+    const input = validated()
+    f.storage.claimWorkspaceIdentity({ workspaceId: 'workspace', replicationEpoch: 'epoch-a', streamIdentity: 'stream-a' })
+    f.storage.appendLogBatch({ workspaceId: 'workspace', originId: 'origin',
+      ops: [{ originSeq: 0, opKind: 'test', payloadJson: '{}', recordedAtMs: 1 }] })
+    f.moment(input)
+    f.raw.prepare(`INSERT INTO sync_relay_shares (share_id, workspace_id, granter_user_id, selector_json, created_at_ms)
+      VALUES ('share', 'workspace', 'owner', ?, 0)`).run(JSON.stringify({ paths: ['docs'], versionId: null }))
+    f.raw.exec(`INSERT INTO sync_relay_share_grants (grant_id, share_id, principal_kind, principal_user_id,
+      principal_email, access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id)
+      VALUES ('grant', 'share', 'user', 'reader', NULL, 'edit', 4, 'active', 0, NULL, NULL)`)
+    const actor = kind === 'owner' ? { kind, userId: 'owner', shareId: 'share' } as const
+      : { kind, userId: 'reader', grantId: 'grant' } as const
+    const request = { document: input.evidence.document, actor }
+    expect(f.storage.registerLiveDocumentBaseline(input).kind).toBe('registered')
+    expect(f.storage.resolveCurrentLiveDocumentBinding(request).kind).toBe('current')
+    expect(f.storage.rotateWorkspaceIdentity({ workspaceId: 'workspace', ownerUserId: 'owner',
+      replicationEpoch: 'epoch-b', streamIdentity: 'stream-b', rotatedAtMs: 20 })).toBe('rotated')
+    f.storage.appendLogBatch({ workspaceId: 'workspace', originId: 'origin',
+      ops: [{ originSeq: 1, opKind: 'test', payloadJson: '{}', recordedAtMs: 21 }] })
+    f.moment(input, 2)
+    const before = f.rows(), beforeUsage = usage(f)
+    for (const reopen of [false, true]) {
+      const storage = reopen ? openSyncRelayStorage(f.path) : f.storage
+      try {
+        expect(storage.resolveCurrentLiveDocumentBinding(request)).toEqual({ kind: 'refused', reason: 'stale-document' })
+        expect(storage.registerLiveDocumentBaseline(input)).toEqual({ kind: 'refused', reason: 'baseline-conflict' })
+      } finally { if (storage !== f.storage) storage.close() }
+    }
+    expect(f.rows()).toEqual(before); expect(usage(f)).toBe(beforeUsage)
+    f.storage.appendLogBatch({ workspaceId: 'workspace', originId: 'origin',
+      ops: [{ originSeq: 2, opKind: 'test', payloadJson: '{}', recordedAtMs: 22 }] })
+    const fresh = validated(checkpoint(), 'docs/new.md', 'new-object'); f.moment(fresh, 3)
+    expect(f.storage.registerLiveDocumentBaseline(fresh).kind).toBe('registered')
+    expect(f.storage.resolveCurrentLiveDocumentBinding({ ...request, document: fresh.evidence.document }).kind).toBe('current')
+  } finally { f.close() }
+})
+
 it('charges original baseline bytes exactly once, preserves quota on replay and refuses excess atomically', () => {
   const first = validated(), second = validated(checkpoint('Second'), 'docs/b.md', 'second-object')
   const total = first.baselineBytes.byteLength + second.baselineBytes.byteLength
