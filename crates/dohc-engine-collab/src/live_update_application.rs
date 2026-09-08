@@ -282,12 +282,6 @@ impl LiveUpdateHostApplicationAck {
     }
 }
 
-fn canonical_binding(binding: &LiveObjectBinding) -> Result<(), ApplicationError> {
-    if binding.clone().normalized().map_err(invalid)? != *binding {
-        return Err(invalid("noncanonical binding"));
-    }
-    Ok(())
-}
 fn canonical_ranges(ranges: &[LiveUpdateStructRange]) -> Result<(), ApplicationError> {
     let mut previous: Option<&LiveUpdateStructRange> = None;
     for range in ranges {
@@ -320,7 +314,7 @@ impl AdmittedLiveUpdate {
     pub fn validate(&self) -> Result<(), ApplicationError> {
         let accepted = &self.metadata.accepted;
         accepted.receipt.validate()?;
-        canonical_binding(&accepted.binding)?;
+        accepted.binding.validate_canonical().map_err(invalid)?;
         accepted.authority.validate()?;
         integer(accepted.received_at_ms, 0, SAFE)?;
         canonical_ranges(&self.metadata.first_seen)?;
@@ -463,7 +457,7 @@ impl ApplicationOwner {
             return Err(invalid("relay namespace is empty"));
         }
         coordinate.validate()?;
-        canonical_binding(&binding)?;
+        binding.validate_canonical().map_err(invalid)?;
         if binding.workspace_id != self.workspace_id {
             return Err(ApplicationError::WorkspaceMismatch);
         }
@@ -586,7 +580,7 @@ fn read_binding(
             let available: i64 = row.get(8)?;
             Ok((binding,coordinate,available))
         }).optional().map_err(read_sql)?.map(|(binding,coordinate,available)| {
-            canonical_binding(&binding).map_err(|_| ApplicationError::Corrupt)?;
+            binding.validate_canonical().map_err(|_| ApplicationError::Corrupt)?;
             coordinate.validate().map_err(|_| ApplicationError::Corrupt)?;
             if !matches!(available,0|1) { return Err(ApplicationError::Corrupt); }
             Ok((binding,coordinate,available==1))
