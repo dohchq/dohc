@@ -33,8 +33,8 @@ import {
   DohcTaskItem,
   dohcMarkdownExtensions,
   escapeHighlightMarkdown,
-  sanitizeImageSrc,
 } from './dohc-markdown-extensions.js'
+import { sanitizeImageSrc } from './image-src.js'
 import { backtickFence } from './markdown-fence.js'
 
 const BODY_FIELD = 'body'
@@ -239,7 +239,7 @@ function parseRichdocMarkdown(markdown: string): JSONContent {
 
   const prepared = markdown
     .replace(
-      /(?:(?:&amp;|&AMP;|&#0{0,5}38;|&#[xX]0{0,4}26;)#(?:13|35|36|41|42|43|45|46|61|91|95|96|126);|&#(?:13|35|36|41|42|43|45|46|61|91|95|96|126);)/gu,
+      /(?:(?:&amp;|&AMP;|&#0{0,5}38;|&#[xX]0{0,4}26;)#(?:13|35|36|41|42|43|45|46|61|91|95|96|126|160);|&#(?:13|35|36|41|42|43|45|46|61|91|95|96|126|160);)/gu,
       (entity, offset: number, source: string) => (
         markdownCharacterIsEscaped(source, offset)
           ? entity
@@ -805,7 +805,7 @@ function escapeLeadingMarkdownBlockSyntax(
   const output: JSONContent[] = []
   let lineStart = true
   const escapedContent = escapePostNewlineMarkdownBlockOpeners(
-    escapeCarriageReturns(content, encodeBlockEscape),
+    escapeParagraphWhitespace(content, encodeBlockEscape),
     encodeBlockEscape,
   )
   const preparedContent = escapeLeadingIndentedCode(
@@ -841,15 +841,16 @@ function escapeLeadingMarkdownBlockSyntax(
   return output
 }
 
-function escapeCarriageReturns(
+function escapeParagraphWhitespace(
   content: JSONContent[],
   encodeBlockEscape: (value: string) => string,
 ): JSONContent[] {
   return content.map(node => (
     typeof node.text === 'string'
-    && node.text.includes('\r')
+    && /[\r\u00a0]/.test(node.text)
     && !node.marks?.some(mark => mark.type === 'code')
-      ? { ...node, text: node.text.replaceAll('\r', encodeBlockEscape('\r')) }
+      // Task-list parsing treats a literal NBSP as indentation, not content.
+      ? { ...node, text: node.text.replace(/[\r\u00a0]/g, encodeBlockEscape) }
       : node
   ))
 }

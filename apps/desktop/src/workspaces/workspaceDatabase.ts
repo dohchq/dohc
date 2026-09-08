@@ -2,8 +2,8 @@ import {
   databaseOpLogPath,
   mediaTypeForPath,
   validateUserMaterializePath,
-  type ChangeAuthor,
 } from "@dohc/workspace-core";
+import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import { randomUUID } from "node:crypto";
 import {
   link,

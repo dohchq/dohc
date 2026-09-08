@@ -2,7 +2,7 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import type { EngineDocSaveState } from "./collab/useEngineDoc";
+import type { EngineDocSaveState } from "./collab/engineDocLease";
 import { FileInspector } from "./FileInspector";
 
 // WS-G2-C-2: the engine Y.Doc is the PRIMARY editing surface,

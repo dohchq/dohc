@@ -20,6 +20,19 @@ import { RecoveryList } from "./RecoveryList";
 
 type UnloadKind = "close" | "reload" | "update" | "quit";
 
+// The warning dialog's copy, one row per unload kind so the title, body, and
+// confirm button can never name different actions. "update" reads as Restart
+// because Restart is the action the user clicked.
+const UNLOAD_COPY: Record<
+  UnloadKind,
+  { title: string; verb: string; confirm: string }
+> = {
+  close: { title: "Close", verb: "closes", confirm: "Close anyway" },
+  reload: { title: "Reload", verb: "reloads", confirm: "Reload anyway" },
+  update: { title: "Restart", verb: "restarts", confirm: "Restart anyway" },
+  quit: { title: "Quit", verb: "quits", confirm: "Quit anyway" },
+};
+
 // The guard cannot tell one unload's beforeunload from another's, but the
 // user asked for a specific action by name — confirming must resume that
 // action, never swap it for a plain exit. In-app
@@ -430,27 +443,13 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
               id="recovery-close-warning-title"
               className="m-0 text-sm font-semibold text-ink"
             >
-              {closeWarning.kind === "reload"
-                ? "Reload"
-                : closeWarning.kind === "update"
-                  ? "Restart"
-                  : closeWarning.kind === "quit"
-                    ? "Quit"
-                    : "Close"}{" "}
+              {UNLOAD_COPY[closeWarning.kind].title}{" "}
               without your set-aside {liveCount === 1 ? "edit" : "edits"}?
             </h3>
             <p className="mb-0 mt-2 text-xs leading-5 text-muted">
               {`${liveCount} set-aside ${
                 liveCount === 1 ? "edit is" : "edits are"
-              } lost when dohc ${
-                closeWarning.kind === "reload"
-                  ? "reloads"
-                  : closeWarning.kind === "update"
-                    ? "restarts"
-                    : closeWarning.kind === "quit"
-                      ? "quits"
-                      : "closes"
-              }.`}{" "}
+              } lost when dohc ${UNLOAD_COPY[closeWarning.kind].verb}.`}{" "}
               Copy {liveCount === 1 ? "it" : "them"} here to keep the text.
             </p>
             <div className="mt-3 max-h-60 overflow-y-auto">
@@ -517,13 +516,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                 }}
                 className="h-8 cursor-pointer rounded-md bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90"
               >
-                {closeWarning.kind === "reload"
-                  ? "Reload anyway"
-                  : closeWarning.kind === "update"
-                    ? "Restart anyway"
-                    : closeWarning.kind === "quit"
-                      ? "Quit anyway"
-                      : "Close anyway"}
+                {UNLOAD_COPY[closeWarning.kind].confirm}
               </button>
             </div>
         </Overlay>

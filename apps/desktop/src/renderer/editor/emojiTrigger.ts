@@ -27,9 +27,9 @@ import { isCodeBlock, isCodeMark } from "./pmHelpers";
 // inside `view.update`) so the replacement is folded into the same
 // transaction cycle instead of racing a second dispatch.
 
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { PluginKey, type Transaction } from '@tiptap/pm/state'
 import { ReplaceStep } from '@tiptap/pm/transform'
-import type { PMDocLike } from './inlineAtomPlugin'
 import { type AutocompleteState } from './wikilinkPlugin'
 import { EMOJI_DATA, type EmojiEntry } from './emojiData'
 
@@ -58,14 +58,14 @@ const EMOJI_COMPLETE_RE = /(?<=^|\s):([a-zA-Z0-9_+-]{2,}):$/
  *  strategy as wikilinkPlugin's `detectAutocomplete` / mentionTrigger's
  *  `detectMentionAutocomplete`. */
 export function detectEmojiAutocomplete(
-  doc: PMDocLike,
+  doc: ProseMirrorNode,
   cursorPos: number,
 ): AutocompleteState {
   let found: AutocompleteState = { active: false }
   doc.descendants((node, pos, parent) => {
     if (!node.isText || !node.text) return
     if (isCodeBlock(parent)) return
-    if ((node.marks ?? []).some(isCodeMark)) return
+    if (node.marks.some(isCodeMark)) return
     const nodeStart = pos
     const nodeEnd = pos + node.text.length
     if (cursorPos < nodeStart || cursorPos > nodeEnd) return
@@ -93,14 +93,14 @@ type CompleteEmojiShortcode = {
  *  the shortcode is actually known — callers combine this with
  *  `lookupEmoji`. */
 export function detectCompleteEmojiShortcode(
-  doc: PMDocLike,
+  doc: ProseMirrorNode,
   cursorPos: number,
 ): CompleteEmojiShortcode | null {
   let found: CompleteEmojiShortcode | null = null
   doc.descendants((node, pos, parent) => {
     if (!node.isText || !node.text) return
     if (isCodeBlock(parent)) return
-    if ((node.marks ?? []).some(isCodeMark)) return
+    if (node.marks.some(isCodeMark)) return
     const nodeStart = pos
     const nodeEnd = pos + node.text.length
     if (cursorPos < nodeStart || cursorPos > nodeEnd) return
@@ -178,10 +178,7 @@ export function makeEmojiPlugin(onAutocompleteChange: (s: AutocompleteState) => 
       // the cursor — not on remote collab edits or other doc changes that
       // happen to leave the cursor after a literal `:shortcode:`.
       if (!insertedClosingColonAtCursor(transactions, sel.from)) return null
-      const found = detectCompleteEmojiShortcode(
-        newState.doc as unknown as PMDocLike,
-        sel.from,
-      )
+      const found = detectCompleteEmojiShortcode(newState.doc, sel.from)
       if (!found) return null
       const entry = lookupEmoji(found.shortcode)
       if (!entry) return null

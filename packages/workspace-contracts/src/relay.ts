@@ -83,16 +83,6 @@ export class RelayOriginDivergedError extends Error {
   }
 }
 
-// The relay served the workspace but is missing a blob the log references —
-// distinct from the fixed absent-workspace 404 so sync can degrade honestly
-// instead of reporting the whole workspace unavailable.
-export class RelayBlobMissingError extends Error {
-  constructor(message = "Relay is missing a referenced blob.") {
-    super(message);
-    this.name = "RelayBlobMissingError";
-  }
-}
-
 export class RelayKeyEnvelopeMissingError extends Error {
   constructor(message = "Relay is missing the workspace key envelope.") {
     super(message);
@@ -187,13 +177,6 @@ export class SharedFileReadOnlyError extends Error {
   }
 }
 
-export class SharedChannelAppendRejectedError extends Error {
-  constructor(message = "The relay refused an op for this shared channel.") {
-    super(message);
-    this.name = "SharedChannelAppendRejectedError";
-  }
-}
-
 export interface PullSharedChannelResult {
   fetched: number;
   applied: number;
@@ -223,7 +206,7 @@ export class ShareUnavailableError extends Error {
 //
 // "not-required" is a `view` share, which may push nothing and so is given no
 // identity — the absence is what keeps its local writes local.
-export type ShareViewEnrolment =
+type ShareViewEnrolment =
   | "recorded"
   | "already-recorded"
   | "not-required";

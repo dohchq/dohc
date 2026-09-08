@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 104" fill="none">
+  <defs>
+    <linearGradient id="edge" x1="12" y1="24" x2="80" y2="85" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f5f7fa"/><stop offset=".22" stop-color="#a1aab3"/><stop offset=".43" stop-color="#e5e9ed"/><stop offset=".58" stop-color="#646e79"/><stop offset=".8" stop-color="#b4bec7"/><stop offset="1" stop-color="#39434d"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="20" y1="15" x2="75" y2="84" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff"/><stop offset=".17" stop-color="#e6ebef"/><stop offset=".42" stop-color="#9da7b0"/><stop offset=".6" stop-color="#f0f3f6"/><stop offset=".8" stop-color="#8b969f"/><stop offset="1" stop-color="#cbd0d2"/>
+    </linearGradient>
+    <linearGradient id="face" x1="21" y1="18" x2="77" y2="77" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f0f3f5"/><stop offset=".28" stop-color="#d9dfe5"/><stop offset=".54" stop-color="#b4bec7"/><stop offset=".78" stop-color="#d4dce2"/><stop offset="1" stop-color="#a4afb8"/>
+    </linearGradient>
+    <radialGradient id="light" cx="0" cy="0" r="1" gradientTransform="translate(28 23) rotate(48) scale(63 39)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff" stop-opacity=".7"/><stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="socket-bevel" x1="34" y1="32" x2="61" y2="65" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#53616d"/><stop offset=".4" stop-color="#86939e"/><stop offset=".62" stop-color="#eff4f7"/><stop offset="1" stop-color="#fff"/>
+    </linearGradient>
+    <linearGradient id="socket-wall" x1="38" y1="34" x2="59" y2="60" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#121a21"/><stop offset=".5" stop-color="#34414c"/><stop offset="1" stop-color="#6a7884"/>
+    </linearGradient>
+    <radialGradient id="socket-floor"><stop stop-color="#303d48"/><stop offset="1" stop-color="#18232d"/></radialGradient>
+    <filter id="shadow" x="-30%" y="-50%" width="160%" height="210%"><feGaussianBlur stdDeviation="2.5"/></filter>
+    <clipPath id="disc"><circle cx="48" cy="46" r="30.8"/></clipPath>
+  </defs>
+  <ellipse cx="49" cy="88" rx="32" ry="7" fill="#15212b" opacity=".26" filter="url(#shadow)"/>
+  <!-- A circular flange beneath the raised socket head. -->
+  <circle cx="48" cy="53" r="39" fill="url(#edge)" stroke="#65717c" stroke-width=".8"/>
+  <circle cx="48" cy="50" r="39" fill="url(#rim)" stroke="#e7edf1" stroke-width=".8"/>
+  <circle cx="48" cy="50" r="36.7" stroke="#667480" stroke-width=".65"/>
+  <circle cx="48" cy="50" r="35.8" stroke="#f8fafc" stroke-opacity=".8" stroke-width=".65"/>
+  <circle cx="48" cy="49" r="34.2" fill="url(#edge)" stroke="#65727e" stroke-width=".65"/>
+  <circle cx="48" cy="46" r="34.2" fill="url(#rim)" stroke="#f6f9fb" stroke-width=".8"/>
+  <circle cx="48" cy="46" r="31.5" fill="url(#face)" stroke="#8e9ba6" stroke-width=".65"/>
+  <circle cx="48" cy="46" r="30.8" fill="url(#light)"/>
+  <!-- Fine concentric tool paths, kept below the primary reflections. -->
+  <g clip-path="url(#disc)" stroke="#526370" stroke-opacity=".15" stroke-width=".28">
+    <circle cx="48" cy="46" r="18"/><circle cx="48" cy="46" r="19"/>
+    <circle cx="48" cy="46" r="20"/><circle cx="48" cy="46" r="21"/>
+    <circle cx="48" cy="46" r="22"/><circle cx="48" cy="46" r="23"/>
+    <circle cx="48" cy="46" r="24"/><circle cx="48" cy="46" r="25"/>
+    <circle cx="48" cy="46" r="26"/><circle cx="48" cy="46" r="27"/>
+    <circle cx="48" cy="46" r="28"/><circle cx="48" cy="46" r="29"/>
+    <circle cx="48" cy="46" r="30"/>
+  </g>
+  <path d="M17.6 43a30.8 30.8 0 0 1 38.2-26.8" stroke="#fff" stroke-opacity=".8" stroke-width=".7" stroke-linecap="round"/>
+  <path d="M76.8 56.4A30.8 30.8 0 0 1 43 76.4" stroke="#687985" stroke-opacity=".5" stroke-width=".65" stroke-linecap="round"/>
+  <!-- Chamfer, dark walls, and a recessed hexagonal socket floor. -->
+  <path d="m48 28 15.6 9v18L48 64l-15.6-9V37Z" fill="url(#socket-bevel)" stroke="#9aa7b2" stroke-width=".45" stroke-linejoin="round"/>
+  <path d="m48 31 13 7.5v15L48 61l-13-7.5v-15Z" fill="url(#socket-wall)" stroke="#4c5b67" stroke-width=".6" stroke-linejoin="round"/>
+  <path d="m35 38.5 13-7.5v7l-8 4.7v13.7l-5-2.9Z" fill="#1e2b35"/>
+  <path d="m48 31 13 7.5v15l-5 2.9V42.7L48 38Z" fill="#536470"/>
+  <path d="m48 38 8 4.7V52l-8 4.7-8-4.7v-9.3Z" fill="url(#socket-floor)"/>
+  <path d="m35 53.5 13 7.5 13-7.5" stroke="#edf4f9" stroke-opacity=".65" stroke-width=".65"/>
+  <!-- Small recessed grade marks on the face. -->
+  <g stroke-linecap="round" stroke-width=".7">
+    <path d="M45.5 22v2.5M48 21.7v2.5M50.5 22v2.5" stroke="#6c7c88"/>
+    <path d="M46 22v2.5M48.5 21.7v2.5M51 22v2.5" stroke="#fff" stroke-opacity=".7" stroke-width=".4"/>
+  </g>
+</svg>

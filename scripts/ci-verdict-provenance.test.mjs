@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { load } from "js-yaml";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
 import {
   HEAD_REFLOG_RECOVERY,
@@ -25,10 +26,6 @@ const workflow = await readFile(
   new URL("../.github/workflows/pr-checks.yml", import.meta.url),
   "utf8",
 );
-const concurrencyAt = workflow.indexOf("\nconcurrency:");
-assert.notEqual(concurrencyAt, -1, "pr-checks.yml has no concurrency block");
-const triggerBlock = workflow.slice(0, concurrencyAt);
-
 const passVerdict =
   "- 2026-07-27T00:00:00.000Z | run-rust-checks | linux/x64 " +
   "(rust cfg x86_64/linux/gnu, head 1f47af31 clean, 11 reads) | PASS | " +
@@ -399,19 +396,14 @@ test("both gate filters select on ignore rules and vendored engine dependencies"
   assert.doesNotMatch(rustFilter, /- 'scripts\/\*\*'/);
 });
 
-test("PR workflow is deliberately disabled: dispatch-only, decision documented", () => {
-  // Ice's 2026-07-28 pre-launch decision: the gate is dispatch-only for now.
-  // This test pins that state so a half re-enable (say, pull_request without
-  // push) can't drift in unnoticed, and so the disable itself reads as a
-  // decision rather than an accident. When re-enabling, restore the previous
-  // version of this test (it asserted: bare `pull_request:` with no branches
-  // filter, `merge_group:`, and `push:` restricted to main).
-  assert.match(triggerBlock, /^  workflow_dispatch:\s*$/m);
-  assert.doesNotMatch(triggerBlock, /^  pull_request:/m);
-  assert.doesNotMatch(triggerBlock, /^  push:/m);
-  assert.doesNotMatch(triggerBlock, /^  merge_group:/m);
-  // The disable must stay explained in the workflow itself.
-  assert.match(workflow, /DISABLED ON PURPOSE \(2026-07-28\)/);
+test("PR workflow stays dispatch-only and cannot schedule cloud runners", () => {
+  const document = load(workflow);
+  assert.deepEqual(Object.keys(document.on), ["workflow_dispatch"]);
+  for (const [name, job] of Object.entries(document.jobs)) {
+    assert.ok(Array.isArray(job["runs-on"]), `${name} must use explicit local runner labels`);
+    assert.ok(job["runs-on"].includes("self-hosted"), `${name} must use a self-hosted runner`);
+  }
+  assert.equal(document.concurrency["cancel-in-progress"], false);
 });
 
 // A run's readings: the tree before the first step, then after each step. A

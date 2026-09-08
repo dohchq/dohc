@@ -92,20 +92,8 @@ import {
 } from "../workspaces/workspaceSettings";
 import { rendererMarks } from "../performance/rendererMarks";
 import {
-  chatMentionOpenTarget,
-  chatsOffCopy,
-  chatsNavigationChangesDestination,
-  chatsNavigationLeavesConversation,
-  chatsNavigationRequiresRemount,
   DesktopWorkspaceShell,
-  graphChatOpenTarget,
   pendingHeadingTargetForOpen,
-  resolveCanonicalDm,
-  goneMountProjections,
-  runCanonicalDmNavigation,
-  shareRefreshSummary,
-  shareUnmountProjection,
-  versionCompareOffCopy,
   WORKBENCH_PERSIST_DELAY_MS,
   type Workspace,
 } from "./DesktopWorkspaceShell";
@@ -113,7 +101,6 @@ import {
   WORKSPACE_ACTIVITY_REFRESH_DELAY_MS,
   WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS,
 } from "./workspaceActivityCoalescer";
-import type { ChatsNav } from "./workbench/ChatsView";
 import {
   CHATS_TAB_PATH,
   OPEN_EDITORS_DEFAULT_HEIGHT,
@@ -130,7 +117,7 @@ import {
   resetOrphanedDrafts,
   useAllOrphanedDrafts,
 } from "./orphanedDrafts";
-import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
+import { disposeEngineDocLeasesForTests } from "./collab/engineDocLease";
 import {
   CollectionFieldWriteHost,
   abandonPendingCollectionFieldWrites,
@@ -3834,383 +3821,6 @@ describe("application menu command routing", () => {
 
 });
 
-describe("targeted chat navigation", () => {
-  const threadNav = (threadId: string, focusMessageId?: string): ChatsNav => ({
-    level: "thread",
-    channel: {
-      id: "channel-1",
-      name: "general",
-      slug: "general",
-      kind: "channel",
-      createdAtMs: 0,
-      updatedAtMs: 0,
-      threadCount: 1,
-      unreadCount: 0,
-    },
-    thread: {
-      id: threadId,
-      channelId: "channel-1",
-      title: "Discussion",
-      createdAtMs: 0,
-      updatedAtMs: 0,
-      messageCount: 2,
-      lastReadSequence: 0,
-      unreadCount: 0,
-    },
-    ...(focusMessageId ? { focusMessageId } : {}),
-  });
-
-  it("remounts the live chat for a message backlink inside the current thread", () => {
-    expect(
-      chatsNavigationRequiresRemount(
-        threadNav("thread-1", "message-1"),
-        threadNav("thread-1", "message-2"),
-      ),
-    ).toBe(true);
-    expect(
-      chatsNavigationRequiresRemount(
-        threadNav("thread-1", "message-1"),
-        threadNav("thread-1"),
-      ),
-    ).toBe(false);
-  });
-
-  // Two keys, two purposes. Cancelling a pending DM lookup asks "did the user
-  // go somewhere?", and a focused message is somewhere. Scoping drafts asks
-  // the narrower "did they leave the conversation?", because the draft they
-  // typed there must survive a jump inside it.
-  it("separates leaving a conversation from going somewhere inside it", () => {
-    const focused = threadNav("thread-1", "message-1");
-    const otherMessage = threadNav("thread-1", "message-2");
-    const otherThread = threadNav("thread-2");
-
-    // A backlink to another message in the open thread: going somewhere...
-    expect(chatsNavigationChangesDestination(focused, otherMessage)).toBe(true);
-    // ...without leaving the conversation, so the draft stays.
-    expect(chatsNavigationLeavesConversation(focused, otherMessage)).toBe(false);
-
-    // Another conversation is both.
-    expect(chatsNavigationChangesDestination(focused, otherThread)).toBe(true);
-    expect(chatsNavigationLeavesConversation(focused, otherThread)).toBe(true);
-
-    // The panel re-reporting where it already is, is neither.
-    expect(
-      chatsNavigationChangesDestination(focused, threadNav("thread-1", "message-1")),
-    ).toBe(false);
-    expect(chatsNavigationLeavesConversation(focused, focused)).toBe(false);
-  });
-
-  it("keeps metadata-light file mentions and graph chats on their known file thread", () => {
-    const thread = {
-      id: "thread-file",
-      title: "File discussion",
-      createdAtMs: 10,
-      updatedAtMs: 20,
-    };
-    const mentionTarget = chatMentionOpenTarget({
-      attachment: {
-        attachmentId: "attachment-1",
-        messageId: "message-1",
-        threadId: thread.id,
-        targetKind: "file",
-        objectId: "object-1",
-        pathHint: "docs/plan.md",
-        createdAtMs: 10,
-      },
-      message: {
-        id: "message-1",
-        threadId: thread.id,
-        authorKind: "human",
-        authorDisplayName: "Ice",
-        body: "See the plan",
-        createdAtMs: 10,
-      },
-      thread,
-    });
-    expect(mentionTarget).toEqual({
-      surface: "file",
-      thread,
-      focusMessageId: "message-1",
-    });
-
-    expect(graphChatOpenTarget({
-      path: `chat-thread:${thread.id}`,
-      kind: "chat-thread",
-      threadId: thread.id,
-      title: thread.title,
-      incoming: 1,
-      outgoing: 0,
-    })).toEqual({
-      surface: "file",
-      thread: { ...thread, createdAtMs: 0, updatedAtMs: 0 },
-    });
-  });
-
-  it("keeps full channel metadata on targeted tab navigation", () => {
-    const target = graphChatOpenTarget({
-      path: "chat-thread:thread-channel",
-      kind: "chat-thread",
-      threadId: "thread-channel",
-      channelId: "channel-1",
-      channelName: "planning",
-      channelSlug: "planning",
-      channelKind: "channel",
-      title: "Planning discussion",
-      incoming: 1,
-      outgoing: 0,
-    });
-
-    expect(target.surface).toBe("channel");
-    if (target.surface === "channel") {
-      expect(target.nav.level).toBe("thread");
-      expect(target.nav.channel.id).toBe("channel-1");
-      expect(target.nav.thread.id).toBe("thread-channel");
-    }
-
-    const mentionTarget = chatMentionOpenTarget({
-      attachment: {
-        attachmentId: "attachment-channel",
-        messageId: "message-channel",
-        threadId: "thread-channel",
-        targetKind: "file",
-        createdAtMs: 0,
-      },
-      message: {
-        id: "message-channel",
-        threadId: "thread-channel",
-        authorKind: "agent",
-        authorDisplayName: "Ice",
-        body: "Updated the plan",
-        createdAtMs: 0,
-      },
-      thread: {
-        id: "thread-channel",
-        title: "Planning discussion",
-        createdAtMs: 0,
-        updatedAtMs: 0,
-      },
-      channelId: "channel-1",
-      channelName: "planning",
-    });
-    expect(mentionTarget.surface).toBe("channel");
-    if (mentionTarget.surface === "channel") {
-      expect(mentionTarget.nav.thread.id).toBe("thread-channel");
-      expect(mentionTarget.nav.focusMessageId).toBe("message-channel");
-    }
-  });
-
-  it("routes DM mentions and graph nodes only through a matching canonical DM", () => {
-    const dm = {
-      channelId: "dm-local",
-      channelWireId: "dm-wire",
-      name: "alice@example.com",
-      peerLabel: "Alice",
-      role: "owner" as const,
-      shareId: null,
-      threadId: "dm-thread",
-      unreadCount: 1,
-      connected: true,
-    };
-    const mentionTarget = chatMentionOpenTarget({
-      attachment: {
-        attachmentId: "attachment-dm",
-        messageId: "message-dm",
-        threadId: "dm-thread",
-        targetKind: "file",
-        createdAtMs: 0,
-      },
-      message: {
-        id: "message-dm",
-        threadId: "dm-thread",
-        authorKind: "human",
-        authorDisplayName: "Alice",
-        body: "DM attachment",
-        createdAtMs: 0,
-      },
-      thread: {
-        id: "dm-thread",
-        title: "Direct message",
-        createdAtMs: 0,
-        updatedAtMs: 0,
-      },
-      channelId: "dm-local",
-      channelWireId: "dm-wire",
-      channelName: "alice@example.com",
-      channelKind: "dm",
-    });
-    expect(mentionTarget).toEqual({
-      surface: "dm",
-      channelId: "dm-local",
-      channelWireId: "dm-wire",
-      threadId: "dm-thread",
-      focusMessageId: "message-dm",
-    });
-    if (mentionTarget.surface !== "dm") throw new Error("Expected DM target");
-    expect(resolveCanonicalDm(mentionTarget, [dm])).toEqual(dm);
-    expect(resolveCanonicalDm({ ...mentionTarget, threadId: "other-thread" }, [dm]))
-      .toBeNull();
-    expect(resolveCanonicalDm({ ...mentionTarget, channelWireId: "other-wire" }, [dm]))
-      .toBeNull();
-
-    expect(graphChatOpenTarget({
-      path: "chat-thread:dm-thread",
-      kind: "chat-thread",
-      threadId: "dm-thread",
-      channelId: "dm-local",
-      channelWireId: "dm-wire",
-      channelName: "alice@example.com",
-      channelKind: "dm",
-      title: "Direct message",
-      incoming: 1,
-      outgoing: 0,
-    })).toEqual({
-      surface: "dm",
-      channelId: "dm-local",
-      channelWireId: "dm-wire",
-      threadId: "dm-thread",
-    });
-  });
-
-  it("preserves a DM mention message target through canonical navigation", async () => {
-    const dm = {
-      channelId: "dm-local",
-      channelWireId: "dm-wire",
-      name: "alice@example.com",
-      peerLabel: "Alice",
-      role: "owner" as const,
-      shareId: null,
-      threadId: "dm-thread",
-      unreadCount: 0,
-      connected: true,
-    };
-    const open = vi.fn();
-
-    await runCanonicalDmNavigation({
-      locator: {
-        channelId: dm.channelId,
-        channelWireId: dm.channelWireId,
-        threadId: dm.threadId,
-        focusMessageId: "message-dm",
-      },
-      syncDms: async () => ({ available: true, dms: [dm] }),
-      isCurrent: () => true,
-      open,
-    });
-
-    expect(open).toHaveBeenCalledWith({
-      level: "dm",
-      dm,
-      focusMessageId: "message-dm",
-    });
-    expect(
-      chatsNavigationRequiresRemount(
-        { level: "dm", dm, focusMessageId: "message-old" },
-        { level: "dm", dm, focusMessageId: "message-dm" },
-      ),
-    ).toBe(true);
-  });
-
-  it("opens an existing local DM when new-DM creation is unavailable", async () => {
-    const dm = {
-      channelId: "dm-local",
-      channelWireId: "dm-wire",
-      name: "alice@example.com",
-      peerLabel: "Alice",
-      role: "owner" as const,
-      shareId: null,
-      threadId: "dm-thread",
-      unreadCount: 0,
-      connected: false,
-    };
-    const open = vi.fn();
-
-    await runCanonicalDmNavigation({
-      locator: {
-        channelId: dm.channelId,
-        channelWireId: dm.channelWireId,
-        threadId: dm.threadId,
-      },
-      syncDms: async () => ({ available: false, dms: [dm] }),
-      isCurrent: () => true,
-      open,
-    });
-
-    expect(open).toHaveBeenCalledWith({ level: "dm", dm });
-  });
-
-  it("does not reopen Chats when destination navigation supersedes a delayed DM lookup", async () => {
-    const delayed = deferred<{
-      available: boolean;
-      dms: Array<{
-        channelId: string;
-        channelWireId: string;
-        name: string;
-        peerLabel: string;
-        role: "owner";
-        shareId: null;
-        threadId: string;
-        unreadCount: number;
-        connected: boolean;
-      }>;
-    }>();
-    let current = true;
-    const open = vi.fn();
-    const pending = runCanonicalDmNavigation({
-      locator: {
-        channelId: "dm-local",
-        channelWireId: "dm-wire",
-        threadId: "dm-thread",
-      },
-      syncDms: () => delayed.promise,
-      isCurrent: () => current,
-      open,
-    });
-
-    // Models the centralized workbench mutation invalidation used by file,
-    // graph, history, and arbitrary editor-tab navigation.
-    current = false;
-    delayed.resolve({
-      available: true,
-      dms: [{
-        channelId: "dm-local",
-        channelWireId: "dm-wire",
-        name: "alice@example.com",
-        peerLabel: "Alice",
-        role: "owner",
-        shareId: null,
-        threadId: "dm-thread",
-        unreadCount: 0,
-        connected: true,
-      }],
-    });
-    await pending;
-    expect(open).not.toHaveBeenCalled();
-  });
-
-  it("clears stale chat navigation to channels when DM canonicalization fails", async () => {
-    const open = vi.fn();
-    const base = {
-      locator: { channelId: "dm-local", threadId: "dm-thread" },
-      isCurrent: () => true,
-      open,
-    };
-    await runCanonicalDmNavigation({
-      ...base,
-      syncDms: async () => ({ available: true, dms: [] }),
-    });
-    expect(open).toHaveBeenLastCalledWith({ level: "channels" });
-
-    open.mockClear();
-    await runCanonicalDmNavigation({
-      ...base,
-      syncDms: async () => {
-        throw new Error("offline");
-      },
-    });
-    expect(open).toHaveBeenLastCalledWith({ level: "channels" });
-  });
-});
-
 describe("heading-target file opens", () => {
   it("clears a prior section command on an ordinary open", () => {
     expect(
@@ -5809,14 +5419,21 @@ describe("ui-state merge-on-load", () => {
     }>();
     let issued = 0;
     const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["b.md", "pulled.md"], "b.md")),
+      Promise.resolve({
+        ...storedStateWithTabs(["b.md", "pulled.md"], "b.md"),
+        chatsVisible: false,
+      }),
     );
     bridge.listWorkspaceFiles = vi.fn(() =>
       ++issued === 1 ? older.promise : newer.promise,
     );
     renderShell(bridge);
 
-    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+      expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
+    });
     act(() => {
       bridge.emitWorkspaceActivity();
     });
@@ -7038,7 +6655,10 @@ describe("ui-state merge-on-load", () => {
     const newer = deferred<Listing>();
     let issued = 0;
     const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["b.md", "live.md"], "b.md")),
+      Promise.resolve({
+        ...storedStateWithTabs(["b.md", "live.md"], "b.md"),
+        chatsVisible: false,
+      }),
     );
     bridge.listWorkspaceFiles = vi.fn(() =>
       ++issued === 1 ? older.promise : newer.promise,
@@ -7046,7 +6666,11 @@ describe("ui-state merge-on-load", () => {
     renderShell(bridge);
 
     // A second listing is issued while the first is still in flight.
-    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+      expect(screen.getByTestId("tab-live.md")).toBeTruthy();
+    });
     act(() => {
       bridge.emitWorkspaceActivity();
     });
@@ -8631,125 +8255,11 @@ describe("active file sharing", () => {
   });
 });
 
-// The banner states the level's real rights. PR2 opens chat at comment
-// and edit; edit's document writes land in PR3, so edit reads the comment
-// sentence until then — a banner promising editing now would be a lie.
+// The banner distinguishes document edits submitted for acceptance from
+// read-only access and conversations that continue in the browser.
 // Removing a mount reprojects path-keyed UI state only when the folder
 // actually went. Record-only cleanup leaves the files exactly where they
 // were, so their tabs, pins and drafts must survive it.
-// The closing line a manual refresh leaves behind. Damage has to reach it:
-// reporting damage in a separate notice meant the summary replaced it, and
-// the user was left with "Shares refreshed" — the wrong half.
-describe("share refresh summary", () => {
-  const row = (over: Partial<{ label: string; status: string; changedPaths: number }>) => ({
-    label: "alex",
-    status: "updated" as const,
-    changedPaths: 0,
-    ...over,
-  }) as Parameters<typeof shareRefreshSummary>[0][number];
-
-  it("states damage and how to fix it, alongside the refresh result", () => {
-    const summary = shareRefreshSummary([
-      row({ label: "kim", changedPaths: 2 }),
-      row({ label: "alex", status: "damaged" }),
-    ]);
-    expect(summary).toContain("Shares refreshed — 2 files updated.");
-    expect(
-      summary,
-      "the summary replaces the damage notice and the fix is lost",
-    ).toContain("dohc can't read what alex grants. Remove it and add the share again.");
-    expect(summary).not.toContain("grant.");
-  });
-
-  it("says nothing about damage when every mount is healthy", () => {
-    const summary = shareRefreshSummary([row({ changedPaths: 1 })]);
-    expect(summary).toBe("Shares refreshed — 1 file updated.");
-    expect(summary).not.toContain("can't read");
-  });
-
-  it("keeps the ended report when damage is present too", () => {
-    const summary = shareRefreshSummary([
-      row({ label: "kim", status: "ended" }),
-      row({ label: "alex", status: "damaged" }),
-      row({ label: "sam", status: "damaged" }),
-    ]);
-    expect(summary).toContain("kim ended");
-    // Plural subjects take the plural verb; the singular case keeps "grants".
-    expect(
-      summary,
-      "two shares reading as one — \"what alex, sam grants\"",
-    ).toContain("what alex, sam grant. Remove them and add those shares again.");
-  });
-
-  it("says so when there is nothing to refresh", () => {
-    expect(shareRefreshSummary([])).toBe("No shares are added to this workspace.");
-  });
-});
-
-describe("share unmount projection", () => {
-  it("reprojects like a folder delete when the folder went", () => {
-    expect(
-      shareUnmountProjection({
-        shareId: "share-1",
-        label: "alex",
-        folderLeft: false,
-      }),
-    ).toEqual([
-      {
-        id: "unmount-share-1",
-        kind: "delete-folder",
-        path: "shared-with-me/alex",
-      },
-    ]);
-  });
-
-  // Both removal surfaces funnel here. The Explorer records the share id
-  // itself; Settings reports it through the files-changed callback. Either
-  // way the reload must not delete state for files still on disk.
-  it("skips a vanished mount whose folder stayed, whichever surface removed it", () => {
-    const previous = [
-      { shareId: "s-gone", label: "alex" },
-      { shareId: "s-left", label: "sam" },
-      { shareId: "s-stays", label: "kim" },
-    ];
-    const next = [{ shareId: "s-stays" }];
-    const foldersLeftBehind = new Set(["s-left"]);
-
-    expect(
-      goneMountProjections({ previous, next, foldersLeftBehind }),
-      "projecting a delete for a mount whose folder is still there",
-    ).toEqual([
-      {
-        id: "unmount-s-gone",
-        kind: "delete-folder",
-        path: "shared-with-me/alex",
-      },
-    ]);
-    // Consumed, so an unrelated later reload cannot read a stale exemption.
-    expect(foldersLeftBehind.has("s-left")).toBe(false);
-  });
-
-  it("projects nothing when nothing vanished", () => {
-    expect(
-      goneMountProjections({
-        previous: [{ shareId: "s-1", label: "alex" }],
-        next: [{ shareId: "s-1" }],
-        foldersLeftBehind: new Set(),
-      }),
-    ).toEqual([]);
-  });
-
-  it("projects nothing when the folder stayed", () => {
-    expect(
-      shareUnmountProjection({
-        shareId: "share-1",
-        label: "alex",
-        folderLeft: true,
-      }),
-      "deleting path-keyed state for files that are still on disk",
-    ).toEqual([]);
-  });
-});
 describe("shared view banner", () => {
   it("does not offer app creation in a received share workspace", async () => {
     const user = userEvent.setup();
@@ -10189,7 +9699,7 @@ describe("explorer destructive change flush boundaries", () => {
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toBe(lateDraft),
     );
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Removing the tab awaited draft settlement; recovery now holds the late text.
     expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2);
   });
 
@@ -14314,75 +13824,6 @@ describe("versions surface after a failed capture build", () => {
   });
 });
 
-// A capability flag is not a count. Whatever main established about the
-// RECORDER, none of it establishes that no version exists: versions live on
-// disk and outlive a session whose capture failed to build, an engine the
-// user switched off, and a settings file dohc could not read. The compare tab
-// has no count to read, so it may never claim absence.
-describe("version-compare off copy", () => {
-  const base = {
-    state: "synced" as const,
-    pendingChangeCount: 0,
-    lastSyncedAtMs: null,
-    liveSessionsGeneration: 0,
-    historyRecordingUnavailable: false,
-    historyShareView: false,
-  };
-
-  it("calls a failed capture build unavailable, never empty", () => {
-    // the cause.
-    const copy = versionCompareOffCopy({
-      ...base,
-      historyRecordingUnavailable: true,
-    });
-    expect(copy).toBe(
-      "dohc could not open versions for this workspace. Your files still save normally. Restart dohc to try again.",
-    );
-    expect(copy).not.toContain("no versions");
-  });
-
-  it("claims nothing when main established nothing", () => {
-    // The renderer's own read failed. It proves nothing either way.
-    const copy = versionCompareOffCopy(base);
-    expect(copy).toContain("dohc could not confirm whether this workspace has versions.");
-    expect(copy).not.toContain("no versions");
-  });
-});
-
-// The same rule on the Chats surfaces. Whatever main established about
-// the RECORDER, none of it establishes that no chat exists: chats live on disk
-// and outlive a session whose capture failed to build, an engine the user
-// switched off, and a settings file dohc could not read.
-describe("chats off copy", () => {
-  const base = {
-    state: "synced" as const,
-    pendingChangeCount: 0,
-    lastSyncedAtMs: null,
-    liveSessionsGeneration: 0,
-    historyRecordingUnavailable: false,
-    historyShareView: false,
-  };
-
-  it("calls a failed capture build unavailable, never empty", () => {
-    // the cause.
-    const copy = chatsOffCopy({
-      ...base,
-      historyRecordingUnavailable: true,
-    });
-    expect(copy).toBe(
-      "dohc could not open chats for this workspace. Your files still save normally. Restart dohc to try again.",
-    );
-    expect(copy).not.toContain("no chats");
-  });
-
-  it("claims nothing when main established nothing", () => {
-    // The renderer's own read failed. It proves nothing either way.
-    const copy = chatsOffCopy(base);
-    expect(copy).toContain("dohc could not confirm whether this workspace has chats.");
-    expect(copy).not.toContain("no chats");
-  });
-});
-
 // #615 pinned that a shared view gets no capture, so main refused every chat
 // call and the panel, the tab and the titlebar button all offered a capability
 // the share never had. #646 PR2 moves the line: main now answers the PER-FILE
@@ -15692,16 +15133,6 @@ describe("settings entry points", () => {
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
   });
 
-  it("opens settings from the status bar context menu", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.showWorkbenchMenu.mockResolvedValue("settings");
-    renderShell(bridge);
-
-    fireEvent.contextMenu(await screen.findByTestId("status-workspace"));
-
-    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
-  });
-
   it("opens settings from the command palette and menu command", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
@@ -16184,6 +15615,7 @@ describe("set-aside draft recovery", () => {
     );
     let switched = false;
     let refreshFailed = false;
+    const recovery = deferred();
     bridge.listWorkspaceVersions = vi.fn(async () => {
       // The switch's OWN refresh fails; the catch path's recovery read then
       // succeeds and reports the version the switch already announced. That
@@ -16192,6 +15624,7 @@ describe("set-aside draft recovery", () => {
         refreshFailed = true;
         throw new Error("selector refresh failed");
       }
+      if (switched) await recovery.promise;
       return {
         versions: [
           {
@@ -16227,24 +15660,42 @@ describe("set-aside draft recovery", () => {
       onEngineYDocSaveState,
       onEngineYDocLineageReplacement,
     });
-    renderShell(bridge);
-    await screen.findByTestId("view-markdown");
-    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
+    try {
+      renderShell(bridge);
+      await screen.findByTestId("view-markdown");
+      await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
 
-    await user.click(await screen.findByTestId("version-menu-button"));
-    const item = (await screen.findAllByTestId("version-item")).find(
-      (candidate) => candidate.dataset.versionId === "v2",
-    );
-    await user.click(item!);
-    await waitFor(() =>
-      expect(bridge.switchWorkspaceVersion).toHaveBeenCalled(),
-    );
+      await user.click(await screen.findByTestId("version-menu-button"));
+      const item = (await screen.findAllByTestId("version-item")).find(
+        (candidate) => candidate.dataset.versionId === "v2",
+      );
+      await user.click(item!);
+      await waitFor(() =>
+        expect(bridge.switchWorkspaceVersion).toHaveBeenCalled(),
+      );
 
-    // The switch landed, so the reopen it announced is the right one.
-    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
-
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // The switch landed, so the reopen it announced is the right one.
+      await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
+      await waitFor(() => {
+        expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+          "selector refresh failed",
+        );
+        expect(
+          (screen.getByTestId("version-menu-button") as HTMLButtonElement).disabled,
+        ).toBe(true);
+      });
+    } finally {
+      await act(async () => {
+        recovery.resolve();
+        await recovery.promise;
+      });
+    }
+    // Recovery has finished when the selector leaves its busy state.
+    await waitFor(() => {
+      expect(
+        (screen.getByTestId("version-menu-button") as HTMLButtonElement).disabled,
+      ).toBe(false);
+      expect(screen.getByTestId("version-menu-active").textContent).toBe("Draft two");
     });
     expect(openEngineYDocSession).toHaveBeenCalledTimes(2);
   });
@@ -16528,6 +15979,8 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+
     vi.useFakeTimers();
     try {
       const listings = bridge.listWorkspaceFiles.mock.calls.length;
@@ -16629,6 +16082,8 @@ describe("workbench render cost", () => {
     const bridge = makeBridge(Promise.resolve(null));
     renderShell(bridge);
     await screen.findAllByTestId("tree-row");
+
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
