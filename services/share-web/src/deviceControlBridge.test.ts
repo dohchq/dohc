@@ -89,6 +89,43 @@ it("supplies its configured exchange key and forwards no caller internal headers
   await fixture.closed;
 });
 
+it("forwards known transport controls then binary segments in both directions with heartbeat", async () => {
+  const fixture = await setup({ heartbeatIntervalMs: 10_000, heartbeatTimeoutMs: 10_000 });
+  await fixture.register();
+  const start = { type: "liveHost.start", version: 1, relayNamespace: "relay", authToken: "A".repeat(43),
+    host: { hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection" } };
+  const startReceived = once(fixture.device, "message");
+  fixture.upstream()!.send(JSON.stringify(start));
+  expect(JSON.parse(String((await startReceived)[0]))).toEqual(start);
+  const transportReceived = once(fixture.upstream()!, "message");
+  fixture.device.send(JSON.stringify({ type: "liveHost.transport", version: 1 }));
+  expect(JSON.parse(String((await transportReceived)[0]))).toEqual({ type: "liveHost.transport", version: 1 });
+  const received = once(fixture.device, "message");
+  fixture.upstream()!.send(Buffer.from("DOP1 segment"));
+  const [bytes, binary] = await received;
+  expect(binary).toBe(true); expect(String(bytes)).toBe("DOP1 segment");
+  const returned = once(fixture.upstream()!, "message");
+  fixture.device.send(Buffer.from("native segment"));
+  expect(String((await returned)[0])).toBe("native segment");
+  const pong = once(fixture.upstream()!, "pong");
+  fixture.upstream()!.ping(Buffer.from("still alive"));
+  expect(String((await pong)[0])).toBe("still alive");
+});
+
+it.each(["early-device", "early-relay", "duplicate-start", "unknown-device"])("refuses invalid document transport ordering: %s", async mode => {
+  const fixture = await setup();
+  await fixture.register();
+  if (mode === "early-device") fixture.device.send(Buffer.from("DOP1"));
+  if (mode === "early-relay") fixture.upstream()!.send(Buffer.from("DOP1"));
+  if (mode === "unknown-device") fixture.device.send(JSON.stringify({ type: "liveHost.transport", version: 1 }));
+  if (mode === "duplicate-start") {
+    const start = JSON.stringify({ type: "liveHost.start", version: 1, relayNamespace: "relay", authToken: "A".repeat(43),
+      host: { hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection" } });
+    fixture.upstream()!.send(start); fixture.upstream()!.send(start);
+  }
+  await fixture.closed;
+});
+
 it("cancels the internal pending handshake when the outbound device leaves", async () => {
   const fixture = await setup({ handshakeTimeoutMs: 60_000 });
   const socketClosed = once(fixture.rawSocket(), "close");
