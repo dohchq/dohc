@@ -34,7 +34,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-const MAX_OPEN_HANDLES: usize = 64;
+pub(super) const MAX_OPEN_HANDLES: usize = 64;
 
 pub(crate) struct OpenWorkspace {
     pub(super) root: PathBuf,

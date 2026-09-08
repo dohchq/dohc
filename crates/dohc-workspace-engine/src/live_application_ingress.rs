@@ -169,6 +169,33 @@ struct Reservation {
     _upload: OwnedSemaphorePermit,
 }
 
+#[derive(Clone)]
+pub(crate) struct SettlementAdmission {
+    budget: Arc<Semaphore>,
+    slots: Arc<Semaphore>,
+    bytes: u32,
+}
+
+impl SettlementAdmission {
+    pub(crate) fn reserve(&self) -> Result<Arc<dyn Send + Sync>, WireError> {
+        let overloaded = || WireError::new(ErrorCode::Overloaded, "live-settlement-capacity");
+        let upload = self
+            .slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| overloaded())?;
+        let bytes = self
+            .budget
+            .clone()
+            .try_acquire_many_owned(self.bytes)
+            .map_err(|_| overloaded())?;
+        Ok(Arc::new(Reservation {
+            _bytes: bytes,
+            _upload: upload,
+        }))
+    }
+}
+
 /// Configured by the owning daemon host. Ordinary daemon startup leaves it off.
 pub struct LiveApplicationIngress {
     service: Arc<EngineService>,
@@ -180,6 +207,30 @@ pub struct LiveApplicationIngress {
 }
 
 impl LiveApplicationIngress {
+    pub(crate) fn settlement_admission(
+        &self,
+        max_applications: usize,
+    ) -> Result<SettlementAdmission, WireError> {
+        // Receipt strings, their serialized audit identities, and cold Y.Doc projection
+        // stay charged to the same admission budget as incoming applications.
+        let bytes = max_applications
+            .checked_mul(8192)
+            .and_then(|bytes| bytes.checked_add(self.config.application_working_reserve_bytes))
+            .and_then(|bytes| bytes.checked_add(MAX_HEADER_BYTES * 3))
+            .filter(|bytes| {
+                max_applications > 0
+                    && self.config.application_working_reserve_bytes > 0
+                    && *bytes <= self.config.aggregate_bytes
+            })
+            .and_then(|bytes| u32::try_from(bytes).ok())
+            .ok_or_else(|| invalid("invalid-live-settlement-budget"))?;
+        Ok(SettlementAdmission {
+            budget: self.budget.clone(),
+            slots: self.upload_slots.clone(),
+            bytes,
+        })
+    }
+
     pub fn new(
         service: Arc<EngineService>,
         config: LiveApplicationIngressConfig,
@@ -492,6 +543,38 @@ fn overloaded() -> WireError {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[tokio::test]
+    async fn settlement_shares_ingress_slots_and_keeps_its_reservation_until_disposal() {
+        let (_scratch, service, _owner, workspace, _, _) = fixture().await;
+        let ingress = LiveApplicationIngress::new(service.clone(), config()).unwrap();
+        assert!(ingress.settlement_admission(0).is_err());
+        assert!(ingress.settlement_admission(usize::MAX).is_err());
+        let capacity = ingress.budget.available_permits();
+        let admission = ingress.settlement_admission(4).unwrap();
+        let first = admission.reserve().unwrap();
+        let second = admission.reserve().unwrap();
+        assert!(admission.reserve().is_err());
+        assert!(ingress.budget.available_permits() < capacity);
+        assert_eq!(ingress.upload_slots.available_permits(), 0);
+        drop(first);
+        assert_eq!(ingress.upload_slots.available_permits(), 1);
+        drop(second);
+        assert_eq!(ingress.budget.available_permits(), capacity);
+        service
+            .call(
+                RequestContext::unbounded(),
+                Request {
+                    id: 100,
+                    method: "workspace.close".into(),
+                    workspace: Some(dohc_engine_protocol::wire::WorkspaceHandle(workspace)),
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    params: serde_json::Value::Null,
+                },
+            )
+            .await
+            .unwrap();
+    }
     use super::*;
     use crate::LiveApplicationHostConfig;
     use dohc_engine_collab::live_object_binding::LiveObjectBinding;

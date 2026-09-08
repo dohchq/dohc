@@ -117,13 +117,15 @@ The transport has no default limits.
 | --- | --- |
 | `maxConnections` | Active connections and pending upgrades per service |
 | `maxHeaderBytes`, `maxCredentialBytes` | Raw header bytes and encoded Authorization bytes |
-| `maxPayloadBytes`, `maxPendingBytes` | Control message bytes and queued socket bytes |
+| `maxPayloadBytes`, `maxPendingBytes` | Message bytes and queued socket bytes; also bound document transport segments and in-flight bytes |
 | `maxFragments`, `maxBufferedChunks` | WebSocket receiver fragments and buffered chunks |
 | `handshakeTimeoutMs` | Time to receive registration |
 | `heartbeatIntervalMs`, `heartbeatTimeoutMs` | Relay ping interval and device pong deadline |
 | `closeTimeoutMs` | Time allowed for socket closure |
 
 `maxPendingBytes` must exceed `maxPayloadBytes` by at least 16 bytes for frame headers.
+Document throughput also depends on this window. A one-segment window waits for
+each credit reply; size it for the intended bandwidth and round-trip delay.
 `maxCredentialBytes` must not exceed `maxHeaderBytes`.
 Each value and the combined heartbeat interval and deadline must fit a signed 32-bit integer.
 These transport bounds do not select document admission or capacity limits.
@@ -167,6 +169,72 @@ Credential maintenance requires the running relay to stop and release deployment
 ownership. After revocation, the next relay process refuses the revoked
 credential. A runtime continuity failure closes active device connections before
 the storage owner releases its lock.
+
+The optional `--delivery-config` file enables the configured native document host.
+It must include a positive integer `shutdownGraceMs`. On disconnect, the connector
+closes native stdin and drains stdout. After that grace period, it sends `SIGTERM`.
+If the child remains alive for another grace period, it sends `SIGKILL`.
+On Windows, the first signal already terminates the child.
+The connector waits for child stdio to close before reporting shutdown.
+
+The delivery configuration accepts an optional `settlement` field:
+`{maxApplicationsPerSettlement}`. Supply a positive integer for this limit.
+When settlement is configured, `ingress.applicationWorkingReserveBytes` must be positive.
+
+Document transport advertises the configured receive limits in its startup messages.
+The bridge reduces each advertisement to its own limits. Senders retain bounded queues
+and wait for byte credit when the receiver is full. Byte credit reports consumed
+transport bytes; durable document acknowledgements still come from the native engine.
+
+## Configured service-host integration
+
+This private integration applies the relay's committed journal through a dedicated
+engine daemon. It has no public editing route or shipping capacity defaults.
+
+Stop the relay before initial provisioning. Run
+`pnpm --filter @dohc/sync-relay deployment provision-service --config ABSOLUTE_DEPLOYMENT_CONFIG --host-id HOST_ID`.
+The command preserves a matching provision. It refuses a different host or device mode.
+
+Set `DOHC_RELAY_SERVICE_HOST_CONFIG` to an absolute, canonical JSON file path.
+The file accepts these fields; all except `settlement` are required. Unknown fields are refused:
+
+| Field | Value |
+| --- | --- |
+| `version` | `1` |
+| `engineExecutable` | Absolute canonical path to the configured-host engine executable |
+| `hostId` | The provisioned service host ID |
+| `instanceId` | A stable operator-assigned instance ID, reused after restart |
+| `workspaces` | Nonempty array of `{root, workspaceId, maxRegistrations}` |
+| `ingress` | `{aggregateBytes, applicationWorkingReserveBytes, maxUploads, uploadDeadlineMs}` for the daemon |
+| `client` | `{aggregateBytes, maxUploads, connectTimeoutMs, requestDeadlineMs}` for the relay client |
+| `settlement` | Optional `{maxApplicationsPerSettlement}` with a positive integer limit |
+
+Each root must be an existing canonical directory with the intended workspace
+identity and main version initialized through the engine. Use dedicated service
+roots. Do not point this integration at an active desktop workspace.
+Workspace IDs and roots must be unique. Supply positive safe integers for limits;
+the application working reserve may be zero only when settlement is absent. Client budgets must also
+meet the existing protocol's minimum upload allocation.
+
+Startup verifies the daemon's namespace, host, and workspace handles before
+opening admission. Shutdown closes the child before relay storage. A retired
+connection cannot disconnect its replacement. Keep the instance ID across
+restarts. This command cannot replace an instance at its current host epoch.
+
+### Verify configured hosts
+
+Use the configured-host executable and its repository verification build receipt.
+Supply absolute paths to the executable and `.dohc-dev/verification/build.json` from that build:
+
+```sh
+pnpm verify:configured-hosts --binary ABSOLUTE_ENGINE_PATH --build-receipt ABSOLUTE_BUILD_JSON
+```
+
+The command checks the executable hash and native source against the receipt's engine hash and commit.
+It builds the relay connector, then runs the service and outbound TLS device proofs sequentially.
+Each proof covers settlement and restart recovery. The device proof also covers a lost acknowledgement and connection replacement.
+Results and process logs remain in `.agent-artifacts/configured-hosts`.
+The command does not build Rust or select a default executable.
 
 ## Reserved later-phase deployment work
 

@@ -15,6 +15,8 @@
 //!   [`supervisor::WorkspaceSupervisor`] dedups on it and never holds its lock
 //!   across the blocking open; [`WorkspaceSupervisor::global`] makes the
 //!   guarantee process-wide.
+//!   New actors refuse multiply-linked databases because SQLite's WAL follows
+//!   the opened filename. Aliases of an existing actor reuse its connection.
 //! - **Explicit lifecycle + deterministic Drop.** `open → ready → draining →
 //!   closed`; dropping an actor or the supervisor joins the worker and releases
 //!   the connection — no detached task outlives its owner, and a panicking

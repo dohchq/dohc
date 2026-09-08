@@ -174,6 +174,18 @@ impl WorkspaceActor {
         now_ms: i64,
         read_only: bool,
     ) -> Result<Self, RuntimeError> {
+        let writer_lock = if read_only {
+            let file = std::fs::File::open(&db_path).map_err(|error| RuntimeError::Identity {
+                reason: "could not inspect workspace database links",
+                source: Some(error),
+            })?;
+            require_single_database_link(&file)?;
+            None
+        } else {
+            let lock = acquire_writer_lock(&db_path)?;
+            require_single_database_link(&lock)?;
+            Some(lock)
+        };
         let (tx, rx) = mpsc::channel::<Command>(CHANNEL_CAPACITY);
         // Reserve the dedicated Close slot up front (the channel is empty, so
         // this cannot fail); `close` sends through it without contending with
@@ -187,7 +199,17 @@ impl WorkspaceActor {
         let worker_state = Arc::clone(&state);
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
-            .spawn(move || worker_main(db_path, now_ms, read_only, rx, worker_state, startup_tx))
+            .spawn(move || {
+                worker_main(
+                    db_path,
+                    now_ms,
+                    read_only,
+                    rx,
+                    worker_state,
+                    startup_tx,
+                    writer_lock,
+                )
+            })
             .map_err(RuntimeError::ThreadSpawn)?;
 
         match startup_rx.recv() {
@@ -381,6 +403,7 @@ fn worker_main(
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
     startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
+    writer_lock: Option<WriterLock>,
 ) {
     // Publish Closed on any exit — normal return OR a panic unwind (e.g. a
     // panicking fault injector). Declared before `store` so `store` (and its
@@ -394,6 +417,8 @@ fn worker_main(
         }
     }
     let _closed_guard = ClosedGuard(Arc::clone(&state));
+    // Drop SQLite first, then its owner lock, then publish Closed, including unwind.
+    let _writer_lock = writer_lock;
 
     let mut store = match if read_only {
         EngineStore::open_read_only(&db_path)
@@ -449,6 +474,74 @@ fn worker_main(
     drop(store);
 }
 
+#[cfg(any(windows, target_vendor = "apple"))]
+type WriterLock = file_guard::FileGuard<Box<std::fs::File>>;
+#[cfg(not(any(windows, target_vendor = "apple")))]
+type WriterLock = std::fs::File;
+
+fn require_single_database_link(file: &std::fs::File) -> Result<(), RuntimeError> {
+    #[cfg(windows)]
+    let count = winapi_util::file::information(file).map(|info| info.number_of_links());
+    #[cfg(unix)]
+    let count = {
+        use std::os::unix::fs::MetadataExt;
+        file.metadata().map(|metadata| metadata.nlink())
+    };
+    let count = count.map_err(|error| RuntimeError::Identity {
+        reason: "could not inspect workspace database links",
+        source: Some(error),
+    })?;
+    // SQLite's WAL name follows the opened path. A second hard link can miss
+    // acknowledged writes left in the first path's WAL after a process crash.
+    if count != 1 {
+        return Err(RuntimeError::WorkspaceHardlinked);
+    }
+    Ok(())
+}
+
+fn acquire_writer_lock(db_path: &std::path::Path) -> Result<WriterLock, RuntimeError> {
+    // Lock the physical database: hard links can have different canonical paths.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(db_path)
+        .map_err(|error| RuntimeError::Identity {
+            reason: "could not open workspace writer lock",
+            source: Some(error),
+        })?;
+    #[cfg(any(windows, target_vendor = "apple"))]
+    {
+        // One byte beyond SQLite's maximum database size and its locking bytes.
+        // Windows LockFileEx and Darwin OFD locks survive unrelated file closes.
+        const OWNER_LOCK_OFFSET: usize = 1usize << 48;
+        file_guard::try_lock(
+            Box::new(file),
+            file_guard::Lock::Exclusive,
+            OWNER_LOCK_OFFSET,
+            1,
+        )
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::WouldBlock => RuntimeError::WorkspaceOwned,
+            _ => RuntimeError::Identity {
+                reason: "could not acquire workspace writer lock",
+                source: Some(error),
+            },
+        })
+    }
+    #[cfg(not(any(windows, target_vendor = "apple")))]
+    {
+        // Linux local flock locks do not overlap SQLite's POSIX record locks.
+        fs4::FileExt::try_lock(&file).map_err(|error| match error {
+            fs4::TryLockError::WouldBlock => RuntimeError::WorkspaceOwned,
+            fs4::TryLockError::Error(error) => RuntimeError::Identity {
+                reason: "could not acquire workspace writer lock",
+                source: Some(error),
+            },
+        })?;
+        Ok(file)
+    }
+}
+
 #[cfg(test)]
 mod saturation_tests {
     use super::*;
@@ -458,6 +551,41 @@ mod saturation_tests {
     use std::task::Poll;
     use std::time::{Duration, Instant};
     use tokio::sync::Semaphore;
+
+    #[test]
+    fn writer_lock_survives_sqlite_descriptor_close_and_hard_link_aliases() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = engine_db_path(&scratch).expect("database path");
+        EngineDbIdentity::resolve_or_create(&db).expect("identity");
+        let alias = db.with_file_name("alias.db");
+        std::fs::hard_link(&db, &alias).expect("hard link");
+        let owner = acquire_writer_lock(&db).expect("owner");
+        // Both a SQLite connection and an independent File open/close must
+        // leave the owner's lock intact. POSIX process locks fail this test.
+        drop(EngineStore::open(&db, 1).expect("SQLite opens under owner lock"));
+        drop(EngineStore::open_read_only(&db).expect("read-only SQLite opens"));
+        drop(std::fs::File::open(&alias).expect("independent descriptor"));
+        assert!(matches!(
+            acquire_writer_lock(&alias),
+            Err(RuntimeError::WorkspaceOwned)
+        ));
+        drop(owner);
+        drop(acquire_writer_lock(&alias).expect("release permits alias owner"));
+    }
+
+    #[test]
+    fn a_new_read_only_actor_refuses_a_hardlinked_database() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = engine_db_path(&scratch).expect("database path");
+        drop(EngineStore::open(&db, 1).expect("database"));
+        let alias = db.with_file_name("alias.db");
+        std::fs::hard_link(&db, &alias).expect("hard link");
+        let identity = EngineDbIdentity::of_existing(&alias).expect("identity");
+        assert!(matches!(
+            WorkspaceActor::spawn_read_only(alias, identity, 1),
+            Err(RuntimeError::WorkspaceHardlinked)
+        ));
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn close_returns_promptly_under_sustained_submission() {

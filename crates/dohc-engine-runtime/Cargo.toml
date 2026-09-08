@@ -24,6 +24,7 @@ dohc-engine-files = { path = "../dohc-engine-files" }
 # value. Encapsulates the platform FFI so the engine crates keep
 # forbid(unsafe_code).
 file-id = "0.2"
+fs4 = "1"
 thiserror = "2"
 # R12 search composes its FTS/policy SQL against the connection the storage core
 # hands it (via read_with/write_with), same seam the versioning/chat domains use.
@@ -38,6 +39,12 @@ tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
 # Cooperative cancellation tree: session/deadline cancellation
 # is checked BETWEEN bounded units, never inside a transaction.
 tokio-util = "0.7"
+
+[target.'cfg(any(windows, target_vendor = "apple"))'.dependencies]
+file-guard = "=0.2.0"
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "=0.1.11"
 
 [dev-dependencies]
 dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }

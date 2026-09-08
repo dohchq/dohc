@@ -524,6 +524,7 @@ fn engine_files(scratch: &ScratchDir) -> Vec<String> {
 /// A fresh root whose binding is malformed refuses with the binding's
 /// cause, both times, and leaves no engine.db behind to turn the second
 /// open into a mismatch.
+/// A refused open leaves no engine store behind.
 #[tokio::test]
 async fn a_fresh_root_with_a_malformed_binding_refuses_twice_and_keeps_no_store() {
     let scratch = ScratchDir::new().expect("scratch");

@@ -46,6 +46,15 @@ interface PrivateLiveApplicationConfig {
   readonly maxUploads: number;
 }
 
+function capturePrivateLiveApplicationConfig(value: PrivateLiveApplicationConfig | undefined): PrivateLiveApplicationConfig | undefined {
+  if (value === undefined) return undefined;
+  const { aggregateBytes, maxUploads } = value;
+  if (!Number.isSafeInteger(aggregateBytes) || aggregateBytes <
+    MAX_LIVE_UPDATE_BYTES + Math.floor((MAX_LIVE_UPDATE_BYTES - 2) / 5) * PACKED_LIVE_RANGE_BYTES + 3 * 1024 * 1024 ||
+    !Number.isSafeInteger(maxUploads) || maxUploads < 1) throw new TypeError("Invalid private live-application budget.");
+  return Object.freeze({ aggregateBytes, maxUploads });
+}
+
 interface LiveApplicationRequest {
   id: number;
   workspace: string;
@@ -573,6 +582,7 @@ export interface EngineClientSpawnOptions {
   authToken: string;
   protocolVersion: number;
   capabilities: string[];
+  privateLiveApplication?: PrivateLiveApplicationConfig;
   connectTimeoutMs?: number;
   maxFrameBytes?: number;
   maxBlobChunkBytes?: number;
@@ -674,19 +684,7 @@ export class EngineClient implements EngineTransport {
       connection.close(),
     private readonly termination: Promise<void> = Promise.resolve(),
   ) {
-    this.liveConfig = connectOptions.privateLiveApplication;
-    if (
-      this.liveConfig &&
-      (!Number.isSafeInteger(this.liveConfig.aggregateBytes) ||
-        this.liveConfig.aggregateBytes <
-          MAX_LIVE_UPDATE_BYTES +
-            Math.floor((MAX_LIVE_UPDATE_BYTES - 2) / 5) *
-              PACKED_LIVE_RANGE_BYTES +
-            3 * 1024 * 1024 ||
-        !Number.isSafeInteger(this.liveConfig.maxUploads) ||
-        this.liveConfig.maxUploads < 1)
-    )
-      throw new TypeError("Invalid private live-application budget.");
+    this.liveConfig = capturePrivateLiveApplicationConfig(connectOptions.privateLiveApplication);
     this.maxFrameBytes =
       connectOptions.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
     if (
@@ -1886,11 +1884,14 @@ export class DuplexEngineClientConnection implements EngineClientConnection {
 export async function createEngineClient(
   options: EngineClientSpawnOptions,
 ): Promise<EngineClient> {
+  // Reject invalid host budgets before creating a process.
+  options = { ...options, privateLiveApplication: capturePrivateLiveApplicationConfig(options.privateLiveApplication) };
   const child = spawn(options.command, options.args ?? [], {
     ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
     env: {
       ...process.env,
       ...options.env,
+      DOHC_ENGINE_LIVE_HOST_CONFIG: options.env?.DOHC_ENGINE_LIVE_HOST_CONFIG,
       [ENGINE_AUTH_TOKEN_ENV]: options.authToken,
     },
     stdio: ["pipe", "pipe", "pipe"],

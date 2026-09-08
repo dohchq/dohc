@@ -132,6 +132,8 @@ async function spawnRunningRelay(
     env: {
       ...process.env,
       DOHC_RELAY_DEPLOYMENT_CONFIG: undefined,
+      DOHC_RELAY_SERVICE_HOST_CONFIG: undefined,
+      DOHC_RELAY_DEVICE_DELIVERY_CONFIG: undefined,
       NODE_ENV: "test",
       SYNC_RELAY_TEST_AUTH: "1",
       SYNC_RELAY_PORT: "0",
@@ -363,6 +365,15 @@ async function settleWithin<T>(
 }
 
 describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
+
+  it("ignores inherited device-delivery config in an isolated relay child", async () => {
+    vi.stubEnv("DOHC_RELAY_DEVICE_DELIVERY_CONFIG", "inherited-device-delivery-must-not-open.json");
+    try {
+      const root = await tempRoot("inherited-device-delivery");
+      const relay = await spawnRunningRelay(join(root, "relay.sqlite"));
+      expect(relay.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:/);
+    } finally { vi.unstubAllEnvs(); }
+  });
 
   it("shuts down promptly when no responses are active", async () => {
     const relayRoot = await tempRoot("relay-quiet-shutdown");
@@ -795,7 +806,7 @@ async function spawnRelayExpectExit(
   envOverrides: Record<string, string | undefined>,
 ): Promise<{ code: number | null; stderr: string }> {
   const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries({ ...process.env, DOHC_RELAY_DEPLOYMENT_CONFIG: undefined, ...envOverrides })) {
+  for (const [key, value] of Object.entries({ ...process.env, DOHC_RELAY_DEPLOYMENT_CONFIG: undefined, DOHC_RELAY_SERVICE_HOST_CONFIG: undefined, DOHC_RELAY_DEVICE_DELIVERY_CONFIG: undefined, ...envOverrides })) {
     if (value !== undefined) env[key] = value;
   }
   const child = spawn(process.execPath, ["--import", "tsx/esm", "src/main.ts"], {
