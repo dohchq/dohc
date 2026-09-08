@@ -57,7 +57,29 @@ People are still learning how they want to work with agents. dohc should not fig
 
 If a folder and a capable agent can already do the job, dohc must earn its place by making that work materially easier to continue, understand, change, and share. Activity inside dohc is not success. Real work becoming easier is.
 
-For product proposals, read the [worked examples](docs/explanation/product-examples.md) to test the proposal against these commitments.
+## What dohc looks like in practice
+
+Use these examples to test product proposals. A feature can use dohc's vocabulary and still miss the product.
+
+### Plan a trip
+
+- ✅ **dohc.** A person works with an agent through files and chat, then builds the trip app they want. They share the app, files, and conversation with the group. The group and their agents can continue the same work from a phone or browser. dohc handles sync, identity, permissions, and history underneath. The trip is the work. Agent orchestration is only one possible means.
+- ❌ **Not dohc.** The person downloads a "travel team" template, configures agent roles and heartbeats, then accepts its prescribed workflow.
+
+### Build a project dashboard
+
+- ✅ **dohc.** An agent builds a source-backed web app in the workspace. The app reads and updates only the files and data its owner exposed. Collaborators can inspect and edit its source. Someone without dohc can open the published URL when they have access.
+- ❌ **Not dohc.** An artifact or dashboard generator emits detached HTML with no durable source, live data boundary, history, or collaborative path forward. A polished demo is not yet a workspace.
+
+### Share work in progress
+
+- ✅ **dohc.** A person shares the relevant part of a workspace with its files, data, app, chat, history, and declared dependencies. The recipient and their agent can inspect what happened and continue the same work without reconstructing its context.
+- ❌ **Not dohc.** The person exports a file, pastes an old chat, or sends a zip. The recipient must start again in another tool. Sharing should transfer continuity, not only bytes.
+
+### Tailor the workspace
+
+- ✅ **dohc.** A user asks an agent to create or change a source-visible plugin or app for their workflow. They can inspect it, fork it, and share it. The result can fit their work without forcing the same workflow on everyone else.
+- ❌ **Not dohc.** dohc ships a hardcoded CRM, requires a project ritual, or becomes a template marketplace. dohc supplies reliable building blocks. Users and agents decide what to build.
 
 ## Product invariants
 
@@ -89,12 +111,17 @@ Understand the constraint before building. Choose the smallest model that makes 
 - Treat approved behavior and design choices as the working baseline. Interpret feedback at the requested scope.
 - Preserve a recoverable comparison before a broad redesign.
 - When a direction is rejected, restore the affected change while preserving unrelated work. Carry the correction into subsequent work.
-- Record durable decisions in the relevant local guidance. Keep experimental values and the conversation history out of root instructions.
+- Update existing guidance for durable decisions. Keep experimental values and conversation history out of instructions.
 
 ### Finish the experience
 
 Craft includes layout, interaction, loading, failure, and recovery. Evaluate the complete experience, including transitions between states.
-For visual changes, inspect the rendered result at affected screen sizes and interaction states before calling the work complete.
+- Choose layouts for their content. Give comparisons enough room, with consistent spacing and varied composition.
+- For broad redesigns, develop one representative section before extending the treatment.
+- On the marketing site, reuse existing tokens and apply metallic depth selectively. Keep product demos recognizable as dohc.
+- Inspect affected layouts, both themes, keyboard access, reduced motion, loading transitions, and failure states in the browser.
+- Match preview and live visuals. Keep content useful while visuals load, and suspend animation offscreen.
+- Measure startup and interaction when changing rendering or loading. Judge the experience alongside automated performance scores.
 
 ## Documentation and writing
 
@@ -107,7 +134,7 @@ Use one name for one thing. [`CONTEXT.md`](CONTEXT.md) is the canonical term lis
 ## Where code lives
 
 - `apps/desktop` contains the Electron app. Most user-visible product work lands here.
-- `apps/site` contains the marketing site and product demo. For site work, read [its guidance](apps/site/AGENTS.md).
+- `apps/site` contains the marketing site and product demo.
 - `packages` contains shared TypeScript contracts, clients, tools, auth, and UI code.
 - `services` contains opt-in auth, sync relay, and SQLite services.
 - `crates` contains the Rust workspace engine and supporting crates. `dohc-workspace-engine` builds the daemon used by the desktop app.

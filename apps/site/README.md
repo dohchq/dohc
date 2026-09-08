@@ -21,8 +21,6 @@ Build with `pnpm --filter @dohc/site build`, then point any static host
 
 ## Design
 
-For site changes, read [AGENTS.md](AGENTS.md) for composition, interaction, and verification guidance.
-
 The site uses warm paper and graphite with selective metallic accents.
 [styles.css](styles.css) defines its font and material tokens. Headings use Source Serif 4;
 body text and labels use Inter; handwritten accents use Homemade Apple. These fonts are bundled locally.
