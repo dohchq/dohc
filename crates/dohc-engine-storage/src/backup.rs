@@ -489,10 +489,14 @@ mod tests {
             tx.execute("INSERT INTO live_device_settlements VALUES ('settlement','relay','workspace','main','object','lineage',0,1,0,1,1,?1,'moment',?1,?1,'{}','{}',0)",[&sha]).unwrap();
             let source=crate::hex_sha256(b"");
             tx.execute("INSERT INTO blobs(sha256,text,byte_length) VALUES (?1,'',0)",[&source]).unwrap();
+            tx.execute("INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES ('workspace','owner',0)",[]).unwrap();
+            tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,updated_at_ms) VALUES ('workspace','main','owner',0)",[]).unwrap();
+            tx.execute("INSERT INTO ydoc_owner_base_sources VALUES ('workspace','main','owner',?1,'owner.md','source',?2,0)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO live_owner_adoptions VALUES ('relay','adoption','workspace','main','owner',?1,'{}','source',?2,0,1,0,?1,?1,0,0,0,'null','{}',1000000,60000)",rusqlite::params![sha,source]).unwrap();
             Ok::<_, StorageError>(())
         }).unwrap();
         for (index, table) in [
+            "ydoc_owner_base_sources",
             "live_owner_adoptions",
             "live_device_bootstraps",
             "live_device_settlements",

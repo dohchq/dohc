@@ -630,12 +630,18 @@ impl EngineService {
         if requested_mode == WorkspaceOpenMode::Full
             && let Some(config) = self.ordinary_live_host.get()
         {
-            let store = dohc_engine_storage::EngineStore::open_read_only(&db_path)
-                .map_err(|error| map_runtime(dohc_engine_runtime::RuntimeError::Storage(error)))?;
-            let mismatch: bool = store.read_with(|conn| conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions a JOIN ydoc_docs d ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id AND d.lineage_claim_id=a.lineage_claim_id WHERE a.workspace_id=?1 AND (a.max_pending_bytes>?2 OR a.max_pending_age_ms>?3))",
-                rusqlite::params![params.workspace_id,config.owner_outbox.max_pending_bytes,config.owner_outbox.max_pending_age_ms],|row|row.get(0)
-            )).map_err(|error| WireError::new(ErrorCode::Internal,error.to_string()))?;
+            let budget_db_path = db_path.clone();
+            let budget_workspace_id = params.workspace_id.clone();
+            let owner_outbox = config.owner_outbox.clone();
+            let mismatch = tokio::task::spawn_blocking(move || {
+                let store = dohc_engine_storage::EngineStore::open_read_only(&budget_db_path)
+                    .map_err(|error| map_runtime(dohc_engine_runtime::RuntimeError::Storage(error)))?;
+                let mismatch: bool = store.read_with(|conn| conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions a JOIN ydoc_docs d ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id AND d.lineage_claim_id=a.lineage_claim_id WHERE a.workspace_id=?1 AND (a.max_pending_bytes>?2 OR a.max_pending_age_ms>?3))",
+                    rusqlite::params![budget_workspace_id,owner_outbox.max_pending_bytes,owner_outbox.max_pending_age_ms],|row|row.get(0)
+                )).map_err(|_| WireError::new(ErrorCode::Internal,"owner-outbox-budget-read-failed"))?;
+                Ok::<_, WireError>(mismatch)
+                }).await.map_err(|_| WireError::new(ErrorCode::Internal,"owner-outbox-budget-worker-failed"))??;
             if mismatch {
                 return Err(WireError::new(
                     ErrorCode::Conflict,

@@ -59,7 +59,13 @@ pub fn retain_owner_base_source_in_tx(
     if doc.has_missing_updates() {
         return Ok(false);
     }
-    let canonical = doc.project(ContentKind::Richdoc)?.content;
+    let canonical = match doc.project(ContentKind::Richdoc) {
+        Ok(projection) => projection.content,
+        Err(CollabError::ProjectionTooLarge { .. } | CollabError::ProjectionTooComplex { .. }) => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
     let projection = doc
         .preserved_markdown_source(&canonical)
         .unwrap_or(canonical);
@@ -114,6 +120,81 @@ mod tests {
                 &NoFaults,
             )
             .unwrap();
+    }
+
+    #[test]
+    fn projection_limits_decline_retention_without_rolling_back_local_work() {
+        use yrs::types::xml::XmlIn;
+        use yrs::{ReadTxn, StateVector, Transact, XmlElementPrelim, XmlFragment, XmlTextPrelim};
+
+        for oversized in [false, true] {
+            let raw = yrs::Doc::new();
+            let body = raw.get_or_insert_xml_fragment(crate::ydoc::ROOT_BODY);
+            let text = if oversized {
+                "x".repeat(crate::limits::MAX_PROJECTION_BYTES + 1)
+            } else {
+                "deep".into()
+            };
+            let mut child: XmlIn =
+                XmlElementPrelim::new("paragraph", [XmlIn::from(XmlTextPrelim::new(text))]).into();
+            if !oversized {
+                for _ in 0..=crate::limits::MAX_PROJECTION_DEPTH {
+                    child = XmlElementPrelim::new("blockquote", [child]).into();
+                }
+            }
+            body.push_back(&mut raw.transact_mut(), child);
+            let baseline = raw
+                .transact()
+                .encode_state_as_update_v1(&StateVector::default());
+            let doc = Ydoc::wire();
+            doc.apply(&baseline).unwrap();
+            match doc.project(ContentKind::Richdoc) {
+                Err(CollabError::ProjectionTooLarge { .. }) if oversized => {}
+                Err(CollabError::ProjectionTooComplex { .. }) if !oversized => {}
+                other => panic!("expected projection limit, got {other:?}"),
+            }
+            let scratch = dohc_test_scratch::ScratchDir::new_named("owner-source-limit").unwrap();
+            let mut store = EngineStore::open(&scratch.join("engine.db"), 0).unwrap();
+            VersionedTextStore::new(&mut store)
+                .ensure_main_version("workspace", "main", 0, &NoFaults)
+                .unwrap();
+            write(&mut store, "source", "source", 1);
+            let key = DocKey::new("workspace", "main", "object").unwrap();
+            durable::claim_base(
+                &mut store,
+                &key,
+                ContentKind::Richdoc,
+                &baseline,
+                &NoFaults,
+                2,
+            )
+            .unwrap();
+            let source = OwnerSeedSource {
+                moment_id: "source".into(),
+                blob_sha256: hex_sha256(b"source"),
+            };
+            let outcome = store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute("UPDATE ydoc_docs SET path='owner.md',updated_at_ms=3", [])
+                        .unwrap();
+                    retain_owner_base_source_in_tx(
+                        tx,
+                        &key,
+                        "owner.md",
+                        &hex_sha256(&baseline),
+                        &source,
+                    )
+                })
+                .unwrap();
+            assert!(matches!(outcome, TxnOutcome::Committed(false)));
+            assert_eq!(store.table_row_count("ydoc_owner_base_sources").unwrap(), 0);
+            let updated: i64 = store
+                .read_with(|conn| {
+                    conn.query_row("SELECT updated_at_ms FROM ydoc_docs", [], |row| row.get(0))
+                })
+                .unwrap();
+            assert_eq!(updated, 3);
+        }
     }
 
     #[test]
