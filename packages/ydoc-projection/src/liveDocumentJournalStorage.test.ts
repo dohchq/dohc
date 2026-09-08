@@ -8,6 +8,7 @@ import * as Y from 'yjs'
 import { parseHostEpoch } from '@dohc/live-session-contract/host-control'
 import { markdownToYDoc } from './import-export.js'
 import { journalMetadataBytes, liveDeliveryBookkeepingBytes, liveDeliveryEventReservationBytes } from './liveDeliveryQuotaTestSupport.js'
+import { liveBaselineStoredBytes } from './liveBaselineQuotaTestSupport.js'
 import { createLiveMarkdownRegistrationValidator, createLiveMarkdownJournalValidator } from './liveDocumentValidation.js'
 import { initializeRelayDeployment, openRelayDeployment } from '../../../services/sync-relay/src/relayDeployment.js'
 import { openSyncRelayStorage, type LiveUpdateJournalCommitInput } from '../../../services/sync-relay/src/storage.js'
@@ -155,7 +156,7 @@ it('charges wide actor selectors and provenance before committing within workspa
     expect(f.storage.commitLiveUpdateJournal(input).result.kind).toBe('accepted');
     const metadata = journalMetadataBytes(f.raw);
     expect(metadata).toBeGreaterThan(20_000);
-    expect(f.journalRows().usage).toBe(f.input.baselineBytes.byteLength + input.updateBytes.byteLength + metadata + liveDeliveryBookkeepingBytes(f.raw));
+    expect(f.journalRows().usage).toBe(liveBaselineStoredBytes(f.raw) + input.updateBytes.byteLength + metadata + liveDeliveryBookkeepingBytes(f.raw));
     const after = f.journalRows();
     expect(f.storage.commitLiveUpdateJournal(input).result).toMatchObject({ kind: 'accepted', replayed: true });
     expect(f.journalRows()).toEqual(after);
@@ -176,7 +177,7 @@ it.each(['owner', 'named'] as const)('commits real %s journal evidence, original
     expect(accepted.admitted?.metadata.firstSeen).toEqual(input.validation.evidence.candidate.ranges)
     const before = f.journalRows()
     expect(before.journal[0]!.validation_checkpoint_bytes).toBeNull()
-    expect(before.usage).toBe(f.input.baselineBytes.byteLength + input.updateBytes.byteLength + journalMetadataBytes(f.raw) + liveDeliveryBookkeepingBytes(f.raw))
+    expect(before.usage).toBe(liveBaselineStoredBytes(f.raw) + input.updateBytes.byteLength + journalMetadataBytes(f.raw) + liveDeliveryBookkeepingBytes(f.raw))
     for (const reopen of [false, true]) {
       const storage = reopen ? openSyncRelayStorage(f.path) : f.storage
       try {
@@ -353,7 +354,7 @@ it('checkpoints exactly the 4095th real no-op delivery and starts a fresh suffix
     if (cut.kind !== 'cut') throw new Error('cut refused')
     const state = Y.encodeStateAsUpdate(f.doc)
     expect(cut.cut.checkpoint.bytes).toEqual(state)
-    expect(f.journalRows().usage).toBe(f.input.baselineBytes.byteLength + noop.byteLength * 4095 + state.byteLength + journalMetadataBytes(f.raw) + liveDeliveryBookkeepingBytes(f.raw))
+    expect(f.journalRows().usage).toBe(liveBaselineStoredBytes(f.raw) + noop.byteLength * 4095 + state.byteLength + journalMetadataBytes(f.raw) + liveDeliveryBookkeepingBytes(f.raw))
     expect(f.storage.commitLiveUpdateJournal(f.capture(noop, 'next')).result.kind).toBe('accepted')
     expect(f.storage.readLiveUpdateJournalCut({ document: f.input.evidence.document }))
       .toMatchObject({ kind: 'cut', cut: { highWater: 4096, suffixCount: 1, checkpoint: { cursor: 4095 } } })
@@ -739,7 +740,7 @@ it('retries an individually valid stale edit and preserves a fresh combined-body
     expect(fresh.validation).toMatchObject({ kind: 'refused', source: 'final', reason: 'capacity-refused' })
     expect(f.storage.commitLiveUpdateJournal(fresh).result).toEqual({ kind: 'refused', reason: 'capacity-refused' })
     expect(f.raw.prepare('SELECT COUNT(*) AS n FROM sync_relay_live_update_journal').get()!.n).toBe(1)
-    expect(f.journalRows().usage).toBe(f.input.baselineBytes.byteLength + first.updateBytes.byteLength + journalMetadataBytes(f.raw) + liveDeliveryBookkeepingBytes(f.raw))
+    expect(f.journalRows().usage).toBe(liveBaselineStoredBytes(f.raw) + first.updateBytes.byteLength + journalMetadataBytes(f.raw) + liveDeliveryBookkeepingBytes(f.raw))
   } finally { f.close() }
 }, 30_000)
 

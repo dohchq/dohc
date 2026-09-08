@@ -461,24 +461,30 @@ export function registerLiveDocumentBaseline(storage: StorageContext, input: Liv
           restoreFenceGeneration: current.binding.restoreFenceGeneration, registeredAtMs: current.registeredAtMs, replayed: true };
       }
       prepareLiveDeliveryWorkspace(storage, document.workspaceId, coordinate.hostId);
-      assertWorkspaceQuota(storage, document.workspaceId, baselineBytes.byteLength);
+      const metadata = [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId,
+        null, currentPath, latest.relay_seq as number, evidence.projectedMarkdownSha256,
+        evidence.projectedMarkdownByteLength, checkpoint.updateDigest, 'current', 'open', 1, registeredAtMs, null];
+      const rangePrefix = [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
+      const rangeBytes = checkpoint.ranges.reduce((sum, range) => sum + Buffer.byteLength(JSON.stringify([
+        ...rangePrefix, range.clientId, range.startClock, range.endClock,
+      ])), 0);
+      // Charge logical stored values, excluding SQLite pages and indexes.
+      const charge = baselineBytes.byteLength + Buffer.byteLength(JSON.stringify(metadata)) + rangeBytes;
+      assertWorkspaceQuota(storage, document.workspaceId, charge);
       storage.db.prepare(`INSERT INTO sync_relay_live_documents (
         workspace_id, main_version_id, object_id, lineage_claim_id, replaces_lineage_claim_id, current_path,
         baseline_moment_relay_seq, baseline_projected_sha256, baseline_projected_byte_length, baseline_digest,
-        baseline_bytes, lineage_state, admission_state, restore_fence_generation, registered_at_ms, retired_at_ms
-      ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'current', 'open', 1, ?, NULL)`)
-        .run(document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId, currentPath,
-          latest.relay_seq, evidence.projectedMarkdownSha256, evidence.projectedMarkdownByteLength,
-          checkpoint.updateDigest, baselineBytes, registeredAtMs);
+        lineage_state, admission_state, restore_fence_generation, registered_at_ms, retired_at_ms, baseline_bytes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(...metadata, baselineBytes);
       const insertRange = storage.db.prepare(`INSERT INTO sync_relay_live_document_baseline_ranges
         (workspace_id, main_version_id, object_id, lineage_claim_id, client_id, start_clock, end_clock)
         VALUES (?, ?, ?, ?, ?, ?, ?)`);
       for (const range of checkpoint.ranges) {
-        insertRange.run(document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId,
-          range.clientId, range.startClock, range.endClock);
+        insertRange.run(...rangePrefix, range.clientId, range.startClock, range.endClock);
       }
       storage.db.prepare(`UPDATE sync_relay_workspace_usage SET usage_bytes = usage_bytes + ? WHERE workspace_id = ?`)
-        .run(baselineBytes.byteLength, document.workspaceId);
+        .run(charge, document.workspaceId);
       registerLiveDeliveryBaseline(storage, document, coordinate.hostId);
       return { kind: "registered", document: { ...document }, currentPath,
         restoreFenceGeneration: 1, registeredAtMs, replayed: false };
