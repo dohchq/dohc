@@ -1671,7 +1671,16 @@ fn safe_read_any(decoder: &mut DecoderV1<'_>, depth: usize) -> Result<Any, Colla
     Ok(match tag {
         127 => Any::Undefined,
         126 => Any::Null,
-        125 => Any::Number(decoder.read_var::<i64>().map_err(parity_decode_error)? as f64),
+        125 => {
+            let value = decoder
+                .read_var_signed::<i64>()
+                .map_err(parity_decode_error)?;
+            Any::Number(if value.value() == 0 && value.is_negative() {
+                -0.0
+            } else {
+                value.value() as f64
+            })
+        }
         124 => Any::Number(decoder.read_f32().map_err(parity_decode_error)? as f64),
         123 => Any::Number(decoder.read_f64().map_err(parity_decode_error)?),
         122 => Any::BigInt(decoder.read_i64().map_err(parity_decode_error)?),
@@ -2425,6 +2434,50 @@ mod tests {
             !structurally_equal_v2(left, right).expect("v2 comparison must succeed"),
             "v2 must detect the mutated document dimension"
         );
+    }
+
+    fn signed_zero_updates() -> (Vec<u8>, Vec<u8>) {
+        // Actual Yjs 13.6.30 updates: client 7, frontmatter.value at clock 0.
+        #[derive(serde::Deserialize)]
+        struct Updates {
+            negative: Vec<u8>,
+            positive: Vec<u8>,
+        }
+        let updates: Updates = serde_json::from_str(include_str!(
+            "../tests/fixtures/signed-zero-same-clock.json"
+        ))
+        .unwrap();
+        (updates.negative, updates.positive)
+    }
+
+    #[test]
+    fn signed_zero_same_clock_change_is_rejected_by_replay_gate() {
+        let (negative, positive) = signed_zero_updates();
+        for (original, changed) in [(&negative, &positive), (&positive, &negative)] {
+            let base = doc_from_update(original);
+            assert!(validate_replay_parity(&base, original).is_ok());
+            assert!(
+                matches!(
+                    validate_replay_parity(&base, changed),
+                    Err(CollabError::ReplayParityViolation { .. })
+                ),
+                "a same-clock sign change must not be accepted as an exact resend"
+            );
+        }
+    }
+
+    #[test]
+    fn signed_zero_same_clock_change_is_visible_to_structural_comparison() {
+        let (negative, positive) = signed_zero_updates();
+        let left = doc_from_update(&negative);
+        let right = doc_from_update(&positive);
+        assert_eq!(left.state_vector(), right.state_vector());
+        assert_ne!(
+            left.project(crate::ContentKind::Richdoc).unwrap().content,
+            right.project(crate::ContentKind::Richdoc).unwrap().content
+        );
+        assert!(!structurally_equal_v2(&left, &right).unwrap());
+        assert_ne!(scan_v1(&negative).unwrap(), scan_v1(&positive).unwrap());
     }
 
     #[test]

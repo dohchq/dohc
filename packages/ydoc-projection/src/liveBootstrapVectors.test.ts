@@ -82,6 +82,21 @@ if (process.env.DOHC_WRITE_BOOTSTRAP_VECTORS === '1') {
 }
 const vectors = JSON.parse(readFileSync(fixture, 'utf8')) as Vector[]
 describe('shared bootstrap projections', () => {
+  it('pins actual Yjs signed-zero updates at the same client and clock', () => {
+    const updates = JSON.parse(readFileSync(new URL('../../../crates/dohc-engine-collab/tests/fixtures/signed-zero-same-clock.json', import.meta.url), 'utf8')) as { negative: number[]; positive: number[] }
+    for (const [name, value] of [['negative', -0], ['positive', 0]] as const) {
+      const source = new Y.Doc()
+      const decoded = new Y.Doc()
+      try {
+        source.clientID = 7
+        source.getMap('frontmatter').set('value', value)
+        expect([...Y.encodeStateAsUpdate(source)]).toEqual(updates[name])
+        Y.applyUpdate(decoded, new Uint8Array(updates[name]))
+        expect(Object.is(decoded.getMap('frontmatter').get('value'), value)).toBe(true)
+        expect([...Y.encodeStateVector(decoded)]).toEqual([1, 7, 1])
+      } finally { source.destroy(); decoded.destroy() }
+    }
+  })
   it('decodes the Rust re-encoding of the actual Yjs negative-zero fixture', () => {
     const bytes = JSON.parse(readFileSync(new URL('../../../crates/dohc-engine-collab/tests/fixtures/live-bootstrap-negative-zero-yrs.json', import.meta.url), 'utf8')) as number[]
     const doc = new Y.Doc()
