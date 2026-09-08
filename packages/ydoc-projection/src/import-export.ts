@@ -1258,9 +1258,10 @@ function writeMap(
 function frontmatterValueNeedsSharedType(value: unknown): boolean {
   if (Array.isArray(value)) return value.some(frontmatterValueNeedsSharedType)
   if (!isFrontmatterMap(value)) return false
-  // Yjs dispatches plain values through `value.constructor`, so that data key
-  // must keep the older shared-type encoding.
+  // Yjs dispatches plain values through `value.constructor`; lib0's plain-map
+  // decoder assigns `__proto__` through its setter. Shared types preserve both keys.
   return Object.hasOwn(value, 'constructor')
+    || Object.hasOwn(value, '__proto__')
     || Object.values(value).some(frontmatterValueNeedsSharedType)
 }
 

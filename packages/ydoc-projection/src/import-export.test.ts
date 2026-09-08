@@ -426,6 +426,32 @@ describe('Y.Doc markdown import/export', () => {
     expect(roundTripped).toEqual(frontmatter)
   })
 
+  it('preserves isolated __proto__ keys through shared frontmatter maps', () => {
+    const source = markdownToYDoc([
+      '---', 'nested:', '  __proto__: nested-value',
+      'sequence:', '  - __proto__: sequence-value', '---', '# Body',
+    ].join('\n'))
+    const received = new Y.Doc()
+    try {
+      expect(source.getMap('frontmatter').get('nested')).toBeInstanceOf(Y.Map)
+      const sequence = source.getMap('frontmatter').get('sequence') as Y.Array<unknown>
+      expect(sequence).toBeInstanceOf(Y.Array)
+      expect(sequence.get(0)).toBeInstanceOf(Y.Map)
+      Y.applyUpdate(received, Y.encodeStateAsUpdate(source))
+      const frontmatter = getDohcYDocFrontmatter(received)
+      expect(frontmatter).toEqual({
+        nested: { ['__proto__']: 'nested-value' },
+        sequence: [{ ['__proto__']: 'sequence-value' }],
+      })
+      const reimported = markdownToYDoc(yDocToMarkdown(received))
+      try { expect(getDohcYDocFrontmatter(reimported)).toEqual(frontmatter) }
+      finally { reimported.destroy() }
+    } finally {
+      source.destroy()
+      received.destroy()
+    }
+  })
+
   it('keeps an unsafe integer as Yjs Any beside a constructor-keyed map', () => {
     const vector = frontmatterVectors.find(
       candidate => candidate.name === 'constructor-map-and-unsafe-integer-share-array',
