@@ -46,6 +46,24 @@ function ackBaseline(
     bootstrapReplayed: false,
   });
 }
+it("funds the stored document binding independently of a large share selector", () => {
+  const f = registered();
+  try {
+    const paths = ["docs", ...Array.from({ length: 99 }, (_, index) => `other-${index}/${"x".repeat(200)}`)];
+    f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'")
+      .run(JSON.stringify({ paths, versionId: null }));
+    const current = f.storage.resolveCurrentLiveDocumentBinding({ document: f.input.evidence.document, actor: f.actor });
+    expect(current.kind).toBe("current");
+    if (current.kind !== "current") throw Error("current binding");
+    expect(current.binding.selectorPaths).toHaveLength(100);
+    expect(Buffer.byteLength(JSON.stringify(current.binding))).toBeGreaterThan(20_000);
+    const { store } = delivery(f), drain = store.open({ host, document: f.input.evidence.document });
+    expect(drain.baseline.binding.selectorPaths).toEqual([f.input.evidence.currentPath]);
+    ackBaseline(store, drain);
+    expect(store.next(drain)).toEqual({ kind: "done", terminalReceipt: null });
+    store.close(drain);
+  } finally { f.close(); }
+});
 it("reserves delivery before admission and completes acknowledgements at quota", () => {
   const quota = 200_000;
   const f = registered({ workspaceQuotaBytes: quota });

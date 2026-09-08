@@ -7,6 +7,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import { parseHostEpoch } from '@dohc/live-session-contract/host-control'
 import { markdownToYDoc } from './import-export.js'
+import { liveDeliveryBookkeepingBytes } from './liveDeliveryQuotaTestSupport.js'
 import { createLiveMarkdownRegistrationValidator } from './liveDocumentValidation.js'
 import { openSyncRelayStorage, type LiveDocumentBaselineRegistrationInput } from '../../../services/sync-relay/src/storage.js'
 
@@ -254,7 +255,7 @@ it.each([0, 1, 2, 3])('rolls back a failure after parent/range write %s', write 
     expect(usage(f)).toBe(0)
     f.raw.exec('DROP TRIGGER fail_registration')
     expect(f.storage.registerLiveDocumentBaseline(input)).toMatchObject({ kind: 'registered', replayed: false })
-    expect(usage(f)).toBe(input.baselineBytes.byteLength)
+    expect(usage(f)).toBe(input.baselineBytes.byteLength + liveDeliveryBookkeepingBytes(f.raw))
   } finally { f.close() }
 })
 
@@ -455,14 +456,23 @@ it.each(['owner', 'named'] as const)('does not revive pre-reset %s authority aft
   } finally { f.close() }
 })
 
-it('charges original baseline bytes exactly once, preserves quota on replay and refuses excess atomically', () => {
+it('charges original baseline and delivery bytes exactly once, preserves quota on replay and refuses excess atomically', () => {
   const first = validated(), second = validated(checkpoint('Second'), 'docs/b.md', 'second-object')
-  const total = first.baselineBytes.byteLength + second.baselineBytes.byteLength
+  const probe = fixture()
+  let total: number
+  try {
+    probe.moment(first); probe.moment(second, 2)
+    expect(probe.storage.registerLiveDocumentBaseline(first).kind).toBe('registered')
+    expect(probe.storage.registerLiveDocumentBaseline(second).kind).toBe('registered')
+    total = first.baselineBytes.byteLength + second.baselineBytes.byteLength + liveDeliveryBookkeepingBytes(probe.raw)
+    expect(usage(probe)).toBe(total)
+    expect(probe.raw.prepare('SELECT COUNT(*) n FROM sync_relay_live_delivery_reservations').get()!.n).toBe(2)
+  } finally { probe.close() }
   const f = fixture({ workspaceQuotaBytes: total })
   try {
     f.moment(first); f.moment(second, 2)
     expect(f.storage.registerLiveDocumentBaseline(first).kind).toBe('registered')
-    expect(usage(f)).toBe(first.baselineBytes.byteLength)
+    expect(usage(f)).toBe(first.baselineBytes.byteLength + liveDeliveryBookkeepingBytes(f.raw))
     expect(f.storage.registerLiveDocumentBaseline(second).kind).toBe('registered')
     expect(usage(f)).toBe(total)
     const before = f.rows(), reopened = openSyncRelayStorage(f.path, { workspaceQuotaBytes: total })
@@ -496,7 +506,7 @@ it('rolls back baseline and range inserts when the usage charge fails', () => {
     expect(usage(f)).toBe(0); expect(f.rows()).toEqual({ documents: [], ranges: [] })
     f.raw.exec('DROP TRIGGER fail_baseline_usage')
     expect(f.storage.registerLiveDocumentBaseline(input)).toMatchObject({ kind: 'registered', replayed: false })
-    expect(usage(f)).toBe(input.baselineBytes.byteLength)
+    expect(usage(f)).toBe(input.baselineBytes.byteLength + liveDeliveryBookkeepingBytes(f.raw))
   } finally { f.close() }
 })
 
