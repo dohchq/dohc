@@ -108,7 +108,7 @@ function liveDocumentMutationRefusal(
     return null;
   }
   return new Error(
-    `dohc could not ${action} ${path}. Shared live files must keep their current location. Continue editing at the original location.`,
+    `dohc could not ${action} ${path}. This action is unavailable for shared live files. Continue editing at the current location.`,
     { cause: error },
   );
 }
@@ -5104,106 +5104,106 @@ export function createWorkspaceEngineCapture(
           throw new Error("A rename can't be restored directly.");
         }
         const path = moment.path;
-        const correlationId = `restore-${createId()}`;
-        // Capture the file's latest disk state first so a restore can never
-        // destroy an edit the engine has not recorded yet — the pre-restore
-        // content stays one moment back in history.
-        const disk = await readDiskTextState(rootPath, path);
-        if (disk.kind === "unreadable") {
-          throw new Error(`Could not read the current ${path} on disk.`);
-        }
-        if (disk.kind === "untracked-content") {
-          throw new Error(
-            `Only engine-owned files can be restored — ${path} is no longer capturable.`,
-          );
-        }
-        const saveMetadata: ActorNeutralWriteMetadata = {
-          origin: "local-file",
-          summary: "Saved latest edits",
-          correlationId,
-        };
-        if (disk.kind === "text" || disk.kind === "binary") {
-          await writeIfChanged(engine, activeVersionId, path, disk, saveMetadata);
-        } else {
-          // Confirmed absent: reconcile the deletion so engine and disk agree
-          // before the restore moment is recorded.
-          await deleteIfTracked(engine, activeVersionId, path, saveMetadata).catch(error => {
-            throw liveDocumentMutationRefusal(error, path, "restore") ?? error;
-          });
-        }
-        const target = moment.payload.before;
-        const metadata: ActorNeutralWriteMetadata = {
-          origin: "restore",
-          summary: `Restored ${path}`,
-          correlationId,
-        };
-        const current = await engine.readTextFile({
-          workspaceId,
-          versionId: activeVersionId,
-          path,
-        });
-        if (target) {
-          if (
-            current &&
-            (target.contentKind === "binary"
-              ? current.contentKind === "binary" && current.sha256 === target.sha256
-              : current.contentKind !== "binary" && current.text === target.text)
-          ) {
-            // Already in the pre-moment state. Returning the same moment id
-            // keeps undo a no-op (undoing an idempotent restore restores the
-            // identical state again).
-            return { restored: "text" as const, restoredMomentId: momentId, path };
+        try {
+          const correlationId = `restore-${createId()}`;
+          // Capture the file's latest disk state first so a restore can never
+          // destroy an edit the engine has not recorded yet — the pre-restore
+          // content stays one moment back in history.
+          const disk = await readDiskTextState(rootPath, path);
+          if (disk.kind === "unreadable") {
+            throw new Error(`Could not read the current ${path} on disk.`);
           }
-          const result =
-            target.contentKind === "binary"
-              ? await (async () => {
-                  const bytes = await engine.readBinaryBlob({
-                    workspaceId,
-                    sha256: target.sha256 ?? "",
-                  });
-                  if (!bytes) {
-                    throw new Error(`Binary content for ${path} is no longer available.`);
-                  }
-                  return engine.writeBinaryFile({
+          if (disk.kind === "untracked-content") {
+            throw new Error(
+              `Only engine-owned files can be restored — ${path} is no longer capturable.`,
+            );
+          }
+          const saveMetadata: ActorNeutralWriteMetadata = {
+            origin: "local-file",
+            summary: "Saved latest edits",
+            correlationId,
+          };
+          if (disk.kind === "text" || disk.kind === "binary") {
+            await writeIfChanged(engine, activeVersionId, path, disk, saveMetadata);
+          } else {
+            // Confirmed absent: reconcile the deletion so engine and disk agree
+            // before the restore moment is recorded.
+            await deleteIfTracked(engine, activeVersionId, path, saveMetadata);
+          }
+          const target = moment.payload.before;
+          const metadata: ActorNeutralWriteMetadata = {
+            origin: "restore",
+            summary: `Restored ${path}`,
+            correlationId,
+          };
+          const current = await engine.readTextFile({
+            workspaceId,
+            versionId: activeVersionId,
+            path,
+          });
+          if (target) {
+            if (
+              current &&
+              (target.contentKind === "binary"
+                ? current.contentKind === "binary" && current.sha256 === target.sha256
+                : current.contentKind !== "binary" && current.text === target.text)
+            ) {
+              // Already in the pre-moment state. Returning the same moment id
+              // keeps undo a no-op (undoing an idempotent restore restores the
+              // identical state again).
+              return { restored: "text" as const, restoredMomentId: momentId, path };
+            }
+            const result =
+              target.contentKind === "binary"
+                ? await (async () => {
+                    const bytes = await engine.readBinaryBlob({
+                      workspaceId,
+                      sha256: target.sha256 ?? "",
+                    });
+                    if (!bytes) {
+                      throw new Error(`Binary content for ${path} is no longer available.`);
+                    }
+                    return engine.writeBinaryFile({
+                      workspaceId,
+                      versionId: activeVersionId,
+                      path,
+                      bytes,
+                      metadata,
+                    });
+                  })()
+                : await engine.writeTextFile({
                     workspaceId,
                     versionId: activeVersionId,
                     path,
-                    bytes,
+                    text: target.text,
                     metadata,
                   });
-                })()
-              : await engine.writeTextFile({
-                  workspaceId,
-                  versionId: activeVersionId,
-                  path,
-                  text: target.text,
-                  metadata,
-                });
-          await materialize([await materializeWriteForSnapshot(engine, result.snapshot)], policy);
+            await materialize([await materializeWriteForSnapshot(engine, result.snapshot)], policy);
+            return {
+              restored: "text" as const,
+              restoredMomentId: result.moment.id,
+              path,
+            };
+          }
+          // The moment created the file: restoring to before it removes it.
+          if (!current) {
+            return { restored: "deleted" as const, restoredMomentId: momentId, path };
+          }
+          const result = await engine.deleteTextFile({
+            workspaceId,
+            versionId: activeVersionId,
+            path,
+            metadata,
+          });
+          await materialize([{ kind: "delete", path }], policy);
           return {
-            restored: "text" as const,
+            restored: "deleted" as const,
             restoredMomentId: result.moment.id,
             path,
           };
-        }
-        // The moment created the file: restoring to before it removes it.
-        if (!current) {
-          return { restored: "deleted" as const, restoredMomentId: momentId, path };
-        }
-        const result = await engine.deleteTextFile({
-          workspaceId,
-          versionId: activeVersionId,
-          path,
-          metadata,
-        }).catch(error => {
+        } catch (error) {
           throw liveDocumentMutationRefusal(error, path, "restore") ?? error;
-        });
-        await materialize([{ kind: "delete", path }], policy);
-        return {
-          restored: "deleted" as const,
-          restoredMomentId: result.moment.id,
-          path,
-        };
+        }
       });
     },
 

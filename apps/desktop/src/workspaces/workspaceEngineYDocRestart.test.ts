@@ -166,7 +166,7 @@ it.each(["notes/note.md", "notes"])("refuses an adopted owner move before vacati
   await writeFile(join(rootPath, "notes/note.md"), "original");
   const session = await capture.openYDocSession({ path: "notes/note.md", onRemoteUpdate: () => undefined });
   state.moveRefusalAt = "preflight";
-  await expect(capture.beginFileRename(fromPath, "moved")).rejects.toThrow("Shared live files must keep their current location.");
+  await expect(capture.beginFileRename(fromPath, "moved")).rejects.toThrow("This action is unavailable for shared live files.");
   expect(state.releaseCalls).toHaveLength(0);
   expect(state.leaseActive).toBe(true);
   expect(state.moveRequests).toEqual(["versionedText.checkMove"]);
@@ -180,7 +180,7 @@ it("propagates a native adopted-owner rename refusal and releases its move reser
   const { capture, state, rootPath } = await reconnectFailureCapture("dohc-adopted-owner-native-move-");
   await writeFile(join(rootPath, "note.md"), "original");
   state.moveRefusalAt = "native";
-  await expect(capture.beginFileRename("note.md", "moved.md")).rejects.toThrow("Shared live files must keep their current location.");
+  await expect(capture.beginFileRename("note.md", "moved.md")).rejects.toThrow("This action is unavailable for shared live files.");
   expect(state.moveRequests).toEqual(["versionedText.checkMove", "versionedText.checkMove", "versionedText.rename"]);
   const reopened = await capture.openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined });
   await reopened.close();
@@ -230,7 +230,7 @@ it("refuses a folder move when owner adoption finishes during session teardown",
   await writeFile(join(rootPath, "notes/note.md"), "original");
   await capture.openYDocSession({ path: "notes/note.md", onRemoteUpdate: () => undefined });
   state.adoptOnClose = true;
-  await expect(capture.beginFileRename("notes", "moved")).rejects.toThrow("Shared live files must keep their current location.");
+  await expect(capture.beginFileRename("notes", "moved")).rejects.toThrow("This action is unavailable for shared live files.");
   expect(state.releaseCalls).toHaveLength(1);
   expect(state.moveRequests).toEqual(["versionedText.checkMove", "versionedText.checkMove"]);
   expect(await readFile(join(rootPath, "notes/note.md"), "utf8")).toBe("original");
