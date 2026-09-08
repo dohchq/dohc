@@ -852,3 +852,4 @@ mod version;
 mod ydoc_base;
 mod ydoc_cache;
 mod ydoc_drain;
+mod ydoc_restore;

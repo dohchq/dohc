@@ -3511,6 +3511,9 @@ fn validate_retryable_ydoc_identity(
 
 fn map_collab_hard_error(error: CollabError) -> SyncError {
     match error {
+        CollabError::RestoreFenced => SyncError::RetryableState {
+            reason: "live document is stopped",
+        },
         CollabError::Storage(storage) => SyncError::Storage(storage),
         hard => SyncError::Storage(StorageError::corrupt_public(hard)),
     }
