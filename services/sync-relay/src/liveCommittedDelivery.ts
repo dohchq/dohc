@@ -195,7 +195,7 @@ export class LiveCommittedDelivery {
     const aborted = () => { if (signal?.aborted) throw signal.reason; };
     try {
       aborted();
-      drain = this.#store.open({ host: this.#connection.host, document });
+      drain = this.#store.openSettlement({ host: this.#connection.host, document });
       const captured = this.#store.settlement(drain);
       const registration = await this.#connection.client.sendRequest({ id: this.#connection.nextRequestId(), method: "liveApplication.register", workspace: this.#connection.workspace, params: { binding: { ...captured.binding, selectorPaths: [...captured.binding.selectorPaths] } }, deadlineMs: this.#connection.deadlineMs });
       aborted();

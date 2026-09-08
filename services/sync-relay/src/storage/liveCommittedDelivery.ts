@@ -258,10 +258,16 @@ export class LiveCommittedDeliveryStore {
     }
     return row;
   }
-  open(input: {
+  open(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey }): CommittedDeliveryDrain {
+    return this.#open(input, true);
+  }
+  openSettlement(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey }): CommittedDeliveryDrain {
+    return this.#open(input, false);
+  }
+  #open(input: {
     host: LiveHostConnectionCoordinate;
     document: LiveDocumentKey;
-  }): CommittedDeliveryDrain {
+  }, createBootstrap: boolean): CommittedDeliveryDrain {
     const host = snapshotHostCoordinate(input.host),
       document = journalDocument(input.document);
     const read = this.#storage.readTx(() => {
@@ -338,6 +344,7 @@ export class LiveCommittedDeliveryStore {
           this.#bootstrapRow(capture);
           return;
         }
+        if (!createBootstrap) throw new Error("Committed delivery must finish before settlement.");
         const values = [
           baseline.bootstrapId,
           baseline.bootstrapMomentId,

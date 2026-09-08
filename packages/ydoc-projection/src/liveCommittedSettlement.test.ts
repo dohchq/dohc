@@ -31,7 +31,7 @@ it("settles acknowledged progress without advancing delivery edges",async()=>{
 });
 
 it("refuses settlement before durable bootstrap acknowledgement",async()=>{
-  const t=fixture(false);try {await expect(t.consumer.settle(t.document)).rejects.toThrow("finish before settlement");expect(t.sendRequest).not.toHaveBeenCalled();} finally {t.f.close();}
+  const t=fixture(false);try {const before=t.f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_live_delivery_bootstraps").get()!.n;await expect(t.consumer.settle(t.document)).rejects.toThrow("finish before settlement");expect(t.sendRequest).not.toHaveBeenCalled();expect(t.f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_live_delivery_bootstraps").get()!.n).toBe(before);} finally {t.f.close();}
 });
 
 it("rechecks cancellation after registration and excludes concurrent document operations",async()=>{
