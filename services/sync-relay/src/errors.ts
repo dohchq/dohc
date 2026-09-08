@@ -145,3 +145,9 @@ export function errorResponse(error: unknown): Response {
   console.error("[sync-relay] unhandled error", error);
   return errorBody("internal_error");
 }
+
+// A link credential that does not resolve answers 401 with the not-found body:
+// the status tells the viewer to re-exchange, and the body says nothing more.
+export function invalidLinkCapability(): RelayError {
+  return new RelayError("not_found", undefined, 401);
+}
