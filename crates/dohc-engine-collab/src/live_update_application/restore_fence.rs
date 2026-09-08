@@ -29,7 +29,7 @@ pub struct NativeRestoreFenceReceipt {
     pub recorded_at_ms: i64,
 }
 
-pub(crate) fn require_open(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
+pub fn require_open(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
     let stopped: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
         params![key.workspace_id, key.version_id, key.object_id], |r| r.get(0),
