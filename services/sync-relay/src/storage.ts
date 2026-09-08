@@ -181,7 +181,6 @@ export {
   type NamedLiveTicketRedemption,
   type LiveTicketStoragePolicy,
 } from "./storage/types";
-export { initializeSyncRelaySchema } from "./storage/schema";
 export {
   objectPathFromMomentPayload,
   objectMomentFromMomentPayload,

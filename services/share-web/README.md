@@ -72,6 +72,10 @@ continuity metadata. Outside development and tests, `DOHC_RELAY_DEPLOYMENT_CONFI
 must name the external configuration file. That file owns the database path;
 `SYNC_RELAY_DB_PATH` cannot override it.
 
+If fresh initialization is interrupted, preserve its partial configuration, relay
+database, and continuity directory. Initialize with new, empty paths after inspecting
+that failure. Do not reuse this procedure to replace an established deployment.
+
 Stop `share-web` and `sync-relay` before backup or restore. Back up the complete
 relay volume, including SQLite side files. Keep the original volume before
 restoring into an empty replacement. The relay refuses startup if the restored

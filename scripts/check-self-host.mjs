@@ -79,7 +79,12 @@ function checkComposeConfig() {
 }
 
 function startComposeStack() {
-  console.log('The relay must already be explicitly initialized. See services/share-web/README.md; this check never initializes or repairs deployment continuity.')
+  const initialized = run('docker', composeArgs('run', '--rm', '--no-deps', '--entrypoint', 'node', 'sync-relay',
+    '-e', "require('node:fs').accessSync('/continuity/deployment.json')"))
+  if (initialized.status !== 0) {
+    record('relay deployment initialization', false, 'Initialize the relay as documented in services/share-web/README.md before starting the stack. The probe does not initialize or repair continuity.')
+    return
+  }
   const up = spawnSync('docker', composeArgs('up', '-d', ...REQUIRED_SERVICES), {
     stdio: 'inherit',
   })

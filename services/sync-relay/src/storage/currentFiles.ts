@@ -344,8 +344,7 @@ export function readCurrentFileState(storage: StorageContext, input: {
     if (!Number.isSafeInteger(input.limit) || input.limit <= 0) {
       throw new Error("current file limit must be a positive safe integer");
     }
-    storage.db.exec("BEGIN");
-    try {
+    return storage.readTx(() => {
       const workspace = storage.db
         .prepare(
           `SELECT COALESCE(epoch_log_floor, 0) AS epoch_log_floor
@@ -375,7 +374,6 @@ export function readCurrentFileState(storage: StorageContext, input: {
           ...query.selectorParams,
           input.limit + 1,
         );
-      storage.db.exec("COMMIT");
       return {
         files: rows.slice(0, input.limit).map((row) => ({
           path: String(row.path),
@@ -386,12 +384,7 @@ export function readCurrentFileState(storage: StorageContext, input: {
         epochLogFloor,
         tooMany: rows.length > input.limit,
       };
-    } catch (error) {
-      try {
-        storage.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    });
   }
 
 export function currentFileBlobByteLength(storage: StorageContext, input: {

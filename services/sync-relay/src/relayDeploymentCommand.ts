@@ -33,7 +33,8 @@ function main(args: string[]): void {
 
 try {
   main(process.argv.slice(2));
-} catch {
+} catch (error) {
   console.error("Relay deployment initialization refused. Use --help for the required paths.");
+  if (error instanceof Error && error.message) console.error(error.message);
   process.exitCode = 1;
 }

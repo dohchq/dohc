@@ -12,6 +12,7 @@ import type { SqliteDb } from "./storage/types";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { createDeviceHostCredential } from "./deviceHostCredential";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
+import type { StorageContext } from "./storage/context";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
@@ -85,6 +86,7 @@ describe("relay deployment continuity", () => {
     expect(() => initializeRelayDeployment(f)).toThrow();
     const other = join(f.root, "nested"); mkdirSync(other);
     expect(() => initializeRelayDeployment({ configPath: join(f.root,"new.json"), relayPath: join(other,"relay.sqlite"), continuityDirectory: join(other,"continuity") })).toThrow();
+    expect(existsSync(join(other, "continuity"))).toBe(false);
   });
 
   it("read snapshots do not reserve mutation stamps", () => {
@@ -110,6 +112,38 @@ describe("relay deployment continuity", () => {
     expect(read(side,"continuity")).toEqual(before);
   });
 
+  it("reopens after a deferred constraint rolls back without reusing its reserved stamp", () => {
+    const f = fixture(), current = openRelayDeployment(f.configPath);
+    const storage = current.storage as StorageContext;
+    const side = join(f.continuityDirectory, "continuity.sqlite");
+    try {
+      storage.tx(() => storage.db.exec("CREATE TABLE test_parent(id INTEGER PRIMARY KEY); CREATE TABLE test_child(parent_id INTEGER REFERENCES test_parent(id) DEFERRABLE INITIALLY DEFERRED)"));
+      const before = read(side, "continuity");
+      expect(() => storage.tx(() => storage.db.exec("INSERT INTO test_child VALUES(17)"))).toThrow(/FOREIGN KEY/);
+      expect(storage.db.prepare("SELECT * FROM test_child").all()).toHaveLength(0);
+      expect(storage.unavailable.aborted).toBe(true);
+      expect(read(side, "continuity").expected_stamp).toBe(before.expected_stamp);
+      expect(Number(read(side, "continuity").next_stamp)).toBeGreaterThan(Number(before.next_stamp));
+    } finally { storage.close(); }
+    const reopened = openRelayDeployment(f.configPath);
+    try {
+      expect(reopened.storage.claimWorkspace({ workspaceId: "after-rollback", ownerUserId: "owner", createdAtMs: 1 })).toBe("created");
+    } finally { reopened.storage.close(); }
+  });
+
+  it("refuses current-file snapshots after storage retirement", () => {
+    let owner!: RelayWriteOwner;
+    const root = mkdtempSync(join(tmpdir(), "relay-read-standing-"));
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+    const path = join(root, "relay.sqlite");
+    new DatabaseSync(path).close();
+    const storage = openSyncRelayStorage(path, {}, db => owner = new RelayWriteOwner(db));
+    try {
+      owner.invalidate();
+      expect(() => storage.readCurrentFileState({ workspaceId: "w", versionId: "main", selectorPaths: ["docs"], limit: 1 })).toThrow(/unavailable/);
+    } finally { storage.close(); }
+  });
+
   it.each(["before-commit", "after-commit"])("retains the actual production interruption at %s", boundary => {
     const f = fixture();
     const child = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./relayDeploymentCrash.fixture.ts", import.meta.url)), f.configPath, boundary],
@@ -127,16 +161,33 @@ describe("relay deployment continuity", () => {
 });
 
 describe("relay write and response lifetime", () => {
+  it("retires after an uncertain rollback and does not cancel its reservation", () => {
+    const raw = new DatabaseSync(":memory:");
+    raw.exec("CREATE TABLE work(value INTEGER); CREATE TABLE sync_relay_continuity(singleton INTEGER,stamp INTEGER); INSERT INTO sync_relay_continuity VALUES(1,0)");
+    let cancelled = false;
+    const db: SqliteDb = { prepare: sql => raw.prepare(sql) as unknown as ReturnType<SqliteDb["prepare"]>, close: () => raw.close(),
+      exec(sql) { if (sql === "COMMIT") throw new Error("commit failed"); raw.exec(sql); if (sql === "ROLLBACK") throw new Error("lost rollback result"); } };
+    const owner = new RelayWriteOwner(db, { reserve: () => 1, cancel: () => { cancelled = true; }, close() {} });
+    try {
+      expect(() => owner.write(() => raw.exec("INSERT INTO work VALUES(1)"))).toThrow(/commit failed/);
+      expect(owner.unavailable.aborted).toBe(true);
+      expect(cancelled).toBe(false);
+    } finally { owner.close(); }
+  });
+
   it("fences an uncertain COMMIT even when SQLite committed before throwing", () => {
     const raw = new DatabaseSync(":memory:");
-    raw.exec("CREATE TABLE work(value INTEGER)");
+    raw.exec("CREATE TABLE work(value INTEGER); CREATE TABLE sync_relay_continuity(singleton INTEGER,stamp INTEGER); INSERT INTO sync_relay_continuity VALUES(1,0)");
+    let cancelled = false;
     const db: SqliteDb = { prepare: sql => raw.prepare(sql) as unknown as ReturnType<SqliteDb["prepare"]>, close: () => raw.close(),
       exec(sql) { raw.exec(sql); if (sql === "COMMIT") throw new Error("lost COMMIT result"); } };
-    const owner = new RelayWriteOwner(db);
+    const owner = new RelayWriteOwner(db, { reserve: () => 1, cancel: () => { cancelled = true; }, close() {} });
     try {
       const standing = owner.captureStanding();
       expect(() => owner.write(() => raw.exec("INSERT INTO work VALUES(1)"))).toThrow(/lost COMMIT/);
       expect(raw.prepare("SELECT * FROM work").all()).toHaveLength(1);
+      expect(raw.prepare("SELECT stamp FROM sync_relay_continuity").get()?.stamp).toBe(1);
+      expect(cancelled).toBe(false);
       expect(standing).toThrow(/unavailable/);
       expect(() => owner.write(() => {})).toThrow(/unavailable/);
     } finally { owner.close(); }
