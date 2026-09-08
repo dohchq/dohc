@@ -108,7 +108,30 @@ fn insert_probe(tx: &rusqlite::Transaction<'_>, op: &ReplicationEnvelope) -> Res
 #[test]
 fn live_binding_refusal_rolls_back_mutation_persists_acks_and_allows_next_envelope() {
     let (_scratch, _path, mut engine) = open_store();
-    let refused = envelope("adopted-owner-peer", 0, "moment.append", json!({}));
+    let text = "refused peer edit";
+    let digest = dohc_engine_storage::hex_sha256(text.as_bytes());
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![digest, text.len() as i64, text],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let refused = envelope(
+        "adopted-owner-peer",
+        0,
+        "moment.append",
+        json!({
+            "momentId":"refused-peer-moment", "versionId":"main", "objectId":"peer-object",
+            "objectCreatedAtMs":1, "path":"peer.md", "recordedAtMs":2000, "operation":"write",
+            "payloadBeforeBlobSha256":null, "payloadBeforePath":null,
+            "payloadAfterBlobSha256":digest, "payloadAfterPath":"peer.md",
+            "metadata":{"origin":"sync"}, "beforePresent":"absent"
+        }),
+    );
     let outcome = apply_envelope_with(&mut engine, &refused, &NoFaults, |tx, op| {
         insert_probe(tx, op)?;
         Err::<(), _>(SyncError::LiveDocumentBindingActive)
@@ -131,6 +154,11 @@ fn live_binding_refusal_rolls_back_mutation_persists_acks_and_allows_next_envelo
         })
         .expect("committed refusal and rolled back mutation");
     assert_eq!((mutations, refusals, journaled), (0, 1, 1));
+    let retained: String = engine.read_with(|conn| conn.query_row(
+        "SELECT text_sha256 FROM replication_refused_moment_blobs WHERE workspace_id='ws' AND origin_id='adopted-owner-peer' AND origin_seq=0 AND role='payload-after'",
+        [], |row|row.get(0),
+    )).expect("refused moment retains its source blob");
+    assert_eq!(retained, digest);
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "adopted-owner-peer").expect("ack"),
         0
@@ -148,7 +176,13 @@ fn live_binding_refusal_rolls_back_mutation_persists_acks_and_allows_next_envelo
         .primary,
         ApplyDisposition::Skipped,
     );
-    let next = envelope("adopted-owner-peer", 1, "moment.append", json!({}));
+    let mut next = envelope(
+        "adopted-owner-peer",
+        1,
+        "moment.append",
+        refused.payload.clone(),
+    );
+    next.payload["momentId"] = json!("next-peer-moment");
     assert_eq!(
         apply_envelope_with(&mut engine, &next, &NoFaults, insert_probe)
             .expect("next envelope")
