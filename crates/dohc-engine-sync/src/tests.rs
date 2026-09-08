@@ -105,6 +105,62 @@ fn insert_probe(tx: &rusqlite::Transaction<'_>, op: &ReplicationEnvelope) -> Res
     Ok(())
 }
 
+#[test]
+fn live_binding_refusal_rolls_back_mutation_persists_acks_and_allows_next_envelope() {
+    let (_scratch, _path, mut engine) = open_store();
+    let refused = envelope("adopted-owner-peer", 0, "moment.append", json!({}));
+    let outcome = apply_envelope_with(&mut engine, &refused, &NoFaults, |tx, op| {
+        insert_probe(tx, op)?;
+        Err::<(), _>(SyncError::LiveDocumentBindingActive)
+    })
+    .expect("binding refusal must not abort the pull");
+    let ApplyDisposition::Refused(refusal) = outcome.primary else {
+        panic!("expected a persisted refusal");
+    };
+    assert_eq!(
+        refusal.reason.message(),
+        "live document binding is still active"
+    );
+    let (mutations, refusals, journaled): (i64, i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row("SELECT COUNT(*) FROM blobs WHERE sha256='adopted-owner-peer'", [], |row| row.get(0))?,
+                conn.query_row("SELECT COUNT(*) FROM replication_pending_refusals WHERE origin_id='adopted-owner-peer' AND origin_seq=0 AND reason_message='live document binding is still active'", [], |row| row.get(0))?,
+                conn.query_row("SELECT COUNT(*) FROM replication_log WHERE origin_id='adopted-owner-peer' AND origin_seq=0", [], |row| row.get(0))?,
+            ))
+        })
+        .expect("committed refusal and rolled back mutation");
+    assert_eq!((mutations, refusals, journaled), (0, 1, 1));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "adopted-owner-peer").expect("ack"),
+        0
+    );
+    assert_eq!(
+        apply_envelope_with(
+            &mut engine,
+            &refused,
+            &NoFaults,
+            |_, _| -> Result<(), SyncError> {
+                panic!("redelivery must not rerun the refused mutation")
+            }
+        )
+        .expect("redelivery")
+        .primary,
+        ApplyDisposition::Skipped,
+    );
+    let next = envelope("adopted-owner-peer", 1, "moment.append", json!({}));
+    assert_eq!(
+        apply_envelope_with(&mut engine, &next, &NoFaults, insert_probe)
+            .expect("next envelope")
+            .primary,
+        ApplyDisposition::Applied(())
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "adopted-owner-peer").expect("next ack"),
+        1
+    );
+}
+
 fn reaction_payload(state: &str, emoji: &str, at_ms: i64, author_id: &str) -> serde_json::Value {
     json!({
         "reactionId": format!("reaction-{author_id}"),

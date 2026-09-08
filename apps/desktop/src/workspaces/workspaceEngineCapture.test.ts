@@ -970,6 +970,31 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it.each(["present", "absent"])("explains a shared live file restore refusal with the artifact %s", async artifact => {
+    const root = await createTestScratch("dohc-live-restore-refusal-");
+    let deletionAttempts = 0;
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine(), undefined, undefined, request => {
+      if (request.method === "versionedText.delete") {
+        deletionAttempts += 1;
+        throw new DaemonRefusalError(
+          { code: "INVALID_PARAMS", message: "live-document-binding-active", retry: "no" },
+          new Error("daemon response"),
+        );
+      }
+    });
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    const created = await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "shared.md", text: "original", metadata: { origin: "api" } });
+    if (artifact === "present") await write(root, "shared.md", "original");
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+    await expect(engine.restoreFileToBeforeMoment(created.moment.id)).rejects.toThrow("dohc could not restore shared.md. Shared live files must keep their current location.");
+    expect(deletionAttempts).toBe(1);
+    expect((await store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "shared.md" }))?.text).toBe("original");
+    if (artifact === "present") expect(await readFile(join(root, "shared.md"), "utf8")).toBe("original");
+    else expect(existsSync(join(root, "shared.md"))).toBe(false);
+    await engine.stop();
+  });
+
   it("closes both daemon stores when the final capture flush rejects", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();

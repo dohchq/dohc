@@ -190,6 +190,40 @@ it("propagates a native adopted-owner rename refusal and releases its move reser
   await capture.stop();
 });
 
+it.each(["notes/note.md", "notes"])("refuses an adopted owner delete before vacating the original session (%s)", async path => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-adopted-owner-delete-");
+  await mkdir(join(rootPath, "notes"));
+  await writeFile(join(rootPath, "notes/note.md"), "original");
+  const session = await capture.openYDocSession({ path: "notes/note.md", onRemoteUpdate: () => undefined });
+  state.moveRefusalAt = "preflight";
+  await expect(capture.settleAndCloseLiveSessionsForPath(path)).rejects.toThrow(`dohc could not delete ${path}.`);
+  expect(state.releaseCalls).toHaveLength(0);
+  expect(state.leaseActive).toBe(true);
+  expect(state.moveRequests).toEqual(["versionedText.checkMove"]);
+  expect(await readFile(join(rootPath, "notes/note.md"), "utf8")).toBe("original");
+  await session.settleNow();
+  await session.close();
+  await capture.stop();
+});
+
+it("refuses a folder delete when owner adoption finishes during teardown and releases its reservation", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-adopted-owner-delete-race-");
+  await mkdir(join(rootPath, "notes"));
+  await writeFile(join(rootPath, "notes/note.md"), "original");
+  await capture.openYDocSession({ path: "notes/note.md", onRemoteUpdate: () => undefined });
+  state.adoptOnClose = true;
+  await expect(capture.settleAndCloseLiveSessionsForPath("notes")).rejects.toThrow("dohc could not delete notes.");
+  expect(state.releaseCalls).toHaveLength(1);
+  expect(state.moveRequests).toEqual(["versionedText.checkMove", "versionedText.checkMove"]);
+  expect(await readFile(join(rootPath, "notes/note.md"), "utf8")).toBe("original");
+  const reopened = await capture.openYDocSession({ path: "notes/note.md", onRemoteUpdate: () => undefined });
+  await reopened.close();
+  state.moveRefusalAt = null;
+  const finish = await capture.settleAndCloseLiveSessionsForPath("notes");
+  finish(false);
+  await capture.stop();
+});
+
 it("refuses a folder move when owner adoption finishes during session teardown", async () => {
   const { capture, state, rootPath } = await reconnectFailureCapture("dohc-adopted-owner-close-race-");
   await mkdir(join(rootPath, "notes"));
