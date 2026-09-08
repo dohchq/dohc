@@ -837,8 +837,8 @@ function assertLiveJournalSchema(db: SqliteDb): void {
 }
 function initializeLiveJournalSchema(db: SqliteDb): void {
   const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(LIVE_JOURNAL_MARKER);
-  const existing = db.prepare("SELECT name FROM sqlite_schema WHERE name IN (?,?,?,?,?,?)").all(...Object.keys(LIVE_JOURNAL_SCHEMA));
   if (marked) { assertLiveJournalSchema(db); return; }
+  const existing = db.prepare("SELECT name FROM sqlite_schema WHERE name IN (?,?,?,?,?,?)").all(...Object.keys(LIVE_JOURNAL_SCHEMA));
   if (existing.length) throw new Error("unmarked live update journal schema already exists");
   for (const sql of Object.values(LIVE_JOURNAL_SCHEMA)) db.exec(sql);
   assertLiveJournalSchema(db);

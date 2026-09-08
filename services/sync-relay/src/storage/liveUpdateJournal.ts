@@ -12,6 +12,10 @@ import { readLiveHostControl } from "./hostControl";
 import { assertWorkspaceQuota } from "./workspaces";
 import { baselineRecord, baselineByteBuffer, baselineByteOffset, baselineByteLength, baselineBufferLength, baselineBufferResizable, authorityInteger, authorityIntegrity, currentLiveDocumentMoment, assertCurrentAuthorityHost, snapshotCurrentBindingRequest, decodeLiveDocumentAuthorityStructure, authorizeLiveDocument } from "./liveDocumentAuthority";
 
+function journalAuthorityHistory(storage: StorageContext, document: LiveDocumentKey): StoredLiveDocumentAuthority[] {
+  return storage.db.prepare(`SELECT * FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id=? AND object_id=? ORDER BY lineage_claim_id`)
+    .all(document.workspaceId, document.mainVersionId, document.objectId).map(row => decodeLiveDocumentAuthorityStructure(storage.db, document, row));
+}
 function journalIntegrity(condition: unknown): asserts condition {
   if (!condition) throw new Error("live update journal is damaged");
 }
@@ -257,8 +261,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
       committed = storage.tx(() => {
         const currentHost = journalHost(storage.db, host);
         if ("kind" in currentHost) return refused(currentHost);
-        const history = storage.db.prepare(`SELECT * FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id=? AND object_id=? ORDER BY lineage_claim_id`)
-          .all(document.workspaceId, document.mainVersionId, document.objectId).map(row => decodeLiveDocumentAuthorityStructure(storage.db, document, row));
+        const history = journalAuthorityHistory(storage, document);
         if (!history.length) return refused({ kind: "refused", reason: "baseline-missing" });
         const stored = history.find(row => row.current) ?? null;
         if (!stored || !stored.open) return refused({ kind: "refused", reason: "authority-refused" });
@@ -336,8 +339,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
 function liveJournalCut(storage: StorageContext, document: LiveDocumentKey):
     | { kind: "cut"; cut: LiveUpdateJournalCut; coverage: LiveUpdateStructRange[] }
     | Exclude<LiveUpdateJournalCutResult, { kind: "cut" }> {
-    const history = storage.db.prepare(`SELECT * FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id=? AND object_id=? ORDER BY lineage_claim_id`)
-      .all(document.workspaceId, document.mainVersionId, document.objectId).map(row => decodeLiveDocumentAuthorityStructure(storage.db, document, row));
+    const history = journalAuthorityHistory(storage, document);
     if (!history.length) return { kind: "refused", reason: "baseline-missing" };
     const stored = history.find(row => row.current);
     if (!stored || !stored.open) return { kind: "refused", reason: "authority-refused" };
