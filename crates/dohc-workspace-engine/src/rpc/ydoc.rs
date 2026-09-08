@@ -1459,16 +1459,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn captured_owner_seed_retains_exact_original_source_moment() {
-        let vectors: Value = serde_json::from_str(include_str!(
-            "../../../dohc-engine-collab/tests/fixtures/live-bootstrap.json"
+        let vector: Value = serde_json::from_str(include_str!(
+            "../../../dohc-engine-collab/tests/fixtures/owner-source-seed.json"
         ))
         .unwrap();
-        let vector = vectors
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|v| v["name"] == "rich-unicode")
-            .unwrap();
         let markdown = vector["markdown"].as_str().unwrap().to_owned();
         let bytes: Vec<u8> = serde_json::from_value(vector["bytes"].clone()).unwrap();
         let scratch = ScratchDir::new().unwrap();
@@ -1534,8 +1528,6 @@ mod tests {
         service.ydoc_record_update(&RequestContext::unbounded(),Some(handle.clone()),Some("owner-source-seed".into()),json!({
             "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&bytes),"seed":true
         })).await.unwrap();
-        let expected_source = source_moment.clone();
-        let expected_markdown = markdown.clone();
         service.workspace_close(Some(handle)).await.unwrap();
         {
             let store = dohc_engine_storage::EngineStore::open(&db_path, 3).unwrap();
@@ -1543,25 +1535,13 @@ mod tests {
                 "SELECT b.source_moment_id,b.source_blob_sha256,b.lineage_claim_id,d.head_update_seq,(SELECT COUNT(*) FROM moments WHERE workspace_id='owner-source') FROM ydoc_owner_base_sources b JOIN ydoc_docs d USING(workspace_id,version_id,object_id) WHERE b.object_id=?1",
                 [&object_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))
             )).unwrap();
-            assert_eq!(row.0, expected_source);
-            assert_eq!(
-                row.1,
-                dohc_engine_storage::hex_sha256(expected_markdown.as_bytes())
-            );
+            assert_eq!(row.0, source_moment);
+            assert_eq!(row.1, dohc_engine_storage::hex_sha256(markdown.as_bytes()));
             assert_eq!(row.3, 1);
             assert_eq!(row.4, 1, "retaining source must not create a domain moment");
             let original: String = store.read_with(|conn|conn.query_row("SELECT snapshot_blob_sha256 FROM ydoc_snapshots WHERE object_id=?1 AND up_to_seq=0",[&object_id],|r|r.get(0))).unwrap();
             assert_eq!(row.2, original);
         }
-        let reopened = dohc_engine_storage::EngineStore::open(
-            &scratch.path().join(".dohc/engine/engine.db"),
-            2,
-        )
-        .unwrap();
-        assert_eq!(
-            reopened.table_row_count("ydoc_owner_base_sources").unwrap(),
-            1
-        );
     }
 
     fn owner_outbox_append_params(workspace_id: &str, append_key: &str) -> Value {

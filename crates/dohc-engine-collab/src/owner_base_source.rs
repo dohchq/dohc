@@ -26,7 +26,6 @@ pub fn retain_owner_base_source_in_tx(
     baseline_digest: &str,
     source: &OwnerSeedSource,
 ) -> Result<bool, CollabError> {
-    let sql = |error: rusqlite::Error| corrupt(&format!("owner base source: {error}"));
     let marker = durable::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
     if marker.content_kind != ContentKind::Richdoc
         || marker.regime != Regime::Replicated
@@ -39,7 +38,7 @@ pub fn retain_owner_base_source_in_tx(
     let original: Option<String> = tx.query_row(
         "SELECT snapshot_blob_sha256 FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND up_to_seq=0",
         params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0),
-    ).optional().map_err(sql)?;
+    ).optional().map_err(durable::map_sql)?;
     if original.as_deref() != Some(baseline_digest) {
         return Err(corrupt("original owner base missing"));
     }
@@ -47,7 +46,7 @@ pub fn retain_owner_base_source_in_tx(
         "SELECT b.text,b.byte_length FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4 AND m.moment_id=?5 AND m.after_content_kind='text' AND m.after_blob_sha256=?6",
         params![key.workspace_id,key.version_id,key.object_id,path,source.moment_id,source.blob_sha256],
         |row| Ok((row.get(0)?,row.get(1)?)),
-    ).optional().map_err(sql)?;
+    ).optional().map_err(durable::map_sql)?;
     let Some((text, byte_length)) = artifact else {
         return Ok(false);
     };
@@ -57,14 +56,21 @@ pub fn retain_owner_base_source_in_tx(
     let baseline = durable::binary_blob_for_gate(tx, baseline_digest)?;
     let doc = Ydoc::wire();
     doc.apply(&baseline)?;
-    if doc.has_missing_updates() || doc.project(ContentKind::Richdoc)?.content != text {
+    if doc.has_missing_updates() {
+        return Ok(false);
+    }
+    let canonical = doc.project(ContentKind::Richdoc)?.content;
+    let projection = doc
+        .preserved_markdown_source(&canonical)
+        .unwrap_or(canonical);
+    if projection != text {
         return Ok(false);
     }
     let retained: Option<(String,String,String,i64)> = tx.query_row(
         "SELECT path,source_moment_id,source_blob_sha256,source_byte_length FROM ydoc_owner_base_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
         params![key.workspace_id,key.version_id,key.object_id,baseline_digest],
         |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
-    ).optional().map_err(sql)?;
+    ).optional().map_err(durable::map_sql)?;
     let expected = (
         path.to_owned(),
         source.moment_id.clone(),
@@ -78,7 +84,7 @@ pub fn retain_owner_base_source_in_tx(
         return Ok(true);
     }
     tx.execute("INSERT INTO ydoc_owner_base_sources (workspace_id,version_id,object_id,lineage_claim_id,path,source_moment_id,source_blob_sha256,source_byte_length) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-        params![key.workspace_id,key.version_id,key.object_id,baseline_digest,path,source.moment_id,source.blob_sha256,byte_length]).map_err(sql)?;
+        params![key.workspace_id,key.version_id,key.object_id,baseline_digest,path,source.moment_id,source.blob_sha256,byte_length]).map_err(durable::map_sql)?;
     Ok(true)
 }
 
