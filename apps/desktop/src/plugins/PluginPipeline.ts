@@ -1,21 +1,26 @@
+import {
+  cloneStatus,
+  initialPluginStatus,
+  invalidPluginError,
+  invalidPluginStatus,
+  manifestSettings,
+  pipelineError,
+  projectPluginStatus,
+  type PluginPipelineError,
+  type PluginPipelineErrorStage,
+  type PluginPipelinePluginStatus,
+} from "./pluginStatusProjection";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, readdir, rm } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import {
-  PLUGIN_PIPELINE_ERROR_STAGES,
-  PLUGIN_PIPELINE_STATUSES,
-} from "../ipc/channels";
 import type { PluginHost, PluginHostStartEvidence } from "./PluginHost";
 import {
   discoverInstalledPlugins,
   type InstalledPluginRecord,
 } from "./pluginDiscovery";
 import { buildPluginBundle } from "./pluginBuildRunner";
-import {
-  foldForCompare,
-  recoverOnDiskSegments,
-} from "./pluginCaseRecovery";
+import { foldForCompare } from "./pluginCaseRecovery";
 import { HOST_CHANGE_REFUSED_ERROR_CODE } from "./pluginCommandInvocation";
 import {
   isPluginHostCommandAuthority,
@@ -28,6 +33,8 @@ import {
 } from "./pluginHostOwnership";
 import { verifyPluginIcon } from "./pluginIcon";
 import { installPluginDependencies } from "./pluginInstallRunner";
+import { PluginJobQueues } from "./pluginJobQueue";
+import { PluginDoorWrites } from "./pluginDoorWrites";
 import { scanPluginLifecycleScripts } from "./pluginLifecycleScan";
 import {
   mutatePluginRecord,
@@ -51,20 +58,16 @@ import {
 } from "./pluginSettingsFile";
 import type { PluginRuntimeStatus } from "./pluginHostProtocol";
 import {
-  canonicalPluginSourceHash,
   hashPluginSourceFiles,
-  isExcludedSourceName,
   isPluginRootArtifact,
   pluginIdToSafePath,
   pluginStateRoot,
   snapshotPluginSource,
-  type PluginSourceFileDigest,
   type PluginSourceSnapshotResult,
 } from "./pluginSourceSnapshot";
 import {
   measurePluginDirectory,
   pluginUninstallPreflight,
-  readPluginBaselineManifest,
   summarizeUninstallPreflight,
   writePluginBaselineManifest,
   type PluginUninstallPreflightSummary,
@@ -75,38 +78,6 @@ import {
   errorMessage,
 } from "./pluginShared";
 
-export { PLUGIN_PIPELINE_ERROR_STAGES, PLUGIN_PIPELINE_STATUSES };
-
-type PluginPipelineStatus = typeof PLUGIN_PIPELINE_STATUSES[number];
-
-type PluginPipelineErrorStage =
-  typeof PLUGIN_PIPELINE_ERROR_STAGES[number];
-
-export interface PluginPipelineError {
-  stage: PluginPipelineErrorStage;
-  code: string;
-  message: string;
-}
-
-/**
- * What the manifest says a plugin is, for the list row and the details header.
- * Every field is optional in the manifest, so every field can be null and each
- * surface falls back on its own: the id names an unnamed plugin, and the
- * glyph tile stands in for a missing icon.
- */
-interface PluginMetadata {
-  displayName: string | null;
-  description: string | null;
-  publisher: string | null;
-  /** Plugin-root-relative, already checked by discovery. */
-  icon: string | null;
-  /** What the plugin calls this build. Display only — never compared. */
-  pluginVersion: string | null;
-  repository: string | null;
-  issues: string | null;
-  license: string | null;
-}
-
 /**
  * Bytes on this machine, measured rather than recorded. Null means the
  * directory holds no files, which is the honest answer for a plugin that was
@@ -115,59 +86,6 @@ interface PluginMetadata {
 interface PluginPipelineSizes {
   installedBytes: number | null;
   dataBytes: number | null;
-}
-
-/** One declared panel, and where the workbench shows it. */
-interface PluginPanelContribution {
-  id: string;
-  title: string;
-  placement: "editor" | "view";
-  /** The rail button's icon, plugin-root-relative, or null to fall back to
-   * the plugin's own icon. */
-  icon: string | null;
-}
-
-interface PluginCommandContribution {
-  id: string;
-  title: string;
-}
-
-export interface PluginPipelinePluginStatus extends PluginMetadata {
-  id: string;
-  directoryName: string;
-  rootPath: string;
-  valid: boolean;
-  status: PluginPipelineStatus;
-  disabledReason: "user" | "crash-loop" | "approval" | "repair" | null;
-  runtimeStatus: PluginRuntimeStatus | null;
-  sourceHash: string | null;
-  approvedHash: string | null;
-  installedBaselineHash: string | null;
-  /** The manifest's declared web apps, so the settings surface can offer an
-   * Open control without a second manifest read. */
-  webApps: { id: string; title: string; instanced: boolean }[];
-  /** The manifest's declared panels, so the workbench can put the ones placed
-   * in the view rail there without a second manifest read. */
-  panels: PluginPanelContribution[];
-  /** The manifest's declared commands, so the workbench can list them
-   * without a second manifest read. */
-  commands: PluginCommandContribution[];
-  /** The manifest's declared settings, so the details page can render the
-   * controls without a second manifest read. Values live per workspace and
-   * travel separately. */
-  settings: PluginSettingDeclaration[];
-  /**
-   * True from the moment a build fails while an old runtime keeps serving,
-   * until a replacement build succeeds — independent of runtimeStatus, so a
-   * crash-loop respawn between the failure and the fix can never make the
-   * still-owed replacement disappear from status. Mirrors recoveryState's
-   * own has() (round-8 finding 3), cleared the moment a replacement
-   * publishes or the plugin stops.
-   */
-  hasFailedReplacement: boolean;
-  diagnostics: string[];
-  warnings: string[];
-  error: PluginPipelineError | null;
 }
 
 export type PluginPipelineStatusEvent =
@@ -237,16 +155,12 @@ interface PluginPipelineOperations {
   discover: typeof discoverInstalledPlugins;
   snapshot: typeof snapshotPluginSource;
   install: typeof installPluginDependencies;
-  scan: typeof scanPluginLifecycleScripts;
   build: typeof buildPluginBundle;
-  readLocalState: typeof readPluginLocalState;
   mutateRecord: typeof mutatePluginRecord;
-  writeBaseline: typeof writePluginBaselineManifest;
   uninstallPreflight: typeof pluginUninstallPreflight;
   hashSource: typeof hashPluginSourceFiles;
   removePath: typeof rm;
   inspectPath: typeof lstat;
-  readFile: typeof readFile;
 }
 
 interface PluginPipelineOptions {
@@ -263,24 +177,12 @@ interface PluginPipelineOptions {
   /** Whether this workspace's engine capture is running right now — used
    * only to keep uninstall preflight's recovery promises honest (a file
    * under the capture size cap is not actually recoverable if capture
-   * wasn't running to record it). Defaults to true so existing callers and
-   * tests that don't care about this keep their current behavior. */
-  isEngineCaptureAvailable?: () => boolean;
+   * wasn't running to record it). */
+  isEngineCaptureAvailable: () => boolean;
   platform?: NodeJS.Platform;
   operations?: Partial<PluginPipelineOperations>;
 }
 
-
-interface QueuedJob {
-  sourceRefresh: boolean;
-  run: () => Promise<void>;
-}
-
-interface PluginJobQueue {
-  jobs: QueuedJob[];
-  sourceRefreshQueued: boolean;
-  draining: Promise<void> | null;
-}
 
 interface UninstallRecordFingerprint {
   approvedHash: string | null;
@@ -354,7 +256,7 @@ interface FullBuildOptions {
   /**
    * The source hash this build is allowed to approve. A caller that already
    * decided this content is approvable — the door-write predicate
-   * (doorApprovedHash: the approved baseline plus the recorded door deltas)
+   * (doorWrites.approvedHash: the approved baseline plus the recorded door deltas)
    * or a verify pass that confirmed the tree still matches its approved
    * hash — passes what it verified. The build takes its own fresh snapshot,
    * so without this an out-of-band change landing between that verification
@@ -414,61 +316,13 @@ const DEFAULT_OPERATIONS: PluginPipelineOperations = {
   discover: discoverInstalledPlugins,
   snapshot: snapshotPluginSource,
   install: installPluginDependencies,
-  scan: scanPluginLifecycleScripts,
   build: buildPluginBundle,
-  readLocalState: readPluginLocalState,
   mutateRecord: mutatePluginRecord,
-  writeBaseline: writePluginBaselineManifest,
   uninstallPreflight: pluginUninstallPreflight,
   hashSource: hashPluginSourceFiles,
   removePath: rm,
   inspectPath: lstat,
-  readFile,
 };
-
-/**
- * The bridge contract caps PluginPipelineError.message at 10,000 characters
- * (min 1), and several producers join unbounded diagnostic lists — a noisy
- * directory's discovery diagnostics, a drifted snapshot manifest's parse
- * issues, a failed build's output. One
- * over-cap message made the whole plugin list and every status event for
- * the candidate fail schema parsing, so every message is bounded here, in
- * the one place all pipeline errors are built.
- */
-const PIPELINE_ERROR_MESSAGE_MAX_CHARS = 8_000;
-
-function boundedErrorMessage(message: string): string {
-  if (message.length === 0) return "(no error detail)";
-  if (message.length <= PIPELINE_ERROR_MESSAGE_MAX_CHARS) return message;
-  const note = (shown: number): string =>
-    ` [${message.length - shown} of ${message.length} characters elided; ` +
-    `this message is capped at ${PIPELINE_ERROR_MESSAGE_MAX_CHARS} characters.]`;
-  // The note's own width shrinks (never grows) once the real shown count —
-  // no larger than the total — replaces the estimate, so the result stays
-  // inside the cap.
-  const shown = PIPELINE_ERROR_MESSAGE_MAX_CHARS - note(0).length;
-  return `${message.slice(0, shown)}${note(shown)}`;
-}
-
-function pipelineError(
-  stage: PluginPipelineErrorStage,
-  code: string,
-  message: string,
-): PluginPipelineError {
-  return { stage, code, message: boundedErrorMessage(message) };
-}
-
-/**
- * The same cap for the diagnostics and warnings a status record carries. Their
- * producers are as unbounded as the error producers above: a hostile
- * dohc-plugin.json puts a whole unrecognized key name into one strict-object
- * diagnostic, and a lifecycle warning line embeds a package's own version
- * string. One over-cap entry failed the entire list's schema parse, denying
- * every other plugin's Disable and Uninstall too.
- */
-function boundedStatusLines(lines: readonly string[]): string[] {
-  return lines.map(boundedErrorMessage);
-}
 
 function failureFromUnknown(
   stage: PluginPipelineErrorStage,
@@ -476,96 +330,6 @@ function failureFromUnknown(
   error: unknown,
 ): PipelineFailure {
   return new PipelineFailure(pipelineError(stage, code, errorMessage(error)));
-}
-
-function cloneError(error: PluginPipelineError | null): PluginPipelineError | null {
-  return error ? { ...error } : null;
-}
-
-function cloneStatus(status: PluginPipelinePluginStatus): PluginPipelinePluginStatus {
-  return {
-    ...status,
-    settings: status.settings.map((setting) => ({ ...setting })),
-    webApps: status.webApps.map((webApp) => ({ ...webApp })),
-    panels: status.panels.map((panel) => ({ ...panel })),
-    commands: status.commands.map((command) => ({ ...command })),
-    diagnostics: [...status.diagnostics],
-    warnings: [...status.warnings],
-    error: cloneError(status.error),
-  };
-}
-
-function manifestWebApps(
-  manifest: {
-    webApps?: { id: string; title: string; instanced: boolean }[];
-  } | null,
-): { id: string; title: string; instanced: boolean }[] {
-  return (manifest?.webApps ?? []).map((webApp) => ({
-    id: webApp.id,
-    title: webApp.title,
-    instanced: webApp.instanced,
-  }));
-}
-
-/**
- * The panels a plugin declares, with where each one shows. The entry path
- * stays behind in main: the renderer never loads a panel by path — it asks
- * for one by id, and main re-reads the manifest to answer.
- */
-function manifestPanels(
-  manifest: {
-    panels?: {
-      id: string;
-      title: string;
-      placement: "editor" | "view";
-      icon?: string;
-    }[];
-  } | null,
-): PluginPanelContribution[] {
-  return (manifest?.panels ?? []).map((panel) => ({
-    id: panel.id,
-    title: panel.title,
-    placement: panel.placement,
-    icon: panel.icon ?? null,
-  }));
-}
-
-function manifestCommands(
-  manifest: {
-    commands?: { id: string; title: string }[];
-  } | null,
-): PluginCommandContribution[] {
-  return (manifest?.commands ?? []).map((command) => ({
-    id: command.id,
-    title: command.title,
-  }));
-}
-
-/**
- * What a plugin says about itself, for the surfaces that show a plugin before
- * anyone installs it. Derived from the candidate on every status change for
- * the same reason webApps is: an approved manifest edit that renames a plugin
- * or rewrites its description must reach the list, not stay frozen at first
- * discovery. The icon comes from the candidate rather than the manifest —
- * discovery is what checked the file behind it.
- */
-function manifestSettings(
-  manifest: { settings?: PluginSettingDeclaration[] } | null,
-): PluginSettingDeclaration[] {
-  return (manifest?.settings ?? []).map((setting) => ({ ...setting }));
-}
-
-function manifestMetadata(candidate: InstalledPluginRecord): PluginMetadata {
-  return {
-    displayName: candidate.manifest?.displayName ?? null,
-    description: candidate.manifest?.description ?? null,
-    publisher: candidate.manifest?.publisher ?? null,
-    icon: candidate.iconPath,
-    pluginVersion: candidate.manifest?.pluginVersion ?? null,
-    repository: candidate.manifest?.repository ?? null,
-    issues: candidate.manifest?.issues ?? null,
-    license: candidate.manifest?.license ?? null,
-  };
 }
 
 /**
@@ -627,18 +391,6 @@ function notDiscoveredError(pluginId: string): PluginPipelineError {
   );
 }
 
-function invalidPluginError(
-  candidate: InstalledPluginRecord,
-): PluginPipelineError | null {
-  if (candidate.diagnostics.length === 0) return null;
-  // pipelineError bounds the joined message.
-  return pipelineError(
-    "discovery",
-    "invalid-plugin",
-    candidate.diagnostics.join(" "),
-  );
-}
-
 function generatedManifest(manifest: DohcPluginManifest): DohcPluginManifest {
   return { ...manifest, entry: "bundle.mjs" };
 }
@@ -672,76 +424,22 @@ function uninstallConfirmationKey(pluginId: string, directoryName: string): stri
   return `${pluginId}\0${directoryName}`;
 }
 
-export interface DoorWrittenDelta {
-  sha256: string;
-  seq: number;
-  provisional?: boolean;
-  /**
-   * The write's original, caller-spelled absolute path. Set only when
-   * landing attributed this delta through sourceRelPath's case-insensitive
-   * fold, not an exact root match — an exact landing already proved
-   * ownership, so it has nothing left to re-confirm. retryProvisionalDeltaRecovery
-   * walks this path from the workspace root to confirm or disprove that
-   * guess; a rekeyed or landing-exact delta carries no origin because it
-   * needs none.
-   */
-  provisionalOrigin?: string;
-}
-
-export function overlayDoorWrittenSourceDeltas(
-  baselineFiles: readonly PluginSourceFileDigest[],
-  deltas: Iterable<readonly [string, DoorWrittenDelta]>,
-  platform: NodeJS.Platform = process.platform,
-): PluginSourceFileDigest[] {
-  const files = new Map(
-    baselineFiles.map((file) => [file.relPath, file.sha256]),
-  );
-  const baselineKeys = new Set(files.keys());
-  const byLowerCase = platform === "win32" || platform === "darwin"
-    ? new Map([...files.keys()].map((relPath) => [foldForCompare(relPath), relPath]))
-    : undefined;
-  for (
-    const [relPath, delta] of [...deltas].sort((a, b) => a[1].seq - b[1].seq)
-  ) {
-    const target = delta.provisional && byLowerCase && !baselineKeys.has(relPath)
-      ? byLowerCase.get(foldForCompare(relPath)) ?? relPath
-      : relPath;
-    files.set(target, delta.sha256);
-  }
-  return [...files].map(([relPath, sha256]) => ({ relPath, sha256 }));
-}
-
 export class PluginPipeline {
   private readonly workspaceRoot: string;
   private readonly dohcDir: string;
   private readonly operations: PluginPipelineOperations;
   private readonly platform: NodeJS.Platform;
   private readonly statuses = new Map<string, PluginPipelinePluginStatus>();
-  // A key's presence is the fact a build failed with an old runtime still
-  // standing in for it — set whenever captureRecoveredManifest runs, keyed
-  // by has(). The value is the generated manifest it also tries to cache,
-  // or null when that read wasn't readable; hasRecoverableFailure only
-  // needs the key, the palette needs the value too (#779 round 21 finding
-  // 5, merged #779 round 26 simplification 8).
+  // A recoveryState key records an unreplaced build failure, even if no host
+  // is running. hasRecoverableFailure checks key presence. The value starts
+  // as null; a successful read caches the generated manifest, and a failed
+  // reread keeps that cache. Without a cached manifest, Retry stays available
+  // and the projector keeps current contributions.
   private readonly recoveryState = new Map<string, DohcPluginManifest | null>();
   private readonly lastApprovedAttemptHash = new Map<string, string>();
-  private readonly queues = new Map<string, PluginJobQueue>();
+  private readonly jobQueues: PluginJobQueues;
   private readonly uninstallConfirmations = new Map<string, UninstallConfirmation>();
-  /**
-   * Every door-written file since the approved baseline, per plugin:
-   * relPath (POSIX, root-relative) to the sha256 of the written bytes and
-   * the write's order in doorWriteSeq. See handleDoorWrittenSourceChange
-   * and doorApprovedHash — this overlay, applied to the persisted baseline
-   * manifest, is the only tree the door path may auto-approve. Overlay
-   * A landing-time key is provisional until pluginAuthoredWrite's async case
-   * recovery moves it to the spelling read from disk.
-   */
-  private readonly doorWrittenDeltas = new Map<
-    string,
-    Map<string, DoorWrittenDelta>
-  >();
-  /** Orders door writes against each build's snapshot; see runFullBuild. */
-  private doorWriteSeq = 0;
+  private readonly doorWrites: PluginDoorWrites;
   /**
    * The plugins whose first install is running right now, and the ones whose
    * source changed while that install ran. A fresh install hashes the tree,
@@ -767,6 +465,21 @@ export class PluginPipeline {
     this.dohcDir = pluginDataDir(options.stateDir, this.workspaceRoot);
     this.operations = { ...DEFAULT_OPERATIONS, ...options.operations };
     this.platform = options.platform ?? process.platform;
+    this.doorWrites = new PluginDoorWrites(
+      this.workspaceRoot,
+      this.dohcDir,
+      this.platform,
+      (pluginId) => this.validCandidate(pluginId)?.rootPath ?? null,
+    );
+    this.jobQueues = new PluginJobQueues((pluginId, error) => {
+      const candidate = this.validCandidate(pluginId);
+      if (candidate) {
+        this.failure(
+          pluginId,
+          pipelineError("runtime", "refresh-failed", errorMessage(error)),
+        );
+      }
+    });
   }
 
   /**
@@ -922,27 +635,10 @@ export class PluginPipeline {
           included.add(installed.id);
           continue;
         }
-        listed.push({
-          id: candidate.id,
-          directoryName: candidate.directoryName,
-          rootPath: candidate.rootPath,
-          valid: false,
-          status: "invalid",
-          disabledReason: null,
-          runtimeStatus: null,
-          sourceHash: null,
-          approvedHash: null,
-          installedBaselineHash: null,
-          ...manifestMetadata(candidate),
-          settings: manifestSettings(candidate.manifest),
-          webApps: manifestWebApps(candidate.manifest),
-          panels: manifestPanels(candidate.manifest),
-          commands: manifestCommands(candidate.manifest),
-          hasFailedReplacement: this.recoveryState.has(candidate.id),
-          diagnostics: boundedStatusLines(candidate.diagnostics),
-          warnings: [],
-          error: invalidPluginError(candidate),
-        });
+        listed.push(invalidPluginStatus(
+          candidate,
+          this.recoveryState.get(candidate.id),
+        ));
         continue;
       }
       const status = this.statuses.get(candidate.id);
@@ -1051,44 +747,6 @@ export class PluginPipeline {
       }
     }
     return null;
-  }
-
-  private sourceRelPathExact(
-    candidate: InstalledPluginRecord,
-    absolutePath: string,
-  ): string | null {
-    const root = resolve(candidate.rootPath);
-    const target = resolve(absolutePath);
-    if (target === root) return null;
-    if (!isInside(root, target)) return null;
-    return relative(root, target).replaceAll("\\", "/");
-  }
-
-  private sourceRelPath(
-    candidate: InstalledPluginRecord,
-    absolutePath: string,
-  ): string | null {
-    const exact = this.sourceRelPathExact(candidate, absolutePath);
-    if (exact !== null) return exact;
-    if (this.platform !== "win32" && this.platform !== "darwin") return null;
-    const root = resolve(candidate.rootPath);
-    const target = resolve(absolutePath);
-    const foldedRoot = foldForCompare(root);
-    const foldedTarget = foldForCompare(target);
-    if (foldedTarget === foldedRoot || !isInside(foldedRoot, foldedTarget)) return null;
-    const rootSegments = root.split(/[\\/]+/).filter(Boolean);
-    const targetSegments = target.split(/[\\/]+/).filter(Boolean);
-    if (
-      rootSegments.length >= targetSegments.length ||
-      rootSegments.some((segment, index) => {
-        const targetSegment = targetSegments[index];
-        return targetSegment === undefined ||
-          foldForCompare(segment) !== foldForCompare(targetSegment);
-      })
-    ) {
-      return null;
-    }
-    return targetSegments.slice(rootSegments.length).join("/");
   }
 
   install(pluginId: string): Promise<PluginPipelineActionResult> {
@@ -1320,10 +978,8 @@ export class PluginPipeline {
   ): Promise<PluginPipelineActionResult> {
     return this.enqueueAdoptedAction(pluginId, async (change) => {
         const candidate = this.requireValidCandidate(pluginId);
-        // A crash-loop respawn between the failure and this call flips
-        // status back to whatever the still-running old build reports;
-        // hasRecoverableFailure is the fact that survives it (round-8
-        // finding 3, round-21 finding 1).
+        // A crash-loop respawn can reset status to the old build's runtime status.
+        // hasRecoverableFailure preserves the failed replacement across that reset.
         if (!this.hasRecoverableFailure(pluginId)) {
           return existingHostResult(this.failure(
             pluginId,
@@ -1365,7 +1021,7 @@ export class PluginPipeline {
    * attributes: the design doc's auto-approve predicate is attribution
    * through the door, not topology, so the refresh auto-approves only when
    * the live tree equals the approved baseline plus every recorded door
-   * delta (doorApprovedHash). Hashing the whole live tree here instead
+   * delta (doorWrites.approvedHash). Hashing the whole live tree here instead
    * folded ambient, watcher-class bytes already on disk — a git checkout, a
    * mirror delivery — into the door write's auto-approval. Deltas are
    * recorded synchronously and keyed per
@@ -1377,23 +1033,7 @@ export class PluginPipeline {
     pluginId: string,
     write: { absolutePath: string; text: string },
   ): void {
-    const candidate = this.validCandidate(pluginId);
-    if (!candidate) return;
-    const exactRelPath = this.sourceRelPathExact(candidate, write.absolutePath);
-    const relPath = exactRelPath ?? this.sourceRelPath(candidate, write.absolutePath);
-    if (relPath === null) return;
-    // node_modules and .dohc are excluded from every source digest, so a
-    // write under them cannot change the hash this predicate compares.
-    if (this.isExcludedRelPath(relPath)) return;
-    const deltas = this.doorWrittenDeltas.get(pluginId) ??
-      new Map<string, DoorWrittenDelta>();
-    deltas.set(relPath, {
-      sha256: createHash("sha256").update(write.text, "utf8").digest("hex"),
-      seq: ++this.doorWriteSeq,
-      provisional: true,
-      provisionalOrigin: exactRelPath === null ? write.absolutePath : undefined,
-    });
-    this.doorWrittenDeltas.set(pluginId, deltas);
+    if (!this.doorWrites.record(pluginId, write)) return;
     this.enqueueSourceRefresh(pluginId, (change) =>
       this.reconcileApprovedCandidate(pluginId, true, change));
   }
@@ -1408,49 +1048,9 @@ export class PluginPipeline {
     from: { absolutePath: string },
     to: { absolutePath: string },
   ): void {
-    const candidate = this.validCandidate(pluginId);
-    if (!candidate) return;
-    const fromRelPath = this.sourceRelPath(candidate, from.absolutePath);
-    if (fromRelPath === null) return;
-    const deltas = this.doorWrittenDeltas.get(pluginId);
-    const delta = deltas?.get(fromRelPath);
-    if (!deltas || !delta) return;
-
-    const toRelPath = this.sourceRelPathExact(candidate, to.absolutePath);
-    if (toRelPath === null) {
-      // Recovery resolved the write's true on-disk path, and it is not
-      // under the plugin's real root: the landing-time fold guessed
-      // ownership from spelling alone, and a case-sensitive volume just
-      // proved that guess wrong. Drop the provisional attribution — this
-      // is an ordinary out-of-band change to a distinct, real directory,
-      // not this plugin's own source.
-      deltas.delete(fromRelPath);
-      this.enqueueSourceRefresh(pluginId, (change) =>
-        this.reconcileApprovedCandidate(pluginId, true, change));
-      return;
-    }
-
-    if (this.isExcludedRelPath(toRelPath)) {
-      deltas.delete(fromRelPath);
-      this.enqueueSourceRefresh(pluginId, (change) =>
-        this.reconcileApprovedCandidate(pluginId, true, change));
-      return;
-    }
-
-    const destination = deltas.get(toRelPath);
-    const pathChanged = fromRelPath !== toRelPath;
-    if (pathChanged) deltas.delete(fromRelPath);
-    if (!destination || destination.seq <= delta.seq) {
-      deltas.set(toRelPath, { sha256: delta.sha256, seq: delta.seq });
-    }
-    if (pathChanged) {
-      this.enqueueSourceRefresh(pluginId, (change) =>
-        this.reconcileApprovedCandidate(pluginId, true, change));
-    }
-  }
-
-  private isExcludedRelPath(relPath: string): boolean {
-    return relPath.split("/").some((segment) => isExcludedSourceName(segment));
+    if (!this.doorWrites.rekey(pluginId, from, to)) return;
+    this.enqueueSourceRefresh(pluginId, (change) =>
+      this.reconcileApprovedCandidate(pluginId, true, change));
   }
 
   /**
@@ -1479,13 +1079,9 @@ export class PluginPipeline {
     const candidate = this.validCandidate(pluginId);
     if (!candidate) return;
     if (runtimeStatus === "disabled") {
-      // recoveryState staying set is what keeps hasFailedReplacement true
-      // through this transition: a build that failed and was never
-      // replaced is still owed one whether or not the old runtime that
-      // outlived it just gave up crash-looping. Clearing it here hid Retry
-      // build and routed Enable through an approval hold instead (round-9
-      // finding 2) — the one path a build failure can leave with no running
-      // host left to preserve the fact for later.
+      // Keep recoveryState when the old runtime stops crash-looping. Its failed
+      // replacement still needs a retry with no host running; clearing the entry
+      // would hide Retry build and route Enable through an approval hold.
       this.setStatus(candidate, {
         status: "disabled",
         disabledReason: "crash-loop",
@@ -1829,11 +1425,7 @@ export class PluginPipeline {
     );
     try {
       await this.discoveryTail.catch(() => undefined);
-      await Promise.all(
-        [...this.queues.values()]
-          .map((queue) => queue.draining)
-          .filter((draining): draining is Promise<void> => draining !== null),
-      );
+      await this.jobQueues.waitForCurrentJobs();
       const outcome = await ownershipOutcome;
       if (!outcome.ok) throw outcome.error;
     } finally {
@@ -2273,7 +1865,7 @@ export class PluginPipeline {
    * batches, and door writes. Verify the live tree against the approved
    * hash; when it changed, auto-approve iff the live tree equals the
    * approved baseline plus the accumulated door-written deltas
-   * (doorApprovedHash) — the design doc's predicate — and hold for approval
+   * (doorWrites.approvedHash) — the design doc's predicate — and hold for approval
    * otherwise. A queued watcher reconcile can be the only refresh that
    * survives enqueueSourceRefresh's dedup after a door write, so it must
    * consult the same predicate rather than holding a pure door-write
@@ -2324,7 +1916,7 @@ export class PluginPipeline {
         this.setStatus(candidate, priorStatus);
         return existingHostResult(undefined);
       }
-      const doorHash = await this.doorApprovedHash(pluginId, record.approvedHash);
+      const doorHash = await this.doorWrites.approvedHash(pluginId, record.approvedHash);
       if (doorHash === null || verified.sourceHash !== doorHash) {
         return mapHostResult(await this.holdForApproval(
           candidate,
@@ -2364,7 +1956,7 @@ export class PluginPipeline {
       // here restarted a plugin the app had turned off — and reset the crash
       // accounting that turned it off.
       const doorHash = priorDisabledReason === "approval"
-        ? await this.doorApprovedHash(pluginId, record.approvedHash)
+        ? await this.doorWrites.approvedHash(pluginId, record.approvedHash)
         : null;
       if (doorHash !== record.approvedHash) {
         this.setStatus(candidate, {
@@ -2384,11 +1976,9 @@ export class PluginPipeline {
       }, change), () => undefined);
     }
     if (!startRuntime || this.host.getStatus(pluginId)) {
-      // A no-op reconcile (nothing to rebuild, nothing to start) must
-      // restore the status this function's own snapshotOrThrow set to
-      // "snapshotting" at the top — otherwise a watcher event for an
-      // already-running, unchanged plugin left it permanently stuck
-      // reading "Checking source" (fixround Section B item 12).
+      // A no-op reconcile must restore the status snapshotOrThrow changed to
+      // "snapshotting". Otherwise an unchanged, running plugin stays stuck on
+      // "Checking source" after a watcher event.
       const runtimeStatus = this.host.getStatus(pluginId);
       this.setStatus(candidate, {
         status: runtimeStatus ?? "queued",
@@ -2437,7 +2027,7 @@ export class PluginPipeline {
       }
       await this.removePluginData(candidate.id);
       this.statuses.delete(candidate.id);
-      this.doorWrittenDeltas.delete(candidate.id);
+      this.doorWrites.forget(candidate.id);
       this.lastApprovedAttemptHash.delete(candidate.id);
       this.sourceChangedDuringInstall.delete(candidate.id);
       this.uninstallConfirmations.delete(
@@ -2569,89 +2159,6 @@ export class PluginPipeline {
     }));
   }
 
-  /**
-   * Retries case recovery for every still-provisional delta before
-   * doorApprovedHash hashes them: confirms a landing-time fold's guessed
-   * ownership, or recovers a leaf's on-disk spelling.
-   */
-  private async retryProvisionalDeltaRecovery(pluginId: string): Promise<void> {
-    if (this.platform !== "win32" && this.platform !== "darwin") return;
-    const deltas = this.doorWrittenDeltas.get(pluginId);
-    if (!deltas) return;
-    const candidate = this.validCandidate(pluginId);
-    if (!candidate) return;
-    const root = resolve(candidate.rootPath);
-    for (const [relPath, delta] of [...deltas]) {
-      if (!delta.provisional) continue;
-      const origin = delta.provisionalOrigin;
-      const { segments, fullyRecovered } = await recoverOnDiskSegments(
-        origin !== undefined ? this.workspaceRoot : root,
-        origin !== undefined
-          ? relative(this.workspaceRoot, origin).replaceAll("\\", "/")
-          : relPath,
-        undefined,
-      );
-      const current = deltas.get(relPath);
-      if (!current || current.seq !== delta.seq) continue;
-      if (!fullyRecovered) continue;
-      const recoveredRelPath = origin !== undefined
-        ? this.sourceRelPathExact(candidate, join(this.workspaceRoot, ...segments))
-        : segments.join("/");
-      if (recoveredRelPath === null) {
-        // Recovery resolved the write's true on-disk path, and it is not
-        // under this plugin's real root: the landing-time fold guessed
-        // ownership from spelling alone, and a case-sensitive volume just
-        // proved that guess wrong. Drop it — the same confirmation
-        // rekeyDoorWrittenSourceChange applies to a delta the writer's own
-        // recovery rekeys.
-        deltas.delete(relPath);
-        continue;
-      }
-      if (this.isExcludedRelPath(recoveredRelPath)) {
-        deltas.delete(relPath);
-        continue;
-      }
-      if (recoveredRelPath === relPath) {
-        deltas.set(relPath, { sha256: delta.sha256, seq: delta.seq });
-        continue;
-      }
-      deltas.delete(relPath);
-      const destination = deltas.get(recoveredRelPath);
-      if (!destination || destination.seq <= delta.seq) {
-        deltas.set(recoveredRelPath, { sha256: delta.sha256, seq: delta.seq });
-      }
-    }
-  }
-
-  /**
-   * The one tree the door path may auto-approve: the approved per-file
-   * baseline overlaid with every door-written delta recorded since. Null
-   * when no baseline verifies against the approved hash — a fresh
-   * install's first approval is user-driven, and a baseline that cannot be
-   * read or does not describe the approved content proves nothing, so
-   * nothing auto-approves. Only handleDoorWrittenSourceChange writes
-   * deltas, so any other byte on disk — an interloper file, a
-   * watcher-class edit, an out-of-band delete — makes the live tree miss
-   * this hash and hold for approval. The SDK write surface has no delete,
-   * so a delta only ever adds or replaces one file. The retry also confirms
-   * ownership for a delta attributed through the landing-time path fold.
-   */
-  private async doorApprovedHash(
-    pluginId: string,
-    approvedHash: string,
-  ): Promise<string | null> {
-    const baseline = await readPluginBaselineManifest(this.dohcDir, pluginId);
-    if (!baseline || baseline.sourceHash !== approvedHash) return null;
-    await this.retryProvisionalDeltaRecovery(pluginId);
-    return canonicalPluginSourceHash(
-      overlayDoorWrittenSourceDeltas(
-        baseline.files,
-        this.doorWrittenDeltas.get(pluginId) ?? [],
-        this.platform,
-      ),
-    );
-  }
-
   private async runFullBuild(
     input: FullBuildOptions,
     change?: PluginHostChangeAuthority,
@@ -2684,7 +2191,7 @@ export class PluginPipeline {
     // baseline, or a user gesture approved whatever superseded them); a
     // delta above it landed after the snapshot and must survive for its own
     // queued refresh.
-    const doorSeqAtSnapshot = this.doorWriteSeq;
+    const doorSeqAtSnapshot = this.doorWrites.checkpoint();
     if (input.freshInstall) this.freshInstallsInFlight.add(candidate.id);
     try {
       const snapshot = await this.snapshotOrThrow(validCandidate);
@@ -2715,12 +2222,10 @@ export class PluginPipeline {
           change,
         );
       }
-      // snapshotOrThrow's own digest is reused for the install baseline
-      // manifest below instead of re-hashing the whole tree a second time
-      // (fixround Section C F1) — writePluginBaselineManifest already
-      // enforces canonicalPluginSourceHash(digest.files) === digest.sourceHash
-      // and digest.sourceHash === installedBaselineHash, which is the same
-      // invariant a second hash pass would have re-verified.
+      // Reuse snapshotOrThrow's digest for the install baseline. The baseline
+      // writer already checks canonicalPluginSourceHash(digest.files) against
+      // digest.sourceHash and digest.sourceHash against installedBaselineHash;
+      // another full-tree hash would repeat those checks.
       const baselineDigest = snapshot.digest;
 
       // candidate.manifest was parsed from the live root at an earlier
@@ -2761,7 +2266,7 @@ export class PluginPipeline {
       this.unwrap("install", installResult);
 
       this.setStatus(candidate, { status: "scanning" });
-      const scan = this.unwrap("scan", await this.operations.scan({
+      const scan = this.unwrap("scan", await scanPluginLifecycleScripts({
         snapshotRoot: snapshot.snapshotRoot,
         manifest,
       }));
@@ -2848,7 +2353,7 @@ export class PluginPipeline {
       // of the installed source, not an approval gate: a failure here cannot
       // let unapproved bytes run.
       try {
-        await this.operations.writeBaseline({
+        await writePluginBaselineManifest({
           dohcDir: this.dohcDir,
           pluginId: candidate.id,
           baselineDigest,
@@ -2857,15 +2362,7 @@ export class PluginPipeline {
       } catch (error) {
         throw failureFromUnknown("state", "state-write-failed", error);
       }
-      const settledDeltas = this.doorWrittenDeltas.get(candidate.id);
-      if (settledDeltas) {
-        for (const [relPath, delta] of settledDeltas) {
-          if (delta.seq <= doorSeqAtSnapshot) settledDeltas.delete(relPath);
-        }
-        if (settledDeltas.size === 0) {
-          this.doorWrittenDeltas.delete(candidate.id);
-        }
-      }
+      this.doorWrites.settle(candidate.id, doorSeqAtSnapshot);
       const warnings = [
         ...scan.warningLines,
         ...(published.cleanupWarning ? [published.cleanupWarning] : []),
@@ -2897,18 +2394,9 @@ export class PluginPipeline {
       }
 
       this.recoveryState.delete(candidate.id);
-      // Discovery's own cached candidate for this id can be stale by now —
-      // a source edit made again right after discovery's last scan (but
-      // before this exact snapshot was taken) still lands in the snapshot,
-      // just not in that cache. Refreshed here so pluginRegistration()
-      // (and anything else that reads this.discovery) is accurate right
-      // away instead of only after the next watcher rescan happens to run.
-      // A later rescan still wins normally, the same as any other edit.
-      // IconPath is manifest-derived the same
-      // way discovery's own scan computes it — left at its stale value, a
-      // build that added, removed or changed a plugin's icon would keep
-      // showing whatever discovery's last scan found instead (#779 round
-      // 25 finding 2).
+      // The built snapshot can include manifest and icon edits made after discovery.
+      // Refresh the cached candidate so pluginRegistration() immediately reports
+      // what was built. A later discovery scan can replace this cache normally.
       const builtIcon = manifest.icon
         ? (await verifyPluginIcon(candidate.rootPath, manifest.icon)).icon
         : null;
@@ -2973,8 +2461,6 @@ export class PluginPipeline {
           runtimeStatus: currentRuntimeStatus,
           sourceHash,
           error: detail,
-          // priorStatus: see its own definition above (#779 round 22
-          // finding 5).
           ...(!recovered && priorStatus
             ? {
               settings: priorStatus.settings,
@@ -3101,12 +2587,9 @@ export class PluginPipeline {
         ? error.detail
         : pipelineError("snapshot", "snapshot-failed", errorMessage(error));
       const runtimeStatus = this.host.getStatus(candidate.id) ?? null;
-      // This verify pass never touched the live root, so whatever it was
-      // running is still running — the same "old runtime still serving a
-      // failed candidate" case runFullBuild's own catch recovers from, and
-      // it needs the same recovery cache write, or the not-yet-trusted
-      // candidate this pass just rejected becomes authoritative everywhere
-      // setStatus derives from it (round-8 finding 1).
+      // Verification left the live root untouched. Recover its manifest as
+      // runFullBuild does on failure, so status contributions still describe the
+      // running build instead of the rejected candidate.
       if (runtimeStatus !== null) {
         await this.captureRecoveredManifest(candidate.id);
       }
@@ -3125,16 +2608,13 @@ export class PluginPipeline {
   }
 
   /**
-   * Populates the recovery cache from the live root's own generated
-   * manifest, so setStatus keeps deriving commands/panels/webApps/settings
-   * from the build actually running rather than a candidate manifest a
-   * failure just meant not to trust. Shared by every failure path that can
-   * land with an old runtime still serving — one entry point missing this
-   * call is how round-8 finding 1 escaped runFullBuild's own version of it.
+   * Cache the live root's generated manifest so status contributions follow
+   * the build that remains available after a replacement fails. Every failure
+   * path that leaves the old build available uses this recovery state.
    *
-   * Marks recoveryState's own key (has(), value null) before attempting
-   * the read: an unreadable or missing generated manifest must not cost
-   * Retry its own availability, only the palette's manifest to show.
+   * Record the failed replacement before reading the manifest. A missing or
+   * unreadable manifest must not remove Retry. Retain any cached manifest;
+   * leave the value null if none has been recovered.
    */
   private async captureRecoveredManifest(pluginId: string): Promise<void> {
     if (!this.recoveryState.has(pluginId)) this.recoveryState.set(pluginId, null);
@@ -3145,7 +2625,7 @@ export class PluginPipeline {
       );
       const [manifestStats, manifestBody] = await Promise.all([
         this.operations.inspectPath(manifestPath),
-        this.operations.readFile(manifestPath, "utf8"),
+        readFile(manifestPath, "utf8"),
       ]);
       if (manifestStats.isFile()) {
         const parsed = DohcPluginManifestSchema.safeParse(
@@ -3156,13 +2636,15 @@ export class PluginPipeline {
         }
       }
     } catch {
-      // The existing candidate-manifest fallback remains the best available
-      // answer when the live manifest cannot be read.
+      // Keep the existing recovery entry when the read fails. It is null if no
+      // manifest has been recovered; the projector then keeps current contributions.
     }
   }
 
-  /** Retry's own precondition: a failed build with an old runtime still
-   * standing in for it, whether or not its manifest could be cached. */
+  /**
+   * Retry is available for a failed status or a recorded failed replacement,
+   * whether or not a host is running or its manifest could be cached.
+   */
   private hasRecoverableFailure(pluginId: string): boolean {
     return this.statuses.get(pluginId)?.status === "failed" ||
       this.recoveryState.has(pluginId);
@@ -3191,10 +2673,6 @@ export class PluginPipeline {
     return snapshot;
   }
 
-  // assertInstall/assertScan/assertBuild were the same body three times —
-  // "if !result.ok, throw PipelineFailure(pipelineError(stage,
-  // result.error.code, result.error.message))" — differing only in which
-  // stage name they threw with (fixround Section C F4).
   private unwrap<T extends { ok: true }, E extends { code: string; message: string }>(
     stage: PluginPipelineErrorStage,
     result: T | { ok: false; error: E },
@@ -3206,7 +2684,7 @@ export class PluginPipeline {
   }
 
   private async localState(): Promise<PluginLocalState> {
-    const result = await this.operations.readLocalState(
+    const result = await readPluginLocalState(
       this.options.stateDir,
       this.workspaceRoot,
     );
@@ -3629,7 +3107,7 @@ export class PluginPipeline {
   ): void {
     for (const pluginId of cleanupIds) {
       this.statuses.delete(pluginId);
-      this.doorWrittenDeltas.delete(pluginId);
+      this.doorWrites.forget(pluginId);
       this.lastApprovedAttemptHash.delete(pluginId);
       this.uninstallConfirmations.delete(
         uninstallConfirmationKey(pluginId, directoryName),
@@ -3758,7 +3236,7 @@ export class PluginPipeline {
   }
 
   private engineCaptureAvailable(): boolean {
-    return this.options.isEngineCaptureAvailable?.() ?? true;
+    return this.options.isEngineCaptureAvailable();
   }
 
   private liveRoot(pluginId: string): string {
@@ -3820,7 +3298,7 @@ export class PluginPipeline {
     try {
       const [manifest, bundleBytes] = await Promise.all([
         this.operations.inspectPath(join(liveRoot, "dohc-plugin.generated.json")),
-        this.operations.readFile(join(liveRoot, "bundle.mjs")),
+        readFile(join(liveRoot, "bundle.mjs")),
       ]);
       if (!manifest.isFile()) return false;
       const bundleHash = createHash("sha256").update(bundleBytes).digest("hex");
@@ -3988,94 +3466,26 @@ export class PluginPipeline {
   }
 
   private baseStatus(candidate: InstalledPluginRecord): PluginPipelinePluginStatus {
-    return {
-      id: candidate.id,
-      directoryName: candidate.directoryName,
-      rootPath: candidate.rootPath,
-      valid: candidate.valid && candidate.manifest !== null,
-      status: candidate.valid ? "discovered" : "invalid",
-      disabledReason: null,
-      runtimeStatus: null,
-      sourceHash: null,
-      approvedHash: null,
-      installedBaselineHash: null,
-      ...manifestMetadata(candidate),
-      settings: manifestSettings(candidate.manifest),
-      webApps: manifestWebApps(candidate.manifest),
-      panels: manifestPanels(candidate.manifest),
-      commands: manifestCommands(candidate.manifest),
-      hasFailedReplacement: this.recoveryState.has(candidate.id),
-      diagnostics: boundedStatusLines(candidate.diagnostics),
-      warnings: [],
-      error: null,
-    };
+    return initialPluginStatus(candidate, this.recoveryState.get(candidate.id));
   }
 
   private setStatus(
     candidate: InstalledPluginRecord,
     patch: Partial<PluginPipelinePluginStatus>,
-    // The manifest (and its own derived icon) a build actually installed,
-    // scanned and built, when this call reports on one. Discovery's own
-    // candidate.manifest/iconPath can be stale by then — a plugin's own
-    // on-disk manifest (and the icon it declares) can change again after
-    // discovery scanned it but before this exact snapshot was taken and
-    // built, and only that snapshot is what is now running. Left
-    // undefined, every derivation below falls back to candidate's own
-    // fields exactly as it always has (#779 round 23 finding 5, round 25
-    // finding 2).
+    // Pass the manifest and icon from the built snapshot when reporting a build;
+    // discovery can be stale if the source changed after its scan. The projector
+    // uses these for built metadata and, unless recovery overrides it, for
+    // contributions. Without built data, its candidate/recovery rules apply.
     built?: { manifest: DohcPluginManifest; iconPath: string | null },
   ): PluginPipelinePluginStatus {
     const current = this.statuses.get(candidate.id) ?? this.baseStatus(candidate);
-    // null (a failed replacement, nothing recovered) falls every
-    // derivation below back to current's own contributions instead of
-    // this candidate's own untrusted manifest.
-    const authoritativeManifest = this.recoveryState.has(candidate.id)
-      ? (this.recoveryState.get(candidate.id) ?? null)
-      : (built?.manifest ?? candidate.manifest);
-    // Only the manifest content and icon this call reports on should
-    // prefer built — directoryName/rootPath/valid below stay tied to the
-    // real discovery candidate, which is what identifies the plugin on
-    // disk, not what it built.
-    const metadataSource: InstalledPluginRecord = built
-      ? { ...candidate, manifest: built.manifest, iconPath: built.iconPath }
-      : candidate;
-    const next: PluginPipelinePluginStatus = {
-      ...current,
-      ...patch,
-      directoryName: candidate.directoryName,
-      rootPath: candidate.rootPath,
-      // A caller with no real discovery candidate left (failure()'s
-      // synthetic fallback, below) explicitly states the validity it wants
-      // preserved via patch.valid; every other caller passes a real
-      // discovered candidate and gets the normal derived computation.
-      // Without this, a failure recorded after a still-valid plugin's
-      // discovery entry was replaced always read back as invalid.
-      valid: patch.valid ?? (candidate.valid && candidate.manifest !== null),
-      // Derived from the candidate like directoryName/rootPath: an approved
-      // manifest edit that adds or renames a web app must become visible on
-      // the next status change, not stay frozen at first discovery. The
-      // manifest's own metadata is derived the same way — except from a
-      // synthetic candidate (failure()'s fallback, a sourceless uninstall),
-      // which has no manifest to read. The status keeps the name and icon it
-      // already carried rather than losing them mid-action.
-      ...(metadataSource.manifest ? manifestMetadata(metadataSource) : {}),
-      settings: authoritativeManifest
-        ? manifestSettings(authoritativeManifest)
-        : current.settings,
-      webApps: patch.webApps ?? (authoritativeManifest
-        ? manifestWebApps(authoritativeManifest)
-        : current.webApps),
-      panels: patch.panels ?? (authoritativeManifest
-        ? manifestPanels(authoritativeManifest)
-        : current.panels),
-      commands: patch.commands ?? (authoritativeManifest
-        ? manifestCommands(authoritativeManifest)
-        : current.commands),
-      hasFailedReplacement: this.recoveryState.has(candidate.id),
-      diagnostics: boundedStatusLines(patch.diagnostics ?? current.diagnostics),
-      warnings: boundedStatusLines(patch.warnings ?? current.warnings),
-      error: patch.error === undefined ? cloneError(current.error) : cloneError(patch.error),
-    };
+    const next = projectPluginStatus(
+      candidate,
+      current,
+      patch,
+      this.recoveryState.get(candidate.id),
+      built,
+    );
     this.statuses.set(candidate.id, next);
     this.emit({ kind: "changed", plugin: cloneStatus(next) });
     return next;
@@ -4134,19 +3544,11 @@ export class PluginPipeline {
     if (this.freshInstallsInFlight.has(pluginId)) {
       this.sourceChangedDuringInstall.add(pluginId);
     }
-    const queue = this.queueFor(pluginId);
-    if (queue.sourceRefreshQueued) return;
-    queue.sourceRefreshQueued = true;
-    const reservation = this.hostOwnership.reserveChange(pluginId);
-    queue.jobs.push({
-      sourceRefresh: true,
-      run: async () => {
-        queue.sourceRefreshQueued = false;
-        await reservation.run(async (change) =>
-          change.preserve(await run(change)));
-      },
+    this.jobQueues.enqueueSourceRefresh(pluginId, () => {
+      const reservation = this.hostOwnership.reserveChange(pluginId);
+      return () => reservation.run(async (change) =>
+        change.preserve(await run(change)));
     });
-    this.drain(pluginId, queue);
   }
 
   private enqueuePreservedBackground<T>(
@@ -4237,61 +3639,8 @@ export class PluginPipeline {
     if (this.disposed) {
       return Promise.reject(new PluginPipelineClosedError());
     }
-    return new Promise<T>((resolveResult, rejectResult) => {
-      const queue = this.queueFor(pluginId);
-      queue.jobs.push({
-        sourceRefresh: false,
-        run: async () => {
-          try {
-            resolveResult(await run());
-          } catch (error) {
-            rejectResult(error);
-          }
-        },
-      });
-      this.drain(pluginId, queue);
-    });
+    return this.jobQueues.enqueueActionValue(pluginId, run);
   }
 
-  private queueFor(pluginId: string): PluginJobQueue {
-    const existing = this.queues.get(pluginId);
-    if (existing) return existing;
-    const queue: PluginJobQueue = {
-      jobs: [],
-      sourceRefreshQueued: false,
-      draining: null,
-    };
-    this.queues.set(pluginId, queue);
-    return queue;
-  }
 
-  private drain(pluginId: string, queue: PluginJobQueue): void {
-    if (queue.draining) return;
-    queue.draining = (async () => {
-      while (queue.jobs.length > 0) {
-        const job = queue.jobs.shift();
-        if (!job) continue;
-        try {
-          await job.run();
-        } catch (error) {
-          if (job.sourceRefresh) {
-            const candidate = this.validCandidate(pluginId);
-            if (candidate) {
-              this.failure(
-                pluginId,
-                pipelineError("runtime", "refresh-failed", errorMessage(error)),
-              );
-            }
-          }
-        }
-      }
-    })().finally(() => {
-      queue.draining = null;
-      if (queue.jobs.length > 0) {
-        this.drain(pluginId, queue);
-      } else if (this.queues.get(pluginId) === queue) {
-        this.queues.delete(pluginId);
-      }
-    });
-  }
 }
