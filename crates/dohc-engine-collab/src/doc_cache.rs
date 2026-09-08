@@ -1,11 +1,11 @@
 //! The writer thread's cache of live Y.Docs, serving the replay-parity gate's
 //! base on cached local and ordinary-remote append paths so they stop paying a
-//! full `load_for_replay_gate` reconstruction per append.
+//! full `load_doc_in` reconstruction per append.
 //!
 //! ## The CACHE-VALID invariant
 //!
 //! An entry may serve as the gate base only when it is **byte-replay-identical**
-//! to what `load_for_replay_gate` would rebuild inside the same transaction:
+//! to what `load_doc_in` would rebuild inside the same transaction:
 //! the cached doc applied exactly the byte sequence, in the same order, that a
 //! fresh reconstruction would apply. Logical CRDT equality is not sufficient —
 //! yrs block splits are history-sensitive, and the gate reads the base's
@@ -37,7 +37,7 @@ use dohc_engine_storage::{EngineStore, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::durable::{
-    binary_blob_for_gate, latest_snapshot, map_sql, query_marker, AppendOutcome, Marker,
+    binary_blob_for_gate, latest_snapshot, map_sql, read_marker_in, AppendOutcome, Marker,
 };
 use crate::error::CollabError;
 use crate::replay_parity::{IntegratedFrontier, IntegratedFrontierDelta};
@@ -100,7 +100,7 @@ impl CacheTuple {
     /// Read the current tuple from the caller's connection, or `None` when the
     /// marker is absent or torn (head row missing).
     fn read_current(conn: &Connection, key: &DocKey) -> Result<Option<Self>, CollabError> {
-        let Some(marker) = query_marker(conn, key)? else {
+        let Some(marker) = read_marker_in(conn, key)? else {
             return Ok(None);
         };
         Self::read_for_marker(conn, key, &marker)
@@ -339,7 +339,7 @@ impl WriterDocCache {
         conn: &Connection,
         key: &DocKey,
     ) -> Result<Option<&Ydoc>, CollabError> {
-        let Some(marker) = query_marker(conn, key)? else {
+        let Some(marker) = read_marker_in(conn, key)? else {
             self.misses.set(self.misses.get() + 1);
             return Ok(None);
         };
@@ -377,11 +377,11 @@ impl WriterDocCache {
         #[cfg(any(test, debug_assertions))]
         {
             use crate::replay_parity::structurally_equal_v2;
-            let fresh = crate::durable::load_for_replay_gate(conn, key)?;
+            let fresh = crate::durable::load_doc_in(conn, key)?;
             assert!(
                 structurally_equal_v2(&fresh, &entry.doc)?,
                 "CACHE-VALID violated: cached Y.Doc structure \
-                 diverges from load_for_replay_gate for {key:?}"
+                 diverges from load_doc_in for {key:?}"
             );
         }
 
