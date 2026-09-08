@@ -1,3 +1,4 @@
+import { workspacePathKey } from "./workspacePathKey";
 import type {
   CollectionGetParams,
   CollectionGetRecordParams,
@@ -61,13 +62,9 @@ export interface OwnedWorkspaceSdkReadPort
   prepareSearch(path?: string): Promise<OwnedWorkspaceSearchView>;
 }
 
-function pathKey(path: string): string {
-  return process.platform === "win32" ? path.toLowerCase() : path;
-}
-
 function isAtOrBelowPrefix(path: string, prefix: string): boolean {
-  const comparedPath = pathKey(path);
-  const comparedPrefix = pathKey(prefix);
+  const comparedPath = workspacePathKey(path);
+  const comparedPrefix = workspacePathKey(prefix);
   return (
     comparedPath === comparedPrefix ||
     comparedPath.startsWith(`${comparedPrefix}/`)
@@ -83,11 +80,13 @@ function includeGlobForOwnerListing(
   requestedPath: string | undefined,
 ): string | undefined {
   if (requestedPath === undefined) return undefined;
-  const requestedKey = pathKey(requestedPath);
-  const file = listed.files.find((entry) => pathKey(entry.path) === requestedKey);
+  const requestedKey = workspacePathKey(requestedPath);
+  const file = listed.files.find(
+    (entry) => workspacePathKey(entry.path) === requestedKey,
+  );
   if (file) return literalGlob(file.path);
   const folder = (listed.folders ?? []).find(
-    (candidate) => pathKey(candidate) === requestedKey,
+    (candidate) => workspacePathKey(candidate) === requestedKey,
   );
   return `${literalGlob(folder ?? requestedPath)}/**`;
 }
@@ -134,12 +133,14 @@ export function createOwnedWorkspaceSdkReadPort(
             ),
         ),
       };
-      const allowed = new Set(visible.files.map((file) => pathKey(file.path)));
+      const allowed = new Set(
+        visible.files.map((file) => workspacePathKey(file.path)),
+      );
       const includeGlob = includeGlobForOwnerListing(visible, requestedPath);
       return {
         listing: visible,
         ...(includeGlob !== undefined ? { includeGlob } : {}),
-        allowPath: (path) => allowed.has(pathKey(path)),
+        allowPath: (path) => allowed.has(workspacePathKey(path)),
       };
     },
   };

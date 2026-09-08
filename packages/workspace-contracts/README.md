@@ -8,5 +8,5 @@ contract helpers without depending on higher-level workspace implementations.
 
 `src/engine.ts` holds the workspace-engine type surface. It is type-only: no zod
 schema mirrors exist for it. `ChangeAuthor` and its branded
-`NonEmptyLocalAuthorLabel` are canonically owned by this package and re-exported
-by `@dohc/workspace-core`.
+`NonEmptyLocalAuthorLabel` are owned by this package. Import them from
+`@dohc/workspace-contracts/engine`. The core author helpers use the same types.

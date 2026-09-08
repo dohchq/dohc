@@ -9,7 +9,7 @@
 // workspace-core barrel, which pulls in node:fs modules (databases.ts) that
 // would blank the renderer's module graph at load if dragged in un-tree-shaken.
 
-export type MergeResult =
+type MergeResult =
   | { kind: "merged"; content: string }
   | { kind: "conflict" };
 

@@ -1,11 +1,7 @@
+import { isEditableEditor } from "./pmHelpers";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import type { Editor } from "@tiptap/core";
-import {
-  NodeSelection,
-  Plugin,
-  PluginKey,
-  type EditorState,
-} from "@tiptap/pm/state";
+import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import {
   FLOATING_MENU_MAX_HEIGHT,
@@ -202,33 +198,6 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
 
 const slashCommandKey = new PluginKey("dohc-slash-command");
 
-type SlashCommandChain = {
-  deleteRange: (range: { from: number; to: number }) => SlashCommandChain;
-  focus: () => SlashCommandChain;
-  insertContent: (content: unknown) => SlashCommandChain;
-  insertTable: (options: {
-    rows: number;
-    cols: number;
-    withHeaderRow: boolean;
-  }) => SlashCommandChain;
-  run: () => boolean;
-  setCodeBlock: (attrs?: { language?: string }) => SlashCommandChain;
-  setHorizontalRule: () => SlashCommandChain;
-  setTextSelection: (pos: number) => SlashCommandChain;
-  toggleBlockquote: () => SlashCommandChain;
-  toggleBulletList: () => SlashCommandChain;
-  toggleHeading: (attrs: { level: 1 | 2 | 3 }) => SlashCommandChain;
-  toggleOrderedList: () => SlashCommandChain;
-  toggleTaskList: () => SlashCommandChain;
-};
-
-function isEditableEditor(editor: Editor | null | undefined): boolean {
-  if (!editor) return false;
-  if ((editor as { isEditable?: boolean }).isEditable === false) return false;
-  if ((editor.view as { editable?: boolean }).editable === false) return false;
-  return true;
-}
-
 export function filterSlashCommands(query: string): SlashCommandItem[] {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return SLASH_COMMANDS;
@@ -252,11 +221,11 @@ function readSlashCommandState(
   view: EditorView,
   previous: SlashCommandState,
 ): SlashCommandState {
-  if ((view as { editable?: boolean }).editable === false) {
+  if (view.editable === false) {
     return CLOSED_SLASH_COMMAND_STATE;
   }
 
-  const state = view.state as EditorState;
+  const state = view.state;
   const selection = state.selection;
   if (!selection.empty) return CLOSED_SLASH_COMMAND_STATE;
 
@@ -487,10 +456,7 @@ export function runSlashCommand(
   if (!state.open || !editor || !isEditableEditor(editor)) return;
 
   const range = { from: state.from, to: state.to };
-  const chain = editor
-    .chain()
-    .focus()
-    .deleteRange(range) as unknown as SlashCommandChain;
+  const chain = editor.chain().focus().deleteRange(range);
   setSlashState(CLOSED_SLASH_COMMAND_STATE);
 
   switch (id) {

@@ -14,7 +14,7 @@ import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import type {
   EngineYDocLineageReplacementEvent,
   EngineYDocSaveStateEvent,
-} from "../ipc/channels";
+} from "../ipc/bridgeContract";
 import { resetOrphanedDrafts } from "./orphanedDrafts";
 
 const canvas = vi.hoisted(() => ({

@@ -70,11 +70,11 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
   recoverRunningDispatches?: boolean;
 };
 type WorkspaceEmptyParams = WorkspaceJsonObject;
-export type CollectionGetParams =
-  WorkspaceJsonObject & CollectionGetContractParams;
+export type CollectionGetParams = WorkspaceJsonObject &
+  CollectionGetContractParams;
 export type CollectionQueryParams = CollectionQueryContractParams;
-export type CollectionGetRecordParams =
-  WorkspaceJsonObject & CollectionGetRecordContractParams;
+export type CollectionGetRecordParams = WorkspaceJsonObject &
+  CollectionGetRecordContractParams;
 export type ConflictListParams = WorkspaceJsonObject & {
   status?: "open" | "resolved";
   afterConflictId?: string;
@@ -100,108 +100,14 @@ type SearchQueryChatMessagesGranularParams = WorkspaceJsonObject & {
 
 export const MAX_GRANULAR_CHAT_QUERY_CHARS = 4096;
 
-type WorkspaceOpenResult = WorkspaceJsonObject & {
-  workspace: string;
-};
-type WorkspaceCloseResult = WorkspaceJsonObject & {
-  closed: boolean;
-};
+export type ConflictFileState = typeof ConflictFileStateSchema.Type;
 
-type ConflictSnapshot = WorkspaceJsonObject & {
-  workspaceId: string;
-  versionId: string;
-  objectId: string;
-  path: string;
-  /**
-   * `null` when the daemon withheld the body, beside the `inbandLimitBytes`
-   * that says so. `conflicts.resolve` withholds every over-cap side to keep
-   * its answer in one control frame; `conflicts.list` withholds the sides of
-   * a row past the conflict row frame cap. Either way `blobSha256` names the
-   * body, and the adapter hydrates it through `versionedText.readBlob`.
-   */
-  text: string | null;
-  inbandLimitBytes?: number;
-  contentKind: "text";
-  sha256: string;
-  byteLength: number;
-  blobSha256: string;
-  updatedAtMs: number;
-  latestMomentId: string;
-  metadataOrigin: string;
-  metadataSummary: string | null;
-  metadataCorrelationId: string | null;
-};
-
-export type ConflictFileState = WorkspaceJsonObject & {
-  path: string;
-  contentKind: "text" | "binary";
-  snapshot: ConflictSnapshot | null;
-  binarySha256: string | null;
-  binaryByteLength: number | null;
-  binaryObjectId: string | null;
-  binaryLatestMomentId: string | null;
-  metadataSummary: string | null;
-  metadataCorrelationId: string | null;
-};
-
-export type ConflictRecord = WorkspaceJsonObject & {
-  id: string;
-  workspaceId: string;
-  path: string;
-  targetVersionId: string;
-  sourceVersionId: string;
-  createdAtMs: number;
-  updatedAtMs: number;
-  status: "open" | "resolved";
-  chosenFrom: "current" | "incoming" | "merged";
-  resolution:
-    | "kept-current"
-    | "applied-incoming"
-    | "applied-merged"
-    | null;
-  metadata: WorkspaceJsonObject & {
-    origin: string;
-    summary: string | null;
-    correlationId: string | null;
-  };
-  base: ConflictFileState;
-  current: ConflictFileState;
-  incoming: ConflictFileState;
-};
-
-type ConflictListPage = WorkspaceJsonObject & {
-  conflicts: ConflictRecord[];
-  nextAfterConflictId: string | null;
-};
-
-type ReplicatedConflictResult =
-  | (WorkspaceJsonObject & {
-      replicated: true;
-      status: "applied";
-      conflictId: string;
-      inserted: boolean | null;
-      matched: boolean;
-    })
-  | (WorkspaceJsonObject & {
-      replicated: true;
-      status: "skipped";
-    })
-  | (WorkspaceJsonObject & {
-      replicated: true;
-      status: "crashed";
-      committed: boolean;
-    });
+export type ConflictRecord = typeof ConflictRecordSchema.Type;
 
 export type ConflictOpenResult =
-  | (WorkspaceJsonObject & { inserted: boolean })
-  | ReplicatedConflictResult;
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.conflictsOpen];
 export type ConflictResolveResult =
-  | (WorkspaceJsonObject & {
-      conflict: ConflictRecord;
-      write: WorkspaceJsonObject | null;
-      delete: WorkspaceJsonObject | null;
-    })
-  | ReplicatedConflictResult;
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.conflictsResolve];
 
 export type CollectionListResult = CollectionListContractResult;
 type CollectionListParams = WorkspaceJsonObject & {
@@ -235,45 +141,16 @@ export type CollectionGetResult = CollectionGetContractResult;
 export type CollectionQueryResult = CollectionQueryContractResult;
 export type CollectionGetRecordResult = CollectionGetRecordContractResult;
 
-export type SearchResult = WorkspaceJsonObject & {
-  surface: "file" | "chat";
-  path: string;
-  title: string;
-  line: number;
-  preview: string;
-  matchStart: number;
-  matchEnd: number;
-  threadId: string | null;
-  objectId: string | null;
-};
-export type SearchQueryPageResult = WorkspaceJsonObject & {
-  results: SearchResult[];
-  nextCursor: string | null;
-  versionId: string;
-  restartRequired: boolean;
-};
-export type GranularChatMessageSearchResult = WorkspaceJsonObject & {
-  threadId: string;
-  messageId: string | null;
-  text: string;
-};
-export type GranularChatMessageSearchResponse = WorkspaceJsonObject & {
-  results: GranularChatMessageSearchResult[];
-  saturated: boolean;
-};
+export type SearchResult = typeof SearchResultSchema.Type;
+export type GranularChatMessageSearchResult =
+  GranularChatMessageSearchResponse["results"][number];
+export type GranularChatMessageSearchResponse =
+  typeof GranularChatMessageSearchResponseSchema.Type;
 
-export type WatcherStatusResult = WorkspaceJsonObject & {
-  running: boolean;
-  degraded: boolean;
-  terminal: boolean;
-  phase: CapturePhase;
-};
-type CapturePhase = "starting" | "importing" | "ready" | "degraded";
-export type CaptureFlushResult = WorkspaceJsonObject & {
-  settled: boolean;
-  running: boolean;
-  degraded: boolean;
-};
+export type WatcherStatusResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.watcherStatus];
+
+export type CaptureFlushResult = typeof CaptureFlushResultSchema.Type;
 /** Mirrors AutomationSubscriptionParams in crates/dohc-workspace-engine. */
 export type AutomationSubscriptionParams = WorkspaceJsonObject & {
   automationId: string;
@@ -293,57 +170,20 @@ export type AutomationSettleParams = WorkspaceJsonObject & {
   nowMs?: number;
 };
 
-/**
- * The change that inserted the claim, keyed either by its replication
- * coordinate or — on a never-synced lineage — by the device-local history
- * row id. Exactly one of the two shapes.
- */
-type AutomationClaimTrigger =
-  | (WorkspaceJsonObject & { originId: string; originSeq: number })
-  | (WorkspaceJsonObject & { historyId: number });
+export type AutomationClaim = typeof AutomationClaimSchema.Type;
 
-export type AutomationClaim = WorkspaceJsonObject & {
-  claimId: string;
-  automationId: string;
-  trigger: AutomationClaimTrigger;
-  recordId: string;
-  collectionPath: string;
-  depth: number;
-  state: "pending" | "running" | "done" | "failed";
-  attempts: number;
-  createdAtMs: number;
-  updatedAtMs: number;
-  error?: string;
-};
+export type AutomationSubscribeResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsSubscribe];
 
-export type AutomationSubscribeResult = WorkspaceJsonObject & {
-  subscribed: boolean;
-};
-
-export type AutomationUnsubscribeResult = WorkspaceJsonObject & {
-  unsubscribed: boolean;
-};
+export type AutomationUnsubscribeResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsUnsubscribe];
 
 /** Null when no pending claim remains: the drain loop's stop condition. */
-export type AutomationClaimNextResult = AutomationClaim | null;
+export type AutomationClaimNextResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsClaimNext];
 
-/**
- * One automation with at least one failed claim. Mirrors AutomationFailure
- * in crates/dohc-workspace-engine: the newest error and its time, plus a
- * generation — the automation's failed-claim count, which only grows
- * (failed rows are never deleted), so an acknowledgment at generation N
- * hides the owner's notice exactly until a newer failure passes N.
- */
-type AutomationFailure = WorkspaceJsonObject & {
-  automationId: string;
-  error: string;
-  updatedAtMs: number;
-  generation: number;
-};
-
-export type AutomationFailuresResult = WorkspaceJsonObject & {
-  failures: AutomationFailure[];
-};
+export type AutomationFailuresResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsFailures];
 
 type CaptureSetAuthorParams = WorkspaceJsonObject & {
   author:
@@ -354,9 +194,6 @@ type CaptureSetAuthorParams = WorkspaceJsonObject & {
         agentRunId?: string;
       })
     | null;
-};
-type CaptureSetAuthorResult = WorkspaceJsonObject & {
-  updated: true;
 };
 
 export type WorkspaceMethodParamsMap = {
@@ -383,28 +220,18 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsSettle]: AutomationSettleParams;
 };
 
-export type WorkspaceMethodResultMap = {
-  [WORKSPACE_METHOD.open]: WorkspaceOpenResult;
-  [WORKSPACE_METHOD.close]: WorkspaceCloseResult;
-  [WORKSPACE_METHOD.conflictsList]: ConflictListPage;
-  [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenResult;
-  [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveResult;
+type CollectionMethodResultMap = {
   [WORKSPACE_METHOD.collectionsList]: CollectionListPage;
   [WORKSPACE_METHOD.collectionsListPendingAdoptions]: CollectionPendingAdoptionsPage;
   [WORKSPACE_METHOD.collectionsGet]: CollectionGetResult;
   [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryResult;
   [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordResult;
-  [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageResult;
-  [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: GranularChatMessageSearchResponse;
-  [WORKSPACE_METHOD.watcherStatus]: WatcherStatusResult;
-  [WORKSPACE_METHOD.captureFlush]: CaptureFlushResult;
-  [WORKSPACE_METHOD.captureReconcile]: CaptureFlushResult;
-  [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorResult;
-  [WORKSPACE_METHOD.automationsSubscribe]: AutomationSubscribeResult;
-  [WORKSPACE_METHOD.automationsUnsubscribe]: AutomationUnsubscribeResult;
-  [WORKSPACE_METHOD.automationsClaimNext]: AutomationClaimNextResult;
-  [WORKSPACE_METHOD.automationsFailures]: AutomationFailuresResult;
-  [WORKSPACE_METHOD.automationsSettle]: AutomationClaim;
+};
+
+export type WorkspaceMethodResultMap = {
+  [M in WorkspaceMethod]: M extends keyof CollectionMethodResultMap
+    ? CollectionMethodResultMap[M]
+    : (typeof WorkspaceResultSchemas)[M]["Type"];
 };
 
 const COLLECTION_INTEGER_MARKER = "$dohcInt64";
@@ -458,8 +285,8 @@ function collectionIntegerMarker(value: JsonValue): bigint | null {
     );
   }
   if (
-    (integer >= -MAX_SAFE_COLLECTION_INTEGER &&
-      integer <= MAX_SAFE_COLLECTION_INTEGER)
+    integer >= -MAX_SAFE_COLLECTION_INTEGER &&
+    integer <= MAX_SAFE_COLLECTION_INTEGER
   ) {
     throw new ProtocolShapeError(
       "A collection integer marker must contain an out-of-safe-range engine integer.",
@@ -495,7 +322,8 @@ function collectionFloatMarker(value: JsonValue): number | null {
 
 export function decodeCollectionValue(value: JsonValue): CollectionValue {
   const entry = singleCollectionWireEntry(value);
-  const unescapedKey = entry === null ? null : unescapeCollectionMarkerKey(entry[0]);
+  const unescapedKey =
+    entry === null ? null : unescapeCollectionMarkerKey(entry[0]);
   if (entry !== null && unescapedKey !== null) {
     return { [unescapedKey]: decodeCollectionValue(entry[1]!) };
   }
@@ -600,10 +428,11 @@ export function collectionResultExpectsBlob(value: JsonValue): boolean {
 
 const NullableString = Schema.NullOr(Schema.String);
 const NullableInt = Schema.NullOr(Schema.Int);
-const JsonObjectSchema = Schema.Record(Schema.String, Schema.Unknown);
-const OptionalIntFromNullable = Schema.optional(
-  Schema.NullOr(Schema.Int),
-).pipe(
+const JsonObjectSchema = Schema.Record(
+  Schema.String,
+  Schema.mutableKey(Schema.Unknown),
+);
+const OptionalIntFromNullable = Schema.optional(Schema.NullOr(Schema.Int)).pipe(
   Schema.decodeTo(Schema.optionalKey(Schema.Int), {
     decode: SchemaGetter.transformOptional(
       Option.filter((value): value is number => value != null),
@@ -617,6 +446,13 @@ const ConflictSnapshotSchema = mutableStruct({
   versionId: Schema.String,
   objectId: Schema.String,
   path: Schema.String,
+  /**
+   * `null` when the daemon withheld the body, beside the `inbandLimitBytes`
+   * that says so. `conflicts.resolve` withholds every over-cap side to keep
+   * its answer in one control frame; `conflicts.list` withholds the sides of
+   * a row past the conflict row frame cap. Either way `blobSha256` names the
+   * body, and the adapter hydrates it through `versionedText.readBlob`.
+   */
   text: Schema.NullOr(Schema.String),
   inbandLimitBytes: OptionalIntFromNullable,
   contentKind: Schema.Literal("text"),
@@ -683,17 +519,6 @@ const ReplicatedConflictResultSchema = Schema.Union([
     committed: Schema.Boolean,
   }),
 ]);
-
-type ReplicatedConflictResultSchemaType =
-  typeof ReplicatedConflictResultSchema.Type;
-type Assert<T extends true> = T;
-type _ReplicatedConflictResultSchemaMatchesPublicType = Assert<
-  ReplicatedConflictResultSchemaType extends ReplicatedConflictResult
-    ? ReplicatedConflictResult extends ReplicatedConflictResultSchemaType
-      ? true
-      : false
-    : false
->;
 
 const CollectionSchemaReasonSchema = mutableStruct({
   code: Schema.Literals(COLLECTION_SCHEMA_REASON_CODES),
@@ -882,7 +707,9 @@ const CollectionGetRecordResultSchema = mutableStruct({
           value: Schema.MutableJson,
         }),
         authorOriginId: NullableString,
-        actorKind: Schema.NullOr(Schema.Literals(["human", "agent", "automation"])),
+        actorKind: Schema.NullOr(
+          Schema.Literals(["human", "agent", "automation"]),
+        ),
         onBehalfOf: NullableString,
         depth: Schema.NullOr(Schema.Int),
         recordedAtMs: Schema.Int,
@@ -933,6 +760,11 @@ const CaptureFlushResultSchema = mutableStruct({
 const AutomationClaimSchema = mutableStruct({
   claimId: Schema.NonEmptyString,
   automationId: Schema.NonEmptyString,
+  /**
+   * The change that inserted the claim, keyed either by its replication
+   * coordinate or — on a never-synced lineage — by the device-local history
+   * row id. Exactly one of the two shapes.
+   */
   trigger: Schema.Union([
     mutableStruct({ originId: Schema.NonEmptyString, originSeq: Schema.Int }),
     mutableStruct({ historyId: Schema.Int }),
@@ -998,6 +830,13 @@ const WorkspaceResultSchemas = {
     unsubscribed: Schema.Boolean,
   }),
   [WORKSPACE_METHOD.automationsClaimNext]: Schema.NullOr(AutomationClaimSchema),
+  /**
+   * One automation with at least one failed claim. Mirrors AutomationFailure
+   * in crates/dohc-workspace-engine: the newest error and its time, plus a
+   * generation — the automation's failed-claim count, which only grows
+   * (failed rows are never deleted), so an acknowledgment at generation N
+   * hides the owner's notice exactly until a newer failure passes N.
+   */
   [WORKSPACE_METHOD.automationsFailures]: mutableStruct({
     failures: Schema.mutable(
       Schema.Array(
@@ -1038,33 +877,7 @@ export function decodeConflictRecord(
   value: JsonValue,
   label = "conflict",
 ): ConflictRecord {
-  return decodeWorkspaceSchema(
-    ConflictRecordSchema,
-    value,
-    label,
-  ) as ConflictRecord;
-}
-
-export function decodeSearchQueryPageResult(
-  value: JsonValue,
-  label = `${WORKSPACE_METHOD.searchQueryPage} result`,
-): SearchQueryPageResult {
-  return decodeWorkspaceSchema(
-    SearchQueryPageResultSchema,
-    value,
-    label,
-  ) as SearchQueryPageResult;
-}
-
-export function decodeGranularChatMessageSearchResponse(
-  value: JsonValue,
-  label = `${WORKSPACE_METHOD.searchQueryChatMessagesGranular} result`,
-): GranularChatMessageSearchResponse {
-  return decodeWorkspaceSchema(
-    GranularChatMessageSearchResponseSchema,
-    value,
-    label,
-  ) as GranularChatMessageSearchResponse;
+  return decodeWorkspaceSchema(ConflictRecordSchema, value, label);
 }
 
 export function decodeCollectionBlobResult(
@@ -1142,9 +955,7 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
 ): WorkspaceMethodResultMap[M] {
   const schema = WorkspaceResultSchemas[method];
   if (schema === undefined) {
-    throw new ProtocolShapeError(
-      `Unsupported workspace method: ${method}`,
-    );
+    throw new ProtocolShapeError(`Unsupported workspace method: ${method}`);
   }
   const decoded = decodeWorkspaceSchema(
     schema,

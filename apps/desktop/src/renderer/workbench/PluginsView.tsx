@@ -1,10 +1,11 @@
+import { pluginKey } from "./pluginCatalog";
 import { AlertTriangle, Blocks, Search } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import type {
   OfferedPluginRecord,
   PluginStatusRecord,
 } from "../../ipc/bridgeContract";
-import { EmptyState, SectionLabel } from "../ui/controls";
+import { EmptyState, SectionLabel, PrimaryButton, SecondaryButton } from "../ui/controls";
 import { PluginIcon } from "./PluginIcon";
 import {
   actionLabel,
@@ -30,11 +31,6 @@ import {
 // Every line below the name is optional, because every manifest field behind
 // it is. A plugin that declares nothing still gets the row it had before
 // manifests carried metadata: glyph, id, status, folder.
-
-const installButton =
-  "shrink-0 rounded-md bg-accent px-2 py-1 text-[11px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50";
-const retryButton =
-  "rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:opacity-50";
 
 export function PluginsView(props: {
   workspaceId: string;
@@ -65,11 +61,11 @@ export function PluginsView(props: {
   );
 
   function renderRow(plugin: PluginStatusRecord) {
-    const busyAction = catalog.busy[plugin.id];
+    const busyAction = catalog.busy[pluginKey(plugin)];
     const disabled = busyAction !== undefined || isPipelineBusy(plugin);
     const selected = props.activePluginId === plugin.id &&
       props.activePluginDirectoryName === plugin.directoryName;
-    const error = catalog.errors[plugin.id];
+    const error = catalog.errors[pluginKey(plugin)];
     return (
       <li key={plugin.directoryName} className="list-none">
         {/* The row's two controls are siblings, never nested: the name area
@@ -150,15 +146,15 @@ export function PluginsView(props: {
             </span>
           </button>
           {canInstall(plugin) ? (
-            <button
+            <PrimaryButton size="compact"
               type="button"
               data-testid="plugin-install"
               disabled={disabled}
               onClick={() => catalog.runAction(plugin, "install")}
-              className={installButton}
+              className="shrink-0"
             >
               {actionLabel("install", busyAction === "install")}
-            </button>
+            </PrimaryButton>
           ) : null}
         </div>
         {error ? (
@@ -204,15 +200,15 @@ export function PluginsView(props: {
               ) : null}
             </span>
           </div>
-          <button
+          <PrimaryButton size="compact"
             type="button"
             data-testid="plugin-offer-add"
             disabled={busy}
             onClick={() => catalog.addOffer(offer)}
-            className={installButton}
+            className="shrink-0"
           >
             {actionLabel("add", busy)}
-          </button>
+          </PrimaryButton>
         </div>
         {error ? (
           <p
@@ -277,9 +273,9 @@ export function PluginsView(props: {
           >
             {catalog.load.message}
           </p>
-          <button type="button" onClick={catalog.reload} className={retryButton}>
+          <SecondaryButton size="compact" type="button" onClick={catalog.reload} >
             Retry
-          </button>
+          </SecondaryButton>
         </div>
       ) : plugins.length === 0 && offersLoad.status === "loading" ? (
         // A workspace with no plugins of its own still waits on the offers
@@ -324,9 +320,9 @@ export function PluginsView(props: {
                 <p role="alert" className="m-0 text-[11px] text-danger">
                   {offersLoad.message}
                 </p>
-                <button type="button" onClick={catalog.reload} className={retryButton}>
+                <SecondaryButton size="compact" type="button" onClick={catalog.reload} >
                   Retry
-                </button>
+                </SecondaryButton>
               </div>
             </section>
           ) : null}

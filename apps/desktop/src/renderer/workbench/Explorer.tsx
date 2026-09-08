@@ -1,3 +1,5 @@
+import { SectionLabel } from "../ui/controls";
+import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
   ChevronRight,
@@ -27,7 +29,7 @@ import {
 } from "react";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import type { DraftFlush } from "../FileInspector";
+import type { DraftFlush } from "../useAutosavedTextDraft";
 import { Overlay } from "../Overlay";
 import { momentDiffName } from "./EditorTabs";
 import { planDrop, type DragSource } from "./file-tree-dnd";
@@ -35,11 +37,10 @@ import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { withMarkdownDefault } from "./new-file-name";
 import {
   applyPendingTreeMoves,
-  parentDir,
   pendingTreeMoveSettled,
   type PendingTreeChange,
 } from "./file-tree-optimistic";
-import { buildTree, leafOf, type TreeNode } from "./path-tree";
+import { buildTree, type TreeNode } from "./path-tree";
 import {
   type EditorGroup,
   clampOpenEditorsHeight,
@@ -218,7 +219,7 @@ function FileKindIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
 export function editorTitle(path: string, label?: string): string {
   if (isGraphTabPath(path)) return "Graph";
   if (isCollectionTabPath(path)) {
-    return leafOf(parseCollectionTabPath(path) ?? "Collection");
+    return basenameOf(parseCollectionTabPath(path) ?? "Collection");
   }
   if (isHistoryTabPath(path)) return "History";
   if (isMomentDiffTabPath(path)) {
@@ -235,7 +236,7 @@ export function editorTitle(path: string, label?: string): string {
   }
   if (isSiteTabPath(path)) return `App: ${parseSiteTabPath(path) ?? "preview"}`;
   if (isVersionCompareTabPath(path)) return "Compare with Main";
-  return leafOf(path);
+  return basenameOf(path);
 }
 
 function OpenEditorIcon(props: { path: string; kind: WorkspaceFileEntry["kind"] | null }) {
@@ -426,7 +427,7 @@ const TreeRow = memo(function TreeRow(props: {
             )}
           </>
         )}
-        <span className="min-w-0 flex-1 truncate">{leafOf(row.fullPath)}</span>
+        <span className="min-w-0 flex-1 truncate">{basenameOf(row.fullPath)}</span>
       </button>
     </li>
   );
@@ -780,7 +781,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       selectedPath ??
       (activeTab && !isVirtualTabPath(activeTab) ? activeTab : null);
     if (!target) return "";
-    return isFolderPath(target) ? target : parentDir(target);
+    return isFolderPath(target) ? target : dirnameOf(target);
   }, [activeTab, focusedPath, isFolderPath, selection]);
 
   const beginCreateAtFocus = useCallback(
@@ -792,7 +793,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   const beginRename = useCallback(
     (path: string, isFolder: boolean) => {
-      setEditValue(leafOf(path));
+      setEditValue(basenameOf(path));
       editDone.current = false;
       setEditing({ mode: "rename", path, isFolder });
     },
@@ -903,7 +904,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   const commitRename = useCallback(
     (path: string, isFolder: boolean, value: string) => {
-      const toPath = resolveTypedPath(value, parentDir(path));
+      const toPath = resolveTypedPath(value, dirnameOf(path));
       setEditing(null);
       if (!toPath || toPath === path) return;
       void runChanges(
@@ -1060,7 +1061,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       });
       if (command === null) return;
       const targetDir =
-        kind === "root" ? "" : kind === "folder" ? (path ?? "") : parentDir(path ?? "");
+        kind === "root" ? "" : kind === "folder" ? (path ?? "") : dirnameOf(path ?? "");
       switch (command) {
         case "new-file":
           beginCreate("file", targetDir);
@@ -1164,7 +1165,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   }, []);
 
   const targetDirFor = useCallback(
-    (path: string): string => (isFolderPath(path) ? path : parentDir(path)),
+    (path: string): string => (isFolderPath(path) ? path : dirnameOf(path)),
     [isFolderPath],
   );
 
@@ -1582,7 +1583,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               data-testid="open-editors-toggle"
               aria-expanded={openEditorsExpanded}
               onClick={() => setOpenEditorsExpanded((expanded) => !expanded)}
-              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-[10px] font-semibold uppercase tracking-wide text-subtle group-hover:text-muted"
+              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left dohc-section-label group-hover:text-muted"
             >
               <ChevronRight
                 size={11}
@@ -1635,13 +1636,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                     data-group-id={group.id}
                   >
                     {props.editorGroups.length > 1 ? (
-                      <div
+                      <SectionLabel as="div"
                         role="heading"
                         aria-level={3}
-                        className="h-6 px-3 pt-1 text-[10px] font-semibold uppercase tracking-wide text-subtle"
+                        className="h-6 px-3 pt-1"
                       >
                         Group {groupIndex + 1}
-                      </div>
+                      </SectionLabel>
                     ) : null}
                     <ul
                       aria-label={
@@ -1777,7 +1778,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               data-testid="explorer-files-toggle"
               aria-expanded={filesExpanded}
               onClick={() => setFilesExpanded((expanded) => !expanded)}
-              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-[10px] font-semibold uppercase tracking-wide text-subtle group-hover:text-muted"
+              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left dohc-section-label group-hover:text-muted"
             >
               <ChevronRight
                 size={11}
@@ -1816,10 +1817,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                   aria-label="Pinned"
                   className="mb-1 border-b border-line pb-1"
                 >
-                  <header className="flex h-6 items-center gap-1.5 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+                  <SectionLabel as="header" className="flex h-6 items-center gap-1.5 px-3">
                     <Pin size={10} aria-hidden />
                     Pinned
-                  </header>
+                  </SectionLabel>
                   <ul className="m-0 list-none p-0">
                     {props.pinned.map((path) => (
                       <li key={path}>
@@ -1848,7 +1849,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                           ) : (
                             fileGlyph(path)
                           )}
-                          <span className="truncate">{leafOf(path)}</span>
+                          <span className="truncate">{basenameOf(path)}</span>
                         </button>
                       </li>
                     ))}
@@ -1901,7 +1902,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 Delete{" "}
                 <span className="break-all font-medium">
                   {confirmDelete.length === 1
-                    ? leafOf(confirmDelete[0]!)
+                    ? basenameOf(confirmDelete[0]!)
                     : `${confirmDelete.length} items`}
                 </span>
                 ?

@@ -8,7 +8,7 @@ import { open } from "node:fs/promises";
 // interaction here -- an RPC would add a failure mode where today there is none.
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { resolveWorkspaceFile } from "./workspaceAssets";
-import { createBoundedTaskQueue, listFiles } from "./workspaceFiles";
+import { createBoundedTaskQueue } from "./workspaceFiles";
 
 export type WorkspaceGraphEdgeKind = "wikilink" | "markdown";
 
@@ -963,64 +963,6 @@ async function readGraphText(
   }
 }
 
-// Loads every markdown file in the workspace (bounded by the same file/byte
-// caps the graph enforces) so both the graph and backlinks read from one place.
-// `graphPaths` keeps the full scanned set (all kinds) — link resolution indexes
-// against it so a markdown link to a non-markdown file still resolves.
-async function loadGraphDocuments(
-  rootPath: string,
-  source?: WorkspaceGraphFileSource,
-): Promise<{
-  docs: MarkdownGraphDocument[];
-  graphPaths: string[];
-  scannedFileCount: number;
-  omittedFileCount: number;
-}> {
-  const listed = source ? await source.list() : await listFiles(rootPath);
-  // Enforce the engine secret floor at the loader so every graph/backlinks
-  // consumer inherits it: a secret- or ignored-classified file (the whole
-  // `.env` family, incl. markdown-extensioned variants like `.env.local.md`,
-  // and ignored segments) must never be scanned as a link source, indexed as
-  // a resolvable node, or surfaced as a backlink entry/snippet. This mirrors
-  // search, which fails-closed on the same `classifyEngineFilePath` floor
-  // (workspaceSearch.ts and the engine's search index) so "what the graph reads" and "what
-  // search may reveal" cannot drift apart.
-  // Read-aware: mounted shares are readable content, so their markdown
-  // joins the graph/backlinks like any other file; secrets stay excluded
-  // inside and outside mounts.
-  const visiblePaths = listed.files
-    .map((file) => file.path)
-    .filter((path) => classifyEngineFilePathForRead(path).kind === "tracked");
-  const graphPaths = visiblePaths.slice(0, MAX_GRAPH_FILES);
-  const selected = graphPaths.filter((path) => isMarkdownGraphPath(path));
-  const docs: MarkdownGraphDocument[] = [];
-  let totalTextBytes = 0;
-  let omittedFileCount = Math.max(0, visiblePaths.length - graphPaths.length);
-
-  for (let index = 0; index < selected.length; index++) {
-    const path = selected[index];
-    try {
-      const result = await readGraphText(rootPath, path, source);
-      if (totalTextBytes + result.bytesRead > MAX_GRAPH_TOTAL_TEXT_BYTES) {
-        omittedFileCount += selected.length - index;
-        break;
-      }
-      totalTextBytes += result.bytesRead;
-      docs.push({ path, text: result.text, truncated: result.truncated });
-    } catch {
-      // The watcher may have observed a file that was moved or deleted by the
-      // time we read it. This is a view; the next refresh will pick it up.
-    }
-  }
-
-  return {
-    docs,
-    graphPaths,
-    scannedFileCount: graphPaths.length,
-    omittedFileCount,
-  };
-}
-
 interface CachedMarkdownGraphDocument extends ParsedMarkdownGraphDocument {
   contentIdentity: string | undefined;
   bytesRead: number;
@@ -1243,30 +1185,4 @@ export class WorkspaceGraphIndex {
       ]),
     };
   }
-}
-
-export async function readWorkspaceGraph(
-  rootPath: string,
-  source?: WorkspaceGraphFileSource,
-): Promise<WorkspaceGraph> {
-  const { docs, graphPaths, scannedFileCount, omittedFileCount } =
-    await loadGraphDocuments(rootPath, source);
-  return buildMarkdownGraph(docs, {
-    allPaths: graphPaths,
-    omittedFileCount,
-    scannedFileCount,
-  });
-}
-
-// Backlinks read the same graph documents and invert the edge derivation: for
-// the open file, find every other file whose links resolve to it. Reuses the
-// graph's link extraction + resolution so a backlink and a graph edge always
-// agree on what points where.
-export async function readWorkspaceBacklinks(
-  rootPath: string,
-  targetPath: string,
-  source?: WorkspaceGraphFileSource,
-): Promise<BacklinkSource[]> {
-  const { docs, graphPaths } = await loadGraphDocuments(rootPath, source);
-  return computeBacklinks(docs, targetPath, { allPaths: graphPaths });
 }

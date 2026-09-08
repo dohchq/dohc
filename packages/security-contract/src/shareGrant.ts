@@ -1,3 +1,4 @@
+import { isRecord } from "@dohc/workspace-core/records";
 import { isShareAccessValue, type ShareAccess } from "./shareSelector";
 
 export type SharePrincipal =
@@ -58,10 +59,6 @@ export type LinkExchangeResult = {
   capabilityToken: string;
   capabilityExpiresAtMs: number;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 function isGrantGeneration(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1;

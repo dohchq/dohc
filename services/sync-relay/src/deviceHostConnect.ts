@@ -1,0 +1,61 @@
+import { WebSocket } from "ws";
+import { DEVICE_CONTROL_PATH, DEVICE_CONTROL_PROTOCOL, parseDeviceControlLimits,
+  parseDeviceControlRegistration, type DeviceControlLimits, type DeviceControlRegistration } from "@dohc/live-session-contract/device-control";
+import { parseDeviceHostCredential, type DeviceHostCredential } from "./deviceHostCredential.js";
+
+export function connectDeviceHost(options: {
+  url: string; credential: DeviceHostCredential; limits: DeviceControlLimits;
+  onRegistered: (registration: DeviceControlRegistration) => void;
+}) {
+  const limits = parseDeviceControlLimits(options.limits);
+  const credential = parseDeviceHostCredential(options.credential);
+  const url = new URL(options.url);
+  if (url.protocol !== "wss:" || url.username || url.password || url.pathname !== DEVICE_CONTROL_PATH || url.search || url.hash) {
+    throw new TypeError("Device host connection requires the WSS device control endpoint.");
+  }
+  const authorization = `Bearer ${Buffer.from(JSON.stringify(credential)).toString("base64url")}`;
+  if (Buffer.byteLength(authorization) > limits.maxCredentialBytes) throw new TypeError("Device host credential exceeds the configured limit.");
+  let registered = false, stopping = false;
+  let timer: ReturnType<typeof setTimeout>;
+  let finish: () => void;
+  const closed = new Promise<void>(resolve => { finish = resolve; });
+  const receive = { headers: { authorization }, followRedirects: false,
+    rejectUnauthorized: true, perMessageDeflate: false, autoPong: false, handshakeTimeout: limits.handshakeTimeoutMs,
+    maxPayload: limits.maxPayloadBytes, maxFragments: limits.maxFragments, maxBufferedChunks: limits.maxBufferedChunks,
+    closeTimeout: limits.closeTimeoutMs };
+  const ws = new WebSocket(url, DEVICE_CONTROL_PROTOCOL, receive);
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    clearTimeout(timer);
+    ws.terminate();
+  };
+  const touch = () => {
+    clearTimeout(timer);
+    timer = setTimeout(stop, limits.heartbeatIntervalMs + limits.heartbeatTimeoutMs);
+    timer.unref();
+  };
+  timer = setTimeout(stop, limits.handshakeTimeoutMs);
+  timer.unref();
+  ws.on("error", stop);
+  ws.on("close", () => { clearTimeout(timer); finish(); });
+  ws.on("message", (data, binary) => {
+    if (stopping || registered || binary) { stop(); return; }
+    try {
+      const notice = parseDeviceControlRegistration(JSON.parse(data.toString()));
+      if (notice.hostId !== credential.hostId || notice.instanceId !== credential.instanceId || notice.hostEpoch !== credential.hostEpoch) {
+        stop(); return;
+      }
+      registered = true;
+      touch();
+      options.onRegistered(notice);
+    } catch { stop(); }
+  });
+  ws.on("ping", data => {
+    if (!registered || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount + data.length + 16 > limits.maxPendingBytes) { stop(); return; }
+    ws.pong(data, undefined, error => { if (error) stop(); });
+    touch();
+  });
+  ws.on("pong", stop);
+  return { closed, stop };
+}
