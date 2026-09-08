@@ -1,4 +1,4 @@
-import {
+import type {
   PLUGIN_PIPELINE_ERROR_STAGES,
   PLUGIN_PIPELINE_STATUSES,
 } from "../ipc/channels";
@@ -8,7 +8,7 @@ import type { DohcPluginManifest, PluginSettingDeclaration } from "./pluginManif
 
 type PluginPipelineStatus = typeof PLUGIN_PIPELINE_STATUSES[number];
 
-type PluginPipelineErrorStage =
+export type PluginPipelineErrorStage =
   typeof PLUGIN_PIPELINE_ERROR_STAGES[number];
 
 export interface PluginPipelineError {

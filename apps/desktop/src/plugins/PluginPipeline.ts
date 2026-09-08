@@ -7,13 +7,13 @@ import {
   pipelineError,
   projectPluginStatus,
   type PluginPipelineError,
+  type PluginPipelineErrorStage,
   type PluginPipelinePluginStatus,
 } from "./pluginStatusProjection";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, readdir, rm } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import type { PLUGIN_PIPELINE_ERROR_STAGES } from "../ipc/channels";
 import type { PluginHost, PluginHostStartEvidence } from "./PluginHost";
 import {
   discoverInstalledPlugins,
@@ -77,9 +77,6 @@ import {
   PLUGIN_HOST_DRAIN_DEADLINE_MS,
   errorMessage,
 } from "./pluginShared";
-
-type PluginPipelineErrorStage =
-  typeof PLUGIN_PIPELINE_ERROR_STAGES[number];
 
 /**
  * Bytes on this machine, measured rather than recorded. Null means the

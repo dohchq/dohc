@@ -24,7 +24,7 @@ interface DoorWrittenDelta {
 function overlayDoorWrittenSourceDeltas(
   baselineFiles: readonly PluginSourceFileDigest[],
   deltas: Iterable<readonly [string, DoorWrittenDelta]>,
-  platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform,
 ): PluginSourceFileDigest[] {
   const files = new Map(
     baselineFiles.map((file) => [file.relPath, file.sha256]),
