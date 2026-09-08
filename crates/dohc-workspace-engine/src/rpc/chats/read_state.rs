@@ -8,9 +8,8 @@ use crate::rpc::chats::decode_chat_cursor;
 use crate::rpc::chats::encode_chat_cursor;
 use crate::rpc::chats::threads::ChatThreadParams;
 use crate::rpc::chats::threads::thread_b2_json;
-use crate::rpc::error::wire;
 use crate::rpc::request::OperationCancellation;
-use crate::rpc::request::deserialize_optional_non_null_string;
+use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use dohc_engine_domain::ChatAgentReadState;
@@ -27,7 +26,7 @@ use serde_json::json;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UnreadFileThreadPageParams {
     page_limit: Option<i64>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     after_thread_id: Option<String>,
 }
 
@@ -193,7 +192,7 @@ impl EngineService {
         let next_cursor = if rows.len() > included {
             let last = rows
                 .get(included.saturating_sub(1))
-                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,

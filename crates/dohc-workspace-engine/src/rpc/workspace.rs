@@ -9,7 +9,6 @@ use crate::rpc::automations::AUTOMATION_CLAIM_REAP_IDLE_MS;
 use crate::rpc::chats::dispatch::CHAT_DISPATCH_MAX_ATTEMPTS;
 use crate::rpc::error::map_root_binding;
 use crate::rpc::error::map_runtime;
-use crate::rpc::error::wire;
 use crate::rpc::error::workspace_unavailable;
 use crate::rpc::relay::RelayOpenParams;
 use crate::rpc::request::OperationCancellation;
@@ -292,7 +291,10 @@ pub(super) fn validate_workspace_param(
     resolved: &str,
 ) -> Result<(), WireError> {
     if candidate.is_some_and(|candidate| candidate != resolved) {
-        return Err(wire(ErrorCode::InvalidParams, "invalid-workspace"));
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "invalid-workspace",
+        ));
     }
     Ok(())
 }
@@ -301,7 +303,10 @@ pub(super) fn enforce_workspace(open: &OpenWorkspace, workspace_id: &str) -> Res
     if open.workspace_id == workspace_id {
         Ok(())
     } else {
-        Err(wire(ErrorCode::InvalidParams, "workspace scope mismatch"))
+        Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "workspace scope mismatch",
+        ))
     }
 }
 
@@ -342,7 +347,7 @@ impl EngineService {
         };
         let capture_enabled = params.capture_mode.is_none();
         if !capture_enabled && capture_author_supplied {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "captureAuthor is unavailable when captureMode is none",
             ));
@@ -373,7 +378,7 @@ impl EngineService {
             // The root's logical binding to a workspace id holds regardless of
             // actor liveness: a different workspace id is always rejected.
             if open.workspace_id != params.workspace_id {
-                return Err(wire(
+                return Err(WireError::new(
                     ErrorCode::InvalidParams,
                     "workspace root is already bound to another workspace",
                 ));
@@ -397,7 +402,7 @@ impl EngineService {
                     {
                         let mut handles = lock(&self.handles);
                         if handles.len() >= MAX_OPEN_HANDLES {
-                            return Err(wire(
+                            return Err(WireError::new(
                                 ErrorCode::Overloaded,
                                 "workspace handle limit reached",
                             ));
@@ -407,19 +412,19 @@ impl EngineService {
                     return Ok(json!({ "workspace": attached_handle }));
                 }
                 if open.mode != requested_mode {
-                    return Err(wire(
+                    return Err(WireError::new(
                         ErrorCode::InvalidParams,
                         "workspace root is already open in a different mode",
                     ));
                 }
                 if lock(&open.capture).is_some() != capture_enabled {
-                    return Err(wire(
+                    return Err(WireError::new(
                         ErrorCode::InvalidParams,
                         "workspace capture configuration mismatch",
                     ));
                 }
                 if open.relay != params.relay.as_ref().map(RelayOpenParams::configuration) {
-                    return Err(wire(
+                    return Err(WireError::new(
                         ErrorCode::InvalidParams,
                         "workspace relay configuration mismatch",
                     ));
@@ -436,7 +441,7 @@ impl EngineService {
                     };
                     let capture = lock(&open.capture);
                     let driver = capture.as_ref().ok_or_else(|| {
-                        wire(
+                        WireError::new(
                             ErrorCode::WorkspaceUnavailable,
                             "capture driver unavailable",
                         )
@@ -480,7 +485,7 @@ impl EngineService {
                 .clear_workspace(&open.workspace_id);
         }
         if lock(&self.handles).len() >= MAX_OPEN_HANDLES {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::Overloaded,
                 "workspace handle limit reached",
             ));
@@ -575,7 +580,7 @@ impl EngineService {
                 return Err(cancellation.interruption("workspace open (actor startup)"));
             }
             opened = &mut opening => {
-                opened.map_err(|_| wire(ErrorCode::Internal, "workspace open task failed"))?
+                opened.map_err(|_| WireError::new(ErrorCode::Internal, "workspace open task failed"))?
             }
         };
         let (actor_open, bound) = actor_open.map_err(map_runtime)?;
@@ -587,7 +592,7 @@ impl EngineService {
         // service, and repeated opens on that service returned above; reject
         // every remaining cross-service/aliased attachment explicitly.
         if !actor_open.created_actor {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::WorkspaceUnavailable,
                 "workspace database is already attached",
             ));
@@ -846,8 +851,8 @@ impl EngineService {
         });
         close_task
             .await
-            .map_err(|_| wire(ErrorCode::Internal, "workspace close task failed"))?
-            .map_err(|_| wire(ErrorCode::Internal, "workspace close task failed"))?
+            .map_err(|_| WireError::new(ErrorCode::Internal, "workspace close task failed"))?
+            .map_err(|_| WireError::new(ErrorCode::Internal, "workspace close task failed"))?
             .map_err(map_runtime)?;
         Ok(json!({ "closed": closed }))
     }

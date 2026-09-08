@@ -5,9 +5,8 @@ use crate::rpc::chats::chat_page_cursor;
 use crate::rpc::chats::chat_page_limit;
 use crate::rpc::chats::decode_chat_cursor;
 use crate::rpc::chats::read_state::ChatOwnerParams;
-use crate::rpc::error::wire;
 use crate::rpc::request::OperationCancellation;
-use crate::rpc::request::deserialize_optional_non_null_string;
+use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use dohc_engine_domain::ChatFollow;
@@ -26,7 +25,7 @@ use serde_json::json;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatFollowSetParams {
     owner_user_id: String,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     replication_owner_user_id: Option<String>,
     target_kind: String,
     target_id: String,
@@ -40,7 +39,7 @@ struct ChatFollowListParams {
     owner_user_id: String,
     state: Option<String>,
     page_limit: Option<i64>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     cursor: Option<String>,
 }
 
@@ -50,7 +49,10 @@ fn parse_follow_target_kind(raw: &str) -> Result<FollowTargetKind, WireError> {
         "agent" => Ok(FollowTargetKind::Agent),
         "channel" => Ok(FollowTargetKind::Channel),
         "thread" => Ok(FollowTargetKind::Thread),
-        _ => Err(wire(ErrorCode::InvalidParams, "unknown follow target kind")),
+        _ => Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "unknown follow target kind",
+        )),
     }
 }
 
@@ -58,7 +60,10 @@ fn parse_follow_state(raw: &str) -> Result<FollowState, WireError> {
     match raw {
         "following" => Ok(FollowState::Following),
         "unfollowed" => Ok(FollowState::Unfollowed),
-        _ => Err(wire(ErrorCode::InvalidParams, "unknown follow state")),
+        _ => Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "unknown follow state",
+        )),
     }
 }
 

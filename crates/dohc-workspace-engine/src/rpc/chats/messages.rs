@@ -9,11 +9,9 @@ use crate::rpc::chats::decode_chat_cursor;
 use crate::rpc::chats::encode_chat_cursor;
 use crate::rpc::chats::threads::ChatLocalAttachmentParams;
 use crate::rpc::chats::threads::ChatThreadPageParams;
-use crate::rpc::chats::threads::deserialize_optional_non_null_attachments;
 use crate::rpc::chats::threads::thread_b2_json;
-use crate::rpc::error::wire;
 use crate::rpc::request::OperationCancellation;
-use crate::rpc::request::deserialize_optional_non_null_string;
+use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use crate::rpc::request::required_idempotency_key;
@@ -52,10 +50,7 @@ struct ChatMessageSendParams {
     body: String,
     #[serde(default)]
     needs_decision: bool,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_non_null_attachments"
-    )]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     attachments: Option<Vec<ChatLocalAttachmentParams>>,
     now_ms: Option<i64>,
 }
@@ -84,7 +79,7 @@ struct ChatReactionSetParams {
     message_id: String,
     emoji: String,
     author: ChatReactionAuthorParams,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     replication_author_id: Option<String>,
     state: String,
     now_ms: Option<i64>,
@@ -103,19 +98,19 @@ struct ChatMessagesListParams {
 struct ChatAttachmentsListForThreadParams {
     thread_id: String,
     page_limit: Option<i64>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatAttachmentsListFileMentionsParams {
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     object_id: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     path_hint: Option<String>,
     page_limit: Option<i64>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     cursor: Option<String>,
 }
 
@@ -126,7 +121,7 @@ struct ChatMentionsListForHandleParams {
     #[serde(default)]
     unread_by_agent_only: bool,
     page_limit: Option<i64>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     cursor: Option<String>,
 }
 
@@ -134,7 +129,10 @@ pub(super) fn parse_actor_kind(raw: &str) -> Result<ChatActorKind, WireError> {
     match raw {
         "human" => Ok(ChatActorKind::Human),
         "agent" => Ok(ChatActorKind::Agent),
-        _ => Err(wire(ErrorCode::InvalidParams, "unknown chat actor kind")),
+        _ => Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "unknown chat actor kind",
+        )),
     }
 }
 
@@ -308,7 +306,7 @@ impl EngineService {
         let next_cursor = if has_more {
             let last = rows
                 .get(included.saturating_sub(1))
-                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
@@ -379,7 +377,7 @@ impl EngineService {
         let next_cursor = if has_more {
             let last = rows
                 .get(included.saturating_sub(1))
-                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
@@ -444,7 +442,7 @@ impl EngineService {
         let next_cursor = if rows.len() > included {
             let last = rows
                 .get(included.saturating_sub(1))
-                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
@@ -571,7 +569,7 @@ impl EngineService {
         let next_cursor = if rows.len() > included {
             let last = rows
                 .get(included.saturating_sub(1))
-                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
@@ -601,7 +599,12 @@ impl EngineService {
         let state = match params.state.as_str() {
             "added" => ChatReactionState::Added,
             "removed" => ChatReactionState::Removed,
-            _ => return Err(wire(ErrorCode::InvalidParams, "invalid-parameters")),
+            _ => {
+                return Err(WireError::new(
+                    ErrorCode::InvalidParams,
+                    "invalid-parameters",
+                ));
+            }
         };
         let author_kind = parse_actor_kind(&params.author.kind)?;
         let open = self.open(handle.as_ref())?;
@@ -663,7 +666,7 @@ impl EngineService {
         let next_cursor = if rows.len() > included {
             let last = rows
                 .get(included.saturating_sub(1))
-                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
