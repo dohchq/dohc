@@ -175,9 +175,16 @@ impl WorkspaceActor {
         read_only: bool,
     ) -> Result<Self, RuntimeError> {
         let writer_lock = if read_only {
+            let file = std::fs::File::open(&db_path).map_err(|error| RuntimeError::Identity {
+                reason: "could not inspect workspace database links",
+                source: Some(error),
+            })?;
+            require_single_database_link(&file)?;
             None
         } else {
-            Some(acquire_writer_lock(&db_path)?)
+            let lock = acquire_writer_lock(&db_path)?;
+            require_single_database_link(&lock)?;
+            Some(lock)
         };
         let (tx, rx) = mpsc::channel::<Command>(CHANNEL_CAPACITY);
         // Reserve the dedicated Close slot up front (the channel is empty, so
@@ -472,6 +479,26 @@ type WriterLock = file_guard::FileGuard<Box<std::fs::File>>;
 #[cfg(not(any(windows, target_vendor = "apple")))]
 type WriterLock = std::fs::File;
 
+fn require_single_database_link(file: &std::fs::File) -> Result<(), RuntimeError> {
+    #[cfg(windows)]
+    let count = winapi_util::file::information(file).map(|info| info.number_of_links());
+    #[cfg(unix)]
+    let count = {
+        use std::os::unix::fs::MetadataExt;
+        file.metadata().map(|metadata| metadata.nlink())
+    };
+    let count = count.map_err(|error| RuntimeError::Identity {
+        reason: "could not inspect workspace database links",
+        source: Some(error),
+    })?;
+    // SQLite's WAL name follows the opened path. A second hard link can miss
+    // acknowledged writes left in the first path's WAL after a process crash.
+    if count != 1 {
+        return Err(RuntimeError::WorkspaceHardlinked);
+    }
+    Ok(())
+}
+
 fn acquire_writer_lock(db_path: &std::path::Path) -> Result<WriterLock, RuntimeError> {
     // Lock the physical database: hard links can have different canonical paths.
     let file = std::fs::OpenOptions::new()
@@ -544,6 +571,20 @@ mod saturation_tests {
         ));
         drop(owner);
         drop(acquire_writer_lock(&alias).expect("release permits alias owner"));
+    }
+
+    #[test]
+    fn a_new_read_only_actor_refuses_a_hardlinked_database() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = engine_db_path(&scratch).expect("database path");
+        drop(EngineStore::open(&db, 1).expect("database"));
+        let alias = db.with_file_name("alias.db");
+        std::fs::hard_link(&db, &alias).expect("hard link");
+        let identity = EngineDbIdentity::of_existing(&alias).expect("identity");
+        assert!(matches!(
+            WorkspaceActor::spawn_read_only(alias, identity, 1),
+            Err(RuntimeError::WorkspaceHardlinked)
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

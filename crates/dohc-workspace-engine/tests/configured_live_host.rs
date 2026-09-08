@@ -517,17 +517,88 @@ fn ordinary_and_configured_processes_share_writer_exclusion_and_crash_release() 
         other_root.join(".dohc/engine/ROOT_BINDING"),
     )
     .unwrap();
+    std::fs::remove_file(other_root.join(".dohc/engine/engine.db")).unwrap();
     let mut owner = Daemon(command(Some(&path)).spawn().unwrap());
     owner.hello("configured-test-secret");
     assert!(matches!(owner.read(), Envelope::HelloAck(_)));
+    std::fs::hard_link(
+        root.join(".dohc/engine/engine.db"),
+        other_root.join(".dohc/engine/engine.db"),
+    )
+    .unwrap();
     let bound_alias = command(Some(&alias_config)).output().unwrap();
     assert!(!bound_alias.status.success());
     assert!(String::from_utf8_lossy(&bound_alias.stderr).contains("workspace-owned"));
     owner.0.kill().unwrap();
     owner.0.wait().unwrap();
-    let mut alias_owner = Daemon(command(Some(&alias_config)).spawn().unwrap());
-    alias_owner.hello("configured-test-secret");
-    assert!(matches!(alias_owner.read(), Envelope::HelloAck(_)));
-    alias_owner.0.stdin.take();
-    assert!(alias_owner.0.wait().unwrap().success());
+    let alias_owner = command(Some(&alias_config)).output().unwrap();
+    assert!(!alias_owner.status.success());
+    assert!(String::from_utf8_lossy(&alias_owner.stderr).contains("workspace-hardlinked"));
+}
+
+#[test]
+fn hardlink_reopen_refuses_orphaned_wal_and_original_root_recovers_acknowledged_write() {
+    let scratch = ScratchDir::new().unwrap();
+    let root = scratch.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let mut owner = Daemon(command(None).spawn().unwrap());
+    owner.hello("configured-test-secret");
+    assert!(matches!(owner.read(), Envelope::HelloAck(_)));
+    let Envelope::Response(opened) = owner.request(
+        1,
+        "workspace.open",
+        None,
+        json!({"rootDir":root,"workspaceId":"workspace","captureMode":"none"}),
+    ) else {
+        panic!("owner opens")
+    };
+    let handle = serde_json::from_value(opened.result["workspace"].clone()).unwrap();
+    assert!(
+        matches!(owner.request(2, "versionedText.write", Some(handle), json!({
+        "versionId":"main","objectId":"object","path":"note.md","text":"acknowledged before crash",
+        "momentId":"moment","origin":"api","nowMs":100
+    })), Envelope::Response(_))
+    );
+    let other_root = scratch.path().join("alias");
+    std::fs::create_dir_all(other_root.join(".dohc/engine")).unwrap();
+    let alias_db = other_root.join(".dohc/engine/engine.db");
+    std::fs::hard_link(root.join(".dohc/engine/engine.db"), &alias_db).unwrap();
+    std::fs::copy(
+        root.join(".dohc/engine/ROOT_BINDING"),
+        other_root.join(".dohc/engine/ROOT_BINDING"),
+    )
+    .unwrap();
+    owner.0.kill().unwrap();
+    owner.0.wait().unwrap();
+    assert!(root.join(".dohc/engine/engine.db-wal").exists());
+    let mut next = Daemon(command(None).spawn().unwrap());
+    next.hello("configured-test-secret");
+    assert!(matches!(next.read(), Envelope::HelloAck(_)));
+    for (id, read_only) in [(1, false), (2, true)] {
+        let Envelope::Error(error) = next.request(id, "workspace.open", None, json!({
+            "rootDir":other_root,"workspaceId":"workspace","captureMode":"none","skipStartupMaintenance":read_only
+        })) else { panic!("hardlink must refuse before SQLite chooses a different WAL") };
+        assert_eq!(error.error.code, ErrorCode::WorkspaceUnavailable);
+        assert_eq!(error.error.message, "workspace-hardlinked");
+    }
+    assert!(!other_root.join(".dohc/engine/engine.db-wal").exists());
+    std::fs::remove_file(&alias_db).unwrap();
+    let Envelope::Response(opened) = next.request(
+        3,
+        "workspace.open",
+        None,
+        json!({"rootDir":root,"workspaceId":"workspace","captureMode":"none"}),
+    ) else {
+        panic!("original root recovers")
+    };
+    let handle = serde_json::from_value(opened.result["workspace"].clone()).unwrap();
+    let Envelope::Response(read) = next.request(
+        4,
+        "versionedText.read",
+        Some(handle),
+        json!({"versionId":"main","path":"note.md"}),
+    ) else {
+        panic!("read acknowledged text")
+    };
+    assert_eq!(read.result["text"], "acknowledged before crash");
 }

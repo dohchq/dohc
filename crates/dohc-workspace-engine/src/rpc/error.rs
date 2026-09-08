@@ -193,6 +193,9 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::WorkspaceOwned => {
             return WireError::new(ErrorCode::WorkspaceUnavailable, "workspace-owned");
         }
+        RuntimeError::WorkspaceHardlinked => {
+            return WireError::new(ErrorCode::WorkspaceUnavailable, "workspace-hardlinked");
+        }
         RuntimeError::Domain(error) => return map_domain(error),
         RuntimeError::Collab(error) => map_collab_code(error),
         RuntimeError::Sync(error) => map_sync_code(error),

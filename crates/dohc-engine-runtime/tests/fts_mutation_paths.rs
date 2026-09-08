@@ -243,13 +243,17 @@ async fn aliased_database_capture_uses_session_root_and_indexes() {
     let alias_dir = scratch.path().join("database-alias");
     std::fs::create_dir_all(&alias_dir).expect("alias dir");
     let aliased_db = alias_dir.join("not-the-canonical-name.db");
-    std::fs::hard_link(&canonical_db, &aliased_db).expect("hard-link database alias");
-
     let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor
+    let first = supervisor
+        .open(&canonical_db, 2)
+        .expect("open canonical actor");
+    std::fs::hard_link(&canonical_db, &aliased_db).expect("hard-link database alias");
+    let aliased = supervisor
         .open(&aliased_db, 2)
-        .expect("open actor through alias")
-        .actor;
+        .expect("reuse actor through alias");
+    assert!(!aliased.created_actor);
+    drop(first);
+    let actor = aliased.actor;
     actor
         .ensure_search_index(
             scratch.path().to_path_buf(),

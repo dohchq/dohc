@@ -83,6 +83,10 @@ pub enum RuntimeError {
     #[error("workspace database already has a writer")]
     WorkspaceOwned,
 
+    /// A fresh SQLite connection cannot choose a WAL path for multiple names.
+    #[error("workspace database has multiple hard links")]
+    WorkspaceHardlinked,
+
     /// The actor's worker thread panicked; the connection was released by
     /// unwinding but the session is dead.
     #[error("workspace actor worker thread panicked")]
