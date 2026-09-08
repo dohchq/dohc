@@ -79,10 +79,10 @@ function checkComposeConfig() {
 }
 
 function startComposeStack() {
-  const initialized = run('docker', composeArgs('run', '--rm', '--no-deps', '--entrypoint', 'node', 'sync-relay',
-    '-e', "require('node:fs').accessSync('/continuity/deployment.json')"))
+  const initialized = run('docker', composeArgs('run', '--rm', '-T', '--no-deps', '--entrypoint', 'node', 'sync-relay',
+    '-e', "require('node:fs').accessSync(process.env.DOHC_RELAY_DEPLOYMENT_CONFIG)"))
   if (initialized.status !== 0) {
-    record('relay deployment initialization', false, 'Initialize the relay as documented in services/share-web/README.md before starting the stack. The probe does not initialize or repair continuity.')
+    record('relay deployment probe', false, (initialized.stderr || initialized.stdout).trim() || 'The deployment probe failed. Check Docker and the configured relay path; see services/share-web/README.md.')
     return
   }
   const up = spawnSync('docker', composeArgs('up', '-d', ...REQUIRED_SERVICES), {
