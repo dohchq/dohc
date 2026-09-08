@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
+import { prosemirrorJSONToYXmlFragment } from 'y-prosemirror'
 import * as projection from './import-export.js'
 import { getDohcYDocFrontmatter, markdownToYDoc } from './import-export.js'
 import * as ordered from './orderedLiveUpdateCut.js'
@@ -174,6 +175,96 @@ describe('call and byte ownership', () => {
 })
 
 describe('public Markdown schema', () => {
+  const nodeAttributes: Record<string, string[]> = {
+    wikilink: ['target', 'label'], inlineAtom: ['atomId', 'params', 'source'],
+    callout: ['calloutType', 'title', 'fold'], mathInline: ['tex'], mathBlock: ['tex'],
+    image: ['src', 'alt', 'title'], escapedPunctuation: ['value'], codeBlock: ['language'],
+    heading: ['level'], orderedList: ['start', 'type'], taskItem: ['checked'],
+    tableCell: ['colspan', 'rowspan', 'colwidth', 'align'],
+    tableHeader: ['colspan', 'rowspan', 'colwidth', 'align'], tableRow: ['height'],
+  }
+  function nodeCheckpoint(name: string, attributes: Record<string, unknown>): Uint8Array {
+    const schema = projection.getDohcProseMirrorSchema()
+    const node = structuredClone(schema.nodes[name].create().toJSON())
+    Object.assign(node.attrs, attributes)
+    const paragraph = { type: 'paragraph', content: [{ type: 'text', text: 'Text' }] }
+    if (['callout', 'taskItem', 'tableCell', 'tableHeader'].includes(name)) node.content = [paragraph]
+    if (name === 'orderedList') node.content = [{ type: 'listItem', content: [paragraph] }]
+    if (name === 'tableRow') node.content = [{ type: 'tableCell', content: [paragraph] }]
+    if (name === 'heading' || name === 'codeBlock') node.content = [{ type: 'text', text: 'Text' }]
+    let child = node
+    if (schema.nodes[name].isInline) child = { type: 'paragraph', content: [node] }
+    if (name === 'taskItem') child = { type: 'taskList', content: [node] }
+    if (name === 'tableCell' || name === 'tableHeader') child = { type: 'table', content: [{ type: 'tableRow', content: [node] }] }
+    if (name === 'tableRow') child = { type: 'table', content: [node] }
+    return encode('', doc => prosemirrorJSONToYXmlFragment(schema, { type: 'doc', content: [child] }, doc.getXmlFragment('body')))
+  }
+  it('covers every current schema attribute explicitly', () => {
+    const schema = projection.getDohcProseMirrorSchema()
+    const inventory = (types: typeof schema.nodes | typeof schema.marks) => Object.fromEntries(Object.entries(types)
+      .map(([name, type]) => [name, Object.keys(type.spec.attrs ?? {})] as const)
+      .filter(([, attrs]) => attrs.length > 0))
+    expect(inventory(schema.nodes)).toEqual(nodeAttributes)
+    expect(inventory(schema.marks)).toEqual({ link: ['href', 'target', 'rel', 'class', 'title'] })
+  })
+  it.each(Object.entries(nodeAttributes).flatMap(([name, keys]) => keys.map(key => [name, key])))('refuses malformed scalar %s.%s without coercion', (name, key) => {
+    const malformed = name === 'taskItem' || ['level', 'start', 'colspan', 'rowspan', 'colwidth', 'height'].includes(key) ? 'wrong' : 5
+    refused(nodeCheckpoint(name, { [key]: malformed }))
+  })
+  it.each(Object.keys(nodeAttributes))('accepts the supported %s defaults', name => {
+    accepted(nodeCheckpoint(name, {}))
+  })
+  it.each([
+    ['orderedList', 'start', NaN], ['orderedList', 'start', Infinity],
+    ['tableRow', 'height', NaN], ['tableRow', 'height', Infinity],
+    ['tableCell', 'colwidth', [80, NaN]], ['tableHeader', 'colwidth', [80, Infinity]],
+    ['heading', 'level', 0], ['heading', 'level', 7],
+  ] as const)('refuses decoded numeric value %s.%s = %s', (name, key, value) => {
+    const checkpoint = nodeCheckpoint(name, { [key]: value })
+    const decoded = new Y.Doc()
+    try {
+      Y.applyUpdate(decoded, checkpoint)
+      const find = (fragment: Y.XmlFragment): Y.XmlElement | undefined => {
+        for (const child of fragment.toArray()) {
+          if (!(child instanceof Y.XmlElement)) continue
+          if (child.nodeName === name) return child
+          const nested = find(child)
+          if (nested) return nested
+        }
+      }
+      const attributes = find(decoded.getXmlFragment('body'))?.getAttributes() as Record<string, unknown> | undefined
+      expect(attributes).toBeDefined()
+      expect(attributes?.[key]).toEqual(value)
+    } finally { decoded.destroy() }
+    refused(checkpoint)
+  })
+  it.each([
+    ['heading', { level: 6 }], ['orderedList', { start: 0 }], ['taskItem', { checked: true }],
+    ['tableCell', { colspan: 2, rowspan: 2, colwidth: [120, 0], align: 'center' }],
+    ['tableHeader', { colwidth: [80], align: 'right' }], ['tableRow', { height: 28.5 }],
+    ['callout', { fold: '-' }], ['wikilink', { target: 'Page', label: null }],
+  ] as const)('retains valid numeric, array, nullable and enum attributes in %s', (name, attributes) => {
+    const checkpoint = nodeCheckpoint(name, attributes)
+    expect(accepted(checkpoint).checkpoint.bytes).toEqual(checkpoint)
+  })
+  it.each(['href', 'target', 'rel', 'class', 'title'])('refuses malformed link %s values', key => {
+    for (const value of [5, true, { nested: 'value' }, ['x']]) {
+      refused(encode('[text](https://example.com)', doc => {
+        const text = (doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText
+        const attrs = text.toDelta()[0].attributes!.link
+        text.format(0, text.length, { link: { ...attrs, [key]: value } })
+      }))
+    }
+  })
+  it('preserves nullable link attributes and canonical frontmatter bigint', () => {
+    const checkpoint = encode('---\ninteger: 9223372036854775807\n---\n\n[text](https://example.com)', doc => {
+      const text = (doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText
+      text.format(0, text.length, { link: { href: null, target: null, rel: null, class: null, title: null } })
+    })
+    const evidence = accepted(checkpoint)
+    expect(evidence.projectedMarkdown).toContain('9223372036854775807')
+    expect(evidence.projectedMarkdown).toContain('[text]()')
+  })
   it.each(['', 'Hello **world**', '# Heading\n\n- item\n- other', '---\ntitle: Test\nlist: [1, true, null]\n---\n\nText', '---\nvalue: .nan\npos: .inf\nneg: -.inf\nzero: -0.0\n---\n\nText', 'first\r\n\r\nsecond'])('accepts canonical importer output %s', markdown => {
     const doc = markdownToYDoc(markdown)
     try { expect(accepted(Y.encodeStateAsUpdate(doc)).projectedMarkdown).toBe(projection.yDocToMarkdown(doc)) }
@@ -315,6 +406,25 @@ describe('real scratch finalization', () => {
       break
     }
     expect(sawFinalizerCapacity).toBe(true)
+  })
+  it('preserves real finalizer capacity refusal over pending schema refusal', () => {
+    const checkpoint = encode('Text', doc => doc.getMap('meta').set('unknown', 1))
+    let sawFinalizerCapacity = false
+    const projector = vi.spyOn(projection, 'yDocToMarkdown')
+    for (let maxDecodedPayloadByteVisits = 1; maxDecodedPayloadByteVisits < 500; maxDecodedPayloadByteVisits++) {
+      const policy = { ...fixturePolicy, maxDecodedPayloadByteVisits }
+      const cut = ordered.validateRegistrationCutForProjection({ mode: 'registration', checkpoint }, policy)
+      if (cut.kind === 'refused') continue
+      let final
+      try { final = cut.cut.finishAfterProjection() }
+      finally { cut.cut.document.destroy() }
+      if (final.kind !== 'refused' || final.reason !== 'capacity-refused') continue
+      expect(createLiveMarkdownRegistrationValidator(policy)(input(checkpoint))).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'registration-input' })
+      sawFinalizerCapacity = true
+      break
+    }
+    expect(sawFinalizerCapacity).toBe(true)
+    expect(projector).not.toHaveBeenCalled()
   })
   it('finalizes after caller bytes change between validation and owned copying', () => {
     const checkpoint = encode('Text')

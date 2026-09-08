@@ -57,7 +57,7 @@ const bufferResizable = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, '
 const setBytes = ByteArray.prototype.set
 const utf8 = new TextEncoder()
 
-export const LIVE_MARKDOWN_VALIDATION_REFUSALS = [
+const LIVE_MARKDOWN_VALIDATION_REFUSALS = [
   'invalid-input', 'invalid-update', 'invalid-schema', 'projection-mutated', 'capacity-refused',
 ] as const
 export type LiveMarkdownValidationRefusal = (typeof LIVE_MARKDOWN_VALIDATION_REFUSALS)[number]
@@ -156,7 +156,7 @@ export function createLiveMarkdownRegistrationValidator(
     let document: LiveDocumentKey, currentPath: string, checkpointValue: unknown
     try {
       const snapshot = exactDataFields(input, INPUT_FIELDS)
-      document = Object.freeze({ ...parseLiveDocumentKey(exactDataFields(snapshot.document, DOCUMENT_FIELDS)) })
+      document = Object.freeze(parseLiveDocumentKey(exactDataFields(snapshot.document, DOCUMENT_FIELDS)))
       if (document.mainVersionId !== 'main' || typeof snapshot.currentPath !== 'string') refuse('invalid-input')
       currentPath = snapshot.currentPath
       const path = validateUserWritePath(currentPath)
@@ -203,7 +203,7 @@ export function createLiveMarkdownRegistrationValidator(
       currentPath,
       checkpoint: Object.freeze({
         get bytes() { return copyBytes(ownedCheckpoint) },
-        updateDigest: sha256Hex(ownedCheckpoint),
+        updateDigest: cut.checkpoint.updateDigest,
         ranges: Object.freeze(cut.checkpoint.ranges.map(range => Object.freeze({ ...range }))),
       }),
       projectedMarkdown,
@@ -344,6 +344,49 @@ function sortedValueEntries(value: Record<string, unknown>): [string, unknown][]
     .map(key => [key, value[key]])
 }
 
+function validBodyAttribute(nodeName: string, key: string, value: unknown): boolean {
+  switch (`${nodeName}.${key}`) {
+    case 'wikilink.target':
+    case 'inlineAtom.atomId': case 'inlineAtom.params': case 'inlineAtom.source':
+    case 'callout.calloutType': case 'callout.title':
+    case 'mathInline.tex': case 'mathBlock.tex':
+    case 'image.src': case 'image.alt': case 'escapedPunctuation.value':
+      return typeof value === 'string'
+    case 'wikilink.label': case 'image.title': case 'codeBlock.language':
+    case 'orderedList.type':
+      return value === null || typeof value === 'string'
+    case 'callout.fold':
+      return value === '' || value === '+' || value === '-'
+    case 'heading.level':
+      return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 6
+    case 'orderedList.start':
+    case 'tableCell.colspan': case 'tableCell.rowspan':
+    case 'tableHeader.colspan': case 'tableHeader.rowspan':
+      return typeof value === 'number' && Number.isFinite(value)
+    case 'taskItem.checked':
+      return typeof value === 'boolean'
+    case 'tableCell.colwidth': case 'tableHeader.colwidth':
+      return value === null || (Array.isArray(value)
+        && value.every(width => typeof width === 'number' && Number.isFinite(width)))
+    case 'tableCell.align': case 'tableHeader.align':
+      return value === null || value === 'left' || value === 'right' || value === 'center'
+    case 'tableRow.height':
+      return value === null || (typeof value === 'number' && Number.isFinite(value) && value > 0)
+    default:
+      return true
+  }
+}
+
+function validateMarkAttributes(name: string, value: unknown): void {
+  // y-prosemirror appends an eight-character hash to nonexclusive mark names.
+  const markName = /(.*)(--[a-zA-Z0-9+/=]{8})$/.exec(name)?.[1] ?? name
+  if (markName !== 'link' || value === null || typeof value !== 'object') return
+  for (const key of ['href', 'target', 'rel', 'class', 'title']) {
+    const attribute = (value as Record<string, unknown>)[key]
+    if (attribute !== undefined && attribute !== null && typeof attribute !== 'string') refuse('invalid-schema')
+  }
+}
+
 function bodyFingerprint(
   body: Y.XmlFragment,
   budget: ProjectionBudget | null,
@@ -362,15 +405,17 @@ function xmlFingerprint(
     budget?.consume(depth)
     if (budget !== null && value.length > budget.remaining) refuse('capacity-refused')
     const attributes = value.getAttributes() as Record<string, unknown>
-    for (const [, attribute] of sortedValueEntries(attributes)) {
+    const entries = sortedValueEntries(attributes)
+    for (const [key, attribute] of entries) {
       if (budget !== null) {
         visitPublicValue(attribute, depth + 1, budget, new Set())
+        if (!validBodyAttribute(value.nodeName, key, attribute)) refuse('invalid-schema')
       }
     }
     return {
       kind: 'element',
       nodeName: value.nodeName,
-      attributes: sortedValueEntries(attributes),
+      attributes: entries,
       children: value.toArray().map(child => xmlFingerprint(child, depth + 1, budget)),
     }
   }
@@ -385,9 +430,10 @@ function xmlFingerprint(
     budget?.consumeNode()
     const attributes = (run.attributes ?? {}) as Record<string, unknown>
     const entries = sortedValueEntries(attributes)
-    for (const [, attribute] of entries) {
+    for (const [name, attribute] of entries) {
       if (budget !== null) {
         visitPublicValue(attribute, depth + 2, budget, new Set())
+        validateMarkAttributes(name, attribute)
       }
     }
     runs.push({ insert: run.insert, attributes: entries })
