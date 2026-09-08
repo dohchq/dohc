@@ -489,7 +489,7 @@ mod tests {
             tx.execute("INSERT INTO live_device_settlements VALUES ('settlement','relay','workspace','main','object','lineage',0,1,0,1,1,?1,'moment',?1,?1,'{}','{}',0)",[&sha]).unwrap();
             let source=crate::hex_sha256(b"");
             tx.execute("INSERT INTO blobs(sha256,text,byte_length) VALUES (?1,'',0)",[&source]).unwrap();
-            tx.execute("INSERT INTO live_owner_adoptions VALUES ('relay','adoption','workspace','main','owner',?1,'{}','source',?2,0,1,0,?1,?1,0,0,0,'null','{}')",rusqlite::params![sha,source]).unwrap();
+            tx.execute("INSERT INTO live_owner_adoptions VALUES ('relay','adoption','workspace','main','owner',?1,'{}','source',?2,0,1,0,?1,?1,0,0,0,'null','{}',1000000,60000)",rusqlite::params![sha,source]).unwrap();
             Ok::<_, StorageError>(())
         }).unwrap();
         for (index, table) in [
