@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Event, Request, Response } from "@dohc/workspace-engine-client";
 import {
   createRustEngineDaemon,
+  EngineClient,
   EngineWorkspaceSessions,
   type EngineDaemonClient,
   type EngineDaemonLifecycleOptions,
@@ -16,6 +17,9 @@ import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { PluginWorkspaceRuntimes, type PluginWorkspaceRuntimeParts } from "../plugins/pluginWorkspaceRuntimes";
 import { deferred } from "../testing/deferred";
 import { createTestScratch } from "./testTemp";
+
+const ownerHostMock = vi.hoisted(() => ({ read: vi.fn(), start: vi.fn() }));
+vi.mock("./desktopOwnerHost", () => ({ readDesktopOwnerHostConfig: ownerHostMock.read, startDesktopOwnerHost: ownerHostMock.start }));
 
 type State = { pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace> };
 type Dependencies = Parameters<typeof createDesktopEngine<State>>[0];
@@ -159,6 +163,48 @@ function fixture() {
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("desktop engine construction", () => {
+  it.each([false, true])("retires owner discovery before workspace close; shutdown=%s", async shutdown => {
+    const f = fixture();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    const rootPath = await createTestScratch("dohc-owner-host-rotation-");
+    f.rows.set("owner", { workspaceId: "owner", rootPath, kind: "personal", mode: "local-first" });
+    f.dependencies.process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG = "test-config";
+    f.dependencies.existingOwnerFor = vi.fn(() => { throw new Error("No editor in this discovery test."); });
+    const stopped: ReturnType<typeof vi.fn>[] = [];
+    ownerHostMock.read.mockReturnValue({ nativeConfigPath: "native-config", workspaceIds: ["owner"], transport: { aggregateBytes: 1024, maxUploads: 1 } });
+    ownerHostMock.start.mockImplementation(() => { const stop = vi.fn(); stopped.push(stop); return { stop }; });
+    let handles = 0;
+    const closing = deferred(), closeEntered = deferred();
+    const originalSend = f.client.sendRequest.bind(f.client);
+    f.client.sendRequest = async request => {
+      if (request.method === "workspace.open" && workspaceIdOf(request) === "owner") return { id: request.id, result: { workspace: `owner-${++handles}` } };
+      if (request.method === "workspace.close" && request.workspace === "owner-1") { closeEntered.resolve(); await closing.promise; }
+      return originalSend(request);
+    };
+    try {
+      expect(await f.engine.start()).toBe(true);
+      const first = await ownerHostMock.start.mock.calls.at(-1)![0].bindings();
+      expect(first.workspaces).toEqual([{ workspaceId: "owner", workspaceHandle: "owner-1" }]);
+      const lease = f.authorities.acquire("owner");
+      const workspace = { workspaceId: "owner", rootPath, attachmentId: lease.binding.attachmentId };
+      lease.release();
+      const close = f.engine.closeRelayTransportWorkspace(workspace);
+      await closeEntered.promise;
+      expect(stopped[0]).toHaveBeenCalledOnce();
+      expect(() => first.assertCurrent()).toThrow("Owner host daemon retired.");
+      const shutdownDone = shutdown ? f.engine.closeAllRelayTransportWorkspaces() : Promise.resolve();
+      closing.resolve(); await close; await shutdownDone;
+      expect(ownerHostMock.start).toHaveBeenCalledTimes(shutdown ? 1 : 2);
+      if (shutdown) return;
+      const next = await ownerHostMock.start.mock.calls.at(-1)![0].bindings();
+      expect(next.workspaces).toEqual([{ workspaceId: "owner", workspaceHandle: "owner-2" }]);
+      expect(() => next.assertCurrent()).not.toThrow();
+      expect(next.client).toBe(first.client);
+    } finally {
+      closing.resolve(); await f.close(); ownerHostMock.read.mockReset(); ownerHostMock.start.mockReset();
+    }
+  });
+
   it("creates no daemon until start and publishes sessions only after the held handshake", async () => {
     const f = fixture(); const held = deferred(); const entered = deferred();
     f.setLaunch(async () => { entered.resolve(); await held.promise; return f.client; });

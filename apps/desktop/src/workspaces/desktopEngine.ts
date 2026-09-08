@@ -64,13 +64,22 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   let rustEngineDaemon: EngineDaemonLifecycle | null = null;
   let rustEngineWorkspaceSessions: EngineWorkspaceSessions | null = null;
   let rustEngineRelayClient: EngineRelayClient | null = null;
+  let rustEngineSessionSource: RelayConfiguredDaemonClientSource | null = null;
   let ownerHost: ReturnType<typeof startDesktopOwnerHost> | undefined;
   let ownerHostConfig: ReturnType<typeof readDesktopOwnerHostConfig> | undefined;
   let ownerHostModule: typeof import("./desktopOwnerHost") | undefined;
-  const startOwnerHost = () => {
+  let ownerHostGeneration = 0;
+  let ownerWorkspaceCloses = 0;
+  let ownerHostShutdown = false;
+  const stopOwnerHost = () => {
+    ownerHostGeneration += 1;
     ownerHost?.stop(); ownerHost = undefined;
-    if (!ownerHostModule || !ownerHostConfig || !rustEngineDaemon || !rustEngineWorkspaceSessions || !dependencies.existingOwnerFor) return;
-    const daemon = rustEngineDaemon, sessions = rustEngineWorkspaceSessions, config = ownerHostConfig;
+  };
+  const startOwnerHost = () => {
+    stopOwnerHost();
+    if (ownerHostShutdown || ownerWorkspaceCloses || !ownerHostModule || !ownerHostConfig || !rustEngineDaemon || !rustEngineWorkspaceSessions || !rustEngineSessionSource || !dependencies.existingOwnerFor) return;
+    const daemon = rustEngineDaemon, sessions = rustEngineWorkspaceSessions, source = rustEngineSessionSource, config = ownerHostConfig;
+    const generation = ownerHostGeneration;
     ownerHost = ownerHostModule.startDesktopOwnerHost({config,ownerFor: dependencies.existingOwnerFor,
       onError: error => console.error("[desktop] owner host connection failed:",error),
       bindings: async () => {
@@ -83,13 +92,13 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             const workspace = {workspaceId,rootPath: lease.binding.canonicalRootPath,attachmentId: lease.binding.attachmentId};
             return sessions.run(workspace, async binding => {
               lease.assertCurrent();
-              if (binding.client !== client) throw new Error("Owner host daemon changed.");
+              if (daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("Owner host daemon changed.");
               return {workspaceId,workspaceHandle: binding.workspace};
             });
           }));
         }
         return {client,workspaces,assertCurrent: () => {
-          if (isQuitting() || daemon.currentClient() !== client) throw new Error("Owner host daemon retired.");
+          if (isQuitting() || ownerHostGeneration !== generation || daemon.currentClient() !== client) throw new Error("Owner host daemon retired.");
         }};
       },
     });
@@ -122,16 +131,23 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   ): Promise<void> {
     const workspaceId =
       typeof workspace === "string" ? workspace : workspace.workspaceId;
-    if (rustEngineRelayClient) {
-      await rustEngineRelayClient.closeWorkspace(workspace);
-      return;
+    const reconnectOwner = ownerHostConfig?.workspaceIds.includes(workspaceId) === true;
+    if (reconnectOwner) { ownerWorkspaceCloses += 1; stopOwnerHost(); }
+    try {
+      if (rustEngineRelayClient) {
+        await rustEngineRelayClient.closeWorkspace(workspace);
+        return;
+      }
+      await rustEngineWorkspaceSessions?.closeWorkspace(workspace);
+      relayTransportRoutes.releaseWorkspace(workspaceId);
+    } finally {
+      if (reconnectOwner) { ownerWorkspaceCloses -= 1; if (!ownerWorkspaceCloses) startOwnerHost(); }
     }
-    await rustEngineWorkspaceSessions?.closeWorkspace(workspace);
-    relayTransportRoutes.releaseWorkspace(workspaceId);
   }
 
   async function closeAllRelayTransportWorkspaces(): Promise<void> {
-    ownerHost?.stop(); ownerHost = undefined;
+    ownerHostShutdown = true;
+    stopOwnerHost();
     if (rustEngineRelayClient) {
       await rustEngineRelayClient.closeAll();
       return;
@@ -206,7 +222,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
           }
         },
         beforePublish: async () => {
-          ownerHost?.stop(); ownerHost = undefined;
+          stopOwnerHost();
           await Promise.all(workspaceAuthorities.workspaceIds().map((workspaceId) =>
             workspaceAuthorities.withAuthority(workspaceId, (lease) => {
               const runtimes = lease.state.pluginRuntimes;
@@ -254,6 +270,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         rustEngineDaemon,
         relayTransportRoutes,
       );
+      rustEngineSessionSource = relaySource;
       // A fresh debug-engine adoption measured 18.7 s for 5,000 files and
       // 101.8 s for 15,000 files on the launch fixture; 120 s bounds that path
       // with headroom. The renderer names the wait.
@@ -298,6 +315,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       rustEngineDaemon = null;
       rustEngineWorkspaceSessions = null;
       rustEngineRelayClient = null;
+      rustEngineSessionSource = null;
       // The window may already be up — it loads while the daemon handshakes —
       // and by the time the user dismisses the dialog above, a restored tab can
       // hold edits (local reads and the plain editor never wait for the
