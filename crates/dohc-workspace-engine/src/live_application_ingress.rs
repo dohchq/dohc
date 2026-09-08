@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const RANGE_BYTES: usize = 16;
+// Worst-case canonical request with 100 selectors and six-byte JSON escapes.
 const MAX_HEADER_BYTES: usize = 643_576;
 const MAX_CHUNK_BYTES: usize = 256 * 1024;
 
@@ -361,9 +362,6 @@ impl LiveApplicationIngress {
             },
             update_bytes: upload.bytes,
         };
-        event
-            .validate()
-            .map_err(|_| invalid("invalid-live-application-metadata"))?;
         // Preserve the upload's original deadline after time spent assembling.
         let remaining = upload
             .deadline
@@ -415,7 +413,7 @@ fn overloaded() -> WireError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::LiveApplicationHostConfig;
     use dohc_engine_collab::live_object_binding::LiveObjectBinding;
@@ -428,7 +426,7 @@ mod tests {
     use dohc_engine_testkit::ScratchDir;
     use serde_json::json;
 
-    async fn fixture() -> (
+    pub(crate) async fn fixture() -> (
         ScratchDir,
         Arc<EngineService>,
         ConnectionOwner,
@@ -523,7 +521,7 @@ mod tests {
         (scratch, service, owner, workspace, id, binding)
     }
 
-    fn config() -> LiveApplicationIngressConfig {
+    pub(crate) fn config() -> LiveApplicationIngressConfig {
         LiveApplicationIngressConfig {
             aggregate_bytes: 512 * 1024 * 1024,
             application_working_reserve_bytes: 32 * 1024 * 1024,
@@ -532,7 +530,7 @@ mod tests {
         }
     }
 
-    fn request(
+    pub(crate) fn request(
         workspace: &str,
         registration: u64,
         binding: &LiveObjectBinding,

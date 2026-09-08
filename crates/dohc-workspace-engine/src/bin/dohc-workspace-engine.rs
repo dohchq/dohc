@@ -249,7 +249,7 @@ where
             break;
         }
         decoder.push(&read_buf[..read]);
-        loop {
+        'frames: loop {
             let frame = match decoder.next_frame() {
                 Ok(Some(frame)) => frame,
                 Ok(None) => break,
@@ -434,7 +434,7 @@ where
                                     )
                                     .await;
                                 keep_running = false;
-                                break;
+                                break 'frames;
                             }
                             continue;
                         }
@@ -506,7 +506,7 @@ async fn write_output<W: AsyncWrite + Unpin>(
     limits: &WireLimits,
     active_egress: Arc<Mutex<HashMap<u64, CancelSignal>>>,
 ) -> Result<(), io::Error> {
-    while let Some(item) = output_rx.recv().await {
+    'items: while let Some(item) = output_rx.recv().await {
         match item {
             OutputItem::Guarded { response, guard } => {
                 let request_id = response.id;
@@ -520,27 +520,36 @@ async fn write_output<W: AsyncWrite + Unpin>(
                     let write = std::future::poll_fn(|cx| {
                         let mut result = std::task::Poll::Pending;
                         if !guard.with_current(&mut || {
-                            result =
-                                std::pin::Pin::new(&mut output).poll_write(cx, &frame[offset..]);
+                            result = std::pin::Pin::new(&mut output)
+                                .poll_write(cx, &frame[offset..])
+                                .map(|result| result.map(Some));
                         }) {
-                            return std::task::Poll::Ready(Err(io::Error::new(
-                                io::ErrorKind::ConnectionAborted,
-                                "live acknowledgement retired",
-                            )));
+                            return std::task::Poll::Ready(Ok(None));
                         }
                         result
                     });
+                    let mut interruption_kind = io::ErrorKind::ConnectionAborted;
                     let count = tokio::select! {
                         biased;
-                        () = cancel.cancelled() => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "live acknowledgement retired")),
-                        () = retired.cancelled() => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "live acknowledgement retired")),
+                        () = cancel.cancelled() => None,
+                        () = retired.cancelled() => None,
                         () = async {
                             match deadline {
                                 Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
                                 None => std::future::pending().await,
                             }
-                        } => return Err(io::Error::new(io::ErrorKind::TimedOut, "live acknowledgement expired")),
+                        } => { interruption_kind = io::ErrorKind::TimedOut; None },
                         count = write => count?,
+                    };
+                    let Some(count) = count else {
+                        if offset == 0 {
+                            lock(&active_egress).remove(&request_id);
+                            continue 'items;
+                        }
+                        return Err(io::Error::new(
+                            interruption_kind,
+                            "live acknowledgement retired",
+                        ));
                     };
                     if count == 0 {
                         return Err(io::Error::new(io::ErrorKind::WriteZero, "stdout closed"));
@@ -790,6 +799,7 @@ async fn dispatch_authenticated<
                     if let Ok(service_response) = outcome
                         && let Some(guard) = &service_response.output_guard
                     {
+                        debug_assert!(service_response.blob_egress.is_none());
                         lock(&completion_egress).insert(id, guard.cancel_signal());
                     }
                     // The handoff runs before the supervisor drops its cancel
@@ -1305,6 +1315,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unwritten_retired_or_expired_acknowledgements_preserve_following_output() {
+        for expired in [false, true] {
+            let retired = CancelSignal::new();
+            if !expired {
+                retired.cancel();
+            }
+            let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+            tx.send(OutputItem::Guarded {
+                response: WireResponse {
+                    id: 9,
+                    result: serde_json::Value::Null,
+                },
+                guard: Arc::new(TestOutputGuard {
+                    cancel: CancelSignal::new(),
+                    retired,
+                    deadline: expired.then(|| std::time::Instant::now() - Duration::from_secs(1)),
+                    dropped: Arc::new(AtomicBool::new(false)),
+                }),
+            })
+            .await
+            .unwrap();
+            tx.send(OutputItem::Envelope(Envelope::Response(WireResponse {
+                id: 10,
+                result: serde_json::Value::Null,
+            })))
+            .await
+            .unwrap();
+            drop(tx);
+            let active = Arc::new(Mutex::new(HashMap::from([(9, CancelSignal::new())])));
+            let mut output = Vec::new();
+            let limits = WireLimits::default();
+            write_output(&mut output, &mut rx, &limits, active.clone())
+                .await
+                .unwrap();
+            assert!(!lock(&active).contains_key(&9));
+            let mut decoder = FrameDecoder::new(limits.clone());
+            decoder.push(&output);
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("following response missing");
+            };
+            assert!(
+                matches!(decode_control(&payload, &limits).unwrap(), Envelope::Response(response) if response.id == 10)
+            );
+            assert!(decoder.next_frame().unwrap().is_none());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partially_written_acknowledgement_expiry_closes_output() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.send(OutputItem::Guarded {
+            response: WireResponse {
+                id: 9,
+                result: serde_json::json!({"content":"larger than the output buffer"}),
+            },
+            guard: Arc::new(TestOutputGuard {
+                cancel: CancelSignal::new(),
+                retired: CancelSignal::new(),
+                deadline: Some(std::time::Instant::now() + Duration::from_secs(10)),
+                dropped: Arc::new(AtomicBool::new(false)),
+            }),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        let (writer, mut reader) = tokio::io::duplex(8);
+        let task = tokio::spawn(async move {
+            write_output(
+                writer,
+                &mut rx,
+                &WireLimits::default(),
+                Arc::new(Mutex::new(HashMap::new())),
+            )
+            .await
+        });
+        let mut prefix = [0; 8];
+        reader.read_exact(&mut prefix).await.unwrap();
+        tokio::time::advance(Duration::from_secs(11)).await;
+        assert_eq!(
+            task.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
+
+    #[tokio::test]
     async fn guarded_output_retires_while_write_or_flush_is_blocked() {
         for flush_only in [false, true] {
             for retire_owner in [false, true] {
@@ -1354,7 +1449,11 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+                if flush_only {
+                    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+                } else {
+                    result.unwrap();
+                }
                 assert!(
                     dropped.load(Ordering::SeqCst),
                     "response disposal releases its reservation"
@@ -1402,10 +1501,7 @@ mod tests {
         });
         polled.notified().await;
         tokio::time::advance(Duration::from_secs(11)).await;
-        assert_eq!(
-            task.await.unwrap().unwrap_err().kind(),
-            io::ErrorKind::TimedOut
-        );
+        task.await.unwrap().unwrap();
         assert!(dropped.load(Ordering::SeqCst));
     }
 

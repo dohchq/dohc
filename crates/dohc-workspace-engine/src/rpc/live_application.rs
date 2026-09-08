@@ -192,8 +192,24 @@ impl EngineService {
         if !connection.retain(&(host.clone() as Arc<dyn ConnectionResource>)) {
             return Err(workspace_unavailable());
         }
+        self.install_live_application_host(config.workspace, host)
+    }
+
+    fn install_live_application_host(
+        &self,
+        workspace: WorkspaceHandle,
+        host: Arc<Host>,
+    ) -> Result<(), WireError> {
         let mut registry = lock(&self.live_applications);
-        if let Some(old) = registry.hosts.insert(config.workspace, host) {
+        if !self
+            .open(Some(&workspace))
+            .is_ok_and(|open| Arc::ptr_eq(&open, &host.open))
+            || !host.current(&host.connection)
+        {
+            host.retire();
+            return Err(workspace_unavailable());
+        }
+        if let Some(old) = registry.hosts.insert(workspace, host) {
             old.retire();
             registry
                 .registrations
@@ -261,10 +277,10 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
-        if !host.current(connection) {
+        let mut registry = lock(&self.live_applications);
+        if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(&workspace))?, &host.open) {
             return Err(workspace_unavailable());
         }
-        let mut registry = lock(&self.live_applications);
         let id = registry
             .next_registration
             .checked_add(1)
@@ -325,7 +341,6 @@ impl EngineService {
             return Err(workspace_unavailable());
         }
         let host = input.registration.host.clone();
-        let mut retirement = RetireOnCancellation(Some(host.clone()));
         let serial = Arc::clone(&host.open.session_ops).lock_owned().await;
         if !host.current(connection)
             || input.registration.retired.is_cancelled()
@@ -342,6 +357,7 @@ impl EngineService {
             _reservation: input.reservation.clone(),
         });
         // Keep the workspace fence until the writer is terminal if the RPC is cancelled.
+        let mut retirement = RetireOnCancellation(Some(host.clone()));
         let operation = tokio::spawn(async move {
             let _serial = serial;
             input
@@ -377,5 +393,94 @@ impl EngineService {
             blob_egress: None,
             output_guard: Some(guard),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::live_application_ingress::{
+        LiveApplicationIngress,
+        tests::{config, fixture, request},
+    };
+    use dohc_engine_collab::Ydoc;
+    use dohc_engine_protocol::transport::EngineService as _;
+    use dohc_engine_protocol::wire::BlobStart;
+    use dohc_engine_storage::hex_sha256;
+
+    #[tokio::test]
+    async fn provisioning_completed_after_workspace_close_cannot_install_a_host() {
+        let (_scratch, service, _owner, workspace, _, _) = fixture().await;
+        let handle = WorkspaceHandle(workspace);
+        let host = {
+            let mut registry = lock(&service.live_applications);
+            registry.registrations.clear();
+            registry.hosts.remove(&handle).unwrap()
+        };
+        assert!(host.owner.is_current());
+        service.workspace_close(Some(handle.clone())).await.unwrap();
+        assert!(
+            service
+                .install_live_application_host(handle.clone(), host.clone())
+                .is_err()
+        );
+        assert!(!host.owner.is_current());
+        assert!(!lock(&service.live_applications).hosts.contains_key(&handle));
+    }
+    #[tokio::test]
+    async fn dropping_an_apply_waiting_for_session_serialization_preserves_the_host() {
+        let (_scratch, service, owner, workspace, registration, binding) = fixture().await;
+        let mut ingress = LiveApplicationIngress::new(service.clone(), config()).unwrap();
+        let bytes = Ydoc::wire().plaintext_insert(0, "queued");
+        ingress
+            .begin(
+                request(&workspace, registration, &binding, &bytes, &[]),
+                &owner.handle(),
+            )
+            .unwrap();
+        for (id, contents) in [(1, bytes.as_slice()), (2, &[][..])] {
+            ingress
+                .start(BlobStart {
+                    request_id: 3,
+                    stream_id: id,
+                    total_bytes: Some(contents.len() as u64),
+                    sha256: Some(hex_sha256(contents)),
+                })
+                .unwrap();
+        }
+        ingress.chunk(1, true, &bytes).unwrap();
+        let (request, input) = ingress.chunk(2, true, &[]).unwrap().unwrap();
+        let retry = LiveApplicationInput {
+            registration: input.registration.clone(),
+            event: input.event.clone(),
+            reservation: input.reservation.clone(),
+        };
+        let handle = dohc_engine_protocol::wire::WorkspaceHandle(workspace);
+        let open = service.open(Some(&handle)).unwrap();
+        let serial = open.session_ops.lock().await;
+        let context = || {
+            let mut ctx = RequestContext::unbounded();
+            ctx.connection = Some(owner.handle());
+            ctx
+        };
+        let mut operation =
+            Box::pin(service.call_with_input(context(), request.clone(), Some(input)));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(operation.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(operation);
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&handle), registration)
+                .is_ok()
+        );
+        drop(serial);
+        let response = service
+            .call_with_input(context(), request, Some(retry))
+            .await
+            .unwrap();
+        assert_eq!(response.response.result["status"], "applied");
     }
 }

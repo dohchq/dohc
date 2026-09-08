@@ -41,6 +41,7 @@ const MAX_LIVE_UPDATE_BYTES = 20 * 1024 * 1024;
 const PACKED_LIVE_RANGE_BYTES = 16;
 
 interface PrivateLiveApplicationConfig {
+  /** Client upload buffers; the daemon configures its own application reserve. */
   readonly aggregateBytes: number;
   readonly maxUploads: number;
 }
@@ -779,6 +780,7 @@ export class EngineClient implements EngineTransport {
     }
     const deadlineMs = request.deadlineMs ?? null;
     let writeTask: Promise<void> = Promise.resolve();
+    let inputComplete = false;
     const response = new Promise<Response>((resolve, reject) => {
       const deadlineTimer =
         deadlineMs !== null
@@ -798,7 +800,10 @@ export class EngineClient implements EngineTransport {
         reject,
         ...(deadlineTimer ? { deadlineTimer } : {}),
       });
-      writeTask = this.writeEnvelope(envelope).then(() => writeInput?.(wireId));
+      writeTask = this.writeEnvelope(envelope).then(async () => {
+        await writeInput?.(wireId);
+        inputComplete = true;
+      });
       void writeTask.catch((cause: unknown) => {
         const pending = this.pending.get(wireId);
         if (!pending) return;
@@ -820,7 +825,7 @@ export class EngineClient implements EngineTransport {
       return result;
     } catch (error: unknown) {
       // A cancelled upload cannot leave a half-written stream on this connection.
-      this.close();
+      if (!inputComplete) this.close();
       await writeTask.catch(() => undefined);
       throw error;
     }
@@ -853,7 +858,12 @@ export class EngineClient implements EngineTransport {
     this.liveUploadBytes += charge;
     this.liveUploads += 1;
     let stopped = false;
-    const abort = (): void => { stopped = true; this.close(); };
+    let uploaded = false;
+    const abort = (): void => {
+      stopped = true;
+      if (!uploaded) this.close();
+      else void this.cancelRequest(request.id).catch(() => undefined);
+    };
     // The reply timer ends when a response arrives. Keep the upload deadline
     // through the final drain so an early reply cannot strand retained input.
     const uploadDeadline = setTimeout(abort, request.deadlineMs);
@@ -901,6 +911,8 @@ export class EngineClient implements EngineTransport {
             });
           }
         }
+        uploaded = true;
+        clearTimeout(uploadDeadline);
       };
       return await this.sendRequestWithInput({
         id: request.id, workspace: request.workspace, method: "liveApplication.apply", deadlineMs: request.deadlineMs,

@@ -110,6 +110,7 @@ impl ConnectionHandle {
     pub fn retain(&self, resource: &Arc<dyn ConnectionResource>) -> bool {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if state.retired {
+            drop(state);
             resource.retire();
             return false;
         }
