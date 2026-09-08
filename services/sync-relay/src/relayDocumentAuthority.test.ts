@@ -436,7 +436,6 @@ it.each([
   await withBindingFixture((storage, path) => {
     const before = raw(path, db => db.prepare(`SELECT * FROM ${documents}`).all());
     raw(path, db => {
-      db.exec("PRAGMA ignore_check_constraints = ON");
       seedReadMoment(db, { relay_seq: 2, moment_id: "malformed-latest", ...change });
     });
     for (const actor of [ownerActor, namedActor]) {

@@ -26,9 +26,9 @@ function checkpoint(markdown = 'Hello', edit?: (doc: Y.Doc) => void): Uint8Array
   const doc = markdownToYDoc(markdown)
   try { edit?.(doc); return Y.encodeStateAsUpdate(doc) } finally { doc.destroy() }
 }
-function validated(bytes = checkpoint(), currentPath = 'docs/a.md') {
+function validated(bytes = checkpoint(), currentPath = 'docs/a.md', objectId = 'object') {
   const captured = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-  const document = { workspaceId: 'workspace', mainVersionId: 'main', objectId: 'object', lineageClaimId: hash(captured) }
+  const document = { workspaceId: 'workspace', mainVersionId: 'main', objectId, lineageClaimId: hash(captured) }
   const result = validate({ document, currentPath, checkpoint: captured })
   expect(result.kind).toBe('accepted')
   if (result.kind !== 'accepted') throw new Error(JSON.stringify(result))
@@ -36,10 +36,10 @@ function validated(bytes = checkpoint(), currentPath = 'docs/a.md') {
   expect(hash(baselineBytes)).toBe(result.evidence.checkpoint.updateDigest)
   return { host: { ...host }, evidence: result.evidence, baselineBytes, registeredAtMs: 10 }
 }
-function fixture() {
+function fixture(options: { workspaceQuotaBytes?: number } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'dohc-baseline-storage-')); roots.push(root)
   const path = join(root, 'relay.sqlite')
-  const storage = openSyncRelayStorage(path)
+  const storage = openSyncRelayStorage(path, options)
   const raw = new DatabaseSync(path)
   try {
     raw.prepare('INSERT INTO sync_relay_workspaces (workspace_id, owner_user_id, created_at_ms) VALUES (?, ?, ?)').run('workspace', 'owner', 0)
@@ -47,7 +47,7 @@ function fixture() {
     storage.registerLiveHost({ ...host, updatedAtMs: 2, guard() {} })
   } catch (error) { raw.close(); storage.close(); throw error }
   const moment = (input: ReturnType<typeof validated>, sequence = 1, changes: Record<string, unknown> = {}) => {
-    const row = { workspace_id: 'workspace', object_id: 'object', relay_seq: sequence, moment_id: `moment-${sequence}`,
+    const row = { workspace_id: 'workspace', object_id: input.evidence.document.objectId, relay_seq: sequence, moment_id: `moment-${sequence}`,
       version_id: 'main', path: input.evidence.currentPath, blob_sha256: input.evidence.projectedMarkdownSha256,
       content_kind: 'text', byte_length: input.evidence.projectedMarkdownByteLength, recorded_at_ms: sequence, ...changes }
     raw.prepare(`INSERT INTO sync_relay_object_moments (${Object.keys(row).join(',')}) VALUES (${Object.keys(row).map(() => '?').join(',')})`)
@@ -62,7 +62,6 @@ it('stores a real validated baseline with first fence 1 and replays without writ
   const f = fixture()
   try {
     const input = validated(); f.moment(input)
-    expect(f.storage).toHaveProperty('registerLiveDocumentBaseline', expect.any(Function))
     const registered = f.storage.registerLiveDocumentBaseline(input)
     expect(registered).toEqual({ kind: 'registered', document: input.evidence.document, currentPath: input.evidence.currentPath,
       restoreFenceGeneration: 1, registeredAtMs: 10, replayed: false })
@@ -252,8 +251,10 @@ it.each([0, 1, 2, 3])('rolls back a failure after parent/range write %s', write 
     f.raw.exec(`CREATE TRIGGER fail_registration AFTER INSERT ON ${table} ${when} BEGIN SELECT RAISE(ABORT, 'registration fault'); END`)
     expect(() => f.storage.registerLiveDocumentBaseline(input)).toThrow(/registration fault/)
     expect(f.rows()).toEqual({ documents: [], ranges: [] })
+    expect(usage(f)).toBe(0)
     f.raw.exec('DROP TRIGGER fail_registration')
     expect(f.storage.registerLiveDocumentBaseline(input)).toMatchObject({ kind: 'registered', replayed: false })
+    expect(usage(f)).toBe(input.baselineBytes.byteLength)
   } finally { f.close() }
 })
 
@@ -364,5 +365,112 @@ it('rejects invalid evidence before acquiring the storage lock', () => {
         .toEqual({ kind: 'refused', reason: 'invalid-baseline' })
     } finally { f.raw.exec('ROLLBACK') }
     expect(f.storage.registerLiveDocumentBaseline(input).kind).toBe('registered')
+  } finally { f.close() }
+})
+
+it.each(['notes/a\u0001b.md', 'notes/a\uD800.md', 'notes/.env.local.md'])
+('refuses validator-accepted paths that a stored binding cannot decode: %j', currentPath => {
+  const f = fixture()
+  try {
+    const input = validated(checkpoint(), currentPath); f.moment(input)
+    expect(f.storage.registerLiveDocumentBaseline(input)).toEqual({ kind: 'refused', reason: 'invalid-baseline' })
+    expect(f.rows()).toEqual({ documents: [], ranges: [] })
+  } finally { f.close() }
+})
+
+it.each([false, true])('refuses pre-reset registration and binding after a real identity rotation, registered=%s', registered => {
+  const f = fixture()
+  try {
+    const input = validated()
+    f.storage.claimWorkspaceIdentity({ workspaceId: 'workspace', replicationEpoch: 'epoch-a', streamIdentity: 'stream-a' })
+    f.storage.appendLogBatch({ workspaceId: 'workspace', originId: 'origin',
+      ops: [{ originSeq: 0, opKind: 'test', payloadJson: '{}', recordedAtMs: 1 }] })
+    f.moment(input)
+    f.raw.prepare(`INSERT INTO sync_relay_shares (share_id, workspace_id, granter_user_id, selector_json, created_at_ms)
+      VALUES ('share', 'workspace', 'owner', ?, 0)`).run(JSON.stringify({ paths: ['docs'], versionId: null }))
+    const binding = { document: input.evidence.document, actor: { kind: 'owner', userId: 'owner', shareId: 'share' } } as const
+    if (registered) {
+      expect(f.storage.registerLiveDocumentBaseline(input).kind).toBe('registered')
+      expect(f.storage.resolveCurrentLiveDocumentBinding(binding).kind).toBe('current')
+    }
+    const before = f.rows()
+    expect(f.storage.rotateWorkspaceIdentity({ workspaceId: 'workspace', ownerUserId: 'owner',
+      replicationEpoch: 'epoch-b', streamIdentity: 'stream-b', rotatedAtMs: 20 })).toBe('rotated')
+    expect(f.storage.getEpochLogFloor('workspace')).toBe(1)
+    const reopened = openSyncRelayStorage(f.path)
+    try {
+      expect(reopened.registerLiveDocumentBaseline(input)).toEqual({ kind: 'refused', reason: 'stale-document' })
+      if (registered) expect(reopened.resolveCurrentLiveDocumentBinding(binding)).toEqual({ kind: 'refused', reason: 'stale-document' })
+      expect(f.rows()).toEqual(before)
+      reopened.appendLogBatch({ workspaceId: 'workspace', originId: 'origin',
+        ops: [{ originSeq: 1, opKind: 'test', payloadJson: '{}', recordedAtMs: 21 }] })
+      const fresh = validated(checkpoint(), 'docs/new.md', 'new-object'); f.moment(fresh, 2)
+      expect(reopened.registerLiveDocumentBaseline(fresh)).toMatchObject({ kind: 'registered', replayed: false })
+      expect(reopened.resolveCurrentLiveDocumentBinding({ ...binding, document: fresh.evidence.document }).kind).toBe('current')
+    } finally { reopened.close() }
+  } finally { f.close() }
+})
+
+function usage(f: ReturnType<typeof fixture>): number {
+  return Number(f.raw.prepare('SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id = ?').get('workspace')!.usage_bytes)
+}
+
+it('charges original baseline bytes exactly once, preserves quota on replay and refuses excess atomically', () => {
+  const first = validated(), second = validated(checkpoint('Second'), 'docs/b.md', 'second-object')
+  const total = first.baselineBytes.byteLength + second.baselineBytes.byteLength
+  const f = fixture({ workspaceQuotaBytes: total })
+  try {
+    f.moment(first); f.moment(second, 2)
+    expect(f.storage.registerLiveDocumentBaseline(first).kind).toBe('registered')
+    expect(usage(f)).toBe(first.baselineBytes.byteLength)
+    expect(f.storage.registerLiveDocumentBaseline(second).kind).toBe('registered')
+    expect(usage(f)).toBe(total)
+    const before = f.rows(), reopened = openSyncRelayStorage(f.path, { workspaceQuotaBytes: total })
+    try {
+      expect(reopened.registerLiveDocumentBaseline(first)).toMatchObject({ replayed: true })
+      expect(reopened.registerLiveDocumentBaseline(second)).toMatchObject({ replayed: true })
+      expect(usage(f)).toBe(total)
+      const excess = validated(checkpoint('Excess'), 'docs/c.md', 'third-object'); f.moment(excess, 3)
+      expect(() => reopened.registerLiveDocumentBaseline(excess)).toThrow(/workspace storage quota exceeded/)
+      expect(usage(f)).toBe(total); expect(f.rows()).toEqual(before)
+    } finally { reopened.close() }
+  } finally { f.close() }
+})
+
+it('refuses a first baseline one byte below its original payload charge', () => {
+  const input = validated(), f = fixture({ workspaceQuotaBytes: input.baselineBytes.byteLength - 1 })
+  try {
+    f.moment(input)
+    expect(() => f.storage.registerLiveDocumentBaseline(input)).toThrow(/workspace storage quota exceeded/)
+    expect(usage(f)).toBe(0); expect(f.rows()).toEqual({ documents: [], ranges: [] })
+  } finally { f.close() }
+})
+
+it('rolls back baseline and range inserts when the usage charge fails', () => {
+  const f = fixture()
+  try {
+    const input = validated(); f.moment(input)
+    f.raw.exec(`CREATE TRIGGER fail_baseline_usage AFTER UPDATE ON sync_relay_workspace_usage
+      BEGIN SELECT RAISE(ABORT, 'usage fault'); END`)
+    expect(() => f.storage.registerLiveDocumentBaseline(input)).toThrow(/usage fault/)
+    expect(usage(f)).toBe(0); expect(f.rows()).toEqual({ documents: [], ranges: [] })
+    f.raw.exec('DROP TRIGGER fail_baseline_usage')
+    expect(f.storage.registerLiveDocumentBaseline(input)).toMatchObject({ kind: 'registered', replayed: false })
+    expect(usage(f)).toBe(input.baselineBytes.byteLength)
+  } finally { f.close() }
+})
+
+it('checks a corrupt retired row alongside healthy current registration', () => {
+  const f = fixture()
+  try {
+    const input = validated(); f.moment(input)
+    expect(f.storage.registerLiveDocumentBaseline(input).kind).toBe('registered')
+    const retired = { ...f.rows().documents[0]!, lineage_claim_id: 'a'.repeat(64), baseline_digest: 'a'.repeat(64),
+      baseline_bytes: new Uint8Array([0]), lineage_state: 'retired', admission_state: 'closed', retired_at_ms: 20 }
+    f.raw.prepare(`INSERT INTO sync_relay_live_documents (${Object.keys(retired).join(',')})
+      VALUES (${Object.keys(retired).map(() => '?').join(',')})`).run(...Object.values(retired))
+    const before = f.rows(), beforeUsage = usage(f)
+    expect(() => f.storage.registerLiveDocumentBaseline(input)).toThrow(/authority is damaged/)
+    expect(f.rows()).toEqual(before); expect(usage(f)).toBe(beforeUsage)
   } finally { f.close() }
 })

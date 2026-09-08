@@ -33,7 +33,7 @@ import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
-import { LIVE_OBJECT_BINDING_PATH_MAX_BYTES, parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import {
   parseLiveDocumentKey,
   parseLiveUpdateDigest,
@@ -2857,10 +2857,8 @@ function snapshotBaseline(outer: Record<string, unknown>, host: LiveHostConnecti
   const document = parseLiveDocumentKey(baselineRecord(evidence.document,
     ["workspaceId", "mainVersionId", "objectId", "lineageClaimId"]));
   const currentPath = evidence.currentPath;
-  if (document.mainVersionId !== "main" || typeof currentPath !== "string" ||
-    Buffer.byteLength(currentPath, "utf8") > LIVE_OBJECT_BINDING_PATH_MAX_BYTES) throw new TypeError("Invalid baseline path.");
-  const checkedPath = validateUserWritePath(currentPath);
-  if (!checkedPath.ok || checkedPath.normalized !== currentPath || liveDocumentKindForPath(currentPath) !== "richdoc") {
+  const binding = parseLiveObjectBinding({ ...document, currentPath, selectorPaths: [currentPath], restoreFenceGeneration: 1 });
+  if (document.mainVersionId !== "main" || binding.currentPath !== currentPath || liveDocumentKindForPath(currentPath) !== "richdoc") {
     throw new TypeError("Invalid baseline path.");
   }
   const checkpoint = baselineRecord(evidence.checkpoint, ["updateDigest", "ranges"], true);
@@ -3405,7 +3403,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         if (!current.open || current.replacesLineageClaimId !== null || current.binding.currentPath !== currentPath ||
           current.baselineSequence !== latest.relay_seq || current.projectedDigest !== evidence.projectedMarkdownSha256 ||
           current.projectedLength !== evidence.projectedMarkdownByteLength || current.baselineDigest !== checkpoint.updateDigest ||
-          !Buffer.from(current.baselineBytes).equals(baselineBytes) ||
+          Buffer.compare(current.baselineBytes, baselineBytes) !== 0 ||
           current.ranges.length !== checkpoint.ranges.length || current.ranges.some((range, index) => {
             const expected = checkpoint.ranges[index]!;
             return range.clientId !== expected.clientId || range.startClock !== expected.startClock || range.endClock !== expected.endClock;
@@ -3413,6 +3411,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         return { kind: "registered", document: { ...document }, currentPath,
           restoreFenceGeneration: current.binding.restoreFenceGeneration, registeredAtMs: current.registeredAtMs, replayed: true };
       }
+      this.assertWorkspaceQuota(document.workspaceId, baselineBytes.byteLength);
       this.db.prepare(`INSERT INTO sync_relay_live_documents (
         workspace_id, main_version_id, object_id, lineage_claim_id, replaces_lineage_claim_id, current_path,
         baseline_moment_relay_seq, baseline_projected_sha256, baseline_projected_byte_length, baseline_digest,
@@ -3428,6 +3427,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         insertRange.run(document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId,
           range.clientId, range.startClock, range.endClock);
       }
+      this.db.prepare(`UPDATE sync_relay_workspace_usage SET usage_bytes = usage_bytes + ? WHERE workspace_id = ?`)
+        .run(baselineBytes.byteLength, document.workspaceId);
       return { kind: "registered", document: { ...document }, currentPath,
         restoreFenceGeneration: 1, registeredAtMs, replayed: false };
     });
@@ -3440,7 +3441,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     if (!latest || latest.path !== currentPath || latest.content_kind !== "text" ||
       typeof latest.blob_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(latest.blob_sha256) ||
       typeof latest.byte_length !== "number" || !Number.isSafeInteger(latest.byte_length) || latest.byte_length < 0 ||
-      typeof latest.relay_seq !== "number" || !Number.isSafeInteger(latest.relay_seq) || latest.relay_seq < 1 ||
+      typeof latest.relay_seq !== "number" || !Number.isSafeInteger(latest.relay_seq) || latest.relay_seq <= this.getEpochLogFloor(document.workspaceId) ||
       typeof latest.recorded_at_ms !== "number" || !Number.isSafeInteger(latest.recorded_at_ms) || latest.recorded_at_ms < 0 ||
       this.objectIdAtPathInVersion({ workspaceId: document.workspaceId, versionId: "main", path: currentPath }) !== document.objectId) return undefined;
     return latest;
