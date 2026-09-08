@@ -99,7 +99,7 @@ impl EngineService {
             &cancellation,
             "automations.subscribe",
             open.actor.automation_subscribe(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.automation_id,
                 params.path,
                 now_ms()?,
@@ -124,7 +124,7 @@ impl EngineService {
             &cancellation,
             "automations.unsubscribe",
             open.actor.automation_unsubscribe(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.automation_id,
                 params.path,
                 Arc::new(NoFaults),
@@ -148,7 +148,7 @@ impl EngineService {
             &cancellation,
             "automations.claimNext",
             open.actor.automation_claim_next(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.now_ms.unwrap_or(now_ms()?),
                 Arc::new(NoFaults),
                 cancellation.token(),
@@ -177,7 +177,7 @@ impl EngineService {
         let failures = Self::read_under_ctx(
             &cancellation,
             "automations.failures",
-            open.actor.automation_failures(open.workspace_id),
+            open.actor.automation_failures(open.workspace_id.clone()),
         )
         .await?;
         Ok(json!({
@@ -223,7 +223,7 @@ impl EngineService {
             &cancellation,
             "automations.settle",
             open.actor.automation_settle(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.claim_id,
                 settle,
                 params.now_ms.unwrap_or(now_ms()?),

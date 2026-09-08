@@ -21,6 +21,7 @@ use dohc_engine_sync::SyncPassOutcome;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub(super) enum IssuedCursor {
@@ -419,7 +420,7 @@ impl EngineService {
         &self,
         handle: Option<&WorkspaceHandle>,
         workspace_id: &str,
-    ) -> Result<(OpenWorkspace, RelayConfiguration), WireError> {
+    ) -> Result<(Arc<OpenWorkspace>, RelayConfiguration), WireError> {
         let open = self.open(handle)?;
         validate_workspace_param(Some(workspace_id), &open.workspace_id)?;
         let configuration = open
@@ -956,6 +957,52 @@ mod tests {
     use dohc_engine_sync::ShareCursor;
     use dohc_engine_sync::SyncPassOutcome;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn relay_access_shares_the_open_binding_and_preserves_scope_refusals() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
+        let supervisor: &'static dohc_engine_runtime::WorkspaceSupervisor =
+            Box::leak(Box::new(dohc_engine_runtime::WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "shared-relay-access",
+            "captureMode": "none",
+            "relay": { "baseUrl": "https://relay.example", "bearerToken": "test-token" },
+        });
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("handle");
+        let retained = service.open(Some(&handle)).expect("retained access");
+        let (open, configuration) = service
+            .relay_open(Some(&handle), "shared-relay-access")
+            .expect("relay access");
+        assert!(Arc::ptr_eq(&retained, &open));
+        assert_eq!(open.relay.as_ref(), Some(&configuration));
+        let refused = service.relay_open(Some(&handle), "another-workspace");
+        assert!(matches!(
+            refused,
+            Err(WireError {
+                code: ErrorCode::InvalidParams,
+                ..
+            })
+        ));
+        service
+            .workspace_close(Some(handle.clone()))
+            .await
+            .expect("close");
+        let refused = service.relay_open(Some(&handle), "shared-relay-access");
+        assert!(matches!(
+            refused,
+            Err(WireError {
+                code: ErrorCode::WorkspaceUnavailable,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn recovered_origins_use_random_uuid_identity_coordinates() {
