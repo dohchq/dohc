@@ -370,7 +370,12 @@ it.each(["mint", "redeem"] as const)("returns no %s result and rolls back on com
       expect(() => operation === "mint" ? state.storage.mintNamedLiveTicket(mint) : state.storage.redeemNamedLiveTicket(redeem)).toThrow("injected commit failure");
     } finally { spy.mockRestore(); }
     expect(rows(state)).toEqual(operation === "mint" ? [] : [{ ticket_id: "ticket-1", redeemed_at_ms: null }]);
-    expect(operation === "mint" ? state.storage.mintNamedLiveTicket(mint) : state.storage.redeemNamedLiveTicket(redeem)).not.toBeNull();
+    expect(state.storage.unavailable.aborted).toBe(true);
+    expect(() => operation === "mint" ? state.storage.mintNamedLiveTicket(mint) : state.storage.redeemNamedLiveTicket(redeem)).toThrow("Relay storage is unavailable.");
+    const reopened = openSyncRelayStorage(state.path, state.config);
+    try {
+      expect(operation === "mint" ? reopened.mintNamedLiveTicket(mint) : reopened.redeemNamedLiveTicket(redeem)).not.toBeNull();
+    } finally { reopened.close(); }
   } finally { await state.close(); }
 });
 
