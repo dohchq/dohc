@@ -22,9 +22,7 @@ import type { Envelope } from "../../workspace-engine-client/src/protocol.js";
 import { LiveCommittedDelivery } from "../../../services/sync-relay/src/liveCommittedDelivery.js";
 
 import { afterEach, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
 import {
   registered,
   DatabaseSync,
@@ -265,7 +263,9 @@ async function launch(
 
 it("reopens both durable stores after dropped host ACKs and an uncertain relay edge COMMIT", async () => {
   const fixture = assertOrderedDeliveryFixture();
-  const packet = mkdtempSync(join(tmpdir(), "dohc-ordered-delivery-"));
+  const packet = process.env.DOHC_ORDERED_DELIVERY_EVIDENCE;
+  if (!packet) throw Error("Run pnpm verify:ordered-delivery to retain integration evidence.");
+  mkdirSync(packet, { recursive: false });
   const f = registered();
   writeFileSync(packet + "/relay-path.json", JSON.stringify({ path: f.path }));
   for (let sequence = 1; sequence <= 3; sequence++)
@@ -441,6 +441,6 @@ it("reopens both durable stores after dropped host ACKs and an uncertain relay e
   } finally {
     uncertain.mockRestore();
     try { await active?.close(); }
-    finally { raw.close(); relay.close(); f.doc.destroy(); rmSync(packet, { recursive: true, force: true }); }
+    finally { raw.close(); relay.close(); f.doc.destroy(); }
   }
 }, 180000);
