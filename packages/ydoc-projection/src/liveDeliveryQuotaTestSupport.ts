@@ -2,6 +2,14 @@ import type { DatabaseSync } from "node:sqlite";
 import { HOST_CONTROL_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/host-control";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 
+export function journalMetadataBytes(db: DatabaseSync): number {
+  const rows = db.prepare("SELECT * FROM sync_relay_live_update_journal WHERE workspace_id='workspace'").all();
+  const metadata = rows.map(row => Object.entries(row).filter(([key]) =>
+    key !== "update_bytes" && key !== "validation_checkpoint_bytes").map(([, value]) => value));
+  const provenance = db.prepare("SELECT * FROM sync_relay_live_update_struct_provenance WHERE workspace_id='workspace'").all().map(Object.values);
+  return [...metadata, ...provenance].reduce((total, row) => total + Buffer.byteLength(JSON.stringify(row)), 0);
+}
+
 export function liveDeliveryBookkeepingBytes(db: DatabaseSync): number {
   const sum = (table: string, expression: string) => Number(db.prepare(
     `SELECT COALESCE(SUM(${expression}),0) AS bytes FROM ${table} WHERE workspace_id='workspace'`,

@@ -7,7 +7,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import { parseHostEpoch } from '@dohc/live-session-contract/host-control'
 import { markdownToYDoc } from './import-export.js'
-import { liveDeliveryBookkeepingBytes, liveDeliveryEventReservationBytes } from './liveDeliveryQuotaTestSupport.js'
+import { journalMetadataBytes, liveDeliveryBookkeepingBytes, liveDeliveryEventReservationBytes } from './liveDeliveryQuotaTestSupport.js'
 import { liveBaselineStoredBytes } from './liveBaselineQuotaTestSupport.js'
 import { createLiveMarkdownRegistrationValidator, createLiveMarkdownJournalValidator } from './liveDocumentValidation.js'
 import { initializeRelayDeployment, openRelayDeployment } from '../../../services/sync-relay/src/relayDeployment.js'
@@ -107,14 +107,6 @@ function registered(options: { workspaceQuotaBytes?: number; deployment?: boolea
     provenance: f.raw.prepare('SELECT * FROM sync_relay_live_update_struct_provenance ORDER BY client_id,start_clock').all(),
     usage: f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes })
   return { ...f, input, actor, doc, update, capture, journalRows, close() { doc.destroy(); f.close() } }
-}
-
-function journalMetadataBytes(db: InstanceType<typeof DatabaseSync>): number {
-  const rows = db.prepare('SELECT * FROM sync_relay_live_update_journal').all();
-  const metadata = rows.map(row => Object.entries(row).filter(([key]) =>
-    key !== 'update_bytes' && key !== 'validation_checkpoint_bytes').map(([, value]) => value));
-  const provenance = db.prepare('SELECT * FROM sync_relay_live_update_struct_provenance').all().map(Object.values);
-  return [...metadata, ...provenance].reduce((total, row) => total + Buffer.byteLength(JSON.stringify(row)), 0);
 }
 
 function probeJournalCharge(f: ReturnType<typeof registered>, input: LiveUpdateJournalCommitInput): number {
