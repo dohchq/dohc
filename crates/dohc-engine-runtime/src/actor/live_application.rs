@@ -1,11 +1,12 @@
 use super::{ActorHandle, Command, LifecycleState};
 use crate::RuntimeError;
-use dohc_engine_collab::WriterDocCache;
+use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
-    AdmittedLiveUpdate, ApplicationHandle, ApplicationHostCoordinate, ApplicationOwner,
-    ApplicationResult, apply_committed,
+    AdmittedLiveUpdate, ApplicationError, ApplicationHandle, ApplicationHostCoordinate,
+    ApplicationOwner, ApplicationResult, apply_committed,
 };
+use dohc_engine_collab::{DocKey, WriterDocCache, durable};
 use dohc_engine_storage::{EngineStore, FaultInjector};
 use std::collections::HashMap;
 use std::sync::{
@@ -233,7 +234,7 @@ impl Request {
                         return Err(RuntimeError::ActorUnavailable);
                     }
                     let application = ApplicationOwner::new(workspace_id.clone())?;
-                    if let Some(mut old) = registry.0.remove(&workspace_id) {
+                    if let Some(old) = registry.0.get_mut(&workspace_id) {
                         old.token.store(false, Ordering::Release);
                         old.application.invalidate(store)?;
                     }
@@ -268,8 +269,19 @@ impl Request {
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
-                    apply_committed(store, cache, &application, event, faults.as_ref())
-                        .map_err(Into::into)
+                    let binding = event.metadata.accepted.binding.clone();
+                    let now_ms = event.metadata.accepted.received_at_ms;
+                    let result = apply_committed(store, cache, &application, event, faults.as_ref())?;
+                    if matches!(&result, ApplicationResult::Applied(ack) if !ack.application_replayed) {
+                        let key = DocKey::new(&binding.workspace_id, &binding.main_version_id, &binding.object_id)
+                            .map_err(ApplicationError::from)?;
+                        // The application is durable. A failed fold suppresses this
+                        // reply, but exact replay retains the original application.
+                        // An injected fold crash is best effort, as in self_bound_log.
+                        durable::maybe_compact(store, &key, DEFAULT_COMPACTION_THRESHOLD, faults.as_ref(), now_ms)
+                            .map_err(ApplicationError::from)?;
+                    }
+                    Ok(result)
                 });
                 let _ = reply.send(result);
             }
@@ -278,16 +290,18 @@ impl Request {
                 token,
                 reply,
             } => {
-                let result = if registry
+                let result = if let Some(entry) = registry
                     .0
-                    .get(&workspace_id)
-                    .is_some_and(|entry| Arc::ptr_eq(&entry.token, &token))
+                    .get_mut(&workspace_id)
+                    .filter(|entry| Arc::ptr_eq(&entry.token, &token))
                 {
-                    let mut entry = registry.0.remove(&workspace_id).expect("matched owner");
                     entry.application.invalidate(store).map_err(Into::into)
                 } else {
                     Err(RuntimeError::ActorUnavailable)
                 };
+                if result.is_ok() {
+                    registry.0.remove(&workspace_id);
+                }
                 let _ = reply.send(result);
             }
         }

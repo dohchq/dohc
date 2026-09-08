@@ -120,6 +120,185 @@ impl FaultInjector for Crash {
     }
 }
 
+struct CrashSecondCommit {
+    point: FaultPoint,
+    visits: std::sync::atomic::AtomicUsize,
+}
+impl FaultInjector for CrashSecondCommit {
+    fn poll(&self, point: FaultPoint) -> FaultAction {
+        if point == self.point
+            && self
+                .visits
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 1
+        {
+            FaultAction::Crash
+        } else {
+            FaultAction::Continue
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committed_application_compacts_and_preserves_replay_through_fold_failures() {
+    for mode in [
+        "success",
+        "before-fold-commit",
+        "after-fold-commit",
+        "fold-error",
+    ] {
+        let (_scratch, db, supervisor, actor) = fixture();
+        let (_owner, handle) = registered(&actor).await;
+        let raw = rusqlite::Connection::open(&db).unwrap();
+        let source = Ydoc::wire();
+        let mut deliveries = Vec::new();
+        for cursor in 1..=64 {
+            let update = event(
+                &format!("delivery-{cursor}"),
+                cursor,
+                "one",
+                source.plaintext_insert(cursor as u32 - 1, "x"),
+            );
+            if cursor == 64 && mode == "fold-error" {
+                raw.execute_batch("CREATE TRIGGER refuse_fold BEFORE INSERT ON ydoc_snapshots WHEN NEW.up_to_seq>0 BEGIN SELECT RAISE(ABORT, 'fold failure'); END;").unwrap();
+            }
+            let faults: Arc<dyn FaultInjector> = if cursor == 64 && mode.contains("fold-commit") {
+                Arc::new(CrashSecondCommit {
+                    point: if mode == "before-fold-commit" {
+                        FaultPoint::StorageBeforePersist
+                    } else {
+                        FaultPoint::StorageAfterCommitBeforeAck
+                    },
+                    visits: std::sync::atomic::AtomicUsize::new(0),
+                })
+            } else {
+                Arc::new(NoFaults)
+            };
+            let result = handle.apply(update.clone(), faults).await;
+            if cursor == 64 && mode == "fold-error" {
+                assert!(matches!(
+                    result,
+                    Err(RuntimeError::LiveApplication(ApplicationError::Collab(_)))
+                ));
+            } else {
+                let applied = ack(result.unwrap());
+                assert!(!applied.application_replayed);
+                assert_eq!(applied.local_ydoc_sequence, cursor);
+            }
+            deliveries.push(update);
+        }
+        let count = |table: &str| -> i64 {
+            raw.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(count("live_device_update_applications"), 64);
+        let folded = matches!(mode, "success" | "after-fold-commit");
+        assert_eq!(count("ydoc_updates"), if folded { 0 } else { 64 });
+        for (index, update) in deliveries.iter().enumerate() {
+            let replay = ack(handle
+                .apply(update.clone(), Arc::new(NoFaults))
+                .await
+                .unwrap());
+            assert!(replay.application_replayed);
+            assert_eq!(replay.local_ydoc_sequence, index as i64 + 1);
+        }
+        // Exact replay does not retry compaction, including while the failing
+        // trigger remains installed. A new delivery retries the existing fold.
+        assert_eq!(count("ydoc_updates"), if folded { 0 } else { 64 });
+        if mode == "fold-error" {
+            raw.execute_batch("DROP TRIGGER refuse_fold").unwrap();
+        }
+        if !folded {
+            ack(handle
+                .apply(
+                    event("delivery-65", 65, "one", source.plaintext_insert(64, "x")),
+                    Arc::new(NoFaults),
+                )
+                .await
+                .unwrap());
+            assert_eq!(count("ydoc_updates"), 0);
+            assert_eq!(count("live_device_update_applications"), 65);
+        }
+        drop(raw);
+        supervisor.close(&db).unwrap();
+        let restarted = supervisor.open(&db, 100).unwrap().actor;
+        let (_next_owner, next) = registered(&restarted).await;
+        for update in deliveries {
+            assert!(
+                ack(next.apply(update, Arc::new(NoFaults)).await.unwrap()).application_replayed
+            );
+        }
+        supervisor.close(&db).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_close_or_replacement_retains_durable_invalidation_for_retry() {
+    for replace in [false, true] {
+        let (_scratch, db, supervisor, actor) = fixture();
+        let (owner, one) = registered(&actor).await;
+        let two = owner
+            .register("relay-A".into(), coordinate("connection"), binding("two"))
+            .await
+            .unwrap();
+        let raw = rusqlite::Connection::open(&db).unwrap();
+        raw.execute_batch("CREATE TRIGGER refuse_second_invalidation BEFORE UPDATE OF available ON live_device_application_bindings WHEN OLD.object_id='two' AND NEW.available=0 BEGIN SELECT RAISE(ABORT, 'invalidation failure'); END;").unwrap();
+        let result = if replace {
+            actor
+                .live_application_owner("workspace".into())
+                .await
+                .map(drop)
+        } else {
+            owner.close().await
+        };
+        assert!(matches!(
+            result,
+            Err(RuntimeError::LiveApplication(ApplicationError::Storage(_)))
+        ));
+        let availability = || {
+            let mut query = raw
+                .prepare(
+                    "SELECT available FROM live_device_application_bindings ORDER BY object_id",
+                )
+                .unwrap();
+            query
+                .query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(availability(), vec![0, 1]);
+        for (handle, object) in [(&one, "one"), (&two, "two")] {
+            assert!(matches!(
+                handle
+                    .apply(event("retired", 1, object, vec![0, 0]), Arc::new(NoFaults))
+                    .await,
+                Err(RuntimeError::ActorUnavailable)
+            ));
+        }
+        raw.execute_batch("DROP TRIGGER refuse_second_invalidation")
+            .unwrap();
+        let next = actor
+            .live_application_owner("workspace".into())
+            .await
+            .unwrap();
+        assert_eq!(availability(), vec![0, 0]);
+        let live = next
+            .register("relay-A".into(), coordinate("next"), binding("one"))
+            .await
+            .unwrap();
+        ack(live
+            .apply(event("recovered", 1, "one", vec![0, 0]), Arc::new(NoFaults))
+            .await
+            .unwrap());
+        next.close().await.unwrap();
+        drop(raw);
+        supervisor.close(&db).unwrap();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn documents_use_the_actor_writer_and_owner_replacement_retires_captured_handles() {
     let (_scratch, db, supervisor, actor) = fixture();
