@@ -18,7 +18,7 @@ afterEach(() => {
 });
 import { createLiveJournalHistoryAuthority } from "../../../services/sync-relay/src/storage/liveJournalHistory.js";
 import { HOST_CONTROL_IDENTIFIER_MAX_BYTES, parseHostEpoch } from "@dohc/live-session-contract/host-control";
-import { journalMetadataBytes, liveDeliveryBookkeepingBytes } from "./liveDeliveryQuotaTestSupport.js";
+import { liveDeliveryBookkeepingBytes } from "./liveDeliveryQuotaTestSupport.js";
 
 function delivery(f: ReturnType<typeof registered>) {
   const history = createLiveJournalHistoryAuthority({
@@ -105,10 +105,13 @@ it("refuses an event atomically when its delivery reservation does not fit", () 
     const probe = openSyncRelayStorage(path), raw = new DatabaseSync(path);
     let journalCharge: number;
     try {
+      const usage = () => Number(raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes);
+      const beforeUsage = usage();
       const beforeDelivery = liveDeliveryBookkeepingBytes(raw);
       expect(probe.commitLiveUpdateJournal(event).result.kind).toBe("accepted");
-      journalCharge = event.updateBytes.byteLength + journalMetadataBytes(raw);
-      expect(liveDeliveryBookkeepingBytes(raw)).toBeGreaterThan(beforeDelivery);
+      const deliveryCharge = liveDeliveryBookkeepingBytes(raw) - beforeDelivery;
+      expect(deliveryCharge).toBeGreaterThan(0);
+      journalCharge = usage() - beforeUsage - deliveryCharge;
     } finally { raw.close(); probe.close(); }
     f.raw.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=? WHERE workspace_id='workspace'").run(quota - journalCharge);
     const before = f.journalRows();
@@ -209,7 +212,19 @@ it("refuses baseline registration atomically when its delivery budget does not f
   try {
     const input = { ...f.input, evidence: { ...f.input.evidence, currentPath: "docs/b.md", document: { ...f.input.evidence.document, objectId: "second-object" } } };
     f.moment(input, 2);
-    f.raw.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=? WHERE workspace_id='workspace'").run(quota - input.baselineBytes.byteLength);
+    const path = `${f.path}.quota-probe`;
+    f.raw.prepare("VACUUM INTO ?").run(path);
+    const probe = openSyncRelayStorage(path), raw = new DatabaseSync(path);
+    let baselineCharge: number;
+    try {
+      const usage = () => Number(raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes);
+      const beforeUsage = usage(), beforeDelivery = liveDeliveryBookkeepingBytes(raw);
+      expect(probe.registerLiveDocumentBaseline(input).kind).toBe("registered");
+      const deliveryCharge = liveDeliveryBookkeepingBytes(raw) - beforeDelivery;
+      expect(deliveryCharge).toBeGreaterThan(0);
+      baselineCharge = usage() - beforeUsage - deliveryCharge;
+    } finally { raw.close(); probe.close(); }
+    f.raw.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=? WHERE workspace_id='workspace'").run(quota - baselineCharge);
     const before = f.rows();
     const funding = f.raw.prepare("SELECT * FROM sync_relay_live_delivery_hosts").all();
     expect(() => f.storage.registerLiveDocumentBaseline(input)).toThrow(/quota/i);

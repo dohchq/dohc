@@ -1,6 +1,6 @@
 import type { SyncRelayStorage } from "./storage";
 
-/** No authorized result or later stream chunk may outlive its storage owner. */
+/** No result or later chunk may outlive its owner. Callers must consume or cancel the returned body. */
 export function guardRelayResponses(
   storage: Pick<SyncRelayStorage, "captureStanding" | "unavailable">,
   handler: (request: Request) => Promise<Response>,
@@ -34,15 +34,15 @@ export function guardRelayResponses(
         signal.removeEventListener("abort", abort);
         void reader.cancel().catch(() => undefined);
       };
-      let controller: ReadableStreamDefaultController<Uint8Array>;
+      let sink: ReadableStreamDefaultController<Uint8Array>;
       const abort = () => {
         if (stopped) return;
         stop();
-        controller.error(new Error("Relay response is unavailable."));
+        sink.error(new Error("Relay response is unavailable."));
       };
       const body = new ReadableStream<Uint8Array>({
         start(value) {
-          controller = value;
+          sink = value;
           signal.addEventListener("abort", abort, { once: true });
           if (signal.aborted) abort();
         },
