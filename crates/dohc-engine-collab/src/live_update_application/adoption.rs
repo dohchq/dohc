@@ -23,7 +23,7 @@ pub struct OwnerAdoptionCut {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::owner_base_source::{OwnerSeedSource, retain_owner_base_source_in_tx};
+    use crate::owner_base_source::{retain_owner_base_source_in_tx, OwnerSeedSource};
     use crate::owner_outbox;
     use dohc_engine_domain::{VersionedTextStore, WriteText};
     use dohc_test_scratch::ScratchDir;
@@ -342,24 +342,22 @@ mod tests {
             (1_000_000, 1),
         ] {
             let before = f.counts();
-            assert!(
-                owner_outbox::append(
-                    &mut f.store,
-                    "workspace",
-                    crate::OwnerOutboxAppendInput {
-                        binding: f.binding.clone(),
-                        base_update: f.cut.baseline_bytes.clone(),
-                        append_key: "caller-selected".into(),
-                        update: f.doc.encode_full_state(),
-                        limits: crate::OwnerOutboxLimits {
-                            max_pending_bytes: bytes,
-                            max_pending_age_ms: age
-                        },
-                        created_at_ms: 11,
-                    }
-                )
-                .is_err()
-            );
+            assert!(owner_outbox::append(
+                &mut f.store,
+                "workspace",
+                crate::OwnerOutboxAppendInput {
+                    binding: f.binding.clone(),
+                    base_update: f.cut.baseline_bytes.clone(),
+                    append_key: "caller-selected".into(),
+                    update: f.doc.encode_full_state(),
+                    limits: crate::OwnerOutboxLimits {
+                        max_pending_bytes: bytes,
+                        max_pending_age_ms: age
+                    },
+                    created_at_ms: 11,
+                }
+            )
+            .is_err());
             assert_eq!(before, f.counts());
         }
     }
@@ -369,18 +367,16 @@ mod tests {
         let mut f = Fixture::new();
         f.local_edit_before_adoption();
         let before = f.counts();
-        assert!(
-            adopt_owner_committed(
-                &mut f.store,
-                &f.handle,
-                f.cut.clone(),
-                f.cut.baseline_bytes.len() + 1,
-                100,
-                10,
-                &NoFaults
-            )
-            .is_err()
-        );
+        assert!(adopt_owner_committed(
+            &mut f.store,
+            &f.handle,
+            f.cut.clone(),
+            f.cut.baseline_bytes.len() + 1,
+            100,
+            10,
+            &NoFaults
+        )
+        .is_err());
         assert_eq!(before, f.counts());
         assert_eq!(f.store.table_row_count("live_owner_adoptions").unwrap(), 0);
     }
@@ -677,18 +673,16 @@ mod tests {
             let mut f = Fixture::new();
             f.local_edit_before_adoption();
             let before = f.counts();
-            assert!(
-                adopt_owner_committed(
-                    &mut f.store,
-                    &f.handle,
-                    f.cut.clone(),
-                    1_000_000,
-                    100,
-                    10,
-                    &Crash(point)
-                )
-                .is_err()
-            );
+            assert!(adopt_owner_committed(
+                &mut f.store,
+                &f.handle,
+                f.cut.clone(),
+                1_000_000,
+                100,
+                10,
+                &Crash(point)
+            )
+            .is_err());
             let committed = point == FaultPoint::StorageAfterCommitBeforeAck;
             assert_eq!(&before[..5], &f.counts()[..5]);
             assert_eq!(

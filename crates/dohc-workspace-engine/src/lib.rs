@@ -22,10 +22,10 @@ pub use events::RECORD_CREATED_EVENT;
 pub use events::RECORD_FIELD_CHANGED_EVENT;
 pub use events::RECORD_UPDATED_EVENT;
 pub use rpc::configured_live_host::ConfiguredLiveHostConfig;
-pub use rpc::ordinary_live_host::OrdinaryLiveHostConfig;
 pub use rpc::conflicts::RESOLVE_ANSWER_SCAFFOLDING_BYTES;
 #[doc(hidden)]
 pub use rpc::live_application::{LiveApplicationHostConfig, LiveApplicationInput};
+pub use rpc::ordinary_live_host::OrdinaryLiveHostConfig;
 
 use crate::rpc::reads::BLOB_EGRESS_BYTE_BUDGET;
 use crate::rpc::reads::BlobEgressBudget;

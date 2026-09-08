@@ -31,7 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use yrs::encoding::write::Write as _;
 use yrs::types::text::{TextDiffChunk, YChange};
@@ -3702,7 +3702,11 @@ fn render_inline(
                             leading_whitespace.iter().enumerate()
                         {
                             let replacement = if index == 0 {
-                                if whitespace == b' ' { "&#32;" } else { "&#9;" }
+                                if whitespace == b' ' {
+                                    "&#32;"
+                                } else {
+                                    "&#9;"
+                                }
                             } else if whitespace == b' ' {
                                 " "
                             } else {
@@ -4251,8 +4255,8 @@ mod projection_tests {
     use std::sync::Arc;
 
     use crate::limits::MAX_PROJECTION_BYTES;
-    use yrs::types::Attrs;
     use yrs::types::xml::XmlIn;
+    use yrs::types::Attrs;
 
     fn scene_map_set(doc: &Ydoc, root: &str, key: &str, value: &str) -> Vec<u8> {
         let map = doc.doc.get_or_insert_map(root);

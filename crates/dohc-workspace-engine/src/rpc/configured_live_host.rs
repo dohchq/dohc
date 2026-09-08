@@ -75,13 +75,16 @@ pub(super) struct IngressConfig {
 impl IngressConfig {
     pub(super) fn validate(&self) -> Result<LiveApplicationIngressConfig, WireError> {
         let upload_deadline = Duration::from_millis(self.upload_deadline_ms);
-        if self.upload_deadline_ms > MAX_WIRE_INTEGER || Instant::now().checked_add(upload_deadline).is_none() {
+        if self.upload_deadline_ms > MAX_WIRE_INTEGER
+            || Instant::now().checked_add(upload_deadline).is_none()
+        {
             return Err(invalid("invalid live host upload deadline"));
         }
         Ok(LiveApplicationIngressConfig {
             aggregate_bytes: self.aggregate_bytes,
             application_working_reserve_bytes: self.application_working_reserve_bytes,
-            max_uploads: self.max_uploads, upload_deadline,
+            max_uploads: self.max_uploads,
+            upload_deadline,
         })
     }
 }
@@ -283,8 +286,16 @@ impl EngineService {
         ctx: &RequestContext,
     ) -> Result<(usize, Arc<dyn Send + Sync>), WireError> {
         if let Some(host) = self.ordinary_live_host.get() {
-            if !host.connection.is_current() || !ctx.connection.as_ref().is_some_and(|connection| host.connection.same_connection(connection)) {
-                return Err(WireError::new(ErrorCode::SessionExpired, "ordinary live host connection is not current"));
+            if !host.connection.is_current()
+                || !ctx
+                    .connection
+                    .as_ref()
+                    .is_some_and(|connection| host.connection.same_connection(connection))
+            {
+                return Err(WireError::new(
+                    ErrorCode::SessionExpired,
+                    "ordinary live host connection is not current",
+                ));
             }
             return Ok((host.settlement.0, host.settlement.1.reserve()?));
         }

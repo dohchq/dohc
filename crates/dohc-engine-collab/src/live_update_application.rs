@@ -12,11 +12,11 @@
 
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
 use crate::live_object_binding::LiveObjectBinding;
-use crate::{CollabError, DocKey, Regime, WriterDocCache, durable};
+use crate::{durable, CollabError, DocKey, Regime, WriterDocCache};
 use dohc_engine_storage::{
-    EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome, get_binary_blob, hex_sha256,
+    get_binary_blob, hex_sha256, EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -25,12 +25,12 @@ const SAFE: i64 = 9_007_199_254_740_991;
 
 mod adoption;
 mod bootstrap;
-pub use adoption::{OwnerAdoptionAck, OwnerAdoptionCut, adopt_owner_committed};
+pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
 mod settlement;
 pub use bootstrap::{
-    BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck, bootstrap_committed,
+    bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
 };
-pub use settlement::{LiveSettlementAudit, LiveSettlementResult, with_settlement};
+pub use settlement::{with_settlement, LiveSettlementAudit, LiveSettlementResult};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApplicationError {
@@ -1241,13 +1241,11 @@ mod tests {
             |_, _, _| Ok(()),
         )
         .unwrap();
-        assert!(
-            store
-                .read_with(|conn| cache
-                    .doc_for_consumer(conn, &key())
-                    .map(|doc| doc.is_some()))
-                .unwrap()
-        );
+        assert!(store
+            .read_with(|conn| cache
+                .doc_for_consumer(conn, &key())
+                .map(|doc| doc.is_some()))
+            .unwrap());
     }
 
     #[test]
@@ -1311,10 +1309,11 @@ mod tests {
                 assert_eq!(count(&store, "live_device_update_applications"), 65);
             }
             store = reopen(store, &dir);
-            assert!(
-                crate::replay_parity::structurally_equal_v2_for_test(&document(&store), &source)
-                    .unwrap()
-            );
+            assert!(crate::replay_parity::structurally_equal_v2_for_test(
+                &document(&store),
+                &source
+            )
+            .unwrap());
             for (index, update) in deliveries.into_iter().enumerate() {
                 let replay = ack(apply(&mut store, &mut cache, &handle, update));
                 assert!(replay.application_replayed);
@@ -1335,13 +1334,11 @@ mod tests {
             apply(&mut store, &mut cache, &handle, update),
             ApplicationResult::Pending(ApplicationPending::DependenciesUnresolved)
         );
-        assert!(
-            store
-                .read_with(|conn| cache
-                    .doc_for_consumer(conn, &key())
-                    .map(|doc| doc.is_none()))
-                .unwrap()
-        );
+        assert!(store
+            .read_with(|conn| cache
+                .doc_for_consumer(conn, &key())
+                .map(|doc| doc.is_none()))
+            .unwrap());
         assert_eq!(count(&store, "ydoc_updates"), 1);
         store = reopen(store, &dir);
         assert_eq!(document(&store).encode_full_state(), before);
@@ -1431,7 +1428,7 @@ mod tests {
 
     #[test]
     fn populated_verified_backup_restores_application_fragments_and_compacted_replay() {
-        use dohc_engine_storage::backup::{BackupOutcome, FreeSpaceProbe, create_verified_backup};
+        use dohc_engine_storage::backup::{create_verified_backup, BackupOutcome, FreeSpaceProbe};
         struct Space;
         impl FreeSpaceProbe for Space {
             fn available_bytes(&self, _: &std::path::Path) -> Result<u64, StorageError> {
@@ -1632,13 +1629,11 @@ mod tests {
                     apply(&mut store, &mut cache, &handle, update.clone()),
                     ApplicationResult::Pending(ApplicationPending::DependenciesUnresolved)
                 );
-                assert!(
-                    store
-                        .read_with(|conn| cache
-                            .doc_for_consumer(conn, &key())
-                            .map(|doc| doc.is_none()))
-                        .unwrap()
-                );
+                assert!(store
+                    .read_with(|conn| cache
+                        .doc_for_consumer(conn, &key())
+                        .map(|doc| doc.is_none()))
+                    .unwrap());
                 store = reopen(store, &dir);
                 assert_eq!(count(&store, "ydoc_updates"), before);
                 assert_eq!(count(&store, "live_device_update_applications"), 0);
@@ -1665,13 +1660,11 @@ mod tests {
                         ),
                         Err(ApplicationError::Interrupted)
                     ));
-                    assert!(
-                        store
-                            .read_with(|conn| cache
-                                .doc_for_consumer(conn, &key())
-                                .map(|doc| doc.is_none()))
-                            .unwrap()
-                    );
+                    assert!(store
+                        .read_with(|conn| cache
+                            .doc_for_consumer(conn, &key())
+                            .map(|doc| doc.is_none()))
+                        .unwrap());
                     store = reopen(store, &dir);
                     let persisted_sequence = store
                         .read_with(|conn| {
@@ -2060,13 +2053,11 @@ mod tests {
                 ),
                 Err(ApplicationError::Interrupted)
             ));
-            assert!(
-                store
-                    .read_with(|conn| cache
-                        .doc_for_consumer(conn, &key())
-                        .map(|doc| doc.is_none()))
-                    .unwrap()
-            );
+            assert!(store
+                .read_with(|conn| cache
+                    .doc_for_consumer(conn, &key())
+                    .map(|doc| doc.is_none()))
+                .unwrap());
             store = reopen(store, &dir);
             let committed = point == FaultPoint::StorageAfterCommitBeforeAck;
             assert_eq!(
