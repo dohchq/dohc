@@ -21,7 +21,9 @@ Build with `pnpm --filter @dohc/site build`, then point any static host
 
 ## Design
 
-Brand tokens mirror `packages/brand/src/tokens.css` (warm paper +
-graphite, almost monochrome). Fonts: brand serif/sans stacks are system
-fonts; `IBM Plex Mono` and the handwriting face `Homemade Apple` load
-from Google Fonts.
+For site changes, read [AGENTS.md](AGENTS.md) for composition, interaction, and verification guidance.
+
+The site uses warm paper and graphite with selective metallic accents.
+[styles.css](styles.css) defines its font and material tokens. Headings use Source Serif 4;
+body text and labels use Inter; handwritten accents use Homemade Apple. These fonts are bundled locally.
+The embedded product demo retains its own desktop typography.

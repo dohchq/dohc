@@ -1,6 +1,8 @@
 # dohc
 
-dohc is a local-first file sync and collaboration workspace for humans and agents. It syncs your files and data across your devices and lets you share work with your team and your agents.
+dohc is a local-first workspace where people and their agents build on files, documents, data, chat, and apps.
+It provides sync, sharing, permissions, and history so each workflow does not have to recreate them.
+Users own their work and decide how to use it.
 
 We are building the MVP and have not launched with users.
 
@@ -8,8 +10,10 @@ We are building the MVP and have not launched with users.
 
 The product sections below are decision boundaries, not a feature checklist. Use them to reject work that would turn dohc into the wrong product.
 
-- If an instruction conflicts with the task, explain the conflict and get human approval before breaking it.
-- Treat the remaining instructions as repository defaults. An explicit developer request can override them.
+- If a task conflicts with product commitments or invariants, explain the conflict. Obtain approval before changing those boundaries.
+- Treat workflow and design instructions as defaults. An explicit developer request can override them.
+- Resolve routine implementation choices within the authorized task without another approval request.
+- Ask when progress requires unavailable access, an unresolved product decision, or authorization beyond the task. Name the specific dependency.
 
 ## Product model
 
@@ -17,13 +21,17 @@ The workspace is the primary product object. It can contain files, live document
 
 Files are the portable foundation, not the required runtime representation for every feature. Use the state model that fits the subsystem. A live document can be a Y.Doc and structured data can live in SQLite. Keep work owned, inspectable, and exportable instead of forcing all state into flat text.
 
-dohc owns the hard coordination: files, data, identity, sync, history, permissions, apps, and chat. Users and their agents own the workflow.
+Design capabilities around shared work. Chat references the work, apps use explicitly exposed data, and collaborators continue within its permissions and history.
+Explain each connection through a concrete user action.
+
+Product commitments describe intended behavior. Verify the current implementation before claiming a capability is available.
+Keep illustrative demos distinguishable from working product behavior.
 
 A workspace must be useful to one person on one device. Team collaboration is still core: adding another person or agent should extend the same work, not require exports, copied context, or a new system.
 
 ### Product commitments
 
-1. **Local first and user owned.** Creating, inspecting, and editing local work must not require an account or network connection. Sync and sharing add capability. They do not make local work a cache of a remote product. Keep the underlying files and data inspectable or exportable so the user can recover their work without dohc. Self-hosting must be meaningful; dohc Cloud should win through the managed network and operational experience, not a crippled local product.
+1. **Local first and user owned.** Creating, inspecting, and editing local work must not require an account or network connection. Sync and sharing add capability. They do not make local work a cache of a remote product. Keep the underlying files and data inspectable or exportable so the user can recover their work without dohc. Self-hosting must be meaningful; dohc Drive should win through the managed network and operational experience, not a crippled local product.
 
 2. **Performance without compromise.** Speed is a core reason to be local-first and to ship a desktop app. dohc must feel native, as if the OS came with it preinstalled. Lots of apps have gotten bogged down with bad tech decisions and slop; dohc does not join them. If Notion in a browser tab feels faster than dohc, dohc has lost its own argument. Make sure every change is considerate of its performance impact, and treat a regression as a bug, not a tradeoff.
 
@@ -49,29 +57,7 @@ People are still learning how they want to work with agents. dohc should not fig
 
 If a folder and a capable agent can already do the job, dohc must earn its place by making that work materially easier to continue, understand, change, and share. Activity inside dohc is not success. Real work becoming easier is.
 
-## What dohc looks like in practice
-
-Use these examples to test product proposals. A feature can use dohc's vocabulary and still miss the product.
-
-### Plan a trip
-
-- ✅ **dohc.** A person works with an agent through files and chat, then builds the trip app they want. They share the app, files, and conversation with the group. The group and their agents can continue the same work from a phone or browser. dohc handles sync, identity, permissions, and history underneath. The trip is the work. Agent orchestration is only one possible means.
-- ❌ **Not dohc.** The person downloads a "travel team" template, configures agent roles and heartbeats, then accepts its prescribed workflow.
-
-### Build a project dashboard
-
-- ✅ **dohc.** An agent builds a source-backed web app in the workspace. The app reads and updates only the files and data its owner exposed. Collaborators can inspect and edit its source. Someone without dohc can open the published URL when they have access.
-- ❌ **Not dohc.** An artifact or dashboard generator emits detached HTML with no durable source, live data boundary, history, or collaborative path forward. A polished demo is not yet a workspace.
-
-### Share work in progress
-
-- ✅ **dohc.** A person shares the relevant part of a workspace with its files, data, app, chat, history, and declared dependencies. The recipient and their agent can inspect what happened and continue the same work without reconstructing its context.
-- ❌ **Not dohc.** The person exports a file, pastes an old chat, or sends a zip. The recipient must start again in another tool. Sharing should transfer continuity, not only bytes.
-
-### Tailor the workspace
-
-- ✅ **dohc.** A user asks an agent to create or change a source-visible plugin or app for their workflow. They can inspect it, fork it, and share it. The result can fit their work without forcing the same workflow on everyone else.
-- ❌ **Not dohc.** dohc ships a hardcoded CRM, requires a project ritual, or becomes a template marketplace. dohc supplies reliable building blocks. Users and agents decide what to build.
+For product proposals, read the [worked examples](docs/explanation/product-examples.md) to test the proposal against these commitments.
 
 ## Product invariants
 
@@ -98,6 +84,18 @@ There are no users yet. Optimize for the best current design instead of preservi
 
 Understand the constraint before building. Choose the smallest model that makes the required behavior and performance unsurprising. Do not preserve complexity because it exists or add machinery because it looks architecturally impressive.
 
+### Continue from approved work
+
+- Treat approved behavior and design choices as the working baseline. Interpret feedback at the requested scope.
+- Preserve a recoverable comparison before a broad redesign.
+- When a direction is rejected, restore the affected change while preserving unrelated work. Carry the correction into subsequent work.
+- Record durable decisions in the relevant local guidance. Keep experimental values and the conversation history out of root instructions.
+
+### Finish the experience
+
+Craft includes layout, interaction, loading, failure, and recovery. Evaluate the complete experience, including transitions between states.
+For visual changes, inspect the rendered result at affected screen sizes and interaction states before calling the work complete.
+
 ## Documentation and writing
 
 Name the reader before adding a document to main. If nobody will use it to make a decision or perform work, do not add it. Git records what happened. Tests should enforce rules that code can break.
@@ -109,7 +107,7 @@ Use one name for one thing. [`CONTEXT.md`](CONTEXT.md) is the canonical term lis
 ## Where code lives
 
 - `apps/desktop` contains the Electron app. Most user-visible product work lands here.
-- `apps/site` contains the marketing site and product demo.
+- `apps/site` contains the marketing site and product demo. For site work, read [its guidance](apps/site/AGENTS.md).
 - `packages` contains shared TypeScript contracts, clients, tools, auth, and UI code.
 - `services` contains opt-in auth, sync relay, and SQLite services.
 - `crates` contains the Rust workspace engine and supporting crates. `dohc-workspace-engine` builds the daemon used by the desktop app.
@@ -219,3 +217,4 @@ Treat a finding as evidence, not a command. Verify it against the current head a
 When ready to merge, add the review-round count, useful fixes, and any reviewer or verification delays to that note.
 Use local step durations for verification time. Report unknown durations as unknown.
 Use these records to identify repeated delays and slow or overlapping tests before adding gates or removing coverage.
+For narrower gates, account for shared dependencies in both the canonical runner and workflow filters before changing coverage.
