@@ -247,6 +247,7 @@ fn verify_key_dir(root: &std::path::Path) -> Result<(), CryptoError> {
 /// orphaned ciphertext would strand it silently; the capture layer checks the
 /// encrypted store first and fails closed instead (TS parity:
 /// `loadSecretDataKey` checks protected rows before its create branch).
+/// Creation requires hard-link support; unsupported filesystems refuse creation.
 pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoError> {
     let path = root.join(SECRET_KEY_FILE_RELATIVE);
     let key = SecretDataKey::generate()?;
@@ -312,6 +313,7 @@ fn finish_key_publication(
     publication: std::io::Result<()>,
 ) -> Result<SecretDataKey, CryptoError> {
     // Hard links publish atomically without replacing a concurrent winner.
+    // Replacing the winner would orphan data already encrypted with its key.
     // Refuse filesystems that cannot provide that guarantee.
     let _ = std::fs::remove_file(temp);
     if publication.is_err_and(|err| err.kind() != std::io::ErrorKind::AlreadyExists) {
