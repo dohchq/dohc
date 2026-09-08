@@ -305,6 +305,44 @@ pub struct StoreCaptureSink {
     provenance: CaptureProvenance,
 }
 
+pub(crate) struct StoreCaptureSinkParams {
+    pub(crate) actor: ActorHandle,
+    pub(crate) workspace_id: String,
+    pub(crate) version_id: String,
+    pub(crate) shadow_root: PathBuf,
+    /// Bind before construction. A failed binding rejects this sink's generation.
+    pub(crate) captured_root: Result<Arc<CapturedRoot>, CaptureError>,
+    pub(crate) now_ms: i64,
+    pub(crate) author_json: Option<String>,
+    pub(crate) leases: LeaseRegistry,
+    pub(crate) self_writes: SelfWriteSuppression,
+    pub(crate) provenance: CaptureProvenance,
+}
+
+#[cfg(test)]
+pub(crate) fn bound_sink_params(
+    actor: ActorHandle,
+    workspace_id: &str,
+    version_id: &str,
+    shadow_root: impl Into<PathBuf>,
+    now_ms: i64,
+) -> StoreCaptureSinkParams {
+    let shadow_root = shadow_root.into();
+    let captured_root = CapturedRoot::bind(&shadow_root).map(Arc::new);
+    StoreCaptureSinkParams {
+        actor,
+        workspace_id: workspace_id.to_owned(),
+        version_id: version_id.to_owned(),
+        shadow_root,
+        captured_root,
+        now_ms,
+        author_json: None,
+        leases: LeaseRegistry::new(),
+        self_writes: SelfWriteSuppression::default(),
+        provenance: CaptureProvenance::default(),
+    }
+}
+
 /// Capture's view of `.dohc/files.toml`, split by why there are no rules.
 pub(crate) enum PolicyState {
     /// A real answer: absent (default policy), parsed rules, or a MALFORMED
@@ -323,47 +361,8 @@ pub(crate) enum PolicyState {
 }
 
 impl StoreCaptureSink {
-    #[cfg(test)]
-    pub(crate) fn new(
-        actor: ActorHandle,
-        workspace_id: impl Into<String>,
-        version_id: impl Into<String>,
-        shadow_root: impl Into<PathBuf>,
-        now_ms: i64,
-        author_json: Option<String>,
-    ) -> Self {
-        Self::new_with_self_writes(
-            actor,
-            workspace_id,
-            version_id,
-            shadow_root,
-            now_ms,
-            author_json,
-            LeaseRegistry::new(),
-            SelfWriteSuppression::default(),
-            CaptureProvenance::default(),
-        )
-    }
-
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_with_self_writes(
-        actor: ActorHandle,
-        workspace_id: impl Into<String>,
-        version_id: impl Into<String>,
-        shadow_root: impl Into<PathBuf>,
-        now_ms: i64,
-        author_json: Option<String>,
-        leases: LeaseRegistry,
-        self_writes: SelfWriteSuppression,
-        provenance: CaptureProvenance,
-    ) -> Self {
-        let shadow_root = shadow_root.into();
-        // Bind before reading any root-scoped policy. A failed bind rejects
-        // this generation instead of letting a later directory inherit the
-        // absent root's default policy snapshot.
-        let captured_root = CapturedRoot::bind(&shadow_root).map(Arc::new);
-        Self::new_with_captured_root(
+    pub(crate) fn new(params: StoreCaptureSinkParams) -> Self {
+        let StoreCaptureSinkParams {
             actor,
             workspace_id,
             version_id,
@@ -374,49 +373,7 @@ impl StoreCaptureSink {
             leases,
             self_writes,
             provenance,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_with_bound_root(
-        actor: ActorHandle,
-        workspace_id: impl Into<String>,
-        version_id: impl Into<String>,
-        shadow_root: impl Into<PathBuf>,
-        captured_root: Arc<CapturedRoot>,
-        now_ms: i64,
-        author_json: Option<String>,
-        leases: LeaseRegistry,
-        self_writes: SelfWriteSuppression,
-        provenance: CaptureProvenance,
-    ) -> Self {
-        Self::new_with_captured_root(
-            actor,
-            workspace_id,
-            version_id,
-            shadow_root.into(),
-            Ok(captured_root),
-            now_ms,
-            author_json,
-            leases,
-            self_writes,
-            provenance,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn new_with_captured_root(
-        actor: ActorHandle,
-        workspace_id: impl Into<String>,
-        version_id: impl Into<String>,
-        shadow_root: PathBuf,
-        captured_root: Result<Arc<CapturedRoot>, CaptureError>,
-        now_ms: i64,
-        author_json: Option<String>,
-        leases: LeaseRegistry,
-        self_writes: SelfWriteSuppression,
-        provenance: CaptureProvenance,
-    ) -> Self {
+        } = params;
         // `.dohc/files.toml` can only narrow engine ownership below the hard
         // floor. See [`PolicyState`] for the absent/malformed/unreadable
         // split: only a file that exists but cannot be read makes ownership
@@ -434,8 +391,8 @@ impl StoreCaptureSink {
         StoreCaptureSink {
             actor,
             leases,
-            workspace_id: workspace_id.into(),
-            version_id: version_id.into(),
+            workspace_id,
+            version_id,
             shadow_root,
             captured_root,
             now_ms,
@@ -1773,7 +1730,13 @@ mod tests {
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         (
             db,
-            StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 10, None),
+            StoreCaptureSink::new(bound_sink_params(
+                actor,
+                WORKSPACE_ID,
+                VERSION_ID,
+                scratch.path(),
+                10,
+            )),
         )
     }
 
@@ -4080,20 +4043,13 @@ mod tests {
         write_file(scratch.path(), ".env", b"TOKEN=offline");
 
         let actor = supervisor.open(&db, 2).expect("open actor").actor;
-        let mut sink = StoreCaptureSink::new_with_self_writes(
-            actor,
-            WORKSPACE_ID,
-            VERSION_ID,
-            scratch.path(),
-            10,
-            None,
-            LeaseRegistry::new(),
-            SelfWriteSuppression::default(),
-            CaptureProvenance {
+        let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+            provenance: CaptureProvenance {
                 summary: Some("Reconciled offline edits".to_owned()),
                 correlation_id: Some("reconcile-test-pass".to_owned()),
             },
-        );
+            ..bound_sink_params(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 10)
+        });
         assert!(matches!(
             ingest(&mut sink, "notes/a.md").expect("text ingest"),
             IngestOutcome::Captured { .. }
@@ -4576,8 +4532,13 @@ mod tests {
         );
         // The policy snapshot is read at construction: a fresh sink sees it.
         let actor = supervisor.open(&db, 1).expect("reopen actor").actor;
-        let mut sink =
-            StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 20, None);
+        let mut sink = StoreCaptureSink::new(bound_sink_params(
+            actor,
+            WORKSPACE_ID,
+            VERSION_ID,
+            scratch.path(),
+            20,
+        ));
         assert_eq!(
             ingest(&mut sink, "private/journal.md").expect("narrowed"),
             IngestOutcome::NotOwned
@@ -4719,7 +4680,13 @@ mod tests {
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         write_file(&root, "first.md", b"first");
         write_file(&root, "second.md", b"second");
-        let mut sink = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        let mut sink = StoreCaptureSink::new(bound_sink_params(
+            actor,
+            WORKSPACE_ID,
+            VERSION_ID,
+            &root,
+            10,
+        ));
 
         // The first read fixes this reconcile generation's canonical root.
         ingest(&mut sink, "first.md").expect("seed canonical root");
@@ -4759,7 +4726,13 @@ mod tests {
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         write_file(&root, "first.md", b"first");
-        let mut sink = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        let mut sink = StoreCaptureSink::new(bound_sink_params(
+            actor,
+            WORKSPACE_ID,
+            VERSION_ID,
+            &root,
+            10,
+        ));
 
         // The first read binds this reconcile generation to the original
         // directory object, not merely to its canonical pathname.
@@ -4818,7 +4791,13 @@ mod tests {
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         write_file(&root, "tasks/collection.yaml", b"name: Tasks\n");
         write_file(&root, "tasks/alpha.md", b"original task\n");
-        let mut sink = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        let mut sink = StoreCaptureSink::new(bound_sink_params(
+            actor,
+            WORKSPACE_ID,
+            VERSION_ID,
+            &root,
+            10,
+        ));
         ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
         ingest(&mut sink, "tasks/alpha.md").expect("capture record");
         seed_captured_richdoc_lineage(&sink, "tasks/alpha.md");
@@ -4864,8 +4843,13 @@ mod tests {
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         write_file(&root, "tasks/collection.yaml", b"name: Tasks\n");
         write_file(&root, "tasks/alpha.md", b"original task\n");
-        let mut sink =
-            StoreCaptureSink::new(actor.clone(), WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        let mut sink = StoreCaptureSink::new(bound_sink_params(
+            actor.clone(),
+            WORKSPACE_ID,
+            VERSION_ID,
+            &root,
+            10,
+        ));
         ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
         ingest(&mut sink, "tasks/alpha.md").expect("capture record");
         seed_captured_richdoc_lineage(&sink, "tasks/alpha.md");
@@ -4939,8 +4923,13 @@ mod tests {
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         write_file(&root, "tasks/collection.yaml", b"name: Tasks\n");
         write_file(&root, "tasks/alpha.md", b"original task\n");
-        let mut sink =
-            StoreCaptureSink::new(actor.clone(), WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        let mut sink = StoreCaptureSink::new(bound_sink_params(
+            actor.clone(),
+            WORKSPACE_ID,
+            VERSION_ID,
+            &root,
+            10,
+        ));
         ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
         ingest(&mut sink, "tasks/alpha.md").expect("capture record");
         seed_captured_richdoc_lineage(&sink, "tasks/alpha.md");
@@ -5015,8 +5004,13 @@ mod tests {
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         write_file(&root, "first.md", b"first");
-        let mut sink =
-            StoreCaptureSink::new(actor.clone(), WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        let mut sink = StoreCaptureSink::new(bound_sink_params(
+            actor.clone(),
+            WORKSPACE_ID,
+            VERSION_ID,
+            &root,
+            10,
+        ));
         ingest(&mut sink, "first.md").expect("capture first head");
         let durable_before = durable_row_counts(&db);
 
@@ -5089,14 +5083,25 @@ mod tests {
         let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
-        let mut seed =
-            StoreCaptureSink::new(actor.clone(), WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        let mut seed = StoreCaptureSink::new(bound_sink_params(
+            actor.clone(),
+            WORKSPACE_ID,
+            VERSION_ID,
+            &root,
+            10,
+        ));
         ingest(&mut seed, "first.md").expect("seed captured head");
         drop(seed);
 
         std::fs::rename(&root, &moved_root).expect("move original capture root");
         std::fs::write(&root, b"not a directory").expect("install refused root");
-        let mut refused = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 20, None);
+        let mut refused = StoreCaptureSink::new(bound_sink_params(
+            actor,
+            WORKSPACE_ID,
+            VERSION_ID,
+            &root,
+            20,
+        ));
         std::fs::remove_file(&root).expect("remove refused root");
         std::fs::create_dir(&root).expect("install replacement directory");
         let retire = refused.retire_policy_excluded("first.md");
@@ -5120,8 +5125,13 @@ mod tests {
         let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
-        let mut stale =
-            StoreCaptureSink::new(actor.clone(), WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        let mut stale = StoreCaptureSink::new(bound_sink_params(
+            actor.clone(),
+            WORKSPACE_ID,
+            VERSION_ID,
+            &root,
+            10,
+        ));
 
         std::fs::create_dir(&root).expect("create recovered root");
         write_file(
@@ -5134,7 +5144,13 @@ mod tests {
         assert_eq!(ingest(&mut stale, "private/journal.md"), Err(ESCAPES_ROOT));
         drop(stale);
 
-        let mut fresh = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 20, None);
+        let mut fresh = StoreCaptureSink::new(bound_sink_params(
+            actor,
+            WORKSPACE_ID,
+            VERSION_ID,
+            &root,
+            20,
+        ));
         assert_eq!(
             ingest(&mut fresh, "private/journal.md").expect("fresh policy snapshot"),
             IngestOutcome::NotOwned
@@ -5387,7 +5403,13 @@ mod tests {
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         write_file(&root, ".env", b"TOKEN=original");
-        let mut sink = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        let mut sink = StoreCaptureSink::new(bound_sink_params(
+            actor,
+            WORKSPACE_ID,
+            VERSION_ID,
+            &root,
+            10,
+        ));
 
         let content = sink
             .read_current_secret(".env")
@@ -5442,17 +5464,10 @@ mod tests {
         let actor = supervisor.open(&db, 3).expect("actor").actor;
         let self_writes = SelfWriteSuppression::default();
         self_writes.record(WORKSPACE_ID, ".env", &hex_sha256(b"MODE=feature\n"));
-        let mut sink = StoreCaptureSink::new_with_self_writes(
-            actor,
-            WORKSPACE_ID,
-            VERSION_ID,
-            scratch.path(),
-            4,
-            None,
-            LeaseRegistry::new(),
+        let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
             self_writes,
-            CaptureProvenance::default(),
-        );
+            ..bound_sink_params(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 4)
+        });
         let observed_sha = match sink.read_current_secret(".env").expect("read secret") {
             SecretContent::Text(text) => hex_sha256(text.as_bytes()),
             SecretContent::Untracked => panic!("fixture secret must be tracked"),
@@ -5528,8 +5543,13 @@ mod tests {
         std::fs::remove_file(scratch.path().join(".dohc/engine/secret.key")).expect("lose key");
 
         let actor = supervisor.open(&db, 1).expect("reopen actor").actor;
-        let mut fresh =
-            StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 30, None);
+        let mut fresh = StoreCaptureSink::new(bound_sink_params(
+            actor,
+            WORKSPACE_ID,
+            VERSION_ID,
+            scratch.path(),
+            30,
+        ));
         write_file(scratch.path(), ".env", b"TOKEN=changed");
         let err = ingest(&mut fresh, ".env").expect_err("must not mint over live secret state");
         assert_eq!(err.reason, "workspace secret key unavailable");
