@@ -121,7 +121,7 @@ where
         }
         if let Some((original, retained_binding, coordinate, sequence)) = read_bootstrap(tx, &held).map_err(E::from)? {
             original.validate().map_err(|_| E::from(ApplicationError::Corrupt))?;
-            canonical_binding(&retained_binding).map_err(|_| E::from(ApplicationError::Corrupt))?;
+            retained_binding.validate_canonical().map_err(|_| E::from(ApplicationError::Corrupt))?;
             coordinate.validate().map_err(|_| E::from(ApplicationError::Corrupt))?;
             if original != input || retained_binding != *binding {
                 return Err(E::from(ApplicationError::Conflict));
