@@ -45,6 +45,7 @@ libc = "0.2"
 harness = []
 
 [dev-dependencies]
+dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }
 # `test-util` gives the driver-loop tests paused virtual time, so they can
 # assert what the supervision loop actually WAITS on (a 30s terminal probe
 # costs the suite nothing) instead of asserting on the tracker beside it.

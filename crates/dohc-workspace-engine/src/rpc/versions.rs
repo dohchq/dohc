@@ -7,7 +7,6 @@ use crate::events::emit_record_events;
 use crate::lock;
 use crate::rpc::error::map_runtime;
 use crate::rpc::error::map_switch_reconcile_error;
-use crate::rpc::error::wire;
 use crate::rpc::error::workspace_unavailable;
 use crate::rpc::history::MOMENTS_PAGE_BYTE_BUDGET;
 use crate::rpc::reads::SINGLE_ROW_HARD_CAP_BYTES;
@@ -145,7 +144,7 @@ fn version_fence_session_view(
     let session = sessions
         .get(session_id)
         .filter(|session| session.workspace == *handle)
-        .ok_or_else(|| wire(ErrorCode::InvalidParams, "ydoc-session-not-found"))?;
+        .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "ydoc-session-not-found"))?;
     Ok(YdocSessionView {
         key: session.key.clone(),
         path: session.path.clone(),
@@ -192,7 +191,7 @@ async fn settle_ydoc_session_for_version_fence(
             for facts in &record_facts {
                 emit_record_events(events, &open.workspace_id, facts);
             }
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "ydoc-remote-updates-pending",
             ));
@@ -210,7 +209,7 @@ async fn settle_ydoc_session_for_version_fence(
 fn unsettled_fork_error(_content_kind: ContentKind) -> WireError {
     // Both kinds settle now (richdoc projection is full-fidelity since
     // R15-3), so an unsettled lineage refuses with one message.
-    wire(ErrorCode::InvalidParams, "ydoc-unsettled-close")
+    WireError::new(ErrorCode::InvalidParams, "ydoc-unsettled-close")
 }
 
 fn settle_preimage(
@@ -403,9 +402,12 @@ impl EngineService {
             )
         });
         let key = DocKey::new(open.workspace_id.clone(), version_id.to_owned(), object_id)
-            .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-input"))?;
+            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-input"))?;
         if self.leases.scoped(&open.root).is_held(&key) {
-            return Err(wire(ErrorCode::InvalidParams, "ydoc-session-busy"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "ydoc-session-busy",
+            ));
         }
         Ok(())
     }
@@ -579,7 +581,7 @@ impl EngineService {
             .as_ref()
             .map(|driver| (Arc::clone(driver.status()), driver.author_json()))
             .ok_or_else(|| {
-                wire(
+                WireError::new(
                     ErrorCode::WorkspaceUnavailable,
                     "capture driver unavailable",
                 )
@@ -667,7 +669,7 @@ impl EngineService {
             if !matches!(reconcile, Ok(false)) {
                 let capture = lock(&open.capture);
                 let driver = capture.as_ref().ok_or_else(|| {
-                    wire(
+                    WireError::new(
                         ErrorCode::WorkspaceUnavailable,
                         "capture driver unavailable",
                     )
@@ -740,7 +742,7 @@ impl EngineService {
                 Err(cancellation.interruption(operation))
             }
             outcome = &mut fence => {
-                outcome.map_err(|_| wire(ErrorCode::Internal, "version fence task failed"))?
+                outcome.map_err(|_| WireError::new(ErrorCode::Internal, "version fence task failed"))?
             }
         }
     }
@@ -789,7 +791,7 @@ impl EngineService {
             .clamp(1, SINGLE_ROW_HARD_CAP_BYTES);
         let included = byte_budget_cut_serialized(&entries, budget);
         if included == 0 && !entries.is_empty() {
-            return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
+            return Err(WireError::new(ErrorCode::InvalidParams, "invalid-input"));
         }
         let byte_truncated = included < entries.len();
         let next_cursor = if byte_truncated {
@@ -858,7 +860,7 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: VersionsSetActiveParams = parse(params)?;
         if params.version_id.is_empty() || params.version_id.trim() != params.version_id {
-            return Err(wire(ErrorCode::InvalidParams, "invalid-version"));
+            return Err(WireError::new(ErrorCode::InvalidParams, "invalid-version"));
         }
         let handle = handle.ok_or_else(workspace_unavailable)?;
         let open = self.open(Some(&handle))?;
@@ -875,7 +877,7 @@ impl EngineService {
         let target = versions
             .into_iter()
             .find(|version| version.version_id == params.version_id)
-            .ok_or_else(|| wire(ErrorCode::InvalidParams, "version-not-found"))?;
+            .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "version-not-found"))?;
         let active = Self::read_under_ctx(
             &cancellation,
             "versions.setActive (active version)",
@@ -954,7 +956,7 @@ impl EngineService {
             .collect();
         let included = byte_budget_cut_serialized(&row_values, MOMENTS_PAGE_BYTE_BUDGET);
         if included == 0 && !row_values.is_empty() {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::Internal,
                 "a listing row exceeds the response frame budget",
             ));

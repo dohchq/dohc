@@ -2,7 +2,6 @@ use crate::EngineService;
 use crate::capture_driver;
 use crate::lock;
 use crate::rpc::error::initial_capture_updating;
-use crate::rpc::error::wire;
 use crate::rpc::workspace::WorkspaceOpenMode;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
@@ -728,7 +727,7 @@ impl EngineService {
                 self.chats_dispatch_fail(&ctx, request.workspace, request.params)
                     .await?
             }
-            _ => return Err(wire(ErrorCode::MethodNotFound, "unknown method")),
+            _ => return Err(WireError::new(ErrorCode::MethodNotFound, "unknown method")),
         };
         Ok(ServiceResponse::response(Response { id, result }))
     }
@@ -752,7 +751,7 @@ impl EngineService {
                     | "chats.readState.listUnreadFileThreads"
             )
         {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "method is unavailable on a read-only workspace handle",
             ));

@@ -8,9 +8,8 @@ use crate::rpc::chats::chat_page_limit;
 use crate::rpc::chats::decode_chat_cursor;
 use crate::rpc::chats::encode_chat_cursor;
 use crate::rpc::chats::threads::ChatThreadParams;
-use crate::rpc::error::wire;
 use crate::rpc::request::OperationCancellation;
-use crate::rpc::request::deserialize_optional_non_null_string;
+use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use dohc_engine_domain::AgentRunRecord;
@@ -30,7 +29,7 @@ pub(crate) const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatDispatchRecordEligibleParams {
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     verified_user_id: Option<String>,
 }
 
@@ -46,9 +45,9 @@ struct ChatDispatchEnqueueParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatDispatchClaimParams {
     run_id: String,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     command: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     log_path: Option<String>,
     now_ms: Option<i64>,
 }
@@ -58,7 +57,7 @@ struct ChatDispatchClaimParams {
 struct ChatDispatchRunPageParams {
     run_id: String,
     page_limit: Option<i64>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     cursor: Option<String>,
 }
 
@@ -74,7 +73,7 @@ struct ChatDispatchThreadRunsParams {
     thread_id: String,
     limit: Option<i64>,
     page_limit: Option<i64>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     cursor: Option<String>,
 }
 
@@ -110,7 +109,7 @@ struct ChatDispatchRecordRunMessageParams {
 struct ChatDispatchSetPausedParams {
     thread_id: String,
     paused: bool,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     reason: Option<String>,
 }
 
@@ -406,7 +405,7 @@ impl EngineService {
         let next_cursor = if rows.len() > included {
             let last = rows
                 .get(included.saturating_sub(1))
-                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
@@ -470,7 +469,7 @@ impl EngineService {
                 cursor
                     .third
                     .clone()
-                    .ok_or_else(|| wire(ErrorCode::InvalidParams, "invalid-cursor"))?,
+                    .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "invalid-cursor"))?,
             )),
         };
         let cancellation = OperationCancellation::new(ctx);
@@ -503,7 +502,7 @@ impl EngineService {
         let next_cursor = if rows.len() > included {
             let last = rows
                 .get(included.saturating_sub(1))
-                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
@@ -583,7 +582,7 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: ChatDispatchRecentCountParams = parse(params)?;
         if !params.since_ms.is_finite() {
-            return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
+            return Err(WireError::new(ErrorCode::InvalidParams, "invalid-input"));
         }
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);

@@ -5,7 +5,6 @@ use crate::rpc::chats::chat_cursor_binding;
 use crate::rpc::chats::chat_page_cursor;
 use crate::rpc::chats::chat_page_limit;
 use crate::rpc::chats::decode_chat_cursor;
-use crate::rpc::error::wire;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
@@ -53,7 +52,10 @@ fn parse_channel_kind(raw: &str) -> Result<ChatChannelKind, WireError> {
         "channel" => Ok(ChatChannelKind::Channel),
         "dm" => Ok(ChatChannelKind::Dm),
         "agent" => Ok(ChatChannelKind::Agent),
-        _ => Err(wire(ErrorCode::InvalidParams, "unknown chat channel kind")),
+        _ => Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "unknown chat channel kind",
+        )),
     }
 }
 

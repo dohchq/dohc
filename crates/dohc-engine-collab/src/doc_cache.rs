@@ -274,6 +274,7 @@ impl WriterDocCache {
 
     /// A cache with tiny limits so tests can exercise eviction without
     /// building 64 MiB of documents.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn with_limits_for_test(max_entries: usize, max_total_bytes: usize) -> Self {
         WriterDocCache {
@@ -841,6 +842,7 @@ impl WriterDocCache {
     /// Replace the cached doc without touching its tuple — a deliberately
     /// invalid entry for tests that prove the differential check catches a
     /// doc/tuple divergence. Never call outside tests.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn poison_doc_for_test(&mut self, key: &DocKey, doc: Ydoc) {
         if let Some(entry) = self.entries.get_mut(key) {
@@ -850,7 +852,7 @@ impl WriterDocCache {
 
     /// Corrupt one retained live identity without changing the doc or tuple.
     /// The next cached serve must trip the FR1-VALID oracle.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn poison_frontier_for_test(&mut self, key: &DocKey) {
         if let Some(entry) = self.entries.get_mut(key) {
@@ -860,7 +862,7 @@ impl WriterDocCache {
 
     /// Replace the check-4 scratch with an empty document without changing its
     /// tuple. The next cached gate must trip FR2-VALID.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn poison_gate_scratch_for_test(&mut self, key: &DocKey) {
         if let Some(entry) = self.entries.get_mut(key) {
@@ -879,7 +881,7 @@ impl WriterDocCache {
     }
 
     /// Differential frontier evidence for mutation tests.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn frontier_matches_doc_for_test(&self, key: &DocKey) -> Result<Option<bool>, CollabError> {
         self.entries
@@ -889,7 +891,7 @@ impl WriterDocCache {
     }
 
     /// `(live identities, unsafe interiors, canonical deletion endpoints)`.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn frontier_fact_counts_for_test(&self, key: &DocKey) -> Option<(usize, usize, usize)> {
         self.entries
@@ -898,6 +900,7 @@ impl WriterDocCache {
     }
 
     /// Whether the check-4-only scratch is resident for this entry.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn gate_scratch_is_resident_for_test(&self, key: &DocKey) -> bool {
         self.entries
@@ -906,7 +909,7 @@ impl WriterDocCache {
     }
 
     /// FR2's exact observation comparison against the writer replay base.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn gate_scratch_matches_doc_for_test(
         &self,
@@ -927,7 +930,7 @@ impl WriterDocCache {
     }
 
     /// `(writer doc + frontier, check-4 scratch)` approximate bytes.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn entry_byte_breakdown_for_test(&self, key: &DocKey) -> Option<(usize, usize)> {
         self.entries.get(key).map(|entry| {
@@ -940,6 +943,7 @@ impl WriterDocCache {
     }
 
     /// Whether an entry is resident (test evidence for eviction/removal).
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn contains_for_test(&self, key: &DocKey) -> bool {
         self.entries.contains_key(key)
@@ -947,6 +951,7 @@ impl WriterDocCache {
 
     /// The cached doc's full-state encode (test evidence for byte-equality
     /// against a cold reconstruction).
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn doc_full_state_for_test(&self, key: &DocKey) -> Option<Vec<u8>> {
         self.entries

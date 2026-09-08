@@ -430,6 +430,8 @@ mod tests {
     struct ConcurrencyProbe {
         current: AtomicUsize,
         peak: AtomicUsize,
+        started: Semaphore,
+        release: Semaphore,
     }
 
     impl EngineService for ConcurrencyProbe {
@@ -437,7 +439,12 @@ mod tests {
         async fn call(&self, _ctx: RequestContext, request: Request) -> RequestOutcome {
             let now = self.current.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(now, Ordering::SeqCst);
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            self.started.add_permits(1);
+            self.release
+                .acquire()
+                .await
+                .expect("release probe")
+                .forget();
             self.current.fetch_sub(1, Ordering::SeqCst);
             Ok(ServiceResponse::response(Response {
                 id: request.id,
@@ -451,15 +458,25 @@ mod tests {
         let service = Arc::new(ConcurrencyProbe {
             current: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
+            started: Semaphore::new(0),
+            release: Semaphore::new(0),
         });
         let supervisor = Supervisor::new(config(3, 64), service.clone());
         let receivers: Vec<_> = (0..24)
             .map(|id| supervisor.try_submit(request(id)).expect("queue has room"))
             .collect();
+        tokio::time::timeout(Duration::from_secs(5), service.started.acquire_many(3))
+            .await
+            .expect("three calls must overlap")
+            .expect("started probe")
+            .forget();
+        assert_eq!(service.current.load(Ordering::SeqCst), 3);
+        service.release.add_permits(24);
         for receiver in receivers {
             let outcome = receiver.await.expect("supervisor responded");
             assert!(outcome.is_ok());
         }
+        assert_eq!(service.current.load(Ordering::SeqCst), 0);
         assert!(
             service.peak.load(Ordering::SeqCst) <= 3,
             "peak concurrency {} exceeded bound",
