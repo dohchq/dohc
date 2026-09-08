@@ -302,6 +302,69 @@ describe('public Markdown schema', () => {
       expect(accepted(Y.encodeStateAsUpdate(doc)).projectedMarkdown).toBe('')
     } finally { doc.destroy() }
   })
+  it.each(['Text', '**Text**', '[Text](https://example.com)'])('preserves empty XmlText after deleting all text from %s', markdown => {
+    const doc = markdownToYDoc(markdown)
+    doc.gc = false
+    try {
+      const text = (doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText
+      text.delete(0, text.length)
+      const checkpoint = Y.encodeStateAsUpdate(doc)
+      const evidence = accepted(checkpoint)
+      expect(evidence.projectedMarkdown).toBe('')
+      expect(evidence.checkpoint.bytes).toEqual(checkpoint)
+      expect(evidence.stateUpdate).toEqual(checkpoint)
+      expect(accepted(evidence.stateUpdate).projectedMarkdown).toBe('')
+      const reopened = new Y.Doc({ gc: false })
+      try {
+        Y.applyUpdate(reopened, evidence.stateUpdate)
+        const paragraph = reopened.getXmlFragment('body').get(0) as Y.XmlElement
+        expect(paragraph.length).toBe(1)
+        expect(paragraph.get(0)).toBeInstanceOf(Y.XmlText)
+        expect((paragraph.get(0) as Y.XmlText).toDelta()).toEqual([])
+      } finally { reopened.destroy() }
+    } finally { doc.destroy() }
+  })
+  it('validates nonempty embeds and format attributes beside empty XmlText', () => {
+    for (const invalid of ['embed', 'link'] as const) {
+      refused(encode('Text', doc => {
+        const paragraph = doc.getXmlFragment('body').get(0) as Y.XmlElement
+        const text = paragraph.get(0) as Y.XmlText
+        paragraph.insert(0, [new Y.XmlText()])
+        if (invalid === 'embed') text.insertEmbed(0, { hidden: 'value' })
+        else text.format(0, text.length, { link: { href: 42 } })
+      }))
+    }
+  })
+  it('keeps invalid roots, nesting and attributes refused beside empty XmlText', () => {
+    refused(encode('Text', doc => doc.getXmlFragment('body').insert(0, [new Y.XmlText()])))
+    refused(encode('Text', doc => {
+      const paragraph = doc.getXmlFragment('body').get(0) as Y.XmlElement
+      const nested = new Y.XmlElement('paragraph')
+      nested.insert(0, [new Y.XmlText()])
+      paragraph.insert(0, [nested])
+    }), 'projection-mutated')
+    refused(encode('Text', doc => {
+      const paragraph = doc.getXmlFragment('body').get(0) as Y.XmlElement
+      const text = paragraph.get(0) as Y.XmlText
+      text.delete(0, text.length)
+      paragraph.setAttribute('unknown', 'hidden')
+    }))
+    refused(encode('Text', doc => {
+      const text = (doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText
+      text.delete(0, text.length)
+      text.setAttribute('hidden', 'value')
+    }))
+  })
+  it('counts empty XmlText toward the unchanged public node limit', () => {
+    const fixture = (nodes: number) => encode('Text', doc => {
+      const text = (doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText
+      text.delete(0, text.length)
+      // Paragraph, empty XmlText, and frontmatter array each consume one node.
+      doc.getMap('frontmatter').set('values', new Array(nodes - 3).fill(0))
+    })
+    accepted(fixture(262_144))
+    refused(fixture(262_145), 'capacity-refused')
+  }, 60_000)
   it.each([['schemaVersion', undefined], ['schemaVersion', 2], ['dohcMarkdownCrlf', undefined], ['dohcMarkdownCrlf', false], ['unknown', true], ['dohcTaggedFrontmatterPrefix', '---\n'], ['dohcTaggedFrontmatterBaseline', '']])('rejects strict metadata %s = %s', (key, value) => {
     refused(encode('Text', doc => doc.getMap('meta').set(key as string, value)))
   })
@@ -535,6 +598,37 @@ function observeJournalCuts() {
 }
 
 describe('private journal evidence and ownership', () => {
+  it('accepts deleting all text as a journal candidate, reopening, and continued editing', () => {
+    const call = journalFixture([doc => {
+      doc.gc = false
+      const text = (doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText
+      text.delete(0, text.length)
+    }])
+    const result = journal(call)
+    expect(result.kind).toBe('accepted')
+    if (result.kind !== 'accepted') return
+    expect(result.evidence.projectedMarkdownByteLength).toBe(0)
+    expect(result.evidence.projectedMarkdownSha256).toBe(hash(new Uint8Array()))
+    const checkpoint = result.evidence.stateUpdate
+    expect(accepted(checkpoint).projectedMarkdown).toBe('')
+    const reopened = new Y.Doc({ gc: false })
+    try {
+      Y.applyUpdate(reopened, checkpoint)
+      const text = (reopened.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText
+      expect(text).toBeInstanceOf(Y.XmlText)
+      expect(text.toDelta()).toEqual([])
+      const before = Y.encodeStateVector(reopened)
+      text.insert(0, 'Continued')
+      const candidate = Y.encodeStateAsUpdate(reopened, before)
+      const continued = journal({ ...input(checkpoint), suffix: [], candidate })
+      expect(continued.kind).toBe('accepted')
+      if (continued.kind !== 'accepted') return
+      expect(accepted(continued.evidence.stateUpdate).projectedMarkdown).toBe('Continued')
+      const withDeletedPrefix = journal({ ...call, suffix: [call.candidate], candidate })
+      expect(withDeletedPrefix.kind).toBe('accepted')
+      if (withDeletedPrefix.kind === 'accepted') expect(withDeletedPrefix.evidence.stateUpdate).toEqual(continued.evidence.stateUpdate)
+    } finally { reopened.destroy() }
+  })
   it('retains original ordered identities and only candidate ranges, with reusable finalized state', () => {
     const call = journalFixture([editText('first '), editText('second ')])
     const result = journal(call)

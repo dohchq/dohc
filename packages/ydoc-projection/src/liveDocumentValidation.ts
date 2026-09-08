@@ -556,9 +556,15 @@ function validateMarkAttributes(name: string, value: unknown): void {
 function bodyFingerprint(
   body: Y.XmlFragment,
   budget: ProjectionBudget | null,
+  depth = 0,
 ): XmlFingerprint[] {
   if (budget !== null && body.length > budget.remaining) refuse('capacity-refused')
-  return body.toArray().map(child => xmlFingerprint(child, 0, budget))
+  const children: XmlFingerprint[] = []
+  for (const child of body.toArray()) {
+    const fingerprint = xmlFingerprint(child, depth, budget)
+    if (fingerprint.kind !== 'text' || fingerprint.delta.length !== 0) children.push(fingerprint)
+  }
+  return children
 }
 
 function xmlFingerprint(
@@ -569,7 +575,6 @@ function xmlFingerprint(
   if (value instanceof Y.XmlHook) refuse('invalid-schema')
   if (value instanceof Y.XmlElement) {
     budget?.consume(depth)
-    if (budget !== null && value.length > budget.remaining) refuse('capacity-refused')
     const attributes = value.getAttributes() as Record<string, unknown>
     const entries = sortedValueEntries(attributes)
     for (const [key, attribute] of entries) {
@@ -582,7 +587,7 @@ function xmlFingerprint(
       kind: 'element',
       nodeName: value.nodeName,
       attributes: entries,
-      children: value.toArray().map(child => xmlFingerprint(child, depth + 1, budget)),
+      children: bodyFingerprint(value, budget, depth + 1),
     }
   }
   if (!(value instanceof Y.XmlText)) refuse('invalid-schema')
