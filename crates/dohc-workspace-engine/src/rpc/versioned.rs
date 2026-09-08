@@ -1,7 +1,6 @@
 use crate::EngineService;
 use crate::rpc::capture::MAX_DESKTOP_CAPTURE_TEXT_BYTES;
 use crate::rpc::error::map_runtime;
-use crate::rpc::error::wire;
 use crate::rpc::history::moment_json;
 use crate::rpc::reads::MAX_INBAND_CONTENT_BYTES;
 use crate::rpc::reads::file_object_json;
@@ -280,7 +279,10 @@ impl EngineService {
         let path = params.path.clone();
         let text = params.text;
         if text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES {
-            return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "content-exceeds-inband-cap",
+            ));
         }
         let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
@@ -346,11 +348,14 @@ impl EngineService {
             (Some(bytes), None) => bytes,
             (None, Some(encoded)) => base64::engine::general_purpose::STANDARD
                 .decode(encoded)
-                .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-input"))?,
-            _ => return Err(wire(ErrorCode::InvalidParams, "invalid-input")),
+                .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-input"))?,
+            _ => return Err(WireError::new(ErrorCode::InvalidParams, "invalid-input")),
         };
         if bytes.len() > MAX_INBAND_CONTENT_BYTES {
-            return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "content-exceeds-inband-cap",
+            ));
         }
         let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
@@ -427,7 +432,7 @@ impl EngineService {
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         if params.sha256.len() != 64 || !params.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
-            return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
+            return Err(WireError::new(ErrorCode::InvalidParams, "invalid-input"));
         }
         let sha256 = params.sha256.to_ascii_lowercase();
         let path = params.path.clone();
@@ -439,16 +444,16 @@ impl EngineService {
             Some(encoded) => {
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(encoded)
-                    .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-input"))?;
+                    .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-input"))?;
                 if bytes.len() > dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES {
-                    return Err(wire(
+                    return Err(WireError::new(
                         ErrorCode::InvalidParams,
                         "content-exceeds-capture-cap",
                     ));
                 }
                 let actual = dohc_engine_storage::hex_sha256(&bytes);
                 if actual != sha256 {
-                    return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
+                    return Err(WireError::new(ErrorCode::InvalidParams, "invalid-input"));
                 }
                 bytes
             }
@@ -460,9 +465,9 @@ impl EngineService {
                         .read_binary_blob_for_egress(open.workspace_id.clone(), sha256),
                 )
                 .await?
-                .ok_or_else(|| wire(ErrorCode::InvalidParams, "file-not-found"))?;
+                .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "file-not-found"))?;
                 blob.bytes
-                    .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?
+                    .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?
             }
         };
         let session_serial = self

@@ -1,6 +1,5 @@
 use crate::EngineService;
 use crate::rpc::error::map_runtime;
-use crate::rpc::error::wire;
 use crate::rpc::history::moment_json;
 use crate::rpc::history::withhold_moment_texts;
 use crate::rpc::reads::RESPONSE_FRAME_BYTES;
@@ -274,7 +273,7 @@ impl ConflictStateDto {
             "text" => ConflictContentKind::Text,
             "binary" => ConflictContentKind::Binary,
             _ => {
-                return Err(wire(
+                return Err(WireError::new(
                     ErrorCode::InvalidParams,
                     "unknown conflict content kind",
                 ));
@@ -304,7 +303,7 @@ impl SnapshotDto {
     fn into_domain(self) -> Result<TextSnapshot, WireError> {
         let actual = dohc_engine_storage::hex_sha256(self.text.as_bytes());
         if self.blob_sha256 != actual {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "snapshot hash does not match text",
             ));
@@ -329,7 +328,10 @@ fn parse_status(raw: &str) -> Result<ConflictStatus, WireError> {
     match raw {
         "open" => Ok(ConflictStatus::Open),
         "resolved" => Ok(ConflictStatus::Resolved),
-        _ => Err(wire(ErrorCode::InvalidParams, "unknown conflict status")),
+        _ => Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "unknown conflict status",
+        )),
     }
 }
 
@@ -338,7 +340,10 @@ fn parse_choice(raw: &str) -> Result<ConflictChoice, WireError> {
         "current" => Ok(ConflictChoice::Current),
         "incoming" => Ok(ConflictChoice::Incoming),
         "merged" => Ok(ConflictChoice::Merged),
-        _ => Err(wire(ErrorCode::InvalidParams, "unknown conflict choice")),
+        _ => Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "unknown conflict choice",
+        )),
     }
 }
 
@@ -347,7 +352,7 @@ fn parse_resolution(raw: &str) -> Result<ConflictResolution, WireError> {
         "kept-current" => Ok(ConflictResolution::KeptCurrent),
         "applied-incoming" => Ok(ConflictResolution::AppliedIncoming),
         "applied-merged" => Ok(ConflictResolution::AppliedMerged),
-        _ => Err(wire(
+        _ => Err(WireError::new(
             ErrorCode::InvalidParams,
             "unknown conflict resolution",
         )),
@@ -678,7 +683,9 @@ impl EngineService {
         }
         let conflict = params
             .conflict
-            .ok_or_else(|| wire(ErrorCode::InvalidParams, "missing conflict or envelope"))?
+            .ok_or_else(|| {
+                WireError::new(ErrorCode::InvalidParams, "missing conflict or envelope")
+            })?
             .into_domain()?;
         enforce_workspace(&open, &conflict.workspace_id)?;
         let inserted = open
@@ -729,7 +736,7 @@ impl EngineService {
             return Ok(replicated_conflict_json(result));
         }
         let local = params.local.ok_or_else(|| {
-            wire(
+            WireError::new(
                 ErrorCode::InvalidParams,
                 "missing local resolve or envelope",
             )
@@ -779,9 +786,9 @@ impl EngineService {
             "keep-current" => ResolveConflictKind::KeepCurrent,
             "apply-incoming" => ResolveConflictKind::ApplyIncoming,
             "apply-merged" => {
-                let text = local
-                    .merged_text
-                    .ok_or_else(|| wire(ErrorCode::InvalidParams, "missing merged text"))?;
+                let text = local.merged_text.ok_or_else(|| {
+                    WireError::new(ErrorCode::InvalidParams, "missing merged text")
+                })?;
                 if encoded_request > RESOLVE_REQUEST_FRAME_BYTES {
                     return Err(WireError::new(
                         ErrorCode::InvalidParams,
@@ -798,7 +805,7 @@ impl EngineService {
                 ResolveConflictKind::ApplyMerged { text }
             }
             _ => {
-                return Err(wire(
+                return Err(WireError::new(
                     ErrorCode::InvalidParams,
                     "unknown conflict resolution",
                 ));

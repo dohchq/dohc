@@ -1,4 +1,4 @@
-use super::error::{map_runtime, wire, workspace_unavailable};
+use super::error::{map_runtime, workspace_unavailable};
 use super::workspace::{OpenWorkspace, WorkspaceOpenMode};
 use crate::{EngineService, lock};
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
@@ -169,14 +169,17 @@ impl EngineService {
         config: LiveApplicationHostConfig,
     ) -> Result<(), WireError> {
         if !connection.is_current() || config.max_registrations == 0 {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "invalid-live-application-host",
             ));
         }
         let open = self.open(Some(&config.workspace))?;
         if open.mode != WorkspaceOpenMode::Full {
-            return Err(wire(ErrorCode::InvalidParams, "workspace-read-only"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "workspace-read-only",
+            ));
         }
         let _serial = Arc::clone(&open.session_ops).lock_owned().await;
         if !Arc::ptr_eq(&self.open(Some(&config.workspace))?, &open) {
@@ -237,7 +240,7 @@ impl EngineService {
             binding: LiveObjectBinding,
         }
         let params: Params = serde_json::from_value(params)
-            .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-live-registration"))?;
+            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-live-registration"))?;
         let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
         let workspace = workspace.ok_or_else(workspace_unavailable)?;
         let host = lock(&self.live_applications)
@@ -279,7 +282,10 @@ impl EngineService {
             .count()
             >= host.max_registrations
         {
-            return Err(wire(ErrorCode::Overloaded, "live-registration-capacity"));
+            return Err(WireError::new(
+                ErrorCode::Overloaded,
+                "live-registration-capacity",
+            ));
         }
         let object_id = params.binding.object_id.clone();
         let handle = host
@@ -299,7 +305,7 @@ impl EngineService {
             .next_registration
             .checked_add(1)
             .filter(|id| *id <= 9_007_199_254_740_991)
-            .ok_or_else(|| wire(ErrorCode::Overloaded, "live-registration-capacity"))?;
+            .ok_or_else(|| WireError::new(ErrorCode::Overloaded, "live-registration-capacity"))?;
         registry.next_registration = id;
         let registration = Arc::new(Registration {
             host: host.clone(),
@@ -365,7 +371,10 @@ impl EngineService {
             || ctx.cancel.is_cancelled()
             || ctx.deadline.is_some_and(|end| Instant::now() >= end)
         {
-            return Err(wire(ErrorCode::Cancelled, "live-application-retired"));
+            return Err(WireError::new(
+                ErrorCode::Cancelled,
+                "live-application-retired",
+            ));
         }
         // The writer command holds the permit independently of this future.
         let guard = Arc::new(ApplicationOutputGuard {
@@ -412,10 +421,13 @@ impl EngineService {
         let outcome = operation.await;
         retirement.0 = None;
         let outcome = outcome
-            .map_err(|_| wire(ErrorCode::Internal, "live-application-interrupted"))?
+            .map_err(|_| WireError::new(ErrorCode::Internal, "live-application-interrupted"))?
             .map_err(map_runtime)?;
         if !guard.is_current() {
-            return Err(wire(ErrorCode::Cancelled, "live-application-retired"));
+            return Err(WireError::new(
+                ErrorCode::Cancelled,
+                "live-application-retired",
+            ));
         }
         Ok(ServiceResponse {
             response: Response {

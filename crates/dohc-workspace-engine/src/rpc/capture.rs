@@ -2,7 +2,6 @@ use crate::EngineService;
 use crate::capture_driver;
 use crate::lock;
 use crate::rpc::dispatch::initial_capture_phase_requires_fence;
-use crate::rpc::error::wire;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::parse;
 use crate::rpc::request::validated_author;
@@ -26,7 +25,7 @@ struct CaptureSetAuthorParams {
 
 pub(super) fn reject_capture_origin(origin: Option<&str>) -> Result<(), WireError> {
     if origin == Some("capture") {
-        Err(wire(
+        Err(WireError::new(
             ErrorCode::InvalidParams,
             "capture is a reserved origin",
         ))
@@ -184,7 +183,7 @@ impl EngineService {
         };
         let capture = lock(&open.capture);
         let driver = capture.as_ref().ok_or_else(|| {
-            wire(
+            WireError::new(
                 ErrorCode::WorkspaceUnavailable,
                 "capture driver unavailable",
             )

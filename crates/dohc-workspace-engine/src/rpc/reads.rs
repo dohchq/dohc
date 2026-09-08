@@ -1,7 +1,6 @@
 use crate::EngineService;
 use crate::rpc::capture::MAX_DESKTOP_CAPTURE_TEXT_BYTES;
 use crate::rpc::error::map_runtime;
-use crate::rpc::error::wire;
 use crate::rpc::history::MOMENTS_PAGE_BYTE_BUDGET;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::parse;
@@ -124,14 +123,14 @@ impl BlobEgressBudget {
             .ok()
             .filter(|bytes| *bytes <= BLOB_EGRESS_BYTE_BUDGET)
             .and_then(|bytes| u32::try_from(bytes).ok())
-            .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+            .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
         tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 Err(cancellation.interruption(&format!("{operation} (egress budget)")))
             }
             permit = Arc::clone(&self.permits).acquire_many_owned(bytes) => {
-                permit.map_err(|_| wire(ErrorCode::Internal, "blob egress budget unavailable"))
+                permit.map_err(|_| WireError::new(ErrorCode::Internal, "blob egress budget unavailable"))
             }
         }
     }
@@ -380,7 +379,10 @@ impl EngineService {
                 // Spelling this one as prose gave the same refusal two wire
                 // messages depending on which method the caller reached it
                 // through, and a client that keys on the code saw neither.
-                return Err(wire(ErrorCode::InvalidParams, "version-not-found"));
+                return Err(WireError::new(
+                    ErrorCode::InvalidParams,
+                    "version-not-found",
+                ));
             }
         }
         let has_more = rows.len() > limit;
@@ -409,7 +411,7 @@ impl EngineService {
             .collect();
         let byte_cut = byte_budget_cut_serialized(&row_values, MOMENTS_PAGE_BYTE_BUDGET);
         if byte_cut == 0 && !row_values.is_empty() {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::Internal,
                 "a listing row exceeds the response frame budget",
             ));
@@ -482,7 +484,7 @@ impl EngineService {
         let params: VersionedBinaryReadBlobParams = parse(params)?;
         if params.sha256.len() != 64 || !params.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
-            return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
+            return Err(WireError::new(ErrorCode::InvalidParams, "invalid-input"));
         }
         // Stored digests are canonical lowercase hex; an uppercase spelling of
         // a referenced digest must find it, not miss the exact-match lookup.
@@ -497,7 +499,7 @@ impl EngineService {
                 .read_binary_blob(open.workspace_id.clone(), sha256.clone()),
         )
         .await?
-        .ok_or_else(|| wire(ErrorCode::InvalidParams, "file-not-found"))?;
+        .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "file-not-found"))?;
         let Some(bytes) = read.bytes else {
             if !ctx.has_capability("blobs") {
                 return Ok((
@@ -520,13 +522,13 @@ impl EngineService {
                     .read_binary_blob_for_egress(open.workspace_id.clone(), sha256.clone()),
             )
             .await?
-            .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+            .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
             if hydrated.byte_length != read.byte_length {
-                return Err(wire(ErrorCode::Internal, "state-corrupt"));
+                return Err(WireError::new(ErrorCode::Internal, "state-corrupt"));
             }
             let bytes = hydrated
                 .bytes
-                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
             return Ok((
                 json!({
                     "bytesBase64": Value::Null,
@@ -561,7 +563,7 @@ impl EngineService {
         let params: VersionedTextReadBlobParams = parse(params)?;
         if params.sha256.len() != 64 || !params.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
-            return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
+            return Err(WireError::new(ErrorCode::InvalidParams, "invalid-input"));
         }
         let sha256 = params.sha256.to_ascii_lowercase();
         let open = self.open(handle.as_ref())?;
@@ -574,7 +576,7 @@ impl EngineService {
                 .read_text_blob(open.workspace_id.clone(), sha256.clone()),
         )
         .await?
-        .ok_or_else(|| wire(ErrorCode::InvalidParams, "file-not-found"))?;
+        .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "file-not-found"))?;
         let Some(text) = read.text else {
             if !ctx.has_capability("blobs") {
                 return Ok((
@@ -597,18 +599,18 @@ impl EngineService {
                     .read_text_blob_for_egress(open.workspace_id.clone(), sha256.clone()),
             )
             .await?
-            .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+            .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
             if hydrated.byte_length != read.byte_length {
-                return Err(wire(ErrorCode::Internal, "state-corrupt"));
+                return Err(WireError::new(ErrorCode::Internal, "state-corrupt"));
             }
             let bytes = hydrated
                 .text
-                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?
                 .into_bytes();
             if bytes.len() as i64 != read.byte_length
                 || dohc_engine_storage::hex_sha256(&bytes) != sha256
             {
-                return Err(wire(ErrorCode::Internal, "state-corrupt"));
+                return Err(WireError::new(ErrorCode::Internal, "state-corrupt"));
             }
             return Ok((
                 json!({
@@ -630,7 +632,7 @@ impl EngineService {
         if bytes.len() as i64 != read.byte_length
             || dohc_engine_storage::hex_sha256(&bytes) != sha256
         {
-            return Err(wire(ErrorCode::Internal, "state-corrupt"));
+            return Err(WireError::new(ErrorCode::Internal, "state-corrupt"));
         }
         Ok((
             json!({

@@ -430,7 +430,7 @@ impl ClockIdentityIndex {
             .count()
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     fn poison_string_run_for_test(&mut self) -> bool {
         for spans in self.clients.values_mut() {
             for span in spans.values_mut() {
@@ -850,7 +850,7 @@ impl IntegratedFrontier {
         Ok(())
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn matches_doc(&self, doc: &Ydoc) -> Result<bool, CollabError> {
         let fresh = scan_v1(&doc.encode_full_state())?;
         Ok(self.identities.semantically_equal(&fresh.identities)
@@ -858,7 +858,7 @@ impl IntegratedFrontier {
             && self.deletion_boundaries() == fresh.deletion_boundaries)
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn fact_counts(&self) -> (usize, usize, usize) {
         (
             self.identities.fact_count(),
@@ -867,7 +867,7 @@ impl IntegratedFrontier {
         )
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn poison_identity_for_test(&mut self) {
         if self.identities.poison_string_run_for_test() {
             return;
@@ -970,9 +970,9 @@ thread_local! {
     static PANIC_INJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    /// Debug/test seam for the scratch-apply error lifecycle. The mutation
+    /// Test seam for the scratch-apply error lifecycle. The mutation
     /// probe is set before this fires, matching a real `Ydoc::apply` failure.
     static SCRATCH_APPLY_ERROR_INJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -996,9 +996,9 @@ pub(crate) fn with_armed_gate<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// Run `f` with resident gate-scratch applies forced to return an error after
-/// setting the mutation probe. Debug tests use this to prove that callers
+/// setting the mutation probe. Tests use this to prove that callers
 /// evict a scratch whose in-place apply did not complete.
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn with_armed_scratch_apply_error_for_test<T>(f: impl FnOnce() -> T) -> T {
     struct Disarm;
@@ -1282,7 +1282,7 @@ fn validate_replay_parity_inner(
             // apply error, check-4 refusal, or later transaction rollback must
             // evict the mutated resident scratch because yrs has no rollback.
             *persistent_scratch_mutated.expect("a resident scratch has a mutation probe") = true;
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             if SCRATCH_APPLY_ERROR_INJECT.with(std::cell::Cell::get) {
                 return Err(CollabError::MalformedUpdate {
                     reason: "injected persistent gate scratch apply failure".to_owned(),
@@ -1406,7 +1406,7 @@ pub(crate) fn rebuild_persistent_gate_scratch(
     Ok(scratch)
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn persistent_gate_scratch_matches_base(
     base: &Ydoc,
     scratch: &Ydoc,
@@ -1974,6 +1974,7 @@ pub(crate) fn structurally_equal_v2(left: &Ydoc, right: &Ydoc) -> Result<bool, C
 
 /// Test evidence for comparing independently reconstructed full-state updates
 /// when raw bytes may differ only through canonicalized map-key ordering.
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn structurally_equal_v2_for_test(left: &Ydoc, right: &Ydoc) -> Result<bool, CollabError> {
     structurally_equal_v2(left, right)

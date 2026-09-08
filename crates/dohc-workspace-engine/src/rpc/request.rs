@@ -1,6 +1,5 @@
 use crate::EngineService;
 use crate::rpc::error::map_runtime;
-use crate::rpc::error::wire;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
@@ -88,25 +87,17 @@ impl Drop for OperationCancellation {
 pub(super) fn required_idempotency_key(request_id: Option<String>) -> Result<String, WireError> {
     request_id
         .filter(|request_id| !request_id.is_empty())
-        .ok_or_else(|| wire(ErrorCode::InvalidParams, "idempotency-key-required"))
+        .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "idempotency-key-required"))
 }
 
-pub(super) fn deserialize_optional_non_null_string<'de, D>(
+pub(super) fn deserialize_optional_non_null<'de, D, T>(
     deserializer: D,
-) -> Result<Option<String>, D::Error>
+) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
 {
-    String::deserialize(deserializer).map(Some)
-}
-
-pub(super) fn deserialize_optional_non_null_i64<'de, D>(
-    deserializer: D,
-) -> Result<Option<i64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    i64::deserialize(deserializer).map(Some)
+    T::deserialize(deserializer).map(Some)
 }
 
 pub(super) fn validate_metadata_fields(
@@ -118,7 +109,7 @@ pub(super) fn validate_metadata_fields(
         .flatten()
         .any(|field| field.len() > MAX_METADATA_FIELD_BYTES)
     {
-        return Err(wire(ErrorCode::InvalidParams, "invalid-metadata"));
+        return Err(WireError::new(ErrorCode::InvalidParams, "invalid-metadata"));
     }
     Ok(())
 }
@@ -128,7 +119,7 @@ pub(super) fn validated_origin(origin: Option<&str>) -> Result<String, WireError
         Some(value @ ("api" | "local-file" | "restore" | "sync" | "unknown")) => {
             Ok(value.to_owned())
         }
-        _ => Err(wire(ErrorCode::InvalidParams, "invalid-metadata")),
+        _ => Err(WireError::new(ErrorCode::InvalidParams, "invalid-metadata")),
     }
 }
 
@@ -138,7 +129,7 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
     };
     let object = value
         .as_object()
-        .ok_or_else(|| wire(ErrorCode::InvalidParams, "invalid-metadata"))?;
+        .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "invalid-metadata"))?;
     let nonempty = |field: &str| {
         object
             .get(field)
@@ -153,23 +144,24 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
         || !nonempty("onBehalfOf")
         || !run_valid
     {
-        return Err(wire(ErrorCode::InvalidParams, "invalid-metadata"));
+        return Err(WireError::new(ErrorCode::InvalidParams, "invalid-metadata"));
     }
     serde_json::to_string(&value)
         .map(Some)
-        .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-metadata"))
+        .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-metadata"))
 }
 
 pub(super) fn parse<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, WireError> {
-    serde_json::from_value(value).map_err(|_| wire(ErrorCode::InvalidParams, "invalid parameters"))
+    serde_json::from_value(value)
+        .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid parameters"))
 }
 
 pub(crate) fn now_ms() -> Result<i64, WireError> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| wire(ErrorCode::Internal, "system clock unavailable"))?;
+        .map_err(|_| WireError::new(ErrorCode::Internal, "system clock unavailable"))?;
     i64::try_from(duration.as_millis())
-        .map_err(|_| wire(ErrorCode::Internal, "system clock unavailable"))
+        .map_err(|_| WireError::new(ErrorCode::Internal, "system clock unavailable"))
 }
 
 impl EngineService {
