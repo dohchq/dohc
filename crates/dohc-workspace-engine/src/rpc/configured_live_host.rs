@@ -167,18 +167,7 @@ impl ConfiguredLiveHostConfig {
             MAX_WIRE_INTEGER,
             MIN_NEGOTIABLE_FRAME_BYTES,
         )?;
-        let upload_deadline = Duration::from_millis(self.ingress.upload_deadline_ms);
-        if self.ingress.upload_deadline_ms > MAX_WIRE_INTEGER
-            || Instant::now().checked_add(upload_deadline).is_none()
-        {
-            return Err(invalid("invalid live host upload deadline"));
-        }
-        Ok(LiveApplicationIngressConfig {
-            aggregate_bytes: self.ingress.aggregate_bytes,
-            application_working_reserve_bytes: self.ingress.application_working_reserve_bytes,
-            max_uploads: self.ingress.max_uploads,
-            upload_deadline,
-        })
+        self.ingress.validate()
     }
 }
 
