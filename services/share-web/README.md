@@ -191,7 +191,7 @@ meet the existing protocol's minimum upload allocation.
 Startup verifies the daemon's namespace, host, and workspace handles before
 opening admission. Shutdown closes the child before relay storage. A retired
 connection cannot disconnect its replacement. Keep the instance ID across
-restarts; changing it requires the separate host transition procedure.
+restarts. This command cannot replace an instance at its current host epoch.
 
 ## Reserved later-phase deployment work
 
