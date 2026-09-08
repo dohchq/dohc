@@ -1,3 +1,4 @@
+import { stripWindowsAliasSuffix } from "./paths";
 import { isRecord } from "./records";
 export type SiteKind = "static" | "package" | "configured";
 export type SiteConfidence = "high" | "medium" | "low";
@@ -247,7 +248,7 @@ function normalizeWorkspacePath(path: string): string | null {
     .replace(/^\/+/, "")
     .split("/")
     .filter((segment) => segment !== "" && segment !== ".");
-  const aliasSegments = segments.map(stripSiteIgnoredAliasSuffix);
+  const aliasSegments = segments.map(stripWindowsAliasSuffix);
   if (aliasSegments.some((segment) => segment === "" || segment === "." || segment === "..")) {
     return null;
   }
@@ -274,21 +275,17 @@ function sitePath(root: string, child: string): string {
   return root === "" ? child : `${root}/${child}`;
 }
 
-function stripSiteIgnoredAliasSuffix(segment: string): string {
-  return segment.replace(/[. ]+$/, "");
-}
-
 function hasIgnoredSiteSegment(path: string): boolean {
   const segments = path.replaceAll("\\", "/").toLowerCase().split("/");
-  if (stripSiteIgnoredAliasSuffix(segments[0] ?? "") === "plugins") {
+  if (stripWindowsAliasSuffix(segments[0] ?? "") === "plugins") {
     return true;
   }
   return segments.some((segment, index) => {
-    const stripped = stripSiteIgnoredAliasSuffix(segment);
+    const stripped = stripWindowsAliasSuffix(segment);
     const nextStripped =
       segments[index + 1] === undefined
         ? undefined
-        : stripSiteIgnoredAliasSuffix(segments[index + 1]!);
+        : stripWindowsAliasSuffix(segments[index + 1]!);
     if (IGNORED_SITE_SEGMENTS.has(stripped)) return true;
     return stripped === ".next" && nextStripped === "cache";
   });

@@ -80,7 +80,7 @@ describe("applyWikilinkPick — insertMode: node (the @-mention path)", () => {
   it("replaces the @query text with a wikilink node carrying target + label", () => {
     const editor = makeEditor("@road");
     // "@road" is 5 chars starting at doc pos 1; from = 1 (the "@").
-    const view = editor.view as Parameters<typeof applyWikilinkPick>[0];
+    const view = editor.view;
     applyWikilinkPick(view, 1, files[0]!, "node");
 
     const node = firstWikilinkNode(editor.getJSON());
@@ -93,7 +93,7 @@ describe("applyWikilinkPick — insertMode: node (the @-mention path)", () => {
 
   it("falls back to the path's leaf segment as the label when the file has no title", () => {
     const editor = makeEditor("@untitled-thing");
-    const view = editor.view as Parameters<typeof applyWikilinkPick>[0];
+    const view = editor.view;
     applyWikilinkPick(view, 1, { path: "deep/nested/untitled-thing.md" }, "node");
 
     const node = firstWikilinkNode(editor.getJSON());
@@ -109,7 +109,7 @@ describe("WikilinkPicker — dismiss leaves the literal text intact", () => {
   it("Escape closes the picker without touching the document", async () => {
     const editor = makeEditor("@road");
     const state: WikilinkPickerState = { open: true, from: 1, query: "road" };
-    const view = editor.view as Parameters<typeof WikilinkPicker>[0]["view"];
+    const view = editor.view;
     const onDismiss = vi.fn();
 
     render(
@@ -137,7 +137,7 @@ describe("WikilinkPicker — dismiss leaves the literal text intact", () => {
   it("clicking a match inserts the node and calls onDismiss", async () => {
     const editor = makeEditor("@road");
     const state: WikilinkPickerState = { open: true, from: 1, query: "road" };
-    const view = editor.view as Parameters<typeof WikilinkPicker>[0]["view"];
+    const view = editor.view;
     const onDismiss = vi.fn();
 
     render(

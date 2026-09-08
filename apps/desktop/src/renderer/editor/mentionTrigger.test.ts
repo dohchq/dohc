@@ -5,50 +5,16 @@ import {
   makeMentionPlugin,
   mentionPluginKey,
 } from './mentionTrigger'
-import type { PMNodeLike, PMDocLike } from './inlineAtomPlugin'
+import { codeBlock, codeMarkText, doc, paragraph } from './testDocs'
 
-// @-mention trigger tests. Pure functions; no DOM. Mirrors
-// wikilinkPlugin.test.ts's `detectAutocomplete` test conventions/helpers.
-// Cursor position convention (matches wikilinkPlugin.test.ts): the doc
-// root offset is 1, so `nodeStart + text.length` puts the cursor right
-// after the full text (i.e. the whole string is "typed so far").
-
-function paragraph(): PMNodeLike {
-  return {
-    type: { name: 'paragraph' },
-  }
-}
-
-function codeBlock(): PMNodeLike {
-  return {
-    type: { name: 'code_block', spec: { code: true } },
-  }
-}
-
-function makeDocWithParent(
-  text: string,
-  parent: PMNodeLike | null,
-  marks: PMNodeLike['marks'] = [],
-): PMDocLike {
-  return {
-    descendants(cb) {
-      cb(
-        {
-          isText: true,
-          text,
-          marks,
-          type: { name: 'text' },
-        },
-        1,
-        parent,
-      )
-    },
-  }
-}
+// @-mention trigger tests over real ProseMirror documents (testDocs.ts).
+// Cursor position convention (matches wikilinkPlugin.test.ts): a block's
+// text starts at pos 1, so `1 + text.length` puts the cursor right after
+// the full text (i.e. the whole string is "typed so far").
 
 describe('detectMentionAutocomplete — @mention picker trigger', () => {
   it('opens right after typing "@" at the start of a block', () => {
-    expect(detectMentionAutocomplete(makeDocWithParent('@x', paragraph()), 3)).toEqual({
+    expect(detectMentionAutocomplete(doc(paragraph('@x')), 3)).toEqual({
       active: true,
       from: 1,
       query: 'x',
@@ -56,7 +22,7 @@ describe('detectMentionAutocomplete — @mention picker trigger', () => {
   })
 
   it('opens for an incomplete mention after whitespace', () => {
-    expect(detectMentionAutocomplete(makeDocWithParent('see @pla', paragraph()), 9)).toEqual({
+    expect(detectMentionAutocomplete(doc(paragraph('see @pla')), 9)).toEqual({
       active: true,
       from: 5,
       query: 'pla',
@@ -64,34 +30,31 @@ describe('detectMentionAutocomplete — @mention picker trigger', () => {
   })
 
   it('does not open mid-word (e.g. an email address)', () => {
-    expect(
-      detectMentionAutocomplete(makeDocWithParent('user@example', paragraph()), 13),
-    ).toEqual({ active: false })
+    expect(detectMentionAutocomplete(doc(paragraph('user@example')), 13)).toEqual({
+      active: false,
+    })
   })
 
   it('does not open when "@" is immediately preceded by other punctuation/text', () => {
-    expect(detectMentionAutocomplete(makeDocWithParent('foo(@bar', paragraph()), 9)).toEqual({
+    expect(detectMentionAutocomplete(doc(paragraph('foo(@bar')), 9)).toEqual({
       active: false,
     })
   })
 
   it('does not open inside fenced code blocks', () => {
-    expect(detectMentionAutocomplete(makeDocWithParent('@nope', codeBlock()), 6)).toEqual({
+    expect(detectMentionAutocomplete(doc(codeBlock('@nope')), 6)).toEqual({
       active: false,
     })
   })
 
   it('does not open inside inline code marks', () => {
-    expect(
-      detectMentionAutocomplete(
-        makeDocWithParent('@nope', paragraph(), [{ type: { name: 'inlineCode' } }]),
-        6,
-      ),
-    ).toEqual({ active: false })
+    expect(detectMentionAutocomplete(doc(paragraph(codeMarkText('@nope'))), 6)).toEqual({
+      active: false,
+    })
   })
 
   it('reports an empty query for a bare trailing "@"', () => {
-    expect(detectMentionAutocomplete(makeDocWithParent('hello @', paragraph()), 8)).toEqual({
+    expect(detectMentionAutocomplete(doc(paragraph('hello @')), 8)).toEqual({
       active: true,
       from: 7,
       query: '',
@@ -99,7 +62,7 @@ describe('detectMentionAutocomplete — @mention picker trigger', () => {
   })
 
   it('closes once a space follows the query (no longer trailing at cursor)', () => {
-    expect(detectMentionAutocomplete(makeDocWithParent('@foo bar', paragraph()), 9)).toEqual({
+    expect(detectMentionAutocomplete(doc(paragraph('@foo bar')), 9)).toEqual({
       active: false,
     })
   })

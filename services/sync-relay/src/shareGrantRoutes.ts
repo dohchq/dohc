@@ -60,6 +60,7 @@ export function createShareGrantRoutes(
   newId: () => string,
   newLinkBearer: () => string,
   resolveUserIdByEmail: ((email: string) => Promise<string | null> | string | null) | undefined,
+  lookupUserEmail: ((userId: string) => Promise<string | null> | string | null) | undefined,
   linkKey: string | Uint8Array | undefined,
   shareWebOrigin: string | undefined,
   requireShareWorkspace: (share: { workspaceId: string }, workspaceId: string) => void,
@@ -599,15 +600,17 @@ export function createShareGrantRoutes(
 
       // Sharing by email. To close the account-enumeration oracle, the
       // response is identical whether or not the email has a dohc account:
-      // a known account becomes an immediate recipient, an unknown email
-      // becomes a pending invite (claimed when that account first touches
-      // the relay). Either way the response never echoes a recipient user
+      // a verified account becomes an immediate recipient. Other addresses
+      // become pending invites, claimed on a relay request after verification.
+      // Either way the response never echoes a recipient user
       // id, so the granter cannot distinguish "has an account" from "does
       // not" by inspecting the reply.
       const email = parseString(input.recipientEmail, "recipientEmail", MAX_EMAIL_CHARS);
       if (!resolveUserIdByEmail) {
         throw badRequest("recipient email lookup is not available on this relay");
       }
+      const granterEmail = await lookupUserEmail?.(actor.userId);
+      if (granterEmail?.trim().toLowerCase() === email.trim().toLowerCase()) throw relayError("self_share");
       const resolved = await resolveUserIdByEmail(email);
       if (resolved === actor.userId) throw relayError("self_share");
       // Re-check after the asynchronous account lookup: a pre-provisioned

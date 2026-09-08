@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { EditorState } from "@tiptap/pm/state";
 import { DecorationSet } from "@tiptap/pm/view";
-import { getDohcProseMirrorSchema } from "./import-export";
-import type { PMDocLike, PMNodeLike } from "./inlineAtomPlugin";
+import { boldText, codeBlock, doc, hardBreak, paragraph, schema } from "./testDocs";
 import {
   buildReplaceActiveTransaction,
   buildReplaceAllTransaction,
@@ -16,24 +15,14 @@ import {
   type FindReplaceState,
 } from "./findReplace";
 
-// Same hand-built-doc convention as wikilinkPlugin.test.ts / inlineAtomPlugin.test.ts:
-// a fake PMDocLike whose `descendants` walks explicit (text, pos) entries so
-// offset math is exercised without a real ProseMirror instance.
-function fakeDoc(entries: Array<{ text: string; pos: number }>): PMDocLike {
-  return {
-    descendants(cb) {
-      for (const e of entries) {
-        const node: PMNodeLike = { isText: true, text: e.text, marks: [], type: { name: "text" } };
-        cb(node, e.pos, null);
-      }
-    },
-  };
-}
+// Real ProseMirror documents built through the shared dohc schema
+// (testDocs.ts). A single paragraph's text starts at pos 1, matching the
+// hand-computed positions below.
 
 describe("computeMatches", () => {
   it("finds multiple matches in plain text", () => {
-    const doc = fakeDoc([{ text: "the cat sat on the mat", pos: 1 }]);
-    expect(computeMatches(doc, "at", true)).toEqual([
+    const d = doc(paragraph("the cat sat on the mat"));
+    expect(computeMatches(d, "at", true)).toEqual([
       { from: 6, to: 8 }, // c-AT
       { from: 10, to: 12 }, // s-AT
       { from: 21, to: 23 }, // m-AT
@@ -41,43 +30,42 @@ describe("computeMatches", () => {
   });
 
   it("is case-insensitive by default and case-sensitive when asked", () => {
-    const doc = fakeDoc([{ text: "Cat cat CAT", pos: 1 }]);
-    expect(computeMatches(doc, "cat", false)).toHaveLength(3);
-    expect(computeMatches(doc, "cat", true)).toEqual([{ from: 5, to: 8 }]);
+    const d = doc(paragraph("Cat cat CAT"));
+    expect(computeMatches(d, "cat", false)).toHaveLength(3);
+    expect(computeMatches(d, "cat", true)).toEqual([{ from: 5, to: 8 }]);
   });
 
   it("spans adjacent text nodes within the same textblock (**bo**ld)", () => {
-    // "bo" (pos 1-3) directly followed by "ld" (pos 3-5) — as ProseMirror
-    // lays out a bold "bo" + plain "ld" inside one paragraph.
-    const doc = fakeDoc([
-      { text: "bo", pos: 1 },
-      { text: "ld", pos: 3 },
-    ]);
-    expect(computeMatches(doc, "old", false)).toEqual([{ from: 2, to: 5 }]);
-    expect(computeMatches(doc, "bold", false)).toEqual([{ from: 1, to: 5 }]);
+    // A bold "bo" (pos 1-3) directly followed by a plain "ld" (pos 3-5)
+    // inside one paragraph — two text nodes, positionally contiguous.
+    const d = doc(paragraph(boldText("bo"), "ld"));
+    expect(computeMatches(d, "old", false)).toEqual([{ from: 2, to: 5 }]);
+    expect(computeMatches(d, "bold", false)).toEqual([{ from: 1, to: 5 }]);
   });
 
   it("does not merge across a block boundary or a non-text gap", () => {
-    // "end" at pos 1-4, then a gap (closing/opening block tags, or an
-    // inline atom) before "start" resumes at pos 10 — not contiguous.
-    const doc = fakeDoc([
-      { text: "end", pos: 1 },
-      { text: "start", pos: 10 },
-    ]);
-    expect(computeMatches(doc, "endstart", false)).toEqual([]);
-    expect(computeMatches(doc, "end", false)).toEqual([{ from: 1, to: 4 }]);
-    expect(computeMatches(doc, "start", false)).toEqual([{ from: 10, to: 15 }]);
+    // "end" at 1..4 in the first paragraph (nodeSize 5); "start" resumes at
+    // 6 in the second — not contiguous.
+    const d = doc(paragraph("end"), paragraph("start"));
+    expect(computeMatches(d, "endstart", false)).toEqual([]);
+    expect(computeMatches(d, "end", false)).toEqual([{ from: 1, to: 4 }]);
+    expect(computeMatches(d, "start", false)).toEqual([{ from: 6, to: 11 }]);
+
+    // A non-text leaf (hardBreak) between two text nodes in the same
+    // paragraph also breaks the run.
+    const withBreak = doc(paragraph("end", hardBreak(), "start"));
+    expect(computeMatches(withBreak, "endstart", false)).toEqual([]);
   });
 
   it("searches code blocks too — no exclusion by node type", () => {
-    const doc = fakeDoc([{ text: "const at = 1", pos: 1 }]);
-    expect(computeMatches(doc, "at", false)).toEqual([{ from: 7, to: 9 }]);
+    const d = doc(codeBlock("const at = 1"));
+    expect(computeMatches(d, "at", false)).toEqual([{ from: 7, to: 9 }]);
   });
 
   it("returns no matches for an empty query or an absent query string", () => {
-    const doc = fakeDoc([{ text: "hello world", pos: 1 }]);
-    expect(computeMatches(doc, "", false)).toEqual([]);
-    expect(computeMatches(doc, "xyz", false)).toEqual([]);
+    const d = doc(paragraph("hello world"));
+    expect(computeMatches(d, "", false)).toEqual([]);
+    expect(computeMatches(d, "xyz", false)).toEqual([]);
   });
 });
 
@@ -106,13 +94,13 @@ describe("nextMatchIndex / prevMatchIndex — wrapping navigation", () => {
 });
 
 describe("findReplaceReducer", () => {
-  const doc = fakeDoc([{ text: "the cat sat on the mat", pos: 1 }]);
+  const catDoc = doc(paragraph("the cat sat on the mat"));
 
   it("open computes matches and activates the first one", () => {
     const state = findReplaceReducer(
       CLOSED_FIND_REPLACE_STATE,
       { type: "open", replace: false, query: "at" },
-      doc,
+      catDoc,
     );
     expect(state.open).toBe(true);
     expect(state.replaceOpen).toBe(false);
@@ -124,10 +112,10 @@ describe("findReplaceReducer", () => {
     const opened = findReplaceReducer(
       CLOSED_FIND_REPLACE_STATE,
       { type: "open", replace: true, query: "cat" },
-      doc,
+      catDoc,
     );
     expect(opened.replaceOpen).toBe(true);
-    const reopened = findReplaceReducer(opened, { type: "open", replace: false }, doc);
+    const reopened = findReplaceReducer(opened, { type: "open", replace: false }, catDoc);
     expect(reopened.replaceOpen).toBe(true); // Mod-f after Mod-h doesn't collapse it
     expect(reopened.query).toBe("cat"); // and doesn't clobber the typed query
   });
@@ -136,11 +124,11 @@ describe("findReplaceReducer", () => {
     const opened = findReplaceReducer(
       CLOSED_FIND_REPLACE_STATE,
       { type: "open", replace: false, query: "at" },
-      doc,
+      catDoc,
     );
-    const navigated = findReplaceReducer(opened, { type: "next" }, doc);
+    const navigated = findReplaceReducer(opened, { type: "next" }, catDoc);
     expect(navigated.activeIndex).toBe(1);
-    const requeried = findReplaceReducer(navigated, { type: "setQuery", query: "cat" }, doc);
+    const requeried = findReplaceReducer(navigated, { type: "setQuery", query: "cat" }, catDoc);
     expect(requeried.matches).toHaveLength(1);
     expect(requeried.activeIndex).toBe(0);
   });
@@ -149,7 +137,7 @@ describe("findReplaceReducer", () => {
     const state = findReplaceReducer(
       CLOSED_FIND_REPLACE_STATE,
       { type: "open", replace: false, query: "zzz" },
-      doc,
+      catDoc,
     );
     expect(state.matches).toEqual([]);
     expect(state.activeIndex).toBe(-1);
@@ -159,24 +147,24 @@ describe("findReplaceReducer", () => {
     const opened = findReplaceReducer(
       CLOSED_FIND_REPLACE_STATE,
       { type: "open", replace: true, query: "cat" },
-      doc,
+      catDoc,
     );
-    expect(findReplaceReducer(opened, { type: "close" }, doc)).toEqual(CLOSED_FIND_REPLACE_STATE);
+    expect(findReplaceReducer(opened, { type: "close" }, catDoc)).toEqual(CLOSED_FIND_REPLACE_STATE);
   });
 
   it("sync keeps the same match active by position when the doc changes elsewhere", () => {
     const opened = findReplaceReducer(
       CLOSED_FIND_REPLACE_STATE,
       { type: "open", replace: false, query: "at" },
-      doc,
+      catDoc,
     );
-    const onSecond = findReplaceReducer(opened, { type: "next" }, doc);
+    const onSecond = findReplaceReducer(opened, { type: "next" }, catDoc);
     expect(onSecond.activeIndex).toBe(1);
     const secondMatchFrom = onSecond.matches[1]!.from;
 
     // An edit after the active match (appending text at the end) doesn't
     // shift any earlier position, so the same match should stay active.
-    const appendedDoc = fakeDoc([{ text: "the cat sat on the mat, extra", pos: 1 }]);
+    const appendedDoc = doc(paragraph("the cat sat on the mat, extra"));
     const synced = findReplaceReducer(onSecond, { type: "sync" }, appendedDoc);
     expect(synced.activeIndex).toBe(1);
     expect(synced.matches[synced.activeIndex]?.from).toBe(secondMatchFrom);
@@ -186,16 +174,16 @@ describe("findReplaceReducer", () => {
     const opened = findReplaceReducer(
       CLOSED_FIND_REPLACE_STATE,
       { type: "open", replace: false, query: "at" },
-      doc,
+      catDoc,
     );
-    const onSecond = findReplaceReducer(opened, { type: "next" }, doc);
+    const onSecond = findReplaceReducer(opened, { type: "next" }, catDoc);
     expect(onSecond.activeIndex).toBe(1);
 
     // The "sat" occurrence (the active match) is gone; only "cat" (before the
     // old position) and "mat" (after it) remain. Forward progression should
     // land on "mat" — the nearest match at/after where we were — not snap
     // back to "cat" at the top of the doc.
-    const editedDoc = fakeDoc([{ text: "the cat ran on the mat", pos: 1 }]);
+    const editedDoc = doc(paragraph("the cat ran on the mat"));
     const synced = findReplaceReducer(onSecond, { type: "sync" }, editedDoc);
     expect(synced.matches).toHaveLength(2);
     expect(synced.activeIndex).toBe(1);
@@ -204,17 +192,14 @@ describe("findReplaceReducer", () => {
 });
 
 describe("buildReplaceActiveTransaction / buildReplaceAllTransaction", () => {
-  const schema = getDohcProseMirrorSchema();
-
   function stateFor(text: string): EditorState {
-    const doc = schema.node("doc", null, [schema.node("paragraph", null, schema.text(text))]);
-    return EditorState.create({ schema, doc });
+    return EditorState.create({ schema, doc: doc(paragraph(text)) });
   }
 
   it("replace-active preserves the surrounding text", () => {
     const text = "the cat sat on the mat";
     const state = stateFor(text);
-    const matches = computeMatches(state.doc as unknown as PMDocLike, "cat", true);
+    const matches = computeMatches(state.doc, "cat", true);
     expect(matches).toHaveLength(1);
 
     const find: Pick<FindReplaceState, "matches" | "activeIndex" | "replacement"> = {
@@ -237,7 +222,7 @@ describe("buildReplaceActiveTransaction / buildReplaceAllTransaction", () => {
   it("replace-all replaces every match and reports the count", () => {
     const text = "the cat sat on the mat";
     const state = stateFor(text);
-    const matches = computeMatches(state.doc as unknown as PMDocLike, "the", true);
+    const matches = computeMatches(state.doc, "the", true);
     expect(matches).toHaveLength(2);
 
     const { tr, count } = buildReplaceAllTransaction(state, { matches, replacement: "a" });
@@ -259,14 +244,13 @@ describe("buildReplaceActiveTransaction / buildReplaceAllTransaction", () => {
 // meta-action wiring, the docChanged→auto-sync branch in apply(), and
 // buildFindDecorations can't silently regress.
 describe("makeFindReplacePlugin (registered plugin, real EditorState)", () => {
-  const schema = getDohcProseMirrorSchema();
-
   function openState(query: string) {
     const plugin = makeFindReplacePlugin();
-    const doc = schema.node("doc", null, [
-      schema.node("paragraph", null, schema.text("the cat sat on the mat")),
-    ]);
-    let state = EditorState.create({ schema, doc, plugins: [plugin] });
+    let state = EditorState.create({
+      schema,
+      doc: doc(paragraph("the cat sat on the mat")),
+      plugins: [plugin],
+    });
     state = state.apply(
       state.tr.setMeta(findReplaceKey, { type: "open", replace: false, query }),
     );

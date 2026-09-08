@@ -12,10 +12,8 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
 import { resetOrphanedDrafts } from "../orphanedDrafts";
-import {
-  disposeEngineDocLeasesForTests,
-  useEngineDoc,
-} from "./useEngineDoc";
+import { disposeEngineDocLeasesForTests } from "./engineDocLease";
+import { useEngineDoc } from "./useEngineDoc";
 
 type SaveStateListener = (event: EngineYDocSaveStateEvent) => void;
 

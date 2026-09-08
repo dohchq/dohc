@@ -1,4 +1,5 @@
-import { jsonResponse, sha256Hex } from "@dohc/service-http";
+import { jsonResponse } from "@dohc/service-http";
+import { sha256Hex } from "@dohc/workspace-core/hash";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
 import { arrayBufferForBytes, readBytes } from "./relayBytes";

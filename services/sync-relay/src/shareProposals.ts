@@ -92,7 +92,7 @@ export function destinationPath(
 
 // The operation a moment records, derived from where the granter has the file
 // and where the change puts it. The domain derives it the same way when it
-// builds a compensating moment (`crates/dohc-engine-domain/src/store.rs`):
+// builds a compensating moment (`crates/dohc-engine-domain/src/store/rollback.rs`):
 // gone is a delete, moved is a rename, and anything else is a write.
 function derivedOperation(
   op: ShareProposalOpRow,

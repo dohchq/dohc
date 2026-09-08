@@ -14,7 +14,7 @@ interface SyncStatus {
   lastSyncedAtMs: number | null;
 }
 
-export interface SyncStatusInput {
+interface SyncStatusInput {
   pendingChangeCount: number;
   inFlight: boolean;
   hasConflict: boolean;

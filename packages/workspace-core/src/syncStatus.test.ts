@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { deriveSyncStatus, type SyncStatusInput } from "./syncStatus";
+import { deriveSyncStatus } from "./syncStatus";
 
-const base: SyncStatusInput = {
+const base: Parameters<typeof deriveSyncStatus>[0] = {
   pendingChangeCount: 0,
   inFlight: false,
   hasConflict: false,

@@ -1005,4 +1005,3 @@ function parseDiscussionModerationAction(
   }
   throw notFound();
 }
-

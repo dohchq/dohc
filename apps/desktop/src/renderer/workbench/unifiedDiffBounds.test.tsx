@@ -14,7 +14,7 @@ vi.mock("./unifiedDiff", async (importOriginal) => {
   return { ...actual, computeTextDiff: computeTextDiffSpy };
 });
 
-const { EngineMomentDiffPage } = await import("../DesktopWorkspaceShell");
+const { EngineMomentDiffPage } = await import("./EngineMomentDiffPage");
 const { VersionComparePage } = await import("./WorkspaceVersions");
 const { momentDiffTabPath } = await import("./workbenchState");
 const noop = () => {};
@@ -106,6 +106,33 @@ describe("history diff page", () => {
     view.unmount();
     await act(async () => { finish({ restored: "text", restoredMomentId: "restore-2" }); await pending; });
     expect(order).toEqual(["restored", "release"]);
+  });
+
+  it.each([false, true])("updates an existing live region with the restore outcome (failure: %s)", async (failure) => {
+    let resolve!: (result: { restored: "text"; restoredMomentId: string }) => void;
+    let reject!: (error: Error) => void;
+    const pending = new Promise<{ restored: "text"; restoredMomentId: string }>((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    vi.stubGlobal("dohcDesktop", { ...bridgeMock, restoreEngineMomentFile: vi.fn().mockReturnValue(pending) });
+    renderPage(momentDetail());
+    await screen.findByTestId("engine-diff-lines");
+    const status = screen.getByRole("status");
+    expect(status.getAttribute("aria-live")).toBe("polite");
+    expect(status.textContent).toBe("");
+    fireEvent.click(screen.getByTestId("engine-diff-restore-file"));
+    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-confirm-restore")); });
+    await act(async () => {
+      if (failure) reject(new Error("Could not restore this file."));
+      else resolve({ restored: "text", restoredMomentId: "restore-1" });
+      await pending.catch(() => undefined);
+    });
+    expect(screen.getByRole("status")).toBe(status);
+    expect(status.textContent).toBe(failure
+      ? "Could not restore this file."
+      : "Restored the earlier state. Undo restore is available here.");
+    expect(status.contains(screen.getByTestId("engine-diff-restore-status"))).toBe(true);
   });
 
   it("diffs a moment once, however often the page renders", async () => {

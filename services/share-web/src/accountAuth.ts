@@ -1,5 +1,6 @@
 import { getCookies, parseSetCookieHeader, splitSetCookieHeader } from "better-auth/cookies";
 import { isIP } from "node:net";
+import { readBoundedJson } from "@dohc/service-http";
 
 export interface AccountAuthConfig {
   upstreamUrl: string;
@@ -21,35 +22,6 @@ function userProjection(value: unknown): { id: string; name: string } | null {
   if (!record(value) || typeof value.id !== "string" || value.id.length === 0 ||
       typeof value.name !== "string") return null;
   return { id: value.id, name: value.name };
-}
-
-async function boundedJson(
-  message: Request | Response,
-  limit: number,
-  signal: AbortSignal,
-): Promise<unknown> {
-  signal.throwIfAborted();
-  const reader = message.body?.getReader();
-  if (!reader) throw new Error("missing body");
-  const abort = (): void => { void reader.cancel().catch(() => undefined); };
-  signal.addEventListener("abort", abort, { once: true });
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  try {
-    while (true) {
-      const next = await reader.read();
-      signal.throwIfAborted();
-      if (next.done) break;
-      if (next.value.byteLength > limit - length) throw new Error("body too large");
-      length += next.value.byteLength;
-      chunks.push(next.value);
-    }
-    return JSON.parse(Buffer.concat(chunks, length).toString("utf8")) as unknown;
-  } finally {
-    signal.removeEventListener("abort", abort);
-    await reader.cancel().catch(() => undefined);
-    reader.releaseLock();
-  }
 }
 
 export function createAccountAuthHandler(options: AccountAuthOptions) {
@@ -136,7 +108,7 @@ export function createAccountAuthHandler(options: AccountAuthOptions) {
       if (cookie) headers.set("cookie", cookie);
       let body: string | undefined;
       if (mutation) {
-        const input = await boundedJson(request, options.maxRequestBytes, controller.signal);
+        const input = await readBoundedJson(request, options.maxRequestBytes, controller.signal);
         if (!record(input)) return refuse(404);
         if (operation === "sign-in") {
           if (Object.keys(input).sort().join(",") !== "email,password" ||
@@ -172,7 +144,7 @@ export function createAccountAuthHandler(options: AccountAuthOptions) {
         await upstream.body?.cancel().catch(() => undefined);
         return refuse(503);
       }
-      const result = await boundedJson(upstream, options.maxResponseBytes, controller.signal);
+      const result = await readBoundedJson(upstream, options.maxResponseBytes, controller.signal);
       const setCookies = checkedCookies(upstream, operation);
       let output: unknown;
       if (operation === "session" && result === null) output = { user: null };
