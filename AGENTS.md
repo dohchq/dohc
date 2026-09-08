@@ -10,9 +10,8 @@ We are building the MVP and have not launched with users.
 
 The product sections below are decision boundaries, not a feature checklist. Use them to reject work that would turn dohc into the wrong product.
 
-- If a task conflicts with product commitments or invariants, explain the conflict. Obtain approval before changing those boundaries.
+- If an instruction conflicts with the task, explain the conflict and get human approval before breaking it.
 - Treat the remaining instructions as repository defaults. An explicit developer request can override them.
-- Ask when progress requires unavailable access, an unresolved product decision, or authorization beyond the task. Name the specific dependency.
 
 ## Product model
 
