@@ -468,6 +468,8 @@ fn worker_main(
 }
 
 fn acquire_writer_lock(db_path: &std::path::Path) -> Result<std::fs::File, RuntimeError> {
+    // Canonical path aliases share this lock. Workspace ROOT_BINDING validation
+    // separately refuses databases copied or hardlinked into an unbound root.
     let canonical = std::fs::canonicalize(db_path).map_err(|error| RuntimeError::Identity {
         reason: "could not resolve workspace writer lock",
         source: Some(error),

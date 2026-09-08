@@ -284,16 +284,15 @@ fn ordinary_and_configured_processes_share_writer_exclusion_and_crash_release() 
     first.hello("configured-test-secret");
     assert!(matches!(first.read(), Envelope::HelloAck(_)));
     let alias = scratch.path().join("workspace-alias");
-    assert!(dohc_engine_testkit::try_make_dir_alias(&root, &alias).unwrap());
     let alias_config = scratch.path().join("alias.json");
-    std::fs::write(&alias_config, configuration(&alias).to_string()).unwrap();
-    assert!(
-        !command(Some(&alias_config))
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
+    if dohc_engine_testkit::try_make_dir_alias(&root, &alias).unwrap() {
+        std::fs::write(&alias_config, configuration(&alias).to_string()).unwrap();
+        let aliased = command(Some(&alias_config)).output().unwrap();
+        assert!(!aliased.status.success());
+        assert!(String::from_utf8_lossy(&aliased.stderr).contains("workspace-owned"));
+    } else {
+        eprintln!("directory aliases unavailable; skipping alias refusal clause");
+    }
     let second = command(Some(&path)).output().unwrap();
     assert!(!second.status.success());
     assert!(second.stdout.is_empty());
@@ -306,13 +305,16 @@ fn ordinary_and_configured_processes_share_writer_exclusion_and_crash_release() 
         panic!("second writer must refuse")
     };
     assert_eq!(error.error.code, ErrorCode::WorkspaceUnavailable);
+    assert_eq!(error.error.message, "workspace-owned");
     first.0.kill().unwrap();
     first.0.wait().unwrap();
     let Envelope::Response(response) = ordinary.request(2, "workspace.open", None, params) else {
         panic!("crash must release writer")
     };
     let handle = serde_json::from_value(response.result["workspace"].clone()).unwrap();
-    assert!(!command(Some(&path)).output().unwrap().status.success());
+    let ordinary_owned = command(Some(&path)).output().unwrap();
+    assert!(!ordinary_owned.status.success());
+    assert!(String::from_utf8_lossy(&ordinary_owned.stderr).contains("workspace-owned"));
     assert!(matches!(
         ordinary.request(3, "workspace.close", Some(handle), json!({})),
         Envelope::Response(_)
