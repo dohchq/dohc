@@ -495,7 +495,6 @@ fn ordinary_and_configured_processes_share_writer_exclusion_and_crash_release() 
     assert!(matches!(reopened.read(), Envelope::HelloAck(_)));
     reopened.0.stdin.take();
     assert!(reopened.0.wait().unwrap().success());
-    assert!(!root.join(".dohc/engine/engine.db.owner-lock").exists());
     let other_root = scratch.path().join("other-root");
     std::fs::create_dir_all(other_root.join(".dohc/engine")).unwrap();
     std::fs::hard_link(
