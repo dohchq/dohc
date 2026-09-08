@@ -1018,19 +1018,6 @@ impl Ydoc {
         })
     }
 
-    /// Set a top-level [`ROOT_FRONTMATTER`] nested map and return the encoded
-    /// delta. Used to exercise constraint 2 (nested key-order nondeterminism).
-    pub fn frontmatter_set_nested(&self, key: &str, entries: &[(&str, &str)]) -> Vec<u8> {
-        let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
-        let nested: std::collections::HashMap<String, Any> = entries
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), Any::from(*v)))
-            .collect();
-        self.with_delta(|txn| {
-            map.insert(txn, key, Any::from(nested.clone()));
-        })
-    }
-
     /// Remove one target from a relation field. A single relation removes the
     /// key; a many relation keeps the sequence and removes matching entries.
     /// Returns `None` when the applied frontmatter has no such link.

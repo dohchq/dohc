@@ -146,7 +146,7 @@ fn cipher_for(key: &SecretDataKey) -> Result<Aes256Gcm, CryptoError> {
 }
 
 /// The always-compiled sealing core. Private: the only public entry is [`seal`]
-/// (fresh CSPRNG IV). `seal_with_iv` (gated) also routes here for parity tests.
+/// (fresh CSPRNG IV). `seal_with_iv` also routes here for parity tests.
 fn seal_core(
     key: &SecretDataKey,
     workspace_id: &str,
@@ -178,13 +178,12 @@ fn seal_core(
 
 /// Encrypt `plaintext` under `key`, bound to `workspace_id`+`path`, using the
 /// caller-supplied `iv`. **Only for deterministic tests / cross-engine parity
-/// fixtures** — gated behind the `test-util` feature and hidden from docs.
+/// fixtures**. Private and compiled only for unit tests.
 ///
 /// A fixed IV reused under one key is catastrophic for AES-GCM, so production
 /// code must never reach this: use [`seal`], which draws a fresh CSPRNG nonce.
-#[cfg(any(test, feature = "test-util"))]
-#[doc(hidden)]
-pub fn seal_with_iv(
+#[cfg(test)]
+fn seal_with_iv(
     key: &SecretDataKey,
     workspace_id: &str,
     path: &str,
@@ -401,8 +400,7 @@ mod tests {
     }
 
     // Byte-exact re-encryption parity vs the real Node fixture. Lives inline (not
-    // in tests/) because it needs `seal_with_iv`, which is gated behind
-    // `test-util`/`cfg(test)` so production consumers cannot reuse a nonce. The
+    // in tests/) because it needs the private, test-only `seal_with_iv`. The
     // integration test (`tests/cross_engine_parity.rs`) covers the public-API
     // decrypt/AAD parity.
     #[test]
