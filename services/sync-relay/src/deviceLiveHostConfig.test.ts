@@ -17,7 +17,7 @@ function fixture() {
   const workspace = join(root, "workspace"); mkdirSync(workspace);
   const file = join(root, "config.json");
   const value = { version: 1, engineExecutable: resolve(process.execPath), hostId: "host", hostEpoch: 1, instanceId: "instance",
-    workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 2 }], maxQueuedBytes: 4_000_000,
+    workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 2 }], maxQueuedBytes: 4_000_000, shutdownGraceMs: 1000,
     ingress: { aggregateBytes: 400_000_000, applicationWorkingReserveBytes: 1_000_000, maxUploads: 2, uploadDeadlineMs: 1000 } };
   return { file, value, write(value: unknown) { writeFileSync(file, JSON.stringify(value)); return file; } };
 }
@@ -26,6 +26,7 @@ it("validates the complete private device configuration before opening a connect
   expect(readDeviceLiveHostConfig(run.write(run.value), limits)).toEqual(run.value);
   for (const value of [{ ...run.value, engineExecutable: "relative.exe" }, { ...run.value, workspaces: [] },
     { ...run.value, workspaces: [...run.value.workspaces, ...run.value.workspaces] }, { ...run.value, maxQueuedBytes: 10 },
+    ...[undefined, 0, -1, 1.5, Infinity, 2_147_483_648].map(shutdownGraceMs => ({ ...run.value, shutdownGraceMs })),
     { ...run.value, ingress: { ...run.value.ingress, maxUploads: 0 } }, { ...run.value, command: "extra" }]) {
     expect(() => readDeviceLiveHostConfig(run.write(value), limits)).toThrow();
   }

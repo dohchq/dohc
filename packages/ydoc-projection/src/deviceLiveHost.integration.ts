@@ -54,7 +54,7 @@ it("delivers through the outbound TLS device pipe and replays a lost durable ack
   expect(deployment.storage.provisionDeviceHostCredential({ credential, updatedAtMs: 1 }).ok).toBe(true);
   const deviceConfig = join(root, "device.json"), relayConfig = join(root, "relay-device.json");
   writeFileSync(deviceConfig, JSON.stringify({ version: 1, engineExecutable: executable, hostId: credential.hostId,
-    hostEpoch: credential.hostEpoch, instanceId: credential.instanceId, maxQueuedBytes: 4_000_000,
+    hostEpoch: credential.hostEpoch, instanceId: credential.instanceId, maxQueuedBytes: 4_000_000, shutdownGraceMs: 5000,
     workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 8 }],
     settlement: { maxApplicationsPerSettlement: 8 },
     ingress: { aggregateBytes: 400_000_000, applicationWorkingReserveBytes: 1_000_000, maxUploads: 2, uploadDeadlineMs: 30_000 } }));
@@ -72,7 +72,7 @@ import child from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 net.Server.prototype.listen = function () { throw new Error('Device listener forbidden'); };
 const original = child.spawn;
-child.spawn = function (...args) { const process = original.apply(this, args); console.error('OWNED_NATIVE_PID=' + process.pid); return process; };
+child.spawn = function (...args) { const process = original.apply(this, args); console.error('OWNED_NATIVE_PID=' + process.pid); process.once('close', () => console.error('CLOSED_NATIVE_PID=' + process.pid)); return process; };
 syncBuiltinESMExports();\n`);
   const processRows: { connectorPid: number; nativePid?: number; logs?: string }[] = [];
   const children = new Set<ChildProcessWithoutNullStreams>();
@@ -292,6 +292,7 @@ syncBuiltinESMExports();\n`);
     expect(hash(readFileSync(executable))).toBe(expectedHash.toLowerCase());
     expect(children.size).toBe(0);
     expect(processRows.every(row => row.nativePid)).toBe(true);
+    for (const row of processRows) expect(row.logs).toContain(`CLOSED_NATIVE_PID=${row.nativePid}`);
     writeFileSync(join(root, "result.json"), JSON.stringify({ verdict: "PASS", scope: "durable-outbound-delivery and explicit configured settlement", executable, sha256: expectedHash, results, processRows }, null, 2));
   } finally {
     await closeTransport();
