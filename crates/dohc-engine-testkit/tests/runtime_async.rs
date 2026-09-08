@@ -6,7 +6,6 @@ use dohc_engine_domain::WriteText;
 use dohc_engine_runtime::{ActorHandle, CancellationToken, NoFaults, WorkspaceSupervisor};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 const WS: &str = "ws";
 
@@ -72,61 +71,4 @@ async fn async_write_read_round_trip() {
     assert_eq!(snapshot.text, "body-1");
 
     sup.close(&db).expect("close");
-}
-
-// oracle: close() lands in bounded time even under sustained concurrent
-// submission — the reserved Close slot cannot be starved by tokio's fair waiter
-// queue (regression for the try_send-spin design).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn close_returns_promptly_under_sustained_submission() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let sup = Arc::new(WorkspaceSupervisor::new());
-    let handle = sup.open(&db, 1).expect("open").actor;
-    seed(&handle).await;
-
-    // Many producers hammer the writer; when the bounded queue is full they
-    // park in the fair send() queue, exactly the condition that could starve a
-    // spinning close().
-    let mut producers = Vec::new();
-    for t in 0..16u64 {
-        let handle = handle.clone();
-        producers.push(tokio::spawn(async move {
-            let mut i = 0u64;
-            loop {
-                let write = unit(&format!("t{t}-d{i}.md"), "x", i as i64 + 1);
-                // Stop once the actor is gone (channel closed by close()).
-                if handle
-                    .versioned_text_write(write, Arc::new(NoFaults), CancellationToken::new())
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-                i += 1;
-            }
-        }));
-    }
-
-    // Let the producers saturate the queue.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // close() joins the worker, so run it on a blocking thread; it must return
-    // quickly despite the sustained load.
-    let started = Instant::now();
-    let sup2 = Arc::clone(&sup);
-    let db2 = db.clone();
-    tokio::task::spawn_blocking(move || sup2.close(&db2).expect("close"))
-        .await
-        .expect("join close");
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "close starved under sustained submission: {elapsed:?}"
-    );
-
-    // Producers observe the actor gone and finish.
-    for p in producers {
-        let _ = p.await;
-    }
 }

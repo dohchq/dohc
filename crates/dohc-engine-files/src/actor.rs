@@ -488,3 +488,68 @@ fn worker_main(
     drop(scanner);
     drop(controller);
 }
+
+#[cfg(test)]
+mod saturation_tests {
+    use super::*;
+    use dohc_test_scratch::ScratchDir;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn overflow_is_never_lost_even_when_the_queue_is_saturated() {
+        let workspace = ScratchDir::new().expect("workspace");
+        let actor = FilesActor::spawn_async(workspace.to_path_buf(), ScanBounds::default())
+            .await
+            .expect("spawn");
+        let handle = actor.handle();
+        let ReconcileRun::Completed(plan) = handle
+            .reconcile(CancellationToken::new())
+            .await
+            .expect("baseline")
+        else {
+            panic!("expected completed baseline");
+        };
+        assert!(plan.ops.is_empty());
+        handle
+            .acknowledge_capture(
+                plan,
+                CaptureApplyResult {
+                    applied_paths: Vec::new(),
+                    captured: Vec::new(),
+                    not_owned_paths: Vec::new(),
+                    failed_applies: Vec::new(),
+                    crashed_after_durable_boundary: None,
+                    degraded: false,
+                },
+            )
+            .await
+            .expect("acknowledge empty baseline");
+        assert!(!handle.stats().await.expect("baseline stats").dirty);
+
+        // Close already holds one permit. Hold every data permit so no command
+        // can enter the channel while overflow is marked.
+        assert!(actor.close_permit.is_some());
+        let permits = actor
+            .tx
+            .try_reserve_many(COMMAND_QUEUE_CAPACITY)
+            .expect("reserve all data slots");
+        let (reply, _reply_rx) = oneshot::channel();
+        assert!(matches!(
+            actor.tx.try_send(Command::Stats { reply }),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        handle.notify_overflow();
+        drop(permits);
+
+        assert!(
+            handle.stats().await.expect("stats").dirty,
+            "overflow mark lost under queue saturation"
+        );
+        assert!(matches!(
+            handle
+                .reconcile_if_dirty(CancellationToken::new())
+                .await
+                .expect("if-dirty"),
+            ReconcileRun::Completed(_)
+        ));
+    }
+}
