@@ -480,7 +480,7 @@ impl EngineService {
             &cancellation,
             "collections.list",
             open.actor
-                .collections_list(open.workspace_id, params.limit, params.cursor),
+                .collections_list(open.workspace_id.clone(), params.limit, params.cursor),
         )
         .await?;
         let mut response = collection_response_value(page)?;
@@ -509,7 +509,7 @@ impl EngineService {
             &cancellation,
             "collections.listPendingAdoptions",
             open.actor.collections_list_pending_adoptions(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.limit,
                 params.cursor,
             ),
@@ -532,7 +532,7 @@ impl EngineService {
             &cancellation,
             "collections.get",
             open.actor
-                .collections_get(open.workspace_id, params.collection_path),
+                .collections_get(open.workspace_id.clone(), params.collection_path),
         )
         .await?
         .ok_or_else(|| wire(ErrorCode::InvalidParams, "collection-not-found"))?;
@@ -573,7 +573,7 @@ impl EngineService {
             &cancellation,
             "collections.query",
             open.actor.collections_query_records(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.collection_path,
                 CollectionQuery {
                     filter: params.filter,
@@ -617,7 +617,7 @@ impl EngineService {
             &cancellation,
             "collections.getRecord",
             open.actor.collections_get_record(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.collection_path,
                 params.record_id,
                 params.history_limit,

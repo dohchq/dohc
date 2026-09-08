@@ -257,7 +257,7 @@ impl EngineService {
             "chats.threads.start",
             open.actor.chat_thread_start(
                 StartChannelThread {
-                    workspace_id: open.workspace_id,
+                    workspace_id: open.workspace_id.clone(),
                     channel_id: params.channel_id,
                     thread_id: params.thread_id,
                     message_id: params.message_id,
@@ -302,7 +302,7 @@ impl EngineService {
             "chats.threads.create",
             open.actor.chat_thread_create(
                 CreateFileThread {
-                    workspace_id: open.workspace_id,
+                    workspace_id: open.workspace_id.clone(),
                     thread_id: params.thread_id,
                     title: params.title,
                     linked_object_id: params.linked_file.object_id,
@@ -499,7 +499,7 @@ impl EngineService {
             &cancellation,
             "chats.threads.findChannelId",
             open.actor
-                .chat_thread_find_channel_id(open.workspace_id, params.thread_id),
+                .chat_thread_find_channel_id(open.workspace_id.clone(), params.thread_id),
         )
         .await?;
         Ok(channel_id.map_or(Value::Null, Value::String))
@@ -525,7 +525,7 @@ impl EngineService {
             &cancellation,
             "chats.threads.revision",
             open.actor
-                .chat_thread_revision(open.workspace_id, params.thread_id),
+                .chat_thread_revision(open.workspace_id.clone(), params.thread_id),
         )
         .await?;
         Ok(json!({ "revision": revision }))
@@ -553,7 +553,7 @@ impl EngineService {
             &cancellation,
             "chats.threads.getProjection",
             open.actor.chat_thread_get_projection(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.thread_id,
                 linked_file_access,
             ),

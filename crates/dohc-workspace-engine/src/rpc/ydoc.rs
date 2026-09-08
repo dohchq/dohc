@@ -480,15 +480,13 @@ impl EngineService {
             ));
         }
         let open = self.open(handle.as_ref())?;
-        let workspace_id = open.workspace_id;
-        let db_path = open.db_path;
         let cancellation = OperationCancellation::new(ctx);
         let read = async move {
             tokio::task::spawn_blocking(move || {
-                let store = dohc_engine_storage::EngineStore::open_read_only(&db_path)?;
+                let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path)?;
                 dohc_engine_collab::read_pending_owner_outbox_page(
                     &store,
-                    &workspace_id,
+                    &open.workspace_id,
                     &params.outbox_id,
                     params.cursor,
                     max_bytes,
@@ -1354,7 +1352,7 @@ impl EngineService {
         &self,
         handle: Option<&WorkspaceHandle>,
         session_id: &str,
-    ) -> Result<(OpenWorkspace, YdocSessionView), WireError> {
+    ) -> Result<(Arc<OpenWorkspace>, YdocSessionView), WireError> {
         let handle = handle.ok_or_else(workspace_unavailable)?;
         let open = self.open(Some(handle))?;
         let sessions = lock(&self.sessions);
@@ -1385,11 +1383,11 @@ impl EngineService {
         &self,
         handle: &WorkspaceHandle,
     ) -> Result<dohc_engine_collab::CacheStats, RuntimeError> {
-        let actor = lock(&self.handles)
+        let open = lock(&self.handles)
             .get(handle)
-            .map(|open| open.actor.clone())
+            .cloned()
             .ok_or(RuntimeError::ActorUnavailable)?;
-        actor.ydoc_cache_stats_for_test().await
+        open.actor.ydoc_cache_stats_for_test().await
     }
 
     /// Evict every actor-local document so the next consumer proves its cold
@@ -1400,11 +1398,11 @@ impl EngineService {
         &self,
         handle: &WorkspaceHandle,
     ) -> Result<dohc_engine_collab::CacheStats, RuntimeError> {
-        let actor = lock(&self.handles)
+        let open = lock(&self.handles)
             .get(handle)
-            .map(|open| open.actor.clone())
+            .cloned()
             .ok_or(RuntimeError::ActorUnavailable)?;
-        actor.ydoc_cache_clear_for_test().await
+        open.actor.ydoc_cache_clear_for_test().await
     }
 }
 

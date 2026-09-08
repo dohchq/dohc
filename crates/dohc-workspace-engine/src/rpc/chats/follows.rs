@@ -112,7 +112,7 @@ impl EngineService {
             "chats.follows.set",
             open.actor.chat_follow_set(
                 SetFollow {
-                    workspace_id: open.workspace_id,
+                    workspace_id: open.workspace_id.clone(),
                     owner_user_id: params.owner_user_id,
                     replication_owner_user_id: params.replication_owner_user_id,
                     target_kind,
@@ -148,8 +148,11 @@ impl EngineService {
         let follows = Self::read_under_ctx(
             &cancellation,
             "chats.follows.list",
-            open.actor
-                .chat_follows_list(open.workspace_id, params.owner_user_id, params.state),
+            open.actor.chat_follows_list(
+                open.workspace_id.clone(),
+                params.owner_user_id,
+                params.state,
+            ),
         )
         .await?;
         let follows: Vec<_> = follows
@@ -206,7 +209,7 @@ impl EngineService {
             &cancellation,
             "chats.follows.ensureDefaults",
             open.actor.chat_follows_ensure_defaults(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.owner_user_id,
                 cancellation.token(),
             ),
