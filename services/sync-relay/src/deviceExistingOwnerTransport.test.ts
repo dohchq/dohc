@@ -42,13 +42,16 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     const discovery = await peer!.sendRequest({id: 1,method: "liveApplication.hosts",params: {}});
     expect(discovery.result).toMatchObject({ownerSessions: {maxEvents: 10}});
     await peer!.sendRequest({id: 2,method: "liveApplication.register",workspace: "ws-ordinary",params: {binding: {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1}}});
-    await peer!.sendRequest({id: 3,method: "liveApplication.ownerState",workspace: "ws-ordinary",params: {registrationId: 9}});
-    const result = await peer!.sendLiveOwnerAdoption({id: 4,workspace: "ws-ordinary",registrationId: 9,sessionId: "9",deadlineMs: 30_000},
+    owner.prepareHandoff.mockRejectedValueOnce(new Error("renderer refused"));
+    await expect(peer!.sendRequest({id: 3,method: "liveApplication.ownerState",workspace: "ws-ordinary",params: {registrationId: 9}})).rejects.toThrow();
+    const state = await peer!.sendRequest({id: 4,method: "liveApplication.ownerState",workspace: "ws-ordinary",params: {registrationId: 9}});
+    expect(state.result).toMatchObject({throughCursor: 0});
+    const result = await peer!.sendLiveOwnerAdoption({id: 5,workspace: "ws-ordinary",registrationId: 9,sessionId: "9",deadlineMs: 30_000},
       { relayDatabaseNamespace: "namespace",adoptionId: "adoption",sourceMomentId: "source",sourceDigest: "b".repeat(64),sourceByteLength: 0,baselineMomentRelaySequence: 1,
         baselineRegisteredAtMs: 0,expectedLocalSequence: 0,terminalReceipt: null,baselineBytes: new Uint8Array([0,0]),events: [] },{maxBytes: 1_000_000,maxEvents: 10});
     expect(result.result).toMatchObject({status: "adopted"});
     expect(singleton.forwardLiveOwnerAdoption.mock.calls[0]![0]).toMatchObject({sessionId: "ordinary-session"});
-    await expect(peer!.sendRequest({id: 5,method: "workspace.close",workspace: "ws-ordinary",params: {}})).rejects.toThrow();
+    await expect(peer!.sendRequest({id: 6,method: "workspace.close",workspace: "ws-ordinary",params: {}})).rejects.toThrow();
     expect(singleton.sendRequest.mock.calls.map(call => call[0].method)).not.toContain("workspace.close");
     expect(singleton.close).not.toHaveBeenCalled();
   } finally { await transport.close(); peer?.close(); }

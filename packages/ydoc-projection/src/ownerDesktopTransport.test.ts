@@ -1,4 +1,5 @@
 import {createHash} from "node:crypto";
+import {spawn,spawnSync,type ChildProcess} from "node:child_process";
 import {once} from "node:events";
 import {createServer} from "node:http";
 import {createServer as createTlsServer} from "node:https";
@@ -24,7 +25,7 @@ import {yDocToMarkdown} from "./import-export.js";
 import {policy} from "./liveCommittedDeliveryTestSupport.js";
 
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
-it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY)("keeps the ordinary desktop owner through authenticated adoption, durable outbox delivery, remote apply and settlement", async () => {
+it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keeps the ordinary desktop owner through authenticated adoption, durable outbox delivery, remote apply and settlement (standalone=%s)", async standalone => {
   const binary = resolve(process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY!);
   expect(hash(readFileSync(binary))).toBe(process.env.DOHC_OWNER_DESKTOP_PROOF_SHA256?.toLowerCase());
   const output = resolve(process.env.DOHC_OWNER_DESKTOP_PROOF_OUTPUT!); mkdirSync(output,{recursive: true});
@@ -45,6 +46,9 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY)("keeps the ordinary desk
   let ipc: ReturnType<typeof createEngineYDocSessionIpc> | undefined;
   let renderer: Awaited<ReturnType<typeof bindEngineYDoc>> | undefined;
   let deployment: ReturnType<typeof openRelayDeployment> | undefined;
+  let child: ChildProcess | undefined;
+  let handoffEditInjected = false;
+  let handoffCount = 0;
   try {
     capture.captureBatch([{path: "docs/a.md",operation: "update"}]); await capture.flush();
     await capture.stop(); await sessions.closeWorkspace(workspace);
@@ -65,7 +69,11 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY)("keeps the ordinary desk
       onLineageReplacement(listener) {listeners.set(CHANNELS.engineYDocLineageReplacement,listener); return () => listeners.delete(CHANNELS.engineYDocLineageReplacement);},
       async acknowledgeLineageReplacement(lineageGeneration) {const result=ipc!.acknowledgeLineageReplacement(sender,{sessionId,lineageGeneration}); if (!result.accepted) throw new Error(result.reason); return result.updates;},
       adoptOwner: lineageGeneration => ipc!.prepareOwnerHandoff(sender,{sessionId,lineageGeneration}),
-      onOwnerHandoff(listener) {listeners.set(CHANNELS.engineYDocOwnerHandoff,event => listener(event.lineageGeneration)); return () => listeners.delete(CHANNELS.engineYDocOwnerHandoff);},
+      onOwnerHandoff(listener) {listeners.set(CHANNELS.engineYDocOwnerHandoff,event => {
+        handoffCount++;
+        listener(event.lineageGeneration);
+        if (!handoffEditInjected) {handoffEditInjected = true; renderer?.doc?.getMap("frontmatter").set("duringHandoff","Queued owner edit");}
+      }); return () => listeners.delete(CHANNELS.engineYDocOwnerHandoff);},
       close: () => ipc!.close(sender,{sessionId}),
     });
     expect(renderer.available).toBe(true);
@@ -94,9 +102,10 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY)("keeps the ordinary desk
     const sharePort = (share.address() as {port: number}).port;
     const bridge = createDeviceControlBridge({publicHosts: new Set([`localhost:${sharePort}`]),relayUrl: `http://127.0.0.1:${relayPort}`,relayExchangeKey: exchangeKey,limits,
       admission: {capacity: 8,refillPerSecond: 1,maxKeys: 8},trustedProxies: new Set()}); share.on("upgrade",bridge.handleUpgrade);
-    const connection = connectDeviceHost({url: `wss://localhost:${sharePort}/api/device-control`,credential,limits,onRegistered() {},existingOwner: {
+    const connect = () => connectDeviceHost({url: `wss://localhost:${sharePort}/api/device-control`,credential,limits,onRegistered() {},existingOwner: {
       client: singleton,workspaces: [{workspaceId: "workspace",workspaceHandle: engineBinding.workspace}],ownerFor: binding => ipc!.existingOwner(binding),
       maxQueuedBytes: 4_000_000,maxFrameBytes: 1_048_576,maxUploads: 2,maxRegistrations: 8,aggregateBytes: 200_000_000,maxAdoptionBytes: 1_000_000,maxAdoptionEvents: 100,requestDeadlineMs: 30_000}});
+    let connection = connect();
     closeNetwork = async () => {connection.stop(); control.close(); bridge.close(); await connection.closed;
       await Promise.all([new Promise<void>(resolve => share.close(() => resolve())),new Promise<void>(resolve => relay.close(() => resolve()))]); native.close();};
     await expect.poll(() => deployment!.storage.getLiveHostControl()?.admissionState,{timeout: 30_000}).toBe("open");
@@ -110,6 +119,59 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY)("keeps the ordinary desk
     expect(deployment.storage.registerLiveDocumentBaseline({host,evidence: registration.evidence,baselineBytes: baseline,registeredAtMs: 3}).kind).toBe("registered");
     deployment.storage.createShare({share: {shareId: "share",workspaceId: "workspace",granterUserId: "owner",selectorJson: JSON.stringify({paths: ["docs"],versionId: null}),createdAtMs: 3},
       grant: {grantId: "grant",shareId: "share",principalKind: "user",principalUserId: "reader",principalEmail: null,access: "edit",generation: 1,status: "active",createdAtMs: 3,revokedAtMs: null,parentGrantId: null}});
+    deployment.storage.createShare({share: {shareId: "named-share",workspaceId: "workspace",granterUserId: "owner",selectorJson: JSON.stringify({paths: ["docs/a.md"],versionId: null}),createdAtMs: 3},
+      grant: {grantId: "named-grant",shareId: "named-share",principalKind: "user",principalUserId: "reader",principalEmail: null,access: "edit",generation: 1,status: "active",createdAtMs: 3,revokedAtMs: null,parentGrantId: null}});
+    if (standalone) {
+      const remote = new Y.Doc(); Y.applyUpdate(remote,baseline); const before = Y.encodeStateVector(remote);
+      remote.getMap("frontmatter").set("remote","Standalone remote edit"); const update = Y.encodeStateAsUpdate(remote,before);
+      const actor = {kind: "named" as const,userId: "reader",grantId: "named-grant"};
+      const current = deployment.storage.resolveCurrentLiveDocumentBinding({document,actor}), cut = deployment.storage.readLiveUpdateJournalCut({document});
+      if (current.kind !== "current" || cut.kind !== "cut") throw new Error("Remote startup cut unavailable.");
+      expect(deployment.storage.commitLiveUpdateJournal({host,actor,expectedAuthority: current.authority,metadata: {deliveryId: "remote-startup",updateDigest: hash(update),binding: current.binding},
+        cutToken: cut.cut,validation: createLiveMarkdownJournalValidator(policy)({document,currentPath: "docs/a.md",checkpoint: cut.cut.checkpoint.bytes,suffix: cut.cut.suffix.map(row => row.bytes),candidate: update}),updateBytes: update,receivedAtMs: Date.now()}).result.kind).toBe("accepted");
+      connection.stop(); await connection.closed; control.close();
+      await new Promise<void>(resolve => relay.close(() => resolve())); deployment.storage.close(); deployment = undefined;
+      const admissionPath = join(root,"owner-admission.json");
+      writeFileSync(admissionPath,JSON.stringify({version: 1,shares: [{workspaceId: "workspace",shareId: "share"}],validation: policy,
+        maxEntriesPerDrain: 10,maxBytesPerDrain: 10_000_000,maxDocumentsPerPass: 10,pollIntervalMs: 100,passDeadlineMs: 30_000}));
+      const mainPath = fileURLToPath(new URL("../../../services/sync-relay/dist/main.js",import.meta.url));
+      for (const devicePath of ["",relayConfig]) {
+        const refused = spawnSync(process.execPath,[mainPath],{windowsHide: true,timeout: 10_000,encoding: "utf8",
+          env: {...process.env,NODE_ENV: "test",SYNC_RELAY_TEST_AUTH: "1",SYNC_RELAY_PORT: "0",DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
+            DOHC_RELAY_DEVICE_DELIVERY_CONFIG: devicePath,DOHC_RELAY_OWNER_ADMISSION_CONFIG: join(root,"missing-owner.json"),
+            DOHC_DEVICE_CONTROL_LIMITS: JSON.stringify(limits),DOHC_RELAY_DEVICE_CONTROL_HOSTS: `127.0.0.1:${relayPort}`,DOHC_RELAY_EXCHANGE_KEY: exchangeKey}});
+        expect(refused.status).toBe(1);
+        expect(refused.stderr).toContain(devicePath ? "Invalid device control configuration" : "Private owner admission requires configured device delivery");
+        expect(refused.stdout).not.toContain("SYNC_RELAY_LISTENING");
+      }
+      let childOutput = "";
+      child = spawn(process.execPath,[mainPath],{windowsHide: true,
+        env: {...process.env,NODE_ENV: "test",SYNC_RELAY_TEST_AUTH: "1",SYNC_RELAY_PORT: String(relayPort),
+          DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,DOHC_RELAY_DEVICE_DELIVERY_CONFIG: relayConfig,DOHC_RELAY_OWNER_ADMISSION_CONFIG: admissionPath,
+          DOHC_DEVICE_CONTROL_LIMITS: JSON.stringify(limits),DOHC_RELAY_DEVICE_CONTROL_HOSTS: `127.0.0.1:${relayPort}`,DOHC_RELAY_EXCHANGE_KEY: exchangeKey},stdio: ["ignore","pipe","pipe"]});
+      child.stdout!.on("data",chunk => {childOutput += String(chunk); writeFileSync(join(root,"standalone.log"),childOutput);});
+      child.stderr!.on("data",chunk => {childOutput += String(chunk); writeFileSync(join(root,"standalone.log"),childOutput);});
+      await expect.poll(() => {if (child!.exitCode !== null) throw new Error(childOutput); return childOutput.includes("SYNC_RELAY_LISTENING");},{timeout: 30_000}).toBe(true);
+      connection = connect();
+      await expect.poll(() => rendererDoc.getMap("frontmatter").get("remote"),{timeout: 30_000}).toBe("Standalone remote edit");
+      const initialHandoffs = handoffCount;
+      rendererDoc.getMap("frontmatter").set("title","Standalone owner edit"); await renderer.flushPendingLocalUpdates();
+      await expect.poll(() => readFileSync(join(workspaceRoot,"docs/a.md"),"utf8"),{timeout: 30_000}).toContain("Standalone owner edit");
+      await expect.poll(() => native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.count,{timeout: 30_000}).toBe(0);
+      expect(native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries").get()!.count).toBeGreaterThan(0);
+      expect(rendererDoc.getMap("frontmatter").get("duringHandoff")).toBe("Queued owner edit");
+      expect(handoffCount).toBe(initialHandoffs);
+      connection.stop(); await connection.closed;
+      rendererDoc.getMap("frontmatter").set("offline","Reconnect owner edit"); await renderer.flushPendingLocalUpdates();
+      await expect.poll(() => native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.count,{timeout: 30_000}).toBeGreaterThan(0);
+      connection = connect();
+      await expect.poll(() => native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.count,{timeout: 30_000}).toBe(0);
+      await expect.poll(() => readFileSync(join(workspaceRoot,"docs/a.md"),"utf8"),{timeout: 30_000}).toContain("Reconnect owner edit");
+      expect(lifecycle.currentClient()).toBe(singleton);
+      expect(native.prepare("SELECT COUNT(*) AS count FROM live_device_bootstraps").get()!.count).toBe(0);
+      writeFileSync(join(root,"result.json"),JSON.stringify({passed: true,standalone: true,binary,document,markdown: yDocToMarkdown(rendererDoc)},null,2)); remote.destroy();
+      return;
+    }
     const drain = async () => {let result: unknown,failure: unknown; await expect.poll(async () => {try {result = await control.drain(document); return true;} catch (error) {if ((error as Error).message.includes("not ready")) return false; failure = error; return true;}},{timeout: 30_000}).toBe(true); if (failure) throw failure; return result;};
     expect(await drain()).toMatchObject({kind: "done"});
     expect(native.prepare("SELECT COUNT(*) AS count FROM live_device_bootstraps").get()!.count).toBe(0);
@@ -118,11 +180,11 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY)("keeps the ordinary desk
     const binding = deployment.storage.resolveCurrentLiveDocumentBinding({document,actor: {kind: "owner",userId: "owner",shareId: "share"}});
     if (binding.kind !== "current") throw new Error("Owner binding unavailable.");
     await ipc.existingOwner(binding.binding).prepareHandoff(new AbortController().signal).then(() => ipc!.existingOwner(binding.binding).finishHandoff(true));
-    expect(native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.count).toBe(1);
+    expect(native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.count).toBeGreaterThan(0);
     await drain();
     const remote = new Y.Doc(); Y.applyUpdate(remote,Y.encodeStateAsUpdate(rendererDoc)); const before = Y.encodeStateVector(remote);
     remote.getMap("frontmatter").set("remote","Remote edit"); const update = Y.encodeStateAsUpdate(remote,before);
-    const actor = {kind: "named" as const,userId: "reader",grantId: "grant"};
+    const actor = {kind: "named" as const,userId: "reader",grantId: "named-grant"};
     const current = deployment.storage.resolveCurrentLiveDocumentBinding({document,actor}), cut = deployment.storage.readLiveUpdateJournalCut({document});
     if (current.kind !== "current" || cut.kind !== "cut") throw new Error("Remote cut unavailable.");
     expect(deployment.storage.commitLiveUpdateJournal({host,actor,expectedAuthority: current.authority,metadata: {deliveryId: "remote-edit",updateDigest: hash(update),binding: current.binding},
@@ -134,6 +196,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY)("keeps the ordinary desk
     expect(native.prepare("SELECT COUNT(*) AS count FROM live_device_bootstraps").get()!.count).toBe(0);
     writeFileSync(join(root,"result.json"),JSON.stringify({passed: true,binary,sha256: hash(readFileSync(binary)),document,markdown: yDocToMarkdown(remote)},null,2)); remote.destroy();
   } finally {
+    if (child && child.exitCode === null) {child.kill(); await once(child,"exit");}
     await closeNetwork?.();
     try { await renderer?.destroy(); await ipc?.shutdown(); await capture.stop(); await sessions.closeAll(); }
     finally { await lifecycle.stop(); deployment?.storage.close(); }

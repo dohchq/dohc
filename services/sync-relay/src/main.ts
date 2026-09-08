@@ -18,6 +18,9 @@ import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
 import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 import { createDeviceControl } from "./deviceControl";
+import {readOwnerAdmissionConfig,startOwnerAdmission} from "./ownerAdmissionConfig";
+import {readRelayDeviceDeliveryConfig} from "./deviceLiveHostConfig";
+import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-control";
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost } from "./serviceLiveHost";
@@ -336,17 +339,22 @@ const server = serveFetchHandler({
 const host = testAuthSeam ? "127.0.0.1" : (process.env.SYNC_RELAY_BIND ?? "0.0.0.0");
 let deviceControl: ReturnType<typeof createDeviceControl> | undefined;
 const deviceDeliveryConfig = process.env.DOHC_RELAY_DEVICE_DELIVERY_CONFIG;
+const ownerAdmissionPath = process.env.DOHC_RELAY_OWNER_ADMISSION_CONFIG;
+if (ownerAdmissionPath && !deviceDeliveryConfig) fatal("FATAL: Private owner admission requires configured device delivery.");
+let ownerAdmission: ReturnType<typeof readOwnerAdmissionConfig> | undefined;
 if (deviceDeliveryConfig && (!deployment || process.env.DOHC_DEVICE_CONTROL_LIMITS === undefined)) fatal("FATAL: Device delivery requires an initialized deployment and device control limits.");
 if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
   try {
+    if (ownerAdmissionPath && deviceDeliveryConfig) ownerAdmission = readOwnerAdmissionConfig(ownerAdmissionPath,
+      readRelayDeviceDeliveryConfig(deviceDeliveryConfig,parseDeviceControlLimits(JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS))).workspaceIds);
     deviceControl = createDeviceControl({
       storage, relayExchangeKey: relayExchangeKey ?? "",
       hosts: new Set((process.env.DOHC_RELAY_DEVICE_CONTROL_HOSTS ?? "").split(",")),
       limits: JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS),
-      ...(deviceDeliveryConfig && deployment ? { delivery: { configPath: deviceDeliveryConfig, history: deployment.history } } : {}),
+      ...(deviceDeliveryConfig && deployment ? { delivery: { configPath: deviceDeliveryConfig, history: deployment.history,ownerAdmission: ownerAdmission?.admission } } : {}),
     });
   } catch {
-    fatal("FATAL: Invalid device control configuration. Check DOHC_DEVICE_CONTROL_LIMITS, DOHC_RELAY_DEVICE_CONTROL_HOSTS, DOHC_RELAY_DEVICE_DELIVERY_CONFIG, and relay exchange key.");
+    fatal("FATAL: Invalid device control configuration. Check DOHC_DEVICE_CONTROL_LIMITS, DOHC_RELAY_DEVICE_CONTROL_HOSTS, DOHC_RELAY_DEVICE_DELIVERY_CONFIG, DOHC_RELAY_OWNER_ADMISSION_CONFIG, and relay exchange key.");
   }
 }
 if (deviceControl) {
@@ -355,6 +363,11 @@ if (deviceControl) {
   process.once("SIGTERM", deviceControl.close);
   server.once("close", deviceControl.close);
 }
+const ownerAdmissionRun = ownerAdmission && deviceControl && deployment ? startOwnerAdmission({config: ownerAdmission,storage,history: deployment.history,control: deviceControl,
+  onError: error => console.error("[sync-relay] private owner delivery:",error)}) : undefined;
+server.once("close",() => ownerAdmissionRun?.close());
+process.once("SIGINT",() => ownerAdmissionRun?.close());
+process.once("SIGTERM",() => ownerAdmissionRun?.close());
 const serviceHostConfig = process.env.DOHC_RELAY_SERVICE_HOST_CONFIG;
 if (serviceHostConfig && !deployment) fatal("FATAL: A service host requires an initialized relay deployment.");
 const serviceHost = serviceHostConfig && deployment

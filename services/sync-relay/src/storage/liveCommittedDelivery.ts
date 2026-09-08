@@ -181,6 +181,15 @@ export class LiveCommittedDeliveryStore {
     this.#history = history;
     attachLiveJournalHistory(storage, history);
   }
+
+  nextOwnerDocument(workspaceId: string, afterObject: string): LiveDocumentKey | undefined {
+    parseLiveUpdateIdentifier(workspaceId, "workspace ID");
+    return this.#storage.readTx(() => {
+      const row = this.#storage.db.prepare("SELECT workspace_id,main_version_id,object_id,lineage_claim_id FROM sync_relay_live_documents WHERE workspace_id=? AND lineage_state='current' AND admission_state='open' AND object_id>? ORDER BY object_id LIMIT 1").get(workspaceId, afterObject);
+      return row ? journalDocument({ workspaceId: row.workspace_id, mainVersionId: row.main_version_id,
+        objectId: row.object_id, lineageClaimId: row.lineage_claim_id }) : undefined;
+    });
+  }
   captureOwnerCut(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; adoptionId: string;
     expectedLocalSequence: number; maxBytes: number; maxEvents: number; throughCursor?: number;
     actor?: import("./types").CurrentLiveBindingRequest["actor"] }): OwnerCutCapture {

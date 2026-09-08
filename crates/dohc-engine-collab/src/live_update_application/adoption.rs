@@ -326,6 +326,27 @@ mod tests {
         assert!(f.adopt().is_err());
     }
     #[test]
+    fn owner_adoption_replay_keeps_original_limits_after_config_change() {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        for (bytes, age) in [(2_000_000, 200_000), (1, 1)] {
+            f.cut.outbox_limits.max_pending_bytes = bytes;
+            f.cut.outbox_limits.max_pending_age_ms = age;
+            assert!(f.adopt().unwrap().adoption_replayed);
+            let limits = f
+                .store
+                .read_with(|tx| {
+                    tx.query_row(
+                        "SELECT max_pending_bytes,max_pending_age_ms FROM live_owner_adoptions",
+                        [],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                })
+                .unwrap();
+            assert_eq!(limits, (1_000_000, 100_000));
+        }
+    }
+    #[test]
     fn owner_adoption_preserves_exact_owner_and_replays_after_later_edits() {
         for edit in [false, true] {
             let mut f = Fixture::new();
@@ -595,8 +616,6 @@ fn validate_cut(
             cut.baseline_moment_relay_sequence,
             cut.baseline_registered_at_ms,
             cut.expected_local_sequence,
-            cut.outbox_limits.max_pending_bytes,
-            cut.outbox_limits.max_pending_age_ms,
             identities,
         ))
         .map_err(|_| ApplicationError::Corrupt)?,

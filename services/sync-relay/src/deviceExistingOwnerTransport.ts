@@ -85,7 +85,7 @@ export function startExistingOwnerDeviceTransport(options: {
   const registrationFor = (operation: Operation): Registration => {
     const registration = registrations.get(integer(operation.params.registrationId,1));
     if (!registration || workspaces.get(operation.workspace) !== registration.binding.workspaceId) throw new Error("Owner registration is unavailable.");
-    registration.owner.assertCurrent(); return registration;
+    return registration;
   };
   async function execute(operation: Operation): Promise<void> {
     let result: unknown;
@@ -101,7 +101,7 @@ export function startExistingOwnerDeviceTransport(options: {
         const params = configRecord(operation.params,["binding"]), binding = parseLiveObjectBinding(params.binding);
         if (workspaces.get(operation.workspace) !== binding.workspaceId) throw new Error("Owner workspace mismatch.");
         const existing = [...registrations.values()].find(row => isDeepStrictEqual(row.binding,binding));
-        if (existing) { existing.owner.assertCurrent(); await send({type: "response",id: operation.id,result: {registrationId: existing.nativeId}}); return; }
+        if (existing) { owner = existing.owner; owner.assertCurrent(); await send({type: "response",id: operation.id,result: {registrationId: existing.nativeId}}); return; }
         if (registrations.size >= config.maxRegistrations) throw new Error("Owner registration capacity exceeded.");
         owner = config.ownerFor(binding); owner.assertCurrent();
         const response = await config.client.sendRequest({ ...request,method: operation.method,params: { binding: { ...binding,selectorPaths: [...binding.selectorPaths] } } },signal);
@@ -109,7 +109,7 @@ export function startExistingOwnerDeviceTransport(options: {
         const nativeId = integer(configRecord(response.result,["registrationId"]).registrationId,1);
         registrations.set(nativeId,{ nativeId,binding,owner,adopted: false }); result = { registrationId: nativeId };
       } else {
-        const registration = registrationFor(operation); owner = registration.owner;
+        const registration = registrationFor(operation); owner = registration.owner; owner.assertCurrent();
         const native = { ...request,registrationId: registration.nativeId,sessionId: owner.nativeSessionId };
         if (operation.method === "liveApplication.ownerState") {
           configRecord(operation.params,["registrationId"]);
@@ -118,7 +118,8 @@ export function startExistingOwnerDeviceTransport(options: {
           await owner.prepareHandoff(signal); owner.assertCurrent();
           const response = await config.client.sendRequest({ ...request,method: operation.method,params: { registrationId: registration.nativeId,sessionId: owner.nativeSessionId } },signal);
           owner.assertCurrent(); const state = configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId"]);
-          result = {adoptionId: state.adoptionId,expectedLocalSequence: state.expectedLocalSequence,throughCursor: state.throughCursor,sessionId: String(registration.nativeId)};
+          result = {adoptionId: state.adoptionId,expectedLocalSequence: state.expectedLocalSequence,
+            throughCursor: state.throughCursor === null && state.outboxId === null ? 0 : state.throughCursor,sessionId: String(registration.nativeId)};
         } else if (operation.method === "liveApplication.ownerOutbox") {
           configRecord(operation.params,["registrationId"]);
           if (!registration.adopted) throw new Error("Owner adoption must finish first.");
@@ -163,7 +164,11 @@ export function startExistingOwnerDeviceTransport(options: {
       if (operation.method === "liveApplication.adoptOwner") await owner!.finishHandoff(true);
     } catch {
       if (owner) {try {owner.assertCurrent();} catch {stop();}}
-      if (owner && ["liveApplication.ownerState","liveApplication.adoptOwner"].includes(operation.method)) await owner.finishHandoff(false).catch(() => undefined);
+      if (owner && ["liveApplication.ownerState","liveApplication.adoptOwner"].includes(operation.method)) {
+        const registration = registrations.get(Number(operation.params.registrationId));
+        clearTimeout(registration?.handoffTimer); if (registration) registration.handoffTimer = undefined;
+        await owner.finishHandoff(false).catch(() => undefined);
+      }
       if (!closed) await send({ type: "error",id: operation.id,error: { code: "FORBIDDEN",message: "owner-device-operation-refused",retryability: "no" } }).catch(stop);
     } finally { operations.delete(operation.id); charged -= operation.charge; clearTimeout(operation.timer); }
   }
