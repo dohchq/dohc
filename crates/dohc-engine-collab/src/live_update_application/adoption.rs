@@ -329,10 +329,22 @@ mod tests {
     fn owner_adoption_replay_keeps_original_limits_after_config_change() {
         let mut f = Fixture::new();
         f.adopt().unwrap();
-        for (bytes, age) in [(2_000_000, 200_000), (1, 1)] {
+        for (bytes, age) in [
+            (2_000_000, 200_000),
+            (1_000_000, 100_000),
+            (1, 100_000),
+            (1_000_000, 1),
+        ] {
             f.cut.outbox_limits.max_pending_bytes = bytes;
             f.cut.outbox_limits.max_pending_age_ms = age;
-            assert!(f.adopt().unwrap().adoption_replayed);
+            if bytes < 1_000_000 || age < 100_000 {
+                assert!(matches!(
+                    f.adopt(),
+                    Err(ApplicationError::ConfiguredBudgetMismatch)
+                ));
+            } else {
+                assert!(f.adopt().unwrap().adoption_replayed);
+            }
             let limits = f
                 .store
                 .read_with(|tx| {
@@ -688,6 +700,11 @@ pub fn adopt_owner_committed(
             params![held.namespace,cut.adoption_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(read_sql)?;
         let binding_json=serde_json::to_string(b).map_err(|_| ApplicationError::Corrupt)?;
         if let Some((saved_digest,saved_binding,sequence,cursor,coverage,covered_sequence)) = previous {
+            let (bytes,age): (i64,i64) = tx.query_row("SELECT max_pending_bytes,max_pending_age_ms FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND adoption_id=?2",
+                params![held.namespace,cut.adoption_id],|row|Ok((row.get(0)?,row.get(1)?))).map_err(read_sql)?;
+            if cut.outbox_limits.max_pending_bytes < bytes || cut.outbox_limits.max_pending_age_ms < age {
+                return Err(ApplicationError::ConfiguredBudgetMismatch);
+            }
             let origin = read_origin(tx,&held)?.ok_or(ApplicationError::Corrupt)?;
             if origin.terminal != cut.terminal_receipt { return Err(ApplicationError::Corrupt); }
             if saved_digest != evidence_digest || saved_binding != binding_json || sequence != cut.expected_local_sequence

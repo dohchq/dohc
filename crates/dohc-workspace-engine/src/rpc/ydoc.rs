@@ -1574,7 +1574,7 @@ mod tests {
             relay_database_namespace: "owner-source-relay".into(),
             adoption_id: "actual-owner".into(),
             outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
-                max_pending_bytes: 1,
+                max_pending_bytes: 10,
                 max_pending_age_ms: 100_000,
             },
             source_moment_id: source_moment.clone(),
@@ -1700,6 +1700,53 @@ mod tests {
                 !refused_blob,
                 "outbox refusal rolls back the local append and blob"
             );
+        }
+        for (bytes, age) in [(9, 100_000), (10, 99_999), (10, 100_000), (20, 200_000)] {
+            let config = serde_json::from_value(json!({
+                "ingress":{"aggregateBytes":400_000_000,"applicationWorkingReserveBytes":1_000_000,"maxUploads":2,"uploadDeadlineMs":30_000},
+                "maxRegistrations":8,"maxAdoptionBytes":1_000_000,"maxAdoptionEvents":100,"maxApplicationsPerSettlement":100,
+                "ownerOutbox":{"maxPendingBytes":bytes,"maxPendingAgeMs":age}
+            })).unwrap();
+            let (restarted, _owner, _ingress) = EngineService::ordinary_live_host(config).unwrap();
+            let params = json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":"owner-source","captureMode":"none"});
+            let opened = restarted
+                .workspace_open(&RequestContext::unbounded(), params.clone())
+                .await;
+            if bytes < 10 || age < 100_000 {
+                assert_eq!(
+                    opened.unwrap_err().message,
+                    "owner-outbox-configured-budget-mismatch"
+                );
+                assert!(crate::lock(&restarted.handles).is_empty());
+                let mut read_params = params;
+                read_params["skipStartupMaintenance"] = json!(true);
+                let opened = restarted
+                    .workspace_open(&RequestContext::unbounded(), read_params)
+                    .await
+                    .unwrap();
+                let handle: WorkspaceHandle =
+                    serde_json::from_value(opened["workspace"].clone()).unwrap();
+                assert!(matches!(
+                    restarted.open(Some(&handle)).unwrap().mode,
+                    super::super::workspace::WorkspaceOpenMode::ReadOnly
+                ));
+                restarted.workspace_close(Some(handle)).await.unwrap();
+            } else {
+                let handle: WorkspaceHandle =
+                    serde_json::from_value(opened.unwrap()["workspace"].clone()).unwrap();
+                restarted.workspace_close(Some(handle)).await.unwrap();
+            }
+            let store = dohc_engine_storage::EngineStore::open_read_only(&db_path).unwrap();
+            let limits: (i64, i64) = store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT max_pending_bytes,max_pending_age_ms FROM live_owner_adoptions",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                })
+                .unwrap();
+            assert_eq!(limits, (10, 100_000));
         }
     }
 

@@ -1,3 +1,4 @@
+import {readRelayDeviceDeliveryConfig} from "../../../services/sync-relay/src/deviceLiveHostConfig.js";
 import {createHash} from "node:crypto";
 import {spawn,spawnSync,type ChildProcess} from "node:child_process";
 import {once} from "node:events";
@@ -7,7 +8,8 @@ import {mkdirSync,mkdtempSync,readFileSync,writeFileSync} from "node:fs";
 import {join,resolve} from "node:path";
 import {fileURLToPath} from "node:url";
 import {DatabaseSync} from "node:sqlite";
-import {expect,it} from "vitest";
+import {expect,it,vi} from "vitest";
+import {LiveCommittedDeliveryStore} from "../../../services/sync-relay/src/storage/liveCommittedDelivery.js";
 import * as Y from "yjs";
 import {EngineDaemonLifecycle,EngineWorkspaceSessions,type EngineClient} from "../../workspace-engine-client/src/daemon/index.js";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
@@ -27,6 +29,7 @@ import {policy} from "./liveCommittedDeliveryTestSupport.js";
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keeps the ordinary desktop owner through authenticated adoption, durable outbox delivery, remote apply and settlement (standalone=%s)", async standalone => {
   const binary = resolve(process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY!);
+  const captures = vi.spyOn(LiveCommittedDeliveryStore.prototype,"captureOwnerCut");
   expect(hash(readFileSync(binary))).toBe(process.env.DOHC_OWNER_DESKTOP_PROOF_SHA256?.toLowerCase());
   const output = resolve(process.env.DOHC_OWNER_DESKTOP_PROOF_OUTPUT!); mkdirSync(output,{recursive: true});
   const root = mkdtempSync(join(output,"case-")), workspaceRoot = join(root,"workspace");
@@ -36,6 +39,10 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
   const nativeConfig = join(root,"ordinary.json");
   writeFileSync(nativeConfig,JSON.stringify({ingress: {aggregateBytes: 400_000_000,applicationWorkingReserveBytes: 1_000_000,maxUploads: 2,uploadDeadlineMs: 30_000},
     maxRegistrations: 8,maxAdoptionBytes: 1_000_000,maxAdoptionEvents: 100,maxApplicationsPerSettlement: 100,ownerOutbox: {maxPendingBytes: 1_000_000,maxPendingAgeMs: 600_000}}));
+  const conflicting = spawnSync(binary,[],{windowsHide: true,timeout: 10_000,encoding: "utf8",env: {...process.env,DOHC_ENGINE_AUTH_TOKEN: "test-auth",
+    DOHC_ENGINE_OWNER_HOST_CONFIG: nativeConfig,DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig}});
+  expect(conflicting.status).not.toBe(0);
+  expect(conflicting.stderr).toContain("mutually exclusive");
   const lifecycle = new EngineDaemonLifecycle({command: binary,maxRestarts: 0,privateOwnerHost: {configPath: nativeConfig,client: {aggregateBytes: 200_000_000,maxUploads: 2}}});
   await lifecycle.start();
   const singleton = lifecycle.currentClient() as EngineClient;
@@ -94,7 +101,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     const relay = createServer(); relay.listen(0,"127.0.0.1"); await once(relay,"listening");
     const relayPort = (relay.address() as {port: number}).port, exchangeKey = "owner-desktop-exchange-key-32-bytes";
     const control = createDeviceControl({storage: deployment.storage,hosts: new Set([`127.0.0.1:${relayPort}`]),relayExchangeKey: exchangeKey,limits,
-      delivery: {configPath: relayConfig,history: deployment.history,ownerAdmission: {shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 10_000_000,validate: createLiveMarkdownJournalValidator(policy)}}});
+      delivery: {config: readRelayDeviceDeliveryConfig(relayConfig,limits),history: deployment.history,ownerAdmission: {shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 10_000_000,validate: createLiveMarkdownJournalValidator(policy)}}});
     relay.on("upgrade",control.handleUpgrade);
     const certificate = fileURLToPath(new URL("../../../services/share-web/src/testing/device-control/localhost-cert.pem",import.meta.url));
     const key = fileURLToPath(new URL("../../../services/share-web/src/testing/device-control/localhost-key.pem",import.meta.url));
@@ -104,7 +111,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
       admission: {capacity: 8,refillPerSecond: 1,maxKeys: 8},trustedProxies: new Set()}); share.on("upgrade",bridge.handleUpgrade);
     const connect = () => connectDeviceHost({url: `wss://localhost:${sharePort}/api/device-control`,credential,limits,onRegistered() {},existingOwner: {
       client: singleton,workspaces: [{workspaceId: "workspace",workspaceHandle: engineBinding.workspace}],ownerFor: binding => ipc!.existingOwner(binding),
-      maxQueuedBytes: 4_000_000,maxFrameBytes: 1_048_576,maxUploads: 2,maxRegistrations: 8,aggregateBytes: 200_000_000,maxAdoptionBytes: 1_000_000,maxAdoptionEvents: 100,requestDeadlineMs: 30_000}});
+      maxQueuedBytes: 4_000_000,maxFrameBytes: 1_048_576,maxUploads: 2,maxRegistrations: 8,aggregateBytes: 200_000_000,maxAdoptionBytes: 1_000_000,maxAdoptionEvents: 2,requestDeadlineMs: 30_000}});
     let connection = connect();
     closeNetwork = async () => {connection.stop(); control.close(); bridge.close(); await connection.closed;
       await Promise.all([new Promise<void>(resolve => share.close(() => resolve())),new Promise<void>(resolve => relay.close(() => resolve()))]); native.close();};
@@ -190,12 +197,27 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     expect(deployment.storage.commitLiveUpdateJournal({host,actor,expectedAuthority: current.authority,metadata: {deliveryId: "remote-edit",updateDigest: hash(update),binding: current.binding},
       cutToken: cut.cut,validation: createLiveMarkdownJournalValidator(policy)({document,currentPath: "docs/a.md",checkpoint: cut.cut.checkpoint.bytes,suffix: cut.cut.suffix.map(row => row.bytes),candidate: update}),updateBytes: update,receivedAtMs: Date.now()}).result.kind).toBe("accepted");
     await control.settle(document);
+    for (let index=0;index<4;index++) {
+      const before = Y.encodeStateVector(remote); remote.getMap("frontmatter").set(`later${index}`,index);
+      const bytes = Y.encodeStateAsUpdate(remote,before), current = deployment.storage.resolveCurrentLiveDocumentBinding({document,actor}), cut = deployment.storage.readLiveUpdateJournalCut({document});
+      if (current.kind !== "current" || cut.kind !== "cut") throw new Error("Later remote cut unavailable.");
+      expect(deployment.storage.commitLiveUpdateJournal({host,actor,expectedAuthority: current.authority,metadata: {deliveryId: `later-${index}`,updateDigest: hash(bytes),binding: current.binding},
+        cutToken: cut.cut,validation: createLiveMarkdownJournalValidator(policy)({document,currentPath: "docs/a.md",checkpoint: cut.cut.checkpoint.bytes,suffix: cut.cut.suffix.map(row => row.bytes),candidate: bytes}),updateBytes: bytes,receivedAtMs: Date.now()}).result.kind).toBe("accepted");
+    }
+    await control.settle(document); await control.settle(document);
+    const captured = captures.mock.calls.length, requests = vi.spyOn(singleton,"sendRequest");
+    await control.settle(document); await control.settle(document);
+    expect(captures.mock.calls.length).toBe(captured);
+    expect(requests.mock.calls.map(call => call[0].method)).not.toContain("ydoc.ownerOutbox.readPending");
+    expect(requests.mock.calls.map(call => call[0].method)).not.toContain("liveApplication.settle");
+    requests.mockRestore();
     expect(yDocToMarkdown(rendererDoc)).toBe(yDocToMarkdown(remote));
     expect(readFileSync(join(workspaceRoot,"docs/a.md"),"utf8")).toBe(yDocToMarkdown(remote));
     expect(lifecycle.currentClient()).toBe(singleton);
     expect(native.prepare("SELECT COUNT(*) AS count FROM live_device_bootstraps").get()!.count).toBe(0);
     writeFileSync(join(root,"result.json"),JSON.stringify({passed: true,binary,sha256: hash(readFileSync(binary)),document,markdown: yDocToMarkdown(remote)},null,2)); remote.destroy();
   } finally {
+    captures.mockRestore();
     if (child && child.exitCode === null) {child.kill(); await once(child,"exit");}
     await closeNetwork?.();
     try { await renderer?.destroy(); await ipc?.shutdown(); await capture.stop(); await sessions.closeAll(); }

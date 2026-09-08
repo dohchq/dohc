@@ -44,6 +44,8 @@ pub enum ApplicationError {
     Corrupt,
     #[error("live application delivery or cursor conflicts with retained evidence")]
     Conflict,
+    #[error("owner outbox configured budget is below the persisted adoption budget")]
+    ConfiguredBudgetMismatch,
     #[error("live application commit acknowledgement was interrupted")]
     Interrupted,
     #[error(transparent)]

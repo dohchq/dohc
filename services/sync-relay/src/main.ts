@@ -345,16 +345,17 @@ let ownerAdmission: ReturnType<typeof readOwnerAdmissionConfig> | undefined;
 if (deviceDeliveryConfig && (!deployment || process.env.DOHC_DEVICE_CONTROL_LIMITS === undefined)) fatal("FATAL: Device delivery requires an initialized deployment and device control limits.");
 if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
   try {
-    if (ownerAdmissionPath && deviceDeliveryConfig) ownerAdmission = readOwnerAdmissionConfig(ownerAdmissionPath,
-      readRelayDeviceDeliveryConfig(deviceDeliveryConfig,parseDeviceControlLimits(JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS))).workspaceIds);
+    const limits = parseDeviceControlLimits(JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS));
+    const delivery = deviceDeliveryConfig ? readRelayDeviceDeliveryConfig(deviceDeliveryConfig,limits) : undefined;
+    if (ownerAdmissionPath && delivery) ownerAdmission = readOwnerAdmissionConfig(ownerAdmissionPath,delivery.workspaceIds);
     deviceControl = createDeviceControl({
       storage, relayExchangeKey: relayExchangeKey ?? "",
       hosts: new Set((process.env.DOHC_RELAY_DEVICE_CONTROL_HOSTS ?? "").split(",")),
-      limits: JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS),
-      ...(deviceDeliveryConfig && deployment ? { delivery: { configPath: deviceDeliveryConfig, history: deployment.history,ownerAdmission: ownerAdmission?.admission } } : {}),
+      limits,
+      ...(delivery && deployment ? { delivery: { config: delivery, history: deployment.history,ownerAdmission: ownerAdmission?.admission } } : {}),
     });
-  } catch {
-    fatal("FATAL: Invalid device control configuration. Check DOHC_DEVICE_CONTROL_LIMITS, DOHC_RELAY_DEVICE_CONTROL_HOSTS, DOHC_RELAY_DEVICE_DELIVERY_CONFIG, DOHC_RELAY_OWNER_ADMISSION_CONFIG, and relay exchange key.");
+  } catch (error) {
+    fatal(`FATAL: Invalid device control configuration. ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 if (deviceControl) {

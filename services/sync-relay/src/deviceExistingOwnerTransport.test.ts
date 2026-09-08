@@ -33,7 +33,7 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
   } } as unknown as WebSocket;
   const owner = { nativeSessionId: "ordinary-session",assertCurrent: vi.fn(),prepareHandoff: vi.fn(async () => undefined),finishHandoff: vi.fn(async () => undefined),remoteApplied: vi.fn(async () => undefined) };
   const singleton = { ready: vi.fn(async () => undefined),close: vi.fn(),sendRequest: vi.fn(async (request: {method: string}) => ({ result:
-    request.method === "liveApplication.provisionOwner" ? { provisioned: true } : request.method === "liveApplication.register" ? { registrationId: 9 } : { adoptionId: "adoption",expectedLocalSequence: 0,throughCursor: null,outboxId: null } })),
+    request.method === "liveApplication.provisionOwner" ? { provisioned: true } : request.method === "liveApplication.register" ? { registrationId: 9 } : { adoptionId: "adoption",expectedLocalSequence: 0,throughCursor: null,outboxId: null,pendingBytes: 0,outboxState: null } })),
     forwardLiveOwnerAdoption: vi.fn(async (_request: { sessionId: string }) => ({ result: { status: "adopted",adoption: { adoptionId: "adoption",localYDocSequence: 0,terminalCursor: 0,adoptionReplayed: false } } })) };
   transport = startExistingOwnerDeviceTransport({ config: { client: singleton as unknown as EngineClient,workspaces: [{workspaceId: "workspace",workspaceHandle: "ws-ordinary"}],ownerFor: () => owner,
     maxQueuedBytes: 2_000_000,maxFrameBytes: 1_048_576,maxUploads: 2,maxRegistrations: 10,aggregateBytes: 200_000_000,maxAdoptionBytes: 1_000_000,maxAdoptionEvents: 10,requestDeadlineMs: 30_000 },start,ws: deviceSocket,limits,stop: () => peerConnection?.close() });
@@ -44,14 +44,22 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     await peer!.sendRequest({id: 2,method: "liveApplication.register",workspace: "ws-ordinary",params: {binding: {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1}}});
     owner.prepareHandoff.mockRejectedValueOnce(new Error("renderer refused"));
     await expect(peer!.sendRequest({id: 3,method: "liveApplication.ownerState",workspace: "ws-ordinary",params: {registrationId: 9}})).rejects.toThrow();
-    const state = await peer!.sendRequest({id: 4,method: "liveApplication.ownerState",workspace: "ws-ordinary",params: {registrationId: 9}});
+    let release!: () => void;
+    owner.prepareHandoff.mockImplementationOnce(() => new Promise<void>(resolve => {release = resolve;}));
+    const pendingState = peer!.sendRequest({id: 4,method: "liveApplication.ownerState",workspace: "ws-ordinary",params: {registrationId: 9}});
+    await expect.poll(() => owner.prepareHandoff.mock.calls.length).toBe(2);
+    const finished = owner.finishHandoff.mock.calls.length;
+    await expect(peer!.sendRequest({id: 5,method: "liveApplication.ownerState",workspace: "ws-ordinary",params: {registrationId: 9}})).rejects.toThrow();
+    expect(owner.finishHandoff.mock.calls.length).toBe(finished);
+    release();
+    const state = await pendingState;
     expect(state.result).toMatchObject({throughCursor: 0});
-    const result = await peer!.sendLiveOwnerAdoption({id: 5,workspace: "ws-ordinary",registrationId: 9,sessionId: "9",deadlineMs: 30_000},
+    const result = await peer!.sendLiveOwnerAdoption({id: 6,workspace: "ws-ordinary",registrationId: 9,sessionId: "9",deadlineMs: 30_000},
       { relayDatabaseNamespace: "namespace",adoptionId: "adoption",sourceMomentId: "source",sourceDigest: "b".repeat(64),sourceByteLength: 0,baselineMomentRelaySequence: 1,
         baselineRegisteredAtMs: 0,expectedLocalSequence: 0,terminalReceipt: null,baselineBytes: new Uint8Array([0,0]),events: [] },{maxBytes: 1_000_000,maxEvents: 10});
     expect(result.result).toMatchObject({status: "adopted"});
     expect(singleton.forwardLiveOwnerAdoption.mock.calls[0]![0]).toMatchObject({sessionId: "ordinary-session"});
-    await expect(peer!.sendRequest({id: 6,method: "workspace.close",workspace: "ws-ordinary",params: {}})).rejects.toThrow();
+    await expect(peer!.sendRequest({id: 7,method: "workspace.close",workspace: "ws-ordinary",params: {}})).rejects.toThrow();
     expect(singleton.sendRequest.mock.calls.map(call => call[0].method)).not.toContain("workspace.close");
     expect(singleton.close).not.toHaveBeenCalled();
   } finally { await transport.close(); peer?.close(); }

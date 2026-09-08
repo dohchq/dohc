@@ -30,7 +30,11 @@ export async function drainOwnerOutbox(options: {
   check();
   const available = await client.sendRequest({...request(),method: "liveApplication.ownerOutbox",params: {registrationId}},signal);
   check();
-  const outboxId = configRecord(available.result,["outboxId"]).outboxId;
+  const status = configRecord(available.result,["outboxId","pendingBytes","state"]), outboxId = status.outboxId;
+  if (typeof status.pendingBytes !== "number" || !Number.isSafeInteger(status.pendingBytes) || status.pendingBytes < 0) throw new Error("Invalid owner pending bytes.");
+  if (status.state === "sealed" || status.state === "quarantined") throw new Error(`Owner outbox is ${status.state}; explicit recovery is required.`);
+  if (status.pendingBytes === 0) return;
+  if (status.state !== "active") throw new Error("Invalid owner outbox state.");
   if (outboxId === null) return;
   if (typeof outboxId !== "string") throw new Error("Invalid owner outbox identity.");
   let receivedBytes = 0;

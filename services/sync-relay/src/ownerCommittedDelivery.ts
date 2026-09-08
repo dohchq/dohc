@@ -13,7 +13,7 @@ import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-bi
 export class OwnerCommittedDelivery {
   readonly #store;
   readonly #active = new Set<string>();
-  readonly #adopted = new Map<string,{registrationId: number; adoptionId: string; sequence: number; binding: LiveObjectBinding}>();
+  readonly #adopted = new Map<string,{registrationId: number; adoptionId: string; sequence: number; binding: LiveObjectBinding;settled?: CommittedSettlement}>();
   constructor(private readonly storage: SyncRelayStorage,history: LiveJournalHistoryAuthority,private readonly connection: {
     client: EngineClient; workspace: string; host: LiveHostConnectionCoordinate; deadlineMs: number; nextRequestId(): number;
     bounds: { maxBytes: number; maxEvents: number };
@@ -35,10 +35,9 @@ export class OwnerCommittedDelivery {
       const shareId = c.ownerAdmission.shares.get(document.workspaceId), share = shareId ? this.storage.getShare(shareId) : null;
       if (!share || share.workspaceId !== document.workspaceId) throw new Error("Owner share is unavailable.");
       const actor = {kind: "owner" as const,userId: share.granterUserId,shareId: share.shareId};
-      const current = this.#store.captureOwnerCut({ host: c.host,document,actor,adoptionId: "owner-state-capture",expectedLocalSequence: 0,...c.bounds });
       let saved = this.#adopted.get(key);
-      if (saved && !isDeepStrictEqual(saved.binding,current.binding)) {this.#adopted.delete(key); saved = undefined;}
       if (!saved) {
+        const current = this.#store.captureOwnerCut({ host: c.host,document,actor,adoptionId: "owner-state-capture",expectedLocalSequence: 0,throughCursor: 0,...c.bounds });
         const registered = await c.client.sendRequest({ ...request(),method: "liveApplication.register",params: { binding: { ...current.binding,selectorPaths: [...current.binding.selectorPaths] } } },signal);
         check(); current.assertCurrent();
         const registrationId = authorityInteger(configRecord(registered.result,["registrationId"]).registrationId,1);
@@ -58,25 +57,30 @@ export class OwnerCommittedDelivery {
         this.#adopted.set(key,saved);
       }
       const {registrationId} = saved;
+      const current = this.#store.openOwnerDelivery({host: c.host,document,actor});
+      if (!isDeepStrictEqual(saved.binding,current.binding)) throw new Error("Owner binding requires reconciliation.");
       await drainOwnerOutbox({storage: this.storage,admission: c.ownerAdmission,client: c.client,workspace: c.workspace,host: c.host,
         registrationId,binding: saved.binding,nextRequestId: c.nextRequestId,deadlineMs: c.deadlineMs,signal,assertCurrent: current.assertCurrent});
-      const latest = this.#store.captureOwnerCut({ host: c.host,document,actor,adoptionId: saved.adoptionId,
-        expectedLocalSequence: saved.sequence,...c.bounds });
-      let progress = this.#store.ownerProgress(latest);
-      for (const event of latest.cut.events) {
-        if (event.metadata.accepted.receipt.journalCursor <= (progress.terminal?.journalCursor ?? 0)) continue;
+      const latest = this.#store.openOwnerDelivery({host: c.host,document,actor});
+      let progress = this.#store.ownerDeliveryProgress(latest);
+      for (let count = 0; count < c.bounds.maxEvents; count++) {
+        const event = this.#store.nextOwnerApplication(latest); if (!event) break;
         check(); latest.assertCurrent();
         const applied = await c.client.sendLiveApplication({ ...request(),registrationId },event,signal);
         check(); latest.assertCurrent();
         const result = configRecord(applied.result,["status","ack"],["reason"]);
         if (result.status !== "applied") throw new Error("Owner application did not commit.");
-        this.#store.acknowledgeOwnerApplication(latest,result.ack);
-        progress = this.#store.ownerProgress(latest);
+        this.#store.acknowledgeOwnerDeliveryApplication(latest,result.ack);
+        progress = this.#store.ownerDeliveryProgress(latest);
       }
-      if (!settle) return { kind: "done" as const,terminalReceipt: progress.terminal };
+      if (!settle) return this.#store.nextOwnerApplication(latest)
+        ? {kind: "pending",reason: "Owner delivery pass reached its event budget."}
+        : { kind: "done",terminalReceipt: progress.terminal };
+      if (saved.settled && saved.settled.terminalCursor === (progress.terminal?.journalCursor ?? 0)) return saved.settled;
       const response = await c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal);
       check(); latest.assertCurrent();
-      return settlementResult(response.result,progress.terminal);
+      saved.settled = settlementResult(response.result,progress.terminal);
+      return saved.settled;
     } finally { this.#active.delete(key); }
   }
   drain(document: LiveDocumentKey,signal?: AbortSignal) { return this.#run(document,false,signal); }

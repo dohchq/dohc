@@ -25,6 +25,7 @@ import {
   baselineRecord,
   decodeLiveDocumentAuthorityStructure,
   currentLiveDocumentBinding,
+  authorizeLiveDocument,
 } from "./liveDocumentAuthority";
 import {
   attachLiveJournalHistory,
@@ -76,6 +77,10 @@ export interface CommittedDeliveryDrain {
 export interface OwnerCutCapture {
   binding: LiveObjectBinding;
   cut: LiveOwnerAdoptionCut;
+  assertCurrent(): void;
+}
+export interface OwnerDeliveryCapture {
+  binding: LiveObjectBinding;
   assertCurrent(): void;
 }
 export type CommittedDeliveryStep =
@@ -176,6 +181,7 @@ export class LiveCommittedDeliveryStore {
   readonly #storage: StorageContext;
   readonly #history: LiveJournalHistoryAuthority;
   readonly #ownerCuts = new WeakMap<OwnerCutCapture,{ host: LiveHostConnectionCoordinate; document: LiveDocumentKey; digest: string }>();
+  readonly #ownerDeliveries = new WeakMap<OwnerDeliveryCapture,{host: LiveHostConnectionCoordinate;document: LiveDocumentKey;highWater: number}>();
   constructor(storage: StorageContext, history: LiveJournalHistoryAuthority) {
     this.#storage = storage;
     this.#history = history;
@@ -188,6 +194,66 @@ export class LiveCommittedDeliveryStore {
       const row = this.#storage.db.prepare("SELECT workspace_id,main_version_id,object_id,lineage_claim_id FROM sync_relay_live_documents WHERE workspace_id=? AND lineage_state='current' AND admission_state='open' AND object_id>? ORDER BY object_id LIMIT 1").get(workspaceId, afterObject);
       return row ? journalDocument({ workspaceId: row.workspace_id, mainVersionId: row.main_version_id,
         objectId: row.object_id, lineageClaimId: row.lineage_claim_id }) : undefined;
+    });
+  }
+  openOwnerDelivery(input: {host: LiveHostConnectionCoordinate;document: LiveDocumentKey;actor: import("./types").CurrentLiveBindingRequest["actor"]}): OwnerDeliveryCapture {
+    const host = snapshotHostCoordinate(input.host), document = journalDocument(input.document);
+    const read = () => {
+      this.#standing(host);
+      const owner = this.#ownerRow(host,document); integrity(owner);
+      const origin = JSON.parse(String(owner.origin_json));
+      const row = this.#storage.db.prepare(`SELECT workspace_id,main_version_id,object_id,lineage_claim_id,current_path,restore_fence_generation,lineage_state,admission_state,baseline_digest,baseline_projected_sha256,baseline_projected_byte_length,baseline_moment_relay_seq,registered_at_ms FROM sync_relay_live_documents WHERE ${WHERE_DOCUMENT}`).get(...documentParams(document));
+      integrity(row && row.lineage_state === "current" && row.admission_state === "open" && row.baseline_digest === document.lineageClaimId &&
+        row.baseline_projected_sha256 === origin.sourceDigest && row.baseline_projected_byte_length === origin.sourceByteLength &&
+        row.baseline_moment_relay_seq === origin.baselineMomentRelaySequence && row.registered_at_ms === origin.baselineRegisteredAtMs);
+      const binding = parseLiveObjectBinding({...document,currentPath: row.current_path,selectorPaths: [row.current_path],restoreFenceGeneration: row.restore_fence_generation});
+      const source = this.#storage.db.prepare("SELECT moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND relay_seq=?")
+        .get(document.workspaceId,document.objectId,row.baseline_moment_relay_seq);
+      integrity(source && source.moment_id === origin.sourceMomentId && source.version_id === document.mainVersionId && source.path === binding.currentPath &&
+        source.content_kind === "text" && source.blob_sha256 === origin.sourceDigest && source.byte_length === origin.sourceByteLength);
+      const hostState = this.#storage.getLiveHostControl(); integrity(hostState);
+      const current = authorizeLiveDocument(this.#storage,{document,actor: input.actor},hostState,{binding,current: true,open: true,baselineSequence: authorityInteger(row.baseline_moment_relay_seq,1)});
+      integrity(current.kind === "current" && isDeepStrictEqual(current.host,host));
+      integrity(createHash("sha256").update(JSON.stringify(current.binding)).digest("hex") === origin.bindingDigest);
+      return {row,origin: String(owner.origin_json),binding: current.binding};
+    };
+    const initial = this.#storage.readTx(read);
+    const assertCurrent = () => {const current = read(); integrity(isDeepStrictEqual(current,initial));};
+    const high = this.#storage.db.prepare(`SELECT MAX(journal_cursor) AS cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT}`).get(...documentParams(document))!;
+    const capture = {binding: initial.binding,assertCurrent};
+    this.#ownerDeliveries.set(capture,{host,document,highWater: high.cursor === null ? 0 : authorityInteger(high.cursor,1)});
+    return capture;
+  }
+  #ownerDelivery(capture: OwnerDeliveryCapture) {
+    const saved = this.#ownerDeliveries.get(capture); integrity(saved); capture.assertCurrent(); return saved;
+  }
+  ownerDeliveryProgress(capture: OwnerDeliveryCapture): {terminal: LiveUpdateReceipt | null;sequence: number} {
+    const {host,document} = this.#ownerDelivery(capture), row = this.#ownerRow(host,document); integrity(row);
+    const terminal = JSON.parse(String(row.tip_receipt_json)), parsed = terminal === null ? null : parseLiveUpdateReceipt(terminal);
+    integrity((parsed?.journalCursor ?? 0) === row.tip_cursor);
+    return {terminal: parsed,sequence: authorityInteger(row.tip_sequence)};
+  }
+  nextOwnerApplication(capture: OwnerDeliveryCapture): AdmittedLiveUpdate | undefined {
+    const {document,highWater} = this.#ownerDelivery(capture), progress = this.ownerDeliveryProgress(capture);
+    const raw = this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor>? AND journal_cursor<=? ORDER BY journal_cursor LIMIT 1`)
+      .get(...documentParams(document),progress.terminal?.journalCursor ?? 0,highWater);
+    if (!raw) {integrity((progress.terminal?.journalCursor ?? 0) === highWater); return undefined;}
+    const row = decodeJournalRow(this.#storage.db,raw); assertJournalCheckpointPosition(this.#storage.db,row); verifyJournalRow(row);
+    return row.admitted;
+  }
+  acknowledgeOwnerDeliveryApplication(capture: OwnerDeliveryCapture,value: unknown): void {
+    const ack = parseLiveUpdateHostApplicationAck(value), {host,document} = this.#ownerDelivery(capture);
+    this.#storage.tx(() => {
+      const next = this.nextOwnerApplication(capture); integrity(next);
+      const receipt = next.metadata.accepted.receipt;
+      integrity(sameReceipt(receipt,{deliveryId: ack.deliveryId,updateDigest: ack.updateDigest,journalCursor: ack.journalCursor,acceptingHostEpoch: ack.acceptingHostEpoch}));
+      const row = this.#ownerRow(host,document); integrity(row && ack.localYDocSequence >= authorityInteger(row.tip_sequence));
+      const tip = JSON.stringify(receipt), values = [this.#history.namespace,...documentParams(document),host.hostId,row.origin_json,tip,ack.journalCursor,ack.localYDocSequence];
+      const charge = Buffer.byteLength(JSON.stringify(values)), previousCharge = authorityInteger(row.accounted_bytes,1), delta = Math.max(1,charge-previousCharge);
+      consumeLiveDeliveryReservation(this.#storage,document,host.hostId,ack.journalCursor,delta,true);
+      const refund = previousCharge + delta - charge; if (refund) this.#refundOwner(document.workspaceId,refund);
+      this.#storage.db.prepare(`UPDATE ${OWNERS} SET tip_receipt_json=?,tip_cursor=?,tip_sequence=?,accounted_bytes=? WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id=?`)
+        .run(tip,ack.journalCursor,ack.localYDocSequence,charge,this.#history.namespace,...documentParams(document),host.hostId);
     });
   }
   captureOwnerCut(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; adoptionId: string;

@@ -90,6 +90,7 @@ export function startExistingOwnerDeviceTransport(options: {
   async function execute(operation: Operation): Promise<void> {
     let result: unknown;
     let owner: ExistingOwnerSession | undefined;
+    let registration: Registration | undefined, armedHandoff = false;
     try {
       check();
       const signal = AbortSignal.any([retired.signal,operation.signal.signal]);
@@ -109,15 +110,16 @@ export function startExistingOwnerDeviceTransport(options: {
         const nativeId = integer(configRecord(response.result,["registrationId"]).registrationId,1);
         registrations.set(nativeId,{ nativeId,binding,owner,adopted: false }); result = { registrationId: nativeId };
       } else {
-        const registration = registrationFor(operation); owner = registration.owner; owner.assertCurrent();
+        registration = registrationFor(operation); owner = registration.owner; owner.assertCurrent();
         const native = { ...request,registrationId: registration.nativeId,sessionId: owner.nativeSessionId };
         if (operation.method === "liveApplication.ownerState") {
           configRecord(operation.params,["registrationId"]);
           if (registration.handoffTimer) throw new Error("Owner handoff is already active.");
           registration.handoffTimer = setTimeout(stop,config.requestDeadlineMs); registration.handoffTimer.unref();
+          armedHandoff = true;
           await owner.prepareHandoff(signal); owner.assertCurrent();
           const response = await config.client.sendRequest({ ...request,method: operation.method,params: { registrationId: registration.nativeId,sessionId: owner.nativeSessionId } },signal);
-          owner.assertCurrent(); const state = configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId"]);
+          owner.assertCurrent(); const state = configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId","pendingBytes","outboxState"]);
           result = {adoptionId: state.adoptionId,expectedLocalSequence: state.expectedLocalSequence,
             throughCursor: state.throughCursor === null && state.outboxId === null ? 0 : state.throughCursor,sessionId: String(registration.nativeId)};
         } else if (operation.method === "liveApplication.ownerOutbox") {
@@ -125,9 +127,9 @@ export function startExistingOwnerDeviceTransport(options: {
           if (!registration.adopted) throw new Error("Owner adoption must finish first.");
           const response = await config.client.sendRequest({...request,method: "liveApplication.ownerState",params: {registrationId: registration.nativeId,sessionId: owner.nativeSessionId}},signal);
           owner.assertCurrent();
-          const state = configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId"]);
+          const state = configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId","pendingBytes","outboxState"]);
           registration.outboxId = state.outboxId === null ? undefined : string(state.outboxId);
-          result = {outboxId: registration.outboxId ?? null};
+          result = {outboxId: registration.outboxId ?? null,pendingBytes: integer(state.pendingBytes),state: state.outboxState};
         } else if (operation.method === "liveApplication.readOwnerOutbox" || operation.method === "liveApplication.acknowledgeOwnerOutbox") {
           if (!registration.adopted || !registration.outboxId) throw new Error("Owner outbox is unavailable.");
           const reading = operation.method === "liveApplication.readOwnerOutbox";
@@ -164,8 +166,7 @@ export function startExistingOwnerDeviceTransport(options: {
       if (operation.method === "liveApplication.adoptOwner") await owner!.finishHandoff(true);
     } catch {
       if (owner) {try {owner.assertCurrent();} catch {stop();}}
-      if (owner && ["liveApplication.ownerState","liveApplication.adoptOwner"].includes(operation.method)) {
-        const registration = registrations.get(Number(operation.params.registrationId));
+      if (owner && (armedHandoff || operation.method === "liveApplication.adoptOwner")) {
         clearTimeout(registration?.handoffTimer); if (registration) registration.handoffTimer = undefined;
         await owner.finishHandoff(false).catch(() => undefined);
       }

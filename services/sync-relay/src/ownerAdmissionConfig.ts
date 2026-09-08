@@ -1,6 +1,7 @@
 import {openSync,readSync,closeSync} from "node:fs";
 import {isAbsolute} from "node:path";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
+// The relay builder bundles this declared dependency without publishing its private validator.
 import {createLiveMarkdownJournalValidator} from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 import type {OrderedLiveUpdateCutPolicy} from "../../../packages/ydoc-projection/src/orderedLiveUpdateCut.js";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery.js";
@@ -29,9 +30,15 @@ export function readOwnerAdmissionConfig(path: string,workspaceIds: readonly str
     if (!workspaceIds.includes(workspaceId) || shares.has(workspaceId)) throw new Error("Private owner workspace is not configured.");
     shares.set(workspaceId,parseLiveUpdateIdentifier(item.shareId,"share ID"));
   }
+  if (shares.size !== workspaceIds.length) throw new Error("Private owner workspace is not configured.");
   const validation = configRecord(row.validation,policyFields);
-  for (const field of policyFields) positive(validation[field]);
-  const validate = createLiveMarkdownJournalValidator(validation as unknown as OrderedLiveUpdateCutPolicy);
+  const policy: OrderedLiveUpdateCutPolicy = {
+    maxStructVisits: positive(validation.maxStructVisits),maxValueNodeVisits: positive(validation.maxValueNodeVisits),
+    maxDecodedPayloadByteVisits: positive(validation.maxDecodedPayloadByteVisits),maxStructClientGroupVisits: positive(validation.maxStructClientGroupVisits),
+    maxDeleteClientGroupVisits: positive(validation.maxDeleteClientGroupVisits),maxDeleteIntervalVisits: positive(validation.maxDeleteIntervalVisits),
+    maxIndexOperations: positive(validation.maxIndexOperations),
+  };
+  const validate = createLiveMarkdownJournalValidator(policy);
   const admission: OwnerOutboxAdmission = {shares,maxEntriesPerDrain: positive(row.maxEntriesPerDrain),maxBytesPerDrain: positive(row.maxBytesPerDrain),validate};
   return {admission,maxDocumentsPerPass: positive(row.maxDocumentsPerPass),pollIntervalMs: positive(row.pollIntervalMs),passDeadlineMs: positive(row.passDeadlineMs)};
 }

@@ -183,7 +183,9 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
             ApplicationError::InvalidInput(_)
             | ApplicationError::WorkspaceMismatch
             | ApplicationError::MainVersionMismatch => ErrorCode::InvalidParams,
-            ApplicationError::Conflict => ErrorCode::Conflict,
+            ApplicationError::Conflict | ApplicationError::ConfiguredBudgetMismatch => {
+                ErrorCode::Conflict
+            }
             _ => ErrorCode::Internal,
         };
         return WireError::new(code, error.code());
