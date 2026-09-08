@@ -1,5 +1,6 @@
 import { canonicalRelayUrl } from "@dohc/workspace-contracts/relay-values";
 import type { AccountAuthConfig } from "./accountAuth";
+import { parseNamedLiveBrowserClientLimits, type NamedLiveBrowserClientLimits } from "./namedLiveBrowserClient";
 
 export interface ShareWebConfig {
   relayUrl: string;
@@ -11,6 +12,7 @@ export interface ShareWebConfig {
   bind: string;
   devMode: boolean;
   accountAuth?: AccountAuthConfig;
+  namedBrowserSessionLimits?: NamedLiveBrowserClientLimits;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -115,6 +117,12 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     accountAuth = { upstreamUrl: upstream.origin, publicOrigin };
   }
 
+  let namedBrowserSessionLimits: NamedLiveBrowserClientLimits | undefined;
+  if (env.DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS !== undefined) {
+    if (!accountAuth || !relayExchangeKey) throw new Error("Named browser sessions require account auth and relay exchange configuration.");
+    namedBrowserSessionLimits = parseNamedLiveBrowserClientLimits(JSON.parse(env.DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS));
+  }
+
   return {
     relayUrl: relayUrl.href,
     publicRelayUrl,
@@ -125,5 +133,6 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     bind: env.DOHC_SHARE_WEB_BIND ?? (devMode ? "127.0.0.1" : "0.0.0.0"),
     devMode,
     ...(accountAuth ? { accountAuth } : {}),
+    ...(namedBrowserSessionLimits ? { namedBrowserSessionLimits } : {}),
   };
 }

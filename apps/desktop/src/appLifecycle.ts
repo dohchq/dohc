@@ -1,0 +1,304 @@
+import { isAbsolute } from "node:path";
+import {
+  classifyShareHandoffArguments,
+  receiveShareHandoffArguments,
+  type ShareHandoffIntentSlot,
+} from "./shareHandoffIngress";
+
+interface QuitEvent {
+  preventDefault(): void;
+}
+
+interface LifecycleApp {
+  requestSingleInstanceLock(): boolean;
+  whenReady(): Promise<unknown>;
+  quit(): void;
+  exit(code: number): void;
+  on(event: "will-quit", listener: (event: QuitEvent) => void): unknown;
+  on(event: "before-quit", listener: (event: QuitEvent) => void): unknown;
+  on(event: "open-url", listener: (event: QuitEvent, argument: string) => void): unknown;
+  on(event: "open-file", listener: (event: QuitEvent, argument: string) => void): unknown;
+  on(event: "second-instance", listener: (event: unknown, argv: string[]) => void): unknown;
+  on(event: "window-all-closed", listener: () => void): unknown;
+  on(event: "activate", listener: () => void): unknown;
+}
+
+interface CliServer {
+  close(): Promise<void>;
+}
+
+export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
+  app: LifecycleApp;
+  runtime: Pick<NodeJS.Process, "platform" | "argv" | "execPath">;
+  handoff: {
+    slot: ShareHandoffIntentSlot;
+    pendingCodeChanged(): void;
+  };
+  windows: {
+    create(): Window;
+    whenLoaded(window: Window): Promise<void>;
+    current(): Window | undefined;
+    hasWorkspace(): boolean;
+    hasAny(): boolean;
+    showOrCreate(): Promise<Window>;
+    activate(window: Window, workspace: Workspace): void;
+  };
+  workspaces: {
+    openPath(path: string, window?: Window): Promise<Workspace | null>;
+    refreshNativeSurfaces(): void;
+  };
+  bootstrap: {
+    markReady(): void;
+    startEngine(): Promise<boolean>;
+    loadSettings(): Promise<Settings>;
+    applySettings(settings: Settings): void;
+    prepareCli(): Promise<void> | undefined;
+    registerHandlers(): void;
+    markFirstWindow(): void;
+    reportFailure(error: unknown): void;
+  };
+  services: {
+    startCli(): Promise<CliServer>;
+    reportCliFailure(error: unknown): void;
+    dispatch: { start(): void; stop(): Promise<void> };
+    refreshTray(): Promise<boolean>;
+    reportTrayFailure(error: unknown): void;
+    warmCredentials(): Promise<void>;
+    reconcileCloud(): void;
+    startUpdates(): void;
+  };
+  beforeQuit(event: QuitEvent): void;
+  shutdown: {
+    budgetMs: number;
+    beginEngineShutdown(): void;
+    stopSearch(): Promise<void>;
+    stopPlugins(): Promise<void>;
+    stopAgentSessions(): Promise<void>;
+    settleYDocs(): Promise<void>;
+    stopAgentIntegration(): Promise<void>;
+    closeWorkspaces(): Promise<void>;
+    disposeDatabase(): Promise<void>;
+    closeRelay(): Promise<void>;
+    stopEngine(): Promise<void>;
+  };
+}) {
+  const { app, runtime, handoff, windows, workspaces, bootstrap, services, shutdown } = dependencies;
+  let quitting = false;
+  let bootstrapComplete = false;
+  const pendingOpenPaths: string[] = [];
+  let cliServer: CliServer | null = null;
+  let cliServerStartup: Promise<CliServer | null> | null = null;
+
+  // Register before acquiring the instance lock: a losing process also quits.
+  app.on("will-quit", (event) => {
+    if (quitting) return;
+    quitting = true;
+    event.preventDefault();
+    // Release opening-document backoff before producers drain. Accepted Y.Doc
+    // writes keep retrying until settlement or the overall shutdown budget.
+    shutdown.beginEngineShutdown();
+    const searchStop = shutdown.stopSearch().catch(() => undefined);
+    const pluginStop = shutdown.stopPlugins();
+    const agentSessionStop = shutdown.stopAgentSessions().catch(() => undefined);
+    const chatDispatchStop = services.dispatch.stop().catch(() => undefined);
+    const cliServerStop = chatDispatchStop.then(() =>
+      (cliServerStartup ?? Promise.resolve(cliServer))
+        .then((server) => server?.close())
+        .catch(() => undefined),
+    );
+    const engineYDocStop = shutdown.settleYDocs();
+    const agentIntegrationStop = agentSessionStop
+      .then(() => shutdown.stopAgentIntegration())
+      .catch(() => undefined);
+    // Starting close early would let a live producer settle onto a closed store.
+    const workspaceAuthorityStop = Promise.allSettled([
+      engineYDocStop,
+      agentSessionStop,
+      chatDispatchStop,
+      cliServerStop,
+      searchStop,
+      agentIntegrationStop,
+      pluginStop,
+    ])
+      .then(() => shutdown.closeWorkspaces())
+      .catch(() => undefined);
+    const workspaceShutdown = workspaceAuthorityStop
+      .then(async () => await shutdown.disposeDatabase())
+      .then(async () => await shutdown.closeRelay())
+      .catch(() => undefined)
+      .then(async () => await shutdown.stopEngine());
+    void Promise.race([
+      workspaceShutdown,
+      new Promise<void>((resolve) => setTimeout(resolve, shutdown.budgetMs)),
+    ]).finally(() => app.exit(0));
+  });
+
+  function collectOpenWorkspaceArgs(argv: string[]): string[] {
+    const openWorkspaceArg = "--open-workspace";
+    const paths: string[] = [];
+    for (let index = 1; index < argv.length; index += 1) {
+      const arg = argv[index] ?? "";
+      if (arg === openWorkspaceArg) {
+        const next = argv[index + 1];
+        if (next) {
+          paths.push(next);
+          index += 1;
+        }
+        continue;
+      }
+      if (arg.startsWith(`${openWorkspaceArg}=`)) {
+        paths.push(arg.slice(openWorkspaceArg.length + 1));
+        continue;
+      }
+      if (arg.startsWith("--")) continue;
+      const portable = arg.replace(/\\/g, "/");
+      if (portable.endsWith("/dist/main/main.js")) continue;
+      if (isAbsolute(arg) && arg !== runtime.execPath) paths.push(arg);
+    }
+    return [...new Set(paths)];
+  }
+
+  async function openWorkspacePaths(
+    paths: string[],
+    window?: Window,
+  ): Promise<Workspace | null> {
+    let lastOpened: Workspace | null = null;
+    for (const path of paths) {
+      const opened = await workspaces.openPath(path, window).catch(() => null);
+      if (opened) lastOpened = opened;
+    }
+    return lastOpened;
+  }
+
+  async function flushPendingOpenPaths(window?: Window): Promise<Workspace | null> {
+    if (pendingOpenPaths.length === 0) return null;
+    const paths = pendingOpenPaths.splice(0);
+    return openWorkspacePaths(paths, window);
+  }
+
+  async function whenReady(): Promise<void> {
+    bootstrap.markReady();
+    const engineStartup = bootstrap.startEngine();
+    const cachedSettingsRead = bootstrap.loadSettings();
+    const cliPreparation = bootstrap.prepareCli();
+    if (cliPreparation) await cliPreparation;
+    bootstrap.registerHandlers();
+    // Apply persisted zoom before creating the first window; overlap its IO
+    // and renderer load with the daemon handshake.
+    bootstrap.applySettings(await cachedSettingsRead);
+    const window = windows.create();
+    const windowLoaded = windows.whenLoaded(window);
+    bootstrap.markFirstWindow();
+
+    if (!(await engineStartup)) return;
+
+    cliServerStartup = services.startCli()
+      .then(async (server) => {
+        if (quitting) {
+          await server.close();
+          return null;
+        }
+        cliServer = server;
+        return server;
+      })
+      .catch((error: unknown) => {
+        services.reportCliFailure(error);
+        return null;
+      });
+    void cliServerStartup.then(() => {
+      if (!quitting) services.dispatch.start();
+    });
+    void services.refreshTray().catch(services.reportTrayFailure);
+
+    const launchWorkspace = await openWorkspacePaths(collectOpenWorkspaceArgs(runtime.argv));
+    const pendingWorkspace = await flushPendingOpenPaths();
+    const activatedWorkspace = pendingWorkspace ?? launchWorkspace;
+    workspaces.refreshNativeSurfaces();
+    void windowLoaded.then(() => {
+      if (activatedWorkspace) windows.activate(window, activatedWorkspace);
+      // Intents received during the last open await still need a drain after
+      // activation. They are later intents and must win over launch paths.
+      void flushPendingOpenPaths(window);
+    });
+    bootstrapComplete = true;
+    void services.warmCredentials().then(() => services.reconcileCloud());
+    services.startUpdates();
+  }
+
+  return {
+    isQuitting: () => quitting,
+    start(): Promise<void> {
+      if (!app.requestSingleInstanceLock()) {
+        app.quit();
+        return Promise.resolve();
+      }
+      if (runtime.platform !== "darwin") {
+        if (receiveShareHandoffArguments(runtime.argv, handoff.slot)) {
+          handoff.pendingCodeChanged();
+        }
+      }
+
+      app.on("open-url", (event, rawArgument) => {
+        event.preventDefault();
+        const accepted = receiveShareHandoffArguments([rawArgument], handoff.slot);
+        if (accepted) handoff.pendingCodeChanged();
+        if (!accepted || !bootstrapComplete) return;
+        void windows.showOrCreate();
+      });
+
+      app.on("open-file", (event, path) => {
+        event.preventDefault();
+        pendingOpenPaths.push(path);
+        if (!bootstrapComplete) return;
+        const window = windows.current();
+        if (window) {
+          void flushPendingOpenPaths(window);
+        } else {
+          void windows.showOrCreate().then((createdWindow) => flushPendingOpenPaths(createdWindow));
+        }
+      });
+
+      app.on("second-instance", (_event, argv) => {
+        const handoffIntent = classifyShareHandoffArguments(argv);
+        const accepted = receiveShareHandoffArguments(argv, handoff.slot);
+        if (accepted) handoff.pendingCodeChanged();
+        const workspacePaths = collectOpenWorkspaceArgs(argv);
+        if (!bootstrapComplete) {
+          pendingOpenPaths.push(...workspacePaths);
+          return;
+        }
+        if (handoffIntent === "rejected" && workspacePaths.length === 0) return;
+        void windows.showOrCreate().then((window) => openWorkspacePaths(workspacePaths, window));
+      });
+
+      app.on("before-quit", (event) => {
+        // A hidden export window cannot answer for renderer-held drafts.
+        if (!windows.hasWorkspace()) return;
+        dependencies.beforeQuit(event);
+      });
+
+      const ready = app.whenReady().then(whenReady).catch((error: unknown) => {
+        bootstrap.reportFailure(error);
+        // Startup failure uses the ordinary quit path so drafts can veto it.
+        app.quit();
+      });
+
+      app.on("window-all-closed", () => {
+        if (runtime.platform === "darwin") return;
+        void services.refreshTray()
+          .then((enabled) => {
+            if (!enabled && !quitting) app.quit();
+          })
+          .catch(() => {
+            if (!quitting) app.quit();
+          });
+      });
+
+      app.on("activate", () => {
+        if (!bootstrapComplete) return;
+        if (!windows.hasAny()) void windows.showOrCreate();
+      });
+      return ready;
+    },
+  };
+}

@@ -216,6 +216,25 @@ function tableTextGrid(editor: Editor): string[][] {
 
 describe("table controls grips", () => {
   let editor: Editor | undefined;
+  let editorFrame: HTMLIFrameElement | undefined;
+
+  function moveEditorToFrame(target: Editor): Window {
+    editorFrame = document.createElement("iframe");
+    document.body.append(editorFrame);
+    const frameDocument = editorFrame.contentDocument!;
+    Object.defineProperty(frameDocument, "elementFromPoint", {
+      configurable: true,
+      value: () => elementFromPointResult,
+    });
+    const content = target.getJSON();
+    target.commands.clearContent();
+    frameDocument.body.append(target.view.dom);
+    target.view.updateRoot();
+    // Build fresh widgets after the editor moves. Their detached buttons
+    // start in the global document and are adopted when ProseMirror inserts them.
+    target.commands.setContent(content);
+    return editorFrame.contentWindow!;
+  }
 
   afterEach(() => {
     elementFromPointResult = null;
@@ -224,6 +243,8 @@ describe("table controls grips", () => {
     document.body.querySelector(".dohc-table-drop-indicator")?.remove();
     editor?.destroy();
     editor = undefined;
+    editorFrame?.remove();
+    editorFrame = undefined;
   });
 
   function dragFirstRowToLast(target: Editor): void {
@@ -290,10 +311,10 @@ describe("table controls grips", () => {
     cells[4]?.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
 
     const visibleRows = editor.view.dom.querySelectorAll(
-      ".dohc-table-grip--row.is-visible",
+      ".dohc-table-grip--row.is-active",
     );
     const visibleColumns = editor.view.dom.querySelectorAll(
-      ".dohc-table-grip--col.is-visible",
+      ".dohc-table-grip--col.is-active",
     );
     expect(visibleRows).toHaveLength(1);
     expect(visibleRows[0]?.getAttribute("data-table-row")).toBe("1");
@@ -317,7 +338,7 @@ describe("table controls grips", () => {
     expect(activeCols[0]?.dataset.col).toBe("1");
     expect(activeRows[0]?.dataset.row).toBe("1");
     const visibleResize = dom.querySelectorAll<HTMLElement>(
-      ".dohc-table-row-resize.is-visible",
+      ".dohc-table-row-resize.is-active",
     );
     expect(visibleResize).toHaveLength(1);
     expect(visibleResize[0]?.dataset.tableRowResize).toBe("1");
@@ -560,6 +581,28 @@ describe("table controls grips", () => {
       ["C1", "C2", "C3"],
       ["A1", "A2", "A3"],
     ]);
+  });
+
+  it.each(["release", "Escape"])("handles a table drag's %s in the editor's window", (ending) => {
+    editor = createLabeledTableEditor();
+    const editorWindow = moveEditorToFrame(editor);
+    const source = editor.view.dom.querySelector(".dohc-table-grip--row") as HTMLElement;
+    expect(source.ownerDocument.defaultView).toBe(editorWindow);
+    elementFromPointResult = source;
+    dispatchPointer(source, "pointerdown");
+    elementFromPointResult = editor.view.dom.querySelectorAll("tr")[2]!.cells[1]!;
+    dispatchPointer(source, "pointermove", { clientX: 10, clientY: 10 });
+    expect(source.getAttribute("aria-grabbed")).toBe("true");
+    elementFromPointResult = null;
+
+    editorWindow.dispatchEvent(ending === "release"
+      ? new MouseEvent("mouseup", { button: 0 })
+      : new KeyboardEvent("keydown", { key: "Escape" }));
+
+    expect(source.getAttribute("aria-grabbed")).toBe("false");
+    expect(tableTextGrid(editor).map((row) => row[0])).toEqual(
+      ending === "release" ? ["B1", "C1", "A1"] : ["A1", "B1", "C1"],
+    );
   });
 
   it("uses the pointer half to insert before the target row", () => {
@@ -1038,6 +1081,30 @@ describe("table controls grips", () => {
     expect(handle.classList.contains("is-resizing")).toBe(false);
   });
 
+  it.each(["release", "Escape"])("handles a row resize's %s in the editor's window", (ending) => {
+    editor = createTableEditor(2, 2);
+    const editorWindow = moveEditorToFrame(editor);
+    const row = editor.view.dom.querySelector("tr") as HTMLTableRowElement;
+    const handle = editor.view.dom.querySelector(".dohc-table-row-resize") as HTMLButtonElement;
+    expect(handle.ownerDocument.defaultView).toBe(editorWindow);
+    Object.defineProperty(row, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ top: 0, bottom: 40, left: 0, right: 240, width: 240, height: 40 }),
+    });
+    dispatchPointer(handle, "pointerdown", { clientY: 100 });
+    dispatchPointer(handle, "pointermove", { clientY: 134 });
+    expect(row.style.height).toBe("74px");
+
+    editorWindow.dispatchEvent(ending === "release"
+      ? new MouseEvent("mouseup", { button: 0 })
+      : new KeyboardEvent("keydown", { key: "Escape" }));
+
+    expect(handle.getAttribute("aria-grabbed")).toBe("false");
+    expect(handle.classList.contains("is-resizing")).toBe(false);
+    expect(tableNode(editor).content?.[0]?.attrs?.height).toBe(ending === "release" ? 74 : null);
+    expect(row.style.height).toBe(ending === "release" ? "74px" : "");
+  });
+
   it("commits a resize from a non-bubbling handle mouseup", () => {
     editor = createTableEditor(2, 2);
     const row = editor.view.dom.querySelector("tr") as HTMLTableRowElement;
@@ -1271,6 +1338,47 @@ describe("table controls grips", () => {
 
     expect(colStrip.style.height).toBe("0px");
     expect(rowStrip.style.width).toBe("0px");
+  });
+
+  it("refreshes edge hit areas after layout changes while the same cell stays hovered", () => {
+    editor = createTableEditor(2, 2);
+    const dom = editor.view.dom;
+    const table = dom.querySelector("table")!;
+    const cells = [...table.querySelectorAll<HTMLElement>("td, th")];
+    const colStrip = table.querySelector<HTMLElement>(".dohc-table-append--col")!;
+    const rowStrip = table.querySelector<HTMLElement>(".dohc-table-append--row")!;
+    const resizeHandles = [...table.querySelectorAll<HTMLElement>(".dohc-table-row-resize")];
+    let width = 200;
+    let height = 100;
+    Object.defineProperty(table, "getBoundingClientRect", {
+      value: () => new DOMRect(20, 30, width, height),
+    });
+    cells.forEach((cell, index) => {
+      Object.defineProperty(cell, "getBoundingClientRect", {
+        value: () => new DOMRect(
+          20 + (index % 2) * width / 2,
+          30 + Math.floor(index / 2) * height / 2,
+          width / 2,
+          height / 2,
+        ),
+      });
+    });
+    dom.dispatchEvent(new MouseEvent("mouseenter"));
+    cells[0]!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    expect(colStrip.style.height).toBe("100px");
+    expect(rowStrip.style.width).toBe("200px");
+    expect(resizeHandles.map((handle) => handle.style.width)).toEqual(["200px", "200px"]);
+
+    const unchangedDocument = editor.state.doc;
+    width = 340;
+    height = 180;
+    cells[0]!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+
+    expect(editor.state.doc).toBe(unchangedDocument);
+    expect(colStrip.style.height).toBe("180px");
+    expect(rowStrip.style.width).toBe("340px");
+    expect(resizeHandles.map((handle) => handle.style.width)).toEqual(["340px", "340px"]);
+    expect(table.querySelectorAll(".dohc-table-row-resize.is-active")).toHaveLength(1);
   });
 
   it("append-row button adds a row at the bottom edge", () => {

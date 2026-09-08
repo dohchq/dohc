@@ -20,10 +20,7 @@ import type {
 //   - modified: both versions have the path with different content.
 // Identical paths are omitted — an empty final page means "no differences".
 
-export type {
-  VersionFileChange,
-  VersionFileChangeStatus,
-} from "@dohc/workspace-contracts/engine";
+export type { VersionFileChange } from "@dohc/workspace-contracts/engine";
 
 /**
  * `COMPARE_PAGE_TEXT_BYTE_BUDGET`: how many UTF-8 bytes of hydrated text one

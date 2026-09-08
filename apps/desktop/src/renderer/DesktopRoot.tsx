@@ -1,3 +1,4 @@
+import { useRequestSequence } from "./useRequestSequence";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   DesktopUserSettingsResult,
@@ -22,7 +23,7 @@ export function DesktopRoot() {
     useState<ShareHandoffStatusSnapshot>({ status: "idle" });
   const registryRequest = useRef(0);
   const committedRegistryRequest = useRef(0);
-  const userSettingsRequest = useRef(0);
+  const userSettingsRequests = useRequestSequence();
   const shareHandoffRevision = useRef(0);
 
   const refreshWorkspaceRegistry = useCallback(async (): Promise<Workspace[]> => {
@@ -46,9 +47,9 @@ export function DesktopRoot() {
   }, []);
 
   const refreshUserSettings = useCallback(async () => {
-    const request = ++userSettingsRequest.current;
+    const request = userSettingsRequests.next();
     const result = DesktopUserSettingsResult.parse(await bridge().getUserSettings());
-    if (request === userSettingsRequest.current) setUserSettings(result);
+    if (userSettingsRequests.isCurrent(request)) setUserSettings(result);
     return result;
   }, []);
 
@@ -126,18 +127,16 @@ export function DesktopRoot() {
   }, []);
 
   useEffect(() => {
-    const unsubscribe = bridge().onUserSettingsChanged((rawResult) => {
-      const result = DesktopUserSettingsResult.safeParse(rawResult);
-      if (!result.success) return;
-      userSettingsRequest.current += 1;
-      setUserSettings(result.data);
+    const unsubscribe = bridge().onUserSettingsChanged((result) => {
+      userSettingsRequests.next();
+      setUserSettings(result);
       // The broadcast is the writer's authoritative result. Re-read as a
       // backstop for an external edit that landed beside that write.
       void refreshUserSettings().catch(() => undefined);
     });
     void refreshUserSettings().catch(() => undefined);
     return () => {
-      userSettingsRequest.current += 1;
+      userSettingsRequests.next();
       unsubscribe();
     };
   }, [refreshUserSettings]);

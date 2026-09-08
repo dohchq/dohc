@@ -964,6 +964,88 @@ describe("PluginDetailsPage", () => {
     expect(open.textContent).toBe("Open T3 Code");
   });
 
+  it("waits for the renamed app root and never opens the retired root from an older list", async () => {
+    const original = plugin("app", {
+      directoryName: "old-app", rootPath: "/workspace/plugins/old-app",
+      webApps: [{ id: "app", title: "App", instanced: false }],
+    });
+    const older = deferred<{ ok: true; plugins: PluginStatusRecord[] }>();
+    const renamed = deferred<{ ok: true; plugins: PluginStatusRecord[] }>();
+    bridgeMock.listPlugins.mockResolvedValueOnce({ ok: true, plugins: [original] })
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(renamed.promise);
+    bridgeMock.openPluginWebApp.mockResolvedValue({ pluginId: "app", webAppId: "app" });
+    renderPage("app", "ws-1", "old-app");
+    await screen.findByTestId("plugin-open-web-app");
+
+    act(() => statusListener?.({ kind: "discovery-changed", workspaceId: "ws-1" }));
+    act(() => statusListener?.({
+      kind: "renamed", workspaceId: "ws-1", pluginId: "app", from: "old-app", to: "new-app",
+    }));
+    expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(3);
+    const waitingOpen = screen.getByTestId("plugin-open-web-app");
+    expect(waitingOpen.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(waitingOpen);
+    expect(bridgeMock.openPluginWebApp).not.toHaveBeenCalled();
+
+    await act(async () => {
+      older.resolve({ ok: true, plugins: [original] });
+      await older.promise;
+    });
+    expect(screen.queryByTestId("plugin-details-missing")).toBeNull();
+    expect(screen.getByTestId("plugin-open-web-app").hasAttribute("disabled")).toBe(true);
+    expect(bridgeMock.openPluginWebApp).not.toHaveBeenCalled();
+
+    const current = { ...original, directoryName: "new-app", rootPath: "/workspace/plugins/new-app" };
+    await act(async () => {
+      renamed.resolve({ ok: true, plugins: [current] });
+      await renamed.promise;
+    });
+    const open = screen.getByTestId("plugin-open-web-app");
+    expect(open.hasAttribute("disabled")).toBe(false);
+    await userEvent.click(open);
+    expect(bridgeMock.openPluginWebApp).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-1", pluginRoot: current.rootPath, pluginId: "app", webAppId: "app", instanceKey: null,
+    });
+  });
+
+  it("keeps another directory usable and accepts a renamed root from a status event", async () => {
+    const original = plugin("app", {
+      directoryName: "old-app", rootPath: "/workspace/plugins/old-app",
+      webApps: [{ id: "app", title: "App", instanced: false }],
+    });
+    const other = { ...original, directoryName: "other-app", rootPath: "/workspace/plugins/other-app" };
+    const renamed = deferred<{ ok: true; plugins: PluginStatusRecord[] }>();
+    bridgeMock.listPlugins.mockResolvedValueOnce({ ok: true, plugins: [original, other] })
+      .mockReturnValueOnce(renamed.promise);
+    bridgeMock.openPluginWebApp.mockResolvedValue({ pluginId: "app", webAppId: "app" });
+    const view = renderPage("app", "ws-1", "other-app");
+    await screen.findByTestId("plugin-open-web-app");
+    act(() => statusListener?.({
+      kind: "renamed", workspaceId: "ws-1", pluginId: "app", from: "old-app", to: "new-app",
+    }));
+    expect(screen.getByTestId("plugin-open-web-app").hasAttribute("disabled")).toBe(false);
+    await userEvent.click(screen.getByTestId("plugin-open-web-app"));
+    expect(bridgeMock.openPluginWebApp).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1", pluginRoot: other.rootPath, pluginId: "app", webAppId: "app", instanceKey: null,
+    });
+
+    view.rerender(<PluginDetailsPage workspaceId="ws-1" pluginId="app" directoryName="new-app" />);
+    expect(screen.getByTestId("plugin-open-web-app").hasAttribute("disabled")).toBe(true);
+    const current = { ...original, directoryName: "new-app", rootPath: "/workspace/plugins/new-app" };
+    act(() => statusListener?.({ kind: "changed", workspaceId: "ws-1", plugin: current }));
+    expect(screen.getByTestId("plugin-open-web-app").hasAttribute("disabled")).toBe(false);
+    await userEvent.click(screen.getByTestId("plugin-open-web-app"));
+    expect(bridgeMock.openPluginWebApp).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1", pluginRoot: current.rootPath, pluginId: "app", webAppId: "app", instanceKey: null,
+    });
+    expect(bridgeMock.openPluginWebApp).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      renamed.resolve({ ok: true, plugins: [current, other] });
+      await renamed.promise;
+    });
+  });
+
   it("can open a web app after leaving a workspace whose open never answered", async () => {
     const installed = plugin("t3-code", {
       webApps: [{ id: "app", title: "T3 Code", instanced: false }],

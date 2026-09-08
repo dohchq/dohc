@@ -2,18 +2,8 @@ import type {
   ShareHandoffIntent,
   ShareHandoffIntentSlot,
 } from "./shareHandoffIngress";
+import type { ShareHandoffStatus } from "./ipc/bridgeContract";
 import { relayUrlsMatch } from "./workspaces/syncCode";
-
-export type ShareHandoffStatus =
-  | { status: "idle" }
-  | { status: "waiting-for-sign-in"; statusId: string }
-  | { status: "waiting-for-acceptance"; statusId: string; email: string }
-  | { status: "failed-wrong-server"; statusId: string; linkRelayUrl: string }
-  | { status: "redeeming"; statusId: string }
-  | { status: "failed-refused"; statusId: string }
-  | { status: "failed-busy"; statusId: string }
-  | { status: "failed-network"; statusId: string }
-  | { status: "done"; statusId: string; shareId: string };
 
 export interface ShareHandoffCredentials {
   serverUrl: string;

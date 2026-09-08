@@ -2,9 +2,9 @@
 // a schema addition: headings already exist as nodes, this just walks them.
 // Two pure concerns live here: (1) flattening the heading list in doc
 // order, and (2) resolving which heading is "active" (the topmost one
-// currently in view). Both are kept DOM-free and duck-typed against
-// minimal shapes — same pattern as inlineAtomPlugin.ts/findReplace.ts —
-// so they're testable without a real ProseMirror schema.
+// currently in view). Both are DOM-free.
+
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 
 export type OutlineHeading = {
   /** Heading level, 1-6. */
@@ -15,28 +15,17 @@ export type OutlineHeading = {
   pos: number;
 };
 
-// Minimal duck-typed shapes covering only what extraction reads off a real
-// ProseMirror Node/doc.
-export type PMHeadingNodeLike = {
-  type: { name: string };
-  attrs?: { level?: unknown };
-  textContent: string;
-};
-export type PMOutlineDocLike = {
-  descendants: (cb: (node: PMHeadingNodeLike, pos: number) => boolean | void) => void;
-};
-
 /** Pure: flatten the doc's heading nodes, in document order. Headings with
  *  no text (an empty "# " line mid-edit) are skipped — they have nothing to
  *  jump to and would just be noise in the rail/panel. */
-export function extractOutline(doc: PMOutlineDocLike): OutlineHeading[] {
+export function extractOutline(doc: ProseMirrorNode): OutlineHeading[] {
   const headings: OutlineHeading[] = [];
   doc.descendants((node, pos) => {
     if (node.type.name !== "heading") return;
     const text = node.textContent.trim();
     if (!text) return;
     const level =
-      typeof node.attrs?.level === "number" && Number.isInteger(node.attrs.level)
+      typeof node.attrs.level === "number" && Number.isInteger(node.attrs.level)
         ? node.attrs.level
         : 1;
     headings.push({ level, text, pos });

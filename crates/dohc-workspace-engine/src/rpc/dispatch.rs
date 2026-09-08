@@ -769,13 +769,7 @@ impl EngineService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::EngineService;
-    use crate::capture_driver;
-    use dohc_engine_protocol::error::ErrorCode;
-    use dohc_engine_protocol::transport::RequestContext;
-    use dohc_engine_protocol::wire::Request;
-    use serde_json::Value;
-    use serde_json::json;
+    use dohc_engine_protocol::transport::EngineService as _;
 
     #[test]
     fn only_idempotent_version_bootstrap_bypasses_the_initial_capture_fence() {

@@ -2,357 +2,17 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { useRef, useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import * as Y from "yjs";
-import {
-  declareSceneRoots,
-  insertElementRevision,
-  putSceneAsset,
-} from "@dohc/excalidraw-scene";
-import {
-  ENGINE_YDOC_UPDATE_MAX_BYTES,
-  type EngineYDocSaveStateEvent,
-} from "../../ipc/channels";
+import type * as Y from "yjs";
+import { insertElementRevision, putSceneAsset } from "@dohc/excalidraw-scene";
+import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 import {
   resetOrphanedDrafts,
   useOrphanedDrafts,
 } from "../orphanedDrafts";
-import {
-  disposeEngineDocLeasesForTests,
-  useEngineDoc,
-} from "./useEngineDoc";
-import { EngineYDocUpdateTooLargeError } from "./engineYDocProvider";
+import { disposeEngineDocLeasesForTests } from "./engineDocLease";
+import { useEngineDoc } from "./useEngineDoc";
+import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
-
-const projectionGate = vi.hoisted(() => ({
-  pending: null as Promise<void> | null,
-  completed: 0,
-}));
-
-vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
-  const actual = await importOriginal<
-    typeof import("@dohc/ydoc-projection")
-  >();
-  return {
-    ...actual,
-    yDocToMarkdown(doc: Y.Doc) {
-      const markdown = actual.yDocToMarkdown(doc);
-      return (
-        projectionGate.pending?.then(() => {
-          projectionGate.completed += 1;
-          return `${markdown} [projected]`;
-        }) ??
-        markdown
-      );
-    },
-  };
-});
-
-const IMAGE_DESCRIPTOR = {
-  id: "recovery-image",
-  mimeType: "image/png",
-  created: 1,
-  ref: "assets/recovery-image.png",
-  sha256: "a".repeat(64),
-  lastRetrieved: 2,
-  version: 3,
-};
-
-// AUDIT-SILENTSAVE. The engine editor's save indicator used to be a 1s timer
-// that flipped to "saved" no matter what the engine did — three dogfood
-// journeys watched a doc read "Saved" over a ZERO-BYTE .md. It is now driven
-// only by main's real settle outcomes. These tests own that contract: no
-// timer may resurrect "saved", a failure must show, and a settle that predates
-// the newest keystroke must not claim to cover it.
-
-type SaveStateListener = (event: EngineYDocSaveStateEvent) => void;
-type LineageReplacementListener = (event: {
-  sessionId: string;
-  update: Uint8Array;
-  recoveredPaths: string[];
-  artifactAssets: readonly typeof IMAGE_DESCRIPTOR[];
-  lineageGeneration: number;
-}) => void;
-
-function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
-  const saveStateListeners = new Set<SaveStateListener>();
-  const remoteUpdateListeners = new Set<
-    (event: { sessionId: string; update: Uint8Array }) => void
-  >();
-  const lineageReplacementListeners = new Set<LineageReplacementListener>();
-  const applied: Array<{ sessionId: string; seq: number }> = [];
-  const applyAttempts: Array<{ sessionId: string; seq: number }> = [];
-  const closed: string[] = [];
-  let rejectedApplyAttempts = 0;
-  let deferredApplyFailure: Promise<never> | null = null;
-  const acknowledgedGenerations: number[] = [];
-  let openedSessionId: string | null = null;
-  let openCount = 0;
-  const doc = new Y.Doc();
-  if (kind === "scene") {
-    declareSceneRoots(doc);
-    insertElementRevision(doc, {
-      id: "recovered-shape",
-      type: "rectangle",
-      version: 1,
-      versionNonce: 1,
-      isDeleted: false,
-      index: "a0",
-    });
-  } else {
-    doc.getMap("meta").set("contentKind", "plain-text");
-    doc.getText("plainText").insert(0, "seed");
-  }
-  let removalInProgress: {
-    operation: "delete" | "move";
-    message: string;
-  } | null = null;
-  let emitDeletedDuringOpen = false;
-  let artifactAssets: readonly typeof IMAGE_DESCRIPTOR[] = [];
-  let artifactAssetsInvalid = false;
-  let lineageReplacementFailure: Error | null = null;
-  let lineageReplacementRefusal:
-    | "session-unavailable"
-    | "lineage-transition"
-    | null = null;
-  let permanentApplyFailure = false;
-  let readArtifactAsset: (descriptor: typeof IMAGE_DESCRIPTOR) => Promise<{
-    descriptor: typeof IMAGE_DESCRIPTOR;
-    bytes: Uint8Array;
-  }> = async () => {
-    throw new Error("missing asset");
-  };
-
-  const api = {
-    async openEngineYDocSession(payload: { sessionId: string }) {
-      openCount += 1;
-      openedSessionId = payload.sessionId;
-      if (emitDeletedDuringOpen) {
-        for (const listener of [...saveStateListeners]) {
-          listener({ sessionId: payload.sessionId, state: "deleted", seq: 0 });
-        }
-      }
-      if (removalInProgress) {
-        return { available: false, removalInProgress };
-      }
-      if (artifactAssetsInvalid) {
-        return { available: false, artifactAssetsInvalid: true };
-      }
-      return {
-        available: true,
-        initialUpdate: Y.encodeStateAsUpdate(doc),
-        artifactAssets,
-        lineageGeneration: 1,
-      };
-    },
-    async applyEngineYDocUpdate(payload: {
-      sessionId: string;
-      update: Uint8Array;
-      seq: number;
-    }) {
-      applyAttempts.push({ sessionId: payload.sessionId, seq: payload.seq });
-      if (permanentApplyFailure) {
-        permanentApplyFailure = false;
-        throw new EngineYDocUpdateTooLargeError(
-          ENGINE_YDOC_UPDATE_MAX_BYTES + 1,
-        );
-      }
-      if (deferredApplyFailure) {
-        const failure = deferredApplyFailure;
-        deferredApplyFailure = null;
-        await failure;
-      }
-      if (rejectedApplyAttempts > 0) {
-        rejectedApplyAttempts -= 1;
-        throw new Error("IPC request rejected");
-      }
-      Y.applyUpdate(doc, payload.update);
-      applied.push({ sessionId: payload.sessionId, seq: payload.seq });
-      return { accepted: true as const };
-    },
-    readEngineYDocArtifactAsset(payload: { descriptor: typeof IMAGE_DESCRIPTOR }) {
-      return readArtifactAsset(payload.descriptor);
-    },
-    onEngineYDocRemoteUpdate: (
-      listener: (event: { sessionId: string; update: Uint8Array }) => void,
-    ) => {
-      remoteUpdateListeners.add(listener);
-      return () => remoteUpdateListeners.delete(listener);
-    },
-    onEngineYDocLineageReplacement: (listener: LineageReplacementListener) => {
-      lineageReplacementListeners.add(listener);
-      return () => lineageReplacementListeners.delete(listener);
-    },
-    async acknowledgeEngineYDocLineageReplacement(payload: {
-      lineageGeneration: number;
-    }) {
-      acknowledgedGenerations.push(payload.lineageGeneration);
-      if (lineageReplacementFailure) throw lineageReplacementFailure;
-      if (lineageReplacementRefusal) {
-        return {
-          accepted: false as const,
-          reason: lineageReplacementRefusal,
-        };
-      }
-      return { accepted: true as const, updates: [] };
-    },
-    onEngineYDocSaveState: (listener: SaveStateListener) => {
-      saveStateListeners.add(listener);
-      return () => saveStateListeners.delete(listener);
-    },
-    async closeEngineYDocSession(payload: { sessionId: string }) {
-      closed.push(payload.sessionId);
-      return undefined;
-    },
-  };
-
-  // Mutates the SOURCE doc and delivers the resulting incremental update as
-  // a forwarded remote delta — a co-editor's edit, arriving on the same
-  // channel a local one settles through. Not gated by `writesRefused`: a
-  // remote update still applies to a deleted-while-editing doc (only LOCAL
-  // writes are refused), so a deletion's captured text must be frozen
-  // against exactly this.
-  function emitRemoteEdit(suffix: string): void {
-    if (openedSessionId === null) throw new Error("session not open yet");
-    const before = Y.encodeStateVector(doc);
-    doc.getText("plainText").insert(doc.getText("plainText").length, suffix);
-    const update = Y.encodeStateAsUpdate(doc, before);
-    const event = { sessionId: openedSessionId, update };
-    act(() => {
-      for (const listener of [...remoteUpdateListeners]) listener(event);
-    });
-  }
-
-  function emitLineageReplacement(
-    text: string,
-    replacementAssets: readonly typeof IMAGE_DESCRIPTOR[] = [],
-    lineageGeneration = 2,
-  ): void {
-    if (openedSessionId === null) throw new Error("session not open yet");
-    const replacement = new Y.Doc();
-    if (kind === "scene") {
-      declareSceneRoots(replacement);
-      insertElementRevision(replacement, {
-        id: "winning-shape",
-        type: "rectangle",
-        version: 1,
-        versionNonce: 1,
-        isDeleted: false,
-        index: "a0",
-      });
-      for (const descriptor of replacementAssets) {
-        putSceneAsset(replacement, descriptor);
-        insertElementRevision(replacement, {
-          id: `image-${descriptor.id}`,
-          type: "image",
-          fileId: descriptor.id,
-          version: 1,
-          versionNonce: 1,
-          isDeleted: false,
-          index: "a1",
-        });
-      }
-    } else {
-      replacement.getMap("meta").set("contentKind", "plain-text");
-      replacement.getText("plainText").insert(0, text);
-    }
-    const event = {
-      sessionId: openedSessionId,
-      update: Y.encodeStateAsUpdate(replacement),
-      recoveredPaths: [],
-      artifactAssets: replacementAssets,
-      lineageGeneration,
-    };
-    act(() => {
-      for (const listener of [...lineageReplacementListeners]) listener(event);
-    });
-  }
-
-  function emit(
-    state:
-      | "settling"
-      | "saved"
-      | "error"
-      | "file-locked"
-      | "read-only"
-      | "deleted",
-    seq: number,
-    sessionId?: string,
-  ): void {
-    const target = sessionId ?? openedSessionId;
-    if (target === null) throw new Error("session not open yet");
-    const event = { sessionId: target, state, seq };
-    act(() => {
-      for (const listener of [...saveStateListeners]) listener(event);
-    });
-  }
-
-  function emitNow(
-    state:
-      | "settling"
-      | "saved"
-      | "error"
-      | "file-locked"
-      | "read-only"
-      | "deleted",
-    seq: number,
-  ): void {
-    if (openedSessionId === null) throw new Error("session not open yet");
-    for (const listener of [...saveStateListeners]) {
-      listener({ sessionId: openedSessionId, state, seq });
-    }
-  }
-
-  return {
-    api,
-    emit,
-    emitNow,
-    emitRemoteEdit,
-    emitLineageReplacement,
-    applied,
-    applyAttempts,
-    closed,
-    sourceDoc: doc,
-    mainText: () => doc.getText("plainText").toString(),
-    acknowledgedGenerations,
-    sessionId: () => openedSessionId,
-    openCount: () => openCount,
-    rejectNextApplyAttempts(count: number) {
-      rejectedApplyAttempts = count;
-    },
-    setRemovalInProgress(value: typeof removalInProgress) {
-      removalInProgress = value;
-    },
-    setEmitDeletedDuringOpen(value: boolean) {
-      emitDeletedDuringOpen = value;
-    },
-    setArtifactReader(
-      descriptors: readonly typeof IMAGE_DESCRIPTOR[],
-      reader: typeof readArtifactAsset,
-    ) {
-      artifactAssets = descriptors;
-      readArtifactAsset = reader;
-    },
-    setArtifactAssetsInvalid(value: boolean) {
-      artifactAssetsInvalid = value;
-    },
-    setLineageReplacementFailure(value: Error | null) {
-      lineageReplacementFailure = value;
-    },
-    setLineageReplacementRefusal(value: typeof lineageReplacementRefusal) {
-      lineageReplacementRefusal = value;
-    },
-    deferNextApplyFailure() {
-      let rejectFailure!: (error: Error) => void;
-      deferredApplyFailure = new Promise<never>((_resolve, reject) => {
-        rejectFailure = reject;
-      });
-      return () => rejectFailure(new Error("renderer update delivery failed"));
-    },
-    rejectNextApplyAsTooLarge() {
-      permanentApplyFailure = true;
-    },
-  };
-}
 
 let lastBoundDoc: Y.Doc | null = null;
 
@@ -414,7 +74,6 @@ function Harness(props: {
       </span>
       <span data-testid="hydrated-assets">{hydratedAssets}</span>
       <span data-testid="text">{engine.doc?.getText("plainText").toString() ?? "none"}</span>
-      <span data-testid="drafts">{drafts.map((draft) => draft.text).join("|")}</span>
       <button
         type="button"
         data-testid="hydrate-assets"
@@ -497,8 +156,6 @@ beforeEach(() => {
   vi.stubGlobal("dohcDesktop", harness.api);
   resetOrphanedDrafts();
   lastBoundDoc = null;
-  projectionGate.pending = null;
-  projectionGate.completed = 0;
 });
 
 afterEach(async () => {
@@ -507,8 +164,6 @@ afterEach(async () => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   resetOrphanedDrafts();
-  projectionGate.pending = null;
-  projectionGate.completed = 0;
 });
 
 async function mountBound() {
@@ -521,58 +176,6 @@ async function flushLocalBatch(): Promise<void> {
     await vi.advanceTimersByTimeAsync(32);
   });
 }
-
-it("never flips back to Saved on a timer — only a real settle report clears it", async () => {
-  await mountBound();
-
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  expect(screen.getByTestId("state").textContent).toBe("saving");
-
-  // The old indicator flipped to "saved" 1s after the last edit regardless of
-  // the engine. Run far past that: with no settle report, nothing may claim it.
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(10_000);
-  });
-  expect(screen.getByTestId("state").textContent).toBe("saving");
-
-  // Only main's real report clears it.
-  harness.emit("saved", harness.applied.at(-1)!.seq);
-  expect(screen.getByTestId("state").textContent).toBe("saved");
-});
-
-it("observes unsaved edits on a replacement document", async () => {
-  await mountBound();
-  harness.emitLineageReplacement("winner");
-  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
-
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  await flushLocalBatch();
-
-  expect(screen.getByTestId("state").textContent).toBe("saving");
-  expect(harness.applied).toHaveLength(1);
-});
-
-it("persists a late edit on the losing mirror during replacement", async () => {
-  await mountBound();
-  const losingDoc = lastBoundDoc!;
-
-  harness.emitLineageReplacement("winner");
-  act(() => {
-    const text = losingDoc.getText("plainText");
-    text.insert(text.length, "!");
-  });
-
-  await waitFor(() =>
-    expect(screen.getByTestId("draft").textContent).toBe("seed!"),
-  );
-  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
-  expect(harness.applied).toHaveLength(0);
-  expect(screen.getByTestId("available").textContent).toBe("true");
-});
 
 it("keeps a failed lineage handoff visible and read-only", async () => {
   await mountBound();
@@ -709,33 +312,6 @@ it("clears a permanent refusal when an independent lineage wins", async () => {
   expect(screen.getByTestId("draft").textContent).toBe("seed!");
 });
 
-it("binds a winning lineage while the deleted path stays deleted", async () => {
-  // Main keeps a deleted entry refusing updates whichever lineage wins, so
-  // the renderer must keep reporting deletion across the replacement — while
-  // a slow retired-recovery projection must still not block the winner from
-  // binding.
-  let releaseProjection!: () => void;
-  projectionGate.pending = new Promise<void>((resolve) => {
-    releaseProjection = resolve;
-  });
-  await mountBound();
-
-  act(() => screen.getByTestId("type").click());
-  harness.emitNow("deleted", 0);
-  harness.emitLineageReplacement("unused");
-
-  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
-  await act(async () => {
-    releaseProjection();
-    await projectionGate.pending;
-  });
-  await waitFor(() =>
-    expect(projectionGate.completed).toBeGreaterThanOrEqual(2),
-  );
-  expect(screen.getByTestId("available").textContent).toBe("true");
-  expect(screen.getByTestId("deleted").textContent).toBe("true");
-});
-
 it("recovers a dirty replaced scene immediately and hydrates its image", async () => {
   harness = harnessBridge("scene");
   const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
@@ -810,48 +386,6 @@ it("recovers a dirty replaced scene immediately and hydrates its image", async (
   });
   expect(screen.getByTestId("asset-recovery").textContent).toBe("none");
   expect(screen.getByTestId("draft-count").textContent).toBe("1");
-});
-
-it("loads scene asset bytes only when recovery needs them", async () => {
-  harness = harnessBridge("scene");
-  const readAsset = vi.fn(async () => ({
-    descriptor: IMAGE_DESCRIPTOR,
-    bytes: new Uint8Array([1, 2, 3]),
-  }));
-  harness.setArtifactReader([IMAGE_DESCRIPTOR], readAsset);
-  putSceneAsset(harness.sourceDoc, IMAGE_DESCRIPTOR);
-  insertElementRevision(harness.sourceDoc, {
-    id: "image-element",
-    type: "image",
-    fileId: IMAGE_DESCRIPTOR.id,
-    version: 1,
-    versionNonce: 1,
-    isDeleted: false,
-    index: "a1",
-  });
-  vi.stubGlobal("dohcDesktop", harness.api);
-  render(
-    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
-  );
-  await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
-  );
-
-  expect(readAsset).not.toHaveBeenCalled();
-
-  act(() => screen.getByTestId("type").click());
-  await flushLocalBatch();
-  harness.emit("deleted", harness.applied.at(-1)!.seq);
-
-  await waitFor(() => expect(readAsset).toHaveBeenCalledOnce());
-  await waitFor(() => {
-    const recovered = parseExcalidrawDocument(
-      screen.getByTestId("draft").textContent!,
-    );
-    expect(recovered.files[IMAGE_DESCRIPTOR.id]).toMatchObject({
-      dataURL: "data:image/png;base64,AQID",
-    });
-  });
 });
 
 it("keeps retired scene authority after a successful replacement", async () => {
@@ -1140,140 +674,6 @@ it("does not reuse a losing lineage asset when the winner reuses its file ID", a
   expect(screen.getByTestId("draft").textContent).not.toContain("CQ==");
 });
 
-it("keeps deletion recovery separate from refused winner edits", async () => {
-  await mountBound();
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  await flushLocalBatch();
-  const appliedAtDelete = harness.applied.length;
-  harness.emit("deleted", harness.applied.at(-1)!.seq);
-  await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("seed!"));
-
-  harness.emitLineageReplacement("winner");
-  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
-  expect(screen.getByTestId("state").textContent).toBe("deleted");
-
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("winner!"));
-  expect(harness.applied).toHaveLength(appliedAtDelete);
-  expect(screen.getByTestId("draft-count").textContent).toBe("2");
-  expect(screen.getByTestId("drafts").textContent).toContain("seed!");
-  expect(screen.getByTestId("drafts").textContent).toContain("winner!");
-  expect(screen.getByTestId("state").textContent).toBe("deleted");
-
-  cleanup();
-  await disposeEngineDocLeasesForTests();
-  render(
-    <Harness
-      workspaceId="ws-1"
-      path="notes/big.md"
-      enabled={false}
-    />,
-  );
-  expect(screen.getByTestId("draft-count").textContent).toBe("2");
-  expect(screen.getByTestId("drafts").textContent).toContain("seed!");
-  expect(screen.getByTestId("drafts").textContent).toContain("winner!");
-});
-
-it("keeps recovery from consecutive independent lineage replacements", async () => {
-  await mountBound();
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  harness.emitLineageReplacement("winner");
-  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
-
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  harness.emitLineageReplacement("final", [], 3);
-  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2, 3]));
-
-  expect(screen.getByTestId("draft-count").textContent).toBe("2");
-  expect(screen.getByTestId("drafts").textContent).toContain("seed!");
-  expect(screen.getByTestId("drafts").textContent).toContain("winner!");
-});
-
-it("shows the failure when a settle fails, instead of reading Saved", async () => {
-  await mountBound();
-
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  await flushLocalBatch();
-  harness.emit("error", harness.applied.at(-1)!.seq);
-  expect(screen.getByTestId("state").textContent).toBe("error");
-
-  // It stays honest: no timer, no later edit-less event, walks it back.
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(10_000);
-  });
-  expect(screen.getByTestId("state").textContent).toBe("error");
-});
-
-it("does not report Saved while an earlier delivery is still unanswered", async () => {
-  await mountBound();
-  const rejectFirst = harness.deferNextApplyFailure();
-
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  await flushLocalBatch();
-  expect(harness.applyAttempts).toHaveLength(1);
-
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  await flushLocalBatch();
-
-  // Main echoes a settle covering the newest seq while the first delivery has
-  // not answered. It must not vouch for the whole mirror yet.
-  harness.emit("saved", 2);
-  expect(screen.getByTestId("state").textContent).toBe("saving");
-
-  rejectFirst();
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(250);
-  });
-  await waitFor(() => expect(harness.applied.at(-1)?.seq).toBe(2));
-  expect(harness.mainText()).toBe("seed!!");
-  // Every outstanding delivery is acknowledged; the deferred settle now
-  // reports the mirror durable without another event.
-  await waitFor(() =>
-    expect(screen.getByTestId("state").textContent).toBe("saved"),
-  );
-});
-
-it("stays Saving until a retried delivery converges", async () => {
-  await mountBound();
-  harness.rejectNextApplyAttempts(2);
-
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  await flushLocalBatch();
-  expect(harness.applyAttempts).toHaveLength(1);
-  expect(screen.getByTestId("state").textContent).toBe("saving");
-
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(250);
-  });
-  expect(harness.applyAttempts).toHaveLength(2);
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(250);
-  });
-  await waitFor(() => expect(harness.applyAttempts).toHaveLength(3));
-  expect(harness.mainText()).toBe("seed!");
-
-  harness.emit("saved", harness.applied.at(-1)!.seq);
-  await waitFor(() =>
-    expect(screen.getByTestId("state").textContent).toBe("saved"),
-  );
-});
-
 it("delivers the final mirror state before the final consumer closes and reopens", async () => {
   const view = render(
     <Harness workspaceId="ws-1" path="notes/big.md" enabled />,
@@ -1351,31 +751,6 @@ it("sets aside the final mirror when live repair and final delivery fail", async
   expect(harness.applied).toHaveLength(0);
 });
 
-it("refuses transport writes synchronously after main reports deletion", async () => {
-  await mountBound();
-
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  await flushLocalBatch();
-  const appliedAtDelete = harness.applied.length;
-  harness.emit("deleted", harness.applied.at(-1)!.seq);
-
-  expect(screen.getByTestId("state").textContent).toBe("deleted");
-  expect(screen.getByTestId("deleted").textContent).toBe("true");
-
-  // A Y.Doc update can fire before the read-only React render commits. The
-  // transport ref closes that gap, so no later update reaches main.
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  expect(harness.applied).toHaveLength(appliedAtDelete);
-  expect(screen.getByTestId("state").textContent).toBe("deleted");
-
-  harness.emit("error", harness.applied.at(-1)!.seq);
-  expect(screen.getByTestId("state").textContent).toBe("deleted");
-});
-
 it("sets aside a refused scene, freezes writes, and releases the session", async () => {
   harness = harnessBridge("scene");
   vi.stubGlobal("dohcDesktop", harness.api);
@@ -1434,84 +809,6 @@ it("replaces the same deletion's draft when a keystroke lands before read-only c
     expect(screen.getByTestId("draft").textContent).toBe("seed!!"),
   );
   expect(harness.applied).toHaveLength(appliedAtDelete);
-});
-
-it("keeps one recovery draft when deletion lands during a lineage replacement handoff", async () => {
-  await mountBound();
-
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  // The mirror is dirty, so the replacement's preserve persists a recovery
-  // draft synchronously; main's deletion notice for the same session lands
-  // before the handoff acknowledges. The deletion must refine the preserved
-  // draft, not capture a sibling from the same mirror.
-  act(() => {
-    harness.emitLineageReplacement("winner!");
-    harness.emitNow("deleted", 0);
-  });
-
-  await waitFor(() =>
-    expect(screen.getByTestId("state").textContent).toBe("deleted"),
-  );
-  expect(screen.getByTestId("draft-count").textContent).toBe("1");
-  expect(screen.getByTestId("draft").textContent).toContain("seed!");
-});
-
-it("freezes the deleted doc's bytes at the event, immune to a remote edit that lands before serialization resolves", async () => {
-  // The boundary capture snapshots the doc synchronously at the
-  // deletion event and defers only the markdown PROJECTION (the part that
-  // needs the lazy Tiptap module). Nothing before this pin distinguished
-  // that from deferring the snapshot too — both pass every earlier test,
-  // because unmount alone does not corrupt a Y.Doc's encodable state.
-  //
-  // A remote update is the real discriminator: it is not gated by
-  // `writesRefused` (only LOCAL writes are refused after deletion), so it
-  // can still land on the same doc while the projection is in flight. A
-  // synchronous snapshot is immune to it; a deferred one would pick it up.
-  await mountBound();
-
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  await flushLocalBatch();
-  harness.emitNow("deleted", harness.applied.at(-1)!.seq);
-
-  // Lands after the event, before the queued serialize job has resolved.
-  harness.emitRemoteEdit("+remote");
-
-  await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("seed!"));
-});
-
-it("stores a deleted scene as portable Excalidraw JSON", async () => {
-  harness = harnessBridge("scene");
-  vi.stubGlobal("dohcDesktop", harness.api);
-  render(
-    <Harness
-      workspaceId="ws-1"
-      path="drawing.excalidraw"
-      kind="scene"
-    />,
-  );
-  await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
-  );
-
-  act(() => screen.getByTestId("type").click());
-  await flushLocalBatch();
-  harness.emit("deleted", harness.applied.at(-1)!.seq);
-
-  await waitFor(() => {
-    const text = screen.getByTestId("draft").textContent ?? "none";
-    expect(text).not.toBe("none");
-    const recovered = JSON.parse(text);
-    expect(recovered).toMatchObject({
-      type: "excalidraw",
-      source: "https://excalidraw.com",
-      elements: [{ id: "recovered-shape" }],
-      files: {},
-    });
-  });
 });
 
 it("upgrades one deleted-scene draft with its verified image bytes", async () => {
@@ -1706,15 +1003,6 @@ it("does not carry a deleted verdict into a fresh bind of the same path", async 
   expect(harness.applied).toHaveLength(appliedBeforeFreshEdit + 1);
 });
 
-it("observes deletion while the open answer is still in flight", async () => {
-  harness.setEmitDeletedDuringOpen(true);
-  render(<Harness workspaceId="ws-1" path="notes/big.md" />);
-
-  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
-  expect(screen.getByTestId("state").textContent).toBe("deleted");
-  expect(screen.getByTestId("deleted").textContent).toBe("true");
-});
-
 it("keeps a failed delete interval retryable without storing a deleted verdict", async () => {
   harness.setRemovalInProgress({
     operation: "delete",
@@ -1758,120 +1046,6 @@ it("keeps invalid scene asset authority as a distinct unavailable outcome", asyn
     "false",
   );
   expect(screen.getByTestId("removal-operation").textContent).toBe("none");
-});
-
-it("passes a file-locked report through, and a real settle clears it", async () => {
-  // The transient lock is its own state so the surface can name the
-  // blocker. Like "error" it never decays on a timer — only a real settle
-  // report walks it back, which is what the engine's own retry produces.
-  await mountBound();
-
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  await flushLocalBatch();
-  harness.emit("file-locked", harness.applied.at(-1)!.seq);
-  expect(screen.getByTestId("state").textContent).toBe("file-locked");
-
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(10_000);
-  });
-  expect(screen.getByTestId("state").textContent).toBe("file-locked");
-
-  // The engine's retry lands: the same real report clears it to Saved.
-  harness.emit("saved", harness.applied.at(-1)!.seq);
-  expect(screen.getByTestId("state").textContent).toBe("saved");
-});
-
-it("does not claim File in use for a lock refusal that predates the newest keystroke", async () => {
-  // `file-locked` is the one refusal whose copy makes a durability claim —
-  // dohc has your edits, and it is retrying. A refusal about older text would
-  // promise safety for a keystroke the settle never carried, so it is held to
-  // the same sequence guard "saved" uses.
-  //
-  await mountBound();
-
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  await flushLocalBatch();
-  const firstSeq = harness.applied.at(-1)!.seq;
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-
-  // The lock refusal belongs to the settle that started before the second
-  // keystroke. The second edit is staged but not sent yet. The local sequence
-  // already guards it, so the document stays saving instead of claiming the
-  // edit is safely parked under a lock.
-  harness.emit("file-locked", firstSeq);
-  expect(screen.getByTestId("state").textContent).toBe("saving");
-
-  // A refusal that does cover the newest edit names the blocker.
-  await flushLocalBatch();
-  const secondSeq = harness.applied.at(-1)!.seq;
-  expect(secondSeq).toBeGreaterThan(firstSeq);
-  harness.emit("file-locked", secondSeq);
-  expect(screen.getByTestId("state").textContent).toBe("file-locked");
-});
-
-it("does not claim Saved for a settle that predates the newest keystroke", async () => {
-  await mountBound();
-
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  await flushLocalBatch();
-  const firstSeq = harness.applied.at(-1)!.seq;
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-
-  // A settle that started before the second keystroke reports success. It
-  // never carried that staged, not-yet-sent edit, so the indicator must keep
-  // saying "saving".
-  harness.emit("saved", firstSeq);
-  expect(screen.getByTestId("state").textContent).toBe("saving");
-
-  // The follow-up settle covers it.
-  await flushLocalBatch();
-  const secondSeq = harness.applied.at(-1)!.seq;
-  expect(secondSeq).toBeGreaterThan(firstSeq);
-  harness.emit("saved", secondSeq);
-  await waitFor(() =>
-    expect(screen.getByTestId("state").textContent).toBe("saved"),
-  );
-});
-
-it("stays Saving while a rejected transport head retries ahead of later edits", async () => {
-  harness.rejectNextApplyAttempts(1);
-  await mountBound();
-
-  act(() => screen.getByTestId("type").click());
-  await flushLocalBatch();
-  expect(harness.applyAttempts.map(({ seq }) => seq)).toEqual([1]);
-  expect(harness.applied).toEqual([]);
-  expect(screen.getByTestId("state").textContent).toBe("saving");
-
-  // A later edit advances the same Yjs client clock. Its batch may become
-  // ready, but it cannot pass the rejected head in the provider's send chain.
-  act(() => screen.getByTestId("type").click());
-  await flushLocalBatch();
-  expect(harness.applyAttempts.map(({ seq }) => seq)).toEqual([1]);
-  expect(screen.getByTestId("state").textContent).toBe("saving");
-
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(218);
-  });
-  expect(harness.applyAttempts.map(({ seq }) => seq)).toEqual([1, 1, 2]);
-  expect(harness.applied.map(({ seq }) => seq)).toEqual([1, 2]);
-
-  // Even after transport recovery, the first batch's settle cannot vouch for
-  // the later edit. Only the acknowledgement covering sequence 2 may clear it.
-  harness.emit("saved", 1);
-  expect(screen.getByTestId("state").textContent).toBe("saving");
-  harness.emit("saved", 2);
-  expect(screen.getByTestId("state").textContent).toBe("saved");
 });
 
 it.each([
@@ -2037,24 +1211,4 @@ it("degrades to not-engine-backed on a bridge without the save-state channel, in
     expect(screen.getByTestId("available").textContent).toBe("false"),
   );
   expect(screen.getByTestId("state").textContent).toBe("saved");
-});
-
-it("ignores a save-state report addressed to a different session", async () => {
-  await mountBound();
-
-  act(() => {
-    screen.getByTestId("type").click();
-  });
-  await flushLocalBatch();
-  const seq = harness.applied.at(-1)!.seq;
-
-  // Another document's settle must never repaint this one (the renderer
-  // async-state invariant): right seq, wrong session id.
-  harness.emit("saved", seq, "eyd-someone-else");
-  expect(screen.getByTestId("state").textContent).toBe("saving");
-
-  harness.emit("saved", seq);
-  await waitFor(() =>
-    expect(screen.getByTestId("state").textContent).toBe("saved"),
-  );
 });
