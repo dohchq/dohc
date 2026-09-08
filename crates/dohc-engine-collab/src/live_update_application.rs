@@ -661,7 +661,7 @@ pub fn apply_committed(
                     ApplicationPending::ApplicabilityUnavailable,
                 ));
             }
-            let Some(marker) = durable::read_marker_in_tx(tx, &key)? else {
+            let Some(marker) = durable::read_marker_in(tx, &key)? else {
                 return Ok(ApplicationResult::Pending(
                     ApplicationPending::BaselineUnavailable,
                 ));
@@ -703,7 +703,7 @@ pub fn apply_committed(
             compaction_due = append.seq.max(marker.head_update_seq) - marker.head_snapshot_seq
                 >= i64::from(DEFAULT_COMPACTION_THRESHOLD);
             // Content dedupe bypasses the append's parity gate. Always reconstruct.
-            if durable::load_doc_in_tx(tx, &key)?.has_missing_updates() {
+            if durable::load_doc_in(tx, &key)?.has_missing_updates() {
                 return Err(TransactionError::DependenciesUnresolved);
             }
             integer(append.seq, 1, SAFE)?;
@@ -1195,7 +1195,7 @@ mod tests {
     }
     fn document(store: &EngineStore) -> Ydoc {
         store
-            .read_with(|conn| durable::load_doc_from_connection(conn, &key()))
+            .read_with(|conn| durable::load_doc_in(conn, &key()))
             .unwrap()
     }
     fn reopen(store: EngineStore, dir: &ScratchDir) -> EngineStore {

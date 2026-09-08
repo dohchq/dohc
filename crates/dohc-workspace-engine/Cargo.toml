@@ -40,8 +40,8 @@ tokio = { version = "1", features = [
 libc = "0.2"
 
 [features]
-# Compiles the test-only probe and marker hooks (`CaptureApplyProbe`,
-# `*_for_harness`); production builds must not enable it.
+# Enables capture probe state and controls plus marker hooks (`*_for_harness`).
+# The probe type exists in all builds; production builds must not enable this feature.
 harness = []
 
 [dev-dependencies]

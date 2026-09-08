@@ -321,7 +321,7 @@ fn apply_deferred_base(
     let origin_id = origin_id.to_owned();
     let outcome = store.write_with(faults, move |tx| {
         let marker_before =
-            dohc_engine_collab::read_marker_in_tx(tx, &key).map_err(map_collab_hard_error)?;
+            dohc_engine_collab::read_marker_in(tx, &key).map_err(map_collab_hard_error)?;
         let local_unpublished = marker_before.as_ref().is_some_and(|marker| {
             marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Unclaimed
                 && (marker.head_update_seq > 0 || marker.head_snapshot_seq > 0)
@@ -332,7 +332,7 @@ fn apply_deferred_base(
                     && marker.lineage_claim_id.as_deref() != Some(payload.lineage_claim_id.as_str())
             });
         let losing_doc = if has_losing_lineage {
-            Some(dohc_engine_collab::load_doc_in_tx(tx, &key).map_err(map_collab_hard_error)?)
+            Some(dohc_engine_collab::load_doc_in(tx, &key).map_err(map_collab_hard_error)?)
         } else {
             None
         };
@@ -439,7 +439,7 @@ fn apply_deferred_base(
             } => (winner, Some(losing_lineage_claim_id)),
             dohc_engine_collab::ClaimOutcome::Claimed { .. }
             | dohc_engine_collab::ClaimOutcome::Resumed => {
-                let winner = dohc_engine_collab::read_marker_in_tx(tx, &key)
+                let winner = dohc_engine_collab::read_marker_in(tx, &key)
                     .map_err(map_collab_hard_error)?
                     .ok_or_else(|| local_corruption("parked winning Y.Doc has no marker"))?;
                 (winner, unpublished_claim_id)
@@ -1335,11 +1335,11 @@ fn ydoc_lineage_completeness_in_tx(
         return Ok(YdocLineageCompleteness::DeferredUpdates);
     }
     let Some(marker) =
-        dohc_engine_collab::read_marker_in_tx(tx, key).map_err(map_collab_hard_error)?
+        dohc_engine_collab::read_marker_in(tx, key).map_err(map_collab_hard_error)?
     else {
         return Ok(YdocLineageCompleteness::Complete(None));
     };
-    let doc = dohc_engine_collab::load_doc_in_tx(tx, key).map_err(map_collab_hard_error)?;
+    let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_collab_hard_error)?;
     if doc.has_pending_dependencies() {
         return Ok(YdocLineageCompleteness::PendingDependencies);
     }
@@ -2427,7 +2427,7 @@ pub fn apply_ydoc_envelope(
                 ],
             )
             .map_err(SyncError::persist)?;
-            let marker_before = dohc_engine_collab::read_marker_in_tx(tx, &claim_key)
+            let marker_before = dohc_engine_collab::read_marker_in(tx, &claim_key)
                 .map_err(map_collab_hard_error)?;
             let losing_last_settled_sha: Option<String> = tx
                 .query_row(
@@ -2452,7 +2452,7 @@ pub fn apply_ydoc_envelope(
                     marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact
                         && marker.lineage_claim_id.as_deref() != Some(incoming.lineage_claim_id)
                 }) {
-                let doc = dohc_engine_collab::load_doc_in_tx(tx, &claim_key)
+                let doc = dohc_engine_collab::load_doc_in(tx, &claim_key)
                     .map_err(map_collab_hard_error)?;
                 let marker = marker_before
                     .as_ref()
@@ -2462,7 +2462,7 @@ pub fn apply_ydoc_envelope(
                 None
             };
             let unpublished_claim_id = if local_unpublished {
-                let doc = dohc_engine_collab::load_doc_in_tx(tx, &claim_key)
+                let doc = dohc_engine_collab::load_doc_in(tx, &claim_key)
                     .map_err(map_collab_hard_error)?;
                 Some(
                     dohc_engine_storage::put_binary_blob(tx, &doc.encode_full_state())
@@ -2555,7 +2555,7 @@ pub fn apply_ydoc_envelope(
                 } => (winner, Some(losing_lineage_claim_id), true),
                 dohc_engine_collab::ClaimOutcome::Claimed { .. }
                 | dohc_engine_collab::ClaimOutcome::Resumed => {
-                    let winner = dohc_engine_collab::read_marker_in_tx(tx, &claim_key)
+                    let winner = dohc_engine_collab::read_marker_in(tx, &claim_key)
                         .map_err(map_collab_hard_error)?
                         .ok_or_else(|| local_corruption("claimed Y.Doc lineage has no marker"))?;
                     (winner, unpublished_claim_id, local_unpublished)
