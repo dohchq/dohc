@@ -417,6 +417,7 @@ impl ActorHandle {
                 faults.as_ref(),
                 &token,
                 None,
+                None,
             )
         })
         .await
@@ -1614,6 +1615,7 @@ pub(super) fn ydoc_settle_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
     root_guard: Option<&dyn WorkspaceRootGuard>,
+    live_audit: Option<&dohc_engine_collab::live_update_application::LiveSettlementAudit>,
 ) -> Result<YdocSettleOutcome, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
@@ -1865,8 +1867,19 @@ pub(super) fn ydoc_settle_on_store(
     // probe that materialization uses. This must precede the settle transaction:
     // compensating only the marker after a rival is found would leave the new
     // head, moment, search row, and materialization job committed.
-    let disk_preimage =
-        ydoc_settle_disk_preimage(root_dir, path, expected_head_sha.as_deref(), &projected_sha)?;
+    let bootstrap_absent = live_audit.is_some_and(|audit| {
+        head_probe.as_ref().is_some_and(|head| {
+            audit.permits_absent_bootstrap(&head.latest_moment_id, &head.blob_sha256)
+        })
+    }) && matches!(
+        probe_projection_target(root_dir, path, ProjectionTargetKind::Plaintext),
+        ProjectionTargetState::Absent
+    );
+    let disk_preimage = if bootstrap_absent {
+        Some(Preimage::Absent)
+    } else {
+        ydoc_settle_disk_preimage(root_dir, path, expected_head_sha.as_deref(), &projected_sha)?
+    };
     // Idempotent no-op: when the lineage's last settled content is exactly
     // this projection, re-settling would mint a duplicate moment (the
     // fingerprint's previous-moment input changed) and a redundant
@@ -1877,6 +1890,20 @@ pub(super) fn ydoc_settle_on_store(
         == Some(projected_sha.as_str())
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
+        if let Some(audit) = live_audit {
+            let recorded = store.write_with(faults, |tx| {
+                audit.record_in_tx(
+                    tx,
+                    &current.latest_moment_id,
+                    &current.blob_sha256,
+                    &projection.source_state_vector_sha256,
+                    now_ms,
+                )
+            })?;
+            if matches!(recorded, TxnOutcome::Crashed { .. }) {
+                return Err(RuntimeError::OperationCrashed);
+            }
+        }
         return Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
             moment_id: current.latest_moment_id,
             path: current.path,
@@ -1900,7 +1927,8 @@ pub(super) fn ydoc_settle_on_store(
     // current head, like the idempotent no-op above. Any doubt — a second
     // update, a snapshot, a prior settle, no recorded seed source, a moved
     // head or disk — falls through to the write below.
-    if let Some(seed_source) = dohc_engine_collab::read_seed_only_lineage_source(store, key)?
+    if live_audit.is_none()
+        && let Some(seed_source) = dohc_engine_collab::read_seed_only_lineage_source(store, key)?
         && Some(&seed_source) == probe_sha.as_ref()
         && matches!(
             &disk_preimage,
@@ -1951,10 +1979,14 @@ pub(super) fn ydoc_settle_on_store(
         if current_sha != expected_head_sha {
             return Err(dohc_engine_domain::DomainError::ConflictStaleTarget);
         }
-        let preimage = current.snapshot.as_ref().map_or_else(
-            || disk_preimage.clone().unwrap_or(Preimage::Absent),
-            |snapshot| Preimage::Present(snapshot.blob_sha256.clone()),
-        );
+        let preimage = if bootstrap_absent {
+            Preimage::Absent
+        } else {
+            current.snapshot.as_ref().map_or_else(
+                || disk_preimage.clone().unwrap_or(Preimage::Absent),
+                |snapshot| Preimage::Present(snapshot.blob_sha256.clone()),
+            )
+        };
         let previous_moment = current
             .snapshot
             .as_ref()
@@ -2040,6 +2072,15 @@ pub(super) fn ydoc_settle_on_store(
         .map_err(|error| {
             dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
         })?;
+        if let Some(audit) = live_audit {
+            audit.record_in_tx(
+                tx,
+                &result.moment.moment_id,
+                &result.snapshot.blob_sha256,
+                &source_state_vector_sha256,
+                now_ms,
+            )?;
+        }
         Ok((result, prior_marker))
     })?;
     let (write, prior_marker) = match outcome {

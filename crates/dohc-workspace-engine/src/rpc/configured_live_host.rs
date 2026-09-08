@@ -1,4 +1,6 @@
-use crate::live_application_ingress::{LiveApplicationIngress, LiveApplicationIngressConfig};
+use crate::live_application_ingress::{
+    LiveApplicationIngress, LiveApplicationIngressConfig, SettlementAdmission,
+};
 use crate::{EngineService, LiveApplicationHostConfig, lock};
 use dohc_engine_collab::live_update_application::{ApplicationHostCoordinate, ApplicationOwner};
 use dohc_engine_protocol::error::{ErrorCode, WireError};
@@ -24,6 +26,13 @@ pub struct ConfiguredLiveHostConfig {
     host: HostCoordinate,
     workspaces: Vec<WorkspaceConfig>,
     ingress: IngressConfig,
+    settlement: Option<SettlementConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SettlementConfig {
+    max_applications_per_settlement: usize,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -159,6 +168,7 @@ impl ConfiguredLiveHostConfig {
 pub(crate) struct Discovery {
     connection: ConnectionHandle,
     result: Value,
+    settlement: Option<(usize, SettlementAdmission)>,
 }
 
 impl EngineService {
@@ -169,6 +179,14 @@ impl EngineService {
         let ingress_config = config.canonicalize_and_validate()?;
         let service = Arc::new(Self::new());
         let ingress = LiveApplicationIngress::new(service.clone(), ingress_config)?;
+        let settlement = config
+            .settlement
+            .map(|config| {
+                ingress
+                    .settlement_admission(config.max_applications_per_settlement)
+                    .map(|admission| (config.max_applications_per_settlement, admission))
+            })
+            .transpose()?;
         let owner = ConnectionOwner::authenticated();
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(owner.handle());
@@ -196,6 +214,7 @@ impl EngineService {
                 let _ = service.configured_live_host.set(Discovery {
                     connection: owner.handle(),
                     result,
+                    settlement,
                 });
                 Ok((service, owner, ingress))
             }
@@ -244,6 +263,32 @@ impl EngineService {
         validate_discovery(&discovery.result, request.id, ctx.max_frame_bytes)?;
         Ok(discovery.result.clone())
     }
+
+    pub(super) fn configured_settlement_admission(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<(usize, Arc<dyn Send + Sync>), WireError> {
+        let discovery = self
+            .configured_live_host
+            .get()
+            .ok_or_else(|| WireError::new(ErrorCode::Forbidden, "live host is not configured"))?;
+        if !discovery.connection.is_current()
+            || !lock(&self.live_applications).hosts_current(&discovery.connection)
+            || !ctx
+                .connection
+                .as_ref()
+                .is_some_and(|connection| discovery.connection.same_connection(connection))
+        {
+            return Err(WireError::new(
+                ErrorCode::SessionExpired,
+                "live host connection is not current",
+            ));
+        }
+        let (max, admission) = discovery.settlement.as_ref().ok_or_else(|| {
+            WireError::new(ErrorCode::Forbidden, "live settlement is not configured")
+        })?;
+        Ok((*max, admission.reserve()?))
+    }
 }
 
 fn discovery(namespace: &str, host: &HostCoordinate, workspaces: Vec<Value>) -> Value {
@@ -286,6 +331,34 @@ mod tests {
         let handles: Vec<_> = lock(&service.handles).keys().cloned().collect();
         for handle in handles {
             service.workspace_close(Some(handle)).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn settlement_requires_an_explicit_valid_operator_budget() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let (service, owner, _ingress) =
+            EngineService::configured_live_host(config(&[(scratch.path(), "workspace")]))
+                .await
+                .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        assert!(matches!(
+            service.configured_settlement_admission(&ctx),
+            Err(WireError {
+                code: ErrorCode::Forbidden,
+                ..
+            })
+        ));
+        close(&service).await;
+        for max in [0, usize::MAX] {
+            let root = dohc_engine_testkit::ScratchDir::new().unwrap();
+            let mut invalid = config(&[(root.path(), "workspace")]);
+            invalid.settlement = Some(SettlementConfig {
+                max_applications_per_settlement: max,
+            });
+            assert!(EngineService::configured_live_host(invalid).await.is_err());
+            assert!(!root.path().join(".dohc/engine/engine.db").exists());
         }
     }
 

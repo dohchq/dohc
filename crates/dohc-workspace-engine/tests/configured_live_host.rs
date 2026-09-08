@@ -45,6 +45,51 @@ impl Drop for Daemon {
     }
 }
 impl Daemon {
+    fn streamed(
+        &mut self,
+        id: u64,
+        method: &str,
+        workspace: dohc_engine_protocol::wire::WorkspaceHandle,
+        params: Value,
+        streams: &[(u64, &[u8])],
+    ) -> Envelope {
+        self.send(Envelope::Request(Request {
+            id,
+            method: method.into(),
+            workspace: Some(workspace),
+            deadline_ms: Some(30_000),
+            idempotency_key: None,
+            params,
+        }));
+        for (stream, bytes) in streams {
+            self.send(Envelope::BlobStart(dohc_engine_protocol::wire::BlobStart {
+                request_id: id,
+                stream_id: *stream,
+                total_bytes: Some(bytes.len() as u64),
+                sha256: Some(dohc_engine_storage::hex_sha256(bytes)),
+            }));
+            self.0
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(
+                    &dohc_engine_protocol::frame::encode_blob_chunk_frame(
+                        *stream,
+                        true,
+                        bytes,
+                        &WireLimits::default(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        loop {
+            let reply = self.read();
+            if !matches!(reply, Envelope::Event(_)) {
+                return reply;
+            }
+        }
+    }
     fn send(&mut self, envelope: Envelope) {
         self.0
             .stdin
@@ -95,6 +140,132 @@ impl Daemon {
             }
         }
     }
+}
+
+#[test]
+fn production_entrypoint_settles_bootstrap_and_replays_receipt_coverage() {
+    use dohc_engine_storage::hex_sha256;
+    let scratch = ScratchDir::new().unwrap();
+    let root = scratch.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let database = root.join(".dohc/engine/engine.db");
+    std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let mut seeded = dohc_engine_storage::EngineStore::open(&database, 0).unwrap();
+    let root_token = dohc_workspace_engine::root_binding::write_new_root_binding(&root).unwrap();
+    seeded
+        .bind_root_token(&root_token, &dohc_engine_storage::NoFaults)
+        .unwrap();
+    dohc_engine_domain::VersionedTextStore::new(&mut seeded)
+        .ensure_main_version("workspace", "main", 0, &dohc_engine_storage::NoFaults)
+        .unwrap();
+    drop(seeded);
+    let path = scratch.path().join("host.json");
+    let mut config = configuration(&root);
+    config["settlement"] = json!({"maxApplicationsPerSettlement":4});
+    std::fs::write(&path, config.to_string()).unwrap();
+    let mut daemon = Daemon(command(Some(&path)).spawn().unwrap());
+    daemon.send(Envelope::Hello(Hello {
+        protocol_version: PROTOCOL_VERSION,
+        auth_token: "configured-test-secret".into(),
+        capabilities: vec!["blobs".into()],
+        last_session_generation: None,
+        max_frame_bytes: None,
+    }));
+    assert!(matches!(daemon.read(), Envelope::HelloAck(_)));
+    let Envelope::Response(hosts) = daemon.request(1, "liveApplication.hosts", None, json!({}))
+    else {
+        panic!("discovery")
+    };
+    let workspace: dohc_engine_protocol::wire::WorkspaceHandle =
+        serde_json::from_value(hosts.result["workspaces"][0]["workspaceHandle"].clone()).unwrap();
+    let db = rusqlite::Connection::open_with_flags(
+        root.join(".dohc/engine/engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let main: String = db
+        .query_row(
+            "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id='workspace'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/live-bootstrap-fixtures/live-bootstrap.json"
+    ))
+    .unwrap();
+    let fixture = fixtures
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "rich-unicode")
+        .unwrap();
+    let bytes: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
+    let markdown = fixture["markdown"].as_str().unwrap();
+    let binding = json!({"workspaceId":"workspace","mainVersionId":main,"objectId":"object","lineageClaimId":hex_sha256(&bytes),"currentPath":"note.md","selectorPaths":["note.md"],"restoreFenceGeneration":0});
+    let Envelope::Response(registered) = daemon.request(
+        2,
+        "liveApplication.register",
+        Some(workspace.clone()),
+        json!({"binding":binding}),
+    ) else {
+        panic!("registration")
+    };
+    let registration = registered.result["registrationId"].clone();
+    let response=daemon.streamed(3,"liveApplication.bootstrap",workspace.clone(),json!({"registrationId":registration,"baselineStreamId":1,"baseline":{"bootstrapId":"baseline","bootstrapMomentId":"baseline-moment","baselineMomentRelaySequence":0,"baselineRegisteredAtMs":1,"baselineDigest":hex_sha256(&bytes),"baselineByteLength":bytes.len(),"projectedMarkdownDigest":hex_sha256(markdown.as_bytes()),"projectedMarkdownByteLength":markdown.len()}}),&[(1,&bytes)]);
+    assert!(matches!(response, Envelope::Response(_)), "{response:?}");
+    assert!(!root.join("note.md").exists());
+    let params = json!({"registrationId":registration,"terminalReceipt":null});
+    let Envelope::Response(settled) = daemon.request(
+        4,
+        "liveApplication.settle",
+        Some(workspace.clone()),
+        params.clone(),
+    ) else {
+        panic!("settlement")
+    };
+    assert_eq!(settled.result["status"], "settled");
+    assert_eq!(settled.result["settlement"]["materialized"], true);
+    assert_eq!(
+        std::fs::read_to_string(root.join("note.md")).unwrap(),
+        markdown
+    );
+    let Envelope::Response(replayed) =
+        daemon.request(5, "liveApplication.settle", Some(workspace.clone()), params)
+    else {
+        panic!("replay")
+    };
+    assert_eq!(replayed.result, settled.result);
+    let receipt = json!({"deliveryId":"noop","updateDigest":hex_sha256(&[0,0]),"journalCursor":2,"acceptingHostEpoch":1});
+    let response=daemon.streamed(6,"liveApplication.apply",workspace.clone(),json!({"registrationId":registration,"rangeCount":0,"rangeStreamId":3,"rangeDigest":hex_sha256(&[]),"updateStreamId":2,"updateByteLength":2,"accepted":{"receipt":receipt,"binding":binding,"authority":{"principalKind":"owner","principalId":"person","grantId":null,"grantGeneration":null},"receivedAtMs":2}}),&[(2,&[0,0]),(3,&[])]);
+    assert!(matches!(response, Envelope::Response(_)), "{response:?}");
+    let Envelope::Response(covered) = daemon.request(
+        7,
+        "liveApplication.settle",
+        Some(workspace.clone()),
+        json!({"registrationId":registration,"terminalReceipt":receipt}),
+    ) else {
+        panic!("coverage")
+    };
+    assert_eq!(covered.result["settlement"]["applicationCount"], 1);
+    assert_eq!(covered.result["settlement"]["terminalCursor"], 2);
+    assert_eq!(
+        covered.result["settlement"]["momentId"],
+        settled.result["settlement"]["momentId"]
+    );
+    let counts:(i64,i64)=db.query_row("SELECT (SELECT COUNT(*) FROM live_device_settlements),(SELECT COUNT(*) FROM engine_search_files_fts WHERE object_id='object' AND text=?1)",[markdown],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(counts, (2, 1));
+    let Envelope::Error(refused) = daemon.request(
+        8,
+        "liveApplication.settle",
+        Some(workspace),
+        json!({"registrationId":registration}),
+    ) else {
+        panic!("missing terminal refusal")
+    };
+    assert_eq!(refused.error.code, ErrorCode::InvalidParams);
+    drop(daemon.0.stdin.take());
+    assert!(daemon.0.wait().unwrap().success());
 }
 
 #[test]

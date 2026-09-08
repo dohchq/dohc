@@ -206,7 +206,7 @@ type BootstrapRecord = (
     i64,
 );
 
-fn read_bootstrap(
+pub(super) fn read_bootstrap(
     conn: &Connection,
     held: &Registration,
 ) -> Result<Option<BootstrapRecord>, ApplicationError> {
