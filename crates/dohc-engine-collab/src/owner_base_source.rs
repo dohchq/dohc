@@ -123,9 +123,8 @@ mod tests {
         VersionedTextStore::new(&mut store)
             .ensure_main_version("workspace", "main", 0, &NoFaults)
             .unwrap();
-        let vectors: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/fixtures/live-bootstrap.json")).unwrap();
-        let vector = &vectors[1];
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/owner-source-seed.json")).unwrap();
         let text = vector["markdown"].as_str().unwrap();
         let baseline: Vec<u8> = serde_json::from_value(vector["bytes"].clone()).unwrap();
         let key = DocKey::new("workspace", "main", "object").unwrap();
