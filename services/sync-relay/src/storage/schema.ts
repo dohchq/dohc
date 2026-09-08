@@ -4,7 +4,7 @@ import {
   LINK_DISCUSSION_BODY_CODE_POINT_LIMIT,
   LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT,
 } from "./limits";
-import { type SqliteDb } from "./types";
+import type { SqliteDb } from "./types";
 
 const NORMALIZED_SHARE_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS sync_relay_shares (
@@ -391,6 +391,7 @@ CREATE TABLE sync_relay_session_host_control (
 `;
 
 function normalizedSchemaSql(value: string): string {
+  // Preserve quoted values: changing 'main' to 'MAIN' changes the constraint.
   return value.trim().replace(/;$/, "").replace(/\s+/g, " ");
 }
 
@@ -560,15 +561,13 @@ function assertLiveDocumentAuthoritySchema(db: SqliteDb): void {
   const same = (actual: unknown, expected: unknown): void => {
     if (JSON.stringify(actual) !== JSON.stringify(expected)) fail();
   };
-  // Preserve quoted values: changing 'main' to 'MAIN' changes the constraint.
-  const sqlText = (sql: string): string => sql.trim().replace(/;$/, "").replace(/\s+/g, " ");
   for (const [name, sql] of Object.entries(LIVE_DOCUMENT_AUTHORITY_SCHEMA)) {
     const rows = db.prepare("SELECT type, tbl_name, sql FROM sqlite_schema WHERE name = ?").all(name);
     const row = rows[0];
     const table = name === "sync_relay_live_documents" || name === "idx_sync_relay_live_documents_current"
       ? "sync_relay_live_documents" : "sync_relay_live_document_baseline_ranges";
     if (rows.length !== 1 || !row || row.type !== (name.startsWith("idx_") ? "index" : "table")
-      || row.tbl_name !== table || typeof row.sql !== "string" || sqlText(row.sql) !== sqlText(sql)) fail();
+      || row.tbl_name !== table || typeof row.sql !== "string" || normalizedSchemaSql(row.sql) !== normalizedSchemaSql(sql)) fail();
   }
   const documentKey = ["workspace_id", "main_version_id", "object_id", "lineage_claim_id"];
   for (const [table, columns] of Object.entries(LIVE_DOCUMENT_AUTHORITY_COLUMNS)) {
@@ -912,7 +911,9 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       ) STRICT;
     `);
     initializeSessionHostControlSchema(db);
+    initializeDeviceHostCredentialSchema(db);
     initializeLiveDocumentAuthoritySchema(db);
+    initializeLiveTicketSchema(db);
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)
@@ -1099,4 +1100,162 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     } catch {}
     throw error;
   }
+}
+
+export const DEVICE_HOST_CREDENTIAL_TABLE = "sync_relay_device_host_credential";
+
+const DEVICE_HOST_CREDENTIAL_MIGRATION = "device-host-credential-v1";
+
+const DEVICE_HOST_CREDENTIAL_SCHEMA = `
+CREATE TABLE sync_relay_device_host_credential (
+  singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+  host_id TEXT NOT NULL CHECK (length(CAST(host_id AS BLOB)) BETWEEN 1 AND 1024),
+  instance_id TEXT NOT NULL CHECK (length(CAST(instance_id AS BLOB)) BETWEEN 1 AND 1024),
+  host_epoch INTEGER NOT NULL CHECK (host_epoch BETWEEN 1 AND 9007199254740991),
+  verifier TEXT NOT NULL CHECK (length(verifier) = 64 AND verifier NOT GLOB '*[^0-9a-f]*'),
+  created_at_ms INTEGER NOT NULL CHECK (created_at_ms BETWEEN 0 AND 9007199254740991),
+  revoked_at_ms INTEGER CHECK (revoked_at_ms BETWEEN created_at_ms AND 9007199254740991)
+) STRICT;`;
+
+function initializeDeviceHostCredentialSchema(db: SqliteDb): void {
+  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(DEVICE_HOST_CREDENTIAL_MIGRATION);
+  const existing = db.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?").get(DEVICE_HOST_CREDENTIAL_TABLE);
+  if (marked) {
+    if (typeof existing?.sql !== "string" || normalizedSchemaSql(existing.sql) !== normalizedSchemaSql(DEVICE_HOST_CREDENTIAL_SCHEMA)) {
+      throw new Error("Device host credential schema is missing or damaged.");
+    }
+    return;
+  }
+  if (existing) throw new Error("Unmarked device host credential table exists.");
+  db.exec(DEVICE_HOST_CREDENTIAL_SCHEMA);
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
+    .run(DEVICE_HOST_CREDENTIAL_MIGRATION, Date.now());
+}
+
+export const LIVE_TICKET_TABLE = "sync_relay_live_session_tickets";
+
+const LIVE_TICKET_MIGRATION = "live-session-tickets-v1";
+
+const LIVE_TICKET_SCHEMA = {
+  sync_relay_live_session_tickets: `
+CREATE TABLE sync_relay_live_session_tickets (
+  ticket_id TEXT NOT NULL
+    CHECK (length(CAST(ticket_id AS BLOB)) BETWEEN 1 AND 512),
+  token_hash TEXT NOT NULL CHECK (
+    length(token_hash) = 43 AND length(CAST(token_hash AS BLOB)) = 43
+    AND token_hash NOT GLOB '*[^A-Za-z0-9_-]*'
+  ),
+  audience TEXT NOT NULL
+    CHECK (length(CAST(audience AS BLOB)) BETWEEN 1 AND 2048),
+  workspace_id TEXT NOT NULL
+    CHECK (length(CAST(workspace_id AS BLOB)) BETWEEN 1 AND 512),
+  main_version_id TEXT NOT NULL CHECK (main_version_id = 'main'),
+  object_id TEXT NOT NULL
+    CHECK (length(CAST(object_id AS BLOB)) BETWEEN 1 AND 512),
+  lineage_claim_id TEXT NOT NULL CHECK (
+    length(lineage_claim_id) = 64 AND length(CAST(lineage_claim_id AS BLOB)) = 64
+    AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'
+  ),
+  current_path TEXT NOT NULL
+    CHECK (length(CAST(current_path AS BLOB)) BETWEEN 1 AND 1024),
+  selector_paths_json TEXT NOT NULL CHECK (
+    length(CAST(selector_paths_json AS BLOB)) BETWEEN 2 AND (100 * (6 * 1024 + 3) + 1)
+  ),
+  restore_fence_generation INTEGER NOT NULL
+    CHECK (restore_fence_generation BETWEEN 1 AND 9007199254740991),
+  principal_kind TEXT NOT NULL CHECK (principal_kind = 'named'),
+  principal_id TEXT NOT NULL
+    CHECK (length(CAST(principal_id AS BLOB)) BETWEEN 1 AND 512),
+  grant_id TEXT NOT NULL
+    CHECK (length(CAST(grant_id AS BLOB)) BETWEEN 1 AND 512),
+  grant_generation INTEGER NOT NULL
+    CHECK (grant_generation BETWEEN 1 AND 9007199254740991),
+  host_epoch INTEGER NOT NULL
+    CHECK (host_epoch BETWEEN 1 AND 9007199254740991),
+  minted_at_ms INTEGER NOT NULL
+    CHECK (minted_at_ms BETWEEN 0 AND 9007199254710991),
+  expires_at_ms INTEGER NOT NULL CHECK (
+    expires_at_ms BETWEEN 0 AND 9007199254740991
+    AND expires_at_ms = minted_at_ms + 30000
+  ),
+  redeemed_at_ms INTEGER CHECK (
+    redeemed_at_ms IS NULL OR (
+      redeemed_at_ms BETWEEN 0 AND 9007199254740991
+      AND minted_at_ms <= redeemed_at_ms AND redeemed_at_ms < expires_at_ms
+    )
+  ),
+  PRIMARY KEY (ticket_id),
+  FOREIGN KEY (workspace_id)
+    REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+`,
+  idx_sync_relay_live_session_tickets_hash: `
+CREATE UNIQUE INDEX idx_sync_relay_live_session_tickets_hash
+  ON sync_relay_live_session_tickets(token_hash);
+`,
+  idx_sync_relay_live_session_tickets_scope_expiry: `
+CREATE INDEX idx_sync_relay_live_session_tickets_scope_expiry
+  ON sync_relay_live_session_tickets(
+    workspace_id, principal_kind, principal_id, grant_id, expires_at_ms, ticket_id
+  );
+`,
+  idx_sync_relay_live_session_tickets_expiry: `
+CREATE INDEX idx_sync_relay_live_session_tickets_expiry
+  ON sync_relay_live_session_tickets(expires_at_ms, ticket_id);
+`,
+} as const;
+
+export const LIVE_TICKET_COLUMNS = [
+  "ticket_id", "token_hash", "audience", "workspace_id", "main_version_id", "object_id",
+  "lineage_claim_id", "current_path", "selector_paths_json", "restore_fence_generation",
+  "principal_kind", "principal_id", "grant_id", "grant_generation", "host_epoch",
+  "minted_at_ms", "expires_at_ms", "redeemed_at_ms",
+] as const;
+
+export const LIVE_TICKET_INTEGER_COLUMNS = new Set<string>([
+  "restore_fence_generation", "grant_generation", "host_epoch", "minted_at_ms", "expires_at_ms", "redeemed_at_ms",
+]);
+
+function assertLiveTicketSchema(db: SqliteDb): void {
+  const fail = (): never => { throw new Error("live-ticket schema is missing or damaged"); };
+  const same = (actual: unknown, expected: unknown): void => {
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) fail();
+  };
+  for (const [name, sql] of Object.entries(LIVE_TICKET_SCHEMA)) {
+    const rows = db.prepare("SELECT type, tbl_name, sql FROM sqlite_schema WHERE name = ?").all(name);
+    const row = rows[0];
+    if (rows.length !== 1 || !row || row.type !== (name === LIVE_TICKET_TABLE ? "table" : "index") ||
+      row.tbl_name !== LIVE_TICKET_TABLE || typeof row.sql !== "string" || normalizedSchemaSql(row.sql) !== normalizedSchemaSql(sql)) fail();
+  }
+  same(db.prepare(`PRAGMA table_info(${LIVE_TICKET_TABLE})`).all().map(row =>
+    [row.cid, row.name, row.type, row.notnull, row.dflt_value, row.pk]),
+  LIVE_TICKET_COLUMNS.map((name, cid) => [cid, name, LIVE_TICKET_INTEGER_COLUMNS.has(name) ? "INTEGER" : "TEXT",
+    name === "redeemed_at_ms" ? 0 : 1, null, name === "ticket_id" ? 1 : 0]));
+  same(db.prepare(`PRAGMA foreign_key_list(${LIVE_TICKET_TABLE})`).all().map(row =>
+    [row.id, row.seq, row.table, row.from, row.to, row.on_update, row.on_delete, row.match]),
+  [[0, 0, "sync_relay_workspaces", "workspace_id", "workspace_id", "NO ACTION", "CASCADE", "NONE"]]);
+  const indexes = [
+    ["idx_sync_relay_live_session_tickets_hash", 1, "c", ["token_hash"]],
+    ["idx_sync_relay_live_session_tickets_scope_expiry", 0, "c", ["workspace_id", "principal_kind", "principal_id", "grant_id", "expires_at_ms", "ticket_id"]],
+    ["idx_sync_relay_live_session_tickets_expiry", 0, "c", ["expires_at_ms", "ticket_id"]],
+    [`sqlite_autoindex_${LIVE_TICKET_TABLE}_1`, 1, "pk", ["ticket_id"]],
+  ] as const;
+  const sorted = (rows: unknown[][]): unknown[][] => rows.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  same(sorted(db.prepare(`PRAGMA index_list(${LIVE_TICKET_TABLE})`).all().map(row => [row.name, row.unique, row.origin, row.partial])),
+    sorted(indexes.map(([name, unique, origin]) => [name, unique, origin, 0])));
+  for (const [name, , , columns] of indexes) {
+    same(db.prepare(`PRAGMA index_info(${name})`).all().map(row => [row.seqno, row.cid, row.name]),
+      columns.map((column, seq) => [seq, LIVE_TICKET_COLUMNS.findIndex(value => value === column), column]));
+  }
+  same(db.prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = ?").all(LIVE_TICKET_TABLE), []);
+}
+
+function initializeLiveTicketSchema(db: SqliteDb): void {
+  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(LIVE_TICKET_MIGRATION) !== undefined;
+  if (marked) { assertLiveTicketSchema(db); return; }
+  const existing = db.prepare("SELECT name FROM sqlite_schema WHERE name IN (?, ?, ?, ?)").all(...Object.keys(LIVE_TICKET_SCHEMA));
+  if (existing.length) throw new Error("unmarked live-ticket schema already exists");
+  for (const sql of Object.values(LIVE_TICKET_SCHEMA)) db.exec(sql);
+  assertLiveTicketSchema(db);
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(LIVE_TICKET_MIGRATION, Date.now());
 }

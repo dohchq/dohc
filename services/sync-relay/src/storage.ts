@@ -1,57 +1,62 @@
-import { resolveCurrentLiveDocumentBinding } from "./storage/liveDocumentAuthority";
-import {
-  type CurrentLiveBindingRequest,
-  type CurrentLiveBindingResult,
-  type SqliteDb,
-  type OpenSyncRelayStorageOptions,
-  type SyncRelayStorage,
-  type LiveHostControlResult,
-  type LiveHostConnectionCoordinate,
-  type BeginLiveHostTransitionInput,
-  type ActivateLiveHostTransitionInput,
-  type WorkspaceSyncIdentity,
-  type WorkspaceBootstrap,
-  type VerifyWorkspaceIdentityResult,
-  type ClaimWorkspaceIdentityResult,
-  type RotateWorkspaceIdentityResult,
-  type EnforceWorkspaceIdentityResult,
-  type PutBlobResult,
-  type CollectUnreferencedBlobsResult,
-  type KeyEnvelopeRow,
-  type SyncRelayLogInput,
-  type AppendLogBatchGuardContext,
-  type AppendLogBatchResult,
-  type SyncRelayShareRow,
-  type SyncRelayShareGrantRow,
-  type SyncRelayLinkCredentialRow,
-  type SyncRelayLinkCredentialGrantRow,
-  type SyncRelayLinkCredentialMint,
-  type LinkGrantTransitionResult,
-  type ShareGrantTransitionResult,
-  type SyncRelayLinkSessionRow,
-  type AppendLinkDiscussionMessageResult,
-  type AppendAuthenticatedDiscussionMessageResult,
-  type SyncRelayShareDiscussionCursor,
-  type SyncRelayShareDiscussionPageDirection,
-  type SyncRelayShareDiscussionPage,
-  type SyncRelayShareDiscussionActivityPage,
-  type SyncRelayLinkPrincipalRow,
-  type SyncRelayDeletedDiscussionMessage,
-  type SyncRelayLinkHandoffCodeRow,
-  type LinkHandoffRedeemResult,
-  type SyncRelayShareWithGrantRow,
-  type SyncRelayLinkInventoryCursor,
-  type SyncRelayLinkInventoryPage,
-  type SyncRelayIndependentGrantInventoryCursor,
-  type SyncRelayIndependentGrantInventoryPage,
-  type SyncRelayLogRow,
-  type ThreadFileBinding,
-  type ObjectMomentRow,
-  type ShareProposalOpRow,
-  type ShareProposalRow,
-  type ShareProposalState,
-  type FetchLogPageResult,
-  type CurrentFileStateSnapshot,
+import type {
+  SqliteDb,
+  OpenSyncRelayStorageOptions,
+  SyncRelayStorage,
+  LiveTicketStoragePolicy,
+  CurrentLiveBindingRequest,
+  CurrentLiveBindingResult,
+  LiveHostControlResult,
+  LiveHostConnectionCoordinate,
+  BeginLiveHostTransitionInput,
+  ActivateLiveHostTransitionInput,
+  WorkspaceSyncIdentity,
+  WorkspaceBootstrap,
+  VerifyWorkspaceIdentityResult,
+  ClaimWorkspaceIdentityResult,
+  RotateWorkspaceIdentityResult,
+  EnforceWorkspaceIdentityResult,
+  PutBlobResult,
+  CollectUnreferencedBlobsResult,
+  KeyEnvelopeRow,
+  SyncRelayLogInput,
+  AppendLogBatchGuardContext,
+  AppendLogBatchResult,
+  SyncRelayShareRow,
+  SyncRelayShareGrantRow,
+  SyncRelayLinkCredentialRow,
+  SyncRelayLinkCredentialGrantRow,
+  SyncRelayLinkCredentialMint,
+  LinkGrantTransitionResult,
+  ShareGrantTransitionResult,
+  SyncRelayLinkSessionRow,
+  AppendLinkDiscussionMessageResult,
+  AppendAuthenticatedDiscussionMessageResult,
+  SyncRelayShareDiscussionCursor,
+  SyncRelayShareDiscussionPageDirection,
+  SyncRelayShareDiscussionPage,
+  SyncRelayShareDiscussionActivityPage,
+  SyncRelayLinkPrincipalRow,
+  SyncRelayDeletedDiscussionMessage,
+  SyncRelayLinkHandoffCodeRow,
+  LinkHandoffRedeemResult,
+  SyncRelayShareWithGrantRow,
+  SyncRelayLinkInventoryCursor,
+  SyncRelayLinkInventoryPage,
+  SyncRelayIndependentGrantInventoryCursor,
+  SyncRelayIndependentGrantInventoryPage,
+  SyncRelayLogRow,
+  ThreadFileBinding,
+  ObjectMomentRow,
+  ShareProposalOpRow,
+  ShareProposalRow,
+  ShareProposalState,
+  FetchLogPageResult,
+  CurrentFileStateSnapshot,
+  TicketHostReport,
+  NamedLiveTicketLookup,
+  NamedLiveTicketMint,
+  NamedLiveTicketRedemption,
+  DeviceHostCredentialResult,
 } from "./storage/types";
 import { createRequire } from "node:module";
 import { resolve, dirname } from "node:path";
@@ -67,8 +72,10 @@ import {
 } from "./storage/limits";
 import { LINK_SESSIONS_PER_GRANT_LIMIT } from "./linkSecurity";
 import { randomUUID } from "node:crypto";
+import { ticketRecord } from "./liveTicketInputs";
 import { initializeSyncRelaySchema } from "./storage/schema";
-import { type HostControlSnapshot, type HostMode, type HostTransitionGeneration } from "@dohc/live-session-contract/host-control";
+import { resolveCurrentLiveDocumentBinding, LIVE_TICKET_REFUSED } from "./storage/liveDocumentAuthority";
+import type { HostControlSnapshot, HostMode, HostTransitionGeneration } from "@dohc/live-session-contract/host-control";
 import * as hostControlStorage from "./storage/hostControl";
 import * as workspacesStorage from "./storage/workspaces";
 import * as blobsStorage from "./storage/blobs";
@@ -80,6 +87,11 @@ import * as handoffStorage from "./storage/handoff";
 import * as objectIndexStorage from "./storage/objectIndex";
 import * as proposalsStorage from "./storage/proposals";
 import * as currentFilesStorage from "./storage/currentFiles";
+import type { NamedLiveBrowserContext } from "./namedLiveBrowserAuth";
+import * as liveDocumentAuthorityStorage from "./storage/liveDocumentAuthority";
+import type { LiveTicketClaims, RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
+import type { DeviceHostCredential } from "./deviceHostCredential";
+
 export {
   SHARED_BLOB_CANDIDATE_LIMIT,
   LINK_INVENTORY_PAGE_SIZE,
@@ -227,22 +239,37 @@ export function openSyncRelayStorage(
     }
   }
   const newDiscussionId = options.newDiscussionId ?? randomUUID;
+  const suppliedTickets = options.liveTickets;
+  const liveTickets = suppliedTickets === undefined ? undefined :
+    ticketRecord(suppliedTickets, ["retainedTicketsPerPrincipalGrant", "expiredTicketCleanupBatchSize", "now"]);
+  if (liveTickets !== undefined) {
+    for (const field of ["retainedTicketsPerPrincipalGrant", "expiredTicketCleanupBatchSize"] as const) {
+      if (typeof liveTickets[field] !== "number" || !Number.isSafeInteger(liveTickets[field]) || liveTickets[field] <= 0) {
+        throw new TypeError("Live-ticket policies must be positive safe integers.");
+      }
+    }
+    if (typeof liveTickets.now !== "function") throw new TypeError("Live tickets require a storage clock.");
+  }
   const db = new DatabaseSync(resolved);
   try {
     db.exec(`PRAGMA busy_timeout = ${SYNC_RELAY_BUSY_TIMEOUT_MS}`);
     db.exec("PRAGMA foreign_keys = ON");
     db.exec("PRAGMA journal_mode = WAL");
     initializeSyncRelaySchema(db);
-    return new SqliteSyncRelayStorage(db, {
-      workspaceQuotaBytes,
-      blobGraceMs,
-      linkSessionsPerGrantLimit,
-      linkDiscussionPrincipalLimit,
-      discussionMessageRateLimit,
-      discussionLifetimeMessageLimit,
-      discussionNonOwnerShareRowLimit,
-      newDiscussionId,
-    });
+    return new SqliteSyncRelayStorage(
+      db,
+      {
+        workspaceQuotaBytes,
+        blobGraceMs,
+        linkSessionsPerGrantLimit,
+        linkDiscussionPrincipalLimit,
+        discussionMessageRateLimit,
+        discussionLifetimeMessageLimit,
+        discussionNonOwnerShareRowLimit,
+        newDiscussionId,
+      },
+      liveTickets as unknown as LiveTicketStoragePolicy | undefined,
+    );
   } catch (error) {
     try {
       db.close();
@@ -256,7 +283,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   constructor(
     readonly db: SqliteDb,
-    readonly options: Required<OpenSyncRelayStorageOptions>,
+    readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets">>,
+    private readonly liveTickets: LiveTicketStoragePolicy | undefined,
   ) {
     this.newDiscussionId = options.newDiscussionId;
   }
@@ -923,6 +951,68 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }): SyncRelayLogRow | null {
     return logStorage.fetchLogCoordinate(this, input);
   }
+
+  ticketTransaction<T>(run: (now: number, policy: LiveTicketStoragePolicy) => T): T | null {
+    const policy = this.liveTickets;
+    if (policy === undefined) throw new Error("Live-ticket storage is not configured.");
+    try {
+      return this.tx(() => {
+        const now = policy.now();
+        if (typeof now !== "number" || !Number.isSafeInteger(now) || now < 0) throw new Error("Invalid live-ticket clock.");
+        return run(now, policy);
+      });
+    } catch (error) {
+      if (error === LIVE_TICKET_REFUSED) return null;
+      throw error;
+    }
+  }
+
+  ticketScopeIsCurrent(scope: NamedLiveBrowserContext): boolean {
+    return liveDocumentAuthorityStorage.ticketScopeIsCurrent(this, scope);
+  }
+
+  currentTicketAuthority(scope: NamedLiveBrowserContext, objectId: string, report: TicketHostReport):
+    Extract<CurrentLiveBindingResult, { kind: "current" }> {
+    return liveDocumentAuthorityStorage.currentTicketAuthority(this, scope, objectId, report);
+  }
+
+  matchingTicket(input: NamedLiveTicketLookup, now: number): LiveTicketClaims {
+    return liveDocumentAuthorityStorage.matchingTicket(this, input, now);
+  }
+
+  readNamedLiveTicketTarget(input: NamedLiveTicketLookup): { workspaceId: string; objectId: string } | null {
+    return liveDocumentAuthorityStorage.readNamedLiveTicketTarget(this, input);
+  }
+
+  mintNamedLiveTicket(input: NamedLiveTicketMint): { expiresAtMs: number } | null {
+    return liveDocumentAuthorityStorage.mintNamedLiveTicket(this, input);
+  }
+
+  redeemNamedLiveTicket(input: NamedLiveTicketRedemption): RedeemedLiveTicket | null {
+    return liveDocumentAuthorityStorage.redeemNamedLiveTicket(this, input);
+  }
+
+  currentLiveDocumentBinding({ document, actor }: CurrentLiveBindingRequest): CurrentLiveBindingResult {
+    return liveDocumentAuthorityStorage.currentLiveDocumentBinding(this, { document, actor });
+  }
+
+  provisionDeviceHostCredential(input: { credential: DeviceHostCredential; updatedAtMs: number }): DeviceHostCredentialResult {
+    return hostControlStorage.provisionDeviceHostCredential(this, input);
+  }
+
+  registerDeviceHost(input: { credential: DeviceHostCredential; connectionId: string; updatedAtMs: number }): DeviceHostCredentialResult {
+    return hostControlStorage.registerDeviceHost(this, input);
+  }
+
+  disconnectDeviceHost(input: { credential: DeviceHostCredential; connectionId: string; updatedAtMs: number }): DeviceHostCredentialResult {
+    return hostControlStorage.disconnectDeviceHost(this, input);
+  }
+
+  revokeDeviceHostCredential(input: { hostId: string; instanceId: string; updatedAtMs: number }): DeviceHostCredentialResult {
+    return hostControlStorage.revokeDeviceHostCredential(this, input);
+  }
 }
 
 export type { CurrentLiveBindingRequest, CurrentLiveBindingResult } from "./storage/types";
+
+export type { DeviceHostCredentialResult, TicketHostReport, NamedLiveTicketLookup, NamedLiveTicketMint, NamedLiveTicketRedemption, LiveTicketStoragePolicy } from "./storage/types";

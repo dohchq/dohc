@@ -1,19 +1,26 @@
-import {
-  type SyncRelayStorage,
-  type SqliteDb,
-  type OpenSyncRelayStorageOptions,
-  type WorkspaceSyncIdentity,
-  type VerifyWorkspaceIdentityResult,
-  type EnforceWorkspaceIdentityResult,
-  type SyncRelayShareGrantRow,
-  type SyncRelayShareRow,
-  type SyncRelayLinkCredentialRow,
-  type ShareProposalOpRow,
+import type {
+  SyncRelayStorage,
+  SqliteDb,
+  OpenSyncRelayStorageOptions,
+  WorkspaceSyncIdentity,
+  VerifyWorkspaceIdentityResult,
+  EnforceWorkspaceIdentityResult,
+  SyncRelayShareGrantRow,
+  SyncRelayShareRow,
+  SyncRelayLinkCredentialRow,
+  ShareProposalOpRow,
+  LiveTicketStoragePolicy,
+  TicketHostReport,
+  CurrentLiveBindingResult,
+  NamedLiveTicketLookup,
+  CurrentLiveBindingRequest,
 } from "./types";
+import type { NamedLiveBrowserContext } from "../namedLiveBrowserAuth";
+import type { LiveTicketClaims } from "@dohc/live-session-contract/live-ticket";
 
 export interface StorageContext extends SyncRelayStorage {
   readonly db: SqliteDb;
-  readonly options: Required<OpenSyncRelayStorageOptions>;
+  readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets">>;
   readonly newDiscussionId: () => string;
   classifyWorkspaceIdentity(
     workspaceId: string,
@@ -42,4 +49,10 @@ export interface StorageContext extends SyncRelayStorage {
     workspaceId: string,
     threadId: string,
   ): Array<Record<string, unknown>>;
+  ticketTransaction<T>(run: (now: number, policy: LiveTicketStoragePolicy) => T): T | null;
+  ticketScopeIsCurrent(scope: NamedLiveBrowserContext): boolean;
+  currentTicketAuthority(scope: NamedLiveBrowserContext, objectId: string, report: TicketHostReport):
+    Extract<CurrentLiveBindingResult, { kind: "current" }>;
+  matchingTicket(input: NamedLiveTicketLookup, now: number): LiveTicketClaims;
+  currentLiveDocumentBinding({ document, actor }: CurrentLiveBindingRequest): CurrentLiveBindingResult;
 }

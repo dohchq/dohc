@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { SearchResultsEvent, SearchResultsEventEntry } from "../../ipc/channels";
+import type { SearchResultsEvent, SearchResultsEventEntry } from "../../ipc/bridgeContract";
 import {
   applyBatch,
   beginSearch,

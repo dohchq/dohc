@@ -12,6 +12,18 @@ describe("share-web configuration", () => {
     DOHC_SHARE_WEB_AUTH_URL: "http://workspace-api:1786",
   };
 
+  it("enables named bootstrap only with explicit complete transport limits and account/service configuration", () => {
+    const limits = { maxPendingRequests: 2, maxRequestBytes: 1038, maxResponseBytes: 4152, timeoutMs: 1000 };
+    expect(loadShareWebConfig(accountEnvironment).namedBrowserSessionLimits).toBeUndefined();
+    const enabled = { ...accountEnvironment, DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "named-session-test-exchange-key-at-least-32",
+      DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS: JSON.stringify(limits) };
+    expect(loadShareWebConfig(enabled).namedBrowserSessionLimits).toEqual(limits);
+    expect(() => loadShareWebConfig({ ...enabled, DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: undefined })).toThrow(/configuration/);
+    expect(() => loadShareWebConfig({ ...enabled, DOHC_SHARE_WEB_AUTH_URL: undefined })).toThrow(/configuration/);
+    expect(() => loadShareWebConfig({ ...enabled, DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS: "{}" })).toThrow(/limits/);
+    expect(() => loadShareWebConfig({ ...enabled, DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS: "{" })).toThrow();
+  });
+
   it("enables account auth only with an explicit upstream and exact HTTPS audience", () => {
     expect(loadShareWebConfig(accountEnvironment).accountAuth).toEqual({
       upstreamUrl: "http://workspace-api:1786", publicOrigin: "https://share.example.test",

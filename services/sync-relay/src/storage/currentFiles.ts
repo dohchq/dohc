@@ -1,11 +1,11 @@
 import { asRecord, validateUserWritePath } from "@dohc/workspace-core";
-import { type SqliteDb, type CurrentFileStateSnapshot } from "./types";
+import type { SqliteDb, CurrentFileStateSnapshot } from "./types";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
-import { type StorageContext } from "./context";
+import type { StorageContext } from "./context";
 
 // Where a `moment.append` payload says its object is after the op: the
 // destination path of a write or a rename (a rename carries the destination in
-// both `path` and `payloadAfterPath`, `crates/dohc-engine-domain/src/store.rs`
+// both `path` and `payloadAfterPath`, `crates/dohc-engine-domain/src/store/delete_rename.rs`
 // `rename`), or NULL for a delete.
 //
 // NULL is also the answer for a moment that names an object but no readable

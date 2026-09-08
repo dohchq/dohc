@@ -1,11 +1,7 @@
-import { createHash } from "node:crypto";
-import { type StorageContext } from "./context";
+import type { StorageContext } from "./context";
+import { sha256Hex } from "@dohc/workspace-core/hash";
 import { SyncRelayConflictError } from "./errors";
-import { type KeyEnvelopeRow } from "./types";
-
-function sha256HexUtf8(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
-}
+import type { KeyEnvelopeRow } from "./types";
 
 export function putKeyEnvelope(storage: StorageContext, input: {
     workspaceId: string;
@@ -13,7 +9,7 @@ export function putKeyEnvelope(storage: StorageContext, input: {
     updatedAtMs: number;
     expectedSha256: string | null;
   }): { sha256: string } {
-    const nextSha256 = sha256HexUtf8(input.envelopeJson);
+    const nextSha256 = sha256Hex(input.envelopeJson);
     storage.db.exec("BEGIN IMMEDIATE");
     try {
       const current = storage.db
@@ -51,7 +47,7 @@ export function putKeyEnvelope(storage: StorageContext, input: {
         storage.db.exec("COMMIT");
         return { sha256: nextSha256 };
       }
-      const currentSha256 = sha256HexUtf8(currentJson);
+      const currentSha256 = sha256Hex(currentJson);
       if (input.expectedSha256 === null) {
         throw new SyncRelayConflictError(
           "key envelope already exists; replacing it requires If-Match with the current sha256",
@@ -102,7 +98,7 @@ export function getKeyEnvelope(storage: StorageContext, workspaceId: string): Ke
     if (typeof row?.envelope_json !== "string") return null;
     return {
       envelopeJson: row.envelope_json,
-      sha256: sha256HexUtf8(row.envelope_json),
+      sha256: sha256Hex(row.envelope_json),
       updatedAtMs: Number(row.updated_at_ms),
     };
   }

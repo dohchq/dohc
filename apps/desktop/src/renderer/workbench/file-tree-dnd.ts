@@ -1,3 +1,4 @@
+import { basenameOf, dirnameOf } from "../path";
 // file-org-v1 D4.7 — drag-and-drop planning. Extracted as a pure
 // function for the same reason as `navigateTree` (the harness is
 // node-only, no DOM). The component sets up HTML5 DnD events; this
@@ -46,22 +47,12 @@ type DropAction =
   | { kind: 'move-folder'; fromPath: string; toPath: string }
   | { kind: 'noop'; reason: string }
 
-function leafOf(path: string): string {
-  const idx = path.lastIndexOf('/')
-  return idx < 0 ? path : path.slice(idx + 1)
-}
-
-function parentOf(path: string): string {
-  const idx = path.lastIndexOf('/')
-  return idx < 0 ? '' : path.slice(0, idx)
-}
-
 export function planDrop(
   source: DragSource,
   target: DropTarget,
 ): DropAction {
-  const sourceParent = parentOf(source.path)
-  const leaf = leafOf(source.path)
+  const sourceParent = dirnameOf(source.path)
+  const leaf = basenameOf(source.path)
 
   // Same parent ⇒ no-op (nothing to do; the item is already where
   // the user is asking).

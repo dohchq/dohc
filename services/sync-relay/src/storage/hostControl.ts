@@ -1,10 +1,11 @@
-import {
-  type SqliteDb,
-  type LiveHostControlResult,
-  type LiveHostControlRefusalReason,
-  type LiveHostConnectionCoordinate,
-  type BeginLiveHostTransitionInput,
-  type ActivateLiveHostTransitionInput,
+import type {
+  SqliteDb,
+  LiveHostControlResult,
+  LiveHostControlRefusalReason,
+  LiveHostConnectionCoordinate,
+  BeginLiveHostTransitionInput,
+  ActivateLiveHostTransitionInput,
+  DeviceHostCredentialResult,
 } from "./types";
 import {
   type HostControlSnapshot,
@@ -16,8 +17,15 @@ import {
   type HostTransitionGeneration,
   nextHostEpoch,
 } from "@dohc/live-session-contract/host-control";
-import { SESSION_HOST_CONTROL_TABLE } from "./schema";
-import { type StorageContext } from "./context";
+import { SESSION_HOST_CONTROL_TABLE, DEVICE_HOST_CREDENTIAL_TABLE } from "./schema";
+import type { StorageContext } from "./context";
+import {
+  type DeviceHostCredential,
+  DeviceHostCredentialRefused,
+  verifyDeviceHostCredentialDigest,
+  parseDeviceHostCredential,
+  deviceHostCredentialDigest,
+} from "../deviceHostCredential";
 
 function parseHostControlTimestamp(value: unknown, name: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
@@ -447,4 +455,75 @@ export function activateLiveHostTransition(storage: StorageContext, input: Activ
         .run(coordinate.instanceId, coordinate.connectionId, updatedAtMs);
       return liveHostSuccess(readRequiredLiveHostControl(storage.db));
     });
+  }
+
+function requireDeviceHostCredential(db: SqliteDb, credential: DeviceHostCredential): void {
+  const record = db.prepare(`SELECT * FROM ${DEVICE_HOST_CREDENTIAL_TABLE} WHERE singleton_id = 1`).get();
+  if (!record || record.revoked_at_ms !== null || record.host_id !== credential.hostId ||
+    record.instance_id !== credential.instanceId || record.host_epoch !== credential.hostEpoch) throw new DeviceHostCredentialRefused();
+  verifyDeviceHostCredentialDigest(credential, record.verifier);
+}
+
+function deviceCredentialResult(operation: () => LiveHostControlResult): DeviceHostCredentialResult {
+  try { return operation(); }
+  catch (error) {
+    if (error instanceof DeviceHostCredentialRefused) return { ok: false, reason: "credential-refused" };
+    throw error;
+  }
+}
+
+export function provisionDeviceHostCredential(storage: StorageContext, input: { credential: DeviceHostCredential; updatedAtMs: number }): DeviceHostCredentialResult {
+    return deviceCredentialResult(() => {
+      const credential = parseDeviceHostCredential(input.credential);
+      const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "device credential creation time");
+      return storage.provisionLiveHostControl({ mode: "device", hostId: credential.hostId, updatedAtMs, guard: () => {
+        const host = readLiveHostControl(storage.db);
+        if (host?.transition || (host?.hostEpoch ?? 1) !== credential.hostEpoch ||
+          (host?.registeredInstanceId !== null && host?.registeredInstanceId !== undefined && host.registeredInstanceId !== credential.instanceId)) {
+          throw new DeviceHostCredentialRefused();
+        }
+        const record = storage.db.prepare(`SELECT 1 FROM ${DEVICE_HOST_CREDENTIAL_TABLE} WHERE singleton_id = 1`).get();
+        if (record) { requireDeviceHostCredential(storage.db, credential); return; }
+        storage.db.prepare(`INSERT INTO ${DEVICE_HOST_CREDENTIAL_TABLE}
+          (singleton_id, host_id, instance_id, host_epoch, verifier, created_at_ms) VALUES (1, ?, ?, ?, ?, ?)`)
+          .run(credential.hostId, credential.instanceId, credential.hostEpoch, deviceHostCredentialDigest(credential), updatedAtMs);
+      } });
+    });
+  }
+
+export function registerDeviceHost(storage: StorageContext, input: { credential: DeviceHostCredential; connectionId: string; updatedAtMs: number }): DeviceHostCredentialResult {
+    return deviceCredentialResult(() => {
+      const credential = parseDeviceHostCredential(input.credential);
+      return storage.registerLiveHost({ mode: "device", hostId: credential.hostId, hostEpoch: credential.hostEpoch,
+        instanceId: credential.instanceId, connectionId: input.connectionId, updatedAtMs: input.updatedAtMs,
+        guard: () => requireDeviceHostCredential(storage.db, credential) });
+    });
+  }
+
+export function disconnectDeviceHost(storage: StorageContext, input: { credential: DeviceHostCredential; connectionId: string; updatedAtMs: number }): DeviceHostCredentialResult {
+    return deviceCredentialResult(() => {
+      const credential = parseDeviceHostCredential(input.credential);
+      return storage.disconnectLiveHost({ mode: "device", hostId: credential.hostId, hostEpoch: credential.hostEpoch,
+        instanceId: credential.instanceId, connectionId: input.connectionId, updatedAtMs: input.updatedAtMs,
+        guard: () => requireDeviceHostCredential(storage.db, credential) });
+    });
+  }
+
+export function revokeDeviceHostCredential(storage: StorageContext, input: { hostId: string; instanceId: string; updatedAtMs: number }): DeviceHostCredentialResult {
+    const hostId = parseHostControlIdentifier(input.hostId, "host ID"), instanceId = parseHostControlIdentifier(input.instanceId, "instance ID");
+    const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "device credential revocation time");
+    return deviceCredentialResult(() => storage.tx(() => {
+      const record = storage.db.prepare(`SELECT * FROM ${DEVICE_HOST_CREDENTIAL_TABLE} WHERE singleton_id = 1`).get();
+      if (!record || record.host_id !== hostId || record.instance_id !== instanceId) throw new DeviceHostCredentialRefused();
+      const host = readRequiredLiveHostControl(storage.db);
+      if (record.revoked_at_ms === null) {
+        storage.db.prepare(`UPDATE ${DEVICE_HOST_CREDENTIAL_TABLE} SET revoked_at_ms = MAX(?, created_at_ms) WHERE singleton_id = 1`).run(updatedAtMs);
+      }
+      if (host.configuredMode === "device" && host.configuredHostId === hostId && host.hostEpoch === record.host_epoch &&
+        host.registeredInstanceId === instanceId && host.transition === null && host.admissionState === "open") {
+        storage.db.prepare(`UPDATE ${SESSION_HOST_CONTROL_TABLE} SET admission_state = 'closed', registered_connection_id = NULL,
+          last_completed_transition_id = NULL, updated_at_ms = ? WHERE singleton_id = 1`).run(updatedAtMs);
+      }
+      return liveHostSuccess(readRequiredLiveHostControl(storage.db));
+    }));
   }

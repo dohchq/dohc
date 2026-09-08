@@ -6,6 +6,7 @@ import { TokenBucketLimiter } from "@dohc/service-http";
 import { asRecord } from "@dohc/workspace-core";
 import { createAccountAuthHandler, type AccountAuthConfig } from "./accountAuth";
 import { isSessionDiscriminator } from "./sessionDiscriminator";
+import { createNamedLiveBrowserClient, type NamedLiveBrowserClientLimits, type NamedLiveBrowserSessionContext } from "./namedLiveBrowserClient";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 export const SHARE_WEB_CSP =
@@ -73,6 +74,7 @@ export interface CreateShareWebApplicationOptions {
   handoffRelayTimeoutMs?: number;
   accountAuth?: AccountAuthConfig;
   fetchAuth?: RelayFetch;
+  namedBrowserSessionLimits?: NamedLiveBrowserClientLimits;
 }
 
 export type LinkBrowserMaterial =
@@ -81,6 +83,7 @@ export type LinkBrowserMaterial =
 
 export interface ShareWebApplication {
   handle(request: Request): Promise<Response>;
+  resolveNamedBrowserSession(request: Request, discriminator: string): Promise<NamedLiveBrowserSessionContext | null>;
   resolveLinkBrowserMaterial(
     discriminator: string,
     cookie: string | null,
@@ -758,7 +761,14 @@ export function createShareWebApplication({
   handoffRelayTimeoutMs = DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
   accountAuth,
   fetchAuth,
+  namedBrowserSessionLimits,
 }: CreateShareWebApplicationOptions): ShareWebApplication {
+  if (namedBrowserSessionLimits && (!accountAuth || !relayExchangeKey || !publicHosts.has(new URL(accountAuth.publicOrigin).host))) {
+    throw new TypeError("Named browser sessions require configured account auth and relay exchange.");
+  }
+  const namedBrowser = namedBrowserSessionLimits ? createNamedLiveBrowserClient({
+    relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, fetchRelay,
+  }) : undefined;
   const accountHandler = accountAuth ? createAccountAuthHandler({
     ...accountAuth,
     fetchAuth,
@@ -954,6 +964,12 @@ export function createShareWebApplication({
     if (!publicHosts.has((request.headers.get("host") ?? "").toLowerCase())) return refused();
     const { pathname, search } = new URL(request.url);
 
+    if (pathname === "/api/live/named-session") {
+      if (!namedBrowser) return refused();
+      const result = await namedBrowser.bootstrap(request);
+      return response(result.body, { status: result.status, headers: result.headers });
+    }
+
     if (pathname.startsWith("/api/account/")) {
       if (!accountHandler) return refused();
       const accountResponse = await accountHandler(request);
@@ -1123,7 +1139,7 @@ export function createShareWebApplication({
 
       const profileSecret = parseCookies(request.headers.get("cookie")).get(
         profileCookieName(authenticated.discriminator),
-      ) ?? null;
+      );
       if (!profileSecret || !LINK_SECRET_PATTERN.test(profileSecret)) return refused();
       let appendBody: string | null = null;
       if (request.method === "POST") {
@@ -1334,7 +1350,8 @@ export function createShareWebApplication({
 
     return refused();
   };
-  return { handle, resolveLinkBrowserMaterial };
+  return { handle, resolveLinkBrowserMaterial,
+    resolveNamedBrowserSession: (request, discriminator) => namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null) };
 }
 
 export const shareWebRefusalBody = REFUSAL_BODY;

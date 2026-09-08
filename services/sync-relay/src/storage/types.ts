@@ -1,11 +1,14 @@
-import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import type { LiveDocumentKey, ServerDerivedLiveUpdateAuthority } from "@dohc/live-session-contract/live-update-admission";
-import {
-  type HostControlSnapshot,
-  type HostMode,
-  type HostEpoch,
-  type HostTransitionGeneration,
+import type {
+  HostControlSnapshot,
+  HostMode,
+  HostEpoch,
+  HostTransitionGeneration,
 } from "@dohc/live-session-contract/host-control";
+import type { LiveDocumentKey, ServerDerivedLiveUpdateAuthority } from "@dohc/live-session-contract/live-update-admission";
+import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import type { RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
+import type { DeviceHostCredential } from "../deviceHostCredential";
+import type { NamedLiveBrowserContext } from "../namedLiveBrowserAuth";
 
 export type LiveHostControlRefusalReason =
   | "not-provisioned"
@@ -448,9 +451,18 @@ export interface AppendLogBatchGuardContext {
 }
 
 export interface SyncRelayStorage {
-  resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult;
   close(): void;
+  resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult;
+  mintNamedLiveTicket(input: NamedLiveTicketMint): { expiresAtMs: number } | null;
+  readNamedLiveTicketTarget(input: NamedLiveTicketLookup): { workspaceId: string; objectId: string } | null;
+  redeemNamedLiveTicket(input: NamedLiveTicketRedemption): RedeemedLiveTicket | null;
   getLiveHostControl(): HostControlSnapshot | null;
+  // Local deployment-operator operations. Account and device requests cannot call these.
+  provisionDeviceHostCredential(input: { credential: DeviceHostCredential; updatedAtMs: number }): DeviceHostCredentialResult;
+  revokeDeviceHostCredential(input: { hostId: string; instanceId: string; updatedAtMs: number }): DeviceHostCredentialResult;
+  // The authenticated transport supplies a fresh connection ID, never the device.
+  registerDeviceHost(input: { credential: DeviceHostCredential; connectionId: string; updatedAtMs: number }): DeviceHostCredentialResult;
+  disconnectDeviceHost(input: { credential: DeviceHostCredential; connectionId: string; updatedAtMs: number }): DeviceHostCredentialResult;
   provisionLiveHostControl(input: {
     mode: HostMode;
     hostId: string;
@@ -893,6 +905,7 @@ export interface SqliteDb {
 }
 
 export interface OpenSyncRelayStorageOptions {
+  liveTickets?: LiveTicketStoragePolicy;
   workspaceQuotaBytes?: number;
   blobGraceMs?: number;
   linkSessionsPerGrantLimit?: number;
@@ -901,4 +914,34 @@ export interface OpenSyncRelayStorageOptions {
   discussionLifetimeMessageLimit?: number;
   discussionNonOwnerShareRowLimit?: number;
   newDiscussionId?: () => string;
+}
+
+export type DeviceHostCredentialResult = LiveHostControlResult |
+  { readonly ok: false; readonly reason: "credential-refused" };
+
+export interface TicketHostReport {
+  readonly connection: LiveHostConnectionCoordinate;
+  readonly binding: LiveObjectBinding;
+}
+
+export interface NamedLiveTicketLookup {
+  readonly tokenHash: string;
+  readonly scope: NamedLiveBrowserContext;
+  readonly audience: string;
+}
+
+export interface NamedLiveTicketMint extends NamedLiveTicketLookup {
+  readonly objectId: string;
+  readonly ticketId: string;
+  readonly report: TicketHostReport;
+}
+
+export interface NamedLiveTicketRedemption extends NamedLiveTicketLookup {
+  readonly report: TicketHostReport;
+}
+
+export interface LiveTicketStoragePolicy {
+  readonly retainedTicketsPerPrincipalGrant: number;
+  readonly expiredTicketCleanupBatchSize: number;
+  readonly now: () => number;
 }

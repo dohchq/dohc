@@ -1,3 +1,4 @@
+import { bytesToBase64 } from "./base64";
 import type { BinaryFileData } from "@excalidraw/excalidraw/types";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
 
@@ -45,18 +46,10 @@ export function binaryFileDataFromArtifact(
     return null;
   }
   const mimeType = expected.mimeType as BinaryFileData["mimeType"];
-  const chunks: string[] = [];
-  for (let offset = 0; offset < loaded.bytes.length; offset += 0x8000) {
-    chunks.push(
-      String.fromCharCode(
-        ...loaded.bytes.subarray(offset, offset + 0x8000),
-      ),
-    );
-  }
   return {
     id: expected.id as BinaryFileData["id"],
     mimeType,
-    dataURL: `data:${mimeType};base64,${btoa(chunks.join(""))}` as BinaryFileData["dataURL"],
+    dataURL: `data:${mimeType};base64,${bytesToBase64(loaded.bytes)}` as BinaryFileData["dataURL"],
     created: expected.created,
     ...(expected.lastRetrieved === undefined
       ? {}

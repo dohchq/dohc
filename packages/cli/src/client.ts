@@ -153,7 +153,7 @@ async function resolveEndpoint(
   return { stateDir, socketPath: described, tokenPath };
 }
 
-export async function locateCliEndpoint(options: CliClientOptions = {}): Promise<CliEndpoint> {
+async function locateCliEndpoint(options: CliClientOptions = {}): Promise<CliEndpoint> {
   const platform = options.platform ?? process.platform;
   const candidates = endpointCandidates(options, platform);
   for (const candidate of candidates) {

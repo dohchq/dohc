@@ -1,3 +1,5 @@
+import { makeTriggerPlugin } from "./triggerPlugin";
+import { isCodeBlock, isCodeMark } from "./pmHelpers";
 // `:shortcode:` emoji autocomplete trigger.
 //
 // A third trigger surface alongside `[[` wikilinks (wikilinkPlugin.ts) and
@@ -25,10 +27,10 @@
 // inside `view.update`) so the replacement is folded into the same
 // transaction cycle instead of racing a second dispatch.
 
-import { Plugin, PluginKey, type Transaction } from '@tiptap/pm/state'
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
+import { PluginKey, type Transaction } from '@tiptap/pm/state'
 import { ReplaceStep } from '@tiptap/pm/transform'
-import type { PMDocLike } from './inlineAtomPlugin'
-import { isCodeBlock, isCodeMark, type AutocompleteState } from './wikilinkPlugin'
+import { type AutocompleteState } from './wikilinkPlugin'
 import { EMOJI_DATA, type EmojiEntry } from './emojiData'
 
 export const emojiPluginKey = new PluginKey('dohc-emoji')
@@ -56,14 +58,14 @@ const EMOJI_COMPLETE_RE = /(?<=^|\s):([a-zA-Z0-9_+-]{2,}):$/
  *  strategy as wikilinkPlugin's `detectAutocomplete` / mentionTrigger's
  *  `detectMentionAutocomplete`. */
 export function detectEmojiAutocomplete(
-  doc: PMDocLike,
+  doc: ProseMirrorNode,
   cursorPos: number,
 ): AutocompleteState {
   let found: AutocompleteState = { active: false }
   doc.descendants((node, pos, parent) => {
     if (!node.isText || !node.text) return
     if (isCodeBlock(parent)) return
-    if ((node.marks ?? []).some(isCodeMark)) return
+    if (node.marks.some(isCodeMark)) return
     const nodeStart = pos
     const nodeEnd = pos + node.text.length
     if (cursorPos < nodeStart || cursorPos > nodeEnd) return
@@ -91,14 +93,14 @@ type CompleteEmojiShortcode = {
  *  the shortcode is actually known — callers combine this with
  *  `lookupEmoji`. */
 export function detectCompleteEmojiShortcode(
-  doc: PMDocLike,
+  doc: ProseMirrorNode,
   cursorPos: number,
 ): CompleteEmojiShortcode | null {
   let found: CompleteEmojiShortcode | null = null
   doc.descendants((node, pos, parent) => {
     if (!node.isText || !node.text) return
     if (isCodeBlock(parent)) return
-    if ((node.marks ?? []).some(isCodeMark)) return
+    if (node.marks.some(isCodeMark)) return
     const nodeStart = pos
     const nodeEnd = pos + node.text.length
     if (cursorPos < nodeStart || cursorPos > nodeEnd) return
@@ -166,17 +168,7 @@ function insertedClosingColonAtCursor(
  *  - `view.update` handles the open-picker notification, same pattern as
  *    makeMentionPlugin / makeWikilinkPlugin. */
 export function makeEmojiPlugin(onAutocompleteChange: (s: AutocompleteState) => void) {
-  let last: AutocompleteState = { active: false }
-  function notify(next: AutocompleteState) {
-    if (next.active && last.active) {
-      if (next.from === last.from && next.query === last.query) return
-    } else if (!next.active && !last.active) {
-      return
-    }
-    last = next
-    onAutocompleteChange(next)
-  }
-  return new Plugin({
+  return makeTriggerPlugin({
     key: emojiPluginKey,
     appendTransaction(transactions, _oldState, newState) {
       if (!transactions.some((tr) => tr.docChanged)) return null
@@ -186,33 +178,12 @@ export function makeEmojiPlugin(onAutocompleteChange: (s: AutocompleteState) => 
       // the cursor — not on remote collab edits or other doc changes that
       // happen to leave the cursor after a literal `:shortcode:`.
       if (!insertedClosingColonAtCursor(transactions, sel.from)) return null
-      const found = detectCompleteEmojiShortcode(
-        newState.doc as unknown as PMDocLike,
-        sel.from,
-      )
+      const found = detectCompleteEmojiShortcode(newState.doc, sel.from)
       if (!found) return null
       const entry = lookupEmoji(found.shortcode)
       if (!entry) return null
       return newState.tr.insertText(entry.emoji, found.from, found.to)
     },
-    view(view) {
-      function recompute() {
-        const state = view.state
-        const s = detectEmojiAutocomplete(
-          state.doc as unknown as PMDocLike,
-          state.selection.from,
-        )
-        notify(s)
-      }
-      recompute()
-      return {
-        update() {
-          recompute()
-        },
-        destroy() {
-          notify({ active: false })
-        },
-      }
-    },
-  })
+
+  }, detectEmojiAutocomplete, onAutocompleteChange)
 }
