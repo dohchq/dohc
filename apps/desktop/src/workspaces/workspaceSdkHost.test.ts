@@ -166,6 +166,7 @@ describe("workspace SDK host authority", () => {
     await writeFile(join(root, "notes", "recipient-only.md"), "hello from recipient disk\n");
     const recipientDatabase = join(root, "recipient-only.sqlite");
     seedDatabase(recipientDatabase, "recipient");
+    const allowPath = (path: string) => path === "notes/today.md";
     const reads: WorkspaceSdkReadPort = {
       readText: async (path) => {
         if (path !== "notes/today.md") throw new Error(`File not found: ${path}`);
@@ -180,7 +181,7 @@ describe("workspace SDK host authority", () => {
         folders: ["notes"],
       }),
       prepareSearch: async () => ({
-        allowPath: (path) => path === "notes/today.md",
+        allowPath,
       }),
       readDatabase: async (path) => {
         if (path !== "canonical.sqlite") throw new Error(`File not found: ${path}`);
@@ -188,7 +189,23 @@ describe("workspace SDK host authority", () => {
       },
       ...unscopedCollectionReads,
     };
-    const context = hostContext(root, { reads });
+    const searchStarter = vi.fn<SdkSearchStarter>((options) => {
+      expect(options.allowPath).toBe(allowPath);
+      expect(options.allowPath?.("notes/today.md")).toBe(true);
+      expect(options.allowPath?.("notes/recipient-only.md")).toBe(false);
+      expect(options.request.query).toBe("hello");
+      options.onBatch({
+        searchId: options.searchId,
+        entries: [{
+          path: "notes/today.md", line: 1, column: 1,
+          preview: "hello from canonical owner", matchStart: 0, matchEnd: 5,
+        }],
+        done: true,
+        limitHit: false,
+      });
+      return { searchId: options.searchId, settled: Promise.resolve(), kill() {} };
+    });
+    const context = hostContext(root, { reads, searchStarter });
 
     await expect(
       invokeWorkspaceSdkHost(context, "files.read", {
@@ -205,6 +222,7 @@ describe("workspace SDK host authority", () => {
     ).resolves.toEqual([
       expect.objectContaining({ path: "notes/today.md" }),
     ]);
+    expect(searchStarter).toHaveBeenCalledOnce();
     await expect(
       invokeWorkspaceSdkHost(context, "databases.read", {
         path: "recipient-only.sqlite",
