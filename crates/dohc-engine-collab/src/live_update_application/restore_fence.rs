@@ -151,6 +151,31 @@ impl ApplicationOwner {
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<NativeRestoreFenceReceipt, ApplicationError> {
+        self.fence_restore_inner(store, input, coordinate, now_ms, faults, false)
+    }
+
+    /// The authenticated host adapter holds its current connection output guard.
+    /// Resume a saved old cut without registering or adopting the document again.
+    pub fn fence_restore_after_reconnect(
+        &mut self,
+        store: &mut EngineStore,
+        input: NativeRestoreFence,
+        coordinate: ApplicationHostCoordinate,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<NativeRestoreFenceReceipt, ApplicationError> {
+        self.fence_restore_inner(store, input, coordinate, now_ms, faults, true)
+    }
+
+    fn fence_restore_inner(
+        &mut self,
+        store: &mut EngineStore,
+        input: NativeRestoreFence,
+        coordinate: ApplicationHostCoordinate,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+        after_reconnect: bool,
+    ) -> Result<NativeRestoreFenceReceipt, ApplicationError> {
         input.validate()?;
         coordinate.validate()?;
         integer(now_ms, 0, SAFE)?;
@@ -197,7 +222,8 @@ impl ApplicationOwner {
             ).map_err(read_sql)?;
             if collision { return Err(ApplicationError::Conflict); }
             if !read_binding(tx, &held)?.is_some_and(|(binding, coordinate, available)| {
-                binding == *b && coordinate == held.coordinate && available
+                binding == *b && available && (coordinate == held.coordinate
+                    || (after_reconnect && coordinate.host_id == held.coordinate.host_id))
             }) {
                 return Err(ApplicationError::Interrupted);
             }

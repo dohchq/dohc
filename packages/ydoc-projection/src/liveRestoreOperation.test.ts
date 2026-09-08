@@ -344,7 +344,7 @@ it.each([false, true])("handles the final available global cursor without a part
 
 const crashFixture = fileURLToPath(new URL("../../../services/sync-relay/src/liveRestoreOperationCrash.fixture.ts", import.meta.url));
 const tsx = pathToFileURL(createRequire(crashFixture).resolve("tsx")).href;
-it.each(["before-operation", "invalidation-before-commit", "invalidation-after-commit", "fence-before-commit", "fence-after-commit", "complete-before-commit", "complete-after-commit"])("retains configured deployment state after process termination at %s", boundary => {
+it.each(["before-operation", "invalidation-before-commit", "invalidation-after-commit", "fence-before-commit", "fence-after-commit", "complete-before-commit", "complete-after-commit", "native-before-commit", "native-after-commit"])("retains configured deployment state after process termination at %s", boundary => {
   const f = fixture(true);
   const intentPath = join(dirname(f.configPath), "intent.json");
   writeFileSync(intentPath, JSON.stringify(f.intent));
@@ -356,11 +356,11 @@ it.each(["before-operation", "invalidation-before-commit", "invalidation-after-c
   expect(child.status).toBe(boundary === "before-operation" ? 80 : boundary.endsWith("before-commit") ? 81 : 82);
   const raw = new DatabaseSync(f.path, { readOnly: true });
   try {
-    const invalidated = boundary === "invalidation-after-commit" || boundary.startsWith("fence-") || boundary.startsWith("complete-");
-    const fenced = boundary === "fence-after-commit" || boundary.startsWith("complete-");
+    const invalidated = boundary === "invalidation-after-commit" || boundary.startsWith("fence-") || boundary.startsWith("complete-") || boundary.startsWith("native-");
+    const fenced = boundary === "fence-after-commit" || boundary.startsWith("complete-") || boundary.startsWith("native-");
     expect(raw.prepare("SELECT status,generation FROM sync_relay_share_grants WHERE grant_id='grant'").get()).toEqual({ status: invalidated ? "revoked" : "active", generation: invalidated ? 5 : 4 });
     expect(raw.prepare("SELECT admission_state,restore_fence_generation FROM sync_relay_live_documents").get()).toEqual({ admission_state: fenced ? "closed" : "open", restore_fence_generation: fenced ? 2 : 1 });
-    expect(raw.prepare("SELECT phase FROM sync_relay_live_restore_operations").all()).toEqual(invalidated ? [{ phase: boundary === "complete-after-commit" ? "old-cut-applied" : fenced ? "fenced" : "authority-invalidated" }] : []);
+    expect(raw.prepare("SELECT phase FROM sync_relay_live_restore_operations").all()).toEqual(invalidated ? [{ phase: boundary === "native-after-commit" ? "native-fenced" : boundary.startsWith("native-") || boundary === "complete-after-commit" ? "old-cut-applied" : fenced ? "fenced" : "authority-invalidated" }] : []);
   } finally { raw.close(); }
   if (boundary.endsWith("before-commit")) expect(() => openRelayDeployment(f.configPath)).toThrow(/continuity/);
   else {

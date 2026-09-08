@@ -421,6 +421,155 @@ async fn restore_fence_accepts_terminal_history_under_an_earlier_selector() {
 }
 
 #[tokio::test]
+async fn restore_fence_recovers_first_commit_after_reconnect_without_readoption() {
+    let f = Fixture::new().await;
+    let input = NativeRestoreFence {
+        operation_id: "restore-reconnected".into(),
+        relay_database_namespace: "relay".into(),
+        old_binding: f.binding.clone(),
+        host_id: "host".into(),
+        new_fence: 1,
+        origin: RestoreDeliveryOrigin::Bootstrap {
+            id: "bootstrap".into(),
+        },
+        terminal: None,
+        applied_sequence: 0,
+    };
+    let coordinate = ApplicationHostCoordinate {
+        host_id: "host".into(),
+        host_epoch: 2,
+        instance_id: "restarted-instance".into(),
+        connection_id: "reconnected".into(),
+    };
+    let snapshot = || {
+        let conn = rusqlite::Connection::open_with_flags(
+            &f.db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        [
+            "live_device_application_bindings",
+            "live_restore_fences",
+            "live_owner_adoptions",
+            "owner_ydoc_outboxes",
+            "ydoc_docs",
+            "live_device_update_applications",
+        ]
+        .map(|table| {
+            let mut query = conn
+                .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+                .unwrap();
+            let count = query.column_count();
+            query
+                .query_map([], |row| {
+                    (0..count)
+                        .map(|index| row.get::<_, rusqlite::types::Value>(index))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        })
+    };
+    let before = snapshot();
+    f.supervisor.close(&f.db).unwrap();
+    let actor = f.supervisor.open(&f.db, 2).unwrap().actor;
+    let replacement = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    assert!(
+        f.owner
+            .fence_restore_after_reconnect(input.clone(), coordinate.clone(), 3, Arc::new(NoFaults))
+            .await
+            .is_err()
+    );
+    assert_eq!(snapshot(), before, "retired connection cannot fence");
+    assert!(
+        replacement
+            .fence_restore(input.clone(), coordinate.clone(), 3, Arc::new(NoFaults))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        snapshot(),
+        before,
+        "strict entry retains exact coordinate checks"
+    );
+    for variant in 0..11 {
+        let mut wrong = input.clone();
+        let mut host = coordinate.clone();
+        match variant {
+            0 => {
+                wrong.host_id = "foreign-host".into();
+                host.host_id = wrong.host_id.clone();
+            }
+            1 => wrong.operation_id.clear(),
+            2 => wrong.relay_database_namespace = "foreign-relay".into(),
+            3 => wrong.old_binding.current_path = "elsewhere.md".into(),
+            4 => wrong.old_binding.lineage_claim_id = "f".repeat(64),
+            5 => {
+                wrong.origin = RestoreDeliveryOrigin::Bootstrap {
+                    id: "foreign-bootstrap".into(),
+                }
+            }
+            6 => {
+                wrong.origin = RestoreDeliveryOrigin::Owner {
+                    id: "foreign-owner".into(),
+                }
+            }
+            7 => wrong.applied_sequence = 1,
+            8 => wrong.new_fence = 2,
+            9 => wrong.old_binding.selector_paths = vec!["notes".into()],
+            _ => {
+                wrong.terminal = Some(LiveUpdateReceipt {
+                    delivery_id: "unapplied".into(),
+                    update_digest: "a".repeat(64),
+                    journal_cursor: 1,
+                    accepting_host_epoch: 1,
+                })
+            }
+        }
+        assert!(
+            replacement
+                .fence_restore_after_reconnect(wrong, host, 3, Arc::new(NoFaults))
+                .await
+                .is_err(),
+            "variant {variant}"
+        );
+        assert_eq!(
+            snapshot(),
+            before,
+            "variant {variant} changed durable state"
+        );
+    }
+    let receipt = replacement
+        .fence_restore_after_reconnect(input.clone(), coordinate.clone(), 4, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(receipt.operation, input);
+    assert_eq!(receipt.local_head_sequence, 0);
+    let stopped = snapshot();
+    let mut wrong = input.clone();
+    wrong.operation_id = "different-operation".into();
+    assert!(
+        replacement
+            .fence_restore_after_reconnect(wrong, coordinate.clone(), 5, Arc::new(NoFaults))
+            .await
+            .is_err()
+    );
+    assert_eq!(snapshot(), stopped, "wrong replay operation changed state");
+    assert_eq!(
+        replacement
+            .fence_restore_after_reconnect(input, coordinate, 6, Arc::new(NoFaults))
+            .await
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(snapshot(), stopped, "exact replay changed state");
+}
+
+#[tokio::test]
 async fn stopped_bootstrap_preserves_replay_after_file_mutation_attempts() {
     use dohc_engine_domain::{DeleteTextFile, RenameTextFile, WriteBinary};
     use dohc_engine_runtime::CancellationToken;

@@ -6,6 +6,7 @@ import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { DeviceControlLimits } from "@dohc/live-session-contract/device-control";
 import { DeviceEngineConnection } from "./deviceEngineConnection.js";
 import { startExistingOwnerDeviceTransport } from "./deviceExistingOwnerTransport.js";
+import type {NativeRestoreFence} from "./liveRestoreFence.js";
 
 it("uses an existing client for bounded owner adoption and refuses ordinary remote methods", async () => {
   let transport!: ReturnType<typeof startExistingOwnerDeviceTransport>, peerConnection: DeviceEngineConnection | undefined, peer: EngineClient | undefined;
@@ -33,11 +34,12 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     queueMicrotask(() => { if (options.binary) transport.receive(bytes); else transport.credit(JSON.parse(bytes.toString()).receivedBytes); done(); });
   } } as unknown as WebSocket;
   const owner = { nativeSessionId: "ordinary-session",assertCurrent: vi.fn(),prepareHandoff: vi.fn(async () => undefined),finishHandoff: vi.fn(async () => undefined),remoteApplied: vi.fn(async (_update: Uint8Array) => undefined) };
-  const singleton = { ready: vi.fn(async () => undefined),close: vi.fn(),sendRequest: vi.fn(async (request: {method: string}) => ({ result:
+  const singleton = { ready: vi.fn(async () => undefined),close: vi.fn(),sendRequest: vi.fn(async (request: {method: string}): Promise<{result: Record<string,unknown>}> => ({ result:
     request.method === "liveApplication.provisionOwner" ? { provisioned: true } : request.method === "liveApplication.register" ? { registrationId: 9 } : { adoptionId: "adoption",expectedLocalSequence: 0,throughCursor: null,outboxId: null,pendingBytes: 0,outboxState: null } })),
     forwardLiveOwnerAdoption: vi.fn(async (_request: { sessionId: string }) => ({ result: { status: "adopted",adoption: { adoptionId: "adoption",localYDocSequence: 0,terminalCursor: 0,adoptionReplayed: false } } })),
     sendLiveApplication: vi.fn(async (_request: unknown,_event: unknown) => ({result: {status: "applied",ack: {}}})) };
-  transport = startExistingOwnerDeviceTransport({ config: { client: singleton as unknown as EngineClient,workspaces: [{workspaceId: "workspace",workspaceHandle: "ws-ordinary"}],ownerFor: () => owner,
+  const ownerFor = vi.fn(() => owner);
+  transport = startExistingOwnerDeviceTransport({ config: { client: singleton as unknown as EngineClient,workspaces: [{workspaceId: "workspace",workspaceHandle: "ws-ordinary"}],ownerFor,
     maxQueuedBytes: 2_000_000,maxFrameBytes: 1_048_576,maxUploads: 2,maxRegistrations: 10,aggregateBytes: 200_000_000,maxAdoptionBytes: 1_000_000,maxAdoptionEvents: 10,requestDeadlineMs: 30_000 },start,ws: deviceSocket,limits,stop: () => peerConnection?.close() });
   try {
     await started; await peer!.ready();
@@ -94,7 +96,32 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     const received = singleton.sendLiveApplication.mock.calls[0]![1] as {updateBytes: Uint8Array};
     expect(owner.remoteApplied.mock.calls[0]![0]).toBe(received.updateBytes);
     expect(Buffer.from(received.updateBytes).equals(Buffer.from(updateBytes))).toBe(true);
-    await expect(peer!.sendRequest({id: 9,method: "workspace.close",workspace: "ws-ordinary",params: {}})).rejects.toThrow();
+    const binding = {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1};
+    const durableOwner = {adoptionId: "adoption",expectedLocalSequence: 0,throughCursor: 0,outboxId: null,pendingBytes: 0,outboxState: null};
+    const handoffs = owner.prepareHandoff.mock.calls.length;
+    singleton.sendRequest.mockResolvedValueOnce({result: durableOwner});
+    await expect(peer!.sendRequest({id: 9,method: "liveApplication.register",workspace: "ws-ordinary",params: {binding,resumeAdoptionId: "wrong"}})).rejects.toThrow();
+    singleton.sendRequest.mockResolvedValueOnce({result: durableOwner});
+    expect((await peer!.sendRequest({id: 10,method: "liveApplication.register",workspace: "ws-ordinary",params: {binding,resumeAdoptionId: "adoption"}})).result).toEqual({registrationId: 9});
+    expect(owner.prepareHandoff).toHaveBeenCalledTimes(handoffs);
+    expect(singleton.forwardLiveOwnerAdoption).toHaveBeenCalledTimes(1);
+    const operation: NativeRestoreFence = {operationId: "stop", relayDatabaseNamespace: "namespace", oldBinding: binding,
+      hostId: "host", newFence: 2, origin: {kind: "owner",id: "adoption"}, terminal: null, appliedSequence: 0};
+    const receipt = {operation,localHeadSequence: 4,recordedAtMs: 10};
+    const calls = singleton.sendRequest.mock.calls.length;
+    await expect(peer!.sendRequest({id: 11,method: "liveApplication.fenceRestore",workspace: "ws-ordinary",params: {operation: {...operation,hostId: "foreign"} as never}})).rejects.toThrow();
+    expect(singleton.sendRequest).toHaveBeenCalledTimes(calls);
+    singleton.sendRequest.mockResolvedValueOnce({result: {status: "fenced",receipt}});
+    expect((await peer!.sendRequest({id: 12,method: "liveApplication.fenceRestore",workspace: "ws-ordinary",params: {operation: operation as never}})).result).toEqual({status: "fenced",receipt});
+    const acquired = ownerFor.mock.calls.length;
+    ownerFor.mockImplementationOnce(() => {throw new Error("renderer session is closed");});
+    singleton.sendRequest.mockResolvedValueOnce({result: {status: "fenced",receipt}});
+    expect((await peer!.sendRequest({id: 13,method: "liveApplication.fenceRestore",workspace: "ws-ordinary",params: {operation: operation as never}})).result).toEqual({status: "fenced",receipt});
+    expect(ownerFor).toHaveBeenCalledTimes(acquired);
+    const pending = await peer!.sendRequest({id: 14,method: "liveApplication.register",workspace: "ws-ordinary",params: {binding,resumeAdoptionId: "adoption"}});
+    expect(pending.result).toMatchObject({status: "pending"});
+    expect(singleton.forwardLiveOwnerAdoption).toHaveBeenCalledTimes(1);
+    await expect(peer!.sendRequest({id: 15,method: "workspace.close",workspace: "ws-ordinary",params: {}})).rejects.toThrow();
     expect(singleton.sendRequest.mock.calls.map(call => call[0].method)).not.toContain("workspace.close");
     expect(singleton.close).not.toHaveBeenCalled();
   } finally { await transport.close(); peer?.close(); }

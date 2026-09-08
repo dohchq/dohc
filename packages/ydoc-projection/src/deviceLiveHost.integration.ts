@@ -19,6 +19,8 @@ import { createDeviceControlBridge } from "../../../services/share-web/src/devic
 import { prepareDeviceHostCredentialFile } from "../../../services/sync-relay/src/deviceHostCredentialFile.js";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import { LiveCommittedDeliveryStore } from "../../../services/sync-relay/src/storage/liveCommittedDelivery.js";
+import { beginStopRestore, advanceStopRestoreFence, readStopRestore } from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
+import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
 import type { LiveHostConnectionCoordinate } from "../../../services/sync-relay/src/storage.js";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -257,6 +259,33 @@ syncBuiltinESMExports();\n`);
     expect(await control!.settle(document)).toEqual(finalSettlement);
     results.push({finalSettlement});
     const finalConnectionId = active.coordinate.connectionId;
+    const authority = deployment.storage.resolveCurrentLiveDocumentBinding({document, actor});
+    if (authority.kind !== "current") throw new Error("Restore authority unavailable.");
+    const lookup = {operationId: "restore-device-stop", workspaceId: "workspace", ownerUserId: "owner"};
+    beginStopRestore(deployment.storage as StorageContext, {deliveryKind: "bootstrap", ...lookup, document,
+      shareId: "share", grantId: "grant", expectedGrantGeneration: 1, expectedDependentGrantIds: [],
+      expectedFence: authority.binding.restoreFenceGeneration, restorePointCursor: 0, restorePointReceiptDigest: hash(baseline)}, Date.now());
+    advanceStopRestoreFence(deployment.storage as StorageContext, lookup, Date.now());
+    const lostFence = vi.spyOn(LiveCommittedDeliveryStore.prototype, "acknowledgeStopRestoreFence")
+      .mockImplementationOnce(() => { throw new Error("Injected lost native fence receipt"); });
+    try { await expect(control!.stopRestore(lookup)).rejects.toThrow("Injected lost native fence receipt"); }
+    finally { lostFence.mockRestore(); }
+    expect(readStopRestore(deployment.storage as StorageContext, lookup)?.phase).toBe("old-cut-applied");
+    await closeTransport(); active = undefined;
+    deployment.storage.close(); deployment = openRelayDeployment(deploymentConfig);
+    active = await launch();
+    let fenced: Awaited<ReturnType<NonNullable<typeof control>["stopRestore"]>> | undefined;
+    let fenceFailure: unknown;
+    await expect.poll(async () => {
+      try { fenced = await control!.stopRestore(lookup); return true; }
+      catch (error) { if ((error as Error).message.includes("not ready")) return false; fenceFailure=error; return true; }
+    }, {timeout: 30_000}).toBe(true);
+    if (fenceFailure) throw fenceFailure;
+    expect(fenced).toMatchObject({kind: "done", receipt: {operation: {operationId: lookup.operationId,
+      terminal: {deliveryId: "replacement", updateDigest: staleDigest}, newFence: authority.binding.restoreFenceGeneration + 1}}});
+    expect(await control!.stopRestore(lookup)).toEqual(fenced);
+    expect(readStopRestore(deployment.storage as StorageContext, lookup)?.phase).toBe("native-fenced");
+    results.push({nativeFenceReceiptReplayed: fenced});
     expect(deployment.storage.revokeDeviceHostCredential({ hostId: credential.hostId, instanceId: credential.instanceId, updatedAtMs: Date.now() }).ok).toBe(true);
     await Promise.all([...childClosures.values()]);
     await expect(control!.drain(document)).rejects.toThrow();
