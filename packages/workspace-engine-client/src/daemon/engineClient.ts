@@ -64,7 +64,7 @@ export interface LiveApplicationBootstrap {
   readonly baselineBytes: Uint8Array;
 }
 
-export interface LiveApplicationBootstrapAck {
+interface LiveApplicationBootstrapAck {
   readonly bootstrapId: string;
   readonly bootstrapMomentId: string;
   readonly baselineDigest: string;
