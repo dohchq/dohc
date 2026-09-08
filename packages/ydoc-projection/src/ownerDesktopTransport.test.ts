@@ -10,6 +10,8 @@ import {fileURLToPath} from "node:url";
 import {DatabaseSync} from "node:sqlite";
 import {expect,it,vi} from "vitest";
 import {LiveCommittedDeliveryStore} from "../../../services/sync-relay/src/storage/liveCommittedDelivery.js";
+import {beginStopRestore,advanceStopRestoreFence,readStopRestore} from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
+import type {StorageContext} from "../../../services/sync-relay/src/storage/context.js";
 import * as Y from "yjs";
 import {EngineDaemonLifecycle,EngineWorkspaceSessions,type EngineClient} from "../../workspace-engine-client/src/daemon/index.js";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
@@ -123,8 +125,9 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     const sharePort = (share.address() as {port: number}).port;
     const bridge = createDeviceControlBridge({publicHosts: new Set([`localhost:${sharePort}`]),relayUrl: `http://127.0.0.1:${relayPort}`,relayExchangeKey: exchangeKey,limits,
       admission: {capacity: 8,refillPerSecond: 1,maxKeys: 8},trustedProxies: new Set()}); share.on("upgrade",bridge.handleUpgrade);
+    let ownerAvailable = true;
     const connect = () => connectDeviceHost({url: `wss://localhost:${sharePort}/api/device-control`,credential,limits,onRegistered() {},existingOwner: {
-      client: singleton,workspaces: [{workspaceId: "workspace",workspaceHandle: engineBinding.workspace}],ownerFor: binding => ipc!.existingOwner(binding),
+      client: singleton,workspaces: [{workspaceId: "workspace",workspaceHandle: engineBinding.workspace}],ownerFor: binding => {if (!ownerAvailable) throw new Error("Renderer owner is unavailable."); return ipc!.existingOwner(binding);},
       maxQueuedBytes: 4_000_000,maxFrameBytes: 1_048_576,maxUploads: 2,maxRegistrations: 8,aggregateBytes: 200_000_000,maxAdoptionBytes: 1_000_000,maxAdoptionEvents: 2,requestDeadlineMs: 30_000}});
     let connection = connect();
     closeNetwork = async () => {connection.stop(); control.close(); bridge.close(); await connection.closed;
@@ -243,6 +246,46 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     expect(lifecycle.currentClient()).toBe(singleton);
     expect(native.prepare("SELECT COUNT(*) AS count FROM live_device_bootstraps").get()!.count).toBe(0);
     assertIndependentRelayReader(root,baseline,rendererDoc);
+    rendererDoc.getMap("frontmatter").set("localRestoreTail","Unadmitted owner work");
+    await renderer.flushPendingLocalUpdates();
+    await expect.poll(() => native.prepare("SELECT COUNT(*) AS n FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.n).toBeGreaterThan(0);
+    const pendingTail = native.prepare("SELECT sequence,update_digest,pending FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence").all();
+    const beforeStop = Y.encodeStateVector(remote); remote.getMap("frontmatter").set("restoreCut","Accepted before stopping");
+    const stopBytes = Y.encodeStateAsUpdate(remote,beforeStop), stopAuthority = deployment.storage.resolveCurrentLiveDocumentBinding({document,actor}), stopCut = deployment.storage.readLiveUpdateJournalCut({document});
+    if (stopAuthority.kind !== "current" || stopCut.kind !== "cut") throw new Error("Stop cut unavailable.");
+    expect(deployment.storage.commitLiveUpdateJournal({host,actor,expectedAuthority: stopAuthority.authority,metadata: {deliveryId: "owner-stop-cut",updateDigest: hash(stopBytes),binding: stopAuthority.binding},
+      cutToken: stopCut.cut,validation: createLiveMarkdownJournalValidator(policy)({document,currentPath: "docs/a.md",checkpoint: stopCut.cut.checkpoint.bytes,suffix: stopCut.cut.suffix.map(row => row.bytes),candidate: stopBytes}),updateBytes: stopBytes,receivedAtMs: Date.now()}).result.kind).toBe("accepted");
+    const lookup = {operationId: "owner-stop",workspaceId: "workspace",ownerUserId: "owner"};
+    beginStopRestore(deployment.storage as StorageContext,{deliveryKind: "owner",...lookup,document,shareId: "share",grantId: "grant",expectedGrantGeneration: 1,
+      expectedDependentGrantIds: [],expectedFence: stopAuthority.binding.restoreFenceGeneration,restorePointCursor: 0,restorePointReceiptDigest: hash(baseline)},Date.now());
+    advanceStopRestoreFence(deployment.storage as StorageContext,lookup,Date.now());
+    const stop = async () => {let result: Awaited<ReturnType<typeof control.stopRestore>> | undefined, failure: unknown; await expect.poll(async () => {
+      try {result = await control.stopRestore(lookup); return true;} catch(error) {if ((error as Error).message.includes("not ready")) return false; failure=error; return true;}
+    },{timeout: 30_000}).toBe(true); if(failure) throw failure; return result!;};
+    const oldConnection = deployment.storage.getLiveHostControl()!.registeredConnectionId;
+    connection.stop(); await connection.closed; connection = connect();
+    await expect.poll(() => deployment!.storage.getLiveHostControl()?.registeredConnectionId,{timeout: 30_000}).not.toBe(oldConnection);
+    const handoffsBeforeStop = handoffCount;
+    const stoppedRequests = vi.spyOn(singleton,"sendRequest");
+    const lostFence = vi.spyOn(LiveCommittedDeliveryStore.prototype,"acknowledgeStopRestoreFence").mockImplementationOnce(() => {throw new Error("Lost owner fence receipt");});
+    try {await expect(stop()).rejects.toThrow("Lost owner fence receipt");} finally {lostFence.mockRestore();}
+    expect(readStopRestore(deployment.storage as StorageContext,lookup)?.phase).toBe("old-cut-applied");
+    expect(handoffCount).toBe(handoffsBeforeStop);
+    expect(stoppedRequests.mock.calls.map(call=>call[0].method)).not.toContain("ydoc.ownerOutbox.readPending");
+    expect(native.prepare("SELECT sequence,update_digest,pending FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence").all()).toEqual(pendingTail);
+    expect(native.prepare("SELECT state,quarantine_reason FROM owner_ydoc_outboxes").get()).toMatchObject({state:"quarantined",quarantine_reason:"restore-fenced"});
+    expect(rendererDoc.getMap("frontmatter").get("restoreCut")).toBe("Accepted before stopping");
+    expect(rendererDoc.getMap("frontmatter").get("localRestoreTail")).toBe("Unadmitted owner work");
+    stoppedRequests.mockRestore();
+    await renderer.destroy(); renderer = undefined; ownerAvailable = false;
+    const replayRequests = vi.spyOn(singleton,"sendRequest");
+    const fenced = await stop();
+    expect(fenced).toMatchObject({kind:"done",receipt:{operation:{operationId:"owner-stop",origin:{kind:"owner"},terminal:{deliveryId:"owner-stop-cut"}}}});
+    expect(await stop()).toEqual(fenced);
+    expect(readStopRestore(deployment.storage as StorageContext,lookup)?.phase).toBe("native-fenced");
+    expect(replayRequests.mock.calls.map(call=>call[0].method)).not.toContain("liveApplication.register");
+    expect(replayRequests.mock.calls.map(call=>call[0].method)).not.toContain("liveApplication.ownerState");
+    replayRequests.mockRestore();
     writeFileSync(join(root,"result.json"),JSON.stringify({passed: true,binary,sha256: hash(readFileSync(binary)),document,markdown: yDocToMarkdown(remote)},null,2)); remote.destroy();
   } finally {
     captures.mockRestore();

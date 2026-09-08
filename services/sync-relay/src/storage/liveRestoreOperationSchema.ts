@@ -14,7 +14,8 @@ const schema = {
     basis_json TEXT NOT NULL CHECK (json_valid(basis_json)),
     terminal_json TEXT CHECK (json_valid(terminal_json)),
     applied_json TEXT CHECK (json_valid(applied_json)),
-    phase TEXT NOT NULL CHECK (phase IN ('authority-invalidated','fenced','old-cut-applied')),
+    native_receipt_json TEXT CHECK (json_valid(native_receipt_json)),
+    phase TEXT NOT NULL CHECK (phase IN ('authority-invalidated','fenced','old-cut-applied','native-fenced')),
     old_fence INTEGER NOT NULL CHECK (old_fence BETWEEN 1 AND ${safe - 1}),
     new_fence INTEGER CHECK (new_fence=old_fence+1),
     cutover_cursor INTEGER CHECK (cutover_cursor BETWEEN 0 AND ${safe}),
@@ -23,8 +24,9 @@ const schema = {
     fenced_at_ms INTEGER CHECK (fenced_at_ms BETWEEN invalidated_at_ms AND ${safe}),
     accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND ${safe}),
     CHECK ((phase='authority-invalidated' AND new_fence IS NULL AND cutover_cursor IS NULL AND fenced_at_ms IS NULL AND terminal_json IS NULL AND applied_json IS NULL)
-      OR (phase IN ('fenced','old-cut-applied') AND new_fence IS NOT NULL AND cutover_cursor IS NOT NULL AND fenced_at_ms IS NOT NULL AND terminal_json IS NOT NULL)),
-    CHECK ((phase='old-cut-applied') = (applied_json IS NOT NULL)),
+      OR (phase IN ('fenced','old-cut-applied','native-fenced') AND new_fence IS NOT NULL AND cutover_cursor IS NOT NULL AND fenced_at_ms IS NOT NULL AND terminal_json IS NOT NULL)),
+    CHECK ((phase IN ('old-cut-applied','native-fenced')) = (applied_json IS NOT NULL)),
+    CHECK ((phase='native-fenced') = (native_receipt_json IS NOT NULL)),
     UNIQUE (workspace_id,main_version_id,object_id),
     FOREIGN KEY (workspace_id,main_version_id,object_id,lineage_claim_id)
       REFERENCES sync_relay_live_documents(workspace_id,main_version_id,object_id,lineage_claim_id) ON DELETE CASCADE

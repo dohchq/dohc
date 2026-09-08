@@ -69,6 +69,7 @@ impl EngineService {
                     | "liveApplication.bootstrap"
                     | "liveApplication.apply"
                     | "liveApplication.settle"
+                    | "liveApplication.fenceRestore"
             )
         {
             return Err(WireError::new(
@@ -102,6 +103,9 @@ impl EngineService {
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
         if request.method == "liveApplication.settle" {
             return self.live_application_settle(ctx, request).await;
+        }
+        if request.method == "liveApplication.fenceRestore" {
+            return self.live_application_fence_restore(ctx, request).await;
         }
         if request.method == "versionedBinary.readBlob" {
             let (result, blob_egress) = self

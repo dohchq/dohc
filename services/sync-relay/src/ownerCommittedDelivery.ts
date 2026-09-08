@@ -8,6 +8,8 @@ import {drainOwnerOutbox,type OwnerOutboxAdmission} from "./ownerOutboxDelivery.
 import {settlementResult,type CommittedSettlement,type CommittedDeliveryOutcome} from "./liveCommittedDelivery.js";
 import {isDeepStrictEqual} from "node:util";
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
+import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
+import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
 
 /** Relay-side delivery to an ordinary desktop owner through its curated bridge. */
 export class OwnerCommittedDelivery {
@@ -85,5 +87,13 @@ export class OwnerCommittedDelivery {
     } finally { this.#active.delete(key); }
   }
   drain(document: LiveDocumentKey,signal?: AbortSignal) { return this.#run(document,false,signal); }
+  async stopRestore(value: StopRestoreLookup, signal?: AbortSignal) {
+    const lookup = snapshotStopRestoreLookup(value), document = parseLiveDocumentKey(this.#store.stopRestoreDocument({...lookup, host: this.connection.host}));
+    const key = JSON.stringify(document);
+    if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
+    this.#active.add(key);
+    try {return await deliverStopRestore({store: this.#store, lookup, connection: this.connection, deliveryKind: "owner", signal});}
+    finally {this.#active.delete(key);}
+  }
   settle(document: LiveDocumentKey,signal?: AbortSignal) { return this.#run(document,true,signal); }
 }

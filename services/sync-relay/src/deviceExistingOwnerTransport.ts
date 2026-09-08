@@ -8,6 +8,7 @@ import { parseAdmittedLiveUpdateMetadata, type LiveUpdateStructRange } from "@do
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { DeviceEngineConnection } from "./deviceEngineConnection.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
+import {parseNativeRestoreFence, parseNativeRestoreFenceReceipt} from "./liveRestoreFence.js";
 
 export interface ExistingOwnerSession {
   readonly nativeSessionId: string;
@@ -98,17 +99,46 @@ export function startExistingOwnerDeviceTransport(options: {
       if (operation.method === "liveApplication.hosts") {
         if (operation.workspace || Object.keys(operation.params).length) throw new Error("Invalid owner discovery.");
         result = { relayNamespace: start.relayNamespace,host: start.host,workspaces: config.workspaces,ownerSessions: { maxBytes: config.maxAdoptionBytes,maxEvents: config.maxAdoptionEvents } };
+      } else if (operation.method === "liveApplication.fenceRestore") {
+        const params = configRecord(operation.params,["operation"]), fence = parseNativeRestoreFence(params.operation);
+        if (workspaces.get(operation.workspace) !== fence.oldBinding.workspaceId || fence.relayDatabaseNamespace !== start.relayNamespace || fence.hostId !== start.host.hostId) throw new Error("Restore host identity mismatch.");
+        const response = await config.client.sendRequest({...request, method: operation.method, params: {operation: fence as never}}, signal);
+        const value = configRecord(response.result,["status","receipt"]);
+        if (value.status !== "fenced") throw new Error("Native restore fence did not commit.");
+        const receipt = parseNativeRestoreFenceReceipt(value.receipt);
+        if (!isDeepStrictEqual(receipt.operation, fence)) throw new Error("Native restore fence acknowledgement mismatch.");
+        for (const [id, entry] of registrations) if (entry.binding.workspaceId === fence.oldBinding.workspaceId && entry.binding.mainVersionId === fence.oldBinding.mainVersionId && entry.binding.objectId === fence.oldBinding.objectId) {
+          clearTimeout(entry.handoffTimer); registrations.delete(id);
+        }
+        result = {status: "fenced", receipt};
       } else if (operation.method === "liveApplication.register") {
-        const params = configRecord(operation.params,["binding"]), binding = parseLiveObjectBinding(params.binding);
+        const params = configRecord(operation.params,["binding"],["resumeAdoptionId"]), binding = parseLiveObjectBinding(params.binding);
+        const resumeAdoptionId = params.resumeAdoptionId === undefined ? undefined : string(params.resumeAdoptionId);
         if (workspaces.get(operation.workspace) !== binding.workspaceId) throw new Error("Owner workspace mismatch.");
         const existing = [...registrations.values()].find(row => isDeepStrictEqual(row.binding,binding));
-        if (existing) { owner = existing.owner; owner.assertCurrent(); await send({type: "response",id: operation.id,result: {registrationId: existing.nativeId}}); return; }
-        if (registrations.size >= config.maxRegistrations) throw new Error("Owner registration capacity exceeded.");
-        owner = config.ownerFor(binding); owner.assertCurrent();
-        const response = await config.client.sendRequest({ ...request,method: operation.method,params: { binding: { ...binding,selectorPaths: [...binding.selectorPaths] } } },signal);
+        if (existing && resumeAdoptionId === undefined) { owner = existing.owner; owner.assertCurrent(); await send({type: "response",id: operation.id,result: {registrationId: existing.nativeId}}); return; }
+        if (!existing && registrations.size >= config.maxRegistrations) throw new Error("Owner registration capacity exceeded.");
+        try {owner = existing?.owner ?? config.ownerFor(binding); owner.assertCurrent();}
+        catch (error) {
+          if (resumeAdoptionId === undefined) throw error;
+          await send({type: "response",id: operation.id,result: {status: "pending",reason: "The existing owner session is unavailable."}}); return;
+        }
+        const nativeId = existing?.nativeId ?? integer(configRecord((await config.client.sendRequest({...request,method: operation.method,params: {binding: {...binding,selectorPaths: [...binding.selectorPaths]}}},signal)).result,["registrationId"]).registrationId,1);
         owner.assertCurrent();
-        const nativeId = integer(configRecord(response.result,["registrationId"]).registrationId,1);
-        registrations.set(nativeId,{ nativeId,binding,owner,adopted: false }); result = { registrationId: nativeId };
+        let adopted = existing?.adopted ?? false;
+        if (resumeAdoptionId !== undefined) {
+          if (existing?.handoffTimer) throw new Error("Owner handoff is already active.");
+          const response = await config.client.sendRequest({...request,id: next(),method: "liveApplication.ownerState",params: {registrationId: nativeId,sessionId: owner.nativeSessionId}},signal);
+          owner.assertCurrent();
+          const state = configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId","pendingBytes","outboxState"]);
+          if (state.throughCursor === null) {
+            await send({type: "response",id: operation.id,result: {status: "pending",reason: "The existing owner adoption is unavailable."}}); return;
+          }
+          integer(state.throughCursor);
+          if (state.adoptionId !== resumeAdoptionId) throw new Error("Owner adoption identity mismatch.");
+          adopted = true;
+        }
+        registrations.set(nativeId,{nativeId,binding,owner,adopted}); result = {registrationId: nativeId};
       } else {
         registration = registrationFor(operation); owner = registration.owner; owner.assertCurrent();
         const native = { ...request,registrationId: registration.nativeId,sessionId: owner.nativeSessionId };
@@ -213,7 +243,7 @@ export function startExistingOwnerDeviceTransport(options: {
     }
     if (value.type !== "request" || operations.size >= config.maxUploads) throw new Error("Owner operation capacity exceeded.");
     const id = integer(value.id,lastId+1), method = string(value.method), workspace = value.workspace == null ? "" : string(value.workspace);
-    if (!["liveApplication.hosts","liveApplication.register","liveApplication.ownerState","liveApplication.ownerOutbox","liveApplication.readOwnerOutbox","liveApplication.acknowledgeOwnerOutbox","liveApplication.adoptOwner","liveApplication.apply","liveApplication.settle"].includes(method) || (method !== "liveApplication.hosts" && !workspaces.has(workspace)) || value.idempotencyKey != null) throw new Error("Owner method is unavailable.");
+    if (!["liveApplication.hosts","liveApplication.register","liveApplication.fenceRestore","liveApplication.ownerState","liveApplication.ownerOutbox","liveApplication.readOwnerOutbox","liveApplication.acknowledgeOwnerOutbox","liveApplication.adoptOwner","liveApplication.apply","liveApplication.settle"].includes(method) || (method !== "liveApplication.hosts" && !workspaces.has(workspace)) || value.idempotencyKey != null) throw new Error("Owner method is unavailable.");
     const params = value.params as Record<string,unknown>;
     if (!params || typeof params !== "object" || Array.isArray(params)) throw new Error("Invalid owner params.");
     const updateBytes = method === "liveApplication.apply" ? integer(params.updateByteLength,2,20_971_520) : 0;

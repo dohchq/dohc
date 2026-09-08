@@ -1,9 +1,11 @@
 import { afterEach, expect, it } from "vitest";
+import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import { registered, host, cleanupLiveDeliveryFixtures } from "./liveCommittedDeliveryTestSupport.js";
 import { createLiveJournalHistoryAuthority } from "../../../services/sync-relay/src/storage/liveJournalHistory.js";
 import { beginStopRestore, advanceStopRestoreFence, readStopRestore, type StopRestoreIntent } from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
 import type { StopRestoreCutCapture, CommittedBootstrap } from "../../../services/sync-relay/src/storage/liveCommittedDelivery.js";
+import type {NativeRestoreFenceReceipt} from "../../../services/sync-relay/src/liveRestoreFence.js";
 import { openSyncRelayStorage } from "../../../services/sync-relay/src/storage.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
@@ -227,6 +229,9 @@ it.each(["bootstrap","owner"] as const)("finishes precharged %s receipts with ex
     if(first.kind==="bootstrap")f.store.acknowledgeStopRestoreBootstrap(capture,bootstrapAck(first.baseline));
     f.store.acknowledgeStopRestoreApplication(capture,null,applicationAck(terminal,1));
     const before=f.journalRows().usage;f.store.completeStopRestoreCut(capture);expect(f.journalRows().usage).toBe(before);
+    const operation = f.store.pendingStopRestoreFence(f.lookup).operation;
+    f.store.acknowledgeStopRestoreFence(f.lookup,{operation,localHeadSequence:operation.appliedSequence,recordedAtMs:100});
+    expect(f.journalRows().usage).toBe(before);
   }finally{f.close();}
 });
 
@@ -321,3 +326,110 @@ it("rolls back owner ACK reservation and quota changes when its progress UPDATE 
     expect(f.store.completeStopRestoreCut(capture).terminal).toEqual(terminal);
   }finally{f.close();}
 });
+
+function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device", events = false) {
+  const f = fixture(kind, mode);
+  if (kind === "owner") f.adopt();
+  const receipts = events ? [f.add("first"), f.add("last")] : [];
+  f.fence();
+  const capture = f.open();
+  if (kind === "bootstrap") {
+    const next = f.store.nextStopRestoreCut(capture);
+    if (next.kind !== "bootstrap") throw Error(next.kind);
+    f.store.acknowledgeStopRestoreBootstrap(capture, bootstrapAck(next.baseline));
+  }
+  for (const [index, receipt] of receipts.entries()) {
+    f.store.acknowledgeStopRestoreApplication(capture, receipts[index - 1] ?? null, applicationAck(receipt, index === 0 ? 9 : 2));
+  }
+  f.store.completeStopRestoreCut(capture);
+  const operation = f.store.pendingStopRestoreFence(f.lookup).operation;
+  const receipt: NativeRestoreFenceReceipt = {operation, localHeadSequence: 11, recordedAtMs: 100};
+  return {...f, capture, receipt};
+}
+
+it.each(["bootstrap", "owner"] as const)("records a funded native fence for %s and replays it after relay reopen", kind => {
+  const f = readyNativeFence(kind, "device", true);
+  let reopened: ReturnType<typeof openSyncRelayStorage> | undefined, closed = false;
+  try {
+    expect(f.receipt.operation.appliedSequence).toBe(2);
+    const before = f.journalRows().usage;
+    const operation = readStopRestore(f.context, f.lookup)!;
+    expect(operation.phase).toBe("old-cut-applied");
+    expect(operation.nativeReceipt).toBeNull();
+    expect(f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt)).toEqual(f.receipt);
+    expect(f.journalRows().usage).toBe(before);
+    expect(readStopRestore(f.context, f.lookup)).toMatchObject({phase: "native-fenced", nativeReceipt: f.receipt, applied: operation.applied});
+    expect(() => f.store.nextStopRestoreCut(f.capture)).toThrow();
+    expect(() => f.store.completeStopRestoreCut(f.capture)).toThrow();
+    f.store.closeStopRestoreCut(f.capture);
+    f.store.closeStopRestoreCut(f.capture);
+    expect(() => f.store.nextStopRestoreCut(f.capture)).toThrow();
+    if (kind === "owner") expect(f.raw.prepare("SELECT tip_sequence,tip_application_sequence FROM sync_relay_live_delivery_owners").get()).toMatchObject({tip_sequence: 9, tip_application_sequence: 2});
+    f.close(); closed = true;
+    reopened = openSyncRelayStorage(f.path);
+    const store = reopened.createLiveCommittedDeliveryStore(createLiveJournalHistoryAuthority({namespace: "restore-test", reconciled: true}));
+    expect(store.pendingStopRestoreFence(f.lookup)).toEqual({operation: f.receipt.operation, receipt: f.receipt});
+    expect(store.acknowledgeStopRestoreFence(f.lookup, f.receipt)).toEqual(f.receipt);
+    expect(() => store.acknowledgeStopRestoreFence(f.lookup, {...f.receipt, recordedAtMs: 101})).toThrow();
+    expect((reopened as StorageContext).db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage").get()!.usage_bytes).toBe(before);
+  } finally {if (!closed) f.close(); reopened?.close();}
+});
+
+it.each(["service", "device"] as const)("requires the durable empty-cut origin before native completion on %s", mode => {
+  const f = readyNativeFence("bootstrap", mode);
+  try {
+    expect(f.receipt.operation.terminal).toBeNull();
+    expect(f.receipt.operation.appliedSequence).toBe(0);
+    expect(f.receipt.operation.origin.kind).toBe("bootstrap");
+    expect(f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt)).toEqual(f.receipt);
+  } finally {f.close();}
+});
+
+const corruptNativeReceipts: [string, (receipt: NativeRestoreFenceReceipt) => void][] = [
+  ["operation ID", r => {r.operation.operationId = "other";}],
+  ["namespace", r => {r.operation.relayDatabaseNamespace = "other";}],
+  ["workspace", r => {r.operation.oldBinding = {...r.operation.oldBinding, workspaceId: "other"};}],
+  ["version", r => {r.operation.oldBinding = {...r.operation.oldBinding, mainVersionId: "other"};}],
+  ["object", r => {r.operation.oldBinding = {...r.operation.oldBinding, objectId: "other"};}],
+  ["lineage", r => {r.operation.oldBinding = {...r.operation.oldBinding, lineageClaimId: "f".repeat(64)};}],
+  ["path", r => {r.operation.oldBinding = {...r.operation.oldBinding, currentPath: "docs/other.md"};}],
+  ["selector", r => {r.operation.oldBinding = {...r.operation.oldBinding, selectorPaths: ["docs/other.md"]};}],
+  ["host", r => {r.operation.hostId = "other";}],
+  ["fence", r => {r.operation.newFence++;}],
+  ["origin kind", r => {r.operation.origin.kind = "owner";}],
+  ["origin ID", r => {r.operation.origin.id = "other";}],
+  ["terminal", r => {r.operation.terminal = {deliveryId: "other", updateDigest: "f".repeat(64), journalCursor: 1, acceptingHostEpoch: parseHostEpoch(1)};}],
+  ["exact sequence", r => {r.operation.appliedSequence = 1;}],
+  ["head sequence", r => {r.localHeadSequence = -1;}],
+  ["recorded time", r => {r.recordedAtMs = Number.MAX_SAFE_INTEGER + 1;}],
+];
+it.each(corruptNativeReceipts)("refuses changed native %s without phase, receipt, or quota mutation", (_name, corrupt) => {
+  const f = readyNativeFence("bootstrap", "device");
+  try {
+    const before = f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(), usage = f.journalRows().usage;
+    const changed = structuredClone(f.receipt); corrupt(changed);
+    expect(() => f.store.acknowledgeStopRestoreFence(f.lookup, changed)).toThrow();
+    expect(f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all()).toEqual(before);
+    expect(f.journalRows().usage).toBe(usage);
+  } finally {f.close();}
+});
+
+for (const saved of [false,true]) {
+  it.each(["owner","history","connection","host","baseline","admission"])(`rechecks %s before native receipt completion or replay (saved=${saved})`,damage=>{
+    const f=readyNativeFence("bootstrap","device");
+    try {
+      if(saved) f.store.acknowledgeStopRestoreFence(f.lookup,f.receipt);
+      if(damage==="owner") f.raw.exec("UPDATE sync_relay_workspaces SET owner_user_id='other'");
+      if(damage==="history") f.history.markUnreconciled();
+      if(damage==="connection") f.raw.exec("UPDATE sync_relay_session_host_control SET registered_connection_id='other'");
+      if(damage==="host") f.raw.exec("UPDATE sync_relay_session_host_control SET configured_host_id='other'");
+      if(damage==="baseline") f.raw.exec("UPDATE sync_relay_live_documents SET baseline_bytes=X'00'");
+      if(damage==="admission") f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='open'");
+      const before=f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(),usage=f.journalRows().usage;
+      expect(()=>f.store.pendingStopRestoreFence(f.lookup)).toThrow();
+      expect(()=>f.store.acknowledgeStopRestoreFence(f.lookup,f.receipt)).toThrow();
+      expect(f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all()).toEqual(before);
+      expect(f.journalRows().usage).toBe(usage);
+    }finally{f.close();}
+  });
+}

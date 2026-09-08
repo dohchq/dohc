@@ -4,7 +4,7 @@ use crate::{EngineService, lock};
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, ApplicationHostCoordinate, ApplicationResult, BootstrapResult,
-    LiveApplicationBootstrap,
+    LiveApplicationBootstrap, NativeRestoreFence,
 };
 use dohc_engine_protocol::cancel::CancelSignal;
 use dohc_engine_protocol::error::{ErrorCode, WireError};
@@ -31,6 +31,7 @@ pub struct LiveApplicationHostConfig {
 
 pub(crate) struct Host {
     output_fence: Mutex<Vec<Weak<Registration>>>,
+    retired: CancelSignal,
     open: Arc<OpenWorkspace>,
     connection: ConnectionHandle,
     owner: ActorLiveApplicationOwner,
@@ -49,6 +50,7 @@ impl std::fmt::Debug for Host {
 impl ConnectionResource for Host {
     fn retire(&self) {
         let registrations = lock(&self.output_fence);
+        self.retired.cancel();
         for registration in registrations.iter().filter_map(Weak::upgrade) {
             registration.retired.cancel();
         }
@@ -132,6 +134,40 @@ impl Drop for RetireOnCancellation {
         if let Some(host) = &self.0 {
             host.retire();
         }
+    }
+}
+
+#[derive(Debug)]
+struct RestoreFenceOutputGuard {
+    host: Arc<Host>,
+    cancel: CancelSignal,
+    deadline: Option<Instant>,
+}
+
+impl OutputGuard for RestoreFenceOutputGuard {
+    fn cancel_signal(&self) -> CancelSignal {
+        self.cancel.clone()
+    }
+    fn retirement_signal(&self) -> CancelSignal {
+        self.host.retired.clone()
+    }
+    fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+    fn is_current(&self) -> bool {
+        self.host.current(&self.host.connection)
+            && !self.cancel.is_cancelled()
+            && self
+                .deadline
+                .is_none_or(|deadline| Instant::now() < deadline)
+    }
+    fn with_current(&self, action: &mut dyn FnMut()) -> bool {
+        let _fence = lock(&self.host.output_fence);
+        if !self.is_current() {
+            return false;
+        }
+        action();
+        true
     }
 }
 
@@ -419,6 +455,135 @@ impl EngineService {
         })
     }
 
+    pub(super) async fn live_application_fence_restore(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+    ) -> Result<ServiceResponse, WireError> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Params {
+            operation: NativeRestoreFence,
+        }
+        if request.idempotency_key.is_some()
+            || request
+                .params
+                .get("operation")
+                .and_then(|value| value.get("terminal"))
+                .is_none()
+        {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid-native-restore-fence",
+            ));
+        }
+        let params: Params = serde_json::from_value(request.params).map_err(|_| {
+            WireError::new(ErrorCode::InvalidParams, "invalid-native-restore-fence")
+        })?;
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        let workspace = request
+            .workspace
+            .as_ref()
+            .ok_or_else(workspace_unavailable)?;
+        let host = lock(&self.live_applications)
+            .hosts
+            .get(workspace)
+            .cloned()
+            .ok_or_else(workspace_unavailable)?;
+        if !host.current(connection)
+            || params.operation.relay_database_namespace != host.namespace
+            || params.operation.host_id != host.coordinate.host_id
+            || params.operation.old_binding.workspace_id != host.open.workspace_id
+        {
+            return Err(workspace_unavailable());
+        }
+        let cancellation = super::request::OperationCancellation::new(&ctx);
+        let check_interruption = || {
+            if ctx.cancel.is_cancelled() {
+                Err(WireError::new(
+                    ErrorCode::Cancelled,
+                    "native restore fence cancelled",
+                ))
+            } else if ctx.deadline.is_some_and(|end| Instant::now() >= end) {
+                Err(WireError::new(
+                    ErrorCode::DeadlineExceeded,
+                    "native restore fence deadline elapsed",
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        check_interruption()?;
+        let serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("native restore fence (queued)"));
+            }
+            serial = Arc::clone(&host.open.session_ops).lock_owned() => serial,
+        };
+        check_interruption()?;
+        if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(workspace))?, &host.open) {
+            return Err(workspace_unavailable());
+        }
+        let now_ms = super::request::now_ms()?;
+        let object_id = params.operation.old_binding.object_id.clone();
+        let guard = Arc::new(RestoreFenceOutputGuard {
+            host: host.clone(),
+            cancel: ctx.cancel.clone(),
+            deadline: ctx.deadline,
+        });
+        let mut retirement = RetireOnCancellation(Some(host.clone()));
+        let worker_host = host.clone();
+        let operation = tokio::spawn(async move {
+            let _serial = serial;
+            worker_host
+                .owner
+                .fence_restore_after_reconnect(
+                    params.operation,
+                    worker_host.coordinate.clone(),
+                    now_ms,
+                    Arc::new(NoFaults),
+                )
+                .await
+        });
+        let outcome = tokio::select! {
+            biased;
+            outcome = operation => outcome,
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("native restore fence"));
+            }
+        };
+        retirement.0 = None;
+        check_interruption()?;
+        let receipt = outcome
+            .map_err(|_| WireError::new(ErrorCode::Internal, "live-application-interrupted"))?
+            .map_err(map_runtime)?;
+        {
+            let mut registry = lock(&self.live_applications);
+            let _fence = lock(&host.output_fence);
+            registry.registrations.retain(|_, registration| {
+                if Arc::ptr_eq(&registration.host, &host) && registration.object_id == object_id {
+                    registration.retired.cancel();
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        if !guard.is_current() {
+            check_interruption()?;
+            return Err(workspace_unavailable());
+        }
+        Ok(ServiceResponse {
+            response: Response {
+                id: request.id,
+                result: json!({"status":"fenced", "receipt":receipt}),
+            },
+            blob_egress: None,
+            output_guard: Some(guard),
+        })
+    }
+
     /// Trusted host setup. No RPC derives these fields from a caller's event.
     #[doc(hidden)]
     pub async fn provision_live_application(
@@ -450,6 +615,7 @@ impl EngineService {
             .map_err(map_runtime)?;
         let host = Arc::new(Host {
             output_fence: Mutex::new(Vec::new()),
+            retired: CancelSignal::new(),
             open,
             connection: connection.clone(),
             owner,
@@ -756,6 +922,139 @@ mod tests {
     use dohc_engine_protocol::wire::BlobStart;
     use dohc_engine_storage::hex_sha256;
 
+    fn fence_request(
+        workspace: &WorkspaceHandle,
+        binding: &LiveObjectBinding,
+        namespace: &str,
+    ) -> Request {
+        Request {
+            id: 81,
+            method: "liveApplication.fenceRestore".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            params: json!({"operation":{"operationId":"restore-rpc","relayDatabaseNamespace":namespace,"oldBinding":binding,"hostId":"host","newFence":binding.restore_fence_generation+1,"origin":{"kind":"bootstrap","id":"bootstrap"},"terminal":null,"appliedSequence":0}}),
+        }
+    }
+
+    async fn fence_queued_interruption(deadline: bool) {
+        let (_scratch, service, owner, workspace, registration, binding) = fixture().await;
+        let workspace = WorkspaceHandle(workspace);
+        let open = service.open(Some(&workspace)).unwrap();
+        let serial = open.session_ops.lock().await;
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        if deadline {
+            tokio::time::pause();
+            ctx.deadline =
+                Some(tokio::time::Instant::now().into_std() + std::time::Duration::from_secs(60));
+        }
+        let cancel = ctx.cancel.clone();
+        let mut waiting =
+            Box::pin(service.call(ctx, fence_request(&workspace, &binding, "relay-history")));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        if deadline {
+            tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        } else {
+            cancel.cancel();
+        }
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiting).await;
+        if deadline {
+            tokio::time::resume();
+        }
+        assert_eq!(
+            result.unwrap().unwrap_err().code,
+            if deadline {
+                ErrorCode::DeadlineExceeded
+            } else {
+                ErrorCode::Cancelled
+            }
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), registration)
+                .is_ok()
+        );
+        drop(serial);
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fence_queued_cancel_preserves_host() {
+        fence_queued_interruption(false).await;
+    }
+    #[tokio::test]
+    async fn fence_queued_deadline_preserves_host() {
+        fence_queued_interruption(true).await;
+    }
+
+    #[tokio::test]
+    async fn fence_wire_refuses_missing_terminal_extra_fields_and_foreign_host() {
+        let (_scratch, service, owner, workspace, registration, binding) = fixture().await;
+        let workspace = WorkspaceHandle(workspace);
+        assert!(
+            service
+                .call(
+                    RequestContext::unbounded(),
+                    fence_request(&workspace, &binding, "relay-history")
+                )
+                .await
+                .is_err()
+        );
+        for variant in 0..5 {
+            let mut request = fence_request(&workspace, &binding, "relay-history");
+            match variant {
+                0 => {
+                    request.params["operation"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("terminal");
+                }
+                1 => request.params["operation"]["extra"] = json!(true),
+                2 => request.params["operation"]["hostId"] = json!("foreign"),
+                3 => request.params["operation"]["relayDatabaseNamespace"] = json!("foreign"),
+                _ => request.idempotency_key = Some("unexpected".into()),
+            }
+            let mut ctx = RequestContext::unbounded();
+            ctx.connection = Some(owner.handle());
+            assert!(
+                service.call(ctx, request).await.is_err(),
+                "variant {variant}"
+            );
+            assert!(
+                service
+                    .live_application_registration(&owner.handle(), Some(&workspace), registration)
+                    .is_ok()
+            );
+        }
+        let host = lock(&service.live_applications)
+            .hosts
+            .get(&workspace)
+            .unwrap()
+            .clone();
+        let guard = RestoreFenceOutputGuard {
+            host: host.clone(),
+            cancel: RequestContext::unbounded().cancel,
+            deadline: None,
+        };
+        assert!(guard.is_current());
+        host.retire();
+        assert!(!guard.is_current());
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        assert!(
+            service
+                .call(ctx, fence_request(&workspace, &binding, "relay-history"))
+                .await
+                .is_err()
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
     async fn settle_queued_interruption(deadline: bool) {
         let (_scratch, service, owner, workspace, registration, _) = fixture().await;
         let workspace = WorkspaceHandle(workspace);
@@ -856,7 +1155,7 @@ mod tests {
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 
-    async fn settle_actor_interruption(deadline: bool) {
+    async fn actor_interruption(deadline: bool, restore_fence: bool) {
         use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
         struct BlockWriter {
             started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -937,15 +1236,19 @@ mod tests {
                 Some(tokio::time::Instant::now().into_std() + std::time::Duration::from_secs(60));
         }
         let cancel = ctx.cancel.clone();
-        let request = Request {
-            id: 72,
-            method: "liveApplication.settle".into(),
-            workspace: Some(workspace.clone()),
-            deadline_ms: None,
-            idempotency_key: None,
-            params: json!({"registrationId":registration,"terminalReceipt":null}),
+        let request = if restore_fence {
+            fence_request(&workspace, &binding, "cancel-test")
+        } else {
+            Request {
+                id: 72,
+                method: "liveApplication.settle".into(),
+                workspace: Some(workspace.clone()),
+                deadline_ms: None,
+                idempotency_key: None,
+                params: json!({"registrationId":registration,"terminalReceipt":null}),
+            }
         };
-        let mut waiting = Box::pin(service.live_application_settle(ctx, request));
+        let mut waiting = Box::pin(service.call(ctx, request));
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
             std::task::Poll::Ready(())
@@ -998,7 +1301,7 @@ mod tests {
             "actor work must retain session exclusion after RPC cancellation"
         );
         assert!(
-            reservation_held,
+            restore_fence || reservation_held,
             "actor work must retain its admission charge after RPC cancellation"
         );
         assert!(
@@ -1009,11 +1312,20 @@ mod tests {
 
     #[tokio::test]
     async fn settle_actor_cancel_keeps_exclusion_and_reservation_until_completion() {
-        settle_actor_interruption(false).await;
+        actor_interruption(false, false).await;
     }
 
     #[tokio::test]
-    async fn settle_completed_operation_survives_late_cancel() {
+    async fn fence_actor_cancel_keeps_exclusion_until_completion() {
+        actor_interruption(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn fence_actor_deadline_keeps_exclusion_until_completion() {
+        actor_interruption(true, true).await;
+    }
+
+    async fn completed_operation_survives_late_cancel(restore_fence: bool) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct CountWake(AtomicUsize);
         impl std::task::Wake for CountWake {
@@ -1061,15 +1373,19 @@ mod tests {
             .as_u64()
             .unwrap();
         let cancel = ctx.cancel.clone();
-        let request = Request {
-            id: 74,
-            method: "liveApplication.settle".into(),
-            workspace: Some(workspace.clone()),
-            deadline_ms: None,
-            idempotency_key: None,
-            params: json!({"registrationId":registration,"terminalReceipt":null}),
+        let request = if restore_fence {
+            fence_request(&workspace, &binding, "completion-test")
+        } else {
+            Request {
+                id: 74,
+                method: "liveApplication.settle".into(),
+                workspace: Some(workspace.clone()),
+                deadline_ms: None,
+                idempotency_key: None,
+                params: json!({"registrationId":registration,"terminalReceipt":null}),
+            }
         };
-        let mut waiting = Box::pin(service.live_application_settle(ctx, request));
+        let mut waiting = Box::pin(service.call(ctx, request));
         let wakes = Arc::new(CountWake(AtomicUsize::new(0)));
         let waker = std::task::Waker::from(wakes.clone());
         assert!(
@@ -1107,8 +1423,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn settle_completed_operation_survives_late_cancel() {
+        completed_operation_survives_late_cancel(false).await;
+    }
+
+    #[tokio::test]
+    async fn fence_completed_operation_survives_late_cancel() {
+        completed_operation_survives_late_cancel(true).await;
+    }
+
+    #[tokio::test]
     async fn settle_actor_deadline_keeps_exclusion_and_reservation_until_completion() {
-        settle_actor_interruption(true).await;
+        actor_interruption(true, false).await;
     }
 
     #[tokio::test]
