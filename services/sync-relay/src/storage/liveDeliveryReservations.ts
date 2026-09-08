@@ -91,7 +91,7 @@ function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspa
   }
   const fundedDocument = Number(known?.funded_document_sequence ?? 0), fundedCursor = Number(known?.funded_journal_cursor ?? 0);
   integrity(Number.isSafeInteger(fundedDocument) && fundedDocument >= 0 && Number.isSafeInteger(fundedCursor) && fundedCursor >= 0);
-  const missingDocument = storage.db.prepare(`SELECT 1 FROM sync_relay_live_documents d LEFT JOIN ${LIVE_DELIVERY_DOCUMENTS} f USING (workspace_id,main_version_id,object_id,lineage_claim_id) WHERE f.registration_sequence IS NULL LIMIT 1`).get();
+  const missingDocument = storage.db.prepare(`SELECT 1 FROM sync_relay_live_documents d LEFT JOIN ${LIVE_DELIVERY_DOCUMENTS} f USING (workspace_id,main_version_id,object_id,lineage_claim_id) WHERE d.workspace_id=? AND f.registration_sequence IS NULL LIMIT 1`).get(workspaceId);
   integrity(!missingDocument);
   const documents = storage.db.prepare(`SELECT workspace_id,main_version_id,object_id,lineage_claim_id,registration_sequence FROM ${LIVE_DELIVERY_DOCUMENTS} WHERE workspace_id=?`).all(workspaceId);
   let documentHighWater = fundedDocument, journalHighWater = fundedCursor;
