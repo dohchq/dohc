@@ -45,3 +45,25 @@ it("requires explicit relay workspace routing and compatible upload and frame bu
     expect(() => readRelayDeviceDeliveryConfig(run.write(bad), limits)).toThrow();
   }
 });
+
+it("rejects relay queues smaller than an advertised payload before connecting", () => {
+  const run = fixture();
+  const wide = { ...limits, maxPayloadBytes: 4_194_304, maxPendingBytes: 4_194_320 };
+  const value = { version: 1, workspaceIds: ["workspace"], maxQueuedBytes: wide.maxPayloadBytes + 15, maxActiveDrains: 2,
+    client: { aggregateBytes: 200_000_000, maxUploads: 2, connectTimeoutMs: 1000, requestDeadlineMs: 1000, maxFrameBytes: 1_048_576 } };
+  expect(() => readRelayDeviceDeliveryConfig(run.write(value), wide)).toThrow("Invalid device delivery limit.");
+  expect(readRelayDeviceDeliveryConfig(run.write({ ...value, maxQueuedBytes: wide.maxPayloadBytes + 16 }), wide).maxQueuedBytes)
+    .toBe(wide.maxPayloadBytes + 16);
+});
+
+it("charges one retained input buffer when transport segments are small", () => {
+  const run = fixture();
+  const deviceBytes = 65_536 + 16;
+  expect(readDeviceLiveHostConfig(run.write({ ...run.value, maxQueuedBytes: deviceBytes }), limits).maxQueuedBytes).toBe(deviceBytes);
+  expect(() => readDeviceLiveHostConfig(run.write({ ...run.value, maxQueuedBytes: deviceBytes - 1 }), limits)).toThrow();
+  const maxFrameBytes = 1_048_576, relayBytes = maxFrameBytes + 20 + 16;
+  const relay = { version: 1, workspaceIds: ["workspace"], maxQueuedBytes: relayBytes, maxActiveDrains: 2,
+    client: { aggregateBytes: 200_000_000, maxUploads: 2, connectTimeoutMs: 1000, requestDeadlineMs: 1000, maxFrameBytes } };
+  expect(readRelayDeviceDeliveryConfig(run.write(relay), limits).maxQueuedBytes).toBe(relayBytes);
+  expect(() => readRelayDeviceDeliveryConfig(run.write({ ...relay, maxQueuedBytes: relayBytes - 1 }), limits)).toThrow();
+});
