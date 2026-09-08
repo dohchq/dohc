@@ -218,6 +218,7 @@ export function decodeLiveDocumentAuthority(db: SqliteDb, document: LiveDocument
   return stored;
 }
 
+// The caller must verify copied baseline bytes against the digest outside its writer transaction.
 export function decodeLiveDocumentAuthorityStructure(db: SqliteDb, document: LiveDocumentKey, row: Record<string, unknown>): StoredLiveDocumentAuthority {
   const storedDocument = parseLiveDocumentKey({
     workspaceId: row.workspace_id, mainVersionId: row.main_version_id,
