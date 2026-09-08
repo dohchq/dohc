@@ -19,6 +19,7 @@ import {
 } from "@dohc/live-session-contract/host-control";
 import { SESSION_HOST_CONTROL_TABLE, DEVICE_HOST_CREDENTIAL_TABLE } from "./schema";
 import type { StorageContext } from "./context";
+import { provisionLiveDeliveryHost } from "./liveDeliveryReservations";
 import {
   type DeviceHostCredential,
   DeviceHostCredentialRefused,
@@ -174,6 +175,7 @@ export function provisionLiveHostControl(storage: StorageContext, input: {
         return liveHostSuccess(existing);
       }
       input.guard();
+      provisionLiveDeliveryHost(storage, hostId, true);
       storage.db
         .prepare(
           `INSERT INTO ${SESSION_HOST_CONTROL_TABLE} (
@@ -213,9 +215,11 @@ export function registerLiveHost(storage: StorageContext, input: LiveHostConnect
         snapshot.registeredConnectionId === coordinate.connectionId
       ) {
         input.guard();
+        provisionLiveDeliveryHost(storage, coordinate.hostId);
         return liveHostSuccess(snapshot);
       }
       input.guard();
+      provisionLiveDeliveryHost(storage, coordinate.hostId);
       storage.db
         .prepare(
           `UPDATE ${SESSION_HOST_CONTROL_TABLE}
@@ -384,6 +388,7 @@ export function commitLiveHostTransitionEpoch(storage: StorageContext, input: {
         return liveHostRefusal("exhausted-epoch");
       }
       const nextEpoch = nextHostEpoch(snapshot.hostEpoch);
+      provisionLiveDeliveryHost(storage, snapshot.transition.toHostId, true);
       storage.db
         .prepare(
           `UPDATE ${SESSION_HOST_CONTROL_TABLE}
@@ -439,6 +444,7 @@ export function activateLiveHostTransition(storage: StorageContext, input: Activ
       const mismatch = compareConfiguredCoordinate(snapshot, coordinate);
       if (mismatch !== null) return liveHostRefusal(mismatch);
       input.guard();
+      provisionLiveDeliveryHost(storage, coordinate.hostId);
       storage.db
         .prepare(
           `UPDATE ${SESSION_HOST_CONTROL_TABLE}

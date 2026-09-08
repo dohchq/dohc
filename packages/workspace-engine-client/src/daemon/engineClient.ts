@@ -778,14 +778,16 @@ export class EngineClient implements EngineTransport {
     return this.readyPromise;
   }
 
-  async sendRequest(request: Request): Promise<Response> {
-    return this.sendRequestWithInput(request);
+  async sendRequest(request: Request, signal?: AbortSignal): Promise<Response> {
+    return this.sendRequestWithInput(request, undefined, signal);
   }
 
   private async sendRequestWithInput(
     request: Request,
     writeInput?: (wireId: number) => Promise<void>,
+    signal?: AbortSignal,
   ): Promise<Response> {
+    if (signal?.aborted) throw signal.reason;
     if (this.closed) {
       const cause = this.closeCause;
       throw new EngineClientError(
@@ -824,6 +826,15 @@ export class EngineClient implements EngineTransport {
     const deadlineMs = request.deadlineMs ?? null;
     let writeTask: Promise<void> = Promise.resolve();
     let inputComplete = false;
+    const abort = (): void => {
+      const pending = this.pending.get(wireId);
+      if (!pending) return;
+      this.pending.delete(wireId);
+      this.abandonedRequestIds.add(wireId);
+      if (pending.deadlineTimer) clearTimeout(pending.deadlineTimer);
+      pending.reject(signal?.reason);
+      void this.writeEnvelope({ type: "cancel", id: wireId }).catch(() => undefined);
+    };
     const response = new Promise<Response>((resolve, reject) => {
       const deadlineTimer =
         deadlineMs !== null
@@ -847,6 +858,7 @@ export class EngineClient implements EngineTransport {
         reject,
         ...(deadlineTimer ? { deadlineTimer } : {}),
       });
+      signal?.addEventListener("abort", abort, { once: true });
       writeTask = this.writeEnvelope(envelope).then(async () => {
         await writeInput?.(wireId);
         inputComplete = true;
@@ -865,16 +877,19 @@ export class EngineClient implements EngineTransport {
         );
       });
     });
-    if (!writeInput) return response;
     try {
       const result = await response;
-      await writeTask;
+      if (writeInput) await writeTask;
       return result;
     } catch (error: unknown) {
       // A cancelled upload cannot leave a half-written stream on this connection.
-      if (!inputComplete) this.close();
-      await writeTask.catch(() => undefined);
+      if (writeInput) {
+        if (!inputComplete) this.close();
+        await writeTask.catch(() => undefined);
+      }
       throw error;
+    } finally {
+      signal?.removeEventListener("abort", abort);
     }
   }
 
@@ -907,11 +922,14 @@ export class EngineClient implements EngineTransport {
           ranges.length * PACKED_LIVE_RANGE_BYTES,
         );
         let previous = -1;
+        let previousEnd = 0;
         for (let index = 0; index < ranges.length; index++) {
           const range = ranges[index]!;
           if (
             !Number.isSafeInteger(range.clientId) ||
-            range.clientId <= previous ||
+            range.clientId < 0 ||
+            range.clientId < previous ||
+            (range.clientId === previous && range.startClock <= previousEnd) ||
             !Number.isInteger(range.startClock) ||
             range.startClock < 0 ||
             !Number.isInteger(range.endClock) ||
@@ -921,6 +939,7 @@ export class EngineClient implements EngineTransport {
             throw new TypeError("Invalid live application range.");
           }
           previous = range.clientId;
+          previousEnd = range.endClock;
           const offset = index * PACKED_LIVE_RANGE_BYTES;
           packed.writeBigUInt64LE(BigInt(range.clientId), offset);
           packed.writeUInt32LE(range.startClock, offset + 8);

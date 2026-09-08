@@ -440,7 +440,14 @@ export function yDocToMarkdown(doc: Y.Doc): string {
     && typeof taggedBaseline === 'string'
     && frontmatterYaml(frontmatter) === taggedBaseline
   ) {
-    return `${taggedPrefix}${restoreLineEndings(body)}`
+    const parsed = parseFrontmatter(taggedPrefix)
+    if (
+      FM_RE.test(taggedPrefix)
+      && /^(?:\r?\n)*$/u.test(parsed.body)
+      && frontmatterYaml(parsed.meta) === taggedBaseline
+    ) {
+      return `${taggedPrefix}${restoreLineEndings(body)}`
+    }
   }
 
   if (Object.keys(frontmatter).length === 0) return restoreLineEndings(body)

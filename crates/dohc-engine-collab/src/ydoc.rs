@@ -791,7 +791,6 @@ impl Ydoc {
         &self,
         projection_node_budget: usize,
     ) -> Result<String, CollabError> {
-        let mut out = ProjectionBuffer::new();
         // Acquire both roots before opening the read txn: yrs `get_or_insert_*`
         // takes the store lock, so calling one while a transaction is live
         // deadlocks (spike harness note).
@@ -807,9 +806,9 @@ impl Ydoc {
         let mut remaining_nodes = projection_node_budget;
         let mut source_text_bytes = 0usize;
         let mut frontmatter_yaml = ProjectionBuffer::new();
+        let mut entries: BTreeMap<String, Value> = BTreeMap::new();
         if frontmatter.len(&txn) > 0 {
             has_frontmatter = true;
-            let mut entries: BTreeMap<String, Value> = BTreeMap::new();
             for (k, v) in frontmatter.iter(&txn) {
                 source_text_bytes = checked_projection_len(source_text_bytes, k.len())?;
                 entries.insert(
@@ -823,15 +822,12 @@ impl Ydoc {
                     )?,
                 );
             }
-            out.push_str("---\n")?;
             let mut ordered: Vec<_> = entries.iter().collect();
             ordered
                 .sort_by(|(left, _), (right, _)| frontmatter_yaml::compare_keys(left, right, true));
             for (k, v) in ordered {
                 frontmatter_yaml.push_str(&project_frontmatter(k, v)?)?;
             }
-            out.push_str(&frontmatter_yaml.value)?;
-            out.push_str("---")?;
         }
         let children: Vec<MarkdownNode> = body
             .children(&txn)
@@ -851,17 +847,41 @@ impl Ydoc {
                     "{}\n"
                 }
             {
-                let mut preserved = ProjectionBuffer::new();
-                preserved.push_str(&prefix)?;
-                preserved.push_str(&if uses_crlf {
-                    body_markdown.replace('\n', "\r\n")
-                } else {
-                    body_markdown
-                })?;
-                return Ok(preserved.into_string());
+                checked_projection_len(0, prefix.len())?;
+                let equivalent =
+                    dohc_engine_domain::collections::markdown_frontmatter_json_with_body(&prefix)
+                        .is_some_and(|(parsed, trailing)| {
+                            prefix.starts_with("---")
+                                && trailing.trim_matches(['\r', '\n']).is_empty()
+                                && parsed.as_object().is_some_and(|map| {
+                                    map.len() == entries.len()
+                                        && entries.iter().all(|(key, value)| {
+                                            map.get(key).is_some_and(|parsed| {
+                                                project_frontmatter(key, parsed).is_ok_and(|left| {
+                                                    project_frontmatter(key, value)
+                                                        .is_ok_and(|right| left == right)
+                                                })
+                                            })
+                                        })
+                                })
+                        });
+                if equivalent {
+                    let mut preserved = ProjectionBuffer::new();
+                    preserved.push_str(&prefix)?;
+                    preserved.push_str(&if uses_crlf {
+                        body_markdown.replace('\n', "\r\n")
+                    } else {
+                        body_markdown
+                    })?;
+                    return Ok(preserved.into_string());
+                }
             }
         }
+        let mut out = ProjectionBuffer::new();
         if has_frontmatter {
+            out.push_str("---\n")?;
+            out.push_str(&frontmatter_yaml.value)?;
+            out.push_str("---")?;
             out.push_str(if body_markdown.starts_with('\n') {
                 "\n"
             } else {
@@ -5580,6 +5600,53 @@ fn main() {}
             loaded.frontmatter_json()["debt"],
             json!(-9_007_199_254_740_993_i64)
         );
+    }
+
+    #[test]
+    fn forged_tagged_frontmatter_prefix_falls_back_to_canonical_projection() {
+        for prefix in [
+            "---\npriority: !custom foreign\n---\n\n",
+            "---\npriority: !custom high\n---\n\ninjected body\n",
+        ] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(
+                ContentKind::Richdoc,
+                "---\npriority: high\n---\n\nReal body",
+            )
+            .unwrap();
+            let meta = doc.doc.get_or_insert_map(ROOT_META);
+            {
+                let mut txn = doc.doc.transact_mut();
+                meta.insert(&mut txn, TAGGED_FRONTMATTER_PREFIX_META_KEY, prefix);
+                meta.insert(
+                    &mut txn,
+                    TAGGED_FRONTMATTER_BASELINE_META_KEY,
+                    "priority: high\n",
+                );
+            }
+            assert_eq!(
+                doc.project_richdoc().unwrap(),
+                "---\npriority: high\n---\n\nReal body"
+            );
+        }
+    }
+
+    #[test]
+    fn preserved_frontmatter_cannot_replace_zero_with_negative_zero() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "---\nvalue: 0\n---\n\nBody")
+            .unwrap();
+        let meta = doc.doc.get_or_insert_map(ROOT_META);
+        {
+            let mut txn = doc.doc.transact_mut();
+            meta.insert(
+                &mut txn,
+                TAGGED_FRONTMATTER_PREFIX_META_KEY,
+                "---\nvalue: -0.0\n---\n\n",
+            );
+            meta.insert(&mut txn, TAGGED_FRONTMATTER_BASELINE_META_KEY, "value: 0\n");
+        }
+        assert_eq!(doc.project_richdoc().unwrap(), "---\nvalue: 0\n---\n\nBody");
     }
 
     fn decode_fixture_int64_markers(value: &mut Value) {
