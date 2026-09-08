@@ -12,6 +12,8 @@ import { liveBaselineStoredBytes } from './liveBaselineQuotaTestSupport.js'
 import { createLiveMarkdownRegistrationValidator, createLiveMarkdownJournalValidator } from './liveDocumentValidation.js'
 import { initializeRelayDeployment, openRelayDeployment } from '../../../services/sync-relay/src/relayDeployment.js'
 import { openSyncRelayStorage, type LiveUpdateJournalCommitInput } from '../../../services/sync-relay/src/storage.js'
+import type { StorageContext } from '../../../services/sync-relay/src/storage/context.js'
+import type { SqliteDb } from '../../../services/sync-relay/src/storage/types.js'
 
 const policy = {
   maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000,
@@ -47,9 +49,15 @@ function fixture(options: { workspaceQuotaBytes?: number; deployment?: boolean }
   const configPath = join(root, 'deployment.json')
   if (options.deployment) initializeRelayDeployment({ configPath, relayPath: path, continuityDirectory: join(root, 'continuity') })
   const storage = options.deployment ? openRelayDeployment(configPath, options).storage : openSyncRelayStorage(path, options)
-  const raw = new DatabaseSync(path)
+  const raw = new DatabaseSync(path, { readOnly: options.deployment === true })
+  const write = (run: (db: SqliteDb | InstanceType<typeof DatabaseSync>) => void) => {
+    if (options.deployment) {
+      const context = storage as StorageContext
+      context.tx(() => run(context.db))
+    } else run(raw)
+  }
   try {
-    raw.prepare('INSERT INTO sync_relay_workspaces (workspace_id, owner_user_id, created_at_ms) VALUES (?, ?, ?)').run('workspace', 'owner', 0)
+    write(db => { db.prepare('INSERT INTO sync_relay_workspaces (workspace_id, owner_user_id, created_at_ms) VALUES (?, ?, ?)').run('workspace', 'owner', 0) })
     storage.provisionLiveHostControl({ mode: host.mode, hostId: host.hostId, updatedAtMs: 1, guard() {} })
     storage.registerLiveHost({ ...host, updatedAtMs: 2, guard() {} })
   } catch (error) { raw.close(); storage.close(); throw error }
@@ -57,21 +65,23 @@ function fixture(options: { workspaceQuotaBytes?: number; deployment?: boolean }
     const row = { workspace_id: 'workspace', object_id: input.evidence.document.objectId, relay_seq: sequence, moment_id: `moment-${sequence}`,
       version_id: 'main', path: input.evidence.currentPath, blob_sha256: input.evidence.projectedMarkdownSha256,
       content_kind: 'text', byte_length: input.evidence.projectedMarkdownByteLength, recorded_at_ms: sequence, ...changes }
-    raw.prepare(`INSERT INTO sync_relay_object_moments (${Object.keys(row).join(',')}) VALUES (${Object.keys(row).map(() => '?').join(',')})`)
-      .run(...Object.values(row) as Array<string | number | null>)
+    write(db => { db.prepare(`INSERT INTO sync_relay_object_moments (${Object.keys(row).join(',')}) VALUES (${Object.keys(row).map(() => '?').join(',')})`)
+      .run(...Object.values(row) as Array<string | number | null>) })
   }
   const rows = () => ({ documents: raw.prepare('SELECT * FROM sync_relay_live_documents ORDER BY lineage_claim_id').all(),
     ranges: raw.prepare('SELECT * FROM sync_relay_live_document_baseline_ranges ORDER BY client_id, start_clock').all() })
-  return { storage, raw, path, moment, rows, close() { raw.close(); storage.close() } }
+  return { storage, raw, path, write, moment, rows, close() { raw.close(); storage.close() } }
 }
 
 function registered(options: { workspaceQuotaBytes?: number; deployment?: boolean; baselineBytes?: Uint8Array; journalPolicy?: typeof policy } = {}) {
   const f = fixture(options), input = validated(options.baselineBytes); f.moment(input)
   expect(f.storage.registerLiveDocumentBaseline(input).kind).toBe('registered')
-  f.raw.prepare(`INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms)
-    VALUES ('share','workspace','owner',?,0)`).run(JSON.stringify({ paths: ['docs'], versionId: null }))
-  f.raw.exec(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
-    VALUES ('grant','share','user','reader',NULL,'edit',4,'active',0,NULL,NULL)`)
+  f.write(db => {
+    db.prepare(`INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms)
+      VALUES ('share','workspace','owner',?,0)`).run(JSON.stringify({ paths: ['docs'], versionId: null }))
+    db.exec(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+      VALUES ('grant','share','user','reader',NULL,'edit',4,'active',0,NULL,NULL)`)
+  })
   const doc = new Y.Doc(); Y.applyUpdate(doc, input.baselineBytes)
   const actor = { kind: 'owner', userId: 'owner', shareId: 'share' } as const
   const update = (key = 'title', value = 'Changed') => {

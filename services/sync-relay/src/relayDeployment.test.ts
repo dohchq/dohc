@@ -37,6 +37,11 @@ describe("relay deployment continuity", () => {
         { encoding: "utf8", windowsHide: true, timeout: 20_000 });
       expect(contender.error).toBeUndefined();
       expect(contender.status, contender.stderr).toBe(0);
+      const missingConfig = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./relayDeploymentCrash.fixture.ts", import.meta.url)), join(f.root, "missing.json"), "contender"],
+        { encoding: "utf8", windowsHide: true, timeout: 20_000 });
+      expect(missingConfig.error).toBeUndefined();
+      expect(missingConfig.status).not.toBe(0);
+      expect(missingConfig.stderr).toMatch(/ENOENT|no such file/);
       expect(() => openSyncRelayStorage(f.relayPath)).toThrow(/configured relay/);
       expect(first.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "u", createdAtMs: 1 })).toBe("created");
     } finally { first.storage.close(); }
