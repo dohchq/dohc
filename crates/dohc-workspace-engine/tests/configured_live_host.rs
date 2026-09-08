@@ -254,3 +254,69 @@ fn ordinary_daemon_has_no_host_and_configuration_does_not_bypass_auth() {
     };
     assert_eq!(error.error.code, ErrorCode::AuthFailed);
 }
+
+#[test]
+fn ordinary_and_configured_processes_share_writer_exclusion_and_crash_release() {
+    let scratch = ScratchDir::new().unwrap();
+    let root = scratch.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let path = scratch.path().join("host.json");
+    std::fs::write(&path, configuration(&root).to_string()).unwrap();
+    let mut first = Daemon(command(Some(&path)).spawn().unwrap());
+    first.hello("configured-test-secret");
+    assert!(matches!(first.read(), Envelope::HelloAck(_)));
+    let alias = scratch.path().join("workspace-alias");
+    assert!(dohc_engine_testkit::try_make_dir_alias(&root, &alias).unwrap());
+    let alias_config = scratch.path().join("alias.json");
+    std::fs::write(&alias_config, configuration(&alias).to_string()).unwrap();
+    assert!(
+        !command(Some(&alias_config))
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let second = command(Some(&path)).output().unwrap();
+    assert!(!second.status.success());
+    assert!(second.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&second.stderr).contains("workspace-owned"));
+    let mut ordinary = Daemon(command(None).spawn().unwrap());
+    ordinary.hello("configured-test-secret");
+    assert!(matches!(ordinary.read(), Envelope::HelloAck(_)));
+    let params = json!({"rootDir":root, "workspaceId":"workspace", "captureMode":"none"});
+    let Envelope::Error(error) = ordinary.request(1, "workspace.open", None, params.clone()) else {
+        panic!("second writer must refuse")
+    };
+    assert_eq!(error.error.code, ErrorCode::WorkspaceUnavailable);
+    first.0.kill().unwrap();
+    first.0.wait().unwrap();
+    let Envelope::Response(response) = ordinary.request(2, "workspace.open", None, params) else {
+        panic!("crash must release writer")
+    };
+    let handle = serde_json::from_value(response.result["workspace"].clone()).unwrap();
+    assert!(!command(Some(&path)).output().unwrap().status.success());
+    assert!(matches!(
+        ordinary.request(3, "workspace.close", Some(handle), json!({})),
+        Envelope::Response(_)
+    ));
+    let mut reopened = Daemon(command(Some(&path)).spawn().unwrap());
+    reopened.hello("configured-test-secret");
+    assert!(matches!(reopened.read(), Envelope::HelloAck(_)));
+    reopened.0.stdin.take();
+    assert!(reopened.0.wait().unwrap().success());
+    assert!(root.join(".dohc/engine/engine.db.owner-lock").exists());
+    let other_root = scratch.path().join("other-root");
+    std::fs::create_dir_all(other_root.join(".dohc/engine")).unwrap();
+    std::fs::hard_link(
+        root.join(".dohc/engine/engine.db"),
+        other_root.join(".dohc/engine/engine.db"),
+    )
+    .unwrap();
+    std::fs::write(&alias_config, configuration(&other_root).to_string()).unwrap();
+    let unbound_alias = command(Some(&alias_config)).output().unwrap();
+    assert!(!unbound_alias.status.success());
+    assert!(
+        unbound_alias.stdout.is_empty(),
+        "a hardlinked database cannot adopt another root"
+    );
+}

@@ -79,6 +79,10 @@ pub enum RuntimeError {
     #[error("workspace actor is unavailable")]
     ActorUnavailable,
 
+    /// Another process holds this workspace's writer lifetime.
+    #[error("workspace database already has a writer")]
+    WorkspaceOwned,
+
     /// The actor's worker thread panicked; the connection was released by
     /// unwinding but the session is dead.
     #[error("workspace actor worker thread panicked")]
@@ -126,6 +130,7 @@ impl RuntimeError {
             RuntimeError::SceneAssetDeletePending => "scene-asset-delete-pending",
             RuntimeError::ThreadSpawn(_) => "thread-spawn-failed",
             RuntimeError::ActorUnavailable => "actor-unavailable",
+            RuntimeError::WorkspaceOwned => "workspace-owned",
             RuntimeError::WorkerPanicked => "worker-panicked",
             RuntimeError::Cancelled => "cancelled",
             RuntimeError::OperationCrashed => "operation-crashed",

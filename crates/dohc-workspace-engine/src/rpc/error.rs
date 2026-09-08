@@ -190,6 +190,9 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::ActorUnavailable | RuntimeError::WorkerPanicked => {
             ErrorCode::WorkspaceUnavailable
         }
+        RuntimeError::WorkspaceOwned => {
+            return WireError::new(ErrorCode::WorkspaceUnavailable, "workspace-owned");
+        }
         RuntimeError::Domain(error) => return map_domain(error),
         RuntimeError::Collab(error) => map_collab_code(error),
         RuntimeError::Sync(error) => map_sync_code(error),
