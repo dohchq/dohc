@@ -1,4 +1,5 @@
 import { initializeLiveCommittedDeliverySchema } from "./liveCommittedDeliverySchema";
+import { initializeLiveRestoreOperationSchema } from "./liveRestoreOperationSchema";
 import {
   LINK_DISCUSSION_NAME_CODE_POINT_LIMIT,
   LINK_DISCUSSION_NAME_BYTE_LIMIT,
@@ -1145,6 +1146,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeLiveDocumentAuthoritySchema(db);
     initializeLiveJournalSchema(db);
     initializeLiveCommittedDeliverySchema(db);
+    initializeLiveRestoreOperationSchema(db);
     initializeLiveTicketSchema(db);
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant

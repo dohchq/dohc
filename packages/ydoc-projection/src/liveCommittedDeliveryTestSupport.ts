@@ -16,6 +16,8 @@ import {
   type LiveUpdateJournalCommitInput,
   type LiveHostConnectionCoordinate,
 } from "../../../services/sync-relay/src/storage.js";
+import { initializeRelayDeployment, openRelayDeployment } from "../../../services/sync-relay/src/relayDeployment.js";
+import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
 
 export const policy = {
   maxStructVisits: 1_000_000,
@@ -86,18 +88,24 @@ function validated(
     registeredAtMs: 10,
   };
 }
-function fixture(options: { workspaceQuotaBytes?: number } = {}, configuredHost: LiveHostConnectionCoordinate = host) {
+function fixture(options: { workspaceQuotaBytes?: number; deployment?: boolean } = {}, configuredHost: LiveHostConnectionCoordinate = host) {
   const root = mkdtempSync(join(tmpdir(), "dohc-baseline-storage-"));
   roots.push(root);
-  const path = join(root, "relay.sqlite");
-  const storage = openSyncRelayStorage(path, options);
-  const raw = new DatabaseSync(path);
+  const path = join(root, "volume", "relay.sqlite");
+  const configPath = join(root, "deployment.json");
+  if (options.deployment) initializeRelayDeployment({ configPath, relayPath: path, continuityDirectory: join(root, "continuity") });
+  const storage = options.deployment ? openRelayDeployment(configPath, options).storage : openSyncRelayStorage(path, options);
+  const raw = new DatabaseSync(path, { readOnly: options.deployment === true });
+  const write = (run: (db: StorageContext["db"]) => void) => {
+    const context = storage as StorageContext;
+    context.tx(() => run(context.db));
+  };
   try {
-    raw
+    write(db => { db
       .prepare(
         "INSERT INTO sync_relay_workspaces (workspace_id, owner_user_id, created_at_ms) VALUES (?, ?, ?)",
       )
-      .run("workspace", "owner", 0);
+      .run("workspace", "owner", 0); });
     storage.provisionLiveHostControl({
       mode: configuredHost.mode,
       hostId: configuredHost.hostId,
@@ -128,7 +136,7 @@ function fixture(options: { workspaceQuotaBytes?: number } = {}, configuredHost:
       recorded_at_ms: sequence,
       ...changes,
     };
-    raw
+    write(db => { db
       .prepare(
         `INSERT INTO sync_relay_object_moments (${Object.keys(row).join(",")}) VALUES (${Object.keys(
           row,
@@ -136,7 +144,7 @@ function fixture(options: { workspaceQuotaBytes?: number } = {}, configuredHost:
           .map(() => "?")
           .join(",")})`,
       )
-      .run(...(Object.values(row) as Array<string | number | null>));
+      .run(...(Object.values(row) as Array<string | number | null>)); });
   };
   const rows = () => ({
     documents: raw
@@ -154,6 +162,8 @@ function fixture(options: { workspaceQuotaBytes?: number } = {}, configuredHost:
     storage,
     raw,
     path,
+    configPath,
+    write,
     moment,
     rows,
     close() {
@@ -169,21 +179,22 @@ export function registered(
     baselineBytes?: Uint8Array;
     journalPolicy?: typeof policy;
     host?: LiveHostConnectionCoordinate;
+    deployment?: boolean;
   } = {},
 ) {
   const f = fixture(options, options.host),
     input = { ...validated(options.baselineBytes), host: { ...(options.host ?? host) } };
   f.moment(input);
   expect(f.storage.registerLiveDocumentBaseline(input).kind).toBe("registered");
-  f.raw
+  f.write(db => { db
     .prepare(
       `INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms)
     VALUES ('share','workspace','owner',?,0)`,
     )
-    .run(JSON.stringify({ paths: ["docs"], versionId: null }));
-  f.raw
+    .run(JSON.stringify({ paths: ["docs"], versionId: null })); });
+  f.write(db => { db
     .exec(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
-    VALUES ('grant','share','user','reader',NULL,'edit',4,'active',0,NULL,NULL)`);
+    VALUES ('grant','share','user','reader',NULL,'edit',4,'active',0,NULL,NULL)`); });
   const doc = new Y.Doc();
   Y.applyUpdate(doc, input.baselineBytes);
   const actor = { kind: "owner", userId: "owner", shareId: "share" } as const;
