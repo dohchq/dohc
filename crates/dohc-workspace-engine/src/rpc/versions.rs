@@ -311,7 +311,6 @@ impl EngineService {
         operation: &str,
         pause_after_capture: bool,
     ) -> Result<WorkspaceBarriers, WireError> {
-        #[cfg(feature = "harness")]
         if pause_after_capture && let Some(probe) = &self.capture_apply_probe {
             probe.observe_version_fence_wait_if_armed();
         }
@@ -330,12 +329,9 @@ impl EngineService {
             None => Arc::clone(&open.capture_apply_gate).lock_owned().await,
         };
 
-        #[cfg(feature = "harness")]
         if pause_after_capture && let Some(probe) = &self.capture_apply_probe {
             probe.pause_version_fence_if_armed().await;
         }
-        #[cfg(not(feature = "harness"))]
-        let _ = pause_after_capture;
 
         let sessions = match cancellation {
             Some(cancellation) => {
@@ -607,7 +603,6 @@ impl EngineService {
                 VersionFenceIntent::Switch { .. } => "version-switch",
             })),
         };
-        #[cfg(feature = "harness")]
         let probe = self.capture_apply_probe.clone();
         let mut fence = tokio::spawn(async move {
             let _barriers = barriers;
@@ -651,7 +646,6 @@ impl EngineService {
                 .await
                 .map_err(map_runtime)?;
 
-            #[cfg(feature = "harness")]
             if let Some(probe) = &probe {
                 probe.record_version_scan();
             }
@@ -683,7 +677,6 @@ impl EngineService {
             let _manifest_changed = reconcile
                 .map_err(|error| map_switch_reconcile_error(error, &detached_operation))?;
 
-            #[cfg(feature = "harness")]
             if let Some(probe) = &probe {
                 probe.pause_version_commit_if_armed().await;
             }
