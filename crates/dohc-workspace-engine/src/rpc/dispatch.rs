@@ -76,6 +76,17 @@ impl EngineService {
         request: Request,
     ) -> Result<ServiceResponse, WireError> {
         let id = request.id;
+        if self.configured_live_host.get().is_some()
+            && matches!(
+                request.method.as_str(),
+                "workspace.open" | "workspace.close"
+            )
+        {
+            return Err(WireError::new(
+                ErrorCode::Forbidden,
+                "configured host workspaces are fixed",
+            ));
+        }
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
         if request.method == "versionedBinary.readBlob" {
@@ -149,6 +160,7 @@ impl EngineService {
             });
         }
         let result = match request.method.as_str() {
+            "liveApplication.hosts" => self.configured_live_hosts(&ctx, &request)?,
             "liveApplication.register" => {
                 self.live_application_register(&ctx, request.workspace, request.params)
                     .await?

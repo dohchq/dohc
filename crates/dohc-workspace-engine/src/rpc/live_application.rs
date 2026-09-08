@@ -79,6 +79,10 @@ pub(crate) struct Registry {
 }
 
 impl Registry {
+    pub(super) fn hosts_current(&self, connection: &ConnectionHandle) -> bool {
+        !self.hosts.is_empty() && self.hosts.values().all(|host| host.current(connection))
+    }
+
     pub(crate) fn retire_workspace(&mut self, workspace: &Arc<OpenWorkspace>) {
         self.hosts.retain(|_, host| {
             if Arc::ptr_eq(&host.open, workspace) {
