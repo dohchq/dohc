@@ -6,6 +6,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import { isEngineWorkspaceOpenRefusedError } from "@dohc/workspace-engine-client/daemon";
 import * as Y from "yjs";
+import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 
 import {
   AcknowledgeEngineYDocLineageReplacementPayload,
@@ -16,6 +17,7 @@ import {
   EngineYDocLineageReplacementEvent,
   EngineYDocRemoteUpdateEvent,
   EngineYDocSaveStateEvent,
+  EngineYDocOwnerHandoff,
   OpenEngineYDocSessionPayload,
   OpenEngineYDocSessionResult,
   ReadEngineYDocArtifactAssetPayload,
@@ -111,6 +113,7 @@ interface LineageReplacement {
 }
 
 interface EngineYDocIpcOwnedSession {
+  ownerHandoff?: { ready(): void; fail(error: unknown): void; done: Promise<void>; finish(): void };
   workspace: EngineYDocWorkspace;
   provider: WorkspaceEngineYDocProviderSession;
   saveSeq: EngineYDocSaveSeqState;
@@ -506,7 +509,12 @@ class EngineYDocSessionIpc {
             owned.deleted = true;
             owned.emit({ state: "deleted", seq: owned.saveSeq.dirtySeq });
           },
-          close: (options) => provider.close(options),
+          close: (options) => {
+            owned.ownerHandoff?.fail(new Error("Owner session closed."));
+            owned.ownerHandoff?.finish();
+            owned.ownerHandoff = undefined;
+            return provider.close(options);
+          },
         };
         if (provider.contentKind === documentKind) {
           delivery = "active";
@@ -635,6 +643,72 @@ class EngineYDocSessionIpc {
       });
     }
     return ApplyEngineYDocUpdateResult.parse(applied.value);
+  }
+
+  existingOwner(binding: LiveObjectBinding) {
+    const authority = this.#acquireWorkspace(binding.workspaceId);
+    try {
+      authority.assertCurrent();
+      const captured = this.#owner.documentSession(authority.workspace.attachmentId, binding.currentPath);
+      const owned = captured?.session;
+      const native = owned?.provider.nativeOwner;
+      if (!captured || !owned || !native) throw new Error("Existing owner is unavailable.");
+      const renderer = this.#sessionFor(captured.caller.sender);
+      const assertCurrent = () => {
+        const currentAuthority = this.#acquireWorkspace(binding.workspaceId);
+        try {
+          currentAuthority.assertCurrent();
+          if (currentAuthority.workspace.attachmentId !== owned.workspace.attachmentId) throw new Error("Owner workspace changed.");
+        } finally { currentAuthority.release(); }
+        captured.assertCurrent();
+        if (!renderer?.isCurrent() || captured.caller.sender.isDestroyed() || owned.deleted || this.#isSharedView(owned.workspace) ||
+          owned.provider.nativeOwner?.sessionId !== native.sessionId || owned.provider.objectId !== binding.objectId ||
+          owned.provider.versionId !== binding.mainVersionId || owned.provider.lineageClaimId !== binding.lineageClaimId) throw new Error("Existing owner changed.");
+      };
+      assertCurrent();
+      return {
+        nativeSessionId: native.sessionId,
+        assertCurrent,
+        prepareHandoff: async (signal: AbortSignal) => {
+          assertCurrent(); signal.throwIfAborted();
+          if (owned.ownerHandoff) throw new Error("Owner handoff is already active.");
+          let ready!: () => void, fail!: (error: unknown) => void, finish!: () => void;
+          const prepared = new Promise<void>((resolve,reject) => { ready = resolve; fail = reject; });
+          const done = new Promise<void>(resolve => { finish = resolve; });
+          const handoff = { ready,fail,done,finish };
+          owned.ownerHandoff = handoff;
+          const abort = () => { fail(signal.reason); finish(); if (owned.ownerHandoff === handoff) owned.ownerHandoff = undefined; };
+          signal.addEventListener("abort",abort,{once: true});
+          void done.finally(() => signal.removeEventListener("abort",abort));
+          try {captured.caller.sender.send(CHANNELS.engineYDocOwnerHandoff, EngineYDocOwnerHandoff.parse({sessionId: captured.caller.sessionId,lineageGeneration: captured.caller.lineageGeneration}));}
+          catch (error) {fail(error); finish(); if (owned.ownerHandoff === handoff) owned.ownerHandoff = undefined;}
+          await prepared; assertCurrent();
+        },
+        finishHandoff: async (_adopted: boolean) => {
+          const handoff = owned.ownerHandoff;
+          if (!handoff) return;
+          owned.ownerHandoff = undefined;
+          handoff.fail(new Error("Owner handoff ended.")); handoff.finish();
+        },
+        remoteApplied: async (_update: Uint8Array) => { assertCurrent(); await native.refresh(); assertCurrent(); },
+      };
+    } finally { authority.release(); }
+  }
+
+  async prepareOwnerHandoff(sender: EngineYDocIpcSender, payload: EngineYDocOwnerHandoff): Promise<void> {
+    const input = EngineYDocOwnerHandoff.parse(payload);
+    const caller = { ...this.#caller(sender,input.sessionId),lineageGeneration: input.lineageGeneration };
+    const access = this.#owner.applyUpdate(caller, owned => owned);
+    if (access.kind !== "applied") throw new Error("Owner handoff session is unavailable.");
+    const owned = access.value, handoff = owned.ownerHandoff, native = owned.provider.nativeOwner;
+    if (!handoff || !native || owned.deleted || this.#isSharedView(owned.workspace)) throw new Error("Owner handoff was not requested.");
+    try {
+      await native.flush();
+      const current = this.#owner.applyUpdate(caller, value => value === owned && value.ownerHandoff === handoff && value.provider.nativeOwner?.sessionId === native.sessionId);
+      if (current.kind !== "applied" || !current.value) throw new Error("Owner handoff session changed.");
+      handoff.ready();
+      await handoff.done;
+    } catch (error) { handoff.fail(error); handoff.finish(); if (owned.ownerHandoff === handoff) owned.ownerHandoff = undefined; throw error; }
   }
 
   acknowledgeLineageReplacement(

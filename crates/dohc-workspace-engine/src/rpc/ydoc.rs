@@ -1573,6 +1573,10 @@ mod tests {
         let cut = dohc_engine_collab::live_update_application::OwnerAdoptionCut {
             relay_database_namespace: "owner-source-relay".into(),
             adoption_id: "actual-owner".into(),
+            outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
+                max_pending_bytes: 1,
+                max_pending_age_ms: 100_000,
+            },
             source_moment_id: source_moment.clone(),
             source_digest: dohc_engine_storage::hex_sha256(markdown.as_bytes()),
             source_byte_length: markdown.len() as i64,
@@ -1619,9 +1623,29 @@ mod tests {
         edited
             .rewrite_content_to_markdown(ContentKind::Richdoc, "Later canonical edit")
             .unwrap();
-        service.ydoc_record_update(&RequestContext::unbounded(),Some(handle.clone()),Some("after-adoption".into()),json!({
-            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(edited.encode_full_state())
-        })).await.unwrap();
+        let queued_bytes = edited.encode_full_state();
+        let edit_params = json!({
+            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&queued_bytes)
+        });
+        for _ in 0..2 {
+            service
+                .ydoc_record_update(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    Some("after-adoption".into()),
+                    edit_params.clone(),
+                )
+                .await
+                .unwrap();
+        }
+        edited
+            .rewrite_content_to_markdown(ContentKind::Richdoc, "Must not commit without delivery")
+            .unwrap();
+        let refused_bytes = edited.encode_full_state();
+        let refusal = service.ydoc_record_update(&RequestContext::unbounded(),Some(handle.clone()),Some("after-seal".into()),json!({
+            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&refused_bytes)
+        })).await.unwrap_err();
+        assert_eq!(refusal.message, "owner-outbox-frozen");
         service
             .ydoc_settle(
                 &RequestContext::unbounded(),
@@ -1651,6 +1675,31 @@ mod tests {
             let original: String = store.read_with(|conn|conn.query_row("SELECT snapshot_blob_sha256 FROM ydoc_snapshots WHERE object_id=?1 AND up_to_seq=0",[&object_id],|r|r.get(0))).unwrap();
             assert_eq!(row.2, original);
             assert_eq!(store.table_row_count("live_owner_adoptions").unwrap(), 1);
+            assert_eq!(
+                store.table_row_count("owner_ydoc_outbox_entries").unwrap(),
+                1,
+                "request replay creates no duplicate delivery"
+            );
+            let queued: (String,i64,Vec<u8>) = store.read_with(|conn|conn.query_row(
+                "SELECT o.state,o.pending_bytes,b.bytes FROM owner_ydoc_outboxes o JOIN owner_ydoc_outbox_entries e USING(outbox_id) JOIN binary_blobs b ON b.sha256=e.update_blob_digest",
+                [],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))).unwrap();
+            assert_eq!(
+                queued,
+                ("sealed".into(), queued_bytes.len() as i64, queued_bytes)
+            );
+            let refused_blob: bool = store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM binary_blobs WHERE sha256=?1)",
+                        [dohc_engine_storage::hex_sha256(&refused_bytes)],
+                        |r| r.get(0),
+                    )
+                })
+                .unwrap();
+            assert!(
+                !refused_blob,
+                "outbox refusal rolls back the local append and blob"
+            );
         }
     }
 

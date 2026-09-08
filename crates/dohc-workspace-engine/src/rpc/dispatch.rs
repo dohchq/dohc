@@ -173,6 +173,8 @@ impl EngineService {
             });
         }
         let result = match request.method.as_str() {
+            "liveApplication.provisionOwner" => self.ordinary_live_provision(&ctx, request.workspace, request.params).await?,
+            "liveApplication.ownerState" => self.live_owner_state(&ctx, request.workspace, request.params).await?,
             "liveApplication.hosts" => self.configured_live_hosts(&ctx, &request)?,
             "liveApplication.register" => {
                 self.live_application_register(&ctx, request.workspace, request.params)

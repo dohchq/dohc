@@ -63,7 +63,7 @@ export function createWorkspaceEngineIpc<
   moveEngineStoreAside: typeof moveEngineStoreAside;
   openWorkspaceActivityUnderEngineStoreLock(workspace: Workspace, options: { afterReopenRecoverySettled: () => void }): Promise<SyncStatusResult>;
   engineYDocSessionIpc: Pick<ReturnType<typeof createEngineYDocSessionIpc>,
-    "open" | "readArtifactAsset" | "applyUpdate" | "acknowledgeLineageReplacement" | "close">;
+    "open" | "readArtifactAsset" | "applyUpdate" | "acknowledgeLineageReplacement" | "prepareOwnerHandoff" | "close">;
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
@@ -301,6 +301,10 @@ export function createWorkspaceEngineIpc<
     registerHandler(CHANNELS.engineYDocClose, async (event, payload) => {
       assertTrustedSender(event);
       await engineYDocSessionIpc.close(event.sender, payload);
+    });
+    registerHandler(CHANNELS.engineYDocPrepareOwnerHandoff, (event,payload) => {
+      assertTrustedSender(event);
+      return engineYDocSessionIpc.prepareOwnerHandoff(event.sender,payload);
     });
   }
 

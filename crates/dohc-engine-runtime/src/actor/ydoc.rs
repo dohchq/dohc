@@ -1419,6 +1419,14 @@ pub(super) fn ydoc_record_update_on_store(
         faults,
         now_ms,
         |tx, outcome, update_sha| {
+            dohc_engine_collab::owner_outbox::append_adopted_local_update_in_tx(
+                tx,
+                &journal_key,
+                &journal_path,
+                outcome.seq,
+                update,
+                now_ms,
+            )?;
             // Origination is asked first and owns the base-once decision: it
             // originates only a lineage that has no base yet. The base is a
             // full state, so it already carries this append and every row the

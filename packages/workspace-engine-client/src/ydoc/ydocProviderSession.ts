@@ -104,6 +104,11 @@ export interface EngineYdocProviderSessionOptions {
 }
 
 export interface EngineYdocProviderSession {
+  readonly nativeOwner?: {
+    readonly sessionId: string;
+    flush(): Promise<void>;
+    refresh(): Promise<void>;
+  };
   readonly doc: Y.Doc;
   readonly initialUpdate: Uint8Array;
   // Injected test providers may omit these values. The daemon open response
@@ -352,6 +357,19 @@ export async function openEngineYdocProviderSession(
   }
 
   return {
+    nativeOwner: {
+      get sessionId() { return session.sessionId; },
+      async flush() {
+        if (closed) throw new Error("Owner session is closed.");
+        await journalChain;
+        await session.resendMissingState();
+        if (localEditError !== null) throw localEditError;
+      },
+      async refresh() {
+        if (closed) throw new Error("Owner session is closed.");
+        await session.resync();
+      },
+    },
     get doc() {
       return session.doc;
     },

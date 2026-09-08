@@ -234,7 +234,13 @@ where
         let key = DocKey::new(&b.workspace_id,&b.main_version_id,&b.object_id)?;
         let marker = durable::read_marker_in(conn,&key)?.ok_or(ApplicationError::Corrupt)?;
         if marker.regime != Regime::Replicated || marker.lineage_claim_status != durable::LineageClaimStatus::Exact || marker.content_kind != crate::ContentKind::Richdoc || marker.lineage_claim_id.as_deref()!=Some(b.lineage_claim_id.as_str()) || marker.path.as_deref()!=Some(b.current_path.as_str()) { return Err(ApplicationError::Conflict); }
-        let (bootstrap,original_binding,_,_) = bootstrap::read_bootstrap(conn,&held)?.ok_or(ApplicationError::Corrupt)?;
+        let owner_origin = adoption::read_origin(conn,&held)?;
+        let (original_binding,origin_moment,origin_digest,origin_cursor,origin_sequence) = if let Some(origin) = &owner_origin {
+            (origin.binding.clone(),origin.source_moment.clone(),origin.source_digest.clone(),origin.terminal.as_ref().map_or(0,|r|r.journal_cursor),origin.sequence)
+        } else {
+            let (bootstrap,original_binding,_,_) = bootstrap::read_bootstrap(conn,&held)?.ok_or(ApplicationError::Corrupt)?;
+            (original_binding,bootstrap.bootstrap_moment_id,bootstrap.projected_markdown_digest,0,0)
+        };
         validate_historical_binding(&original_binding,b)?;
         let latest = latest_receipt(conn,&held)?;
         if latest != terminal { return Err(invalid("settlement terminal is not current")); }
@@ -245,7 +251,7 @@ where
             Some((start,end,start_sequence,_)) if end == terminal_cursor => (start,start_sequence),
             Some((_,end,_,end_sequence)) if end < terminal_cursor => (end,end_sequence),
             Some(_) => return Err(ApplicationError::Corrupt),
-            None => (0,0),
+            None => (origin_cursor,origin_sequence),
         };
         let receipts = read_interval(conn,&held,previous_cursor,terminal_cursor,max_applications)?;
         let mut sequences=HashSet::new();
@@ -258,7 +264,7 @@ where
         let interval_digest=hex_sha256(&serde_json::to_vec(&receipts).map_err(|_| ApplicationError::Corrupt)?);
         let last_settled: Option<String> = conn.query_row("SELECT last_settled_sha FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![b.workspace_id,b.main_version_id,b.object_id],|row|row.get(0)).map_err(read_sql)?;
         Ok(LiveSettlementAudit { namespace:held.namespace.clone(),binding:b.clone(),coordinate:held.coordinate.clone(),previous_cursor,terminal_cursor,previous_sequence,sequence:marker.head_update_seq,receipts,interval_digest,
-            bootstrap_moment:bootstrap.bootstrap_moment_id,bootstrap_digest:bootstrap.projected_markdown_digest,first:previous.is_none() && last_settled.is_none() })
+            bootstrap_moment:origin_moment,bootstrap_digest:origin_digest,first:owner_origin.is_none() && previous.is_none() && last_settled.is_none() })
     }).map_err(E::from)?;
     settle(store, &audit)
 }
@@ -294,9 +300,17 @@ fn latest_receipt(
     registration: &Registration,
 ) -> Result<Option<LiveUpdateReceipt>, ApplicationError> {
     let b = &registration.binding;
-    conn.query_row("SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY journal_cursor DESC LIMIT 1",
+    let applied: Option<LiveUpdateReceipt> = conn.query_row("SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY journal_cursor DESC LIMIT 1",
         params![registration.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
-        |row| Ok(LiveUpdateReceipt { delivery_id:row.get(0)?,update_digest:row.get(1)?,journal_cursor:row.get(2)?,accepting_host_epoch:row.get(3)? })).optional().map_err(read_sql)
+        |row| Ok(LiveUpdateReceipt { delivery_id:row.get(0)?,update_digest:row.get(1)?,journal_cursor:row.get(2)?,accepting_host_epoch:row.get(3)? })).optional().map_err(read_sql)?;
+    let adopted = adoption::read_origin(conn, registration)?.and_then(|origin| origin.terminal);
+    match (applied, adopted) {
+        (Some(applied), Some(adopted)) if applied.journal_cursor <= adopted.journal_cursor => {
+            Ok(Some(adopted))
+        }
+        (Some(applied), _) => Ok(Some(applied)),
+        (None, adopted) => Ok(adopted),
+    }
 }
 
 fn read_interval(

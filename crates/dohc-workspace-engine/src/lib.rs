@@ -22,6 +22,7 @@ pub use events::RECORD_CREATED_EVENT;
 pub use events::RECORD_FIELD_CHANGED_EVENT;
 pub use events::RECORD_UPDATED_EVENT;
 pub use rpc::configured_live_host::ConfiguredLiveHostConfig;
+pub use rpc::ordinary_live_host::OrdinaryLiveHostConfig;
 pub use rpc::conflicts::RESOLVE_ANSWER_SCAFFOLDING_BYTES;
 #[doc(hidden)]
 pub use rpc::live_application::{LiveApplicationHostConfig, LiveApplicationInput};
@@ -57,6 +58,7 @@ pub struct EngineService {
     handles: Mutex<HashMap<WorkspaceHandle, Arc<OpenWorkspace>>>,
     live_applications: Mutex<rpc::live_application::Registry>,
     configured_live_host: std::sync::OnceLock<rpc::configured_live_host::Discovery>,
+    ordinary_live_host: std::sync::OnceLock<rpc::ordinary_live_host::OrdinaryHost>,
     pending_cursors: Mutex<HashMap<String, PendingCursor>>,
     open_lock: Arc<tokio::sync::Mutex<()>>,
     next_handle: std::sync::atomic::AtomicU64,
@@ -146,6 +148,7 @@ impl EngineService {
             handles: Mutex::new(HashMap::new()),
             live_applications: Mutex::new(rpc::live_application::Registry::default()),
             configured_live_host: std::sync::OnceLock::new(),
+            ordinary_live_host: std::sync::OnceLock::new(),
             pending_cursors: Mutex::new(HashMap::new()),
             open_lock: Arc::new(tokio::sync::Mutex::new(())),
             next_handle: std::sync::atomic::AtomicU64::new(1),

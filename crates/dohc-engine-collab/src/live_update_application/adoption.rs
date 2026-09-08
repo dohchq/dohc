@@ -16,12 +16,14 @@ pub struct OwnerAdoptionCut {
     pub expected_local_sequence: i64,
     pub events: Vec<AdmittedLiveUpdate>,
     pub terminal_receipt: Option<LiveUpdateReceipt>,
+    /// Native host configuration, never decoded from the relay cut.
+    pub outbox_limits: crate::OwnerOutboxLimits,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::owner_base_source::{retain_owner_base_source_in_tx, OwnerSeedSource};
+    use crate::owner_base_source::{OwnerSeedSource, retain_owner_base_source_in_tx};
     use crate::owner_outbox;
     use dohc_engine_domain::{VersionedTextStore, WriteText};
     use dohc_test_scratch::ScratchDir;
@@ -126,6 +128,10 @@ mod tests {
                 expected_local_sequence: 0,
                 events: vec![],
                 terminal_receipt: None,
+                outbox_limits: crate::OwnerOutboxLimits {
+                    max_pending_bytes: 1_000_000,
+                    max_pending_age_ms: 100_000,
+                },
             };
             Self {
                 _scratch: scratch,
@@ -139,6 +145,9 @@ mod tests {
             }
         }
         fn edit(&mut self, acknowledge: bool) {
+            self.edit_with_limit(acknowledge, 1_000_000);
+        }
+        fn edit_with_limit(&mut self, acknowledge: bool, max_pending_bytes: i64) {
             self.doc
                 .rewrite_content_to_markdown(ContentKind::Richdoc, "owner edit")
                 .unwrap();
@@ -161,7 +170,7 @@ mod tests {
                     append_key: "edit".into(),
                     update: bytes.clone(),
                     limits: owner_outbox::OwnerOutboxLimits {
-                        max_pending_bytes: 1_000_000,
+                        max_pending_bytes,
                         max_pending_age_ms: 100_000,
                     },
                     created_at_ms: 4,
@@ -229,6 +238,92 @@ mod tests {
             .map(|t| self.store.table_row_count(t).unwrap())
             .collect()
         }
+    }
+    #[test]
+    fn owner_adoption_is_the_origin_for_remote_apply_and_settlement_coverage() {
+        let mut f = Fixture::new();
+        f.edit(true);
+        f.adopt().unwrap();
+        assert_eq!(
+            f.store.table_row_count("live_device_bootstraps").unwrap(),
+            0
+        );
+        let mut event = f.cut.events[0].clone();
+        assert!(matches!(
+            apply_committed(
+                &mut f.store,
+                &mut WriterDocCache::new(),
+                &f.handle,
+                event.clone(),
+                &NoFaults
+            ),
+            Err(ApplicationError::Conflict)
+        ));
+        f.doc
+            .rewrite_content_to_markdown(ContentKind::Richdoc, "remote after adoption")
+            .unwrap();
+        event.update_bytes = f.doc.encode_full_state();
+        event.metadata.accepted.receipt.delivery_id = "remote-after-adoption".into();
+        event.metadata.accepted.receipt.journal_cursor = 8;
+        event.metadata.accepted.receipt.update_digest = hex_sha256(&event.update_bytes);
+        let applied = apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event.clone(),
+            &NoFaults,
+        )
+        .unwrap();
+        assert!(matches!(applied, ApplicationResult::Applied(_)));
+        let result: Result<_, ApplicationError> = with_settlement(
+            &mut f.store,
+            &f.handle,
+            Some(event.metadata.accepted.receipt.clone()),
+            10,
+            |_, audit| Ok(audit.result("test".into(), "test-moment".into(), "a".repeat(64), false)),
+        );
+        let result = result.unwrap();
+        assert_eq!(result.previous_cursor, 7);
+        assert_eq!(result.terminal_cursor, 8);
+        assert_eq!(result.application_count, 1);
+        assert_eq!(result.local_ydoc_sequence, 2);
+        assert_eq!(
+            f.store.table_row_count("live_device_bootstraps").unwrap(),
+            0
+        );
+        assert_eq!(f.store.table_row_count("moments").unwrap(), 1);
+    }
+    #[test]
+    fn owner_adoption_accepts_drained_sealed_outbox_and_rejects_identity_collision() {
+        let mut f = Fixture::new();
+        f.edit_with_limit(true, 1);
+        let state: String = f
+            .store
+            .read_with(|conn| {
+                conn.query_row("SELECT state FROM owner_ydoc_outboxes", [], |row| {
+                    row.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(state, "sealed");
+        let before = f.counts();
+        assert!(!f.adopt().unwrap().adoption_replayed);
+        assert!(f.adopt().unwrap().adoption_replayed);
+        f.cut.adoption_id = "different-attempt".into();
+        assert!(matches!(f.adopt(), Err(ApplicationError::Conflict)));
+        assert_eq!(before, f.counts());
+        f.cut.adoption_id = "adoption".into();
+        f.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE owner_ydoc_outbox_entries SET update_digest=?1",
+                    params![hex_sha256(b"changed")],
+                )
+                .map_err(write_sql)?;
+                Ok::<_, ApplicationError>(())
+            })
+            .unwrap();
+        assert!(f.adopt().is_err());
     }
     #[test]
     fn owner_adoption_preserves_exact_owner_and_replays_after_later_edits() {
@@ -389,15 +484,17 @@ mod tests {
             let mut f = Fixture::new();
             f.edit(true);
             let before = f.counts();
-            assert!(adopt_owner_committed(
-                &mut f.store,
-                &f.handle,
-                f.cut.clone(),
-                1_000_000,
-                100,
-                &Crash(point)
-            )
-            .is_err());
+            assert!(
+                adopt_owner_committed(
+                    &mut f.store,
+                    &f.handle,
+                    f.cut.clone(),
+                    1_000_000,
+                    100,
+                    &Crash(point)
+                )
+                .is_err()
+            );
             assert_eq!(before, f.counts());
             let committed = point == FaultPoint::StorageAfterCommitBeforeAck;
             assert_eq!(
@@ -444,6 +541,8 @@ fn validate_cut(
     integer(cut.baseline_moment_relay_sequence, 0, SAFE)?;
     integer(cut.baseline_registered_at_ms, 0, SAFE)?;
     integer(cut.expected_local_sequence, 0, SAFE)?;
+    integer(cut.outbox_limits.max_pending_bytes, 1, SAFE)?;
+    integer(cut.outbox_limits.max_pending_age_ms, 1, SAFE)?;
     if max_bytes == 0
         || max_events == 0
         || max_events >= i64::MAX as usize
@@ -496,6 +595,8 @@ fn validate_cut(
             cut.baseline_moment_relay_sequence,
             cut.baseline_registered_at_ms,
             cut.expected_local_sequence,
+            cut.outbox_limits.max_pending_bytes,
+            cut.outbox_limits.max_pending_age_ms,
             identities,
         ))
         .map_err(|_| ApplicationError::Corrupt)?,
@@ -568,6 +669,8 @@ pub fn adopt_owner_committed(
             params![held.namespace,cut.adoption_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(read_sql)?;
         let binding_json=serde_json::to_string(b).map_err(|_| ApplicationError::Corrupt)?;
         if let Some((saved_digest,saved_binding,sequence,cursor,coverage,covered_sequence)) = previous {
+            let origin = read_origin(tx,&held)?.ok_or(ApplicationError::Corrupt)?;
+            if origin.terminal != cut.terminal_receipt { return Err(ApplicationError::Corrupt); }
             if saved_digest != evidence_digest || saved_binding != binding_json || sequence != cut.expected_local_sequence
                 || marker.head_update_seq < sequence || cursor != cut.terminal_receipt.as_ref().map_or(0,|r|r.journal_cursor) {
                 return Err(ApplicationError::Conflict);
@@ -575,6 +678,9 @@ pub fn adopt_owner_committed(
             if outbox_coverage(tx,b,&cut.events,max_events,Some(covered_sequence))? != (coverage,covered_sequence) { return Err(ApplicationError::Corrupt); }
             return Ok(OwnerAdoptionAck {adoption_id:cut.adoption_id.clone(),local_ydoc_sequence:sequence,terminal_cursor:cursor,adoption_replayed:true});
         }
+        let existing_document: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
+            params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |r| r.get(0)).map_err(read_sql)?;
+        if existing_document { return Err(ApplicationError::Conflict); }
         if marker.head_update_seq != cut.expected_local_sequence { return Err(invalid("owner adoption evidence is stale")); }
         let local = durable::load_doc_in(tx, &key)?;
         let journal = Ydoc::wire();
@@ -587,9 +693,9 @@ pub fn adopt_owner_committed(
         }
         let (coverage,covered_sequence) = outbox_coverage(tx, b, &cut.events, max_events,None)?;
         let terminal_cursor = cut.terminal_receipt.as_ref().map_or(0,|r|r.journal_cursor);
-        tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,host_coordinate_json)
-            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
-            params![held.namespace,cut.adoption_id,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,binding_json,cut.source_moment_id,cut.source_digest,cut.source_byte_length,cut.baseline_moment_relay_sequence,cut.baseline_registered_at_ms,evidence_digest,coverage,covered_sequence,marker.head_update_seq,terminal_cursor,serde_json::to_string(&held.coordinate).map_err(|_|ApplicationError::Corrupt)?]).map_err(write_sql)?;
+        tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms)
+            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+            params![held.namespace,cut.adoption_id,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,binding_json,cut.source_moment_id,cut.source_digest,cut.source_byte_length,cut.baseline_moment_relay_sequence,cut.baseline_registered_at_ms,evidence_digest,coverage,covered_sequence,marker.head_update_seq,terminal_cursor,serde_json::to_string(&cut.terminal_receipt).map_err(|_|ApplicationError::Corrupt)?,serde_json::to_string(&held.coordinate).map_err(|_|ApplicationError::Corrupt)?,cut.outbox_limits.max_pending_bytes,cut.outbox_limits.max_pending_age_ms]).map_err(write_sql)?;
         Ok(OwnerAdoptionAck { adoption_id:cut.adoption_id.clone(),local_ydoc_sequence:marker.head_update_seq,terminal_cursor,adoption_replayed:false })
     })?;
     match result {
@@ -621,7 +727,7 @@ fn outbox_coverage(
     let mut coverage = Vec::new();
     if let Some((id, state, base, pending, next)) = parent {
         let terminal = replay_sequence.unwrap_or(next - 1);
-        if (state != "active" && !(replay_sequence.is_some() && state == "sealed"))
+        if (state != "active" && state != "sealed")
             || base != b.lineage_claim_id
             || (replay_sequence.is_none() && pending != 0)
             || next < 1
@@ -679,4 +785,46 @@ fn outbox_coverage(
         hex_sha256(&serde_json::to_vec(&coverage).map_err(|_| ApplicationError::Corrupt)?),
         coverage.len() as i64,
     ))
+}
+
+pub(super) struct AdoptedOrigin {
+    pub binding: LiveObjectBinding,
+    pub source_moment: String,
+    pub source_digest: String,
+    pub sequence: i64,
+    pub terminal: Option<LiveUpdateReceipt>,
+}
+
+pub(super) fn read_origin(
+    conn: &Connection,
+    held: &Registration,
+) -> Result<Option<AdoptedOrigin>, ApplicationError> {
+    let b = &held.binding;
+    let raw: Option<(String,String,String,i64,i64,String)> = conn.query_row(
+        "SELECT a.binding_json,a.source_moment_id,a.source_digest,a.local_ydoc_sequence,a.terminal_cursor,a.terminal_receipt_json FROM live_owner_adoptions a
+        JOIN ydoc_owner_base_sources s ON s.workspace_id=a.workspace_id AND s.version_id=a.main_version_id AND s.object_id=a.object_id AND s.lineage_claim_id=a.lineage_claim_id AND s.source_moment_id=a.source_moment_id AND s.source_blob_sha256=a.source_digest AND s.source_byte_length=a.source_byte_length
+        JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id AND m.object_id=s.object_id AND m.path=s.path AND m.moment_id=s.source_moment_id AND m.after_blob_sha256=s.source_blob_sha256 AND m.after_content_kind='text'
+        JOIN ydoc_snapshots snap ON snap.workspace_id=a.workspace_id AND snap.version_id=a.main_version_id AND snap.object_id=a.object_id AND snap.up_to_seq=0 AND snap.snapshot_blob_sha256=a.lineage_claim_id
+        WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5",
+        params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(read_sql)?;
+    let Some((binding, source_moment, source_digest, sequence, cursor, terminal)) = raw else {
+        return Ok(None);
+    };
+    let binding = serde_json::from_str(&binding).map_err(|_| ApplicationError::Corrupt)?;
+    settlement::validate_historical_binding(&binding, b)?;
+    let terminal: Option<LiveUpdateReceipt> =
+        serde_json::from_str(&terminal).map_err(|_| ApplicationError::Corrupt)?;
+    if let Some(receipt) = &terminal {
+        receipt.validate()?;
+    }
+    if terminal.as_ref().map_or(0, |r| r.journal_cursor) != cursor || sequence < 0 {
+        return Err(ApplicationError::Corrupt);
+    }
+    Ok(Some(AdoptedOrigin {
+        binding,
+        source_moment,
+        source_digest,
+        sequence,
+        terminal,
+    }))
 }

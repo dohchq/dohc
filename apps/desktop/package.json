@@ -74,6 +74,7 @@
     "@dohc/cli": "workspace:*",
     "@dohc/collection-views": "workspace:*",
     "@dohc/live-session-contract": "workspace:*",
+    "@dohc/sync-relay": "workspace:*",
     "@dohc/sdk": "workspace:*",
     "@dohc/security-contract": "workspace:*",
     "@dohc/sqlite-worker": "workspace:*",

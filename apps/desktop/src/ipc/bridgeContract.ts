@@ -5822,6 +5822,11 @@ export type AcknowledgeEngineYDocLineageReplacementResult = z.infer<
 export const CloseEngineYDocSessionPayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
 });
+export const EngineYDocOwnerHandoff = z.object({
+  sessionId: ENGINE_YDOC_SESSION_ID,
+  lineageGeneration: z.number().int().positive(),
+}).strict();
+export type EngineYDocOwnerHandoff = z.infer<typeof EngineYDocOwnerHandoff>;
 export type CloseEngineYDocSessionPayload = z.infer<typeof CloseEngineYDocSessionPayload>;
 
 export const EngineYDocRemoteUpdateEvent = z.object({
@@ -6400,6 +6405,8 @@ export interface DohcDesktopBridge {
   acknowledgeEngineYDocLineageReplacement(
     payload: AcknowledgeEngineYDocLineageReplacementPayload,
   ): Promise<AcknowledgeEngineYDocLineageReplacementResult>;
+  prepareEngineYDocOwnerHandoff(payload: EngineYDocOwnerHandoff): Promise<void>;
+  onEngineYDocOwnerHandoff(listener: (event: EngineYDocOwnerHandoff) => void): () => void;
   // Settle + close the session in main (releases the single-canonical
   // reservation so the same object can reopen on a version/file switch).
   closeEngineYDocSession(payload: CloseEngineYDocSessionPayload): Promise<void>;

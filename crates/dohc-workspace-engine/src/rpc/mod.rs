@@ -3,6 +3,7 @@ pub(super) mod capture;
 pub(super) mod chats;
 pub(super) mod collections;
 pub(crate) mod configured_live_host;
+pub(crate) mod ordinary_live_host;
 pub(super) mod conflicts;
 pub(super) mod dispatch;
 pub(super) mod error;

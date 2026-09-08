@@ -1195,6 +1195,8 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
       applyEngineYDocUpdate: applied,
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(
         (listener: (event: EngineYDocSaveStateEvent) => void) => {

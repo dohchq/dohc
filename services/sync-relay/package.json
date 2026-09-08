@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./device-host": "./src/deviceHost.ts",
     ".": "./src/server.ts",
     "./storage": "./src/storage.ts",
     "./testing": "./src/testing/index.ts"

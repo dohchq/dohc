@@ -21,6 +21,7 @@ export class DeviceEngineConnection implements EngineClientConnection {
   }
   credit(total: number): void { this.queue.acknowledge(total); }
   acknowledge(total: number): void { this.writer.acknowledge(total); }
+  control(bytes: Buffer): void { this.writer.write(bytes, false, () => undefined); }
   receive(bytes: Buffer): void { if (!this.closed) this.events.emit("data", bytes); }
   write(bytes: Buffer): boolean { return this.queue.write(bytes); }
   close(): void {

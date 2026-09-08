@@ -176,6 +176,9 @@ pub enum CollabError {
     #[error("local-only close would discard unsettled edits; settle before closing")]
     UnsettledClose,
 
+    #[error("owner delivery outbox is frozen for recovery")]
+    OwnerOutboxFrozen,
+
     /// The persisted lineage is structurally inconsistent (e.g. a referenced
     /// blob is missing, or a snapshot fails to reconstruct).
     #[error("corrupt Y.Doc lineage: {reason}")]
@@ -218,6 +221,7 @@ impl CollabError {
             CollabError::ObjectAliasCollision => "object-alias-collision",
             CollabError::SeedOntoExistingLineage => "seed-onto-existing-lineage",
             CollabError::UnsettledClose => "unsettled-close",
+            CollabError::OwnerOutboxFrozen => "owner-outbox-frozen",
             CollabError::Corrupt { .. } => "corrupt-lineage",
             CollabError::Storage(_) => "storage",
         }

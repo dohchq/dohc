@@ -222,6 +222,14 @@ function makeTransport(
     readArtifactAsset(descriptor) {
       return bridge().readEngineYDocArtifactAsset({ sessionId, descriptor });
     },
+    adoptOwner(generation) {
+      return bridge().prepareEngineYDocOwnerHandoff({sessionId,lineageGeneration: generation});
+    },
+    onOwnerHandoff(listener) {
+      return bridge().onEngineYDocOwnerHandoff(event => {
+        if (event.sessionId === sessionId) listener(event.lineageGeneration);
+      });
+    },
     stageLocalUpdate() {
       if (writesRefused.current) return null;
       localSeq.current += 1;

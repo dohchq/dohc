@@ -12,10 +12,11 @@ import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-ad
 import type { LiveJournalHistoryAuthority } from "./liveCommittedDelivery.js";
 import { readRelayDeviceDeliveryConfig } from "./deviceLiveHostConfig.js";
 import { createDeviceLiveDelivery } from "./deviceLiveDelivery.js";
+import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 
 export function createDeviceControl(options: {
   storage: SyncRelayStorage; hosts: ReadonlySet<string>; relayExchangeKey: string; limits: DeviceControlLimits;
-  delivery?: { configPath: string; history: LiveJournalHistoryAuthority };
+  delivery?: { configPath: string; history: LiveJournalHistoryAuthority; ownerAdmission?: OwnerOutboxAdmission };
 }) {
   const limits = parseDeviceControlLimits(options.limits);
   const deliveryConfig = options.delivery ? readRelayDeviceDeliveryConfig(options.delivery.configPath, limits) : undefined;
@@ -126,7 +127,7 @@ export function createDeviceControl(options: {
         ws.send(notice, error => { if (error) stop(); });
         if (deliveryConfig && options.delivery) {
           delivery = createDeviceLiveDelivery({ ws, limits, config: deliveryConfig, storage: options.storage,
-            history: options.delivery.history, host: { mode: "device", hostId: parsedCredential.hostId, hostEpoch: parsedCredential.hostEpoch,
+            history: options.delivery.history, ownerAdmission: options.delivery.ownerAdmission, host: { mode: "device", hostId: parsedCredential.hostId, hostEpoch: parsedCredential.hostEpoch,
               instanceId: parsedCredential.instanceId, connectionId }, isCurrent, stop });
           currentDelivery = delivery;
         }

@@ -3133,6 +3133,7 @@ const { refreshDispatchTray, refreshSystemThemeDesktopIcons } = createDesktopTra
 });
 
 const desktopEngine = createDesktopEngine({
+  existingOwnerFor: binding => engineYDocSessionIpc.existingOwner(binding),
   app, dialog, process, createRustEngineDaemon, defaultEngineBinaryPath,
   isQuitting: (): boolean => appLifecycle.isQuitting(),
   workspaceAuthorities, pluginWorkspaceRuntimes, notifyRenderer,

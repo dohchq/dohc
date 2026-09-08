@@ -10,6 +10,7 @@ export function liveDeliveryBookkeepingBytes(db: DatabaseSync): number {
     + sum("sync_relay_live_delivery_documents", "accounted_bytes")
     + sum("sync_relay_live_delivery_reservations", "reserved_bytes + accounted_bytes")
     + sum("sync_relay_live_delivery_bootstraps", "accounted_bytes")
+    + sum("sync_relay_live_delivery_owners", "accounted_bytes")
     + sum("sync_relay_live_delivery_edges", "accounted_bytes");
 }
 

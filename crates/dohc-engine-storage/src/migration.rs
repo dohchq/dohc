@@ -1493,9 +1493,12 @@ CREATE TABLE live_owner_adoptions (
     covered_outbox_sequence INTEGER NOT NULL CHECK (covered_outbox_sequence >= 0),
     local_ydoc_sequence INTEGER NOT NULL CHECK (local_ydoc_sequence >= 0),
     terminal_cursor INTEGER NOT NULL CHECK (terminal_cursor >= 0),
+    terminal_receipt_json TEXT NOT NULL CHECK (json_valid(terminal_receipt_json)),
     host_coordinate_json TEXT NOT NULL CHECK (json_valid(host_coordinate_json)),
+    max_pending_bytes INTEGER NOT NULL CHECK (max_pending_bytes BETWEEN 1 AND 9007199254740991),
+    max_pending_age_ms INTEGER NOT NULL CHECK (max_pending_age_ms BETWEEN 1 AND 9007199254740991),
     PRIMARY KEY (relay_database_namespace, adoption_id),
-    UNIQUE (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id),
+    UNIQUE (workspace_id, main_version_id, object_id, lineage_claim_id),
     FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (lineage_claim_id) REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
     FOREIGN KEY (source_digest) REFERENCES blobs(sha256) ON DELETE RESTRICT

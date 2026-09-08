@@ -1,6 +1,6 @@
 use super::*;
 use crate::{ContentKind, Ydoc};
-use dohc_engine_domain::{write_text_in_tx, DomainError, WriteResult, WriteText};
+use dohc_engine_domain::{DomainError, WriteResult, WriteText, write_text_in_tx};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -546,12 +546,13 @@ mod tests {
         store
             .write_with(&NoFaults, |tx| {
                 tx.execute("DELETE FROM ydoc_snapshots", []).unwrap();
-                assert!(tx
-                    .execute(
+                assert!(
+                    tx.execute(
                         "DELETE FROM binary_blobs WHERE sha256=?1",
                         [hex_sha256(&vector.bytes)]
                     )
-                    .is_err());
+                    .is_err()
+                );
                 tx.execute(
                     "DELETE FROM versioned_workspaces WHERE workspace_id='workspace'",
                     [],

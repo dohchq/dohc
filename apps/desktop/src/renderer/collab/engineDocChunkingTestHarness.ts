@@ -28,6 +28,8 @@ export function harnessBridge(initialUpdate?: Uint8Array) {
       return { accepted: true as const };
     },
     onEngineYDocRemoteUpdate: () => () => undefined,
+    onEngineYDocOwnerHandoff: () => () => undefined,
+    prepareEngineYDocOwnerHandoff: async () => undefined,
     onEngineYDocLineageReplacement: () => () => undefined,
     onEngineYDocSaveState: (listener: SaveStateListener) => {
       saveStateListeners.add(listener);

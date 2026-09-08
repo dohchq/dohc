@@ -21,12 +21,16 @@ import type { WorkspaceAuthorityLease } from "./workspaceAuthorityOwner";
 import type { PluginWorkspaceRuntimes } from "../plugins/pluginWorkspaceRuntimes";
 import type { launchMarks as launchMarksImplementation } from "../performance/launchMarks";
 import type { desktopMarks as desktopMarksImplementation } from "../performance/desktopMarks";
+import {EngineClient} from "@dohc/workspace-engine-client/daemon";
+import type {ExistingOwnerDeviceConfig} from "@dohc/sync-relay/device-host";
+import {readDesktopOwnerHostConfig,startDesktopOwnerHost} from "./desktopOwnerHost";
 
 type EngineAuthorityState = {
   pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
 };
 
 interface DesktopEngineDependencies<State extends EngineAuthorityState> {
+  existingOwnerFor?: ExistingOwnerDeviceConfig["ownerFor"];
   app: Pick<App, "isPackaged" | "getAppPath" | "quit">;
   dialog: Pick<Dialog, "showErrorBox">;
   process: { env: NodeJS.ProcessEnv; resourcesPath?: string };
@@ -60,6 +64,35 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   let rustEngineDaemon: EngineDaemonLifecycle | null = null;
   let rustEngineWorkspaceSessions: EngineWorkspaceSessions | null = null;
   let rustEngineRelayClient: EngineRelayClient | null = null;
+  let ownerHost: ReturnType<typeof startDesktopOwnerHost> | undefined;
+  let ownerHostConfig: ReturnType<typeof readDesktopOwnerHostConfig> | undefined;
+  const startOwnerHost = () => {
+    ownerHost?.stop(); ownerHost = undefined;
+    if (!ownerHostConfig || !rustEngineDaemon || !rustEngineWorkspaceSessions || !dependencies.existingOwnerFor) return;
+    const daemon = rustEngineDaemon, sessions = rustEngineWorkspaceSessions, config = ownerHostConfig;
+    ownerHost = startDesktopOwnerHost({config,ownerFor: dependencies.existingOwnerFor,
+      onError: error => console.error("[desktop] owner host connection failed:",error),
+      bindings: async () => {
+        const client = daemon.currentClient();
+        if (!(client instanceof EngineClient)) throw new Error("Owner host requires the desktop daemon client.");
+        const workspaces = [];
+        for (const workspaceId of config.workspaceIds) {
+          workspaces.push(await workspaceAuthorities.withAuthority(workspaceId,async lease => {
+            lease.assertCurrent();
+            const workspace = {workspaceId,rootPath: lease.binding.canonicalRootPath,attachmentId: lease.binding.attachmentId};
+            return sessions.run(workspace, async binding => {
+              lease.assertCurrent();
+              if (binding.client !== client) throw new Error("Owner host daemon changed.");
+              return {workspaceId,workspaceHandle: binding.workspace};
+            });
+          }));
+        }
+        return {client,workspaces,assertCurrent: () => {
+          if (isQuitting() || daemon.currentClient() !== client) throw new Error("Owner host daemon retired.");
+        }};
+      },
+    });
+  };
   // Settles with the daemon handshake (false = startup failed and the app is
   // quitting). The whenReady continuation creates the window while the daemon
   // starts, so a fast renderer can ask for the engine before the handshake
@@ -97,6 +130,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   }
 
   async function closeAllRelayTransportWorkspaces(): Promise<void> {
+    ownerHost?.stop(); ownerHost = undefined;
     if (rustEngineRelayClient) {
       await rustEngineRelayClient.closeAll();
       return;
@@ -128,7 +162,13 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     // callback and leave the user with no dialog, on the one path whose job is
     // to explain that the engine could not start.
     try {
+      if (process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG) {
+        if (!dependencies.existingOwnerFor) throw new Error("Owner session authority is unavailable.");
+        ownerHostConfig = readDesktopOwnerHostConfig(process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG);
+      }
       rustEngineDaemon = createRustEngineDaemon({
+        ...(ownerHostConfig ? {privateOwnerHost: {configPath: ownerHostConfig.nativeConfigPath,
+          client: {aggregateBytes: ownerHostConfig.transport.aggregateBytes,maxUploads: ownerHostConfig.transport.maxUploads}}} : {}),
         ...testEngineRestartOverrides(),
         command: defaultEngineBinaryPath({
           isPackaged: app.isPackaged,
@@ -164,6 +204,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
           }
         },
         beforePublish: async () => {
+          ownerHost?.stop(); ownerHost = undefined;
           await Promise.all(workspaceAuthorities.workspaceIds().map((workspaceId) =>
             workspaceAuthorities.withAuthority(workspaceId, (lease) => {
               const runtimes = lease.state.pluginRuntimes;
@@ -178,6 +219,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         // staleness window. Scope-free: the lost event could have belonged to
         // any open workspace.
         onLaunch: () => {
+          startOwnerHost();
           for (const runtimes of restartingPluginRuntimes) {
             runtimes.resumeAfterEngineRestart();
           }
@@ -220,6 +262,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         sessions: rustEngineWorkspaceSessions,
         routes: relayTransportRoutes,
       });
+      startOwnerHost();
       console.info(
         "[desktop] Rust engine daemon handshake complete; startup smoke running.",
       );

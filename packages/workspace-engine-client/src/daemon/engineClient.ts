@@ -73,6 +73,21 @@ export interface LiveApplicationBootstrap {
   readonly baselineBytes: Uint8Array;
 }
 
+/** Trusted main-process evidence acquired from the authenticated relay journal. */
+export interface LiveOwnerAdoptionCut {
+  readonly relayDatabaseNamespace: string;
+  readonly adoptionId: string;
+  readonly sourceMomentId: string;
+  readonly sourceDigest: string;
+  readonly sourceByteLength: number;
+  readonly baselineMomentRelaySequence: number;
+  readonly baselineRegisteredAtMs: number;
+  readonly expectedLocalSequence: number;
+  readonly terminalReceipt: AdmittedLiveUpdate["metadata"]["accepted"]["receipt"] | null;
+  readonly baselineBytes: Uint8Array;
+  readonly events: readonly AdmittedLiveUpdate[];
+}
+
 interface LiveApplicationBootstrapAck {
   readonly bootstrapId: string;
   readonly bootstrapMomentId: string;
@@ -1054,6 +1069,55 @@ export class EngineClient implements EngineTransport {
     );
   }
 
+  async sendLiveOwnerAdoption(
+    request: LiveApplicationRequest & { sessionId: string },
+    cut: LiveOwnerAdoptionCut,
+    bounds: { maxBytes: number; maxEvents: number },
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    if (!Number.isSafeInteger(bounds.maxBytes) || bounds.maxBytes < 1 || !Number.isSafeInteger(bounds.maxEvents) || bounds.maxEvents < 1 ||
+      cut.events.length > bounds.maxEvents || typeof request.sessionId !== "string" || !request.sessionId || request.sessionId.length > 256) {
+      throw new TypeError("Invalid owner adoption bounds.");
+    }
+    // Reserve before serialization or copying evidence. The caller already owns the cut.
+    return this.sendLiveUpload(request, "liveApplication.adoptOwner", bounds.maxBytes * 3, () => {
+      const { baselineBytes, events, ...header } = cut;
+      const fields: Buffer[] = [];
+      let length = 0;
+      const field = (value: Uint8Array): void => {
+        if (value.byteLength > MAX_U32 || length + 4 + value.byteLength > bounds.maxBytes) throw new TypeError("Owner adoption byte limit exceeded.");
+        const prefix = Buffer.alloc(4);
+        prefix.writeUInt32LE(value.byteLength);
+        fields.push(prefix, Buffer.from(value));
+        length += 4 + value.byteLength;
+      };
+      field(Buffer.from(JSON.stringify({ ...header, eventCount: events.length })));
+      field(baselineBytes);
+      for (const event of events) {
+        field(Buffer.from(JSON.stringify(event.metadata)));
+        field(event.updateBytes);
+      }
+      const bytes = Buffer.concat(fields, length);
+      const digest = createHash("sha256").update(bytes).digest("hex");
+      const streamId = this.nextLiveStreamId++;
+      if (!Number.isSafeInteger(streamId)) throw new TypeError("Live stream identifiers exhausted.");
+      return { params: { registrationId: request.registrationId, sessionId: request.sessionId, streamId, byteLength: bytes.length, digest },
+        streams: [{ streamId, bytes, digest }] };
+    }, signal);
+  }
+
+  /** Bounded forwarding between the authenticated device bridge and its existing daemon. */
+  async forwardLiveOwnerAdoption(
+    request: LiveApplicationRequest & { sessionId: string }, bytes: Uint8Array, maxBytes: number, signal?: AbortSignal,
+  ): Promise<Response> {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || bytes.byteLength < 1 || bytes.byteLength > maxBytes || !request.sessionId || request.sessionId.length > 256) throw new TypeError("Invalid owner adoption forwarding bounds.");
+    return this.sendLiveUpload(request, "liveApplication.adoptOwner", bytes.byteLength + 3 * 1024 * 1024, () => {
+      const captured = Buffer.from(bytes), digest = createHash("sha256").update(captured).digest("hex"), streamId = this.nextLiveStreamId++;
+      if (!Number.isSafeInteger(streamId)) throw new TypeError("Live stream identifiers exhausted.");
+      return { params: { registrationId: request.registrationId, sessionId: request.sessionId, streamId, byteLength: captured.length, digest }, streams: [{ streamId, bytes: captured, digest }] };
+    }, signal);
+  }
+
   private async sendLiveUpload(
     request: LiveApplicationRequest,
     method: string,
@@ -1083,7 +1147,7 @@ export class EngineClient implements EngineTransport {
       throw new TypeError("Invalid live application request.");
     }
     if (
-      this.liveUploads >= this.liveConfig.maxUploads ||
+      !Number.isSafeInteger(charge) || charge < 1 || this.liveUploads >= this.liveConfig.maxUploads ||
       charge > this.liveConfig.aggregateBytes - this.liveUploadBytes
     ) {
       throw new TypeError("Private live application upload capacity is full.");
