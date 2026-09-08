@@ -746,6 +746,94 @@ describe("private admitted-update upload", () => {
   });
 });
 
+describe("request cancellation", () => {
+  it("cancels a pending registration locally and keeps the connection usable", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const controller = new AbortController();
+    const cancelled = new Error("registration cancelled");
+    const registered = Promise.withResolvers<number>();
+    const wireCancelled = Promise.withResolvers<number>();
+    peer.onEnvelope = envelope => {
+      if (envelope.type === "request") registered.resolve(envelope.id);
+      if (envelope.type === "cancel") wireCancelled.resolve(envelope.id);
+    };
+    try {
+      const request = transport.sendRequest({ id: 91, method: "liveApplication.register", workspace: "ws-0000000000000001", params: {}, deadlineMs: 30_000 }, controller.signal);
+      const rejected = expect(request).rejects.toBe(cancelled);
+      const wireId = await registered.promise;
+      controller.abort(cancelled);
+      await rejected;
+      expect(await wireCancelled.promise).toBe(wireId);
+      peer.send({ type: "response", id: wireId, result: { registrationId: 7 } });
+      peer.onEnvelope = envelope => {
+        if (envelope.type === "request") peer.send({ type: "response", id: envelope.id, result: { ok: true } });
+      };
+      await expect(transport.sendRequest({ id: 92, method: "engine.ping", params: {} })).resolves.toMatchObject({ result: { ok: true } });
+    } finally { transport.close(); }
+  });
+
+  it("does not send an already cancelled registration", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const controller = new AbortController();
+    const cancelled = new Error("already cancelled");
+    controller.abort(cancelled);
+    try {
+      await expect(transport.sendRequest({ id: 93, method: "liveApplication.register", params: {}, deadlineMs: 30_000 }, controller.signal)).rejects.toBe(cancelled);
+      expect(peer.received.filter(envelope => envelope.type === "request")).toEqual([]);
+    } finally { transport.close(); }
+  });
+});
+
+describe("private application range ordering", () => {
+  it.each([
+    ["separated ranges from one client", [{ clientId: 7, startClock: 0, endClock: 3 }, { clientId: 7, startClock: 5, endClock: 10 }], true],
+    ["adjacent ranges", [{ clientId: 7, startClock: 0, endClock: 3 }, { clientId: 7, startClock: 3, endClock: 10 }], false],
+    ["overlapping ranges", [{ clientId: 7, startClock: 0, endClock: 6 }, { clientId: 7, startClock: 5, endClock: 10 }], false],
+    ["reversed clients", [{ clientId: 7, startClock: 0, endClock: 3 }, { clientId: 6, startClock: 5, endClock: 10 }], false],
+    ["negative client", [{ clientId: -1, startClock: 0, endClock: 3 }], false],
+  ] as const)("handles %s according to the admitted range contract", async (_name, firstSeen, allowed) => {
+    const doc = new Y.Doc();
+    doc.clientID = 7;
+    doc.getText("body").insert(0, "abcdefghij");
+    const bytes = Y.encodeStateAsUpdate(doc);
+    doc.destroy();
+    const accepted = parseRelayAcceptedLiveUpdate({
+      receipt: { deliveryId: "ranges", updateDigest: createHash("sha256").update(bytes).digest("hex"), journalCursor: 1, acceptingHostEpoch: 1 },
+      binding: { workspaceId: "workspace", mainVersionId: "main", objectId: "one", lineageClaimId: "a".repeat(64), currentPath: "one.md", selectorPaths: ["one.md"], restoreFenceGeneration: 0 },
+      authority: { principalKind: "owner", principalId: "owner", grantId: null, grantGeneration: null }, receivedAtMs: 0,
+    });
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge();
+    await transport.ready();
+    const packed: Buffer[] = [];
+    let finished = 0;
+    let uploadId = 0;
+    peer.onEnvelope = envelope => { if (envelope.type === "blobStart") uploadId = envelope.requestId; };
+    peer.onBlobChunk = frame => {
+      if (frame.streamId === 2) packed.push(Buffer.from(frame.payload));
+      if (frame.fin && ++finished === 2) peer.send({ type: "response", id: uploadId, result: { status: "applied" } });
+    };
+    try {
+      const upload = transport.sendLiveApplication({ id: 73, workspace: "ws-0000000000000001", registrationId: 1, deadlineMs: 30_000 }, { metadata: { accepted, firstSeen }, updateBytes: bytes });
+      if (allowed) {
+        await expect(upload).resolves.toMatchObject({ result: { status: "applied" } });
+        const wire = Buffer.concat(packed);
+        expect(Array.from({ length: wire.length / 16 }, (_, index) => ({ clientId: Number(wire.readBigUInt64LE(index * 16)), startClock: wire.readUInt32LE(index * 16 + 8), endClock: wire.readUInt32LE(index * 16 + 12) }))).toEqual(firstSeen);
+      } else {
+        await expect(upload).rejects.toThrow("Invalid live application range.");
+        expect(finished).toBe(0);
+      }
+    } finally { transport.close(); }
+  });
+});
+
 describe("private baseline upload", () => {
   function baseline(bytes: Uint8Array = new Uint8Array([0, 0])) {
     return {

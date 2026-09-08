@@ -104,7 +104,7 @@ export class LiveCommittedDelivery {
               },
             },
             deadlineMs: this.#connection.deadlineMs,
-          });
+          }, signal);
           aborted();
           const id = (response.result as { registrationId?: unknown })
             ?.registrationId;
