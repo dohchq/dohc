@@ -99,12 +99,16 @@ function pathIsAtOrUnder(path: string, pathOrPrefix: string): boolean {
   return path === pathOrPrefix || path.startsWith(`${pathOrPrefix}/`);
 }
 
-function liveDocumentMoveRefusal(error: unknown, path: string): Error | null {
+function liveDocumentMutationRefusal(
+  error: unknown,
+  path: string,
+  action: "move" | "delete" | "restore",
+): Error | null {
   if (!(error instanceof DaemonRefusalError) || error.message !== "live-document-binding-active") {
     return null;
   }
   return new Error(
-    `dohc could not move ${path}. Shared live files must keep their current location. Continue editing at the original location.`,
+    `dohc could not ${action} ${path}. Shared live files must keep their current location. Continue editing at the original location.`,
     { cause: error },
   );
 }
@@ -4413,6 +4417,18 @@ export function createWorkspaceEngineCapture(
       const match = (p: string) =>
         pathIsAtOrUnder(p, pathOrPrefix);
       return enqueueResult("close live session for destructive op", async () => {
+        const engine = await engineStore();
+        const versionId = await activeVersionIdOf(engine);
+        // Refuse before teardown, then recheck under the removal reservation
+        // because an owner handoff can finish while its session closes.
+        const ensureDeleteAllowed = async (): Promise<void> => {
+          try {
+            await engine.checkMove({ workspaceId, versionId, path: pathOrPrefix });
+          } catch (error) {
+            throw liveDocumentMutationRefusal(error, pathOrPrefix, "delete") ?? error;
+          }
+        };
+        await ensureDeleteAllowed();
         await settleAndCloseLiveYDocSessions(
           match,
           "Saved latest edits before removing the file",
@@ -4420,8 +4436,6 @@ export function createWorkspaceEngineCapture(
         const suspended = suspendDetachedDebts(match);
         // Held from here until the finisher reports the outcome, so a debt
         // registered inside the window cannot settle the path mid-delete.
-        // Nothing after this line can throw, so the finisher is the
-        // only closer this seam needs.
         const closeRemovalWindow = openRemovalWindow({
           match,
           operation: "delete",
@@ -4431,7 +4445,7 @@ export function createWorkspaceEngineCapture(
         // to the chain, so no task can observe a half-decided outcome — but
         // the rule is the same one the move seam needs, and stating it once is
         // cheaper than re-deriving it per seam.
-        return (removed: boolean) => {
+        const finish = (removed: boolean) => {
           if (removed) {
             // Rescan — the snapshot is not the whole set. The disk delete
             // runs off the capture chain, so an open of this path can land on
@@ -4447,6 +4461,13 @@ export function createWorkspaceEngineCapture(
           }
           closeRemovalWindow();
         };
+        try {
+          await ensureDeleteAllowed();
+        } catch (error) {
+          finish(false);
+          throw error;
+        }
+        return finish;
       });
     },
 
@@ -5106,7 +5127,9 @@ export function createWorkspaceEngineCapture(
         } else {
           // Confirmed absent: reconcile the deletion so engine and disk agree
           // before the restore moment is recorded.
-          await deleteIfTracked(engine, activeVersionId, path, saveMetadata);
+          await deleteIfTracked(engine, activeVersionId, path, saveMetadata).catch(error => {
+            throw liveDocumentMutationRefusal(error, path, "restore") ?? error;
+          });
         }
         const target = moment.payload.before;
         const metadata: ActorNeutralWriteMetadata = {
@@ -5172,6 +5195,8 @@ export function createWorkspaceEngineCapture(
           versionId: activeVersionId,
           path,
           metadata,
+        }).catch(error => {
+          throw liveDocumentMutationRefusal(error, path, "restore") ?? error;
         });
         await materialize([{ kind: "delete", path }], policy);
         return {
@@ -5559,7 +5584,7 @@ export function createWorkspaceEngineCapture(
           try {
             await engine.checkMove({ workspaceId, versionId, path: fromPath });
           } catch (error) {
-            throw liveDocumentMoveRefusal(error, fromPath) ?? error;
+            throw liveDocumentMutationRefusal(error, fromPath, "move") ?? error;
           }
         };
         await ensureMoveAllowed();
@@ -5734,7 +5759,7 @@ export function createWorkspaceEngineCapture(
             },
           });
         } catch (error) {
-          const refusal = liveDocumentMoveRefusal(error, fromPath);
+          const refusal = liveDocumentMutationRefusal(error, fromPath, "move");
           if (refusal) throw refusal;
           // Other engine refusals can fall back to the watcher's capture.
           onError(`prepare rename of ${fromPath}`, error);

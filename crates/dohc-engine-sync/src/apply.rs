@@ -339,6 +339,9 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
 
 fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
     match error {
+        SyncError::LiveDocumentBindingActive => Some(RefusalReason::InvalidInput {
+            reason: "live document binding is still active".to_owned(),
+        }),
         SyncError::InvalidInput { reason } => Some(RefusalReason::InvalidInput {
             reason: (*reason).to_owned(),
         }),
@@ -354,7 +357,17 @@ fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
         SyncError::UnsupportedOperation => Some(RefusalReason::InvalidInput {
             reason: "operation kind is not supported by this client".to_owned(),
         }),
-        _ => None,
+        SyncError::Storage(_)
+        | SyncError::SequenceGap
+        | SyncError::CoordinateDiverged
+        | SyncError::RetryableState { .. }
+        | SyncError::ProjectionTooLarge { .. }
+        | SyncError::ShareBoundaryViolation
+        | SyncError::ShareVersionMismatch { .. }
+        | SyncError::ShareVersionUnusable { .. }
+        | SyncError::BlobInvalid
+        | SyncError::BlobTooLarge { .. }
+        | SyncError::FaultCrash => None,
     }
 }
 
