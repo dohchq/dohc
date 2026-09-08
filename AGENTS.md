@@ -178,6 +178,26 @@ Keep each appointed reviewer through the fix rounds. Replace an unavailable revi
 The replacement owns the remaining review, including necessary checks of later fixes.
 The original reviewer's return does not require another pass.
 
+### Macroscope trial
+
+Use one Macroscope review for ready PRs that change persistence, recovery,
+permissions, workspace isolation, sync conflict handling, or live-document settlement.
+Skip documentation, cosmetic UI changes, and test-only changes.
+Include refactors when they affect these behaviors.
+
+- Complete local gates and required local reviews before requesting Macroscope.
+- Check PR comments and checks for an existing request or review before posting.
+- If none exists, comment `@macroscope-app review` once.
+- Request at most one Macroscope review per PR unless the user asks for another.
+- Verify findings using the review rules below.
+- Summarize confirmed bugs missed by local reviews, false positives, and actual cost when available.
+- Keep billing settings and additional Macroscope features unchanged.
+- If a spend limit stops review, report the skip and continue the existing review process.
+
+Manual review requests can bypass per-review and per-PR caps.
+The monthly workspace limit still applies.
+Macroscope supplements required reviews during the trial; it is not a merge gate.
+
 ### Review findings
 
 Treat a finding as evidence, not a command. Verify it against the current head and required behavior.
