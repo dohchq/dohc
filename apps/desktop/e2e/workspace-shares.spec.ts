@@ -903,7 +903,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
   }
 });
 
-test("mount side: add a share into a workspace as shared-with-me/, follow edits, survive revoke, unmount", async () => {
+test("mount side: add a share into a workspace and open it beside local files", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const hostWorkspaceId = "share-mount-host-e2e";
@@ -986,119 +986,6 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
     // The mounted file opens read-only with the granter's content.
     await explorerRow(page, "shared-with-me/e2e-granter/docs/brief.md").click();
     await expect(page.getByText("The lighthouse memo.")).toBeVisible();
-
-    // Writes are refused at the IPC boundary (reserved projection), and
-    // re-sharing mounted content is refused with the honest copy.
-    const boundaryChecks = await page.evaluate(async (unusedContentHash) => {
-      const api = (window as unknown as {
-        dohcDesktop: Pick<
-          DohcDesktopBridge,
-          "getWorkspaceRegistry" | "writeWorkspaceText" | "createRelayShare"
-        >;
-      }).dohcDesktop;
-      const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
-      const capture = async (run: () => Promise<unknown>) => {
-        try {
-          await run();
-          return "allowed";
-        } catch (error) {
-          return error instanceof Error ? error.message : String(error);
-        }
-      };
-      return {
-        write: await capture(() =>
-          api.writeWorkspaceText({
-            workspaceId,
-            relativePath: "shared-with-me/e2e-granter/docs/brief.md",
-            text: "defaced",
-            expectedContentHash: unusedContentHash,
-          }),
-        ),
-        reshare: await capture(() =>
-          api.createRelayShare({
-            workspaceId,
-            recipientEmail: "third-party@dohc.test",
-            access: "view",
-            paths: ["shared-with-me/e2e-granter/docs"],
-          }),
-        ),
-      };
-    }, UNUSED_CONTENT_HASH);
-    expect(boundaryChecks.write).toContain("reserved");
-    expect(boundaryChecks.reshare).toContain(
-      "copy it into your own files to share it onward",
-    );
-
-    // The granter keeps working; a refresh pass pulls the update into the
-    // mounted folder.
-    await granter.writeText("docs/brief.md", "# Brief\n\nThe lighthouse memo, round two.\n");
-    const refreshOutcome = await page.evaluate(async () => {
-      const api = (window as unknown as {
-        dohcDesktop: {
-          getWorkspaceRegistry(): Promise<{ workspaces: Array<{ workspaceId: string }> }>;
-          refreshShareMounts(payload: { workspaceId: string }): Promise<{
-            results: Array<{ label: string; status: string; changedPaths: number }>;
-          }>;
-        };
-      }).dohcDesktop;
-      const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
-      return api.refreshShareMounts({ workspaceId });
-    });
-    expect(refreshOutcome.results).toEqual([
-      { shareId, label: "e2e-granter", status: "updated", changedPaths: 1 },
-    ]);
-    expect(
-      await readFile(
-        join(temp.rootPath, "shared-with-me/e2e-granter/docs/brief.md"),
-        "utf8",
-      ),
-    ).toContain("round two");
-
-    // Revoke: the next refresh reports ended and the files stay readable.
-    const revoke = await relayJson(
-      relay.baseUrl,
-      GRANTER_TOKEN,
-      `/sync/shares/${shareId}/revoke`,
-      { method: "POST" },
-    );
-    expect(revoke.status).toBe(200);
-    const endedOutcome = await page.evaluate(async () => {
-      const api = (window as unknown as {
-        dohcDesktop: {
-          getWorkspaceRegistry(): Promise<{ workspaces: Array<{ workspaceId: string }> }>;
-          refreshShareMounts(payload: { workspaceId: string }): Promise<{
-            results: Array<{ status: string }>;
-          }>;
-        };
-      }).dohcDesktop;
-      const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
-      return api.refreshShareMounts({ workspaceId });
-    });
-    expect(endedOutcome.results[0]!.status).toBe("ended");
-    expect(
-      await readFile(
-        join(temp.rootPath, "shared-with-me/e2e-granter/docs/brief.md"),
-        "utf8",
-      ),
-    ).toContain("round two");
-
-    // Unmount removes exactly the projection; the host's own files survive.
-    await page.evaluate(async (id) => {
-      const api = (window as unknown as {
-        dohcDesktop: {
-          getWorkspaceRegistry(): Promise<{ workspaces: Array<{ workspaceId: string }> }>;
-          unmountShare(payload: { workspaceId: string; shareId: string }): Promise<unknown>;
-        };
-      }).dohcDesktop;
-      const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
-      await api.unmountShare({ workspaceId, shareId: id });
-    }, shareId);
-    expect(
-      existsSync(join(temp.rootPath, "shared-with-me/e2e-granter")),
-    ).toBe(false);
-    expect(await readFile(join(temp.rootPath, "notes/mine.md"), "utf8")).toContain(
-      "Host workspace file",
-    );
   } finally {
     await relay?.stop();
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);

@@ -781,6 +781,7 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
     expect(identity, "cloudEnableSync must adopt a replication identity").not.toBeNull();
     if (identity === null) throw new Error("cloudEnableSync did not adopt an identity");
     const adoptedIdentity: RelayWorkspaceIdentity = identity;
+    await expect(relayServesWorkspace(relay!.baseUrl, TOKEN, workspaceId)).rejects.toThrow(/409/);
 
     const syncedBeforeWrite = await readSyncStatus(page, workspaceId);
     expect(syncedBeforeWrite.lastSyncedAtMs).not.toBeNull();
