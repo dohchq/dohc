@@ -633,7 +633,7 @@ pub(crate) mod tests {
     async fn bootstrap_commits_through_actor_and_replays_without_second_domain_write() {
         let (scratch, service, owner, workspace, _, mut binding) = fixture().await;
         let vectors: serde_json::Value = serde_json::from_str(include_str!(
-            "../../dohc-engine-collab/tests/fixtures/live-bootstrap.json"
+            "../../dohc-engine-collab/tests/live-bootstrap-fixtures/live-bootstrap.json"
         ))
         .unwrap();
         let vector = &vectors[1];

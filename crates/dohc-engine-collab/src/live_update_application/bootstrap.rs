@@ -1,6 +1,6 @@
 use super::*;
 use crate::{ContentKind, Ydoc};
-use dohc_engine_domain::{write_text_in_tx, DomainError, WriteResult, WriteText};
+use dohc_engine_domain::{DomainError, WriteResult, WriteText, write_text_in_tx};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -253,7 +253,10 @@ mod tests {
         registration_accepted: bool,
     }
     fn vectors() -> Vec<Vector> {
-        serde_json::from_str(include_str!("../../tests/fixtures/live-bootstrap.json")).unwrap()
+        serde_json::from_str(include_str!(
+            "../../tests/live-bootstrap-fixtures/live-bootstrap.json"
+        ))
+        .unwrap()
     }
     fn input(vector: &Vector) -> LiveApplicationBootstrap {
         LiveApplicationBootstrap {
@@ -348,7 +351,7 @@ mod tests {
                     "Yrs emits the exact bytes that the TypeScript fixture decodes as negative zero"
                 );
                 let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("tests/fixtures/live-bootstrap-negative-zero-yrs.json");
+                    .join("tests/live-bootstrap-fixtures/live-bootstrap-negative-zero-yrs.json");
                 if std::env::var("DOHC_WRITE_BOOTSTRAP_VECTORS").as_deref() == Ok("1") {
                     std::fs::write(
                         &path,
@@ -521,12 +524,13 @@ mod tests {
         store
             .write_with(&NoFaults, |tx| {
                 tx.execute("DELETE FROM ydoc_snapshots", []).unwrap();
-                assert!(tx
-                    .execute(
+                assert!(
+                    tx.execute(
                         "DELETE FROM binary_blobs WHERE sha256=?1",
                         [hex_sha256(&vector.bytes)]
                     )
-                    .is_err());
+                    .is_err()
+                );
                 tx.execute(
                     "DELETE FROM versioned_workspaces WHERE workspace_id='workspace'",
                     [],

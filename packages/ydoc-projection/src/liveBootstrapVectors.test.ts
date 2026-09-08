@@ -5,7 +5,7 @@ import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
 import { createLiveMarkdownRegistrationValidator } from './liveDocumentValidation.js'
 import frontmatterFixtures from '../../../crates/dohc-engine-domain/tests/fixtures/collection-frontmatter.json'
 
-const fixture = new URL('../../../crates/dohc-engine-collab/tests/fixtures/live-bootstrap.json', import.meta.url)
+const fixture = new URL('../../../crates/dohc-engine-collab/tests/live-bootstrap-fixtures/live-bootstrap.json', import.meta.url)
 // Exercise the actual public Y.Doc representation, including UTF-8 wire normalization.
 const scalarStrings = [
   '', 'true', 'True', 'TRUE', 'false', 'False', 'FALSE', 'null', 'Null', 'NULL', '~',
@@ -83,7 +83,7 @@ if (process.env.DOHC_WRITE_BOOTSTRAP_VECTORS === '1') {
 const vectors = JSON.parse(readFileSync(fixture, 'utf8')) as Vector[]
 describe('shared bootstrap projections', () => {
   it('pins actual Yjs signed-zero updates at the same client and clock', () => {
-    const updates = JSON.parse(readFileSync(new URL('../../../crates/dohc-engine-collab/tests/fixtures/signed-zero-same-clock.json', import.meta.url), 'utf8')) as { negative: number[]; positive: number[] }
+    const updates = JSON.parse(readFileSync(new URL('../../../crates/dohc-engine-collab/tests/live-bootstrap-fixtures/signed-zero-same-clock.json', import.meta.url), 'utf8')) as { negative: number[]; positive: number[] }
     for (const [name, value] of [['negative', -0], ['positive', 0]] as const) {
       const source = new Y.Doc()
       const decoded = new Y.Doc()
@@ -98,7 +98,7 @@ describe('shared bootstrap projections', () => {
     }
   })
   it('decodes the Rust re-encoding of the actual Yjs negative-zero fixture', () => {
-    const bytes = JSON.parse(readFileSync(new URL('../../../crates/dohc-engine-collab/tests/fixtures/live-bootstrap-negative-zero-yrs.json', import.meta.url), 'utf8')) as number[]
+    const bytes = JSON.parse(readFileSync(new URL('../../../crates/dohc-engine-collab/tests/live-bootstrap-fixtures/live-bootstrap-negative-zero-yrs.json', import.meta.url), 'utf8')) as number[]
     const doc = new Y.Doc()
     try {
       Y.applyUpdate(doc, new Uint8Array(bytes))

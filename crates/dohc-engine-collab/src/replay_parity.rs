@@ -2444,7 +2444,7 @@ mod tests {
             positive: Vec<u8>,
         }
         let updates: Updates = serde_json::from_str(include_str!(
-            "../tests/fixtures/signed-zero-same-clock.json"
+            "../tests/live-bootstrap-fixtures/signed-zero-same-clock.json"
         ))
         .unwrap();
         (updates.negative, updates.positive)
