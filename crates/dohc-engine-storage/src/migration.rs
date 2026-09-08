@@ -1528,6 +1528,19 @@ CREATE TABLE live_device_bootstraps (
     FOREIGN KEY (baseline_digest) REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
 ) STRICT;
 
+CREATE TABLE live_restore_fences (
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    relay_database_namespace TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    input_json TEXT NOT NULL CHECK (json_valid(input_json)),
+    receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
+    PRIMARY KEY (workspace_id, main_version_id, object_id),
+    UNIQUE (relay_database_namespace, operation_id),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+
 CREATE TABLE live_device_settlements (
     settlement_id TEXT NOT NULL PRIMARY KEY,
     relay_database_namespace TEXT NOT NULL,

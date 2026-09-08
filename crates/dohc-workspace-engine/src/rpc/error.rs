@@ -367,6 +367,7 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::ObjectAliasCollision
         | CollabError::SeedOntoExistingLineage
         | CollabError::OwnerOutboxFrozen
+        | CollabError::RestoreFenced
         | CollabError::UnsettledClose => ErrorCode::InvalidParams,
     }
 }

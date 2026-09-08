@@ -533,6 +533,7 @@ where
     let mut probe = GateBaseProbe::default();
     let mut pending_after_append = None;
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
+        crate::live_update_application::require_restore_open(tx, key)?;
         if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
             let recorded: Option<(String, i64)> = tx
                 .query_row(
@@ -1365,6 +1366,7 @@ fn claim_base_with_coordinate_in_tx(
     coordinate: Option<&BaseRelayCoordinate>,
     now_ms: i64,
 ) -> Result<ClaimOutcome, CollabError> {
+    crate::live_update_application::require_restore_open(tx, key)?;
     validate_update_bytes(base_bytes)?;
     let incoming_claim_id = crate::hex_sha256(base_bytes);
     (|| {
@@ -1726,6 +1728,7 @@ pub fn replace_lineage_with_successor_in_tx(
     tx: &Transaction<'_>,
     replacement: SuccessorReplacement<'_>,
 ) -> Result<SuccessorInstallOutcome, CollabError> {
+    crate::live_update_application::require_restore_open(tx, replacement.key)?;
     let SuccessorReplacement {
         key,
         expected_predecessor_claim_id,
@@ -1884,6 +1887,7 @@ pub fn archive_active_lineage_in_tx(
     last_surfaced_projection_sha256: Option<&str>,
     now_ms: i64,
 ) -> Result<(), CollabError> {
+    crate::live_update_application::require_restore_open(tx, key)?;
     let (marker, doc, state_vector) =
         load_exact_active_lineage(tx, key, expected_claim_id, expected_state_vector_sha256)?;
 
@@ -2075,6 +2079,7 @@ pub fn record_update_in_tx(
     attribution: Option<&ChangeAttribution>,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
+    crate::live_update_application::require_restore_open(tx, key)?;
     validate_update_bytes(update)?;
     let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
     let sha = crate::hex_sha256(update);

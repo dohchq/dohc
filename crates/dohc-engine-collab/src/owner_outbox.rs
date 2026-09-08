@@ -211,6 +211,20 @@ pub fn append_in_tx(
     workspace_id: &str,
     input: OwnerOutboxAppendInput,
 ) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
+    require_workspace(workspace_id, &input.binding.workspace_id)?;
+    let key = crate::DocKey::new(
+        &input.binding.workspace_id,
+        &input.binding.main_version_id,
+        &input.binding.object_id,
+    )
+    .map_err(|_| OwnerOutboxError::InvalidInput("invalid document identity"))?;
+    crate::live_update_application::require_restore_open(tx, &key).map_err(
+        |error| match error {
+            crate::CollabError::RestoreFenced => OwnerOutboxError::Frozen,
+            crate::CollabError::Storage(error) => OwnerOutboxError::Storage(error),
+            _ => OwnerOutboxError::Corrupt,
+        },
+    )?;
     append_with_retained_base(tx, workspace_id, input, None)
 }
 

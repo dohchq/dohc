@@ -5,9 +5,9 @@ use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, ApplicationError, ApplicationHandle, ApplicationHostCoordinate,
     ApplicationOwner, ApplicationResult, BootstrapResult, LiveApplicationBootstrap,
-    LiveSettlementResult, LiveUpdateReceipt, OwnerAdoptionAck, OwnerAdoptionCut,
-    adopt_owner_committed, apply_committed, bootstrap_committed, validate_application_binding,
-    with_settlement,
+    LiveSettlementResult, LiveUpdateReceipt, NativeRestoreFence, NativeRestoreFenceReceipt,
+    OwnerAdoptionAck, OwnerAdoptionCut, adopt_owner_committed, apply_committed,
+    bootstrap_committed, validate_application_binding, with_settlement,
 };
 use dohc_engine_collab::{CollabError, WriterDocCache};
 use dohc_engine_storage::{EngineStore, FaultInjector};
@@ -84,6 +84,36 @@ impl ActorHandle {
 }
 
 impl ActorLiveApplicationOwner {
+    /// Fence through the same writer queue as local and committed updates.
+    pub async fn fence_restore(
+        &self,
+        input: NativeRestoreFence,
+        coordinate: ApplicationHostCoordinate,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<NativeRestoreFenceReceipt, RuntimeError> {
+        current(&self.actor, &self.token)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(Request::FenceRestore {
+                workspace_id: self.workspace_id.clone(),
+                token: self.token.clone(),
+                input,
+                coordinate,
+                now_ms,
+                faults,
+                reply,
+            })))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        let receipt = receive
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        current(&self.actor, &self.token)?;
+        Ok(receipt)
+    }
+
     /// Retire handles synchronously at the transport's close boundary.
     pub fn retire(&self) {
         self.token.store(false, Ordering::Release);
@@ -345,6 +375,15 @@ impl Registry {
 }
 
 pub(super) enum Request {
+    FenceRestore {
+        workspace_id: String,
+        token: Token,
+        input: NativeRestoreFence,
+        coordinate: ApplicationHostCoordinate,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        reply: Reply<NativeRestoreFenceReceipt>,
+    },
     AdoptOwner {
         workspace_id: String,
         token: Token,
@@ -417,6 +456,22 @@ impl Request {
         cache: &mut WriterDocCache,
     ) {
         match self {
+            Self::FenceRestore {
+                workspace_id,
+                token,
+                input,
+                coordinate,
+                now_ms,
+                faults,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|owner| {
+                    owner
+                        .fence_restore(store, input, coordinate, now_ms, faults.as_ref())
+                        .map_err(Into::into)
+                });
+                let _ = reply.send(result);
+            }
             Self::AdoptOwner {
                 workspace_id,
                 token,
