@@ -4,12 +4,13 @@
 //! handle. Event parsing supplies no authority. The owner serializes held-handle
 //! invalidation with each transaction; the transport must also suppress a reply
 //! if its connection closes after this operation returns.
-//! After a new application commits, the writer must run `durable::maybe_compact`
-//! with the existing default threshold. Compaction cannot share the append
-//! transaction. A later failure leaves the committed application replayable.
+//! New committed applications compact at the existing default threshold after
+//! the append transaction closes and its cache entry is evicted. A failed fold
+//! leaves the committed application replayable. Exact replay does not compact.
 //! The durable `available` column fences a registration; it does not prove that
 //! its connection is alive. Owner drop invalidates held handles in memory.
 
+use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
 use crate::live_object_binding::LiveObjectBinding;
 use crate::{durable, CollabError, DocKey, Regime, WriterDocCache};
 use dohc_engine_storage::{
@@ -635,6 +636,7 @@ pub fn apply_committed(
     }
     let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
     let mut mutation_attempted = false;
+    let mut compaction_due = false;
     let outcome = store.write_with(
         faults,
         |tx| -> Result<ApplicationResult, TransactionError> {
@@ -692,6 +694,8 @@ pub fn apply_committed(
                 None,
                 event.metadata.accepted.received_at_ms,
             )?;
+            compaction_due = append.seq.max(marker.head_update_seq) - marker.head_snapshot_seq
+                >= i64::from(DEFAULT_COMPACTION_THRESHOLD);
             // Content dedupe bypasses the append's parity gate. Always reconstruct.
             if durable::load_doc_in_tx(tx, &key)?.has_missing_updates() {
                 return Err(TransactionError::DependenciesUnresolved);
@@ -719,7 +723,22 @@ pub fn apply_committed(
         cache.remove(&key);
     }
     match outcome {
-        Ok(TxnOutcome::Committed(result)) => Ok(result),
+        Ok(TxnOutcome::Committed(result)) => {
+            if compaction_due
+                && matches!(&result, ApplicationResult::Applied(ack) if !ack.application_replayed)
+            {
+                // The key is already evicted. As in self_bound_log, an injected
+                // fold crash keeps the committed ACK; a real error suppresses it.
+                durable::maybe_compact(
+                    store,
+                    &key,
+                    DEFAULT_COMPACTION_THRESHOLD,
+                    faults,
+                    event.metadata.accepted.received_at_ms,
+                )?;
+            }
+            Ok(result)
+        }
         Ok(TxnOutcome::Crashed { .. }) => Err(ApplicationError::Interrupted),
         Err(TransactionError::DependenciesUnresolved) => Ok(ApplicationResult::Pending(
             ApplicationPending::DependenciesUnresolved,
