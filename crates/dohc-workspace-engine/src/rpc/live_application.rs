@@ -249,6 +249,13 @@ impl EngineService {
         if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(&workspace))?, &host.open) {
             return Err(workspace_unavailable());
         }
+        params
+            .binding
+            .validate_canonical()
+            .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-live-registration"))?;
+        if params.binding.workspace_id != host.open.workspace_id {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-live-registration"));
+        }
         // Re-registering an object retires its queued acknowledgements under the
         // same fence as output polling, before the replacement writer command.
         {
@@ -444,6 +451,82 @@ mod tests {
     use dohc_engine_protocol::transport::EngineService as _;
     use dohc_engine_protocol::wire::BlobStart;
     use dohc_engine_storage::hex_sha256;
+
+    #[tokio::test]
+    async fn invalid_live_application_replacement_preserves_the_registration() {
+        let (_scratch, service, owner, workspace, registration, binding) = fixture().await;
+        let workspace = WorkspaceHandle(workspace);
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let original = service
+            .live_application_registration(&owner.handle(), Some(&workspace), registration)
+            .unwrap();
+        let mut noncanonical = binding.clone();
+        noncanonical
+            .selector_paths
+            .push(noncanonical.current_path.clone());
+        let mut wrong_workspace = binding.clone();
+        wrong_workspace.workspace_id = "another-workspace".into();
+        for invalid in [noncanonical, wrong_workspace] {
+            assert!(
+                service
+                    .live_application_register(
+                        &ctx,
+                        Some(workspace.clone()),
+                        json!({ "binding": invalid })
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(!original.retired.is_cancelled());
+            assert!(
+                service
+                    .live_application_registration(&owner.handle(), Some(&workspace), registration)
+                    .is_ok()
+            );
+        }
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_application_state_is_retired_when_a_closed_actor_is_evicted() {
+        let (scratch, service, owner, workspace, registration_id, _) = fixture().await;
+        let handle = WorkspaceHandle(workspace);
+        let registration = lock(&service.live_applications)
+            .registrations
+            .get(&registration_id)
+            .unwrap()
+            .clone();
+        let old_open = Arc::downgrade(&registration.host.open);
+        let supervisor = service.supervisor;
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+        tokio::task::spawn_blocking(move || supervisor.close(&db_path))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let reopened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({ "rootDir": scratch.path(), "workspaceId": "workspace", "captureMode": "none" }),
+            )
+            .await
+            .unwrap();
+        let rebound: WorkspaceHandle =
+            serde_json::from_value(reopened["workspace"].clone()).unwrap();
+        assert_ne!(rebound, handle);
+        service.workspace_close(Some(rebound)).await.unwrap();
+
+        assert!(registration.retired.is_cancelled());
+        assert!(!registration.host.owner.is_current());
+        assert!(owner.handle().is_current());
+        let registry = lock(&service.live_applications);
+        assert!(registry.hosts.is_empty());
+        assert!(registry.registrations.is_empty());
+        drop(registry);
+        drop(registration);
+        assert!(old_open.upgrade().is_none());
+    }
 
     #[tokio::test]
     async fn provisioning_completed_after_workspace_close_cannot_install_a_host() {

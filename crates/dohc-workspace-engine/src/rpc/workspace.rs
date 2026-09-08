@@ -445,6 +445,7 @@ impl EngineService {
                 }
                 return Ok(json!({ "workspace": handle }));
             }
+            lock(&self.live_applications).retire_workspace(&open);
             lock(&self.handles).remove(&handle);
             let attached_handles = {
                 let mut handles = lock(&self.handles);
