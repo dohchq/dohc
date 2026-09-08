@@ -1231,6 +1231,60 @@ fn moment_before_from_payload(
     }
 }
 
+pub(crate) fn retain_refused_moment_blobs(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+) -> Result<(), SyncError> {
+    let payload: MomentAppendPayload =
+        Deserialize::deserialize(&envelope.payload).map_err(|_| SyncError::InvalidInput {
+            reason: "moment.append payload is malformed",
+        })?;
+    for (role, digest, kind) in [
+        (
+            "payload-before",
+            payload.payload_before_blob_sha256.as_deref(),
+            payload.payload_before_content_kind.as_deref(),
+        ),
+        (
+            "payload-after",
+            Some(payload.payload_after_blob_sha256.as_str()),
+            payload.payload_after_content_kind.as_deref(),
+        ),
+        (
+            "before",
+            payload.before_blob_sha256.as_deref(),
+            payload.before_content_kind.as_deref(),
+        ),
+    ] {
+        let Some(digest) = digest else { continue };
+        let (text_sha256, binary_sha256) = match ContentKind::from_wire(kind) {
+            ContentKind::Text => {
+                require_blob_text(tx, digest)?;
+                (Some(digest), None)
+            }
+            ContentKind::Binary => {
+                require_binary_blob(tx, digest)?;
+                (None, Some(digest))
+            }
+        };
+        tx.execute(
+            "INSERT INTO replication_refused_moment_blobs \
+             (workspace_id,origin_id,origin_seq,role,text_sha256,binary_sha256) \
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                envelope.workspace_id,
+                envelope.origin_id,
+                envelope.origin_seq,
+                role,
+                text_sha256,
+                binary_sha256
+            ],
+        )
+        .map_err(SyncError::persist)?;
+    }
+    Ok(())
+}
+
 fn require_blob_text(tx: &Transaction<'_>, sha: &str) -> Result<String, SyncError> {
     let row: Option<(i64, String)> = tx
         .query_row(

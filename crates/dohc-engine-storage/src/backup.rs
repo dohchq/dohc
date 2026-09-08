@@ -84,6 +84,8 @@ const COMPARED_TABLES: &[&str] = &[
     "ydoc_recovery_decisions",
     "owner_ydoc_outboxes",
     "owner_ydoc_outbox_entries",
+    "replication_log",
+    "replication_refused_moment_blobs",
     "replication_pending_conflict_bundles",
     "replication_pending_conflict_ops",
     "replication_pending_conflict_moments",
@@ -475,7 +477,7 @@ mod tests {
     use super::COMPARED_TABLES;
 
     #[test]
-    fn restore_comparison_rejects_missing_or_lost_live_application_tables() {
+    fn restore_comparison_rejects_missing_or_lost_live_and_recovery_tables() {
         use crate::{EngineStore, NoFaults, StorageError};
         use dohc_test_scratch::ScratchDir;
         let dir = ScratchDir::new_named("backup-application-comparison").unwrap();
@@ -495,6 +497,8 @@ mod tests {
             tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,updated_at_ms) VALUES ('workspace','main','owner',0)",[]).unwrap();
             tx.execute("INSERT INTO ydoc_owner_base_sources VALUES ('workspace','main','owner',?1,'owner.md','source',?2,0)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO live_owner_adoptions VALUES ('relay','adoption','workspace','main','owner',?1,'{}','source',?2,0,1,0,?1,?1,0,0,0,'null','{}',1000000,60000)",rusqlite::params![sha,source]).unwrap();
+            tx.execute("INSERT INTO replication_log VALUES ('workspace','peer',0,'moment.append','{}',0,1,'refused')",[]).unwrap();
+            tx.execute("INSERT INTO replication_refused_moment_blobs VALUES ('workspace','peer',0,'payload-after',NULL,?1)",[&sha]).unwrap();
             Ok::<_, StorageError>(())
         }).unwrap();
         for (index, table) in [
@@ -506,6 +510,8 @@ mod tests {
             "live_device_application_bindings",
             "live_device_update_applications",
             "live_device_application_first_seen",
+            "replication_log",
+            "replication_refused_moment_blobs",
         ]
         .into_iter()
         .enumerate()

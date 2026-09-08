@@ -590,6 +590,23 @@ CREATE TABLE replication_log (
 CREATE INDEX idx_replication_log_order
     ON replication_log(workspace_id, recorded_at_ms, origin_id, origin_seq);
 
+CREATE TABLE replication_refused_moment_blobs (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK (origin_seq >= 0),
+    role TEXT NOT NULL CHECK (role IN ('payload-before', 'payload-after', 'before')),
+    text_sha256 TEXT REFERENCES blobs(sha256) ON DELETE RESTRICT,
+    binary_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY (workspace_id, origin_id, origin_seq, role),
+    CHECK ((text_sha256 IS NOT NULL) != (binary_sha256 IS NOT NULL)),
+    FOREIGN KEY (workspace_id, origin_id, origin_seq)
+      REFERENCES replication_log(workspace_id, origin_id, origin_seq) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX replication_refused_moment_text_blobs
+    ON replication_refused_moment_blobs(text_sha256) WHERE text_sha256 IS NOT NULL;
+CREATE INDEX replication_refused_moment_binary_blobs
+    ON replication_refused_moment_blobs(binary_sha256) WHERE binary_sha256 IS NOT NULL;
+
 CREATE TABLE replication_peers (
     workspace_id TEXT    NOT NULL,
     origin_id    TEXT    NOT NULL,
