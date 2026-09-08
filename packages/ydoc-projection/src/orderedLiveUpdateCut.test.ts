@@ -57,10 +57,13 @@ vi.mock('lib0/hash/sha256', async (importOriginal) => {
 })
 
 import * as Y from 'yjs'
+import * as orderedCut from './orderedLiveUpdateCut.js'
 import { parseBoundedV1Json } from './boundedV1Json.js'
 import {
   validateOrderedLiveUpdateCut,
+  validateRegistrationCutForProjection,
   type OrderedLiveUpdateCutFailureStage,
+  type OrderedLiveUpdateCutFinalizeResult,
   type OrderedLiveUpdateCutPolicy,
   type OrderedLiveUpdateCutRefusal,
   type OrderedLiveUpdateCutResult,
@@ -81,6 +84,288 @@ const BOUNDED_JSON_SOURCE = fileURLToPath(new URL('./boundedV1Json.ts', import.m
 const PACKAGE_INDEX_SOURCE = fileURLToPath(new URL('./index.ts', import.meta.url))
 const PACKAGE_JSON_SOURCE = fileURLToPath(new URL('../package.json', import.meta.url))
 
+describe('registration projection topology', () => {
+  function checkpointOf(write: (document: Y.Doc) => void): Uint8Array {
+    const document = new Y.Doc({ gc: false })
+    document.clientID = 1
+    try {
+      write(document)
+      return Y.encodeStateAsUpdate(document)
+    } finally { document.destroy() }
+  }
+
+  function projection(checkpoint: Uint8Array, policy = highPolicy()) {
+    const result = validateRegistrationCutForProjection({ mode: 'registration', checkpoint }, policy)
+    expect(result.kind === 'refused' ? `${result.reason}:${stageName(result.stage)}` : result.kind)
+      .toBe('accepted')
+    if (result.kind !== 'accepted') throw new Error(result.reason)
+    return result
+  }
+
+  it('distinguishes hidden keyed body state from a valid empty checkpoint', () => {
+    const sender = new Y.Doc({ gc: false })
+    sender.clientID = 1
+    sender.getMap('meta').set('schemaVersion', 1)
+    sender.getMap('body').set('hidden', 42)
+    const malformed = Y.encodeStateAsUpdate(sender)
+    sender.destroy()
+    const generic = accepted(validateOrderedLiveUpdateCut(
+      { mode: 'registration', checkpoint: malformed }, highPolicy(),
+    ))
+    try {
+      expect(generic.document.getXmlFragment('body').length).toBe(0)
+      expect(generic.document.getXmlFragment('body').toArray()).toEqual([])
+      expect(generic.document.getMap('meta').toJSON()).toEqual({ schemaVersion: 1 })
+      expect(() => generic.document.getMap('body')).toThrow(/different constructor/)
+      expect(generic.finishAfterProjection().kind).toBe('accepted')
+    } finally { generic.document.destroy() }
+
+    const validateProjection = Reflect.get(orderedCut, 'validateRegistrationCutForProjection')
+    expect(validateProjection, 'private registration projection proof is missing').toBeTypeOf('function')
+    for (const [checkpoint, expected] of [
+      [malformed, { kind: 'incompatible' }],
+      [new Uint8Array([0, 0]), { kind: 'compatible', bodyHasActiveItem: false, canonicalZeroStructSeed: true }],
+    ] as const) {
+      const result = validateProjection({ mode: 'registration', checkpoint }, highPolicy())
+      expect(result.kind).toBe('accepted')
+      if (result.kind !== 'accepted') throw new Error(result.reason)
+      try {
+        expect(result.topology).toEqual(expected)
+        expect(result.cut.finishAfterProjection().kind).toBe('accepted')
+      } finally { result.cut.document.destroy() }
+    }
+  })
+
+  it('accepts metadata, XML children and nested frontmatter containers', () => {
+    const metadata = checkpointOf(document => document.getMap('meta').set('schemaVersion', 1))
+    const populated = checkpointOf(document => {
+      document.getMap('meta').set('schemaVersion', 1)
+      const element = new Y.XmlElement('paragraph')
+      document.getXmlFragment('body').insert(0, [element])
+      element.setAttribute('align', 'left')
+      const text = new Y.XmlText()
+      element.insert(0, [text])
+      text.insert(0, 'hello')
+      text.format(0, 3, { bold: true })
+      const map = new Y.Map<unknown>()
+      document.getMap('frontmatter').set('nested', map)
+      const array = new Y.Array<unknown>()
+      map.set('values', array)
+      array.push([1, { plain: ['value'] }, new Y.Map([['key', 'value']])])
+    })
+    for (const [checkpoint, bodyHasActiveItem] of [[metadata, false], [populated, true]] as const) {
+      const result = projection(checkpoint)
+      try {
+        expect(result.topology).toEqual({ kind: 'compatible', bodyHasActiveItem, canonicalZeroStructSeed: false })
+        expect(Object.isFrozen(result)).toBe(true)
+        expect(Object.isFrozen(result.topology)).toBe(true)
+        expect(Object.isFrozen(result.cut)).toBe(true)
+        expect(result.cut.finishAfterProjection().kind).toBe('accepted')
+      } finally { result.cut.document.destroy() }
+    }
+  })
+
+  it.each([
+    ['raw body', (document: Y.Doc): void => document.getText('body').insert(0, 'hidden')],
+    ['unkeyed metadata', (document: Y.Doc): void => document.getArray('meta').push([1])],
+    ['unkeyed frontmatter', (document: Y.Doc): void => document.getArray('frontmatter').push([1])],
+    ['unknown root', (document: Y.Doc): void => { document.getMap('other').set('key', 1) }],
+    ['wrong body container', (document: Y.Doc): void => document.getArray('body').push([new Y.Map()])],
+    ['nested wrong frontmatter container', (document: Y.Doc) => {
+      const map = new Y.Map()
+      document.getMap('frontmatter').set('nested', map)
+      map.set('text', new Y.Text('hidden'))
+    }],
+    ['binary content', (document: Y.Doc) => document.getMap('frontmatter').set('binary', new Uint8Array([1]))],
+  ] as const)('separates incompatible %s from generic update validity', (_name, write) => {
+    const checkpoint = checkpointOf(write)
+    const generic = accepted(validateOrderedLiveUpdateCut({ mode: 'registration', checkpoint }, highPolicy()))
+    try { expect(generic.finishAfterProjection().kind).toBe('accepted') }
+    finally { generic.document.destroy() }
+    const result = projection(checkpoint)
+    try {
+      expect(result.topology).toEqual({ kind: 'incompatible' })
+      expect(result.cut.finishAfterProjection().kind).toBe('accepted')
+    } finally { result.cut.document.destroy() }
+  })
+
+  it('separates ContentDoc topology from generic public writer acceptance', () => {
+    const child = new Y.Doc({ guid: 'child' })
+    const checkpoint = replacementItemUpdate(updateWithText('doc'), new Y.ContentDoc(child))
+    child.destroy()
+    const generic = accepted(validateOrderedLiveUpdateCut({ mode: 'registration', checkpoint }, highPolicy()))
+    const result = projection(checkpoint)
+    try {
+      expect(result.topology.kind).toBe('incompatible')
+      expect(result.cut.finishAfterProjection().kind).toBe('accepted')
+      expect(generic.finishAfterProjection().kind).toBe('accepted')
+    } finally { result.cut.document.destroy(); generic.document.destroy() }
+  })
+
+  it('leaves Any scalar semantics to the projection schema', () => {
+    const checkpoint = checkpointOf(document => {
+      document.getMap('frontmatter').set('values', {
+        missing: undefined, bytes: new Uint8Array([1]), nan: Number.NaN, big: 1n,
+      })
+    })
+    const generic = accepted(validateOrderedLiveUpdateCut({ mode: 'registration', checkpoint }, highPolicy()))
+    const result = projection(checkpoint)
+    try {
+      expect(result.topology).toMatchObject({ kind: 'compatible', bodyHasActiveItem: false })
+      expect(result.cut.finishAfterProjection().kind).toBe('accepted')
+      expect(generic.finishAfterProjection().kind).toBe('accepted')
+    } finally { result.cut.document.destroy(); generic.document.destroy() }
+  })
+
+  it('checks active state while preserving deleted roots and container history', () => {
+    const checkpoint = checkpointOf(document => {
+      const hidden = document.getMap('body')
+      hidden.set('gone', new Y.Map([['hidden', new Y.Text('old')]]))
+      hidden.delete('gone')
+      document.getMap('other').set('gone', 1)
+      document.getMap('other').delete('gone')
+      const frontmatter = document.getMap('frontmatter')
+      frontmatter.set('replacement', new Y.Text('old'))
+      frontmatter.set('replacement', 'current')
+    })
+    const result = projection(checkpoint)
+    try {
+      expect(result.topology).toEqual({ kind: 'compatible', bodyHasActiveItem: false, canonicalZeroStructSeed: false })
+      expect(result.cut.document.getMap('frontmatter').get('replacement')).toBe('current')
+      expect(result.cut.finishAfterProjection().kind).toBe('accepted')
+    } finally { result.cut.document.destroy() }
+  })
+
+  it('follows right-origin-only placement and inherited keyed placement', () => {
+    const xml = checkpointOf(document => {
+      const body = document.getXmlFragment('body')
+      body.insert(0, [new Y.XmlElement('paragraph')])
+      body.insert(0, [new Y.XmlElement('paragraph')])
+      body.insert(1, [new Y.XmlText('middle')])
+    })
+    expect(Y.decodeUpdate(xml).structs.some(item => item instanceof Y.Item
+      && item.origin === null && item.rightOrigin !== null && item.parent === null)).toBe(true)
+    const keyed = checkpointOf(document => {
+      document.getMap('body').set('hidden', 'first')
+      document.getMap('body').set('hidden', 'second')
+    })
+    expect(Y.decodeUpdate(keyed).structs.some(item => item instanceof Y.Item
+      && item.origin !== null && item.parent === null && item.parentSub === null)).toBe(true)
+    for (const [checkpoint, kind] of [[xml, 'compatible'], [keyed, 'incompatible']] as const) {
+      const result = projection(checkpoint)
+      try {
+        expect(result.topology.kind).toBe(kind)
+        expect(result.cut.finishAfterProjection().kind).toBe('accepted')
+      } finally { result.cut.document.destroy() }
+    }
+  })
+
+  it('reuses the existing decoders and encoders and charges only additional index work', () => {
+    const checkpoint = updateWithText('proof')
+    resetProbe()
+    const generic = accepted(validateOrderedLiveUpdateCut({ mode: 'registration', checkpoint }, highPolicy()))
+    const genericCalls = { ...yjsProbe, digestViews: yjsProbe.digestViews.length }
+    const genericFinal = generic.finishAfterProjection()
+    resetProbe()
+    const result = projection(checkpoint)
+    try {
+      expect({ ...yjsProbe, digestViews: yjsProbe.digestViews.length }).toEqual(genericCalls)
+      expect(result.cut.usage).toEqual({ ...generic.usage, indexOperations: result.cut.usage.indexOperations })
+      expect(result.cut.usage.indexOperations).toBeGreaterThan(generic.usage.indexOperations)
+      const final = result.cut.finishAfterProjection()
+      expect(final.kind).toBe('accepted')
+      expect(final.usage.indexOperations - result.cut.usage.indexOperations)
+        .toBe(genericFinal.usage.indexOperations - generic.usage.indexOperations)
+      expect(final.usage.decoderPasses).toBe(4)
+      expect(yjsProbe.encodeStateAsUpdateCalls).toBe(2)
+      expect(yjsProbe.encodeStateVectorCalls).toBe(2)
+      expect(yjsProbe.readUpdateV2Calls).toBe(1)
+    } finally { result.cut.document.destroy(); generic.document.destroy() }
+  })
+
+  it('enforces exact index budgets before return and during the real finalizer', () => {
+    const checkpoint = updateWithText('budget')
+    const measured = projection(checkpoint)
+    const initial = measured.cut.usage.indexOperations
+    const total = measured.cut.finishAfterProjection().usage.indexOperations
+    measured.cut.document.destroy()
+    const initialExact = projection(checkpoint, highPolicy({ maxIndexOperations: initial }))
+    try {
+      refused(initialExact.cut.finishAfterProjection(), 'capacity-refused', { kind: 'final' })
+      refused(initialExact.cut.finishAfterProjection(), 'invalid-input', { kind: 'call' })
+    } finally { initialExact.cut.document.destroy() }
+    const destroy = vi.spyOn(Y.Doc.prototype, 'destroy')
+    try {
+      refused(validateRegistrationCutForProjection({ mode: 'registration', checkpoint },
+        highPolicy({ maxIndexOperations: initial - 1 })), 'capacity-refused', { kind: 'final' })
+      expect(destroy).toHaveBeenCalledTimes(1)
+    } finally { destroy.mockRestore() }
+    for (const [limit, kind] of [[total, 'accepted'], [total - 1, 'refused']] as const) {
+      const result = projection(checkpoint, highPolicy({ maxIndexOperations: limit }))
+      try { expect(result.cut.finishAfterProjection().kind).toBe(kind) }
+      finally { result.cut.document.destroy() }
+    }
+  })
+
+  it('charges the direct-root provider, placement memo and scope memo operations', () => {
+    const checkpoint = checkpointOf(document => document.getMap('meta').set('schemaVersion', 1))
+    const generic = accepted(validateOrderedLiveUpdateCut({ mode: 'registration', checkpoint }, highPolicy()))
+    // One sort visit, three provider writes/lookups, six scope lookups/writes,
+    // seven placement operations, two chain checks/writes, six unwind operations,
+    // one scope result lookup, and one outer traversal visit.
+    const topologyOperations = 1 + 3 + 6 + 7 + 2 + 6 + 1 + 1
+    const exact = generic.usage.indexOperations + topologyOperations
+    const result = projection(checkpoint, highPolicy({ maxIndexOperations: exact }))
+    try {
+      expect(result.cut.usage.indexOperations).toBe(exact)
+      refused(result.cut.finishAfterProjection(), 'capacity-refused', { kind: 'final' })
+      const oneLess = refused(validateRegistrationCutForProjection({ mode: 'registration', checkpoint },
+        highPolicy({ maxIndexOperations: exact - 1 })), 'capacity-refused', { kind: 'final' })
+      expect(oneLess.usage.indexOperations).toBe(exact - 1)
+      expect(generic.finishAfterProjection().kind).toBe('accepted')
+    } finally { result.cut.document.destroy(); generic.document.destroy() }
+  })
+
+  it.each(['mutate', 'destroy'] as const)('keeps the finalizer authoritative after incompatible topology: %s', action => {
+    const result = projection(checkpointOf(document => document.getMap('body').set('hidden', 1)))
+    expect(result.topology.kind).toBe('incompatible')
+    try {
+      if (action === 'mutate') result.cut.document.getMap('meta').set('schemaVersion', 1)
+      else result.cut.document.destroy()
+      refused(result.cut.finishAfterProjection(), 'projection-mutated', { kind: 'final' })
+      refused(result.cut.finishAfterProjection(), 'invalid-input', { kind: 'call' })
+    } finally { if (action !== 'destroy') result.cut.document.destroy() }
+  })
+
+  it('rejects journal calls at runtime and stays outside the package API', () => {
+    resetProbe()
+    refused(Reflect.apply(validateRegistrationCutForProjection, undefined, [{
+      mode: 'journal-candidate', checkpoint: new Uint8Array([0, 0]), suffix: [], candidate: new Uint8Array([0, 0]),
+    }, highPolicy()]), 'invalid-input', { kind: 'call' })
+    expect(yjsProbe.documentConstructions).toBe(0)
+    expect(readFileSync(PACKAGE_INDEX_SOURCE, 'utf8')).not.toContain('validateRegistrationCutForProjection')
+    expect(readFileSync(PACKAGE_JSON_SOURCE, 'utf8')).not.toContain('orderedLiveUpdateCut')
+  })
+
+  it('bounds a long inherited placement chain without recursive traversal', () => {
+    const checkpoint = checkpointOf(document => {
+      const body = document.getXmlFragment('body')
+      for (let index = 0; index < 1_024; index += 1) body.insert(0, [new Y.XmlElement('paragraph')])
+    })
+    const generic = accepted(validateOrderedLiveUpdateCut({ mode: 'registration', checkpoint }, highPolicy()))
+    const result = projection(checkpoint)
+    try {
+      expect(result.topology).toMatchObject({ kind: 'compatible', bodyHasActiveItem: true })
+      const extra = result.cut.usage.indexOperations - generic.usage.indexOperations
+      expect(extra).toBeGreaterThan(1_024)
+      expect(extra).toBeLessThan(100 * 1_024)
+      expect(result.cut.document.getXmlFragment('body').length).toBe(1_024)
+      expect(result.cut.finishAfterProjection().kind).toBe('accepted')
+      expect(generic.finishAfterProjection().kind).toBe('accepted')
+    } finally { result.cut.document.destroy(); generic.document.destroy() }
+  })
+})
+
 beforeEach(() => resetProbe())
 
 function resetProbe(): void {
@@ -99,7 +384,7 @@ function accepted(result: OrderedLiveUpdateCutResult) {
 }
 
 function refused(
-  result: OrderedLiveUpdateCutResult,
+  result: OrderedLiveUpdateCutResult | OrderedLiveUpdateCutFinalizeResult,
   reason?: OrderedLiveUpdateCutRefusal['reason'],
   stage?: OrderedLiveUpdateCutFailureStage,
 ): OrderedLiveUpdateCutRefusal {
@@ -595,7 +880,7 @@ function writesTo(
 }
 
 function assertProjectedWrites(sourceAst: ts.SourceFile): void {
-  const validate = namedFunction(sourceAst, 'validateOrderedLiveUpdateCut')
+  const validate = namedFunction(sourceAst, 'validateCut')
   const projectedNames = new Set(['projectedUsage', 'fromParts', 'fromActual'])
   const projectedAssignments = writesTo(validate, projectedNames)
   expect(projectedAssignments.length).toBeGreaterThan(0)
@@ -2377,7 +2662,9 @@ describe('validateOrderedLiveUpdateCut', () => {
     expect(source).not.toMatch(/Y\.(?:decodeUpdate|readUpdate|applyUpdate|applyUpdateV2)\s*\(/)
     expect(source).toContain('Y.decodeUpdateV2(')
     expect(source).toContain('Y.readUpdateV2(')
-    expect(source.match(/export function /g)).toHaveLength(1)
+    expect([...source.matchAll(/export function (\w+)/g)].map(match => match[1])).toEqual([
+      'validateOrderedLiveUpdateCut', 'validateRegistrationCutForProjection',
+    ])
 
     const finalizer = namedFunction(sourceAst, 'createFinalizer')
     const finalizerBindings = finalizer.body!.statements
