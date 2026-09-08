@@ -1,5 +1,8 @@
 import type {
   CurrentLiveBindingRequest,
+  LiveDocumentBaselineRegistrationInput,
+  RelayBaselineRegistrationResult,
+  LiveHostConnectionCoordinate,
   SqliteDb,
   SyncRelayShareRow,
   CurrentLiveBindingResult,
@@ -10,6 +13,7 @@ import type {
 } from "./types";
 import {
   ticketRecord,
+  snapshotHostCoordinate,
   parseTicketHash,
   snapshotNamedTicketScope,
   snapshotTicketHostReport,
@@ -19,6 +23,7 @@ import {
   parseLiveUpdateDigest,
   parseLiveUpdateIdentifier,
   type LiveDocumentKey,
+  type LiveUpdateStructRange,
   parseLiveUpdateStructRange,
   type ServerDerivedLiveUpdateAuthority,
   parseServerDerivedLiveUpdateAuthority,
@@ -53,7 +58,8 @@ import {
 } from "@dohc/live-session-contract/live-ticket";
 import type { NamedLiveBrowserContext } from "../namedLiveBrowserAuth";
 import { authorizeNamedLiveEditShareGrant } from "../shareAuthorization";
-import { readLiveHostControl } from "./hostControl";
+import { readLiveHostControl, parseHostControlTimestamp } from "./hostControl";
+import { assertWorkspaceQuota } from "./workspaces";
 
 function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest): CurrentLiveBindingRequest {
   const outer = ticketRecord(input, ["document", "actor"]);
@@ -74,6 +80,87 @@ function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest): Curren
   return { document, actor: kind.value === "owner"
     ? { kind: "owner", userId, shareId: parseLiveUpdateIdentifier(actor.shareId, "share ID") }
     : { kind: "named", userId, grantId: parseLiveUpdateIdentifier(actor.grantId, "grant ID") } };
+}
+
+function baselineRecord(value: unknown, fields: readonly string[], allowExtra = false): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || nodeTypes.isProxy(value) || Array.isArray(value) ||
+    (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
+    throw new TypeError("Invalid baseline record.");
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  if (!allowExtra && (keys.length !== fields.length || keys.some(key => typeof key !== "string" || !fields.includes(key)))) {
+    throw new TypeError("Invalid baseline fields.");
+  }
+  const result: Record<string, unknown> = {};
+  for (const field of fields) {
+    const descriptor = descriptors[field];
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, "value")) throw new TypeError("Invalid baseline field.");
+    result[field] = descriptor.value;
+  }
+  return result;
+}
+
+const baselineBytePrototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
+
+const baselineByteBuffer = Object.getOwnPropertyDescriptor(baselineBytePrototype, "buffer")!.get!;
+
+const baselineByteOffset = Object.getOwnPropertyDescriptor(baselineBytePrototype, "byteOffset")!.get!;
+
+const baselineByteLength = Object.getOwnPropertyDescriptor(baselineBytePrototype, "byteLength")!.get!;
+
+const baselineBufferLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")!.get!;
+
+const baselineBufferResizable = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "resizable")?.get;
+
+function snapshotBaseline(outer: Record<string, unknown>, host: LiveHostConnectionCoordinate): LiveDocumentBaselineRegistrationInput {
+  const evidence = baselineRecord(outer.evidence,
+    ["version", "document", "currentPath", "checkpoint", "projectedMarkdownSha256", "projectedMarkdownByteLength"], true);
+  if (evidence.version !== 1) throw new TypeError("Unknown baseline evidence version.");
+  const document = parseLiveDocumentKey(baselineRecord(evidence.document,
+    ["workspaceId", "mainVersionId", "objectId", "lineageClaimId"]));
+  const currentPath = evidence.currentPath;
+  const binding = parseLiveObjectBinding({ ...document, currentPath, selectorPaths: [currentPath], restoreFenceGeneration: 1 });
+  if (document.mainVersionId !== "main" || binding.currentPath !== currentPath || liveDocumentKindForPath(currentPath) !== "richdoc") {
+    throw new TypeError("Invalid baseline path.");
+  }
+  const checkpoint = baselineRecord(evidence.checkpoint, ["updateDigest", "ranges"], true);
+  const updateDigest = parseLiveUpdateDigest(checkpoint.updateDigest);
+  if (parseLiveUpdateDigest(document.lineageClaimId) !== updateDigest) throw new TypeError("Baseline lineage mismatch.");
+  const bytes = outer.baselineBytes;
+  if (!nodeTypes.isUint8Array(bytes)) throw new TypeError("Invalid baseline bytes.");
+  const buffer = Reflect.apply(baselineByteBuffer, bytes, []) as ArrayBuffer;
+  const offset = Reflect.apply(baselineByteOffset, bytes, []) as number;
+  const length = Reflect.apply(baselineByteLength, bytes, []) as number;
+  const backingLength = Reflect.apply(baselineBufferLength, buffer, []) as number;
+  if (length < 1 || length > 20_971_520 || offset > backingLength || length > backingLength - offset ||
+    (baselineBufferResizable !== undefined && Reflect.apply(baselineBufferResizable, buffer, []))) {
+    throw new TypeError("Invalid baseline bytes.");
+  }
+  const baselineBytes = new Uint8Array(new Uint8Array(buffer, offset, length));
+  if (createHash("sha256").update(baselineBytes).digest("hex") !== updateDigest) throw new TypeError("Baseline digest mismatch.");
+  const rawRanges = checkpoint.ranges;
+  if (!Array.isArray(rawRanges) || nodeTypes.isProxy(rawRanges) || Object.getPrototypeOf(rawRanges) !== Array.prototype) {
+    throw new TypeError("Invalid baseline ranges.");
+  }
+  const rangeCount = Object.getOwnPropertyDescriptor(rawRanges, "length")!.value as number;
+  if (Reflect.ownKeys(rawRanges).length !== rangeCount + 1) throw new TypeError("Invalid baseline ranges.");
+  const ranges: LiveUpdateStructRange[] = [];
+  for (let index = 0; index < rangeCount; index++) {
+    const descriptor = Object.getOwnPropertyDescriptor(rawRanges, String(index));
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, "value")) throw new TypeError("Invalid baseline range.");
+    const range = parseLiveUpdateStructRange(baselineRecord(descriptor.value, ["clientId", "startClock", "endClock"]));
+    const previous = ranges.at(-1);
+    if (previous && (range.clientId < previous.clientId ||
+      (range.clientId === previous.clientId && range.startClock <= previous.endClock))) throw new TypeError("Noncanonical baseline ranges.");
+    ranges.push(range);
+  }
+  const projectedMarkdownSha256 = parseLiveUpdateDigest(evidence.projectedMarkdownSha256);
+  const projectedMarkdownByteLength = parseHostControlTimestamp(evidence.projectedMarkdownByteLength, "projection length");
+  if (projectedMarkdownByteLength > 2_097_152) throw new TypeError("Invalid baseline projection length.");
+  const registeredAtMs = parseHostControlTimestamp(outer.registeredAtMs, "registration timestamp");
+  return { host, baselineBytes, registeredAtMs, evidence: { version: 1, document, currentPath,
+    checkpoint: { updateDigest, ranges }, projectedMarkdownSha256, projectedMarkdownByteLength } };
 }
 
 function authorityIntegrity(condition: unknown): asserts condition {
@@ -114,22 +201,37 @@ function assertCurrentAuthorityHost(db: SqliteDb, host: HostControlSnapshot): vo
   }
 }
 
-function readLiveDocumentAuthority(db: SqliteDb, document: LiveDocumentKey): {
+interface StoredLiveDocumentAuthority {
   binding: LiveObjectBinding;
   current: boolean;
   open: boolean;
-} | null {
+  replacesLineageClaimId: string | null;
+  baselineSequence: number;
+  baselineDigest: string;
+  baselineBytes: Uint8Array;
+  projectedDigest: string;
+  projectedLength: number;
+  ranges: LiveUpdateStructRange[];
+  registeredAtMs: number;
+}
+
+function readLiveDocumentAuthority(db: SqliteDb, document: LiveDocumentKey): StoredLiveDocumentAuthority | null {
   const row = db.prepare(`SELECT * FROM sync_relay_live_documents
     WHERE workspace_id = ? AND main_version_id = ? AND object_id = ?
       AND (lineage_state = 'current' OR lineage_claim_id = ?)
     ORDER BY lineage_state = 'current' DESC LIMIT 1`)
     .get(document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId);
   if (!row) return null;
+  return decodeLiveDocumentAuthority(db, document, row);
+}
+
+function decodeLiveDocumentAuthority(db: SqliteDb, document: LiveDocumentKey, row: Record<string, unknown>): StoredLiveDocumentAuthority {
   const storedDocument = parseLiveDocumentKey({
     workspaceId: row.workspace_id, mainVersionId: row.main_version_id,
     objectId: row.object_id, lineageClaimId: row.lineage_claim_id,
   });
   authorityIntegrity(storedDocument.mainVersionId === "main");
+  authorityIntegrity(storedDocument.workspaceId === document.workspaceId && storedDocument.objectId === document.objectId);
   const baselineDigest = parseLiveUpdateDigest(row.baseline_digest);
   authorityIntegrity(parseLiveUpdateDigest(storedDocument.lineageClaimId) === baselineDigest);
   if (row.replaces_lineage_claim_id !== null) {
@@ -138,7 +240,7 @@ function readLiveDocumentAuthority(db: SqliteDb, document: LiveDocumentKey): {
   const binding = parseLiveObjectBinding({ ...storedDocument, currentPath: row.current_path,
     selectorPaths: [row.current_path], restoreFenceGeneration: row.restore_fence_generation });
   authorityIntegrity(binding.currentPath === row.current_path && liveDocumentKindForPath(binding.currentPath) === "richdoc");
-  authorityInteger(row.registered_at_ms);
+  const registeredAtMs = authorityInteger(row.registered_at_ms);
   authorityIntegrity(row.lineage_state === "current" || row.lineage_state === "retired");
   authorityIntegrity(row.admission_state === "open" || row.admission_state === "closed");
   if (row.lineage_state === "current") authorityIntegrity(row.retired_at_ms === null);
@@ -160,14 +262,19 @@ function readLiveDocumentAuthority(db: SqliteDb, document: LiveDocumentKey): {
     ORDER BY client_id, start_clock`)
     .all(document.workspaceId, document.mainVersionId, document.objectId, storedDocument.lineageClaimId);
   let previous: ReturnType<typeof parseLiveUpdateStructRange> | null = null;
+  const decodedRanges: LiveUpdateStructRange[] = [];
   for (const raw of ranges) {
     authorityIntegrity(raw.workspace_id === storedDocument.workspaceId && raw.main_version_id === "main" &&
       raw.object_id === storedDocument.objectId && raw.lineage_claim_id === storedDocument.lineageClaimId);
     const range = parseLiveUpdateStructRange({ clientId: raw.client_id, startClock: raw.start_clock, endClock: raw.end_clock });
     authorityIntegrity(previous === null || previous.clientId !== range.clientId || previous.endClock < range.startClock);
     previous = range;
+    decodedRanges.push(range);
   }
-  return { binding, current: row.lineage_state === "current", open: row.admission_state === "open" };
+  return { binding, current: row.lineage_state === "current", open: row.admission_state === "open",
+    replacesLineageClaimId: row.replaces_lineage_claim_id as string | null,
+    baselineSequence, baselineDigest, baselineBytes: bytes, projectedDigest: projectionDigest,
+    projectedLength: projectionLength, ranges: decodedRanges, registeredAtMs };
 }
 
 function canonicalLiveSelector(share: SyncRelayShareRow, selector: ShareSelector): boolean {
@@ -315,6 +422,86 @@ export function redeemNamedLiveTicket(storage: StorageContext, input: NamedLiveT
     });
   }
 
+export function registerLiveDocumentBaseline(storage: StorageContext, input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult {
+    let outer: Record<string, unknown>;
+    try { outer = baselineRecord(input, ["host", "evidence", "baselineBytes", "registeredAtMs"]); }
+    catch { return { kind: "refused", reason: "invalid-baseline" }; }
+    let coordinate: LiveHostConnectionCoordinate;
+    try { coordinate = snapshotHostCoordinate(baselineRecord(outer.host, ["mode", "hostId", "hostEpoch", "instanceId", "connectionId"])); }
+    catch { return { kind: "refused", reason: "stale-host" }; }
+    let owned: LiveDocumentBaselineRegistrationInput;
+    try { owned = snapshotBaseline(outer, coordinate); }
+    catch { return { kind: "refused", reason: "invalid-baseline" }; }
+    const { evidence, baselineBytes, registeredAtMs } = owned;
+    const { document, currentPath, checkpoint } = evidence;
+    return storage.tx((): RelayBaselineRegistrationResult => {
+      const host = readLiveHostControl(storage.db);
+      if (host !== null) assertCurrentAuthorityHost(storage.db, host);
+      if (host === null || host.admissionState !== "open" || host.transition !== null) {
+        return { kind: "refused", reason: "host-unavailable" };
+      }
+      if (host.configuredMode !== coordinate.mode || host.configuredHostId !== coordinate.hostId ||
+        host.hostEpoch !== coordinate.hostEpoch || host.registeredInstanceId !== coordinate.instanceId ||
+        host.registeredConnectionId !== coordinate.connectionId) return { kind: "refused", reason: "stale-host" };
+      const latest = currentLiveDocumentMoment(storage, document, currentPath);
+      if (!latest || latest.blob_sha256 !== evidence.projectedMarkdownSha256 ||
+        latest.byte_length !== evidence.projectedMarkdownByteLength) return { kind: "refused", reason: "stale-document" };
+      const history = storage.db.prepare(`SELECT * FROM sync_relay_live_documents
+        WHERE workspace_id = ? AND main_version_id = ? AND object_id = ? ORDER BY lineage_claim_id`)
+        .all(document.workspaceId, document.mainVersionId, document.objectId)
+        .map(row => decodeLiveDocumentAuthority(storage.db, document, row));
+      const current = history.find(row => row.current);
+      if (history.length > 0) {
+        if (!current || current.binding.lineageClaimId !== document.lineageClaimId) {
+          return { kind: "refused", reason: "lineage-conflict" };
+        }
+        if (!current.open || current.replacesLineageClaimId !== null || current.binding.currentPath !== currentPath ||
+          current.baselineSequence !== latest.relay_seq || current.projectedDigest !== evidence.projectedMarkdownSha256 ||
+          current.projectedLength !== evidence.projectedMarkdownByteLength || current.baselineDigest !== checkpoint.updateDigest ||
+          Buffer.compare(current.baselineBytes, baselineBytes) !== 0 ||
+          current.ranges.length !== checkpoint.ranges.length || current.ranges.some((range, index) => {
+            const expected = checkpoint.ranges[index]!;
+            return range.clientId !== expected.clientId || range.startClock !== expected.startClock || range.endClock !== expected.endClock;
+          })) return { kind: "refused", reason: "baseline-conflict" };
+        return { kind: "registered", document: { ...document }, currentPath,
+          restoreFenceGeneration: current.binding.restoreFenceGeneration, registeredAtMs: current.registeredAtMs, replayed: true };
+      }
+      assertWorkspaceQuota(storage, document.workspaceId, baselineBytes.byteLength);
+      storage.db.prepare(`INSERT INTO sync_relay_live_documents (
+        workspace_id, main_version_id, object_id, lineage_claim_id, replaces_lineage_claim_id, current_path,
+        baseline_moment_relay_seq, baseline_projected_sha256, baseline_projected_byte_length, baseline_digest,
+        baseline_bytes, lineage_state, admission_state, restore_fence_generation, registered_at_ms, retired_at_ms
+      ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'current', 'open', 1, ?, NULL)`)
+        .run(document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId, currentPath,
+          latest.relay_seq, evidence.projectedMarkdownSha256, evidence.projectedMarkdownByteLength,
+          checkpoint.updateDigest, baselineBytes, registeredAtMs);
+      const insertRange = storage.db.prepare(`INSERT INTO sync_relay_live_document_baseline_ranges
+        (workspace_id, main_version_id, object_id, lineage_claim_id, client_id, start_clock, end_clock)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`);
+      for (const range of checkpoint.ranges) {
+        insertRange.run(document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId,
+          range.clientId, range.startClock, range.endClock);
+      }
+      storage.db.prepare(`UPDATE sync_relay_workspace_usage SET usage_bytes = usage_bytes + ? WHERE workspace_id = ?`)
+        .run(baselineBytes.byteLength, document.workspaceId);
+      return { kind: "registered", document: { ...document }, currentPath,
+        restoreFenceGeneration: 1, registeredAtMs, replayed: false };
+    });
+  }
+
+function currentLiveDocumentMoment(storage: StorageContext, document: LiveDocumentKey, currentPath: string): Record<string, unknown> | undefined {
+    const latest = storage.db.prepare(`SELECT path, content_kind, blob_sha256, byte_length, relay_seq, recorded_at_ms FROM sync_relay_object_moments
+      WHERE workspace_id = ? AND object_id = ? AND version_id = 'main' ORDER BY relay_seq DESC LIMIT 1`)
+      .get(document.workspaceId, document.objectId);
+    if (!latest || latest.path !== currentPath || latest.content_kind !== "text" ||
+      typeof latest.blob_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(latest.blob_sha256) ||
+      typeof latest.byte_length !== "number" || !Number.isSafeInteger(latest.byte_length) || latest.byte_length < 0 ||
+      typeof latest.relay_seq !== "number" || !Number.isSafeInteger(latest.relay_seq) || latest.relay_seq <= storage.getEpochLogFloor(document.workspaceId) ||
+      typeof latest.recorded_at_ms !== "number" || !Number.isSafeInteger(latest.recorded_at_ms) || latest.recorded_at_ms < 0 ||
+      storage.objectIdAtPathInVersion({ workspaceId: document.workspaceId, versionId: "main", path: currentPath }) !== document.objectId) return undefined;
+    return latest;
+  }
+
 export function currentLiveDocumentBinding(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest): CurrentLiveBindingResult {
     const host = readLiveHostControl(storage.db);
     if (host !== null) assertCurrentAuthorityHost(storage.db, host);
@@ -323,18 +510,11 @@ export function currentLiveDocumentBinding(storage: StorageContext, { document, 
     }
     authorityIntegrity(host.registeredInstanceId !== null && host.registeredConnectionId !== null);
     const stored = readLiveDocumentAuthority(storage.db, document);
-    if (!stored || !stored.current || !stored.open || stored.binding.lineageClaimId !== document.lineageClaimId) {
+    if (!stored || !stored.current || !stored.open || stored.binding.lineageClaimId !== document.lineageClaimId ||
+      stored.baselineSequence <= storage.getEpochLogFloor(document.workspaceId)) {
       return { kind: "refused", reason: "stale-document" };
     }
-    const latest = storage.db.prepare(`SELECT path, content_kind, blob_sha256, byte_length, relay_seq, recorded_at_ms FROM sync_relay_object_moments
-      WHERE workspace_id = ? AND object_id = ? AND version_id = 'main' ORDER BY relay_seq DESC LIMIT 1`)
-      .get(document.workspaceId, document.objectId);
-    if (!latest || latest.path !== stored.binding.currentPath || latest.content_kind !== "text" ||
-        typeof latest.blob_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(latest.blob_sha256) ||
-        typeof latest.byte_length !== "number" || !Number.isSafeInteger(latest.byte_length) || latest.byte_length < 0 ||
-        typeof latest.relay_seq !== "number" || !Number.isSafeInteger(latest.relay_seq) || latest.relay_seq < 1 ||
-        typeof latest.recorded_at_ms !== "number" || !Number.isSafeInteger(latest.recorded_at_ms) || latest.recorded_at_ms < 0 ||
-        storage.objectIdAtPathInVersion({ workspaceId: document.workspaceId, versionId: "main", path: stored.binding.currentPath }) !== document.objectId) {
+    if (!currentLiveDocumentMoment(storage, document, stored.binding.currentPath)) {
       return { kind: "refused", reason: "stale-document" };
     }
     let share: SyncRelayShareRow;

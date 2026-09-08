@@ -4,6 +4,8 @@ import type {
   SyncRelayStorage,
   LiveTicketStoragePolicy,
   CurrentLiveBindingRequest,
+  LiveDocumentBaselineRegistrationInput,
+  RelayBaselineRegistrationResult,
   CurrentLiveBindingResult,
   LiveHostControlResult,
   LiveHostConnectionCoordinate,
@@ -160,6 +162,8 @@ export {
   type ThreadFileBinding,
   type OpenSyncRelayStorageOptions,
   type CurrentLiveBindingRequest,
+  type LiveDocumentBaselineRegistrationInput,
+  type RelayBaselineRegistrationResult,
   type CurrentLiveBindingResult,
   type DeviceHostCredentialResult,
   type TicketHostReport,
@@ -300,6 +304,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
     return liveDocumentAuthorityStorage.resolveCurrentLiveDocumentBinding(this, input);
+  }
+
+  registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult {
+    return liveDocumentAuthorityStorage.registerLiveDocumentBaseline(this, input);
   }
 
   getLiveHostControl(): HostControlSnapshot | null {

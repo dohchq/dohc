@@ -4,7 +4,7 @@ import type {
   HostEpoch,
   HostTransitionGeneration,
 } from "@dohc/live-session-contract/host-control";
-import type { LiveDocumentKey, ServerDerivedLiveUpdateAuthority } from "@dohc/live-session-contract/live-update-admission";
+import type { LiveDocumentKey, LiveUpdateStructRange, ServerDerivedLiveUpdateAuthority } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
 import type { DeviceHostCredential } from "../deviceHostCredential";
@@ -45,6 +45,26 @@ export interface CurrentLiveBindingRequest {
     | { readonly kind: "owner"; readonly userId: string; readonly shareId: string }
     | { readonly kind: "named"; readonly userId: string; readonly grantId: string };
 }
+
+export interface LiveDocumentBaselineRegistrationInput {
+  readonly host: LiveHostConnectionCoordinate;
+  readonly evidence: {
+    readonly version: 1;
+    readonly document: LiveDocumentKey;
+    readonly currentPath: string;
+    readonly checkpoint: { readonly updateDigest: string; readonly ranges: readonly LiveUpdateStructRange[] };
+    readonly projectedMarkdownSha256: string;
+    readonly projectedMarkdownByteLength: number;
+  };
+  readonly baselineBytes: Uint8Array;
+  readonly registeredAtMs: number;
+}
+
+export type RelayBaselineRegistrationResult =
+  | { readonly kind: "registered"; readonly document: LiveDocumentKey; readonly currentPath: string;
+      readonly restoreFenceGeneration: number; readonly registeredAtMs: number; readonly replayed: boolean }
+  | { readonly kind: "refused"; readonly reason: "invalid-baseline" | "host-unavailable" | "stale-host" |
+      "stale-document" | "lineage-conflict" | "baseline-conflict" };
 
 export type CurrentLiveBindingResult =
   | {
@@ -453,6 +473,7 @@ export interface AppendLogBatchGuardContext {
 export interface SyncRelayStorage {
   close(): void;
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult;
+  registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult;
   mintNamedLiveTicket(input: NamedLiveTicketMint): { expiresAtMs: number } | null;
   readNamedLiveTicketTarget(input: NamedLiveTicketLookup): { workspaceId: string; objectId: string } | null;
   redeemNamedLiveTicket(input: NamedLiveTicketRedemption): RedeemedLiveTicket | null;

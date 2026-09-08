@@ -27,7 +27,7 @@ import {
   deviceHostCredentialDigest,
 } from "../deviceHostCredential";
 
-function parseHostControlTimestamp(value: unknown, name: string): number {
+export function parseHostControlTimestamp(value: unknown, name: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new RangeError(`${name} must be a non-negative safe integer`);
   }
