@@ -18,6 +18,13 @@ pub struct LiveObjectBinding {
     pub restore_fence_generation: i64,
 }
 impl LiveObjectBinding {
+    pub fn validate_canonical(&self) -> Result<(), &'static str> {
+        if self.clone().normalized()? != *self {
+            return Err("noncanonical binding");
+        }
+        Ok(())
+    }
+
     pub(crate) fn normalized(mut self) -> Result<Self, &'static str> {
         for value in [
             self.workspace_id.as_str(),

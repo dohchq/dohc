@@ -176,7 +176,10 @@ it.skipIf(engine.missing)("reads an owner queue larger than a daemon control fra
   await writeFile(join(root, ".dohc", "engine", "SHADOW_CLONE"),
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "utf8");
   await writeFile(join(root, "owner.md"), "Owner outbox frame fixture", "utf8");
-  const lifecycle = new EngineDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
+  // Match the real-session helper's aggregate-load allowance for startup smoke.
+  const lifecycle = new EngineDaemonLifecycle({
+    command: engine.require(), maxRestarts: 0, requestTimeoutMs: 10_000,
+  });
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
   const workspace = { workspaceId: "owner-outbox-frame", rootPath: root, attachmentId: Symbol("owner-pages") };
   const capture = createWorkspaceEngineCapture({

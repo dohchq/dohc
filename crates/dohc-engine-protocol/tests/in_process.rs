@@ -15,6 +15,7 @@ struct EchoService {
 }
 
 impl EngineService for EchoService {
+    type Input = ();
     async fn call(
         &self,
         _ctx: RequestContext,

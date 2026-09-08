@@ -694,8 +694,13 @@ export class EngineDaemonLifecycle {
   }
 
   private async runSmoke(client: EngineDaemonClient): Promise<JsonValue> {
-    return await runEngineDaemonSmoke(async (rootDir, workspaceId) =>
-      await this.smokeWorkspaceWithClient(client, rootDir, workspaceId),
+    return await runEngineDaemonSmoke(
+      async (rootDir, workspaceId) =>
+        await this.smokeWorkspaceWithClient(client, rootDir, workspaceId),
+      (error) => this.reportFailure(
+        new Error("Could not delete the engine startup smoke directory.", { cause: error }),
+        false,
+      ),
     );
   }
 
@@ -1006,6 +1011,7 @@ export class EngineDaemonLifecycle {
 
 async function runEngineDaemonSmoke(
   smokeWorkspace: (rootDir: string, workspaceId: string) => Promise<JsonValue>,
+  onCleanupFailure?: (error: unknown) => void,
 ): Promise<JsonValue> {
   const rootDir = await mkdtemp(join(tmpdir(), "dohc-rust-engine-smoke-"));
   try {
@@ -1014,7 +1020,13 @@ async function runEngineDaemonSmoke(
     // opens must never share one workspaceId.
     return await smokeWorkspace(rootDir, `desktop-startup-smoke-${randomUUID()}`);
   } finally {
-    await rm(rootDir, { recursive: true, force: true });
+    try {
+      await rm(rootDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    } catch (error) {
+      // A locked temporary file does not make a responsive daemon unhealthy.
+      if (!onCleanupFailure) throw error;
+      onCleanupFailure(error);
+    }
   }
 }
 

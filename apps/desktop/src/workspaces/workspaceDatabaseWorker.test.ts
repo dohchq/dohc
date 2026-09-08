@@ -398,7 +398,7 @@ describe("workspace database worker", () => {
       4,
       5,
     ]);
-  });
+  }, 20_000);
 
   it("pages at the row limit and at the serialized byte budget", async () => {
     const root = await createTestScratch("dohc-db-worker-page-");

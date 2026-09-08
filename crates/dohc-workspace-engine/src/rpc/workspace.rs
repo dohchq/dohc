@@ -451,6 +451,7 @@ impl EngineService {
                 return Ok(json!({ "workspace": handle }));
             }
             lock(&self.handles).remove(&handle);
+            lock(&self.live_applications).retire_workspace(&open);
             let attached_handles = {
                 let mut handles = lock(&self.handles);
                 let attached: Vec<WorkspaceHandle> = handles
@@ -803,6 +804,7 @@ impl EngineService {
                 }
                 (removed, attached)
             };
+            lock(&self.live_applications).retire_workspace(&open);
             lock(&self.pending_cursors).retain(|_, pending| {
                 pending.handle != handle && !attached_handles.contains(&pending.handle)
             });
