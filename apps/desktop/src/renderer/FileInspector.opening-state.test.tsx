@@ -428,8 +428,10 @@ describe("markdown document opening state", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("markdown-open-state"), "restore path: in the capture, keep `unsavedDraft.current` true and drop the setDraft/setSavedBody/latestDraft reset together. Neither the sync effect (blocked by the flag) nor the direct reset hands the surface back, and the assertion below finds 'Draft!' still in the source editor.").toBeNull(),
     );
-    expect(codeEditorText(screen.getByTestId("markdown-editor"))).toBe(
-      DOC_MARKDOWN,
+    await waitFor(() =>
+      expect(codeEditorText(screen.getByTestId("markdown-editor"))).toBe(
+        DOC_MARKDOWN,
+      ),
     );
 
     // Dismiss retires the notice, and the save pipeline is healthy again.
