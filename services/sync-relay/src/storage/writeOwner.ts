@@ -14,11 +14,17 @@ export class RelayWriteOwner {
   readonly #unavailable = new AbortController();
   #writing = false;
   #stamp: number;
+  readonly #changes;
+  readonly #schema;
   constructor(
     readonly db: SqliteDb,
     readonly continuity?: RelayContinuity,
     stamp = 0,
-  ) { this.#stamp = stamp; }
+  ) {
+    this.#stamp = stamp;
+    this.#changes = continuity ? db.prepare("SELECT total_changes() AS count") : undefined;
+    this.#schema = continuity ? db.prepare("PRAGMA schema_version") : undefined;
+  }
 
   get unavailable(): AbortSignal { return this.#unavailable.signal; }
 
@@ -62,21 +68,23 @@ export class RelayWriteOwner {
       this.#stamp = stamp;
       return result;
     } catch (error) {
-      if (committing) this.invalidate();
       if (began) {
         try {
+          // SQLite refuses ROLLBACK when COMMIT already ended the transaction.
+          // Only a successful rollback permits cancelling the reserved stamp.
           this.db.exec("ROLLBACK");
-          if (reserved && !committing && !this.unavailable.aborted) this.continuity!.cancel(stamp, previous);
+          if (reserved && !this.unavailable.aborted) this.continuity!.cancel(stamp, previous);
         } catch { this.invalidate(); }
       }
+      if (committing) this.invalidate();
       throw error;
     } finally { this.#writing = false; }
   }
 
   private mutationState(): string {
     return JSON.stringify([
-      this.db.prepare("SELECT total_changes() AS count").get()?.count,
-      this.db.prepare("PRAGMA schema_version").get()?.schema_version,
+      this.#changes!.get()?.count,
+      this.#schema!.get()?.schema_version,
     ]);
   }
 

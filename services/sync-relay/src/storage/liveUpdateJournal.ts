@@ -11,6 +11,7 @@ import { LIVE_JOURNAL_TABLE, LIVE_JOURNAL_PROVENANCE } from "./schema";
 import { snapshotHostCoordinate } from "../liveTicketInputs";
 import { readLiveHostControl } from "./hostControl";
 import { assertWorkspaceQuota } from "./workspaces";
+import { registerLiveDeliveryEvent } from "./liveDeliveryReservations";
 import { baselineRecord, baselineByteBuffer, baselineByteOffset, baselineByteLength, baselineBufferLength, baselineBufferResizable, authorityInteger, authorityIntegrity, currentLiveDocumentMoment, assertCurrentAuthorityHost, snapshotCurrentBindingRequest, decodeLiveDocumentAuthorityStructure, authorizeLiveDocument } from "./liveDocumentAuthority";
 
 function journalAuthorityHistory(storage: StorageContext, document: LiveDocumentKey): StoredLiveDocumentAuthority[] {
@@ -324,6 +325,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         journalIntegrity(isDeepStrictEqual(row.admitted.metadata, intended) && Buffer.compare(row.admitted.updateBytes, updateBytes) === 0 &&
           (due ? row.checkpoint && row.checkpoint.digest === checkpointDigest && Buffer.compare(row.checkpoint.bytes, checkpointBytes!) === 0 : row.checkpoint === null));
         storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, document.workspaceId);
+        registerLiveDeliveryEvent(storage, document, currentHost.configuredHostId, raw);
         return { reply: { result: { kind: "accepted" as const, receipt: { ...row.admitted.metadata.accepted.receipt }, replayed: false }, admitted: row.admitted } };
       });
     } catch (error) {

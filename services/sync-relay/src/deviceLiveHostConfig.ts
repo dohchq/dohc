@@ -26,7 +26,7 @@ function read(value: string): unknown {
   return JSON.parse(readFileSync(file, "utf8"));
 }
 export function readDeviceLiveHostConfig(file: string, limits: DeviceControlLimits) {
-  const row = configRecord(read(file), ["version", "engineExecutable", "hostId", "hostEpoch", "instanceId", "workspaces", "ingress", "maxQueuedBytes"], ["settlement"]);
+  const row = configRecord(read(file), ["version", "engineExecutable", "hostId", "hostEpoch", "instanceId", "workspaces", "ingress", "maxQueuedBytes", "shutdownGraceMs"], ["settlement"]);
   if (row.version !== 1 || !Array.isArray(row.workspaces) || row.workspaces.length < 1 || row.workspaces.length > 64) throw new TypeError("Invalid device delivery configuration.");
   const workspaces = row.workspaces.map(item => {
     const entry = configRecord(item, ["root", "workspaceId", "maxRegistrations"]);
@@ -37,8 +37,9 @@ export function readDeviceLiveHostConfig(file: string, limits: DeviceControlLimi
   const ingress = configRecord(row.ingress, ["aggregateBytes", "applicationWorkingReserveBytes", "maxUploads", "uploadDeadlineMs"]);
   return Object.freeze({ version: 1 as const, engineExecutable: path(row.engineExecutable, false),
     settlement: parseLiveSettlementConfig(row.settlement),
+    shutdownGraceMs: integer(row.shutdownGraceMs),
     hostId: parseHostControlIdentifier(row.hostId), hostEpoch: parseHostEpoch(row.hostEpoch), instanceId: parseHostControlIdentifier(row.instanceId),
-    workspaces: Object.freeze(workspaces), maxQueuedBytes: integer(row.maxQueuedBytes, Math.max(limits.maxPayloadBytes + 16, 65_536 + Math.ceil(65_536 / limits.maxPayloadBytes) * 16)),
+    workspaces: Object.freeze(workspaces), maxQueuedBytes: integer(row.maxQueuedBytes, Math.max(limits.maxPayloadBytes + 16, 65_536 + 16)),
     ingress: Object.freeze({ aggregateBytes: integer(ingress.aggregateBytes), applicationWorkingReserveBytes: integer(ingress.applicationWorkingReserveBytes, 0),
       maxUploads: integer(ingress.maxUploads), uploadDeadlineMs: integer(ingress.uploadDeadlineMs) }) });
 }
@@ -52,7 +53,7 @@ export function readRelayDeviceDeliveryConfig(file: string, limits: DeviceContro
   const client = configRecord(row.client, ["aggregateBytes", "maxUploads", "connectTimeoutMs", "requestDeadlineMs", "maxFrameBytes"]);
   const maxFrameBytes = integer(client.maxFrameBytes, 1024 * 1024);
   return Object.freeze({ workspaceIds: Object.freeze(workspaceIds), maxActiveDrains: integer(row.maxActiveDrains),
-    maxQueuedBytes: integer(row.maxQueuedBytes, maxFrameBytes + 20 + Math.ceil((maxFrameBytes + 20) / limits.maxPayloadBytes) * 16),
+    maxQueuedBytes: integer(row.maxQueuedBytes, Math.max(limits.maxPayloadBytes + 16, maxFrameBytes + 20 + 16)),
     client: Object.freeze({ aggregateBytes: integer(client.aggregateBytes, 20 * 1024 * 1024 + Math.floor((20 * 1024 * 1024 - 2) / 5) * 16 + 3 * 1024 * 1024),
       maxUploads: integer(client.maxUploads), connectTimeoutMs: integer(client.connectTimeoutMs), requestDeadlineMs: integer(client.requestDeadlineMs), maxFrameBytes }) });
 }

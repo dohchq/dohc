@@ -5,6 +5,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { afterEach, expect, it } from "vitest";
 import { DEVICE_CONTROL_PROTOCOL, type DeviceControlLimits } from "@dohc/live-session-contract/device-control";
 import { createDeviceControlBridge } from "./deviceControlBridge.js";
+import { DeviceCreditSender } from "@dohc/service-http";
 
 const limits: DeviceControlLimits = { maxConnections: 2, maxHeaderBytes: 8192, maxCredentialBytes: 4096,
   maxPayloadBytes: 4096, maxPendingBytes: 8192, maxFragments: 8, maxBufferedChunks: 8,
@@ -92,14 +93,14 @@ it("supplies its configured exchange key and forwards no caller internal headers
 it("forwards known transport controls then binary segments in both directions with heartbeat", async () => {
   const fixture = await setup({ heartbeatIntervalMs: 10_000, heartbeatTimeoutMs: 10_000 });
   await fixture.register();
-  const start = { type: "liveHost.start", version: 1, relayNamespace: "relay", authToken: "A".repeat(43),
+  const start = { type: "liveHost.start", version: 1, relayNamespace: "relay", receive: { maxPayloadBytes: 4096, maxPendingBytes: 8192 }, authToken: "A".repeat(43),
     host: { hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection" } };
   const startReceived = once(fixture.device, "message");
   fixture.upstream()!.send(JSON.stringify(start));
   expect(JSON.parse(String((await startReceived)[0]))).toEqual(start);
   const transportReceived = once(fixture.upstream()!, "message");
-  fixture.device.send(JSON.stringify({ type: "liveHost.transport", version: 1 }));
-  expect(JSON.parse(String((await transportReceived)[0]))).toEqual({ type: "liveHost.transport", version: 1 });
+  fixture.device.send(JSON.stringify({ type: "liveHost.transport", version: 1, receive: { maxPayloadBytes: 4096, maxPendingBytes: 8192 } }));
+  expect(JSON.parse(String((await transportReceived)[0]))).toEqual({ type: "liveHost.transport", version: 1, receive: { maxPayloadBytes: 4096, maxPendingBytes: 8192 } });
   const received = once(fixture.device, "message");
   fixture.upstream()!.send(Buffer.from("DOP1 segment"));
   const [bytes, binary] = await received;
@@ -117,14 +118,52 @@ it.each(["early-device", "early-relay", "duplicate-start", "unknown-device"])("r
   await fixture.register();
   if (mode === "early-device") fixture.device.send(Buffer.from("DOP1"));
   if (mode === "early-relay") fixture.upstream()!.send(Buffer.from("DOP1"));
-  if (mode === "unknown-device") fixture.device.send(JSON.stringify({ type: "liveHost.transport", version: 1 }));
+  if (mode === "unknown-device") fixture.device.send(JSON.stringify({ type: "liveHost.transport", version: 1, receive: { maxPayloadBytes: 4096, maxPendingBytes: 8192 } }));
   if (mode === "duplicate-start") {
-    const start = JSON.stringify({ type: "liveHost.start", version: 1, relayNamespace: "relay", authToken: "A".repeat(43),
+    const start = JSON.stringify({ type: "liveHost.start", version: 1, relayNamespace: "relay", receive: { maxPayloadBytes: 4096, maxPendingBytes: 8192 }, authToken: "A".repeat(43),
       host: { hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection" } });
     fixture.upstream()!.send(start); fixture.upstream()!.send(start);
   }
   await fixture.closed;
 });
+
+it("carries frames larger than the bridge budget in both directions after a receiver stalls", async () => {
+  const fixture = await setup({ heartbeatIntervalMs: 60_000, heartbeatTimeoutMs: 60_000 });
+  await fixture.register();
+  const receive = { maxPayloadBytes: 4096, maxPendingBytes: 8192 };
+  const start = once(fixture.device, "message");
+  fixture.upstream()!.send(JSON.stringify({ type: "liveHost.start", version: 1, relayNamespace: "relay", receive,
+    authToken: "A".repeat(43), host: { hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection" } }));
+  await start;
+  const attached = once(fixture.upstream()!, "message");
+  fixture.device.send(JSON.stringify({ type: "liveHost.transport", version: 1, receive }));
+  await attached;
+  const transfers = [[fixture.upstream()!, fixture.device, Buffer.alloc(1024 * 1024, 37)],
+    [fixture.device, fixture.upstream()!, Buffer.alloc(700_000, 81)]] as const;
+  await Promise.all(transfers.map(async ([source, target, expected]) => {
+    const chunks: Buffer[] = [];
+    let count = 0, credit = 0, release!: () => void, first!: () => void, complete!: () => void;
+    const firstReceived = new Promise<void>(resolve => { first = resolve; });
+    const completed = new Promise<void>(resolve => { complete = resolve; });
+    const queue = new DeviceCreditSender({ maxQueuedBytes: expected.length + 16, maxPayloadBytes: 4096, windowBytes: 8192,
+      send(bytes, done) { source.send(bytes, done); }, onDrain() {}, onError() { throw new Error("Transfer failed."); } });
+    source.on("message", (bytes, binary) => { if (!binary) queue.acknowledge(JSON.parse(bytes.toString()).receivedBytes); });
+    target.on("message", (bytes, binary) => {
+      if (!binary) return;
+      const chunk = Buffer.from(bytes as Buffer); chunks.push(chunk); count += chunk.length; credit += chunk.length + 16;
+      const ack = () => target.send(JSON.stringify({ type: "liveHost.credit", version: 1, receivedBytes: credit }));
+      if (chunks.length === 1) { release = ack; first(); } else ack();
+      if (count === expected.length) complete();
+    });
+    queue.write(expected);
+    await firstReceived;
+    expect(source.readyState).toBe(WebSocket.OPEN); expect(target.readyState).toBe(WebSocket.OPEN);
+    release();
+    await completed;
+    expect(Buffer.concat(chunks)).toEqual(expected);
+    queue.close();
+  }));
+}, 20_000);
 
 it("cancels the internal pending handshake when the outbound device leaves", async () => {
   const fixture = await setup({ handshakeTimeoutMs: 60_000 });

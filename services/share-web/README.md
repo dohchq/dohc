@@ -72,6 +72,15 @@ continuity metadata. Outside development and tests, `DOHC_RELAY_DEPLOYMENT_CONFI
 must name the external configuration file. That file owns the database path;
 `SYNC_RELAY_DB_PATH` cannot override it.
 
+If fresh initialization is interrupted, preserve its partial configuration, relay
+database, and continuity directory. Initialize with new, empty paths after inspecting
+that failure. Do not reuse this procedure to replace an established deployment.
+Set `DOHC_RELAY_DEPLOYMENT_CONFIG` in the Compose service to the new configuration path.
+
+The relay can retire its storage handle at runtime and report HTTP 503 from `/health`.
+Restart the service once. A confirmed rollback permits reopening; a continuity
+refusal requires preserving both volumes and following the recovery limits below.
+
 Stop `share-web` and `sync-relay` before backup or restore. Back up the complete
 relay volume, including SQLite side files. Keep the original volume before
 restoring into an empty replacement. The relay refuses startup if the restored
@@ -108,13 +117,15 @@ The transport has no default limits.
 | --- | --- |
 | `maxConnections` | Active connections and pending upgrades per service |
 | `maxHeaderBytes`, `maxCredentialBytes` | Raw header bytes and encoded Authorization bytes |
-| `maxPayloadBytes`, `maxPendingBytes` | Control message bytes and queued socket bytes |
+| `maxPayloadBytes`, `maxPendingBytes` | Message bytes and queued socket bytes; also bound document transport segments and in-flight bytes |
 | `maxFragments`, `maxBufferedChunks` | WebSocket receiver fragments and buffered chunks |
 | `handshakeTimeoutMs` | Time to receive registration |
 | `heartbeatIntervalMs`, `heartbeatTimeoutMs` | Relay ping interval and device pong deadline |
 | `closeTimeoutMs` | Time allowed for socket closure |
 
 `maxPendingBytes` must exceed `maxPayloadBytes` by at least 16 bytes for frame headers.
+Document throughput also depends on this window. A one-segment window waits for
+each credit reply; size it for the intended bandwidth and round-trip delay.
 `maxCredentialBytes` must not exceed `maxHeaderBytes`.
 Each value and the combined heartbeat interval and deadline must fit a signed 32-bit integer.
 These transport bounds do not select document admission or capacity limits.
@@ -159,6 +170,18 @@ ownership. After revocation, the next relay process refuses the revoked
 credential. A runtime continuity failure closes active device connections before
 the storage owner releases its lock.
 
+The optional `--delivery-config` file enables the configured native document host.
+It must include a positive integer `shutdownGraceMs`. On disconnect, the connector
+closes native stdin and drains stdout. After that grace period, it sends `SIGTERM`.
+If the child remains alive for another grace period, it sends `SIGKILL`.
+On Windows, the first signal already terminates the child.
+The connector waits for child stdio to close before reporting shutdown.
+
+Document transport advertises the configured receive limits in its startup messages.
+The bridge reduces each advertisement to its own limits. Senders retain bounded queues
+and wait for byte credit when the receiver is full. Byte credit reports consumed
+transport bytes; durable document acknowledgements still come from the native engine.
+
 ## Configured service-host integration
 
 This private integration applies the relay's committed journal through a dedicated
@@ -192,6 +215,16 @@ Startup verifies the daemon's namespace, host, and workspace handles before
 opening admission. Shutdown closes the child before relay storage. A retired
 connection cannot disconnect its replacement. Keep the instance ID across
 restarts. This command cannot replace an instance at its current host epoch.
+The optional `--delivery-config` file enables the configured native document host.
+It must include a positive integer `shutdownGraceMs`. On disconnect, the connector
+closes native stdin and drains stdout. After that grace period, it sends `SIGTERM`.
+If the child remains alive for another grace period, it sends `SIGKILL`.
+The connector waits for child stdio to close before reporting shutdown.
+
+Document transport advertises the configured receive limits in its startup messages.
+The bridge reduces each advertisement to its own limits. Senders retain bounded queues
+and wait for byte credit when the receiver is full. Byte credit reports consumed
+transport bytes; durable document acknowledgements still come from the native engine.
 
 ## Reserved later-phase deployment work
 

@@ -1,6 +1,6 @@
 import { WebSocket } from "ws";
 import { DEVICE_CONTROL_PATH, DEVICE_CONTROL_PROTOCOL, parseDeviceControlLimits,
-  parseDeviceControlRegistration, parseDeviceLiveHostStart, type DeviceControlLimits, type DeviceControlRegistration } from "@dohc/live-session-contract/device-control";
+  parseDeviceControlRegistration, parseDeviceLiveHostStart, parseDeviceLiveHostCredit, type DeviceControlLimits, type DeviceControlRegistration } from "@dohc/live-session-contract/device-control";
 import { parseDeviceHostCredential, type DeviceHostCredential } from "./deviceHostCredential.js";
 import { readDeviceLiveHostConfig } from "./deviceLiveHostConfig.js";
 import { startDeviceNativeTransport } from "./deviceNativeTransport.js";
@@ -61,7 +61,8 @@ export function connectDeviceHost(options: {
           if (!native) throw new Error("Early device bytes.");
           native.receive(Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data));
         } else {
-          if (!config || native) throw new Error("Unexpected device control.");
+          if (native) { native.credit(parseDeviceLiveHostCredit(JSON.parse(data.toString()))); return; }
+          if (!config) throw new Error("Unexpected device control.");
           const start = parseDeviceLiveHostStart(JSON.parse(data.toString()));
           if (start.host.hostId !== registration!.hostId || start.host.hostEpoch !== registration!.hostEpoch ||
             start.host.instanceId !== registration!.instanceId || start.host.connectionId !== registration!.connectionId) throw new Error("Device start identity mismatch.");

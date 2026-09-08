@@ -130,7 +130,7 @@ export class LiveCommittedDelivery {
               },
             },
             deadlineMs: this.#connection.deadlineMs,
-          });
+          }, signal);
           aborted();
           const id = (response.result as { registrationId?: unknown })
             ?.registrationId;
@@ -195,14 +195,14 @@ export class LiveCommittedDelivery {
     const aborted = () => { if (signal?.aborted) throw signal.reason; };
     try {
       aborted();
-      drain = this.#store.open({ host: this.#connection.host, document });
+      drain = this.#store.openSettlement({ host: this.#connection.host, document });
       const captured = this.#store.settlement(drain);
-      const registration = await this.#connection.client.sendRequest({ id: this.#connection.nextRequestId(), method: "liveApplication.register", workspace: this.#connection.workspace, params: { binding: { ...captured.binding, selectorPaths: [...captured.binding.selectorPaths] } }, deadlineMs: this.#connection.deadlineMs });
+      const registration = await this.#connection.client.sendRequest({ id: this.#connection.nextRequestId(), method: "liveApplication.register", workspace: this.#connection.workspace, params: { binding: { ...captured.binding, selectorPaths: [...captured.binding.selectorPaths] } }, deadlineMs: this.#connection.deadlineMs }, signal);
       aborted();
       this.#store.settlement(drain);
       const registrationId = (registration.result as {registrationId?: unknown})?.registrationId;
       if (typeof registrationId !== "number" || !Number.isSafeInteger(registrationId) || registrationId < 1) throw new Error("Invalid committed settlement registration.");
-      const response = await this.#connection.client.sendRequest({ id: this.#connection.nextRequestId(), method: "liveApplication.settle", workspace: this.#connection.workspace, params: { registrationId, terminalReceipt: captured.terminalReceipt ? { ...captured.terminalReceipt } : null }, deadlineMs: this.#connection.deadlineMs });
+      const response = await this.#connection.client.sendRequest({ id: this.#connection.nextRequestId(), method: "liveApplication.settle", workspace: this.#connection.workspace, params: { registrationId, terminalReceipt: captured.terminalReceipt ? { ...captured.terminalReceipt } : null }, deadlineMs: this.#connection.deadlineMs }, signal);
       aborted();
       this.#store.settlement(drain);
       return settlementResult(response.result, captured.terminalReceipt);

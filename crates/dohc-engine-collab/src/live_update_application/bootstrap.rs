@@ -129,7 +129,7 @@ where
             let marker = durable::read_marker_in(tx, &key).map_err(ApplicationError::from).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;
             if marker.regime != Regime::Replicated || marker.lineage_claim_id.as_deref() != Some(&input.baseline_digest)
                 || marker.lineage_claim_status != durable::LineageClaimStatus::Exact || marker.content_kind != ContentKind::Richdoc
-                || marker.path.as_deref() != Some(&binding.current_path) || marker.head_update_seq < sequence || sequence != 0 {
+                || marker.path.as_deref() != Some(&binding.current_path) || sequence != 0 || marker.head_update_seq < 0 {
                 return Err(E::from(ApplicationError::Corrupt));
             }
             let retained = get_binary_blob(tx, &input.baseline_digest).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;

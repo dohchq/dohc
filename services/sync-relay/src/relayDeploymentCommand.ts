@@ -57,7 +57,8 @@ function main(args: string[]): void {
 
 try {
   main(process.argv.slice(2));
-} catch {
+} catch (error) {
   console.error("Relay deployment command refused. Use --help for the required arguments.");
+  if (error instanceof Error && error.message) console.error(error.message);
   process.exitCode = 1;
 }

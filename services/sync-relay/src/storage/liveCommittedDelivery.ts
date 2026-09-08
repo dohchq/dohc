@@ -44,7 +44,7 @@ import {
   verifyJournalRow,
   assertJournalCheckpointPosition,
 } from "./liveUpdateJournal";
-import { assertWorkspaceQuota } from "./workspaces";
+import { bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
 
 export interface CommittedBootstrap {
   readonly bootstrapId: string;
@@ -203,15 +203,6 @@ export class LiveCommittedDeliveryStore {
     }
     return capture;
   }
-  #charge(workspaceId: string, bytes: number): void {
-    assertWorkspaceQuota(this.#storage, workspaceId, bytes);
-    const result = this.#storage.db
-      .prepare(
-        "UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?",
-      )
-      .run(bytes, workspaceId);
-    integrity(result.changes === 1);
-  }
   #bootstrapRow(capture: DrainCapture): Record<string, unknown> {
     const row = this.#storage.db
       .prepare(`SELECT * FROM ${BOOTSTRAPS} WHERE ${WHERE_BOOTSTRAP}`)
@@ -258,10 +249,16 @@ export class LiveCommittedDeliveryStore {
     }
     return row;
   }
-  open(input: {
+  open(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey }): CommittedDeliveryDrain {
+    return this.#open(input, true);
+  }
+  openSettlement(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey }): CommittedDeliveryDrain {
+    return this.#open(input, false);
+  }
+  #open(input: {
     host: LiveHostConnectionCoordinate;
     document: LiveDocumentKey;
-  }): CommittedDeliveryDrain {
+  }, createBootstrap: boolean): CommittedDeliveryDrain {
     const host = snapshotHostCoordinate(input.host),
       document = journalDocument(input.document);
     const read = this.#storage.readTx(() => {
@@ -316,6 +313,7 @@ export class LiveCommittedDeliveryStore {
     try {
       this.#storage.tx(() => {
         this.#capture(drain);
+        bindLiveDeliveryHostNamespace(this.#storage, document.workspaceId, host.hostId, this.#history.namespace);
         const row = this.#storage.db
           .prepare(`SELECT * FROM ${BOOTSTRAPS} WHERE ${WHERE_BOOTSTRAP}`)
           .get(
@@ -338,6 +336,7 @@ export class LiveCommittedDeliveryStore {
           this.#bootstrapRow(capture);
           return;
         }
+        if (!createBootstrap) throw new Error("Committed delivery must finish before settlement.");
         const values = [
           baseline.bootstrapId,
           baseline.bootstrapMomentId,
@@ -353,7 +352,7 @@ export class LiveCommittedDeliveryStore {
           baseline.projectedMarkdownByteLength,
         ];
         const charge = Buffer.byteLength(JSON.stringify(values));
-        this.#charge(document.workspaceId, charge);
+        consumeLiveDeliveryReservation(this.#storage, document, host.hostId, 0, charge, false);
         this.#storage.db
           .prepare(
             `INSERT INTO ${BOOTSTRAPS}(bootstrap_id,bootstrap_moment_id,relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,host_id,
@@ -547,7 +546,7 @@ export class LiveCommittedDeliveryStore {
             h.connectionId,
           ]),
         );
-      this.#charge(capture.document.workspaceId, charge);
+      consumeLiveDeliveryReservation(this.#storage, capture.document, h.hostId, 0, charge, true);
       this.#storage.db
         .prepare(
           `UPDATE ${BOOTSTRAPS} SET local_ydoc_sequence=?,ack_host_mode=?,ack_host_epoch=?,ack_instance_id=?,ack_connection_id=?,accounted_bytes=accounted_bytes+? WHERE bootstrap_id=? AND local_ydoc_sequence IS NULL`,
@@ -636,7 +635,7 @@ export class LiveCommittedDeliveryStore {
           h.connectionId,
         ];
       const charge = Buffer.byteLength(JSON.stringify(values));
-      this.#charge(capture.document.workspaceId, charge);
+      consumeLiveDeliveryReservation(this.#storage, capture.document, h.hostId, ack.journalCursor, charge, true);
       this.#storage.db
         .prepare(
           `INSERT INTO ${EDGES}(bootstrap_id,workspace_id,journal_cursor,predecessor_cursor,delivery_id,update_digest,accepting_host_epoch,local_ydoc_sequence,ack_host_mode,ack_host_epoch,ack_instance_id,ack_connection_id,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
