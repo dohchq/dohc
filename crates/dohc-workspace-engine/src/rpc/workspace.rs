@@ -445,8 +445,8 @@ impl EngineService {
                 }
                 return Ok(json!({ "workspace": handle }));
             }
-            lock(&self.live_applications).retire_workspace(&open);
             lock(&self.handles).remove(&handle);
+            lock(&self.live_applications).retire_workspace(&open);
             let attached_handles = {
                 let mut handles = lock(&self.handles);
                 let attached: Vec<WorkspaceHandle> = handles

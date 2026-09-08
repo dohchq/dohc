@@ -5,7 +5,7 @@ use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, ApplicationError, ApplicationHandle, ApplicationHostCoordinate,
     ApplicationOwner, ApplicationResult, BootstrapResult, LiveApplicationBootstrap,
-    apply_committed, bootstrap_committed,
+    apply_committed, bootstrap_committed, validate_application_binding,
 };
 use dohc_engine_collab::{CollabError, WriterDocCache};
 use dohc_engine_storage::{EngineStore, FaultInjector};
@@ -89,6 +89,22 @@ impl ActorLiveApplicationOwner {
 
     pub fn is_current(&self) -> bool {
         current(&self.actor, &self.token).is_ok()
+    }
+
+    /// Check durable binding identity before the transport retires output guards.
+    pub async fn validate_binding(&self, binding: LiveObjectBinding) -> Result<(), RuntimeError> {
+        current(&self.actor, &self.token)?;
+        let workspace_id = self.workspace_id.clone();
+        let token = self.token.clone();
+        self.actor
+            .run(move |store, _| {
+                if !token.load(Ordering::Acquire) {
+                    return Err(RuntimeError::ActorUnavailable);
+                }
+                validate_application_binding(store, &workspace_id, &binding).map_err(Into::into)
+            })
+            .await?;
+        current(&self.actor, &self.token)
     }
 
     /// Register an authenticated coordinate and prepared document binding.

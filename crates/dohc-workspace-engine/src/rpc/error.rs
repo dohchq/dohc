@@ -261,6 +261,16 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
             return wire(code, message);
         }
     }
+    if let RuntimeError::LiveApplication(ref application) = error {
+        let code = match application {
+            ApplicationError::InvalidInput(_)
+            | ApplicationError::WorkspaceMismatch
+            | ApplicationError::MainVersionMismatch => ErrorCode::InvalidParams,
+            ApplicationError::Conflict => ErrorCode::Conflict,
+            _ => ErrorCode::Internal,
+        };
+        return wire(code, error.code());
+    }
     let code = match error {
         RuntimeError::Cancelled => ErrorCode::Cancelled,
         RuntimeError::ActorUnavailable | RuntimeError::WorkerPanicked => {
@@ -485,6 +495,33 @@ mod tests {
     use dohc_engine_sync::ObservedBytes;
     use dohc_engine_sync::RelayError;
     use dohc_engine_sync::SyncError;
+
+    #[test]
+    fn live_application_native_errors_preserve_refusal_and_failure_codes() {
+        for (application, expected) in [
+            (
+                ApplicationError::InvalidInput("invalid binding"),
+                ErrorCode::InvalidParams,
+            ),
+            (
+                ApplicationError::WorkspaceMismatch,
+                ErrorCode::InvalidParams,
+            ),
+            (
+                ApplicationError::MainVersionMismatch,
+                ErrorCode::InvalidParams,
+            ),
+            (ApplicationError::Conflict, ErrorCode::Conflict),
+            (ApplicationError::Corrupt, ErrorCode::Internal),
+            (ApplicationError::Interrupted, ErrorCode::Internal),
+        ] {
+            let error = RuntimeError::LiveApplication(application);
+            let message = error.code();
+            let mapped = map_runtime(error);
+            assert_eq!(mapped.code, expected);
+            assert_eq!(mapped.message, message);
+        }
+    }
 
     #[test]
     fn live_application_wrappers_preserve_storage_and_collaboration_refusals() {
