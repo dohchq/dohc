@@ -2,8 +2,8 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import { DEVICE_CONTROL_PATH, DEVICE_CONTROL_PROTOCOL, parseDeviceControlLimits,
-  parseDeviceControlRegistration, type DeviceControlLimits } from "@dohc/live-session-contract/device-control";
-import { createDeviceControlRequestParser, refuseDeviceControl, TokenBucketLimiter } from "@dohc/service-http";
+  parseDeviceControlRegistration, parseDeviceLiveHostStart, parseDeviceLiveHostTransport, type DeviceControlLimits } from "@dohc/live-session-contract/device-control";
+import { BoundedSendQueue, createDeviceControlRequestParser, refuseDeviceControl, TokenBucketLimiter } from "@dohc/service-http";
 import { clientAddress } from "./clientAddress.js";
 
 export function createDeviceControlBridge(options: {
@@ -53,12 +53,15 @@ export function createDeviceControlBridge(options: {
     if (!limiter.allow(address, now())) { refuseDeviceControl(socket, limits.closeTimeoutMs); return; }
     let device: WebSocket | undefined, upstream: WebSocket | undefined;
     let done = false, registered = false;
+    let started = false, attached = false;
+    let toDevice: BoundedSendQueue | undefined, toRelay: BoundedSendQueue | undefined;
     let expectedPong: Buffer | undefined;
     let timer: ReturnType<typeof setTimeout>;
     const stop = () => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      toDevice?.close(); toRelay?.close();
       connections.delete(stop);
       socket.removeListener("data", earlyData);
       upstream?.terminate();
@@ -71,13 +74,17 @@ export function createDeviceControlBridge(options: {
     };
     const writable = (target: WebSocket | undefined, bytes: number): target is WebSocket =>
       target?.readyState === WebSocket.OPEN && target.bufferedAmount + bytes <= limits.maxPendingBytes;
+    const sendQueue = (target: WebSocket) => new BoundedSendQueue({ maxBytes: limits.maxPendingBytes, maxSegmentBytes: limits.maxPayloadBytes,
+      send(bytes, binary, callback) {
+        if (!writable(target, bytes.length + 16)) throw new Error("Device bridge is full.");
+        target.send(bytes, { binary }, callback);
+      }, onDrain() {}, onError: stop });
     const earlyData = () => stop();
     connections.add(stop);
     socket.once("close", stop);
     socket.once("end", stop);
     socket.once("error", stop);
-    // No device application frames exist in this protocol. Observe cancellation
-    // while the relay authenticates, and refuse bytes sent before the upgrade.
+    // Observe cancellation during relay authentication and refuse pre-upgrade bytes.
     socket.on("data", earlyData);
     socket.resume();
     timer = setTimeout(stop, limits.handshakeTimeoutMs);
@@ -90,17 +97,45 @@ export function createDeviceControlBridge(options: {
       upstream.on("error", stop);
       upstream.on("close", stop);
       upstream.on("message", (data, binary) => {
-        if (done || registered || binary) { stop(); return; }
+        if (done) return;
         try {
+          if (registered) {
+            if (binary) {
+              if (!attached) throw new Error("Early relay bytes.");
+              toDevice!.write(Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data), true);
+            } else {
+              if (started) throw new Error("Unexpected relay control.");
+              const start = JSON.stringify(parseDeviceLiveHostStart(JSON.parse(data.toString())));
+              started = true;
+              toDevice!.write(Buffer.from(start), false);
+            }
+            return;
+          }
+          if (binary) throw new Error("Early relay bytes.");
           const notice = JSON.stringify(parseDeviceControlRegistration(JSON.parse(data.toString())));
           if (Buffer.byteLength(notice) > limits.maxPayloadBytes) { stop(); return; }
           socket.removeListener("data", earlyData);
           socket.pause();
           server.handleUpgrade(request, socket, head, accepted => {
             device = accepted;
+            toDevice = sendQueue(device);
+            toRelay = sendQueue(upstream!);
             device.on("error", stop);
             device.on("close", stop);
-            device.on("message", stop);
+            device.on("message", (bytes, isBinary) => {
+              try {
+                if (!registered || !started) throw new Error("Early device bytes.");
+                if (isBinary) {
+                  if (!attached) throw new Error("Early native bytes.");
+                  toRelay!.write(Buffer.isBuffer(bytes) ? bytes : Array.isArray(bytes) ? Buffer.concat(bytes) : Buffer.from(bytes), true);
+                } else {
+                  if (attached) throw new Error("Unexpected device control.");
+                  const transport = JSON.stringify(parseDeviceLiveHostTransport(JSON.parse(bytes.toString())));
+                  attached = true;
+                  toRelay!.write(Buffer.from(transport), false);
+                }
+              } catch { stop(); }
+            });
             device.on("ping", stop);
             device.on("pong", pong => {
               if (!expectedPong || !pong.equals(expectedPong) || !writable(upstream, pong.length + 16)) { stop(); return; }
@@ -109,7 +144,7 @@ export function createDeviceControlBridge(options: {
             });
             if (done || !writable(device, Buffer.byteLength(notice) + 16)) { stop(); return; }
             registered = true;
-            device.send(notice, error => { if (error) stop(); });
+            toDevice.write(Buffer.from(notice), false);
             touch();
             device.resume();
           });

@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { WebSocket } from "ws";
@@ -20,15 +20,19 @@ const exchangeKey = "device-control-test-exchange-key-32";
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-async function setup(overrides: Partial<DeviceControlLimits> = {}, deployment = false) {
+async function setup(overrides: Partial<DeviceControlLimits> = {}, deployment = false, delivery = false) {
   const directory = await mkdtemp(join(tmpdir(), "dohc-device-control-"));
   const configPath = join(directory, "deployment.json");
   if (deployment) initializeRelayDeployment({ configPath, relayPath: join(directory, "volume", "relay.sqlite"), continuityDirectory: join(directory, "continuity") });
-  const storage = deployment ? openRelayDeployment(configPath).storage : openSyncRelayStorage(join(directory, "relay.sqlite"));
+  const owner = deployment ? openRelayDeployment(configPath) : undefined;
+  const storage = owner?.storage ?? openSyncRelayStorage(join(directory, "relay.sqlite"));
+  const deliveryConfig = join(directory, "delivery.json");
+  if (delivery) await writeFile(deliveryConfig, JSON.stringify({ version: 1, workspaceIds: ["workspace"], maxQueuedBytes: 4_000_000, maxActiveDrains: 1,
+    client: { aggregateBytes: 200_000_000, maxUploads: 1, connectTimeoutMs: 1000, requestDeadlineMs: 1000, maxFrameBytes: 1_048_576 } }));
   const credential = createDeviceHostCredential("device-test", parseHostEpoch(1));
   expect(storage.provisionDeviceHostCredential({ credential, updatedAtMs: Date.now() }).ok).toBe(true);
   const control = createDeviceControl({ storage, hosts: new Set(["relay.test"]), relayExchangeKey: exchangeKey,
-    limits: { ...limits, ...overrides } });
+    limits: { ...limits, ...overrides }, ...(delivery && owner ? { delivery: { configPath: deliveryConfig, history: owner.history } } : {}) });
   const server = createServer();
   server.on("upgrade", control.handleUpgrade);
   server.listen(0, "127.0.0.1");
@@ -60,6 +64,25 @@ async function setup(overrides: Partial<DeviceControlLimits> = {}, deployment = 
 }
 
 describe("outbound device control authority", () => {
+  it.each(["early-binary", "unknown-control", "malformed-native", "oversize"])("refuses invalid private delivery bytes: %s", async mode => {
+    const fixture = await setup({}, true, true);
+    const connection = fixture.connect();
+    const notices: Record<string, unknown>[] = [];
+    connection.ws.on("message", (bytes, binary) => { if (!binary) notices.push(JSON.parse(bytes.toString())); });
+    await expect.poll(() => notices.length).toBe(2);
+    expect(notices[1]).toMatchObject({ type: "liveHost.start", version: 1,
+      host: { hostId: fixture.credential.hostId, instanceId: fixture.credential.instanceId } });
+    await expect(fixture.control.drain({ workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64) })).rejects.toThrow("not ready");
+    if (mode === "early-binary") connection.ws.send(Buffer.from("DOP1"));
+    if (mode === "unknown-control") connection.ws.send(JSON.stringify({ type: "native.ready", version: 1 }));
+    if (mode === "malformed-native") {
+      connection.ws.send(JSON.stringify({ type: "liveHost.transport", version: 1 }));
+      connection.ws.send(Buffer.alloc(12));
+    }
+    if (mode === "oversize") connection.ws.send(Buffer.alloc(limits.maxPayloadBytes + 1));
+    await connection.closed;
+    await expect.poll(() => fixture.storage.getLiveHostControl()?.admissionState).toBe("closed");
+  });
   it("registers server coordinates, replaces the same instance, and ignores its stale disconnect", async () => {
     const fixture = await setup();
     const first = await fixture.registered();

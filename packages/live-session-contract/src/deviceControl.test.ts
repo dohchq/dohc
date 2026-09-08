@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { parseDeviceControlLimits, parseDeviceControlRegistration } from "./deviceControl.js";
+import { parseDeviceControlLimits, parseDeviceControlRegistration, parseDeviceLiveHostStart, parseDeviceLiveHostTransport } from "./deviceControl.js";
 
 const limits = { maxConnections: 4, maxHeaderBytes: 8192, maxCredentialBytes: 4096, maxPayloadBytes: 4096,
   maxPendingBytes: 8192, maxFragments: 8, maxBufferedChunks: 8, handshakeTimeoutMs: 1000,
@@ -23,4 +23,17 @@ it("accepts only the full device registration coordinate", () => {
   expect(() => parseDeviceControlRegistration({ ...notice, mode: "service" })).toThrow();
   expect(() => parseDeviceControlRegistration({ ...notice, documentReady: true })).toThrow();
   expect(() => parseDeviceControlRegistration({ ...notice, hostEpoch: Number.MAX_SAFE_INTEGER + 1 })).toThrow();
+});
+
+const start = { type: "liveHost.start", version: 1, relayNamespace: "relay", authToken: "A".repeat(43),
+  host: { hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection" } };
+it("accepts only the two bounded live transport controls", () => {
+  expect(parseDeviceLiveHostStart(start)).toEqual(start);
+  expect(parseDeviceLiveHostTransport({ type: "liveHost.transport", version: 1 })).toEqual({ type: "liveHost.transport", version: 1 });
+  for (const value of [{ ...start, command: "run" }, { ...start, version: 2 }, { ...start, host: { ...start.host, root: "/" } },
+    { ...start, authToken: "" }, { ...start, host: { ...start.host, hostEpoch: 0 } }, { ...start, relayNamespace: "" }]) {
+    expect(() => parseDeviceLiveHostStart(value)).toThrow();
+  }
+  expect(() => parseDeviceLiveHostTransport({ type: "liveHost.transport", version: 1, ready: true })).toThrow();
+  expect(() => parseDeviceLiveHostTransport({ type: "liveHost.start", version: 1 })).toThrow();
 });

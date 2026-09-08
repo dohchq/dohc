@@ -8,11 +8,18 @@ import { createDeviceControlRequestParser, refuseDeviceControl } from "@dohc/ser
 import { parseDeviceHostCredential } from "./deviceHostCredential.js";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity.js";
 import type { SyncRelayStorage } from "./storage.js";
+import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
+import type { LiveJournalHistoryAuthority } from "./liveCommittedDelivery.js";
+import { readRelayDeviceDeliveryConfig } from "./deviceLiveHostConfig.js";
+import { createDeviceLiveDelivery } from "./deviceLiveDelivery.js";
 
 export function createDeviceControl(options: {
   storage: SyncRelayStorage; hosts: ReadonlySet<string>; relayExchangeKey: string; limits: DeviceControlLimits;
+  delivery?: { configPath: string; history: LiveJournalHistoryAuthority };
 }) {
   const limits = parseDeviceControlLimits(options.limits);
+  const deliveryConfig = options.delivery ? readRelayDeviceDeliveryConfig(options.delivery.configPath, limits) : undefined;
+  if (options.delivery && !options.delivery.history.reconciled) throw new Error("Device delivery requires reconciled deployment history.");
   if (typeof options.relayExchangeKey !== "string" || options.relayExchangeKey.length < 32) {
     throw new TypeError("Device control requires a relay exchange key.");
   }
@@ -25,6 +32,7 @@ export function createDeviceControl(options: {
   const server = new WebSocketServer(receive);
   const connections = new Set<() => void>();
   let current: (() => void) | undefined;
+  let currentDelivery: ReturnType<typeof createDeviceLiveDelivery> | undefined;
   let closed = false;
   server.on("wsClientError", (_error, socket) => refuseDeviceControl(socket, limits.closeTimeoutMs));
 
@@ -50,6 +58,7 @@ export function createDeviceControl(options: {
     if (Buffer.byteLength(notice) > limits.maxPayloadBytes) { refuseDeviceControl(socket, limits.closeTimeoutMs); return; }
     const parsedCredential = credential;
     let ws: WebSocket | undefined;
+    let delivery: ReturnType<typeof createDeviceLiveDelivery> | undefined;
     let registered = false, done = false;
     let expectedPong: Buffer | undefined;
     let timer: ReturnType<typeof setTimeout>;
@@ -59,6 +68,8 @@ export function createDeviceControl(options: {
       clearTimeout(timer);
       connections.delete(stop);
       if (current === stop) current = undefined;
+      if (currentDelivery === delivery) currentDelivery = undefined;
+      delivery?.close();
       if (ws) ws.terminate(); else socket.destroy();
       if (registered) {
         // Storage checks this incarnation; a stale close cannot disconnect its replacement.
@@ -94,7 +105,10 @@ export function createDeviceControl(options: {
         ws = accepted;
         ws.on("error", stop);
         ws.on("close", stop);
-        ws.on("message", stop);
+        ws.on("message", (data, binary) => {
+          if (!delivery) { stop(); return; }
+          delivery.receive(Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data), binary);
+        });
         ws.on("ping", stop);
         ws.on("pong", data => {
           if (!expectedPong || !data.equals(expectedPong)) { stop(); return; }
@@ -110,6 +124,12 @@ export function createDeviceControl(options: {
         current?.();
         current = stop;
         ws.send(notice, error => { if (error) stop(); });
+        if (deliveryConfig && options.delivery) {
+          delivery = createDeviceLiveDelivery({ ws, limits, config: deliveryConfig, storage: options.storage,
+            history: options.delivery.history, host: { mode: "device", hostId: parsedCredential.hostId, hostEpoch: parsedCredential.hostEpoch,
+              instanceId: parsedCredential.instanceId, connectionId }, isCurrent, stop });
+          currentDelivery = delivery;
+        }
         schedulePing();
         ws.resume();
       });
@@ -124,5 +144,10 @@ export function createDeviceControl(options: {
   };
   options.storage.unavailable.addEventListener("abort", close, { once: true });
   if (options.storage.unavailable.aborted) close();
-  return { handleUpgrade, close };
+  return { handleUpgrade, close,
+    async drain(document: LiveDocumentKey, signal?: AbortSignal) {
+      if (!currentDelivery) throw new Error("Device delivery is unavailable.");
+      return currentDelivery.drain(document, signal);
+    },
+  };
 }
