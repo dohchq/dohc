@@ -39,5 +39,12 @@ export function initializeLiveRestoreOperationSchema(db: SqliteDb): void {
       throw new Error("Live restore schema is missing or damaged.");
     }
   }
+  const indexes = db.prepare(`PRAGMA index_list(${LIVE_RESTORE_OPERATIONS})`).all();
+  if (indexes.length !== 2 || indexes.some(row => row.unique !== 1 || row.partial !== 0 || (row.origin !== "pk" && row.origin !== "u"))) {
+    throw new Error("Live restore index is damaged.");
+  }
+  if (db.prepare(`PRAGMA foreign_key_check(${LIVE_RESTORE_OPERATIONS})`).all().length) {
+    throw new Error("Live restore parent is damaged.");
+  }
   if (!marked) db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(marker, Date.now());
 }

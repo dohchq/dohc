@@ -7,8 +7,9 @@ import type { StorageContext } from "./context";
 import { revokeShareGrantInTransaction } from "./shares";
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_RESTORE_OPERATIONS as table } from "./liveRestoreOperationSchema";
-import { effectiveShareSelector, parseStoredAnyShareSelectorJson, visibleSharePath } from "../shareFilter";
+import { effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, visibleSharePath } from "../shareFilter";
 import { canonicalLiveSelector, currentLiveDocumentMoment } from "./liveDocumentAuthority";
+import { requireLiveJournalHistory } from "./liveJournalHistory";
 
 export type StopRestoreIntent = {
   operationId: string;
@@ -60,8 +61,8 @@ function requireAvailableJournalCursor(storage: StorageContext): void {
   const sequence = rows.length === 0 ? 0 : integer(Number(rows[0]!.seq));
   if (rows.length > 1 || sequence < integer(Number(maximum)) || sequence === Number.MAX_SAFE_INTEGER) refuse();
 }
-function read(storage: StorageContext, operationId: string): StopRestoreOperation | null {
-  const row = storage.db.prepare(`SELECT * FROM ${table} WHERE operation_id=?`).get(operationId);
+function read(storage: StorageContext, operationId: string, workspaceId: string): StopRestoreOperation | null {
+  const row = storage.db.prepare(`SELECT * FROM ${table} WHERE operation_id=? AND workspace_id=?`).get(operationId, workspaceId);
   if (!row) return null;
   const intent = snapshot(JSON.parse(String(row.intent_json)) as StopRestoreIntent);
   if (intent.operationId !== operationId || !isDeepStrictEqual(key(intent.document),
@@ -77,7 +78,8 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
   const intent = snapshot(input), at = integer(now);
   return storage.tx(() => {
     owner(storage, intent.document.workspaceId, intent.ownerUserId);
-    const saved = read(storage, intent.operationId);
+    requireLiveJournalHistory(storage);
+    const saved = read(storage, intent.operationId, intent.document.workspaceId);
     if (saved) { if (!isDeepStrictEqual(saved.intent, intent)) refuse(); return saved; }
     requireAvailableJournalCursor(storage);
     const document = storage.db.prepare(`SELECT restore_fence_generation,baseline_digest,baseline_moment_relay_seq,current_path FROM sync_relay_live_documents
@@ -92,7 +94,7 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
       !grant || grant.shareId !== intent.shareId || grant.generation !== intent.expectedGrantGeneration || grant.status !== "active") refuse();
     const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
     const selector = storedSelector && effectiveShareSelector(storedSelector, grant.access);
-    if (!selector || "kind" in selector || selector.versionId !== null || !canonicalLiveSelector(share, selector) ||
+    if (!selector || !isLiveEditShareSelector(selector) || !canonicalLiveSelector(share, selector) ||
       visibleSharePath(selector, String(document.current_path)) !== document.current_path ||
       (grant.principalKind !== "link" && intent.expectedDependentGrantIds.length !== 0)) refuse();
     const point = intent.restorePointCursor === 0 ? document.baseline_digest : storage.db.prepare(`SELECT update_digest FROM sync_relay_live_update_journal
@@ -113,20 +115,19 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
       VALUES (?,?,?,?,?,?,'authority-invalidated',?,NULL,NULL,?,?,NULL,?)`)
       .run(intent.operationId, ...key(intent.document), intentJson, intent.expectedFence, revoked.grant.generation, at, charge);
     storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, intent.document.workspaceId);
-    return read(storage, intent.operationId)!;
+    return read(storage, intent.operationId, intent.document.workspaceId)!;
   });
 }
 
 export function readStopRestore(storage: StorageContext, input: { operationId: string; workspaceId: string; ownerUserId: string }): StopRestoreOperation | null {
   const operationId = parseLiveUpdateIdentifier(input.operationId), workspaceId = parseLiveUpdateIdentifier(input.workspaceId), userId = parseLiveUpdateIdentifier(input.ownerUserId);
-  return storage.readTx(() => { owner(storage, workspaceId, userId); const saved = read(storage, operationId);
-    if (saved && saved.intent.document.workspaceId !== workspaceId) refuse(); return saved; });
+  return storage.readTx(() => { owner(storage, workspaceId, userId); return read(storage, operationId, workspaceId); });
 }
 
 export function advanceStopRestoreFence(storage: StorageContext, input: { operationId: string; workspaceId: string; ownerUserId: string }, now: number): StopRestoreOperation {
   const operationId = parseLiveUpdateIdentifier(input.operationId), workspaceId = parseLiveUpdateIdentifier(input.workspaceId), userId = parseLiveUpdateIdentifier(input.ownerUserId), at = integer(now);
   return storage.tx(() => {
-    owner(storage, workspaceId, userId); const saved = read(storage, operationId);
+    owner(storage, workspaceId, userId); requireLiveJournalHistory(storage); const saved = read(storage, operationId, workspaceId);
     if (!saved || saved.intent.document.workspaceId !== workspaceId) refuse();
     if (saved.phase === "fenced") return saved;
     const { intent } = saved, grant = storage.getShareGrant(intent.grantId);
@@ -138,8 +139,9 @@ export function advanceStopRestoreFence(storage: StorageContext, input: { operat
       WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current' AND admission_state='open' AND restore_fence_generation=?`)
       .run(saved.oldFence + 1, ...key(intent.document), saved.oldFence);
     if (Number(changed.changes) !== 1) refuse();
-    storage.db.prepare(`UPDATE ${table} SET phase='fenced',new_fence=?,cutover_cursor=?,fenced_at_ms=? WHERE operation_id=?`)
+    const advanced = storage.db.prepare(`UPDATE ${table} SET phase='fenced',new_fence=?,cutover_cursor=?,fenced_at_ms=? WHERE operation_id=?`)
       .run(saved.oldFence + 1, cutover, at, operationId);
-    return read(storage, operationId)!;
+    if (Number(advanced.changes) !== 1) refuse();
+    return read(storage, operationId, workspaceId)!;
   });
 }

@@ -9,6 +9,8 @@ import { registered, host, DatabaseSync, cleanupLiveDeliveryFixtures } from "./l
 import { openRelayDeployment } from "../../../services/sync-relay/src/relayDeployment.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
 import { beginStopRestore, advanceStopRestoreFence, readStopRestore, type StopRestoreIntent } from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
+import { attachLiveJournalHistory, createLiveJournalHistoryAuthority } from "../../../services/sync-relay/src/storage/liveJournalHistory.js";
+import { initializeLiveRestoreOperationSchema } from "../../../services/sync-relay/src/storage/liveRestoreOperationSchema.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
 const named = { kind: "named", userId: "reader", grantId: "grant" } as const;
@@ -25,6 +27,67 @@ function fixture(deployment = false, workspaceQuotaBytes?: number) {
     credentials: f.raw.prepare("SELECT * FROM sync_relay_link_credentials").all() });
   return { ...f, context, intent, lookup, rows };
 }
+
+it.each(["view", "comment"])("refuses a non-edit target grant (%s) without stopping editors", access => {
+  const f = fixture();
+  try {
+    f.write(db => { db.prepare("UPDATE sync_relay_share_grants SET access=? WHERE grant_id='grant'").run(access); });
+    const before = f.rows();
+    expect(() => beginStopRestore(f.context, f.intent, 40)).toThrow();
+    expect(f.rows()).toEqual(before);
+  } finally { f.close(); }
+});
+
+it.each(["begin", "fence"])("requires reconciled journal history before %s", phase => {
+  const f = fixture();
+  try {
+    const history = createLiveJournalHistoryAuthority({ namespace: "restore-history", reconciled: true });
+    attachLiveJournalHistory(f.context, history);
+    if (phase === "fence") beginStopRestore(f.context, f.intent, 40);
+    history.markUnreconciled();
+    const before = f.rows();
+    expect(() => phase === "begin" ? beginStopRestore(f.context, f.intent, 40) : advanceStopRestoreFence(f.context, f.lookup, 50)).toThrow(/reconciliation/);
+    expect(f.rows()).toEqual(before);
+  } finally { f.close(); }
+});
+
+it("does not disclose whether another workspace has an operation ID", () => {
+  const f = fixture();
+  try {
+    f.write(db => { db.prepare("INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms) VALUES('other','other-owner',0)").run(); });
+    beginStopRestore(f.context, f.intent, 40);
+    const lookup = { operationId: "restore", workspaceId: "other", ownerUserId: "other-owner" };
+    expect(readStopRestore(f.context, lookup)).toBeNull();
+    expect(readStopRestore(f.context, { ...lookup, operationId: "unused" })).toBeNull();
+  } finally { f.close(); }
+});
+
+it("rolls back the document fence when its operation update is ignored", () => {
+  const f = fixture();
+  try {
+    beginStopRestore(f.context, f.intent, 40);
+    f.write(db => { db.exec("CREATE TRIGGER ignore_restore BEFORE UPDATE ON sync_relay_live_restore_operations BEGIN SELECT RAISE(IGNORE); END"); });
+    const before = f.rows();
+    expect(() => advanceStopRestoreFence(f.context, f.lookup, 50)).toThrow();
+    expect(f.rows()).toEqual(before);
+    f.write(db => { db.exec("DROP TRIGGER ignore_restore"); });
+    expect(advanceStopRestoreFence(f.context, f.lookup, 50).phase).toBe("fenced");
+  } finally { f.close(); }
+});
+
+it.each(["index", "parent"])("refuses damaged restore schema %s on initialization", damage => {
+  const f = fixture();
+  try {
+    beginStopRestore(f.context, f.intent, 40);
+    if (damage === "index") f.raw.exec("CREATE INDEX unexpected_restore ON sync_relay_live_restore_operations(phase)");
+    else {
+      f.raw.exec("PRAGMA foreign_keys=OFF");
+      f.raw.exec("UPDATE sync_relay_live_restore_operations SET workspace_id='missing'");
+      f.raw.exec("PRAGMA foreign_keys=ON");
+    }
+    expect(() => initializeLiveRestoreOperationSchema(f.context.db)).toThrow(/damaged/);
+  } finally { f.close(); }
+});
 
 it.each([false, true])("revokes before fencing and resumes each phase exactly once, deployment=%s", deployment => {
   const f = fixture(deployment);
