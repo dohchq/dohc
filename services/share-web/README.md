@@ -117,13 +117,15 @@ The transport has no default limits.
 | --- | --- |
 | `maxConnections` | Active connections and pending upgrades per service |
 | `maxHeaderBytes`, `maxCredentialBytes` | Raw header bytes and encoded Authorization bytes |
-| `maxPayloadBytes`, `maxPendingBytes` | Control message bytes and queued socket bytes |
+| `maxPayloadBytes`, `maxPendingBytes` | Message bytes and queued socket bytes; also bound document transport segments and in-flight bytes |
 | `maxFragments`, `maxBufferedChunks` | WebSocket receiver fragments and buffered chunks |
 | `handshakeTimeoutMs` | Time to receive registration |
 | `heartbeatIntervalMs`, `heartbeatTimeoutMs` | Relay ping interval and device pong deadline |
 | `closeTimeoutMs` | Time allowed for socket closure |
 
 `maxPendingBytes` must exceed `maxPayloadBytes` by at least 16 bytes for frame headers.
+Document throughput also depends on this window. A one-segment window waits for
+each credit reply; size it for the intended bandwidth and round-trip delay.
 `maxCredentialBytes` must not exceed `maxHeaderBytes`.
 Each value and the combined heartbeat interval and deadline must fit a signed 32-bit integer.
 These transport bounds do not select document admission or capacity limits.
@@ -172,6 +174,7 @@ The optional `--delivery-config` file enables the configured native document hos
 It must include a positive integer `shutdownGraceMs`. On disconnect, the connector
 closes native stdin and drains stdout. After that grace period, it sends `SIGTERM`.
 If the child remains alive for another grace period, it sends `SIGKILL`.
+On Windows, the first signal already terminates the child.
 The connector waits for child stdio to close before reporting shutdown.
 
 Document transport advertises the configured receive limits in its startup messages.
