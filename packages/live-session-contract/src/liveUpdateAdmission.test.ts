@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import vectors from "../vectors/live-update-admission-vectors.json";
 import {
   LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
@@ -111,7 +112,7 @@ describe("live-update shared vectors", () => {
       expect(Array.from(parsed.updateBytes)).toEqual(row.bytes);
       // These vectors distinguish parser normalization from the Rust consumer's
       // raw immutable-record check. The shared parser does not prove a commit.
-      const canonical = JSON.stringify(parsed.metadata) === JSON.stringify(row.metadata);
+      const canonical = isDeepStrictEqual(parsed.metadata, row.metadata);
       const digestMatches = createHash("sha256").update(bytes).digest("hex") === parsed.metadata.accepted.receipt.updateDigest;
       expect(canonical && digestMatches).toBe(row.committedValid);
     });

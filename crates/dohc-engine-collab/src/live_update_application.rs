@@ -4,12 +4,16 @@
 //! handle. Event parsing supplies no authority. The owner serializes held-handle
 //! invalidation with each transaction; the transport must also suppress a reply
 //! if its connection closes after this operation returns.
+//! After a new application commits, the writer must run `durable::maybe_compact`
+//! with the existing default threshold. Compaction cannot share the append
+//! transaction. A later failure leaves the committed application replayable.
+//! The durable `available` column fences a registration; it does not prove that
+//! its connection is alive. Owner drop invalidates held handles in memory.
 
 use crate::live_object_binding::LiveObjectBinding;
 use crate::{durable, CollabError, DocKey, Regime, WriterDocCache};
 use dohc_engine_storage::{
-    get_binary_blob, hex_sha256, put_binary_blob_with_sha, EngineStore, FaultInjector, NoFaults,
-    StorageError, TxnOutcome,
+    get_binary_blob, hex_sha256, EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -928,7 +932,6 @@ fn insert_application(
     let b = &a.binding;
     let c = &r.coordinate;
     let (kind, principal, grant, generation) = a.authority.fields();
-    put_binary_blob_with_sha(tx, &event.update_bytes, &a.receipt.update_digest)?;
     tx.execute("INSERT INTO live_device_update_applications (relay_database_namespace,workspace_id,delivery_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,update_digest,update_byte_length,journal_cursor,accepting_host_epoch,principal_kind,principal_id,grant_id,grant_generation,received_at_ms,first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,applied_connection_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
         params![r.namespace,b.workspace_id,a.receipt.delivery_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,serde_json::to_string(&b.selector_paths).map_err(|_| invalid("selector JSON"))?,b.restore_fence_generation,a.receipt.update_digest,event.update_bytes.len() as i64,a.receipt.journal_cursor,a.receipt.accepting_host_epoch,kind,principal,grant,generation,a.received_at_ms,event.metadata.first_seen.len() as i64,sequence,c.host_id,c.host_epoch,c.instance_id,c.connection_id]).map_err(write_sql)?;
     for (ordinal, range) in event.metadata.first_seen.iter().enumerate() {
@@ -941,6 +944,7 @@ fn insert_application(
 mod tests {
     use super::*;
     use crate::{ContentKind, Ydoc};
+    use dohc_engine_storage::put_binary_blob_with_sha;
     use dohc_test_scratch::ScratchDir;
 
     #[cfg(feature = "fault-injection")]
