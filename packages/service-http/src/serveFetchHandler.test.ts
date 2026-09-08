@@ -53,10 +53,13 @@ describe("serveFetchHandler", () => {
         entered();
       });
       const response = new Response(new ReadableStream({ start(controller) { controller.error(new Error("retired response")); } }));
+      const cancel = response.body!.cancel.bind(response.body!);
       vi.spyOn(response.body!, "cancel").mockImplementation(() => ({
         catch(onRejected: (error: Error) => void) {
-          onRejected(new Error("retired response"));
-          return { then(resolve: () => void) { cancellationAwaited(); resolve(); } };
+          const cancelled = cancel().catch(onRejected);
+          return { then(resolve: () => void, reject: (error: unknown) => void) {
+            cancelled.then(() => { cancellationAwaited(); resolve(); }, reject);
+          } };
         },
       }) as unknown as Promise<void>);
       return response;

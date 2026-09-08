@@ -41,6 +41,7 @@ describe("relay deployment continuity", () => {
         { encoding: "utf8", windowsHide: true, timeout: 20_000 });
       expect(missingConfig.error).toBeUndefined();
       expect(missingConfig.status).not.toBe(0);
+      expect(missingConfig.stderr).toMatch(/ENOENT|no such file/);
       expect(() => openSyncRelayStorage(f.relayPath)).toThrow(/configured relay/);
       expect(first.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "u", createdAtMs: 1 })).toBe("created");
     } finally { first.storage.close(); }
