@@ -33,15 +33,14 @@ pub mod secret;
 
 // The public sealing entry is [`aead::seal`] only — it draws a fresh CSPRNG IV
 // on every call. The deterministic caller-supplied-IV variant (`seal_with_iv`)
-// is gated behind the `test-util` feature and intentionally not re-exported
-// here: reusing a nonce under one key breaks AES-GCM catastrophically.
+// is private and compiled only for unit tests. Reusing a nonce under one key
+// breaks AES-GCM catastrophically.
 pub use aead::{
     MAX_SECRET_FILE_BYTES, SECRET_AAD_PREFIX, SECRET_IV_BYTES, SECRET_TAG_BYTES, SealedSecret,
     open, seal, secret_aad,
 };
 pub use error::CryptoError;
 pub use key::{
-    SECRET_KEY_BYTES, SECRET_KEY_FILE_PREFIX, SECRET_KEY_FILE_RELATIVE, SecretDataKey,
-    create_key_file, load_key_file, load_or_create_key_file,
+    SECRET_KEY_BYTES, SECRET_KEY_FILE_RELATIVE, SecretDataKey, create_key_file, load_key_file,
 };
 pub use secret::SecretPlaintext;

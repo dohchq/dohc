@@ -602,20 +602,6 @@ pub fn read_replication_acked_seq(
     store.read_with(|conn| read_ack_conn(conn, workspace_id, origin_id))
 }
 
-pub fn ack_replication_peer(
-    store: &mut EngineStore,
-    workspace_id: &str,
-    origin_id: &str,
-    origin_seq: i64,
-    faults: &dyn FaultInjector,
-) -> Result<TxnOutcome<i64>, SyncError> {
-    let outcome = store.write_with(faults, |tx| {
-        ack_tx(tx, workspace_id, origin_id, origin_seq)?;
-        Ok::<i64, SyncError>(origin_seq)
-    })?;
-    Ok(outcome)
-}
-
 pub(crate) fn read_ack_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,

@@ -9,10 +9,8 @@ import {
 } from "./pluginAutomations";
 import type { PluginAutomationRunParams } from "./pluginHostProtocol";
 import type { PluginAutomationDeclaration } from "./pluginManifestSchema";
-import type {
-  PluginPipelinePluginStatus,
-  PluginPipelineStatusEvent,
-} from "./PluginPipeline";
+import type { PluginPipelineStatusEvent } from "./PluginPipeline";
+import type { PluginPipelinePluginStatus } from "./pluginStatusProjection";
 
 function claimOf(overrides: Partial<AutomationClaim> = {}): AutomationClaim {
   return {

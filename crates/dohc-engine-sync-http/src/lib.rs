@@ -124,15 +124,7 @@ impl std::fmt::Debug for HttpRelayTransport {
 
 impl HttpRelayTransport {
     pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Result<Self, RelayError> {
-        Self::with_timeout(base_url, token, Duration::from_secs(30))
-    }
-
-    pub fn with_timeout(
-        base_url: impl Into<String>,
-        token: impl Into<String>,
-        timeout: Duration,
-    ) -> Result<Self, RelayError> {
-        Self::build(base_url, token, timeout, false)
+        Self::build(base_url, token, false)
     }
 
     /// Explicit debug-profile opt-in for authenticated loopback HTTP.
@@ -145,13 +137,12 @@ impl HttpRelayTransport {
         base_url: impl Into<String>,
         token: impl Into<String>,
     ) -> Result<Self, RelayError> {
-        Self::build(base_url, token, Duration::from_secs(30), true)
+        Self::build(base_url, token, true)
     }
 
     fn build(
         base_url: impl Into<String>,
         token: impl Into<String>,
-        timeout: Duration,
         allow_insecure_loopback: bool,
     ) -> Result<Self, RelayError> {
         let base_url = base_url.into().trim_end_matches('/').to_owned();
@@ -162,7 +153,7 @@ impl HttpRelayTransport {
         Ok(Self {
             base_url,
             token,
-            agent: configured_agent(timeout, allow_insecure_loopback, None),
+            agent: configured_agent(Duration::from_secs(30), allow_insecure_loopback, None),
         })
     }
 
