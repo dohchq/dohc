@@ -329,6 +329,357 @@ mod tests {
     fn counts(store: &EngineStore) -> (i64, i64, i64, i64) {
         store.read_with(|conn| conn.query_row("SELECT (SELECT COUNT(*) FROM live_device_bootstraps),(SELECT COUNT(*) FROM moments),(SELECT COUNT(*) FROM ydoc_docs),(SELECT COUNT(*) FROM snapshots)",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))).unwrap()
     }
+    fn fence_input(handle: &ApplicationHandle) -> (NativeRestoreFence, ApplicationHostCoordinate) {
+        let held = handle.registration.lock().unwrap();
+        (
+            NativeRestoreFence {
+                operation_id: "restore".into(),
+                relay_database_namespace: held.namespace.clone(),
+                old_binding: held.binding.clone(),
+                host_id: held.coordinate.host_id.clone(),
+                new_fence: 1,
+                origin: RestoreDeliveryOrigin::Bootstrap {
+                    id: "bootstrap-1".into(),
+                },
+                terminal: None,
+                applied_sequence: 0,
+            },
+            held.coordinate.clone(),
+        )
+    }
+
+    #[test]
+    fn restore_fence_stops_bootstrap_writes_and_replays_after_reopen() {
+        let vector = vectors()
+            .into_iter()
+            .find(|v| v.registration_accepted)
+            .unwrap();
+        let (dir, mut store, mut cache, mut owner, handle) = fixture(&vector);
+        run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap();
+        let (input, coordinate) = fence_input(&handle);
+        let before = counts(&store);
+        let receipt = owner
+            .fence_restore(
+                &mut store,
+                input.clone(),
+                coordinate.clone(),
+                200,
+                &NoFaults,
+            )
+            .unwrap();
+        assert_eq!(receipt.local_head_sequence, 0);
+        assert_eq!(counts(&store), before);
+        assert!(matches!(
+            run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap(),
+            BootstrapResult::Pending(_)
+        ));
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let doc = Ydoc::wire();
+        doc.apply(&vector.bytes).unwrap();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "stale edit")
+            .unwrap();
+        let bytes = doc.encode_full_state();
+        assert!(matches!(
+            store.write_with(&NoFaults, |tx| durable::record_update_in_tx(
+                tx, &key, &bytes, None, None, 201
+            )),
+            Err(CollabError::RestoreFenced)
+        ));
+        drop(handle);
+        drop(owner);
+        drop(store);
+        let mut store = EngineStore::open(&dir.join("engine.db"), 202).unwrap();
+        let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
+        for namespace in ["relay-A", "another-relay"] {
+            assert!(matches!(
+                owner.register(
+                    &mut store,
+                    namespace.into(),
+                    coordinate.clone(),
+                    input.old_binding.clone()
+                ),
+                Err(ApplicationError::Collab(CollabError::RestoreFenced))
+            ));
+        }
+        assert_eq!(
+            owner
+                .fence_restore(
+                    &mut store,
+                    input.clone(),
+                    coordinate.clone(),
+                    203,
+                    &NoFaults
+                )
+                .unwrap(),
+            receipt
+        );
+        let mut conflict = input;
+        conflict.operation_id = "different".into();
+        assert!(owner
+            .fence_restore(&mut store, conflict, coordinate, 204, &NoFaults)
+            .is_err());
+        assert_eq!(store.table_row_count("live_restore_fences").unwrap(), 1);
+    }
+
+    #[test]
+    fn restore_fence_replay_refuses_changed_durable_state() {
+        for sql in [
+            "UPDATE live_device_application_bindings SET available=1",
+            "UPDATE live_device_application_bindings SET restore_fence_generation=2",
+            "UPDATE ydoc_docs SET path='other.md'",
+            "DELETE FROM ydoc_docs",
+        ] {
+            let vector = vectors()
+                .into_iter()
+                .find(|v| v.registration_accepted)
+                .unwrap();
+            let (_dir, mut store, mut cache, mut owner, handle) = fixture(&vector);
+            run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap();
+            let (input, coordinate) = fence_input(&handle);
+            owner
+                .fence_restore(
+                    &mut store,
+                    input.clone(),
+                    coordinate.clone(),
+                    200,
+                    &NoFaults,
+                )
+                .unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(sql, []).unwrap();
+                    Ok::<_, StorageError>(())
+                })
+                .unwrap();
+            assert!(
+                owner
+                    .fence_restore(&mut store, input, coordinate, 201, &NoFaults)
+                    .is_err(),
+                "{sql}"
+            );
+            assert_eq!(store.table_row_count("live_restore_fences").unwrap(), 1);
+        }
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn restore_fence_commit_boundaries_reopen_without_partial_state() {
+        use dohc_engine_storage::{FaultAction, FaultPoint};
+        struct Crash(FaultPoint);
+        impl FaultInjector for Crash {
+            fn poll(&self, point: FaultPoint) -> FaultAction {
+                if point == self.0 {
+                    FaultAction::Crash
+                } else {
+                    FaultAction::Continue
+                }
+            }
+        }
+        for point in [
+            FaultPoint::StorageBeforePersist,
+            FaultPoint::StorageAfterCommitBeforeAck,
+        ] {
+            let vector = vectors()
+                .into_iter()
+                .find(|v| v.registration_accepted)
+                .unwrap();
+            let (dir, mut store, mut cache, mut owner, handle) = fixture(&vector);
+            run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap();
+            let (input, coordinate) = fence_input(&handle);
+            assert!(owner
+                .fence_restore(
+                    &mut store,
+                    input.clone(),
+                    coordinate.clone(),
+                    200,
+                    &Crash(point)
+                )
+                .is_err());
+            drop(handle);
+            drop(owner);
+            drop(store);
+            let mut store = EngineStore::open(&dir.join("engine.db"), 201).unwrap();
+            let committed = point == FaultPoint::StorageAfterCommitBeforeAck;
+            assert_eq!(
+                store.table_row_count("live_restore_fences").unwrap(),
+                i64::from(committed)
+            );
+            let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
+            if !committed {
+                owner
+                    .register(
+                        &mut store,
+                        input.relay_database_namespace.clone(),
+                        coordinate.clone(),
+                        input.old_binding.clone(),
+                    )
+                    .unwrap();
+            }
+            let receipt = owner
+                .fence_restore(&mut store, input, coordinate, 202, &NoFaults)
+                .unwrap();
+            assert_eq!(receipt.recorded_at_ms, if committed { 200 } else { 202 });
+        }
+    }
+
+    #[test]
+    fn restore_fence_refuses_mismatched_receipts_without_mutation() {
+        for field in [
+            "namespace",
+            "host",
+            "source",
+            "path",
+            "selector",
+            "lineage",
+            "fence",
+            "sequence",
+            "terminal",
+        ] {
+            let vector = vectors()
+                .into_iter()
+                .find(|v| v.registration_accepted)
+                .unwrap();
+            let (_dir, mut store, mut cache, mut owner, handle) = fixture(&vector);
+            run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap();
+            let (mut input, coordinate) = fence_input(&handle);
+            match field {
+                "namespace" => input.relay_database_namespace = "other".into(),
+                "host" => input.host_id = "other".into(),
+                "source" => input.origin = RestoreDeliveryOrigin::Bootstrap { id: "other".into() },
+                "path" => input.old_binding.current_path = "notes/other.md".into(),
+                "selector" => input.old_binding.selector_paths = vec!["notes".into()],
+                "lineage" => input.old_binding.lineage_claim_id = "f".repeat(64),
+                "fence" => input.new_fence = 2,
+                "sequence" => input.applied_sequence = 1,
+                "terminal" => {
+                    input.terminal = Some(LiveUpdateReceipt {
+                        delivery_id: "missing".into(),
+                        update_digest: "f".repeat(64),
+                        journal_cursor: 1,
+                        accepting_host_epoch: 1,
+                    })
+                }
+                _ => unreachable!(),
+            }
+            let before = counts(&store);
+            assert!(
+                owner
+                    .fence_restore(&mut store, input, coordinate, 200, &NoFaults)
+                    .is_err(),
+                "{field}"
+            );
+            assert_eq!(store.table_row_count("live_restore_fences").unwrap(), 0);
+            assert_eq!(counts(&store), before);
+            assert!(matches!(
+                run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap(),
+                BootstrapResult::Bootstrapped(_)
+            ));
+        }
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn restore_fence_process_child() {
+        let Some(path) = std::env::var_os("DOHC_RESTORE_FENCE_TEST_INPUT") else {
+            return;
+        };
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let input: NativeRestoreFence = serde_json::from_value(value["input"].clone()).unwrap();
+        let coordinate: ApplicationHostCoordinate =
+            serde_json::from_value(value["coordinate"].clone()).unwrap();
+        let mut store =
+            EngineStore::open(std::path::Path::new(value["db"].as_str().unwrap()), 201).unwrap();
+        let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
+        owner
+            .register(
+                &mut store,
+                input.relay_database_namespace.clone(),
+                coordinate.clone(),
+                input.old_binding.clone(),
+            )
+            .unwrap();
+        struct Exit(bool);
+        impl FaultInjector for Exit {
+            fn poll(
+                &self,
+                point: dohc_engine_storage::FaultPoint,
+            ) -> dohc_engine_storage::FaultAction {
+                use dohc_engine_storage::{FaultAction, FaultPoint};
+                if (!self.0 && point == FaultPoint::StorageBeforePersist)
+                    || (self.0 && point == FaultPoint::StorageAfterCommitBeforeAck)
+                {
+                    std::process::exit(if self.0 { 82 } else { 81 });
+                }
+                FaultAction::Continue
+            }
+        }
+        owner
+            .fence_restore(
+                &mut store,
+                input,
+                coordinate,
+                202,
+                &Exit(value["after"].as_bool().unwrap()),
+            )
+            .unwrap();
+        panic!("process did not reach its commit boundary");
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn restore_fence_survives_native_process_exit_before_and_after_commit() {
+        for after in [false, true] {
+            let vector = vectors()
+                .into_iter()
+                .find(|v| v.registration_accepted)
+                .unwrap();
+            let (dir, mut store, mut cache, owner, handle) = fixture(&vector);
+            run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap();
+            let (input, coordinate) = fence_input(&handle);
+            let path = dir.join("restore-process.json");
+            std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"db":dir.join("engine.db"),"input":input,"coordinate":coordinate,"after":after})).unwrap()).unwrap();
+            drop(handle);
+            drop(owner);
+            drop(store);
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "live_update_application::bootstrap::tests::restore_fence_process_child",
+                    "--nocapture",
+                ])
+                .env("DOHC_RESTORE_FENCE_TEST_INPUT", &path)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(if after { 82 } else { 81 }),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let mut store = EngineStore::open(&dir.join("engine.db"), 203).unwrap();
+            assert_eq!(
+                store.table_row_count("live_restore_fences").unwrap(),
+                i64::from(after)
+            );
+            let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
+            if !after {
+                owner
+                    .register(
+                        &mut store,
+                        input.relay_database_namespace.clone(),
+                        coordinate.clone(),
+                        input.old_binding.clone(),
+                    )
+                    .unwrap();
+            }
+            let receipt = owner
+                .fence_restore(&mut store, input, coordinate, 204, &NoFaults)
+                .unwrap();
+            assert_eq!(receipt.recorded_at_ms, if after { 202 } else { 204 });
+            assert_eq!(receipt.local_head_sequence, 0);
+        }
+    }
     #[test]
     fn owner_source_bootstrap_preserves_valid_lexical_markdown() {
         let source: Value = serde_json::from_str(include_str!(

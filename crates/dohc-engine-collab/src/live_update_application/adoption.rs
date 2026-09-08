@@ -262,6 +262,152 @@ mod tests {
             .collect()
         }
     }
+
+    #[test]
+    fn restore_fence_refuses_late_creation_of_an_empty_owner_outbox() {
+        for reopen in [false, true] {
+            let mut f = Fixture::new();
+            let ack = f.adopt().unwrap();
+            assert_eq!(f.store.table_row_count("owner_ydoc_outboxes").unwrap(), 0);
+            let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+            let input = NativeRestoreFence {
+                operation_id: "empty-owner-restore".into(),
+                relay_database_namespace: "namespace".into(),
+                old_binding: f.binding.clone(),
+                host_id: coordinate.host_id.clone(),
+                new_fence: 1,
+                origin: RestoreDeliveryOrigin::Owner {
+                    id: ack.adoption_id,
+                },
+                terminal: f.cut.terminal_receipt.clone(),
+                applied_sequence: ack.local_ydoc_sequence,
+            };
+            let receipt = f
+                ._owner
+                .fence_restore(
+                    &mut f.store,
+                    input.clone(),
+                    coordinate.clone(),
+                    20,
+                    &NoFaults,
+                )
+                .unwrap();
+            let pending = owner_outbox::OwnerOutboxAppendInput {
+                binding: f.binding.clone(),
+                base_update: f.cut.baseline_bytes.clone(),
+                append_key: "late-owner-edit".into(),
+                update: f.doc.encode_full_state(),
+                limits: f.cut.outbox_limits.clone(),
+                created_at_ms: 21,
+            };
+            let path = f._scratch.join("engine.db");
+            let mut store = if reopen {
+                drop(f.handle);
+                drop(f._owner);
+                drop(f.store);
+                EngineStore::open(&path, 21).unwrap()
+            } else {
+                f.store
+            };
+            let before = store.table_row_count("binary_blobs").unwrap();
+            assert!(matches!(
+                owner_outbox::append(&mut store, "workspace", pending),
+                Err(owner_outbox::OwnerOutboxError::Frozen)
+            ));
+            assert_eq!(store.table_row_count("owner_ydoc_outboxes").unwrap(), 0);
+            assert_eq!(
+                store.table_row_count("owner_ydoc_outbox_entries").unwrap(),
+                0
+            );
+            assert_eq!(store.table_row_count("binary_blobs").unwrap(), before);
+            let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
+            assert_eq!(
+                owner
+                    .fence_restore(&mut store, input, coordinate, 22, &NoFaults)
+                    .unwrap(),
+                receipt
+            );
+        }
+    }
+
+    #[test]
+    fn restore_fence_keeps_owner_pending_bytes_and_separates_head_from_ack() {
+        let mut f = Fixture::new();
+        f.local_edit_before_adoption();
+        let ack = f.adopt().unwrap();
+        let terminal = f.cut.terminal_receipt.clone();
+        f.edit(false);
+        let pending_before:Vec<(String,String,i64)>=f.store.read_with(|c| {
+            let mut q=c.prepare("SELECT update_digest,update_blob_digest,byte_length FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence").unwrap();
+            q.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<Result<_,_>>()
+        }).unwrap();
+        assert!(!pending_before.is_empty());
+        let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+        let input = NativeRestoreFence {
+            operation_id: "owner-restore".into(),
+            relay_database_namespace: "namespace".into(),
+            old_binding: f.binding.clone(),
+            host_id: coordinate.host_id.clone(),
+            new_fence: 1,
+            origin: RestoreDeliveryOrigin::Owner {
+                id: ack.adoption_id,
+            },
+            terminal,
+            applied_sequence: ack.local_ydoc_sequence,
+        };
+        let receipt = f
+            ._owner
+            .fence_restore(
+                &mut f.store,
+                input.clone(),
+                coordinate.clone(),
+                20,
+                &NoFaults,
+            )
+            .unwrap();
+        assert!(receipt.local_head_sequence > receipt.operation.applied_sequence);
+        let pending_after:Vec<(String,String,i64)>=f.store.read_with(|c| {
+            let mut q=c.prepare("SELECT update_digest,update_blob_digest,byte_length FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence").unwrap();
+            q.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<Result<_,_>>()
+        }).unwrap();
+        assert_eq!(pending_after, pending_before);
+        let outboxes: Vec<String> = f
+            .store
+            .read_with(|c| {
+                let mut q = c
+                    .prepare("SELECT outbox_id FROM owner_ydoc_outboxes")
+                    .unwrap();
+                q.query_map([], |r| r.get(0))
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+            })
+            .unwrap();
+        let mut retained = Vec::new();
+        for id in outboxes {
+            let p = owner_outbox::read_pending(&f.store, "workspace", &id).unwrap();
+            assert_eq!(p.state, owner_outbox::OwnerOutboxState::Quarantined);
+            retained.push(p);
+        }
+        assert!(f.adopt().is_err());
+        let path = f._scratch.join("engine.db");
+        drop(f.handle);
+        drop(f._owner);
+        drop(f.store);
+        let mut store = EngineStore::open(&path, 21).unwrap();
+        for original in retained {
+            assert_eq!(
+                owner_outbox::read_pending(&store, "workspace", &original.outbox_id).unwrap(),
+                original
+            );
+        }
+        let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
+        assert_eq!(
+            owner
+                .fence_restore(&mut store, input, coordinate, 22, &NoFaults)
+                .unwrap(),
+            receipt
+        );
+    }
     #[test]
     fn first_adoption_seeds_only_pending_local_state_and_preserves_history() {
         let mut f = Fixture::new();

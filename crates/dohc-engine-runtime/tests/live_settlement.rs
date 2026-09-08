@@ -244,6 +244,182 @@ impl Drop for Fixture {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_fence_serializes_queued_writes_and_preserves_other_documents() {
+    struct Block {
+        entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl FaultInjector for Block {
+        fn poll(&self, point: FaultPoint) -> FaultAction {
+            if point == FaultPoint::StorageBeforePersist {
+                if let Some(entered) = self.entered.lock().unwrap().take() {
+                    entered.send(()).unwrap();
+                    self.release.lock().unwrap().recv().unwrap();
+                }
+            }
+            FaultAction::Continue
+        }
+    }
+    let f = Fixture::new().await;
+    let actor = f.supervisor.open(&f.db, 2).unwrap().actor;
+    let coordinate = ApplicationHostCoordinate {
+        host_id: "host".into(),
+        host_epoch: 1,
+        instance_id: "instance".into(),
+        connection_id: "connection".into(),
+    };
+    let input = NativeRestoreFence {
+        operation_id: "restore".into(),
+        relay_database_namespace: "relay".into(),
+        old_binding: f.binding.clone(),
+        host_id: "host".into(),
+        new_fence: 1,
+        origin: RestoreDeliveryOrigin::Bootstrap {
+            id: "bootstrap".into(),
+        },
+        terminal: None,
+        applied_sequence: 0,
+    };
+    let (entered, at_commit) = tokio::sync::oneshot::channel();
+    let (release, wait_release) = std::sync::mpsc::channel();
+    let mut fence = Box::pin(f.owner.fence_restore(
+        input.clone(),
+        coordinate.clone(),
+        3,
+        Arc::new(Block {
+            entered: std::sync::Mutex::new(Some(entered)),
+            release: std::sync::Mutex::new(wait_release),
+        }),
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(fence.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    at_commit.await.unwrap();
+    let key = dohc_engine_collab::DocKey::new("workspace", "main", "object").unwrap();
+    let mut local = Box::pin(actor.ydoc_record_update(
+        key,
+        f.binding.current_path.clone(),
+        ContentKind::Richdoc,
+        dohc_engine_collab::Regime::Replicated,
+        vec![0, 0],
+        None,
+        None,
+        Some(f.binding.lineage_claim_id.clone()),
+        false,
+        None,
+        None,
+        4,
+        Arc::new(NoFaults),
+        tokio_util::sync::CancellationToken::new(),
+    ));
+    let remote = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "late".into(),
+                    update_digest: hex_sha256(&[0, 0]),
+                    journal_cursor: 1,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 4,
+            },
+            first_seen: vec![],
+        },
+        update_bytes: vec![0, 0],
+    };
+    let mut remote = Box::pin(f.handle.apply(remote, Arc::new(NoFaults)));
+    std::future::poll_fn(|cx| {
+        assert!(local.as_mut().poll(cx).is_pending());
+        assert!(remote.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    release.send(()).unwrap();
+    assert_eq!(fence.await.unwrap().local_head_sequence, 0);
+    assert!(local.await.is_err());
+    assert!(matches!(
+        remote.await.unwrap(),
+        ApplicationResult::Pending(_)
+    ));
+    assert!(f.settle(None, 4, Arc::new(NoFaults)).await.is_err());
+    assert!(
+        f.owner
+            .register(
+                "another-relay".into(),
+                coordinate.clone(),
+                f.binding.clone()
+            )
+            .await
+            .is_err()
+    );
+    let other = dohc_engine_collab::DocKey::new("workspace", "main", "other").unwrap();
+    let doc = Ydoc::wire();
+    actor
+        .ydoc_record_update(
+            other,
+            "other.txt".into(),
+            ContentKind::Plaintext,
+            dohc_engine_collab::Regime::LocalOnly,
+            doc.plaintext_insert(0, "unrelated"),
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            5,
+            Arc::new(NoFaults),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let receipt = f
+        .owner
+        .fence_restore(input, coordinate, 6, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(receipt.recorded_at_ms, 3);
+}
+
+#[tokio::test]
+async fn restore_fence_accepts_terminal_history_under_an_earlier_selector() {
+    let mut f = Fixture::new().await;
+    let terminal = f.apply_folder_scope().await;
+    let input = NativeRestoreFence {
+        operation_id: "restore".into(),
+        relay_database_namespace: "relay".into(),
+        old_binding: f.binding.clone(),
+        host_id: "host".into(),
+        new_fence: 1,
+        origin: RestoreDeliveryOrigin::Bootstrap {
+            id: "bootstrap".into(),
+        },
+        terminal: Some(terminal),
+        applied_sequence: 1,
+    };
+    let coordinate = ApplicationHostCoordinate {
+        host_id: "host".into(),
+        host_epoch: 1,
+        instance_id: "instance".into(),
+        connection_id: "connection".into(),
+    };
+    assert_eq!(
+        f.owner
+            .fence_restore(input, coordinate, 3, Arc::new(NoFaults))
+            .await
+            .unwrap()
+            .local_head_sequence,
+        1
+    );
+}
+
 #[tokio::test]
 async fn configured_settlement_projects_baseline_updates_and_unchanged_coverage() {
     let f = Fixture::new().await;

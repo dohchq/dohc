@@ -179,6 +179,9 @@ pub enum CollabError {
     #[error("owner delivery outbox is frozen for recovery")]
     OwnerOutboxFrozen,
 
+    #[error("the document is stopped for restoration")]
+    RestoreFenced,
+
     /// The persisted lineage is structurally inconsistent (e.g. a referenced
     /// blob is missing, or a snapshot fails to reconstruct).
     #[error("corrupt Y.Doc lineage: {reason}")]
@@ -222,6 +225,7 @@ impl CollabError {
             CollabError::SeedOntoExistingLineage => "seed-onto-existing-lineage",
             CollabError::UnsettledClose => "unsettled-close",
             CollabError::OwnerOutboxFrozen => "owner-outbox-frozen",
+            CollabError::RestoreFenced => "restore-fenced",
             CollabError::Corrupt { .. } => "corrupt-lineage",
             CollabError::Storage(_) => "storage",
         }

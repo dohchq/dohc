@@ -38,6 +38,7 @@ const SYNCHRONOUS_NORMAL: i64 = 1;
 /// The tables every valid v2 store must contain. Missing any of these on an
 /// otherwise-v2-stamped database is `state-corrupt`.
 const REQUIRED_TABLES: &[&str] = &[
+    "live_restore_fences",
     "live_owner_adoptions",
     "live_device_bootstraps",
     "live_device_settlements",
@@ -389,6 +390,7 @@ mod tests {
     #[test]
     fn current_schema_rejects_each_missing_live_application_table() {
         for table in [
+            "live_restore_fences",
             "live_owner_adoptions",
             "live_device_bootstraps",
             "live_device_application_bindings",
