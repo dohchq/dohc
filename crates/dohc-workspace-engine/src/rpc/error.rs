@@ -29,12 +29,12 @@ pub(super) fn map_switch_reconcile_error(
             };
             WireError::new(ErrorCode::Internal, message)
         }
-        capture_driver::SwitchReconcileError::Unavailable => wire(
+        capture_driver::SwitchReconcileError::Unavailable => WireError::new(
             ErrorCode::WorkspaceUnavailable,
             "capture driver unavailable",
         ),
         capture_driver::SwitchReconcileError::ApplyFailed => {
-            wire(ErrorCode::Internal, "pre-version-reconcile-failed")
+            WireError::new(ErrorCode::Internal, "pre-version-reconcile-failed")
         }
     }
 }
@@ -42,27 +42,31 @@ pub(super) fn map_switch_reconcile_error(
 pub(super) fn map_owner_outbox(error: OwnerOutboxError) -> WireError {
     match error {
         OwnerOutboxError::InvalidInput(_) => {
-            wire(ErrorCode::InvalidParams, "invalid-owner-outbox-input")
+            WireError::new(ErrorCode::InvalidParams, "invalid-owner-outbox-input")
         }
         OwnerOutboxError::WorkspaceMismatch => {
-            wire(ErrorCode::InvalidParams, "owner-outbox-workspace-mismatch")
+            WireError::new(ErrorCode::InvalidParams, "owner-outbox-workspace-mismatch")
         }
-        OwnerOutboxError::MainVersionMismatch => wire(
+        OwnerOutboxError::MainVersionMismatch => WireError::new(
             ErrorCode::InvalidParams,
             "owner-outbox-main-version-mismatch",
         ),
         OwnerOutboxError::ParentMismatch => {
-            wire(ErrorCode::InvalidParams, "owner-outbox-parent-mismatch")
+            WireError::new(ErrorCode::InvalidParams, "owner-outbox-parent-mismatch")
         }
         OwnerOutboxError::AppendKeyMismatch => {
-            wire(ErrorCode::InvalidParams, "owner-outbox-append-key-mismatch")
+            WireError::new(ErrorCode::InvalidParams, "owner-outbox-append-key-mismatch")
         }
-        OwnerOutboxError::Frozen => wire(ErrorCode::InvalidParams, "owner-outbox-frozen"),
-        OwnerOutboxError::NotFound => wire(ErrorCode::InvalidParams, "owner-outbox-not-found"),
+        OwnerOutboxError::Frozen => WireError::new(ErrorCode::InvalidParams, "owner-outbox-frozen"),
+        OwnerOutboxError::NotFound => {
+            WireError::new(ErrorCode::InvalidParams, "owner-outbox-not-found")
+        }
         OwnerOutboxError::ReceiptMismatch => {
-            wire(ErrorCode::InvalidParams, "owner-outbox-receipt-mismatch")
+            WireError::new(ErrorCode::InvalidParams, "owner-outbox-receipt-mismatch")
         }
-        OwnerOutboxError::Corrupt => wire(ErrorCode::Internal, "owner-outbox-state-corrupt"),
+        OwnerOutboxError::Corrupt => {
+            WireError::new(ErrorCode::Internal, "owner-outbox-state-corrupt")
+        }
         OwnerOutboxError::Storage(error) => map_runtime(RuntimeError::Storage(error)),
     }
 }
@@ -119,7 +123,7 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         &error,
         RuntimeError::Materialize(dohc_engine_files::MaterializeError::FileLocked)
     ) {
-        return wire(ErrorCode::Overloaded, "file-locked");
+        return WireError::new(ErrorCode::Overloaded, "file-locked");
     }
     // The other busy thing, and the same answer. `StorageError::FileLocked` is
     // the store reporting itself intact and the operation retryable: writers
@@ -131,7 +135,7 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
     // must not read it as the user's file being held: nothing outside dohc is
     // involved, and there is nothing for a person to do.
     if store_busy(&error) {
-        return wire(ErrorCode::Overloaded, "engine-store-busy");
+        return WireError::new(ErrorCode::Overloaded, "engine-store-busy");
     }
     // Keep the storage refusal code so the desktop can offer move-aside
     // recovery instead of reporting a generic workspace failure.
@@ -140,49 +144,42 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         | dohc_engine_storage::StorageError::ForeignDatabase),
     ) = &error
     {
-        return wire(ErrorCode::Internal, refused.code());
+        return WireError::new(ErrorCode::Internal, refused.code());
     }
     if matches!(
         &error,
         RuntimeError::Collab(CollabError::ReplayParityViolation { .. })
     ) {
-        return wire(ErrorCode::InvalidParams, "Y.Doc replay parity violation");
+        return WireError::new(ErrorCode::InvalidParams, "Y.Doc replay parity violation");
     }
     if matches!(
         &error,
         RuntimeError::Collab(CollabError::LineageWriteStale { .. })
     ) {
-        return wire(ErrorCode::InvalidParams, "ydoc-lineage-stale");
+        return WireError::new(ErrorCode::InvalidParams, "ydoc-lineage-stale");
     }
     if matches!(
         &error,
         RuntimeError::Collab(CollabError::ObjectAliasCollision)
     ) {
-        return wire(ErrorCode::InvalidParams, "ydoc-object-alias-collision");
+        return WireError::new(ErrorCode::InvalidParams, "ydoc-object-alias-collision");
     }
     if matches!(&error, RuntimeError::Collab(CollabError::UnsettledClose)) {
-        return wire(ErrorCode::InvalidParams, "ydoc-unsettled-close");
+        return WireError::new(ErrorCode::InvalidParams, "ydoc-unsettled-close");
     }
     if matches!(&error, RuntimeError::Relay(RelayError::OriginDiverged)) {
-        return wire(ErrorCode::InvalidParams, "relay-origin-diverged");
+        return WireError::new(ErrorCode::InvalidParams, "relay-origin-diverged");
     }
     if matches!(&error, RuntimeError::Relay(RelayError::ShareReadOnly)) {
-        return wire(ErrorCode::InvalidParams, "share-read-only");
+        return WireError::new(ErrorCode::InvalidParams, "share-read-only");
     }
     if matches!(&error, RuntimeError::SceneAssetDeletePending) {
-        return wire(
+        return WireError::new(
             ErrorCode::Overloaded,
             "Sync has not delivered every drawing asset delete. Retry the rollback after sync completes.",
         );
     }
-    // The rejections whose message carries numbers. `wire` takes a static
-    // string, so the generic tail below would replace them with a placeholder —
-    // and a size refusal that drops its limit and usage is the one an agent
-    // cannot act on (AGENTS.md: show agents the limits they hit). Each of these
-    // names a constraint, a limit, a unit and an observed size (the identifier
-    // one also names the field). One code for all of them —
-    // `PayloadTooLarge` means "what you sent is past a size limit", whichever
-    // part of it was.
+    // Preserve measured limits and observed sizes before the static-message mappings.
     match &error {
         RuntimeError::Relay(relay @ RelayError::BlobTooLarge { .. }) => {
             return WireError::new(ErrorCode::PayloadTooLarge, relay.to_string());
@@ -200,70 +197,19 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         }
         _ => {}
     }
-    if let RuntimeError::Domain(domain) = &error {
-        let message = match domain {
-            DomainError::IdempotencyKeyReuseMismatch => Some("idempotency-key-reuse-mismatch"),
-            DomainError::DuplicateMomentId => Some("duplicate-id"),
-            DomainError::FileNotFound => Some("file-not-found"),
-            DomainError::TargetPathExists => Some("target-path-exists"),
-            DomainError::VersionNotFound => Some("version-not-found"),
-            DomainError::InvalidVersion => Some("invalid-version"),
-            DomainError::VersionNameConflict => Some("version-name-conflict"),
-            DomainError::InvalidVersionName => Some("invalid-version-name"),
-            DomainError::DuplicateId => Some("duplicate-id"),
-            DomainError::ForkBaseNotFound => Some("fork-base-not-found"),
-            DomainError::ConflictNotFound => Some("conflict-not-found"),
-            DomainError::ConflictStaleTarget => Some("conflict-stale-target"),
-            DomainError::BinaryHeadNotText => Some("binary-head-not-text"),
-            DomainError::InvalidPath { .. } => Some("invalid-path"),
-            DomainError::InvalidText { .. } => Some("invalid-text"),
-            DomainError::NotSecretPath => Some("not-secret-path"),
-            DomainError::SecretMomentNotFound => Some("moment-not-found"),
-            DomainError::Crypto(error) => Some(error.code()),
-            DomainError::InvalidInput { .. } => Some("invalid-input"),
-            DomainError::StateCorrupt { .. } => Some("state-corrupt"),
-            DomainError::Storage(_) => Some("persist-failed"),
-            DomainError::Chat { code, .. } => Some(*code),
-            _ => None,
-        };
-        if let Some(message) = message {
-            let code = match domain {
-                DomainError::Storage(_)
-                | DomainError::StateCorrupt { .. }
-                | DomainError::Chat {
-                    code: "state-corrupt",
-                    ..
-                } => ErrorCode::Internal,
-                // Same severity split as map_domain_code: decode/key failures
-                // are internal state problems, not caller mistakes.
-                DomainError::Crypto(error) => match error {
-                    dohc_engine_crypto::CryptoError::InvalidIvLength
-                    | dohc_engine_crypto::CryptoError::InvalidTagLength
-                    | dohc_engine_crypto::CryptoError::PlaintextTooLarge
-                    | dohc_engine_crypto::CryptoError::PlaintextNotUtf8
-                    | dohc_engine_crypto::CryptoError::InvalidBase64 => ErrorCode::InvalidParams,
-                    dohc_engine_crypto::CryptoError::DecryptFailed
-                    | dohc_engine_crypto::CryptoError::InvalidKeyLength
-                    | dohc_engine_crypto::CryptoError::KeyFileMalformed => ErrorCode::Internal,
-                },
-                _ => ErrorCode::InvalidParams,
-            };
-            return wire(code, message);
-        }
-    }
     let code = match error {
         RuntimeError::Cancelled => ErrorCode::Cancelled,
         RuntimeError::ActorUnavailable | RuntimeError::WorkerPanicked => {
             ErrorCode::WorkspaceUnavailable
         }
-        RuntimeError::Domain(error) => map_domain_code(error),
+        RuntimeError::Domain(error) => return map_domain(error),
         RuntimeError::Collab(error) => map_collab_code(error),
         RuntimeError::Sync(error) => map_sync_code(error),
         RuntimeError::Relay(error) => map_relay_code(error),
         RuntimeError::Search(error) => map_search_code(error),
         _ => ErrorCode::Internal,
     };
-    wire(code, "workspace operation failed")
+    WireError::new(code, "workspace operation failed")
 }
 
 fn map_relay_code(error: RelayError) -> ErrorCode {
@@ -327,51 +273,58 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
     }
 }
 
-fn map_domain_code(error: DomainError) -> ErrorCode {
-    match error {
-        DomainError::Storage(_)
-        | DomainError::StateCorrupt { .. }
-        | DomainError::Chat {
+fn map_domain(error: DomainError) -> WireError {
+    use ErrorCode::{Internal, InvalidParams};
+    use dohc_engine_crypto::CryptoError;
+
+    let (code, message) = match error {
+        DomainError::IdempotencyKeyReuseMismatch => {
+            (InvalidParams, "idempotency-key-reuse-mismatch")
+        }
+        DomainError::DuplicateMomentId | DomainError::DuplicateId => {
+            (InvalidParams, "duplicate-id")
+        }
+        DomainError::FileNotFound => (InvalidParams, "file-not-found"),
+        DomainError::TargetPathExists => (InvalidParams, "target-path-exists"),
+        DomainError::VersionNotFound => (InvalidParams, "version-not-found"),
+        DomainError::InvalidVersion => (InvalidParams, "invalid-version"),
+        DomainError::VersionNameConflict => (InvalidParams, "version-name-conflict"),
+        DomainError::InvalidVersionName => (InvalidParams, "invalid-version-name"),
+        DomainError::ForkBaseNotFound => (InvalidParams, "fork-base-not-found"),
+        DomainError::ConflictNotFound => (InvalidParams, "conflict-not-found"),
+        DomainError::ConflictStaleTarget => (InvalidParams, "conflict-stale-target"),
+        DomainError::BinaryHeadNotText => (InvalidParams, "binary-head-not-text"),
+        DomainError::InvalidPath { .. } => (InvalidParams, "invalid-path"),
+        DomainError::InvalidText { .. } => (InvalidParams, "invalid-text"),
+        DomainError::NotSecretPath => (InvalidParams, "not-secret-path"),
+        DomainError::SecretMomentNotFound => (InvalidParams, "moment-not-found"),
+        DomainError::InvalidInput { .. } => (InvalidParams, "invalid-input"),
+        DomainError::StateCorrupt { .. } => (Internal, "state-corrupt"),
+        DomainError::Storage(_) => (Internal, "persist-failed"),
+        DomainError::Chat {
             code: "state-corrupt",
             ..
-        } => ErrorCode::Internal,
-        DomainError::Crypto(error) => match error {
-            dohc_engine_crypto::CryptoError::InvalidIvLength
-            | dohc_engine_crypto::CryptoError::InvalidTagLength
-            | dohc_engine_crypto::CryptoError::PlaintextTooLarge
-            | dohc_engine_crypto::CryptoError::PlaintextNotUtf8
-            | dohc_engine_crypto::CryptoError::InvalidBase64 => ErrorCode::InvalidParams,
-            dohc_engine_crypto::CryptoError::DecryptFailed
-            | dohc_engine_crypto::CryptoError::InvalidKeyLength
-            | dohc_engine_crypto::CryptoError::KeyFileMalformed => ErrorCode::Internal,
-        },
-        DomainError::PayloadTooLarge { .. } => ErrorCode::PayloadTooLarge,
+        } => (Internal, "state-corrupt"),
+        DomainError::Chat { code, .. } => (InvalidParams, code),
+        DomainError::Crypto(error) => {
+            let code = match error {
+                CryptoError::InvalidIvLength
+                | CryptoError::InvalidTagLength
+                | CryptoError::PlaintextTooLarge
+                | CryptoError::PlaintextNotUtf8
+                | CryptoError::InvalidBase64 => InvalidParams,
+                CryptoError::DecryptFailed
+                | CryptoError::InvalidKeyLength
+                | CryptoError::KeyFileMalformed => Internal,
+            };
+            (code, error.code())
+        }
         DomainError::WorkspaceNotFound
-        | DomainError::VersionNotFound
-        | DomainError::InvalidVersion
         | DomainError::WorkspaceMismatch
-        | DomainError::VersionNameConflict
-        | DomainError::InvalidVersionName
-        | DomainError::DuplicateId
-        | DomainError::DuplicateMomentId
-        | DomainError::FileNotFound
-        | DomainError::BinaryHeadNotText
-        | DomainError::TextHeadNotBinary
-        | DomainError::TargetPathExists
-        | DomainError::ForkBaseNotFound
-        | DomainError::ConflictNotFound
-        | DomainError::ConflictStaleTarget
-        | DomainError::InvalidText { .. }
-        | DomainError::InvalidPath { .. }
-        | DomainError::NotSecretPath
-        | DomainError::InvalidInput { .. }
-        | DomainError::IdempotencyKeyReuseMismatch
-        | DomainError::SecretMomentNotFound
-        | DomainError::Chat { .. } => ErrorCode::InvalidParams,
-        DomainError::ConflictMetadataTooLarge { .. }
-        | DomainError::ConflictResolveAnswerTooLarge { .. } => ErrorCode::PayloadTooLarge,
-        _ => ErrorCode::Internal,
-    }
+        | DomainError::TextHeadNotBinary => (InvalidParams, "workspace operation failed"),
+        _ => (Internal, "workspace operation failed"),
+    };
+    WireError::new(code, message)
 }
 
 fn map_collab_code(error: CollabError) -> ErrorCode {
@@ -447,21 +400,17 @@ pub(super) fn map_root_binding(error: root_binding::RootBindingError) -> WireErr
 }
 
 pub(super) fn initial_capture_updating() -> WireError {
-    wire(
+    WireError::new(
         ErrorCode::Overloaded,
         "Workspace is still updating. Try again.",
     )
 }
 
 pub(super) fn workspace_unavailable() -> WireError {
-    wire(
+    WireError::new(
         ErrorCode::WorkspaceUnavailable,
         "workspace handle is unavailable",
     )
-}
-
-pub(super) fn wire(code: ErrorCode, message: &'static str) -> WireError {
-    WireError::new(code, message)
 }
 
 #[cfg(test)]
@@ -598,10 +547,129 @@ mod tests {
         assert_eq!(binary_head.code, ErrorCode::InvalidParams);
     }
 
-    /// An ingest ceiling is useless if the caller cannot read which limit it
-    /// hit. `wire` only takes static strings, so the generic tail replaces
-    /// every message with "workspace operation failed".
-    ///
+    #[test]
+    fn secret_failures_preserve_safe_messages_and_caller_error_severity() {
+        use dohc_engine_crypto::CryptoError;
+        use dohc_engine_protocol::Retryability;
+
+        for (error, code, message) in [
+            (
+                CryptoError::DecryptFailed,
+                ErrorCode::Internal,
+                "decrypt-failed",
+            ),
+            (
+                CryptoError::InvalidKeyLength,
+                ErrorCode::Internal,
+                "key-corrupt",
+            ),
+            (
+                CryptoError::KeyFileMalformed,
+                ErrorCode::Internal,
+                "key-corrupt",
+            ),
+            (
+                CryptoError::InvalidIvLength,
+                ErrorCode::InvalidParams,
+                "invalid-iv",
+            ),
+            (
+                CryptoError::InvalidTagLength,
+                ErrorCode::InvalidParams,
+                "invalid-tag",
+            ),
+            (
+                CryptoError::PlaintextTooLarge,
+                ErrorCode::InvalidParams,
+                "invalid-text",
+            ),
+            (
+                CryptoError::PlaintextNotUtf8,
+                ErrorCode::InvalidParams,
+                "invalid-text",
+            ),
+            (
+                CryptoError::InvalidBase64,
+                ErrorCode::InvalidParams,
+                "invalid-input",
+            ),
+        ] {
+            let surfaced = map_runtime(RuntimeError::Domain(DomainError::Crypto(error)));
+            assert_eq!(
+                (surfaced.code, surfaced.message.as_str(), surfaced.retry),
+                (code, message, Retryability::No)
+            );
+        }
+    }
+
+    #[test]
+    fn domain_refusals_keep_wire_names_and_hide_internal_reasons() {
+        use dohc_engine_protocol::Retryability;
+
+        for (error, code, message) in [
+            (
+                DomainError::DuplicateMomentId,
+                ErrorCode::InvalidParams,
+                "duplicate-id",
+            ),
+            (
+                DomainError::SecretMomentNotFound,
+                ErrorCode::InvalidParams,
+                "moment-not-found",
+            ),
+            (
+                DomainError::Chat {
+                    code: "state-corrupt",
+                    reason: "private state detail",
+                },
+                ErrorCode::Internal,
+                "state-corrupt",
+            ),
+            (
+                DomainError::Chat {
+                    code: "message-not-found",
+                    reason: "private message detail",
+                },
+                ErrorCode::InvalidParams,
+                "message-not-found",
+            ),
+            (
+                DomainError::StateCorrupt {
+                    reason: "private state detail",
+                },
+                ErrorCode::Internal,
+                "state-corrupt",
+            ),
+            (
+                DomainError::WorkspaceNotFound,
+                ErrorCode::InvalidParams,
+                "workspace operation failed",
+            ),
+            (
+                DomainError::WorkspaceMismatch,
+                ErrorCode::InvalidParams,
+                "workspace operation failed",
+            ),
+            (
+                DomainError::TextHeadNotBinary,
+                ErrorCode::InvalidParams,
+                "workspace operation failed",
+            ),
+            (
+                DomainError::CaptureNotOwned,
+                ErrorCode::Internal,
+                "workspace operation failed",
+            ),
+        ] {
+            let surfaced = map_runtime(RuntimeError::Domain(error));
+            assert_eq!(
+                (surfaced.code, surfaced.message.as_str(), surfaced.retry),
+                (code, message, Retryability::No)
+            );
+        }
+    }
+
+    /// Size refusals preserve the measured limit and observed usage.
     #[test]
     fn an_oversized_blob_refusal_reaches_the_caller_naming_its_limit() {
         let surfaced = map_runtime(RuntimeError::Relay(RelayError::BlobTooLarge {

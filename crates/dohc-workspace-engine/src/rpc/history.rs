@@ -1,6 +1,5 @@
 use crate::EngineService;
 use crate::rpc::capture::MAX_DESKTOP_CAPTURE_TEXT_BYTES;
-use crate::rpc::error::wire;
 use crate::rpc::reads::MAX_INBAND_CONTENT_BYTES;
 use crate::rpc::reads::byte_budget_cut_serialized;
 use crate::rpc::reads::inband_text;
@@ -145,7 +144,7 @@ fn encode_moment_page(page: &MomentPage) -> Result<EncodedMomentPage, WireError>
     }
     let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
     if included == 0 && !rows.is_empty() {
-        return Err(wire(
+        return Err(WireError::new(
             ErrorCode::Internal,
             "a moment row exceeds the response frame budget",
         ));
@@ -235,7 +234,10 @@ impl EngineService {
         // moments.list can return — whitespace/control-carrying
         // included — must stay filterable verbatim.
         if params.object_id.as_deref() == Some("") {
-            return Err(wire(ErrorCode::InvalidParams, "objectId must not be empty"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "objectId must not be empty",
+            ));
         }
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
@@ -290,7 +292,7 @@ impl EngineService {
                 .await?;
         }
         if !flush.settled {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::Overloaded,
                 "History is still updating. Try again.",
             ));
@@ -352,7 +354,10 @@ impl EngineService {
         // string): all-whitespace ids are storable and moments.list
         // returns them verbatim — they must stay fetchable verbatim.
         if params.moment_id.is_empty() {
-            return Err(wire(ErrorCode::InvalidParams, "momentId must not be empty"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "momentId must not be empty",
+            ));
         }
         let moment_id = params.moment_id;
         let open = self.open(handle.as_ref())?;

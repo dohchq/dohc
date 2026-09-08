@@ -6,9 +6,8 @@ use crate::rpc::chats::chat_page_cursor;
 use crate::rpc::chats::chat_page_limit;
 use crate::rpc::chats::decode_chat_cursor;
 use crate::rpc::chats::encode_chat_cursor;
-use crate::rpc::error::wire;
 use crate::rpc::request::OperationCancellation;
-use crate::rpc::request::deserialize_optional_non_null_string;
+use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use dohc_engine_domain::BookmarkMode;
@@ -29,7 +28,7 @@ struct ChatBookmarkListParams {
     owner_user_id: String,
     state: Option<String>,
     page_limit: Option<i64>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     cursor: Option<String>,
 }
 
@@ -46,7 +45,7 @@ struct ChatBookmarkListPendingParams {
     owner_user_id: String,
     limit: Option<i64>,
     page_limit: Option<i64>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     cursor: Option<String>,
 }
 
@@ -94,7 +93,7 @@ struct ChatBookmarkMarkStaleParams {
     owner_user_id: String,
     bookmark_id: String,
     generation: i64,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     failure_reason: Option<String>,
 }
 
@@ -102,7 +101,7 @@ fn parse_bookmark_target_kind(raw: &str) -> Result<BookmarkTargetKind, WireError
     match raw {
         "message" => Ok(BookmarkTargetKind::Message),
         "thread" => Ok(BookmarkTargetKind::Thread),
-        _ => Err(wire(
+        _ => Err(WireError::new(
             ErrorCode::InvalidParams,
             "unknown bookmark target kind",
         )),
@@ -113,7 +112,10 @@ fn parse_bookmark_mode(raw: &str) -> Result<BookmarkMode, WireError> {
     match raw {
         "live" => Ok(BookmarkMode::Live),
         "snapshot" => Ok(BookmarkMode::Snapshot),
-        _ => Err(wire(ErrorCode::InvalidParams, "unknown bookmark mode")),
+        _ => Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "unknown bookmark mode",
+        )),
     }
 }
 
@@ -220,7 +222,10 @@ impl EngineService {
         let workspace_id = open.workspace_id.clone();
         let logical_limit = params.limit.unwrap_or(50);
         if !(1..=200).contains(&logical_limit) {
-            return Err(wire(ErrorCode::InvalidParams, "invalid-parameters"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid-parameters",
+            ));
         }
         let page_limit = chat_page_limit(params.page_limit)?;
         let logical_limit_binding = logical_limit.to_string();
@@ -232,7 +237,7 @@ impl EngineService {
         let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
         let consumed = cursor.as_ref().map_or(0, |cursor| cursor.consumed);
         if consumed > logical_limit {
-            return Err(wire(ErrorCode::InvalidParams, "invalid-cursor"));
+            return Err(WireError::new(ErrorCode::InvalidParams, "invalid-cursor"));
         }
         let remaining = logical_limit - consumed;
         if remaining == 0 {
@@ -265,7 +270,7 @@ impl EngineService {
         let next_cursor = if has_more {
             let last = rows
                 .get(included.saturating_sub(1))
-                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
@@ -407,7 +412,7 @@ impl EngineService {
         let params: ChatBookmarkArchiveParams = parse(params)?;
         let request_id = request_id
             .filter(|request_id| !request_id.is_empty())
-            .ok_or_else(|| wire(ErrorCode::InvalidParams, "idempotency-key-required"))?;
+            .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "idempotency-key-required"))?;
         let open = self.open(handle.as_ref())?;
         let workspace_id = open.workspace_id.clone();
         let cancellation = OperationCancellation::new(ctx);
