@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginHost, PluginHostRecordToken } from "./PluginHost";
-import type { PluginPipeline, PluginPipelinePluginStatus } from "./PluginPipeline";
+import type { PluginPipeline } from "./PluginPipeline";
+import type { PluginPipelinePluginStatus } from "./pluginStatusProjection";
 import { PluginHostOwnership } from "./pluginHostOwnership";
 import { createPluginPanelSurfaceHostLease, createPluginWebAppHostLease } from "./pluginHostStart";
 import { deferred } from "../testing/deferred";

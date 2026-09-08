@@ -222,7 +222,7 @@ pub fn delete_file_search_index(
 /// must already be the display title (the caller derives it the same way the
 /// rebuild does, via [`thread_display_title`], so a rebuild reproduces
 /// byte-identical rows).
-pub fn upsert_thread_header_search_index(
+fn upsert_thread_header_search_index(
     conn: &Connection,
     workspace_id: &str,
     thread_id: &str,
@@ -239,7 +239,7 @@ pub fn upsert_thread_header_search_index(
 }
 
 /// Upsert a chat message's FTS row (`upsertChatMessageSearchIndex`).
-pub fn upsert_chat_message_search_index(
+fn upsert_chat_message_search_index(
     conn: &Connection,
     workspace_id: &str,
     thread_id: &str,

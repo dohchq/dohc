@@ -315,6 +315,7 @@ async function openDevice(
     },
   });
   pipeline = new PluginPipeline({
+    isEngineCaptureAvailable: () => true,
     workspaceRoot,
     stateDir,
     hostOwnership: new PluginHostOwnership(host),
