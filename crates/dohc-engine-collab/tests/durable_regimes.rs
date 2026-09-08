@@ -12,7 +12,7 @@ use dohc_engine_collab::ContentKind;
 use dohc_engine_collab::{
     apply_remote_update, apply_remote_update_in_transaction_with_projection, claim_base,
     claim_base_at_relay, close_session, ensure_marker, fresh_successor_base, load_persisted,
-    maybe_compact, read_marker, record_base_coordinate, record_local_update,
+    maybe_compact, read_marker, record_base_coordinate_in_tx, record_local_update,
     replace_lineage_with_successor, settle, BaseCoordinateRecord, BaseRelayCoordinate,
     ClaimOutcome, CloseOutcome, CollabError, CompactOutcome, DocKey, LeaseRegistry,
     LineageClaimStatus, LineageGuard, LocalAppend, MarkerCreation, Regime, RemoteUpdate,
@@ -2313,19 +2313,21 @@ fn relay_base_arbitration_is_ordered_and_claim_safe() {
         other => panic!("unexpected first claim: {other:?}"),
     };
     committed(
-        record_base_coordinate(
-            &mut ts.store,
-            BaseCoordinateRecord {
-                key: &key,
-                lineage_claim_id: &first_claim,
-                origin_id: "first-origin",
-                origin_seq: 7,
-                relay_seq: Some(10),
-                now_ms: 1_010,
-            },
-            &NoFaults,
-        )
-        .expect("stamp first relay coordinate"),
+        ts.store
+            .write_with(&NoFaults, |tx| {
+                record_base_coordinate_in_tx(
+                    tx,
+                    BaseCoordinateRecord {
+                        key: &key,
+                        lineage_claim_id: &first_claim,
+                        origin_id: "first-origin",
+                        origin_seq: 7,
+                        relay_seq: Some(10),
+                        now_ms: 1_010,
+                    },
+                )
+            })
+            .expect("stamp first relay coordinate"),
     );
 
     let later = Ydoc::wire();

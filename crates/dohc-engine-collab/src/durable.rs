@@ -272,7 +272,7 @@ pub enum CloseOutcome {
 pub fn read_marker(store: &EngineStore, key: &DocKey) -> Result<Option<Marker>, CollabError> {
     #[cfg(test)]
     READ_MARKER_COUNT.with(|count| count.set(count.get() + 1));
-    store.read_with(|conn| query_marker(conn, key))
+    store.read_with(|conn| read_marker_in(conn, key))
 }
 
 #[cfg(test)]
@@ -306,7 +306,7 @@ pub fn load_persisted(
     // reading them outside the snapshot is safe.
     let loaded = store.read_with(|conn| -> Result<_, CollabError> {
         let read_tx = conn.unchecked_transaction().map_err(map_sql)?;
-        let marker = match query_marker(&read_tx, key)? {
+        let marker = match read_marker_in(&read_tx, key)? {
             Some(m) => m,
             None => return Ok(None),
         };
@@ -558,7 +558,7 @@ where
             }
         }
         if let LineageGuard::Expect(expected) = lineage_guard {
-            let observed = query_marker(tx, key)?.and_then(|marker| marker.lineage_claim_id);
+            let observed = read_marker_in(tx, key)?.and_then(|marker| marker.lineage_claim_id);
             if observed.as_deref() != expected {
                 return Err(CollabError::LineageWriteStale {
                     expected: expected.map(ToOwned::to_owned),
@@ -582,7 +582,7 @@ where
             .map_err(map_sql)?;
         }
         let guarded_marker = if require_empty_lineage {
-            query_marker(tx, key)?
+            read_marker_in(tx, key)?
         } else {
             None
         };
@@ -606,7 +606,7 @@ where
         }) = marker
         {
             validate_update_bytes(update)?;
-            match query_marker(tx, key)? {
+            match read_marker_in(tx, key)? {
                 Some(marker) => {
                     if marker.content_kind != content_kind {
                         return Err(CollabError::ContentKindMismatch);
@@ -648,7 +648,7 @@ where
                 }
             }
         } else {
-            query_marker(tx, key)?.ok_or(CollabError::NoMarker)?
+            read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?
         };
         {
             // Collection reconciliation already indexed the captured artifact.
@@ -877,7 +877,7 @@ fn append_local_update(
             record_facts: None,
         });
     }
-    let base = load_for_replay_gate(conn, key)?;
+    let base = load_doc_in(conn, key)?;
     let (_, seq, record_facts) = append_and_index_update(
         conn,
         key,
@@ -966,7 +966,7 @@ fn append_local_update_cached(
             (seq, record_facts)
         }
         None => {
-            let base = load_for_replay_gate(conn, key)?;
+            let base = load_doc_in(conn, key)?;
             let validation = crate::replay_parity::validate_replay_parity_for_cached_gate(
                 &base,
                 None,
@@ -1403,7 +1403,7 @@ fn claim_base_with_coordinate_in_tx(
         // Silently resuming (and acking) a different base would drop a
         // divergent lineage while the relay cursor advances past it, leaving
         // that peer's later updates missing an unrecoverable dependency.
-        let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+        let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
         match marker.lineage_claim_status {
             LineageClaimStatus::Unclaimed => {}
             LineageClaimStatus::Exact => {
@@ -1443,7 +1443,8 @@ fn claim_base_with_coordinate_in_tx(
                                         now_ms,
                                     },
                                 )?;
-                                let winner = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+                                let winner =
+                                    read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
                                 return Ok(ClaimOutcome::Replaced {
                                     losing_lineage_claim_id: stored,
                                     winner,
@@ -1471,7 +1472,7 @@ fn claim_base_with_coordinate_in_tx(
                                 now_ms,
                             },
                         )?;
-                        let winner = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+                        let winner = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
                         Ok(ClaimOutcome::Replaced {
                             losing_lineage_claim_id: stored,
                             winner,
@@ -1529,14 +1530,6 @@ fn claim_base_with_coordinate_in_tx(
 
 /// Persist an exact base origin and, when supplied, its authenticated relay
 /// position. The claim id must still be active in this transaction.
-pub fn record_base_coordinate(
-    store: &mut EngineStore,
-    record: BaseCoordinateRecord<'_>,
-    faults: &dyn FaultInjector,
-) -> Result<TxnOutcome<()>, CollabError> {
-    store.write_with(faults, |tx| record_base_coordinate_in_tx(tx, record))
-}
-
 pub fn record_base_coordinate_in_tx(
     tx: &Transaction<'_>,
     record: BaseCoordinateRecord<'_>,
@@ -1559,7 +1552,7 @@ pub fn record_base_coordinate_in_tx(
             reason: "base relay coordinates must be bounded and nonnegative".to_owned(),
         });
     }
-    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
     if marker.lineage_claim_id.as_deref() != Some(lineage_claim_id) {
         return Err(CollabError::LineageWriteStale {
             expected: Some(lineage_claim_id.to_owned()),
@@ -1750,7 +1743,7 @@ pub fn replace_lineage_with_successor_in_tx(
             observed: successor.predecessor_state_vector_sha256.clone(),
         });
     }
-    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
     if marker.lineage_claim_status == LineageClaimStatus::Exact
         && marker.lineage_claim_id.as_deref() == Some(successor.lineage_claim_id.as_str())
     {
@@ -1941,7 +1934,7 @@ fn load_exact_active_lineage(
     expected_claim_id: &str,
     expected_state_vector_sha256: &str,
 ) -> Result<(Marker, Ydoc, Vec<u8>), CollabError> {
-    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
     if marker.lineage_claim_id.as_deref() != Some(expected_claim_id) {
         return Err(CollabError::LineagePredecessorMismatch {
             expected: expected_claim_id.to_owned(),
@@ -1961,7 +1954,7 @@ fn load_exact_active_lineage(
             reason: "deferred Y.Doc coordinates are pending",
         });
     }
-    let doc = load_for_replay_gate(tx, key)?;
+    let doc = load_doc_in(tx, key)?;
     if doc.has_pending_dependencies() {
         return Err(CollabError::LineageIncomplete {
             reason: "the active Y.Doc has pending dependencies",
@@ -2070,45 +2063,6 @@ fn validate_successor_base(
     Ok(())
 }
 
-/// Read a doc's marker inside the caller's transaction.
-///
-/// Origination reads the marker under the same transaction as the append it
-/// rides and the claim it may commit, so the three cannot disagree.
-pub fn read_marker_in_tx(
-    tx: &Transaction<'_>,
-    key: &DocKey,
-) -> Result<Option<Marker>, CollabError> {
-    read_marker_from_connection(tx, key)
-}
-
-/// Read a doc's marker from the caller's SQLite connection.
-///
-/// This is the read-only counterpart to [`read_marker_in_tx`]. Callers that
-/// need a stable multi-query view must supply a connection inside their own
-/// transaction.
-pub fn read_marker_from_connection(
-    conn: &Connection,
-    key: &DocKey,
-) -> Result<Option<Marker>, CollabError> {
-    query_marker(conn, key)
-}
-
-/// Reconstruct the persisted doc inside the caller's transaction (marker
-/// required). The conflict-resolution fold reads, rewrites, and appends under
-/// one transaction so the folded update extends exactly the lineage it read.
-pub fn load_doc_in_tx(tx: &Transaction<'_>, key: &DocKey) -> Result<Ydoc, CollabError> {
-    load_doc_from_connection(tx, key)
-}
-
-/// Reconstruct a persisted doc from the caller's SQLite connection.
-///
-/// This is the read-only counterpart to [`load_doc_in_tx`]. Callers that need
-/// the marker and update rows to share one snapshot must supply a connection
-/// inside their own transaction.
-pub fn load_doc_from_connection(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError> {
-    load_for_replay_gate(conn, key)
-}
-
 /// Append one locally-produced update inside the caller's transaction — the
 /// transaction-composable core of [`record_local_update`]. Validates the
 /// bytes, content-dedupes, runs the replay-parity gate, and advances the
@@ -2122,7 +2076,7 @@ pub fn record_update_in_tx(
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     validate_update_bytes(update)?;
-    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
     let sha = crate::hex_sha256(update);
     append_local_update(
         tx,
@@ -2153,7 +2107,7 @@ pub fn encode_origination_base_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
 ) -> Result<Option<OriginationBase>, CollabError> {
-    let doc = load_for_replay_gate(tx, key)?;
+    let doc = load_doc_in(tx, key)?;
     if doc.has_missing_updates() {
         return Ok(None);
     }
@@ -2456,11 +2410,11 @@ pub(crate) fn validate_update_bytes(update: &[u8]) -> Result<(), CollabError> {
     Ok(())
 }
 
-/// Reconstruct a lineage from the caller's connection/transaction for the
-/// replay-parity gate. Keeping this read inside the write transaction makes the
-/// checked base exactly the base that the append will extend.
-pub(crate) fn load_for_replay_gate(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError> {
-    query_marker(conn, key)?.ok_or(CollabError::NoMarker)?;
+/// Reconstruct a persisted lineage from the caller's connection, requiring a marker.
+/// Supply an existing transaction to read the marker, snapshot, and updates from
+/// one snapshot. Appends and lineage changes must use that same transaction.
+pub fn load_doc_in(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError> {
+    read_marker_in(conn, key)?.ok_or(CollabError::NoMarker)?;
     let snapshot = latest_snapshot(conn, key)?;
     let from_seq = snapshot.as_ref().map_or(0, |(seq, _)| *seq);
     let tail = updates_after(conn, key, from_seq)?;
@@ -2517,7 +2471,9 @@ struct MarkerRow {
     base_relay_confirmed_absent: bool,
 }
 
-pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Marker>, CollabError> {
+/// Read a doc's marker from the caller's connection. Supply the existing
+/// transaction when the marker must agree with another read or mutation.
+pub fn read_marker_in(conn: &Connection, key: &DocKey) -> Result<Option<Marker>, CollabError> {
     let row = conn
         .query_row(
             "SELECT content_kind, regime, head_update_seq, head_snapshot_seq, \
@@ -2600,7 +2556,7 @@ pub fn validate_remote_update(
             return crate::validate_replay_parity(cached, bytes);
         }
     }
-    let base = store.read_with(|conn| load_for_replay_gate(conn, key))?;
+    let base = store.read_with(|conn| load_doc_in(conn, key))?;
     for queued in pending {
         base.apply(queued)?;
     }
@@ -2770,7 +2726,7 @@ pub(crate) fn head_of(
     conn: &Connection,
     key: &DocKey,
 ) -> Result<(i64, i64, LineageClaimStatus), CollabError> {
-    let marker = query_marker(conn, key)?.ok_or(CollabError::NoMarker)?;
+    let marker = read_marker_in(conn, key)?.ok_or(CollabError::NoMarker)?;
     Ok((
         marker.head_update_seq,
         marker.head_snapshot_seq,
