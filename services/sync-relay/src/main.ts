@@ -20,6 +20,7 @@ import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 import { createDeviceControl } from "./deviceControl";
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
+import { startServiceLiveHost } from "./serviceLiveHost";
 
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
   process.env.NODE_ENV === "test" ? process.env.SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS : undefined,
@@ -150,9 +151,8 @@ const dbPath = process.env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay
 const deploymentConfig = process.env.DOHC_RELAY_DEPLOYMENT_CONFIG;
 if (!isDevOrTest && !deploymentConfig) fatal("FATAL: DOHC_RELAY_DEPLOYMENT_CONFIG must name an initialized deployment outside development/test.");
 if (deploymentConfig && process.env.SYNC_RELAY_DB_PATH !== undefined) fatal("FATAL: The deployment config owns the relay database path. Remove SYNC_RELAY_DB_PATH.");
-const storage = deploymentConfig
-  ? openRelayDeployment(deploymentConfig, { workspaceQuotaBytes }).storage
-  : openSyncRelayStorage(dbPath, { workspaceQuotaBytes });
+const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, { workspaceQuotaBytes }) : undefined;
+const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, { workspaceQuotaBytes });
 
 // Production auth intentionally reuses workspace-api's Better Auth database
 // and BETTER_AUTH_SECRET. A bearer token minted by workspace-api's desktop
@@ -352,6 +352,11 @@ if (deviceControl) {
   process.once("SIGTERM", deviceControl.close);
   server.once("close", deviceControl.close);
 }
+const serviceHostConfig = process.env.DOHC_RELAY_SERVICE_HOST_CONFIG;
+if (serviceHostConfig && !deployment) fatal("FATAL: A service host requires an initialized relay deployment.");
+const serviceHost = serviceHostConfig && deployment
+  ? await startServiceLiveHost({ configPath: serviceHostConfig, storage, history: deployment.history })
+  : undefined;
 server.listen(requestedPort, host, () => {
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : requestedPort;
@@ -363,6 +368,7 @@ server.listen(requestedPort, host, () => {
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    await serviceHost?.close();
     storage.close();
     try {
       await pool?.end();

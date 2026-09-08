@@ -132,6 +132,7 @@ async function spawnRunningRelay(
     env: {
       ...process.env,
       DOHC_RELAY_DEPLOYMENT_CONFIG: undefined,
+      DOHC_RELAY_SERVICE_HOST_CONFIG: undefined,
       NODE_ENV: "test",
       SYNC_RELAY_TEST_AUTH: "1",
       SYNC_RELAY_PORT: "0",
@@ -795,7 +796,7 @@ async function spawnRelayExpectExit(
   envOverrides: Record<string, string | undefined>,
 ): Promise<{ code: number | null; stderr: string }> {
   const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries({ ...process.env, DOHC_RELAY_DEPLOYMENT_CONFIG: undefined, ...envOverrides })) {
+  for (const [key, value] of Object.entries({ ...process.env, DOHC_RELAY_DEPLOYMENT_CONFIG: undefined, DOHC_RELAY_SERVICE_HOST_CONFIG: undefined, ...envOverrides })) {
     if (value !== undefined) env[key] = value;
   }
   const child = spawn(process.execPath, ["--import", "tsx/esm", "src/main.ts"], {

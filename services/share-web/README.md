@@ -159,6 +159,40 @@ ownership. After revocation, the next relay process refuses the revoked
 credential. A runtime continuity failure closes active device connections before
 the storage owner releases its lock.
 
+## Configured service-host integration
+
+This private integration applies the relay's committed journal through a dedicated
+engine daemon. It has no public editing route or shipping capacity defaults.
+
+Stop the relay before initial provisioning. Run
+`pnpm --filter @dohc/sync-relay deployment provision-service --config ABSOLUTE_DEPLOYMENT_CONFIG --host-id HOST_ID`.
+The command preserves a matching provision. It refuses a different host or device mode.
+
+Set `DOHC_RELAY_SERVICE_HOST_CONFIG` to an absolute, canonical JSON file path.
+The file requires these fields; unknown fields are refused:
+
+| Field | Value |
+| --- | --- |
+| `version` | `1` |
+| `engineExecutable` | Absolute canonical path to the configured-host engine executable |
+| `hostId` | The provisioned service host ID |
+| `instanceId` | A stable operator-assigned instance ID, reused after restart |
+| `workspaces` | Nonempty array of `{root, workspaceId, maxRegistrations}` |
+| `ingress` | `{aggregateBytes, applicationWorkingReserveBytes, maxUploads, uploadDeadlineMs}` for the daemon |
+| `client` | `{aggregateBytes, maxUploads, connectTimeoutMs, requestDeadlineMs}` for the relay client |
+
+Each root must be an existing canonical directory with the intended workspace
+identity and main version initialized through the engine. Use dedicated service
+roots. Do not point this integration at an active desktop workspace.
+Workspace IDs and roots must be unique. Supply positive safe integers for limits;
+the explicit application working reserve may be zero. Client budgets must also
+meet the existing protocol's minimum upload allocation.
+
+Startup verifies the daemon's namespace, host, and workspace handles before
+opening admission. Shutdown closes the child before relay storage. A retired
+connection cannot disconnect its replacement. Keep the instance ID across
+restarts. This command cannot replace an instance at its current host epoch.
+
 ## Reserved later-phase deployment work
 
 Phase 4 must define and test reverse-proxy WebSocket timeouts before browser

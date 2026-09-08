@@ -74,6 +74,32 @@ it("refuses to adopt an existing database", async () => {
   await expect(stat(target.continuity)).rejects.toMatchObject({ code: "ENOENT" });
 });
 
+it("provisions a service host once without opening admission or replacing its identity", async () => {
+  const target = paths("service");
+  expect(await run(target.args)).toMatchObject({ code: 0 });
+  const provision = ["provision-service", "--config", target.config, "--host-id", "service"];
+  expect(await run(provision)).toMatchObject({ code: 0 });
+  expect(await run(provision)).toMatchObject({ code: 0 });
+  expect(await run([...provision.slice(0, -1), "different"])).toMatchObject({ code: 1 });
+  const { storage } = openRelayDeployment(target.config);
+  try {
+    expect(storage.getLiveHostControl()).toMatchObject({ configuredMode: "service", configuredHostId: "service",
+      hostEpoch: 1, admissionState: "closed", registeredInstanceId: null });
+  } finally { storage.close(); }
+});
+
+it("refuses service provisioning over a device host", async () => {
+  const target = paths("device");
+  expect(await run(target.args)).toMatchObject({ code: 0 });
+  const { storage } = openRelayDeployment(target.config);
+  try { storage.provisionLiveHostControl({ mode: "device", hostId: "device", updatedAtMs: 1, guard: storage.captureStanding() }); }
+  finally { storage.close(); }
+  expect(await run(["provision-service", "--config", target.config, "--host-id", "device"])).toMatchObject({ code: 1 });
+  const reopened = openRelayDeployment(target.config).storage;
+  try { expect(reopened.getLiveHostControl()).toMatchObject({ configuredMode: "device", configuredHostId: "device", hostEpoch: 1 }); }
+  finally { reopened.close(); }
+});
+
 it.each(["restore", "reset"])("refuses the unsupported %s action before creating files", async action => {
   const target = paths(action);
   expect(await run([action, ...target.args.slice(1)])).toMatchObject({ code: 1, stdout: "" });
