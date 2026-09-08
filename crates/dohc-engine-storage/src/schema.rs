@@ -38,6 +38,9 @@ const SYNCHRONOUS_NORMAL: i64 = 1;
 /// The tables every valid v2 store must contain. Missing any of these on an
 /// otherwise-v2-stamped database is `state-corrupt`.
 const REQUIRED_TABLES: &[&str] = &[
+    "live_device_application_bindings",
+    "live_device_update_applications",
+    "live_device_application_first_seen",
     "engine_migrations",
     "engine_ownership",
     "engine_requests",
@@ -378,6 +381,33 @@ fn integrity_check(conn: &Connection) -> Result<(), StorageError> {
 #[cfg(test)]
 mod tests {
     use super::REQUIRED_TABLES;
+
+    #[test]
+    fn current_schema_rejects_each_missing_live_application_table() {
+        for table in [
+            "live_device_application_bindings",
+            "live_device_update_applications",
+            "live_device_application_first_seen",
+        ] {
+            assert!(REQUIRED_TABLES.contains(&table));
+            let directory =
+                dohc_test_scratch::ScratchDir::new_named("live-application-schema").unwrap();
+            let path = directory.path().join("store.sqlite");
+            drop(crate::EngineStore::open(&path, 0).unwrap());
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(&format!("DROP TABLE {table}"))
+                .unwrap();
+            drop(connection);
+            assert!(
+                matches!(
+                    crate::EngineStore::open(&path, 0),
+                    Err(crate::StorageError::StateCorrupt { .. })
+                ),
+                "missing {table}"
+            );
+        }
+    }
 
     #[test]
     fn current_schema_rejects_missing_owner_outbox_tables() {

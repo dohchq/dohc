@@ -1,6 +1,8 @@
 # dohc
 
-dohc is a local-first file sync and collaboration workspace for humans and agents. It syncs your files and data across your devices and lets you share work with your team and your agents.
+dohc is a local-first workspace where people and their agents build on files, documents, data, chat, and apps.
+It provides sync, sharing, permissions, and history so each workflow does not have to recreate them.
+Users own their work and decide how to use it.
 
 We are building the MVP and have not launched with users.
 
@@ -17,13 +19,17 @@ The workspace is the primary product object. It can contain files, live document
 
 Files are the portable foundation, not the required runtime representation for every feature. Use the state model that fits the subsystem. A live document can be a Y.Doc and structured data can live in SQLite. Keep work owned, inspectable, and exportable instead of forcing all state into flat text.
 
-dohc owns the hard coordination: files, data, identity, sync, history, permissions, apps, and chat. Users and their agents own the workflow.
+Design capabilities around shared work. Chat references the work, apps use explicitly exposed data, and collaborators continue within its permissions and history.
+Explain each connection through a concrete user action.
+
+Product commitments describe intended behavior. Verify the current implementation before claiming a capability is available.
+Keep illustrative demos distinguishable from working product behavior.
 
 A workspace must be useful to one person on one device. Team collaboration is still core: adding another person or agent should extend the same work, not require exports, copied context, or a new system.
 
 ### Product commitments
 
-1. **Local first and user owned.** Creating, inspecting, and editing local work must not require an account or network connection. Sync and sharing add capability. They do not make local work a cache of a remote product. Keep the underlying files and data inspectable or exportable so the user can recover their work without dohc. Self-hosting must be meaningful; dohc Cloud should win through the managed network and operational experience, not a crippled local product.
+1. **Local first and user owned.** Creating, inspecting, and editing local work must not require an account or network connection. Sync and sharing add capability. They do not make local work a cache of a remote product. Keep the underlying files and data inspectable or exportable so the user can recover their work without dohc. Self-hosting must be meaningful; dohc Drive should win through the managed network and operational experience, not a crippled local product.
 
 2. **Performance without compromise.** Speed is a core reason to be local-first and to ship a desktop app. dohc must feel native, as if the OS came with it preinstalled. Lots of apps have gotten bogged down with bad tech decisions and slop; dohc does not join them. If Notion in a browser tab feels faster than dohc, dohc has lost its own argument. Make sure every change is considerate of its performance impact, and treat a regression as a bug, not a tradeoff.
 
@@ -98,6 +104,21 @@ There are no users yet. Optimize for the best current design instead of preservi
 
 Understand the constraint before building. Choose the smallest model that makes the required behavior and performance unsurprising. Do not preserve complexity because it exists or add machinery because it looks architecturally impressive.
 
+### Continue from approved work
+
+- Treat approved behavior and design choices as the working baseline. Interpret feedback at the requested scope.
+- Preserve a recoverable comparison before a broad redesign.
+- When a direction is rejected, restore the affected change while preserving unrelated work. Carry the correction into subsequent work.
+
+### Finish the experience
+
+Craft includes layout, interaction, loading, failure, and recovery. Evaluate the complete experience, including transitions between states.
+- Choose layouts for their content. Give comparisons enough room, with consistent spacing and varied composition.
+- For broad redesigns, develop one representative section before extending the treatment.
+- Inspect affected layouts, both themes, keyboard access, reduced motion, loading transitions, and failure states in the browser.
+- Match preview and live visuals. Keep content useful while visuals load, and suspend animation offscreen.
+- Measure startup and interaction when changing rendering or loading. Judge the experience alongside automated performance scores.
+
 ## Documentation and writing
 
 Name the reader before adding a document to main. If nobody will use it to make a decision or perform work, do not add it. Git records what happened. Tests should enforce rules that code can break.
@@ -146,23 +167,25 @@ GitHub PR checks stay dispatch-only and require self-hosted runners. Do not enab
 Keep one concern per PR. Keep required contract, caller, and test changes together.
 Finish implementation, self-simplification, and focused checks before requesting independent review.
 
-### Verify the final commit
+### Verify the change
 
 The canonical local runner selects JavaScript and Rust gates from the [`PR checks` workflow's filters](.github/workflows/pr-checks.yml).
 Use `pnpm verify:plan --base <target-ref>` to inspect that selection locally.
 
 - One agent owns verification and the PR's evidence. Other agents run focused checks for their changes.
-- Before merging, require passing local evidence for the final head against the current target branch.
+- Before merging, require passing local evidence that covers the PR's changes.
+- After a rebase or merge, inspect the delta and reuse passing evidence when it still covers the change.
+- Rerun only checks affected by source, dependency, configuration, or conflict-resolution changes. Advancing main alone does not require another gate run.
 - Require every selected job to pass. A missing, cancelled, or failed run is not a pass.
 - If a job reads a changed file outside its filter, correct the filter and run that job.
 - When impact is unclear, run both jobs with explicit `--job js` and `--job rust` invocations.
-- Record the commit, target ref, selected gates, result, and evidence location in the PR.
+- Record the tested commit, target ref, selected gates, result, and evidence location. Explain any reuse across commits.
 - If no code gate applies, record the runner's selection and reason.
 - Add focused platform verification when changed behavior depends on Windows or macOS.
 
 Use `pnpm verify:pr --base <target-ref>` as the single full-verification entry point.
 It owns the service setup, prebuilds, gate selection, and evidence. Follow [the verification procedure](docs/how-to/verify-agent-work.md#verify-a-pull-request).
-Preserve every applicable check. Accept its `result.json` only for the final, unchanged commit.
+Keep the checkout unchanged during each run. Preserve the original commit and target in its `result.json`.
 The Rust gate retains its build budget and mandatory summary-verdict checks.
 
 ### Select reviewers
@@ -177,6 +200,26 @@ The Rust gate retains its build budget and mandatory summary-verdict checks.
 Keep each appointed reviewer through the fix rounds. Replace an unavailable reviewer once and record the reason.
 The replacement owns the remaining review, including necessary checks of later fixes.
 The original reviewer's return does not require another pass.
+
+### Macroscope trial
+
+Use one Macroscope review for ready PRs that change persistence, recovery,
+permissions, workspace isolation, sync conflict handling, or live-document settlement.
+Skip documentation, cosmetic UI changes, and test-only changes.
+Include refactors when they affect these behaviors.
+
+- Complete local gates and required local reviews before requesting Macroscope.
+- Check PR comments and checks for an existing request or review before posting.
+- If none exists, comment `@macroscope-app review` once.
+- Request at most one Macroscope review per PR unless the user asks for another.
+- Verify findings using the review rules below.
+- Summarize confirmed bugs missed by local reviews, false positives, and actual cost when available.
+- Keep billing settings and additional Macroscope features unchanged.
+- If a spend limit stops review, report the skip and continue the existing review process.
+
+Manual review requests can bypass per-review and per-PR caps.
+The monthly workspace limit still applies.
+Macroscope supplements required reviews during the trial; it is not a merge gate.
 
 ### Review findings
 
@@ -199,3 +242,4 @@ Treat a finding as evidence, not a command. Verify it against the current head a
 When ready to merge, add the review-round count, useful fixes, and any reviewer or verification delays to that note.
 Use local step durations for verification time. Report unknown durations as unknown.
 Use these records to identify repeated delays and slow or overlapping tests before adding gates or removing coverage.
+For narrower gates, account for shared dependencies in both the canonical runner and workflow filters before changing coverage.

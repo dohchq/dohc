@@ -60,7 +60,7 @@ Record the operator's result with the session evidence. The automated picker sea
 
 One verification owner runs the full selected gates locally and records the evidence in the PR.
 Run focused checks locally. Use the [review policy](../../AGENTS.md#select-reviewers) to select independent reviewers and handle later fixes.
-Before merging, confirm every applicable job passed for the final head against the current target branch.
+Before merging, confirm passing evidence covers the PR's changes under the [evidence reuse rules](../../AGENTS.md#verify-the-change).
 For platform-specific changes, add focused checks on that platform.
 
 Use the canonical runner below. Other agents reuse its evidence instead of reconstructing or repeating the full verification.
@@ -74,13 +74,13 @@ The Rust gate uses the repository build budget and checks its summary verdict.
 The runner removes its Postgres container by the recorded container ID.
 
 To schedule jobs separately, use `pnpm verify:pr --base <target-ref> --job js` and `--job rust`.
-Each report states its scope. Both selected jobs must pass on the same commit before claiming a complete PR gate.
+Each report states its scope. Every selected job needs passing evidence that covers the change.
 An explicit `--job` runs that job even when the filters omit it.
 Use it when a build or test step reads a changed file outside the filters.
 
 Read `result.json` before reporting a pass. Include the commit, gates, and evidence directory in the PR.
-After review fixes, the verification owner reruns the selected local gates on the new commit.
-Evidence from another commit does not prove the new commit.
+After review fixes or integration changes, rerun affected checks and record why the remaining evidence still applies.
+Keep each receipt's tested commit and target unchanged; document reuse in the PR.
 Use the report's `steps[].seconds` when recording verification delays.
 
 ## Measure performance
