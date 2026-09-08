@@ -403,6 +403,7 @@ dependencies = [
  "dohc-engine-sync-http",
  "dohc-engine-testkit",
  "file-id",
+ "fs4",
  "rusqlite",
  "serde_json",
  "thiserror",

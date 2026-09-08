@@ -174,6 +174,11 @@ impl WorkspaceActor {
         now_ms: i64,
         read_only: bool,
     ) -> Result<Self, RuntimeError> {
+        let writer_lock = if read_only {
+            None
+        } else {
+            Some(acquire_writer_lock(&db_path)?)
+        };
         let (tx, rx) = mpsc::channel::<Command>(CHANNEL_CAPACITY);
         // Reserve the dedicated Close slot up front (the channel is empty, so
         // this cannot fail); `close` sends through it without contending with
@@ -187,7 +192,17 @@ impl WorkspaceActor {
         let worker_state = Arc::clone(&state);
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
-            .spawn(move || worker_main(db_path, now_ms, read_only, rx, worker_state, startup_tx))
+            .spawn(move || {
+                worker_main(
+                    db_path,
+                    now_ms,
+                    read_only,
+                    rx,
+                    worker_state,
+                    startup_tx,
+                    writer_lock,
+                )
+            })
             .map_err(RuntimeError::ThreadSpawn)?;
 
         match startup_rx.recv() {
@@ -381,6 +396,7 @@ fn worker_main(
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
     startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
+    writer_lock: Option<std::fs::File>,
 ) {
     // Publish Closed on any exit — normal return OR a panic unwind (e.g. a
     // panicking fault injector). Declared before `store` so `store` (and its
@@ -394,6 +410,8 @@ fn worker_main(
         }
     }
     let _closed_guard = ClosedGuard(Arc::clone(&state));
+    // Drop SQLite first, then its owner lock, then publish Closed, including unwind.
+    let _writer_lock = writer_lock;
 
     let mut store = match if read_only {
         EngineStore::open_read_only(&db_path)
@@ -447,6 +465,37 @@ fn worker_main(
     // publishes Closed as it falls out of scope (same ordering the guard
     // guarantees on a panic unwind).
     drop(store);
+}
+
+fn acquire_writer_lock(db_path: &std::path::Path) -> Result<std::fs::File, RuntimeError> {
+    // Canonical path aliases share this lock. Workspace ROOT_BINDING validation
+    // separately refuses databases copied or hardlinked into an unbound root.
+    let canonical = std::fs::canonicalize(db_path).map_err(|error| RuntimeError::Identity {
+        reason: "could not resolve workspace writer lock",
+        source: Some(error),
+    })?;
+    let mut lock_path = canonical.into_os_string();
+    lock_path.push(".owner-lock");
+    // A separate persistent inode avoids disturbing SQLite's POSIX record locks.
+    // Never unlink it: a replacement inode would admit another owner.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(std::path::PathBuf::from(lock_path))
+        .map_err(|error| RuntimeError::Identity {
+            reason: "could not open workspace writer lock",
+            source: Some(error),
+        })?;
+    fs4::FileExt::try_lock(&file).map_err(|error| match error {
+        fs4::TryLockError::WouldBlock => RuntimeError::WorkspaceOwned,
+        fs4::TryLockError::Error(error) => RuntimeError::Identity {
+            reason: "could not acquire workspace writer lock",
+            source: Some(error),
+        },
+    })?;
+    Ok(file)
 }
 
 #[cfg(test)]

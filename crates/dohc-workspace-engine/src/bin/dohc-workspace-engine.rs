@@ -19,7 +19,9 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_runtime::{RuntimeError, WorkspaceSupervisor};
 use dohc_workspace_engine::live_application_ingress::LiveApplicationIngress;
-use dohc_workspace_engine::{EngineEventNotice, EngineService, LiveApplicationInput};
+use dohc_workspace_engine::{
+    ConfiguredLiveHostConfig, EngineEventNotice, EngineService, LiveApplicationInput,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
@@ -73,18 +75,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
-    let service = Arc::new(EngineService::new());
+    let (service, live) = match std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG") {
+        Some(path) => {
+            let config = ConfiguredLiveHostConfig::read(std::path::Path::new(&path))?;
+            let (service, owner, ingress) = EngineService::configured_live_host(config).await?;
+            (service, Some((owner, ingress)))
+        }
+        None => (Arc::new(EngineService::new()), None),
+    };
     let supervisor = Arc::new(Supervisor::new(
         SupervisorConfig::default(),
         service.clone(),
     ));
-    let transport = run_transport(
+    let transport = run_transport_with_live(
         auth_token,
         tokio::io::stdin(),
         tokio::io::stdout(),
         supervisor,
         service.events().subscribe(),
         || WorkspaceSupervisor::global().close_all(),
+        live,
     )
     .await;
     // Store actors are closed by the hook above; any in-flight capture write
@@ -95,6 +105,7 @@ async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[cfg(test)]
 async fn run_transport<R, W, S, C>(
     auth_token: String,
     input: R,

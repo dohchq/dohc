@@ -404,7 +404,7 @@ pub struct ApplicationHostCoordinate {
     pub connection_id: String,
 }
 impl ApplicationHostCoordinate {
-    fn validate(&self) -> Result<(), ApplicationError> {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
         identifier(&self.host_id, 1024)?;
         integer(self.host_epoch, 1, SAFE)?;
         identifier(&self.instance_id, 1024)?;

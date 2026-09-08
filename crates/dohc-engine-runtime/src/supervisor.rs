@@ -439,6 +439,23 @@ mod tests {
     use dohc_engine_testkit::ScratchDir;
 
     #[test]
+    fn independent_supervisors_refuse_a_second_writer_then_allow_reopen() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let first = WorkspaceSupervisor::new();
+        let second = WorkspaceSupervisor::new();
+        assert!(first.open(&db, 0).unwrap().created_actor);
+        assert!(!first.open(&db, 0).unwrap().created_actor);
+        assert!(matches!(
+            second.open(&db, 0),
+            Err(crate::RuntimeError::WorkspaceOwned)
+        ));
+        first.close(&db).unwrap();
+        assert!(second.open(&db, 0).unwrap().created_actor);
+        second.close(&db).unwrap();
+    }
+
+    #[test]
     fn open_reports_actor_ownership_and_store_disposition() {
         let scratch = ScratchDir::new().expect("scratch");
         let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine db path");
