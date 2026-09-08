@@ -18,6 +18,10 @@ publish.workspace = true
 description = "Durable Y.Doc layer for the workspace engine: update log, snapshots, compaction, per-document leases, replicated lineage, and the settle projection."
 
 [features]
+# Cache inspection, poison hooks, and replay fault injection for tests.
+# Production builds must not enable this feature.
+# Poison tests require debug assertions.
+test-support = []
 # Passthrough of the storage crate's crash-injection seam so the durable
 # append / settle-commit crash-recovery tests can arm the shared storage fault
 # points under `-p dohc-engine-collab --features fault-injection`. Under
@@ -61,6 +65,8 @@ ryu-js = "1.0.3"
 base64 = "0.23"
 
 [dev-dependencies]
+# Integration tests need the library built with its test APIs.
+dohc-engine-collab = { path = ".", features = ["test-support"] }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 dohc-test-scratch = { path = "../dohc-test-scratch" }
 
