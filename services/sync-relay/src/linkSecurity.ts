@@ -196,7 +196,14 @@ export interface ValidatedLinkCapability {
 }
 
 export function validateLinkCapability(input: {
-  storage: SyncRelayStorage;
+  storage: Pick<
+    SyncRelayStorage,
+    | "findLinkSessionByCapabilityHash"
+    | "getShare"
+    | "getShareGrant"
+    | "workspaceIsOwnedBy"
+    | "findChannelCreateKind"
+  >;
   capabilityToken: string;
   linkKey: BinaryLike;
   nowMs: number;
@@ -226,4 +233,8 @@ export function validateLinkCapability(input: {
     access: authorized.effectiveSelector.access,
     effectiveSelector: authorized.effectiveSelector,
   };
+}
+
+export function isPublicLinkAccess(value: string): value is "view" | "comment" {
+  return value === "view" || value === "comment";
 }
