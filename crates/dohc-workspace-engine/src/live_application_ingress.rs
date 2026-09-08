@@ -1,11 +1,11 @@
 //! Private admitted-update assembly. No deployment values are selected here.
 
 use crate::EngineService;
-use crate::rpc::live_application::{LiveApplicationInput, Registration};
+use crate::rpc::live_application::{LiveApplicationInput, LiveApplicationOperation, Registration};
 use dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
 use dohc_engine_collab::live_update_application::{
-    AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveUpdateStructRange, RelayAcceptedLiveUpdate,
-    parse_admitted_metadata,
+    AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveApplicationBootstrap,
+    LiveUpdateStructRange, RelayAcceptedLiveUpdate, parse_admitted_metadata,
 };
 use dohc_engine_protocol::error::{ErrorCode, WireError};
 use dohc_engine_protocol::limits::MAX_WIRE_INTEGER;
@@ -64,6 +64,19 @@ struct ApplyParams {
     range_digest: String,
     update_stream_id: u64,
     update_byte_length: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BootstrapParams {
+    registration_id: u64,
+    baseline_stream_id: u64,
+    baseline: LiveApplicationBootstrap,
+}
+
+enum Metadata {
+    Apply(RelayAcceptedLiveUpdate),
+    Bootstrap(LiveApplicationBootstrap),
 }
 
 struct Stream {
@@ -140,10 +153,10 @@ impl Stream {
 
 struct Upload {
     request: Request,
-    accepted: RelayAcceptedLiveUpdate,
+    metadata: Metadata,
     registration: Arc<Registration>,
     update: Stream,
-    ranges: Stream,
+    ranges: Option<Stream>,
     bytes: Vec<u8>,
     first_seen: Vec<LiveUpdateStructRange>,
     range_tail: Vec<u8>,
@@ -196,7 +209,11 @@ impl LiveApplicationIngress {
         mut request: Request,
         connection: &ConnectionHandle,
     ) -> Result<(), WireError> {
-        if request.method != "liveApplication.apply" || request.idempotency_key.is_some() {
+        if !matches!(
+            request.method.as_str(),
+            "liveApplication.apply" | "liveApplication.bootstrap"
+        ) || request.idempotency_key.is_some()
+        {
             return Err(invalid("invalid-live-application-request"));
         }
         if self.uploads.contains_key(&request.id) {
@@ -207,42 +224,75 @@ impl LiveApplicationIngress {
             .clone()
             .try_acquire_owned()
             .map_err(|_| overloaded())?;
-        let params: ApplyParams = serde_json::from_value(std::mem::take(&mut request.params))
-            .map_err(|_| invalid("invalid-live-application-header"))?;
-        let canonical = parse_admitted_metadata(serde_json::json!({
-            "accepted": params.accepted, "firstSeen": [],
-        }))
-        .map_err(|_| invalid("invalid-live-application-header"))?;
-        if canonical.accepted != params.accepted {
-            return Err(invalid("noncanonical-live-application-header"));
-        }
-        if !(2..=MAX_YDOC_UPDATE_BYTES).contains(&params.update_byte_length)
-            || params.range_count > (params.update_byte_length - 2) / 5
-            || params.update_stream_id == params.range_stream_id
-            || self.last_stream_id.is_some_and(|last| {
-                params.update_stream_id <= last || params.range_stream_id <= last
-            })
+        let (metadata, registration_id, update, ranges, range_count) = if request.method
+            == "liveApplication.bootstrap"
         {
+            let params: BootstrapParams =
+                serde_json::from_value(std::mem::take(&mut request.params))
+                    .map_err(|_| invalid("invalid-live-bootstrap-header"))?;
+            params
+                .baseline
+                .validate()
+                .map_err(|_| invalid("invalid-live-bootstrap-header"))?;
+            let update = Stream::new(
+                params.baseline_stream_id,
+                params.baseline.baseline_byte_length as usize,
+                params.baseline.baseline_digest.clone(),
+            )?;
+            (
+                Metadata::Bootstrap(params.baseline),
+                params.registration_id,
+                update,
+                None,
+                0,
+            )
+        } else {
+            let params: ApplyParams = serde_json::from_value(std::mem::take(&mut request.params))
+                .map_err(|_| invalid("invalid-live-application-header"))?;
+            let canonical = parse_admitted_metadata(serde_json::json!({
+                "accepted": params.accepted, "firstSeen": [],
+            }))
+            .map_err(|_| invalid("invalid-live-application-header"))?;
+            if canonical.accepted != params.accepted {
+                return Err(invalid("noncanonical-live-application-header"));
+            }
+            if !(2..=MAX_YDOC_UPDATE_BYTES).contains(&params.update_byte_length)
+                || params.range_count > (params.update_byte_length - 2) / 5
+                || params.update_stream_id == params.range_stream_id
+            {
+                return Err(invalid("invalid-live-application-bounds"));
+            }
+            let update = Stream::new(
+                params.update_stream_id,
+                params.update_byte_length,
+                params.accepted.receipt.update_digest.clone(),
+            )?;
+            let ranges = Stream::new(
+                params.range_stream_id,
+                params.range_count * RANGE_BYTES,
+                params.range_digest,
+            )?;
+            (
+                Metadata::Apply(params.accepted),
+                params.registration_id,
+                update,
+                Some(ranges),
+                params.range_count,
+            )
+        };
+        if self.last_stream_id.is_some_and(|last| {
+            update.id <= last || ranges.as_ref().is_some_and(|ranges| ranges.id <= last)
+        }) {
             return Err(invalid("invalid-live-application-bounds"));
         }
         let registration = self.service.live_application_registration(
             connection,
             request.workspace.as_ref(),
-            params.registration_id,
-        )?;
-        let update = Stream::new(
-            params.update_stream_id,
-            params.update_byte_length,
-            params.accepted.receipt.update_digest.clone(),
-        )?;
-        let ranges = Stream::new(
-            params.range_stream_id,
-            params.range_count * RANGE_BYTES,
-            params.range_digest,
+            registration_id,
         )?;
         let reserved = self
             .config
-            .reservation_bytes(params.update_byte_length, params.range_count)
+            .reservation_bytes(update.expected, range_count)
             .and_then(|bytes| u32::try_from(bytes).ok())
             .ok_or_else(overloaded)?;
         let permit = Arc::new(Reservation {
@@ -255,11 +305,11 @@ impl LiveApplicationIngress {
         });
         let mut bytes = Vec::new();
         bytes
-            .try_reserve_exact(params.update_byte_length)
+            .try_reserve_exact(update.expected)
             .map_err(|_| overloaded())?;
         let mut first_seen = Vec::new();
         first_seen
-            .try_reserve_exact(params.range_count)
+            .try_reserve_exact(range_count)
             .map_err(|_| overloaded())?;
         let duration = request
             .deadline_ms
@@ -269,12 +319,16 @@ impl LiveApplicationIngress {
         let deadline = Instant::now()
             .checked_add(duration)
             .ok_or_else(|| invalid("invalid-live-upload-deadline"))?;
-        self.last_stream_id = Some(params.update_stream_id.max(params.range_stream_id));
+        self.last_stream_id = Some(
+            ranges
+                .as_ref()
+                .map_or(update.id, |ranges| update.id.max(ranges.id)),
+        );
         self.uploads.insert(
             request.id,
             Upload {
                 request,
-                accepted: params.accepted,
+                metadata,
                 registration,
                 update,
                 ranges,
@@ -298,8 +352,11 @@ impl LiveApplicationIngress {
         }
         if start.stream_id == upload.update.id {
             upload.update.start(&start)
-        } else if start.stream_id == upload.ranges.id {
-            upload.ranges.start(&start)
+        } else if let Some(ranges) = &mut upload.ranges {
+            if start.stream_id != ranges.id {
+                return Err(invalid("unknown-live-stream"));
+            }
+            ranges.start(&start)
         } else {
             Err(invalid("unknown-live-stream"))
         }
@@ -314,7 +371,13 @@ impl LiveApplicationIngress {
         let id = self
             .uploads
             .iter()
-            .find(|(_, upload)| upload.update.id == stream_id || upload.ranges.id == stream_id)
+            .find(|(_, upload)| {
+                upload.update.id == stream_id
+                    || upload
+                        .ranges
+                        .as_ref()
+                        .is_some_and(|ranges| ranges.id == stream_id)
+            })
             .map(|(id, _)| *id)
             .ok_or_else(|| invalid("unknown-live-stream"))?;
         let upload = self.uploads.get_mut(&id).expect("located upload");
@@ -325,7 +388,11 @@ impl LiveApplicationIngress {
             upload.update.chunk(bytes, fin)?;
             upload.bytes.extend_from_slice(bytes);
         } else {
-            upload.ranges.chunk(bytes, fin)?;
+            upload
+                .ranges
+                .as_mut()
+                .ok_or_else(|| invalid("unknown-live-stream"))?
+                .chunk(bytes, fin)?;
             for byte in bytes {
                 upload.range_tail.push(*byte);
                 if upload.range_tail.len() == RANGE_BYTES {
@@ -335,10 +402,11 @@ impl LiveApplicationIngress {
                     let end = u32::from_le_bytes(raw[12..16].try_into().expect("four bytes"));
                     if client > MAX_WIRE_INTEGER
                         || start >= end
-                        || upload
-                            .first_seen
-                            .last()
-                            .is_some_and(|previous| previous.client_id >= client as i64)
+                        || upload.first_seen.last().is_some_and(|previous| {
+                            previous.client_id > client as i64
+                                || (previous.client_id == client as i64
+                                    && previous.end_clock >= i64::from(start))
+                        })
                     {
                         return Err(invalid("invalid-live-range"));
                     }
@@ -351,16 +419,26 @@ impl LiveApplicationIngress {
                 }
             }
         }
-        if !upload.update.finished || !upload.ranges.finished {
+        if !upload.update.finished
+            || upload
+                .ranges
+                .as_ref()
+                .is_some_and(|ranges| !ranges.finished)
+        {
             return Ok(None);
         }
         let mut upload = self.uploads.remove(&id).expect("completed upload");
-        let event = AdmittedLiveUpdate {
-            metadata: AdmittedLiveUpdateMetadata {
-                accepted: upload.accepted,
-                first_seen: upload.first_seen,
-            },
-            update_bytes: upload.bytes,
+        let operation = match upload.metadata {
+            Metadata::Apply(accepted) => LiveApplicationOperation::Apply(AdmittedLiveUpdate {
+                metadata: AdmittedLiveUpdateMetadata {
+                    accepted,
+                    first_seen: upload.first_seen,
+                },
+                update_bytes: upload.bytes,
+            }),
+            Metadata::Bootstrap(metadata) => {
+                LiveApplicationOperation::Bootstrap(metadata, upload.bytes)
+            }
         };
         // Preserve the upload's original deadline after time spent assembling.
         let remaining = upload
@@ -372,7 +450,7 @@ impl LiveApplicationIngress {
             upload.request,
             LiveApplicationInput {
                 registration: upload.registration,
-                event,
+                operation,
                 reservation: upload.permit,
             },
         )))
@@ -550,6 +628,161 @@ pub(crate) mod tests {
                 "registrationId": registration, "rangeCount": ranges.len()/16, "rangeStreamId": 2, "rangeDigest": hex_sha256(ranges), "updateStreamId": 1, "updateByteLength": bytes.len(),
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn packed_ranges_preserve_disjoint_spans_and_refuse_noncanonical_order() {
+        let (_scratch, service, owner, workspace, registration, binding) = fixture().await;
+        let bytes = Ydoc::wire().plaintext_insert(0, "abcdefghij");
+        for (spans, allowed) in [
+            ([(7_u64, 0_u32, 3_u32), (7, 5, 10)], true),
+            ([(7, 0, 3), (7, 3, 10)], false),
+            ([(7, 0, 6), (7, 5, 10)], false),
+            ([(7, 0, 3), (6, 5, 10)], false),
+        ] {
+            let ranges: Vec<u8> = spans
+                .iter()
+                .flat_map(|(client, start, end)| {
+                    let mut packed = client.to_le_bytes().to_vec();
+                    packed.extend(start.to_le_bytes());
+                    packed.extend(end.to_le_bytes());
+                    packed
+                })
+                .collect();
+            let mut ingress = LiveApplicationIngress::new(service.clone(), config()).unwrap();
+            ingress
+                .begin(
+                    request(&workspace, registration, &binding, &bytes, &ranges),
+                    &owner.handle(),
+                )
+                .unwrap();
+            for (stream_id, payload) in [(1, &bytes), (2, &ranges)] {
+                ingress
+                    .start(BlobStart {
+                        request_id: 3,
+                        stream_id,
+                        total_bytes: Some(payload.len() as u64),
+                        sha256: Some(hex_sha256(payload)),
+                    })
+                    .unwrap();
+            }
+            assert!(ingress.chunk(1, true, &bytes).unwrap().is_none());
+            let decoded = ingress.chunk(2, true, &ranges);
+            if allowed {
+                let (_, input) = decoded.unwrap().unwrap();
+                let LiveApplicationOperation::Apply(event) = input.operation else {
+                    panic!("expected application");
+                };
+                assert_eq!(
+                    event.metadata.first_seen,
+                    spans.map(|(client, start, end)| LiveUpdateStructRange {
+                        client_id: client as i64,
+                        start_clock: i64::from(start),
+                        end_clock: i64::from(end)
+                    })
+                );
+            } else {
+                assert!(decoded.is_err());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_commits_through_actor_and_replays_without_second_domain_write() {
+        let (scratch, service, owner, workspace, _, mut binding) = fixture().await;
+        let vectors: serde_json::Value = serde_json::from_str(include_str!(
+            "../../dohc-engine-collab/tests/live-bootstrap-fixtures/live-bootstrap.json"
+        ))
+        .unwrap();
+        let vector = &vectors[1];
+        let bytes: Vec<u8> = serde_json::from_value(vector["bytes"].clone()).unwrap();
+        let markdown = vector["markdown"].as_str().unwrap();
+        binding.object_id = "two".into();
+        binding.current_path = "two.md".into();
+        binding.selector_paths = vec!["two.md".into()];
+        binding.lineage_claim_id = hex_sha256(&bytes);
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let registered = service
+            .call(
+                ctx,
+                Request {
+                    id: 10,
+                    method: "liveApplication.register".into(),
+                    workspace: Some(dohc_engine_protocol::wire::WorkspaceHandle(
+                        workspace.clone(),
+                    )),
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    params: json!({"binding":binding}),
+                },
+            )
+            .await
+            .unwrap();
+        let registration = registered.response.result["registrationId"]
+            .as_u64()
+            .unwrap();
+        let mut ingress = LiveApplicationIngress::new(service.clone(), config()).unwrap();
+        let budget = ingress.budget.available_permits();
+        for sequence in 1..=2 {
+            let request = Request {
+                id: 20 + sequence,
+                method: "liveApplication.bootstrap".into(),
+                workspace: Some(dohc_engine_protocol::wire::WorkspaceHandle(
+                    workspace.clone(),
+                )),
+                deadline_ms: Some(30_000),
+                idempotency_key: None,
+                params: json!({"registrationId":registration,"baselineStreamId":sequence,"baseline":{
+                    "bootstrapId":"bootstrap","bootstrapMomentId":"bootstrap-moment","baselineMomentRelaySequence":0,"baselineRegisteredAtMs":100,
+                    "baselineDigest":hex_sha256(&bytes),"baselineByteLength":bytes.len(),"projectedMarkdownDigest":hex_sha256(markdown.as_bytes()),"projectedMarkdownByteLength":markdown.len()
+                }}),
+            };
+            ingress.begin(request, &owner.handle()).unwrap();
+            ingress
+                .start(BlobStart {
+                    request_id: 20 + sequence,
+                    stream_id: sequence,
+                    total_bytes: Some(bytes.len() as u64),
+                    sha256: Some(hex_sha256(&bytes)),
+                })
+                .unwrap();
+            let (request, input) = ingress.chunk(sequence, true, &bytes).unwrap().unwrap();
+            let mut ctx = RequestContext::unbounded();
+            ctx.connection = Some(owner.handle());
+            let response = service
+                .call_with_input(ctx, request, Some(input))
+                .await
+                .unwrap();
+            assert_eq!(response.response.result["status"], "bootstrapped");
+            assert_eq!(response.response.result["ack"]["localYDocSequence"], 0);
+            assert_eq!(
+                response.response.result["ack"]["bootstrapReplayed"],
+                sequence == 2
+            );
+            assert!(response.output_guard.as_ref().unwrap().is_current());
+            assert!(ingress.budget.available_permits() < budget);
+            let raw =
+                rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).unwrap();
+            let rows:(i64,i64,i64)=raw.query_row("SELECT (SELECT COUNT(*) FROM live_device_bootstraps),(SELECT COUNT(*) FROM moments WHERE object_id='two'),(SELECT COUNT(*) FROM engine_search_files_fts WHERE object_id='two' AND text=?1)",[markdown],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+            assert_eq!(rows, (1, 1, 1));
+            drop(response);
+            assert_eq!(ingress.budget.available_permits(), budget);
+        }
+        service
+            .call(
+                RequestContext::unbounded(),
+                Request {
+                    id: 100,
+                    method: "workspace.close".into(),
+                    workspace: Some(dohc_engine_protocol::wire::WorkspaceHandle(workspace)),
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    params: serde_json::Value::Null,
+                },
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

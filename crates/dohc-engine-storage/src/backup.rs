@@ -46,6 +46,7 @@ use std::path::{Path, PathBuf};
 /// The durable tables whose row counts a restore test compares source-vs-copy.
 /// A mismatch means the copy is not a faithful snapshot — the backup fails.
 const COMPARED_TABLES: &[&str] = &[
+    "live_device_bootstraps",
     "live_device_application_bindings",
     "live_device_update_applications",
     "live_device_application_first_seen",
@@ -477,12 +478,15 @@ mod tests {
         let mut store = EngineStore::open(&dir.join("source.db"), 0).unwrap();
         store.write_with(&NoFaults, |tx| {
             let sha = crate::put_binary_blob(tx, &[0, 0]).unwrap();
+            tx.execute("INSERT INTO versioned_workspaces VALUES ('workspace','main')",[]).unwrap();
+            tx.execute("INSERT INTO live_device_bootstraps VALUES ('relay','workspace','main','object',?1,'bootstrap','bootstrap-moment','{}',?1,2,0,0,?1,0,0,'{}')",[&sha]).unwrap();
             tx.execute("INSERT INTO live_device_application_bindings VALUES ('relay','workspace','main','object','lineage','a.md','[\"a.md\"]',0,'host',1,'instance','connection',1)", []).unwrap();
             tx.execute("INSERT INTO live_device_update_applications VALUES ('relay','workspace','delivery','main','object','lineage','a.md','[\"a.md\"]',0,?1,2,1,1,'owner','person',NULL,NULL,0,1,1,'host',1,'instance','connection')", [&sha]).unwrap();
             tx.execute("INSERT INTO live_device_application_first_seen VALUES ('relay','workspace','delivery',0,1,0,1)", []).unwrap();
             Ok::<_, StorageError>(())
         }).unwrap();
         for (index, table) in [
+            "live_device_bootstraps",
             "live_device_application_bindings",
             "live_device_update_applications",
             "live_device_application_first_seen",
@@ -517,6 +521,7 @@ mod tests {
     #[test]
     fn backup_compares_live_application_tables() {
         for table in [
+            "live_device_bootstraps",
             "live_device_application_bindings",
             "live_device_update_applications",
             "live_device_application_first_seen",

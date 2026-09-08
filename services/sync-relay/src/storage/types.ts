@@ -1,3 +1,5 @@
+import type { LiveCommittedDeliveryStore } from "./liveCommittedDelivery";
+import type { LiveJournalHistoryAuthority } from "./liveJournalHistory";
 import type { AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveUpdateSubmissionMetadata, LiveUpdateAcceptResult } from "@dohc/live-session-contract/live-update-admission";
 import type {
   HostControlSnapshot,
@@ -551,6 +553,7 @@ export type CommittedLiveUpdateResult =
   | { readonly kind: "retry"; readonly reason: "host-unavailable" };
 
 export interface SyncRelayStorage {
+  createLiveCommittedDeliveryStore(history: LiveJournalHistoryAuthority): LiveCommittedDeliveryStore;
   readLiveUpdateJournalCut(input: { document: LiveDocumentKey }): LiveUpdateJournalCutResult;
   commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput): RelayLiveUpdateJournalResult;
   readCommittedLiveUpdate(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; journalCursor: number }): CommittedLiveUpdateResult;

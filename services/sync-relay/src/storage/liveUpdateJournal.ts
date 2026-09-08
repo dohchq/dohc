@@ -1,3 +1,4 @@
+import { requireLiveJournalHistory } from "./liveJournalHistory";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual, types as nodeTypes } from "node:util";
 import { LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT, parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
@@ -10,6 +11,7 @@ import { LIVE_JOURNAL_TABLE, LIVE_JOURNAL_PROVENANCE } from "./schema";
 import { snapshotHostCoordinate } from "../liveTicketInputs";
 import { readLiveHostControl } from "./hostControl";
 import { assertWorkspaceQuota } from "./workspaces";
+import { registerLiveDeliveryEvent } from "./liveDeliveryReservations";
 import { baselineRecord, baselineByteBuffer, baselineByteOffset, baselineByteLength, baselineBufferLength, baselineBufferResizable, authorityInteger, authorityIntegrity, currentLiveDocumentMoment, assertCurrentAuthorityHost, snapshotCurrentBindingRequest, decodeLiveDocumentAuthorityStructure, authorizeLiveDocument } from "./liveDocumentAuthority";
 
 function journalAuthorityHistory(storage: StorageContext, document: LiveDocumentKey): StoredLiveDocumentAuthority[] {
@@ -22,7 +24,7 @@ function journalIntegrity(condition: unknown): asserts condition {
 function journalDigest(bytes: Uint8Array, digest: string): void {
   journalIntegrity(createHash("sha256").update(bytes).digest("hex") === digest);
 }
-function journalDocument(value: unknown): LiveDocumentKey {
+export function journalDocument(value: unknown): LiveDocumentKey {
   const document = parseLiveDocumentKey(baselineRecord(value, ["workspaceId", "mainVersionId", "objectId", "lineageClaimId"]));
   if (document.mainVersionId !== "main") throw new TypeError("Journal document must be main.");
   return document;
@@ -63,7 +65,7 @@ function journalBinding(value: unknown): LiveObjectBinding {
   });
   return parseLiveObjectBinding({ ...record, selectorPaths: paths });
 }
-function documentParams(document: LiveDocumentKey): [string, string, string, string] {
+export function documentParams(document: LiveDocumentKey): [string, string, string, string] {
   return [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
 }
 const JOURNAL_DOCUMENT_WHERE = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
@@ -71,7 +73,7 @@ interface DecodedJournalRow {
   admitted: AdmittedLiveUpdate;
   checkpoint: { digest: string; bytes: Uint8Array } | null;
 }
-function decodeJournalRow(db: SqliteDb, raw: Record<string, unknown>, provenance?: Record<string, unknown>[]): DecodedJournalRow {
+export function decodeJournalRow(db: SqliteDb, raw: Record<string, unknown>, provenance?: Record<string, unknown>[]): DecodedJournalRow {
   const binding = parseLiveObjectBinding({ workspaceId: raw.workspace_id, mainVersionId: raw.main_version_id,
     objectId: raw.object_id, lineageClaimId: raw.lineage_claim_id, currentPath: raw.current_path,
     selectorPaths: typeof raw.selector_paths_json === "string" ? JSON.parse(raw.selector_paths_json) : null,
@@ -100,7 +102,7 @@ function decodeJournalRow(db: SqliteDb, raw: Record<string, unknown>, provenance
   };
   return { admitted: { metadata, updateBytes: journalBytes(raw.update_bytes) }, checkpoint };
 }
-function assertJournalCheckpointPosition(db: SqliteDb, row: DecodedJournalRow): void {
+export function assertJournalCheckpointPosition(db: SqliteDb, row: DecodedJournalRow): { count: number; bytes: number } {
   const { binding, receipt } = row.admitted.metadata.accepted;
   const previous = db.prepare(`SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE}
     AND journal_cursor<? AND validation_checkpoint_bytes IS NOT NULL ORDER BY journal_cursor DESC LIMIT 1`)
@@ -124,8 +126,9 @@ function assertJournalCheckpointPosition(db: SqliteDb, row: DecodedJournalRow): 
     journalIntegrity(due === hasCheckpoint);
     if (index < segment.length - 1) journalIntegrity(!due);
   }
+  return { count: segment.length, bytes };
 }
-function verifyJournalRow(row: DecodedJournalRow): void {
+export function verifyJournalRow(row: DecodedJournalRow): void {
   journalDigest(row.admitted.updateBytes, row.admitted.metadata.accepted.receipt.updateDigest);
   if (row.checkpoint) journalDigest(row.checkpoint.bytes, row.checkpoint.digest);
 }
@@ -145,14 +148,14 @@ function copyJournalData(value: unknown): unknown {
   }
   return result;
 }
-function verifyJournalCut(cut: LiveUpdateJournalCut): void {
+export function verifyJournalCut(cut: LiveUpdateJournalCut): void {
   for (const authority of cut.authorityHistory) journalDigest(authority.baselineBytes, authority.baselineDigest);
   journalDigest(cut.baseline.bytes, cut.baseline.digest);
   journalDigest(cut.checkpoint.bytes, cut.checkpoint.digest);
   if (cut.checkpoint.metadata && cut.checkpoint.updateBytes) journalDigest(cut.checkpoint.updateBytes, cut.checkpoint.metadata.accepted.receipt.updateDigest);
   for (const row of cut.suffix) journalDigest(row.bytes, row.digest);
 }
-function journalHost(db: SqliteDb, candidate: LiveHostConnectionCoordinate): HostControlSnapshot |
+export function journalHost(db: SqliteDb, candidate: LiveHostConnectionCoordinate): HostControlSnapshot |
   { kind: "retry"; reason: "host-unavailable" } | { kind: "refused"; reason: "stale-session" } {
   const host = readLiveHostControl(db);
   if (host) assertCurrentAuthorityHost(db, host);
@@ -231,6 +234,7 @@ export function readLiveUpdateJournalCut(storage: StorageContext, input: { docum
   }
 
 export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpdateJournalCommitInput): RelayLiveUpdateJournalResult {
+    requireLiveJournalHistory(storage);
     const outer = baselineRecord(input, ["host", "actor", "expectedAuthority", "metadata", "cutToken", "validation", "updateBytes", "receivedAtMs"]);
     const host = snapshotHostCoordinate(outer.host);
     const rawMetadata = baselineRecord(outer.metadata, ["deliveryId", "updateDigest", "binding"]);
@@ -259,6 +263,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
     let committed: { reply: RelayLiveUpdateJournalResult; row?: DecodedJournalRow; history?: StoredLiveDocumentAuthority[]; advancedCut?: LiveUpdateJournalCut };
     try {
       committed = storage.tx(() => {
+        requireLiveJournalHistory(storage);
         const currentHost = journalHost(storage.db, host);
         if ("kind" in currentHost) return refused(currentHost);
         const history = journalAuthorityHistory(storage, document);
@@ -320,6 +325,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         journalIntegrity(isDeepStrictEqual(row.admitted.metadata, intended) && Buffer.compare(row.admitted.updateBytes, updateBytes) === 0 &&
           (due ? row.checkpoint && row.checkpoint.digest === checkpointDigest && Buffer.compare(row.checkpoint.bytes, checkpointBytes!) === 0 : row.checkpoint === null));
         storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, document.workspaceId);
+        registerLiveDeliveryEvent(storage, document, currentHost.configuredHostId, raw);
         return { reply: { result: { kind: "accepted" as const, receipt: { ...row.admitted.metadata.accepted.receipt }, replayed: false }, admitted: row.admitted } };
       });
     } catch (error) {
@@ -336,7 +342,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
     return committed.reply;
   }
 
-function liveJournalCut(storage: StorageContext, document: LiveDocumentKey):
+export function liveJournalCut(storage: StorageContext, document: LiveDocumentKey):
     | { kind: "cut"; cut: LiveUpdateJournalCut; coverage: LiveUpdateStructRange[] }
     | Exclude<LiveUpdateJournalCutResult, { kind: "cut" }> {
     const history = journalAuthorityHistory(storage, document);

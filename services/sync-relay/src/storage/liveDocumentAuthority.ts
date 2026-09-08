@@ -61,6 +61,7 @@ import type { NamedLiveBrowserContext } from "../namedLiveBrowserAuth";
 import { authorizeNamedLiveEditShareGrant } from "../shareAuthorization";
 import { readLiveHostControl, parseHostControlTimestamp } from "./hostControl";
 import { assertWorkspaceQuota } from "./workspaces";
+import { prepareLiveDeliveryWorkspace, registerLiveDeliveryBaseline } from "./liveDeliveryReservations";
 
 export function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest): CurrentLiveBindingRequest {
   const outer = ticketRecord(input, ["document", "actor"]);
@@ -459,6 +460,7 @@ export function registerLiveDocumentBaseline(storage: StorageContext, input: Liv
         return { kind: "registered", document: { ...document }, currentPath,
           restoreFenceGeneration: current.binding.restoreFenceGeneration, registeredAtMs: current.registeredAtMs, replayed: true };
       }
+      prepareLiveDeliveryWorkspace(storage, document.workspaceId, coordinate.hostId);
       assertWorkspaceQuota(storage, document.workspaceId, baselineBytes.byteLength);
       storage.db.prepare(`INSERT INTO sync_relay_live_documents (
         workspace_id, main_version_id, object_id, lineage_claim_id, replaces_lineage_claim_id, current_path,
@@ -477,6 +479,7 @@ export function registerLiveDocumentBaseline(storage: StorageContext, input: Liv
       }
       storage.db.prepare(`UPDATE sync_relay_workspace_usage SET usage_bytes = usage_bytes + ? WHERE workspace_id = ?`)
         .run(baselineBytes.byteLength, document.workspaceId);
+      registerLiveDeliveryBaseline(storage, document, coordinate.hostId);
       return { kind: "registered", document: { ...document }, currentPath,
         restoreFenceGeneration: 1, registeredAtMs, replayed: false };
     });

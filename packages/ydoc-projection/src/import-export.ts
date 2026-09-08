@@ -440,7 +440,14 @@ export function yDocToMarkdown(doc: Y.Doc): string {
     && typeof taggedBaseline === 'string'
     && frontmatterYaml(frontmatter) === taggedBaseline
   ) {
-    return `${taggedPrefix}${restoreLineEndings(body)}`
+    const parsed = parseFrontmatter(taggedPrefix)
+    if (
+      FM_RE.test(taggedPrefix)
+      && /^(?:\r?\n)*$/u.test(parsed.body)
+      && frontmatterYaml(parsed.meta) === taggedBaseline
+    ) {
+      return `${taggedPrefix}${restoreLineEndings(body)}`
+    }
   }
 
   if (Object.keys(frontmatter).length === 0) return restoreLineEndings(body)
@@ -1219,8 +1226,8 @@ function normalizeFrontmatterValue(value: unknown): unknown {
   if (!isFrontmatterMap(value)) return value
 
   const normalized = nullPrototypeRecord()
-  for (const [key, child] of Object.entries(value)) {
-    normalized[key] = normalizeFrontmatterValue(child)
+  for (const key of Object.keys(value).sort()) {
+    normalized[key] = normalizeFrontmatterValue(value[key])
   }
   return normalized
 }
@@ -1337,7 +1344,7 @@ function mapToObject(
     Array.from(map.entries(), ([key, child]) => [
       unescapeSharedBigIntKeys ? unescapeSharedBigIntKey(key) : key,
       yFrontmatterValueToPlain(child),
-    ]),
+    ] as const).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
   )
 }
 

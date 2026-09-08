@@ -3,7 +3,8 @@ use super::workspace::{OpenWorkspace, WorkspaceOpenMode};
 use crate::{EngineService, lock};
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
-    AdmittedLiveUpdate, ApplicationHostCoordinate, ApplicationResult,
+    AdmittedLiveUpdate, ApplicationHostCoordinate, ApplicationResult, BootstrapResult,
+    LiveApplicationBootstrap,
 };
 use dohc_engine_protocol::cancel::CancelSignal;
 use dohc_engine_protocol::error::{ErrorCode, WireError};
@@ -96,8 +97,14 @@ impl Registry {
 #[doc(hidden)]
 pub struct LiveApplicationInput {
     pub(crate) registration: Arc<Registration>,
-    pub(crate) event: AdmittedLiveUpdate,
+    pub(crate) operation: LiveApplicationOperation,
     pub(crate) reservation: Arc<dyn Send + Sync>,
+}
+
+#[derive(Clone)]
+pub(crate) enum LiveApplicationOperation {
+    Apply(AdmittedLiveUpdate),
+    Bootstrap(LiveApplicationBootstrap, Vec<u8>),
 }
 
 struct ApplicationOutputGuard {
@@ -343,7 +350,11 @@ impl EngineService {
         input: LiveApplicationInput,
     ) -> Result<ServiceResponse, WireError> {
         let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
-        if request.method != "liveApplication.apply"
+        let method = match &input.operation {
+            LiveApplicationOperation::Apply(_) => "liveApplication.apply",
+            LiveApplicationOperation::Bootstrap(..) => "liveApplication.bootstrap",
+        };
+        if request.method != method
             || !input.registration.host.current(connection)
             || input.registration.retired.is_cancelled()
             || !Arc::ptr_eq(
@@ -376,11 +387,36 @@ impl EngineService {
         let mut retirement = RetireOnCancellation(Some(host.clone()));
         let operation = tokio::spawn(async move {
             let _serial = serial;
-            input
-                .registration
-                .handle
-                .apply_with_reservation(input.event, Arc::new(NoFaults), Some(input.reservation))
-                .await
+            match input.operation {
+                LiveApplicationOperation::Apply(event) => input
+                    .registration
+                    .handle
+                    .apply_with_reservation(event, Arc::new(NoFaults), Some(input.reservation))
+                    .await
+                    .map(|result| match result {
+                        ApplicationResult::Applied(ack) => {
+                            json!({ "status": "applied", "ack": ack })
+                        }
+                        ApplicationResult::Pending(reason) => pending_result(reason),
+                    }),
+                LiveApplicationOperation::Bootstrap(metadata, bytes) => input
+                    .registration
+                    .handle
+                    .bootstrap(
+                        metadata,
+                        bytes,
+                        input.registration.host.open.root.clone(),
+                        Arc::new(NoFaults),
+                        Some(input.reservation),
+                    )
+                    .await
+                    .map(|result| match result {
+                        BootstrapResult::Bootstrapped(ack) => {
+                            json!({ "status": "bootstrapped", "ack": ack })
+                        }
+                        BootstrapResult::Pending(reason) => pending_result(reason),
+                    }),
+            }
         });
         let outcome = operation.await;
         retirement.0 = None;
@@ -393,26 +429,27 @@ impl EngineService {
                 "live-application-retired",
             ));
         }
-        let result = match outcome {
-            ApplicationResult::Applied(ack) => json!({ "status": "applied", "ack": ack }),
-            ApplicationResult::Pending(reason) => {
-                json!({ "status": "pending", "reason": match reason {
-                    dohc_engine_collab::live_update_application::ApplicationPending::DependenciesUnresolved => "dependencies-unresolved",
-                    dohc_engine_collab::live_update_application::ApplicationPending::BaselineUnavailable => "baseline-unavailable",
-                    dohc_engine_collab::live_update_application::ApplicationPending::ApplicabilityUnavailable => "applicability-unavailable",
-                    dohc_engine_collab::live_update_application::ApplicationPending::BindingMismatch => "binding-mismatch",
-                }})
-            }
-        };
         Ok(ServiceResponse {
             response: Response {
                 id: request.id,
-                result,
+                result: outcome,
             },
             blob_egress: None,
             output_guard: Some(guard),
         })
     }
+}
+
+fn pending_result(
+    reason: dohc_engine_collab::live_update_application::ApplicationPending,
+) -> Value {
+    use dohc_engine_collab::live_update_application::ApplicationPending;
+    json!({ "status": "pending", "reason": match reason {
+        ApplicationPending::DependenciesUnresolved => "dependencies-unresolved",
+        ApplicationPending::BaselineUnavailable => "baseline-unavailable",
+        ApplicationPending::ApplicabilityUnavailable => "applicability-unavailable",
+        ApplicationPending::BindingMismatch => "binding-mismatch",
+    }})
 }
 
 #[cfg(test)]
@@ -562,7 +599,7 @@ mod tests {
         let (request, input) = ingress.chunk(2, true, &[]).unwrap().unwrap();
         let retry = LiveApplicationInput {
             registration: input.registration.clone(),
-            event: input.event.clone(),
+            operation: input.operation.clone(),
             reservation: input.reservation.clone(),
         };
         let handle = dohc_engine_protocol::wire::WorkspaceHandle(workspace);

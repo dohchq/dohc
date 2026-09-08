@@ -23,6 +23,11 @@ use std::sync::{Arc, Mutex};
 
 const SAFE: i64 = 9_007_199_254_740_991;
 
+mod bootstrap;
+pub use bootstrap::{
+    bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApplicationError {
     #[error("invalid live application input: {0}")]
@@ -390,7 +395,8 @@ pub fn parse_application_ack(
     Ok(ack)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApplicationHostCoordinate {
     pub host_id: String,
     pub host_epoch: i64,
