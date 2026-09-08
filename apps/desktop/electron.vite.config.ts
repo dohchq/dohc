@@ -14,6 +14,7 @@ export const mainBundledWorkspaceDeps = [
   "@dohc/live-session-contract",
   "@dohc/sdk",
   "@dohc/security-contract",
+  "@dohc/sync-relay",
   "@dohc/workspace-core",
   "@dohc/workspace-contracts",
   "@dohc/workspace-engine-client",
