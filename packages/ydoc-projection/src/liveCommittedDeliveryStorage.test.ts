@@ -17,6 +17,7 @@ afterEach(() => {
   cleanupLiveDeliveryFixtures();
 });
 import { createLiveJournalHistoryAuthority } from "../../../services/sync-relay/src/storage/liveJournalHistory.js";
+import { HOST_CONTROL_IDENTIFIER_MAX_BYTES, parseHostEpoch } from "@dohc/live-session-contract/host-control";
 
 function delivery(f: ReturnType<typeof registered>) {
   const history = createLiveJournalHistoryAuthority({
@@ -45,6 +46,185 @@ function ackBaseline(
     bootstrapReplayed: false,
   });
 }
+it("reserves delivery before admission and completes acknowledgements at quota", () => {
+  const quota = 200_000;
+  const f = registered({ workspaceQuotaBytes: quota });
+  try {
+    const event = f.capture(f.update(), "reserved-event");
+    expect(f.storage.commitLiveUpdateJournal(event).result.kind).toBe("accepted");
+    const usage = () => Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes);
+    const reserved = () => Number(f.raw.prepare("SELECT COALESCE(SUM(reserved_bytes),0) AS total FROM sync_relay_live_delivery_reservations").get()!.total);
+    const charged = usage();
+    expect(reserved()).toBeGreaterThan(0);
+    expect(f.storage.commitLiveUpdateJournal(event).result).toMatchObject({ kind: "accepted", replayed: true });
+    expect(usage()).toBe(charged);
+    f.raw.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=? WHERE workspace_id='workspace'").run(quota);
+    const { store } = delivery(f);
+    const drain = store.open({ host, document: f.input.evidence.document });
+    expect(usage()).toBe(quota);
+    ackBaseline(store, drain);
+    const next = store.next(drain);
+    if (next.kind !== "next") throw Error("expected event");
+    const ack = { ...next.admitted.metadata.accepted.receipt, localYDocSequence: 1, applicationReplayed: false };
+    store.acknowledge(drain, next.predecessor, ack);
+    expect(store.next(drain).kind).toBe("done");
+    expect(reserved()).toBe(0);
+    expect(usage()).toBeLessThan(quota);
+    const completedUsage = usage();
+    store.acknowledge(drain, next.predecessor, ack);
+    expect(usage()).toBe(completedUsage);
+  } finally { f.close(); }
+});
+
+it("refuses an event atomically when its delivery reservation does not fit", () => {
+  const quota = 200_000;
+  const f = registered({ workspaceQuotaBytes: quota });
+  try {
+    const event = f.capture(f.update(), "no-reservation-space");
+    f.raw.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=? WHERE workspace_id='workspace'").run(quota - event.updateBytes.byteLength);
+    const before = f.journalRows();
+    expect(() => f.storage.commitLiveUpdateJournal(event)).toThrow(/quota/i);
+    expect(f.journalRows()).toEqual(before);
+    expect(f.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_delivery_reservations WHERE journal_cursor>0").get()!.count).toBe(0);
+  } finally { f.close(); }
+});
+
+it("refuses a missing reservation instead of repairing it during delivery or reconnect", () => {
+  const f = registered();
+  try {
+    const event = f.capture(f.update());
+    expect(f.storage.commitLiveUpdateJournal(event).result.kind).toBe("accepted");
+    const { store } = delivery(f);
+    const drain = store.open({ host, document: f.input.evidence.document });
+    ackBaseline(store, drain);
+    const next = store.next(drain);
+    if (next.kind !== "next") throw Error("expected event");
+    f.raw.exec("DELETE FROM sync_relay_live_delivery_reservations WHERE journal_cursor>0");
+    expect(() => store.acknowledge(drain, next.predecessor, { ...next.admitted.metadata.accepted.receipt, localYDocSequence: 1, applicationReplayed: false })).toThrow(/reservation/i);
+    expect(() => f.storage.registerLiveHost({ ...host, updatedAtMs: 40, guard() {} })).toThrow(/reservation/i);
+    expect(f.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_delivery_edges").get()!.count).toBe(0);
+  } finally { f.close(); }
+});
+
+function transitionHost(f: ReturnType<typeof registered>, from: LiveHostConnectionCoordinate, toMode: "device" | "service", toHostId: string) {
+  const transitionId = `transition-${from.hostEpoch}`;
+  const begin = f.storage.beginLiveHostTransition({ from, toMode, toHostId, transitionId, startedAtMs: 40, guard() {} });
+  if (!begin.ok || !begin.snapshot.transition) throw Error("transition refused");
+  const transitionGeneration = begin.snapshot.transition.transitionGeneration;
+  const committed = f.storage.commitLiveHostTransitionEpoch({ transitionId, transitionGeneration, updatedAtMs: 41 });
+  if (!committed.ok) throw Error("transition commit refused");
+  const coordinate = { mode: toMode, hostId: toHostId, hostEpoch: parseHostEpoch(from.hostEpoch + 1), instanceId: `instance-${toHostId}`, connectionId: `connection-${toHostId}` };
+  const active = f.storage.activateLiveHostTransition({ ...coordinate, transitionId, transitionGeneration, transitionFromEpoch: from.hostEpoch, updatedAtMs: 42, guard() {} });
+  if (!active.ok) throw Error("activation refused");
+  return coordinate;
+}
+
+it("funds new documents and events when a previously used host returns", () => {
+  const f = registered();
+  try {
+    const { store } = delivery(f);
+    const first = store.open({ host, document: f.input.evidence.document });
+    ackBaseline(store, first);
+    store.close(first);
+    const service = transitionHost(f, host, "service", "service-host");
+    const secondInput = { ...f.input, host: service, evidence: { ...f.input.evidence, currentPath: "docs/b.md", document: { ...f.input.evidence.document, objectId: "second-object" } } };
+    f.moment(secondInput, 2);
+    expect(f.storage.registerLiveDocumentBaseline(secondInput).kind).toBe("registered");
+    expect(f.storage.commitLiveUpdateJournal(f.capture(f.update(), "while-away")).result.kind).toBe("accepted");
+    const returned = transitionHost(f, service, "device", host.hostId);
+    const retained = store.open({ host: returned, document: f.input.evidence.document });
+    const event = store.next(retained);
+    if (event.kind !== "next") throw Error("new history not delivered");
+    store.acknowledge(retained, event.predecessor, { ...event.admitted.metadata.accepted.receipt, localYDocSequence: 1, applicationReplayed: false });
+    expect(store.next(retained).kind).toBe("done");
+    const added = store.open({ host: returned, document: secondInput.evidence.document });
+    ackBaseline(store, added);
+    expect(store.next(added).kind).toBe("done");
+  } finally { f.close(); }
+});
+
+it("keeps the previous host coordinate when destination funding exceeds quota", () => {
+  const quota = 200_000;
+  const f = registered({ workspaceQuotaBytes: quota });
+  try {
+    const begin = f.storage.beginLiveHostTransition({ from: host, toMode: "service", toHostId: "new-host", transitionId: "quota-transition", startedAtMs: 40, guard() {} });
+    if (!begin.ok || !begin.snapshot.transition) throw Error("transition refused");
+    f.raw.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=? WHERE workspace_id='workspace'").run(quota);
+    const before = f.storage.getLiveHostControl();
+    expect(() => f.storage.commitLiveHostTransitionEpoch({ transitionId: "quota-transition", transitionGeneration: begin.snapshot.transition!.transitionGeneration, updatedAtMs: 41 })).toThrow(/quota/i);
+    expect(f.storage.getLiveHostControl()).toEqual(before);
+    expect(f.raw.prepare("SELECT 1 FROM sync_relay_live_delivery_hosts WHERE host_id='new-host'").get()).toBeUndefined();
+    expect(f.raw.prepare("SELECT 1 FROM sync_relay_live_delivery_reservations WHERE host_id='new-host'").get()).toBeUndefined();
+  } finally { f.close(); }
+});
+
+it("stores delivery acknowledgements at the configured host identifier limit", () => {
+  const identifier = "x".repeat(HOST_CONTROL_IDENTIFIER_MAX_BYTES);
+  const coordinate = { ...host, hostId: identifier, instanceId: identifier, connectionId: identifier };
+  const f = registered({ host: coordinate });
+  try {
+    expect(f.storage.commitLiveUpdateJournal(f.capture(f.update())).result.kind).toBe("accepted");
+    const { store } = delivery(f);
+    const drain = store.open({ host: coordinate, document: f.input.evidence.document });
+    ackBaseline(store, drain);
+    const event = store.next(drain);
+    if (event.kind !== "next") throw Error("expected event");
+    store.acknowledge(drain, event.predecessor, { ...event.admitted.metadata.accepted.receipt, localYDocSequence: 1, applicationReplayed: false });
+    expect(store.next(drain).kind).toBe("done");
+  } finally { f.close(); }
+});
+
+it("refuses baseline registration atomically when its delivery budget does not fit", () => {
+  const quota = 200_000;
+  const f = registered({ workspaceQuotaBytes: quota });
+  try {
+    const input = { ...f.input, evidence: { ...f.input.evidence, currentPath: "docs/b.md", document: { ...f.input.evidence.document, objectId: "second-object" } } };
+    f.moment(input, 2);
+    f.raw.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=? WHERE workspace_id='workspace'").run(quota - input.baselineBytes.byteLength);
+    const before = f.rows();
+    const funding = f.raw.prepare("SELECT * FROM sync_relay_live_delivery_hosts").all();
+    expect(() => f.storage.registerLiveDocumentBaseline(input)).toThrow(/quota/i);
+    expect(f.rows()).toEqual(before);
+    expect(f.raw.prepare("SELECT * FROM sync_relay_live_delivery_hosts").all()).toEqual(funding);
+    expect(f.raw.prepare("SELECT 1 FROM sync_relay_live_delivery_documents WHERE object_id='second-object'").get()).toBeUndefined();
+  } finally { f.close(); }
+});
+
+it("refuses a changed history namespace after reopening", () => {
+  const f = registered();
+  let reopened: ReturnType<typeof openSyncRelayStorage> | undefined;
+  let originalClosed = false;
+  try {
+    const { store } = delivery(f);
+    const drain = store.open({ host, document: f.input.evidence.document });
+    ackBaseline(store, drain);
+    f.storage.close();
+    originalClosed = true;
+    reopened = openSyncRelayStorage(f.path);
+    const foreign = reopened.createLiveCommittedDeliveryStore(createLiveJournalHistoryAuthority({ namespace: "foreign-history", reconciled: true }));
+    expect(() => foreign.open({ host, document: f.input.evidence.document })).toThrow(/reservation/i);
+    expect(f.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_delivery_bootstraps").get()!.count).toBe(1);
+  } finally {
+    reopened?.close();
+    if (originalClosed) { f.doc.destroy(); f.raw.close(); }
+    else f.close();
+  }
+});
+
+it("refuses missing funded baseline metadata on reconnect and removes workspace funding on deletion", () => {
+  const f = registered();
+  try {
+    f.raw.exec("DELETE FROM sync_relay_live_delivery_reservations WHERE journal_cursor=0");
+    expect(() => f.storage.registerLiveHost({ ...host, updatedAtMs: 50, guard() {} })).toThrow(/reservation/i);
+    const { store } = delivery(f);
+    expect(() => store.open({ host, document: f.input.evidence.document })).toThrow(/reservation/i);
+    f.raw.exec("DELETE FROM sync_relay_workspaces WHERE workspace_id='workspace'");
+    for (const table of ["sync_relay_live_delivery_hosts", "sync_relay_live_delivery_documents", "sync_relay_live_delivery_reservations"]) {
+      expect(f.raw.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()!.count).toBe(0);
+    }
+  } finally { f.close(); }
+});
+
 it("shares persisted bootstrap identity and serializes acknowledgement edges across issued drains", () => {
   const f = registered();
   try {
