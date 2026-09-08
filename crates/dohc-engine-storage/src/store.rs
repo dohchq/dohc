@@ -290,7 +290,7 @@ impl EngineStore {
 
     /// The on-disk size of the main database file, from `page_count * page_size`
     /// (the free-space preflight budget). Does not require the file path.
-    pub fn database_size_bytes(&self) -> Result<u64, StorageError> {
+    pub(crate) fn database_size_bytes(&self) -> Result<u64, StorageError> {
         let page_count: i64 = self
             .conn
             .pragma_query_value(None, "page_count", |r| r.get(0))
@@ -306,7 +306,7 @@ impl EngineStore {
     /// Copy the live database into `dest` as a clean single-file snapshot
     /// (`VACUUM INTO`). `dest` must not already exist. Used by the backup
     /// pipeline; not a general-purpose export.
-    pub fn vacuum_into(&self, dest: &Path) -> Result<(), StorageError> {
+    pub(crate) fn vacuum_into(&self, dest: &Path) -> Result<(), StorageError> {
         let dest_str = dest.to_str().ok_or(StorageError::InvalidInput {
             reason: "backup destination path is not valid UTF-8",
         })?;
