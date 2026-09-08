@@ -21,6 +21,7 @@ import {
 import {
   validateRegistrationCutForProjection,
   validateJournalCutForProjection,
+  MAX_OLD_SUFFIX_ENTRIES,
   type OrderedLiveUpdateCutPolicy,
   type OrderedLiveUpdateCutFinalizeResult,
   type ProjectionTopology,
@@ -30,7 +31,6 @@ import {
 
 const INPUT_FIELDS = ['document', 'currentPath', 'checkpoint'] as const
 const JOURNAL_INPUT_FIELDS = [...INPUT_FIELDS, 'suffix', 'candidate'] as const
-const MAX_SUFFIX_ENTRIES = 4_094
 const DOCUMENT_FIELDS = ['workspaceId', 'mainVersionId', 'objectId', 'lineageClaimId'] as const
 const POLICY_FIELDS = [
   'maxStructVisits',
@@ -265,7 +265,7 @@ function captureSuffix(value: unknown): Uint8Array[] {
   if (lengthDescriptor === undefined || !Object.hasOwn(lengthDescriptor, 'value')) refuse('invalid-input')
   const length: unknown = lengthDescriptor.value
   if (typeof length !== 'number' || !Number.isSafeInteger(length) || length < 0) refuse('invalid-input')
-  if (length > MAX_SUFFIX_ENTRIES) refuse('capacity-refused')
+  if (length > MAX_OLD_SUFFIX_ENTRIES) refuse('capacity-refused')
   const keys = Reflect.ownKeys(value)
   if (keys.length !== length + 1 || keys.some(key => {
     if (key === 'length') return false
@@ -306,7 +306,7 @@ export function createLiveMarkdownJournalValidator(
           document: input.document,
           currentPath: input.currentPath,
           checkpointDigest: cut.checkpointDigest,
-          suffixDigests: Object.freeze([...cut.suffixDigests]),
+          suffixDigests: cut.suffixDigests,
           candidate: Object.freeze({
             updateDigest: cut.candidate.updateDigest,
             ranges: Object.freeze(cut.candidate.ranges.map(range => Object.freeze({ ...range }))),
@@ -559,10 +559,13 @@ function bodyFingerprint(
   depth = 0,
 ): XmlFingerprint[] {
   if (budget !== null && body.length > budget.remaining) refuse('capacity-refused')
+  const schema = getDohcProseMirrorSchema()
+  const permitsText = body instanceof Y.XmlElement
+    && schema.nodes[body.nodeName]?.contentMatch.matchType(schema.nodes.text) != null
   const children: XmlFingerprint[] = []
   for (const child of body.toArray()) {
     const fingerprint = xmlFingerprint(child, depth, budget)
-    if (fingerprint.kind !== 'text' || fingerprint.delta.length !== 0) children.push(fingerprint)
+    if (!permitsText || fingerprint.kind !== 'text' || fingerprint.delta.length !== 0) children.push(fingerprint)
   }
   return children
 }
@@ -575,6 +578,7 @@ function xmlFingerprint(
   if (value instanceof Y.XmlHook) refuse('invalid-schema')
   if (value instanceof Y.XmlElement) {
     budget?.consume(depth)
+    if (budget !== null && value.length > budget.remaining) refuse('capacity-refused')
     const attributes = value.getAttributes() as Record<string, unknown>
     const entries = sortedValueEntries(attributes)
     for (const [key, attribute] of entries) {

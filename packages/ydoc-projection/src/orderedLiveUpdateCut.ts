@@ -145,7 +145,7 @@ const REGISTRATION_FIELDS = ['mode', 'checkpoint'] as const
 const JOURNAL_FIELDS = ['mode', 'checkpoint', 'suffix', 'candidate'] as const
 const MAX_UPDATE_BYTES = 20 * 1024 * 1024
 const MAX_STATE_BYTES = 20 * 1024 * 1024
-const MAX_OLD_SUFFIX_ENTRIES = 4_094
+export const MAX_OLD_SUFFIX_ENTRIES = 4_094
 const MAX_TOTAL_CUT_BYTES = 62_914_559
 const MAX_DEPTH = 128
 const nativeJsonParse = JSON.parse
@@ -3603,40 +3603,33 @@ function validateCut(
       dirtyLatch,
     }, acceptedUsage)
 
+    let cut: ValidatedLiveUpdateCut
     if (snapshot.mode === 'registration') {
       const checkpoint = inputEvidence[0] as ValidatedCutInputEvidence
-      const cut = Object.freeze({
+      cut = Object.freeze({
         mode: 'registration' as const,
         document,
         usage: acceptedUsage,
         finishAfterProjection,
         checkpoint: frozenInputEvidence(checkpoint.updateDigest, checkpoint.ranges),
       })
-      if (topology !== undefined) {
-        if (topology.value === undefined) fail('invalid-update', { kind: 'final' })
-        projectionDocument = undefined
-        return Object.freeze({ kind: 'accepted', cut, topology: topology.value })
-      }
-      return Object.freeze({
-        kind: 'accepted',
-        cut,
+    } else {
+      const candidate = inputEvidence[inputEvidence.length - 1] as ValidatedCutInputEvidence
+      cut = Object.freeze({
+        mode: 'journal-candidate' as const,
+        document,
+        usage: acceptedUsage,
+        finishAfterProjection,
+        checkpointDigest: (inputEvidence[0] as ValidatedCutInputEvidence).updateDigest,
+        suffixDigests: Object.freeze(
+          inputEvidence.slice(1, 1 + snapshot.suffixCount).map(entry => entry.updateDigest),
+        ),
+        candidate: frozenInputEvidence(
+          candidate.updateDigest,
+          candidate.ranges,
+        ),
       })
     }
-    const candidate = inputEvidence[inputEvidence.length - 1] as ValidatedCutInputEvidence
-    const cut = Object.freeze({
-      mode: 'journal-candidate' as const,
-      document,
-      usage: acceptedUsage,
-      finishAfterProjection,
-      checkpointDigest: (inputEvidence[0] as ValidatedCutInputEvidence).updateDigest,
-      suffixDigests: Object.freeze(
-        inputEvidence.slice(1, 1 + snapshot.suffixCount).map(entry => entry.updateDigest),
-      ),
-      candidate: frozenInputEvidence(
-        candidate.updateDigest,
-        candidate.ranges,
-      ),
-    })
     if (topology !== undefined) {
       if (topology.value === undefined) fail('invalid-update', { kind: 'final' })
       projectionDocument = undefined

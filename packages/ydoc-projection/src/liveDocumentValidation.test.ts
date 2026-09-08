@@ -335,6 +335,27 @@ describe('public Markdown schema', () => {
       }))
     }
   })
+  it.each(['image', 'mathBlock', 'bulletList', 'blockquote'])('rejects empty XmlText under %s where the schema forbids text', name => {
+    const schema = projection.getDohcProseMirrorSchema()
+    const paragraph = { type: 'paragraph', content: [{ type: 'text', text: 'Text' }] }
+    const node = schema.nodes[name].create().toJSON()
+    if (name === 'bulletList') node.content = [{ type: 'listItem', content: [paragraph] }]
+    if (name === 'blockquote') node.content = [paragraph]
+    const validCheckpoint = encode('', doc => {
+      const body = doc.getXmlFragment('body')
+      const child = schema.nodes[name].isInline ? { type: 'paragraph', content: [node] } : node
+      prosemirrorJSONToYXmlFragment(schema, { type: 'doc', content: [child] }, body)
+    })
+    accepted(validCheckpoint)
+    const doc = new Y.Doc({ gc: false })
+    try {
+      Y.applyUpdate(doc, validCheckpoint)
+      const child = doc.getXmlFragment('body').get(0) as Y.XmlElement
+      const parent = schema.nodes[name].isInline ? child.get(0) as Y.XmlElement : child
+      parent.insert(0, [new Y.XmlText()])
+      refused(Y.encodeStateAsUpdate(doc))
+    } finally { doc.destroy() }
+  })
   it('keeps invalid roots, nesting and attributes refused beside empty XmlText', () => {
     refused(encode('Text', doc => doc.getXmlFragment('body').insert(0, [new Y.XmlText()])))
     refused(encode('Text', doc => {
@@ -364,6 +385,22 @@ describe('public Markdown schema', () => {
     })
     accepted(fixture(262_144))
     refused(fixture(262_145), 'capacity-refused')
+  }, 60_000)
+  it.each(['# Heading', '```\nCode\n```'])('preserves valid empty text after deleting %s', markdown => {
+    const checkpoint = encode(markdown, doc => {
+      const text = (doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText
+      text.delete(0, text.length)
+    })
+    const evidence = accepted(checkpoint)
+    expect(accepted(evidence.stateUpdate).stateUpdate).toEqual(evidence.stateUpdate)
+  })
+  it('refuses excessive child count before malformed parent attributes', () => {
+    const checkpoint = encode('Text', doc => {
+      // Leave one node for the paragraph and none for its child.
+      doc.getMap('frontmatter').set('values', new Array(262_142).fill(0))
+      ;(doc.getXmlFragment('body').get(0) as Y.XmlElement).setAttribute('unknown', 'hidden')
+    })
+    refused(checkpoint, 'capacity-refused')
   }, 60_000)
   it.each([['schemaVersion', undefined], ['schemaVersion', 2], ['dohcMarkdownCrlf', undefined], ['dohcMarkdownCrlf', false], ['unknown', true], ['dohcTaggedFrontmatterPrefix', '---\n'], ['dohcTaggedFrontmatterBaseline', '']])('rejects strict metadata %s = %s', (key, value) => {
     refused(encode('Text', doc => doc.getMap('meta').set(key as string, value)))
@@ -860,7 +897,7 @@ describe('journal real cut counterexamples and checkpoint feasibility', () => {
       && struct.id.clock < range.endClock && struct.id.clock + struct.length > range.startClock)).toBe(false)
   })
 
-  it.each([1, 5])('revalidates finalized journal checkpoints under the exact measured work policy, suffix=%s', suffixCount => {
+  it.each([0, 1, 5])('records finalized checkpoint revalidation under the exact measured work policy, suffix=%s', suffixCount => {
     const call = journalFixture(Array.from({ length: suffixCount + 1 }, (_, index) => editText(`${index} `)))
     const measured = ordered.validateJournalCutForProjection({ mode: 'journal-candidate', checkpoint: call.checkpoint, suffix: call.suffix, candidate: call.candidate }, fixturePolicy)
     expect(measured.kind).toBe('accepted')
@@ -881,7 +918,13 @@ describe('journal real cut counterexamples and checkpoint feasibility', () => {
     const result = createLiveMarkdownJournalValidator(policy)(call)
     expect(result.kind).toBe('accepted')
     if (result.kind !== 'accepted') return
-    expect(createLiveMarkdownRegistrationValidator(policy)(input(result.evidence.stateUpdate)).kind).toBe('accepted')
+    const registration = createLiveMarkdownRegistrationValidator(policy)(input(result.evidence.stateUpdate))
+    if (suffixCount === 0) {
+      expect(registration).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'registration-input' })
+      expect(createLiveMarkdownJournalValidator(policy)({
+        ...input(result.evidence.stateUpdate), suffix: [], candidate: new Uint8Array([0, 0]),
+      })).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'admitted-cut' })
+    } else expect(registration.kind).toBe('accepted')
   })
 
   it('applies the final public body limit and repaired attribute domains to journal cuts', () => {
