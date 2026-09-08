@@ -318,6 +318,15 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             ],
         )
         .map_err(SyncError::persist)?;
+        if let Admission::Refused(refusal) = &admission
+            && envelope.op_kind == "moment.append"
+            && matches!(
+                refusal.reason.message(),
+                "live document is stopped" | "live document binding is still active"
+            )
+        {
+            crate::moment_apply::retain_refused_moment_blobs(tx, envelope)?;
+        }
         ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
         if crashes(faults, FaultPoint::SyncBeforeApplyCommit) {
             return Err(SyncError::FaultCrash);

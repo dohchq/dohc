@@ -127,6 +127,7 @@ const REQUIRED_TABLES: &[&str] = &[
     // R10 replication, relay, and share cursors.
     "sync_identity",
     "replication_log",
+    "replication_refused_moment_blobs",
     "replication_pending_refusals",
     "replication_peers",
     "sync_relay_cursors",
