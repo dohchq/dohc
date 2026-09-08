@@ -855,9 +855,14 @@ impl Ydoc {
                                 && trailing.trim_matches(['\r', '\n']).is_empty()
                                 && parsed.as_object().is_some_and(|map| {
                                     map.len() == entries.len()
-                                        && entries
-                                            .iter()
-                                            .all(|(key, value)| map.get(key) == Some(value))
+                                        && entries.iter().all(|(key, value)| {
+                                            map.get(key).is_some_and(|parsed| {
+                                                project_frontmatter(key, parsed).is_ok_and(|left| {
+                                                    project_frontmatter(key, value)
+                                                        .is_ok_and(|right| left == right)
+                                                })
+                                            })
+                                        })
                                 })
                         });
                 if equivalent {
@@ -5624,6 +5629,24 @@ fn main() {}
                 "---\npriority: high\n---\n\nReal body"
             );
         }
+    }
+
+    #[test]
+    fn preserved_frontmatter_cannot_replace_zero_with_negative_zero() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "---\nvalue: 0\n---\n\nBody")
+            .unwrap();
+        let meta = doc.doc.get_or_insert_map(ROOT_META);
+        {
+            let mut txn = doc.doc.transact_mut();
+            meta.insert(
+                &mut txn,
+                TAGGED_FRONTMATTER_PREFIX_META_KEY,
+                "---\nvalue: -0.0\n---\n\n",
+            );
+            meta.insert(&mut txn, TAGGED_FRONTMATTER_BASELINE_META_KEY, "value: 0\n");
+        }
+        assert_eq!(doc.project_richdoc().unwrap(), "---\nvalue: 0\n---\n\nBody");
     }
 
     fn decode_fixture_int64_markers(value: &mut Value) {
