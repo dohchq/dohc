@@ -190,10 +190,12 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
   function pages(result: ReturnType<typeof pendingResult>, chunkSize = 31) {
     const { entries, baseUpdateBase64, ...header } = result;
     const base = Buffer.from(baseUpdateBase64, "base64");
+    const snapshot = "a".repeat(64);
     const parts = [
       { part: "header", sequence: 0, bytes: Buffer.from(JSON.stringify({
         ...header, baseByteLength: base.length, pendingEntryCount: entries.length,
         nextSequence: Math.max(0, ...entries.map((entry) => entry.sequence)) + 1,
+        firstEntryCursor: entries[0] ? {snapshot,part: "entryHeader",sequence: entries[0].sequence,offset: 0} : null,
       })) },
       { part: "base", sequence: 0, bytes: base },
       ...entries.flatMap(({ updateBase64, ...entry }) => [
@@ -201,7 +203,6 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
         { part: "update", sequence: entry.sequence, bytes: Buffer.from(updateBase64, "base64") },
       ]),
     ];
-    const snapshot = "a".repeat(64);
     const resultPages = parts.flatMap(({ part, sequence, bytes }) => {
       const offsets = Array.from({ length: Math.max(1, Math.ceil(bytes.length / chunkSize)) }, (_, i) => i * chunkSize);
       return offsets.map((offset) => ({
@@ -241,6 +242,19 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
 
   function read(result: ReturnType<typeof pendingResult>) {
     return reader(pages(result)).read();
+  }
+
+  function deliveryReader(responses: ReturnType<typeof pages>, binding: ReturnType<typeof pendingResult>["binding"], changedAt?: number) {
+    const requests: Request[] = [];
+    const client = outbox({async sendRequest(request) {
+      requests.push(request);
+      if (requests.length === changedAt) return {id: request.id,result: {kind: "readChanged"}};
+      const cursor = (request.params as {cursor?: {part: string; sequence: number; offset: number}}).cursor;
+      const page = cursor === undefined ? responses[0] : responses.find(page => page.part === cursor.part && page.sequence === cursor.sequence && page.offset === cursor.offset);
+      if (!page) throw new Error("Cursor is outside the fixture.");
+      return {id: request.id,result: page};
+    }});
+    return {requests,read: () => client.readDeliveryHead("outbox-1",binding)};
   }
 
   it("preserves non-empty base and update bytes with matching accounting", async () => {
@@ -335,6 +349,40 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     result.pendingBytes += 1;
     await expect(reader(pages(result)).readHead()).rejects.toThrow("snapshot is incomplete");
   });
+
+  it("reads the native first entry with gaps without returning or requesting base bytes", async () => {
+    const result = pendingResult(); result.binding.lineageClaimId = result.baseUpdateDigest;
+    result.entries[0]!.sequence = 3;
+    result.entries.push({...result.entries[0]!,sequence: 7,appendKey: "append-7",deliveryId: "delivery-7"});
+    result.pendingBytes = 6;
+    const run = deliveryReader(pages(result,4096),result.binding);
+    const head = await run.read();
+    expect(head.entry).toMatchObject({sequence: 3,update: new Uint8Array([2,3,4])});
+    expect(head).not.toHaveProperty("baseUpdate");
+    expect(run.requests.map(request => (request.params as {cursor?: {part: string}}).cursor?.part ?? "header")).toEqual(["header","entryHeader","update"]);
+  });
+
+  it.each(["binding","base-digest","base-length","cursor-snapshot","cursor-sequence","missing-cursor","update-hash","changed"])(
+    "refuses a delivery head with %s damage before returning an entry",
+    async damage => {
+      const result = pendingResult(); result.binding.lineageClaimId = result.baseUpdateDigest;
+      const expected = {...result.binding};
+      if (damage === "binding") result.binding.objectId = "other";
+      if (damage === "base-digest") result.baseUpdateDigest = "f".repeat(64);
+      const responses = pages(result,4096), header = responses[0]!;
+      const raw = JSON.parse(Buffer.from(header.bytesBase64,"base64").toString());
+      if (damage === "base-length") raw.baseByteLength = 0;
+      if (damage === "cursor-snapshot") raw.firstEntryCursor.snapshot = "f".repeat(64);
+      if (damage === "cursor-sequence") raw.firstEntryCursor.sequence = raw.nextSequence;
+      if (damage === "missing-cursor") delete raw.firstEntryCursor;
+      const bytes = Buffer.from(JSON.stringify(raw));
+      header.bytesBase64 = bytes.toString("base64"); header.digest = sha(bytes); header.totalBytes = bytes.length;
+      if (damage === "update-hash") responses.find(page => page.part === "update")!.bytesBase64 = "BQYH";
+      const run = deliveryReader(responses,expected,damage === "changed" ? 3 : undefined);
+      await expect(run.read()).rejects.toThrow();
+      expect(run.requests.length).toBeLessThanOrEqual(3);
+    },
+  );
 
   it.each(["empty", "rewind", "offset", "snapshot", "digest", "truncated", "extra"] as const)(
     "refuses a %s page before returning a snapshot",

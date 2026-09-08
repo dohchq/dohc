@@ -690,7 +690,7 @@ class EngineYDocSessionIpc {
           owned.ownerHandoff = undefined;
           handoff.fail(new Error("Owner handoff ended.")); handoff.finish();
         },
-        remoteApplied: async (_update: Uint8Array) => { assertCurrent(); await native.refresh(); assertCurrent(); },
+        remoteApplied: async (update: Uint8Array) => { assertCurrent(); await native.applyRemoteUpdate(update); assertCurrent(); },
       };
     } finally { authority.release(); }
   }

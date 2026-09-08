@@ -2185,7 +2185,7 @@ export function createWorkspaceEngineCapture(
         return {
           sessionId: owner.sessionId,
           flush: () => append(async () => { assertCurrent(); await owner.flush(); assertCurrent(); }),
-          refresh: () => append(async () => { assertCurrent(); await owner.refresh(); assertCurrent(); }),
+          applyRemoteUpdate: (update: Uint8Array) => append(async () => { assertCurrent(); await owner.applyRemoteUpdate(update); assertCurrent(); }),
         };
       },
       get doc() {

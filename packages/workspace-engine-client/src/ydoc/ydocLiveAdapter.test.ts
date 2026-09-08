@@ -122,6 +122,43 @@ function richdocUpdate(initialUpdate: Uint8Array, text: string): Uint8Array {
   return Y.encodeStateAsUpdate(mirror, before);
 }
 
+it("forwards committed owner deltas without resync or journaling, while daemon gaps still resync", async () => {
+  const original = "x".repeat(131_072);
+  const engine = seedPlaintextEngine(original);
+  let forward = true;
+  const remote = vi.fn(), gaps = vi.fn();
+  const provider = await openEngineYdocProviderSession({
+    transport: {...forwardYdocBlobEgress(engine),sendRequest: request => engine.sendRequest(request),onEvent: handler => engine.onEvent(event => {if (forward) handler(event);})},
+    workspace: WORKSPACE,versionId: VERSION,path: PATH,contentKind: "plaintext",
+    onRemoteUpdate: remote,onResyncNeeded: gaps,scheduleSettle: () => () => undefined,
+  });
+  const owner = provider.nativeOwner!;
+  const recordedBeforeDelivery = engine.recordedUpdates.length;
+  const mirror = new Y.Doc(); Y.applyUpdate(mirror,provider.initialUpdate);
+  let deltaBytes = 0;
+  try {
+    for (let index = 0; index < 100; index++) {
+      const before = Y.encodeStateVector(mirror);
+      mirror.getText("plainText").insert(original.length + index,"!");
+      const update = Y.encodeStateAsUpdate(mirror,before); deltaBytes += update.length;
+      forward = false; engine.applyRemoteUpdate(owner.sessionId,update);
+      await owner.applyRemoteUpdate(update);
+      forward = true; engine.emitRemoteUpdate(owner.sessionId,update,{seq: index + 1});
+    }
+    expect(provider.doc.getText("plainText").toString()).toBe(original + "!".repeat(100));
+    expect(remote).toHaveBeenCalledTimes(100);
+    expect(deltaBytes).toBeLessThan(10_000);
+    expect(engine.requests.filter(request => request.method === YDOC_METHOD.resync)).toHaveLength(0);
+    expect(engine.recordedUpdates).toHaveLength(recordedBeforeDelivery);
+    const update = plaintextUpdate(Y.encodeStateAsUpdate(mirror),text => text.insert(text.length,"gap"));
+    engine.applyRemoteUpdate(owner.sessionId,update,{seq: 102});
+    await expect.poll(() => provider.doc.getText("plainText").toString()).toBe(original + "!".repeat(100) + "gap");
+    expect(gaps).toHaveBeenCalledOnce();
+    expect(engine.requests.filter(request => request.method === YDOC_METHOD.resync)).toHaveLength(1);
+  } finally {await provider.close({settle: false}); mirror.destroy();}
+  await expect(owner.applyRemoteUpdate(new Uint8Array([0,0]))).rejects.toThrow("closed");
+});
+
 describe("scene artifact seed admission", () => {
   it("forwards the first-generation intent and disables it for a replay generation", async () => {
     const engine = new YdocLoopbackEngine();

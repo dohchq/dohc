@@ -33,7 +33,7 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
   const relaySocket = { readyState: 1,bufferedAmount: 0,send(bytes: Buffer,options: {binary: boolean},done: () => void) {
     queueMicrotask(() => { if (options.binary) transport.receive(bytes); else transport.credit(JSON.parse(bytes.toString()).receivedBytes); done(); });
   } } as unknown as WebSocket;
-  const owner = { nativeSessionId: "ordinary-session",assertCurrent: vi.fn(),prepareHandoff: vi.fn(async () => undefined),finishHandoff: vi.fn(async () => undefined),remoteApplied: vi.fn(async () => undefined) };
+  const owner = { nativeSessionId: "ordinary-session",assertCurrent: vi.fn(),prepareHandoff: vi.fn(async () => undefined),finishHandoff: vi.fn(async () => undefined),remoteApplied: vi.fn(async (_update: Uint8Array) => undefined) };
   const singleton = { ready: vi.fn(async () => undefined),close: vi.fn(),sendRequest: vi.fn(async (request: {method: string}): Promise<{result: Record<string,unknown>}> => ({ result:
     request.method === "liveApplication.provisionOwner" ? { provisioned: true } : request.method === "liveApplication.register" ? { registrationId: 9 } : { adoptionId: "adoption",expectedLocalSequence: 0,throughCursor: null,outboxId: null,pendingBytes: 0,outboxState: null } })),
     forwardLiveOwnerAdoption: vi.fn(async (_request: { sessionId: string }) => ({ result: { status: "adopted",adoption: { adoptionId: "adoption",localYDocSequence: 0,terminalCursor: 0,adoptionReplayed: false } } })),
@@ -76,13 +76,25 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     expect(result.result).toMatchObject({status: "adopted"});
     expect(singleton.forwardLiveOwnerAdoption.mock.calls[0]![0]).toMatchObject({sessionId: "ordinary-session"});
     const updateBytes = new Uint8Array(1_100_000).fill(1);
-    await peer!.sendLiveApplication({id: 8,workspace: "ws-ordinary",registrationId: 9,deadlineMs: 30_000},{updateBytes,metadata: {firstSeen: [],accepted: {
+    let applied!: () => void;
+    const nativeApplied = {result: {status: "applied",ack: {cursor: 1}}};
+    singleton.sendLiveApplication.mockImplementationOnce(async () => {
+      await new Promise<void>(resolve => {applied = resolve;});
+      return nativeApplied;
+    });
+    const applying = peer!.sendLiveApplication({id: 8,workspace: "ws-ordinary",registrationId: 9,deadlineMs: 30_000},{updateBytes,metadata: {firstSeen: [],accepted: {
       receipt: {deliveryId: "large",updateDigest: createHash("sha256").update(updateBytes).digest("hex"),journalCursor: 1,acceptingHostEpoch: parseHostEpoch(1)},
       binding: {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1},
       authority: {principalKind: "owner",principalId: "owner",grantId: null,grantGeneration: null},receivedAtMs: 1,
     }}});
+    await expect.poll(() => singleton.sendLiveApplication.mock.calls.length).toBe(1);
+    expect(owner.remoteApplied).not.toHaveBeenCalled();
+    applied();
+    expect((await applying).result).toEqual(nativeApplied.result);
+    expect(owner.remoteApplied).toHaveBeenCalledOnce();
     expect(singleton.sendLiveApplication).toHaveBeenCalledTimes(1);
     const received = singleton.sendLiveApplication.mock.calls[0]![1] as {updateBytes: Uint8Array};
+    expect(owner.remoteApplied.mock.calls[0]![0]).toBe(received.updateBytes);
     expect(Buffer.from(received.updateBytes).equals(Buffer.from(updateBytes))).toBe(true);
     const binding = {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1};
     const durableOwner = {adoptionId: "adoption",expectedLocalSequence: 0,throughCursor: 0,outboxId: null,pendingBytes: 0,outboxState: null};

@@ -57,7 +57,7 @@ export async function drainOwnerOutbox(options: {
   try {
     for (let index = 0; index < admission.maxEntriesPerDrain; index++) {
       check();
-      const pending = await outbox.readHead(outboxId); check();
+      const pending = await outbox.readDeliveryHead(outboxId,binding); check();
       if (!isDeepStrictEqual(pending.binding,binding) || pending.baseUpdateDigest !== binding.lineageClaimId) throw new Error("Owner outbox binding changed.");
       if (pending.state !== "active" || !pending.entry) return;
       const entry = pending.entry;

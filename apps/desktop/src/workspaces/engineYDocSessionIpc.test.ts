@@ -180,7 +180,7 @@ const openPayload = {
 describe("engine Y.Doc IPC adapter", () => {
   it("hands the existing session to main only after its journal flush and keeps the renderer held until completion", async () => {
     const flush = deferred<void>();
-    const nativeOwner = {sessionId: "native-existing",flush: vi.fn(() => flush.promise),refresh: vi.fn(async () => undefined)};
+    const nativeOwner = {sessionId: "native-existing",flush: vi.fn(() => flush.promise),refresh: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async (_update: Uint8Array) => undefined)};
     const h = harness(providerSession({nativeOwner,objectId: "object",versionId: "main",lineageClaimId: "a".repeat(64)}));
     const sender = new FakeSender(7);
     await h.ipc.open(sender,openPayload);
@@ -197,14 +197,19 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(released).toBe(false);
     await owner.finishHandoff(true); await holding;
     expect(released).toBe(true);
-    await owner.remoteApplied(new Uint8Array([0,0]));
-    expect(nativeOwner.refresh).toHaveBeenCalledOnce();
+    const updates = Array.from({length: 100}, (_, index) => new Uint8Array([index, 0]));
+    for (const update of updates) await owner.remoteApplied(update);
+    expect(nativeOwner.refresh).not.toHaveBeenCalled();
+    expect(nativeOwner.applyRemoteUpdate.mock.calls.map(([update]) => update)).toEqual(updates);
+    expect(nativeOwner.applyRemoteUpdate.mock.calls.reduce((bytes, [update]) => bytes + update.byteLength, 0)).toBe(200);
     h.setGeneration(2);
     expect(() => owner.assertCurrent()).toThrow();
+    await expect(owner.remoteApplied(new Uint8Array([0,0]))).rejects.toThrow();
+    expect(nativeOwner.applyRemoteUpdate).toHaveBeenCalledTimes(100);
   });
 
   it("releases a prepared renderer when relay acquisition is cancelled", async () => {
-    const nativeOwner = {sessionId: "native-existing",flush: vi.fn(async () => undefined),refresh: vi.fn(async () => undefined)};
+    const nativeOwner = {sessionId: "native-existing",flush: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async () => undefined)};
     const h = harness(providerSession({nativeOwner,objectId: "object",versionId: "main",lineageClaimId: "a".repeat(64)}));
     const sender = new FakeSender(7); await h.ipc.open(sender,openPayload);
     const owner = h.ipc.existingOwner({workspaceId: "workspace-1",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "notes/a.md",selectorPaths: ["notes/a.md"],restoreFenceGeneration: 1});
