@@ -448,3 +448,114 @@ fn worker_main(
     // guarantees on a panic unwind).
     drop(store);
 }
+
+#[cfg(test)]
+mod saturation_tests {
+    use super::*;
+    use dohc_engine_testkit::{ScratchDir, engine_db_path};
+    use std::future::{Future, poll_fn};
+    use std::sync::atomic::AtomicUsize;
+    use std::task::Poll;
+    use std::time::{Duration, Instant};
+    use tokio::sync::Semaphore;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn close_returns_promptly_under_sustained_submission() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = engine_db_path(&scratch).expect("database path");
+        let identity = EngineDbIdentity::resolve_or_create(&db).expect("identity");
+        let mut actor = WorkspaceActor::spawn(db, identity, 1, 1).expect("spawn");
+        assert!(actor.close_permit.is_some());
+        let handle = actor.handle();
+        let (entered, entered_rx) = oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let mut worker = {
+            let handle = handle.clone();
+            tokio::spawn(async move {
+                handle
+                    .run(move |_, _| {
+                        let _ = entered.send(());
+                        let _ = release_rx.recv();
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        entered_rx.await.expect("worker entered gate");
+
+        let completed = Arc::new(AtomicUsize::new(0));
+        for _ in 0..COMMAND_QUEUE_CAPACITY {
+            let completed = Arc::clone(&completed);
+            assert!(
+                handle
+                    .tx
+                    .try_send(Command::Run(Box::new(move |_, _| {
+                        completed.fetch_add(1, Ordering::SeqCst);
+                    })))
+                    .is_ok()
+            );
+        }
+        assert!(matches!(
+            handle.tx.try_send(Command::Run(Box::new(|_, _| {}))),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+
+        let parked = Arc::new(Semaphore::new(0));
+        let mut producers = Vec::new();
+        for _ in 0..16 {
+            let handle = handle.clone();
+            let parked = Arc::clone(&parked);
+            producers.push(tokio::spawn(async move {
+                let mut first = Box::pin(handle.run(|_, _| Ok(())));
+                let pending = poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx).is_pending())).await;
+                parked.add_permits(1);
+                assert!(pending, "full send must park");
+                if first.await.is_err() {
+                    return;
+                }
+                while handle.run(|_, _| Ok(())).await.is_ok() {}
+            }));
+        }
+        parked
+            .acquire_many(16)
+            .await
+            .expect("all producers parked")
+            .forget();
+        assert_eq!(completed.load(Ordering::SeqCst), 0);
+
+        let started = Instant::now();
+        let (closing, closing_rx) = oneshot::channel();
+        let mut close = tokio::task::spawn_blocking(move || {
+            let _ = closing.send(());
+            actor.close()
+        });
+        closing_rx.await.expect("close thread started");
+        // This observes the close caller, not Close admission. Keep producers
+        // running as the worker resumes so a fair-send starvation can recur.
+        release.send(()).expect("release worker");
+        let finished = tokio::time::timeout(Duration::from_secs(5), async {
+            (&mut close).await.expect("join close").expect("close");
+            (&mut worker)
+                .await
+                .expect("join worker call")
+                .expect("worker call");
+            for producer in &mut producers {
+                producer.await.expect("producer exited");
+            }
+        })
+        .await;
+        if finished.is_err() {
+            // Stop the load before reporting starvation so blocked close can exit.
+            for producer in &producers {
+                producer.abort();
+            }
+        }
+        finished.expect("close and producers must finish within five seconds");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "close starved under sustained submission"
+        );
+        assert_eq!(completed.load(Ordering::SeqCst), COMMAND_QUEUE_CAPACITY);
+        assert_eq!(handle.lifecycle(), LifecycleState::Closed);
+    }
+}
