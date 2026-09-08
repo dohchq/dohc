@@ -2,7 +2,9 @@ import { randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { WebSocket } from "ws";
 import { EngineClient } from "@dohc/workspace-engine-client/daemon";
-import { parseDeviceLiveHostStart, parseDeviceLiveHostTransport, type DeviceControlLimits } from "@dohc/live-session-contract/device-control";
+import { parseDeviceLiveHostStart, parseDeviceLiveHostTransport, parseDeviceLiveHostCredit, deviceLiveHostReceive,
+  type DeviceLiveHostReceive, type DeviceControlLimits } from "@dohc/live-session-contract/device-control";
+import { DeviceCreditWindow } from "@dohc/service-http";
 import { parseLiveDocumentKey, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import { DeviceEngineConnection } from "./deviceEngineConnection.js";
 import { configRecord, type RelayDeviceDeliveryConfig } from "./deviceLiveHostConfig.js";
@@ -20,6 +22,9 @@ export function createDeviceLiveDelivery(options: {
   const authToken = randomBytes(32).toString("base64url");
   let connection: DeviceEngineConnection | undefined, client: EngineClient | undefined;
   let ready = false, closed = false, requestId = 0, active = 0;
+  const receive = deviceLiveHostReceive(limits, { maxPayloadBytes: limits.maxPayloadBytes, maxPendingBytes: config.maxQueuedBytes });
+  const incoming = new DeviceCreditWindow(receive.maxPendingBytes, receive.maxPayloadBytes);
+  let receivedBytes = 0;
   const nextRequestId = () => {
     if (requestId === Number.MAX_SAFE_INTEGER) throw new Error("Device request IDs exhausted.");
     return ++requestId;
@@ -30,15 +35,15 @@ export function createDeviceLiveDelivery(options: {
   const timer = setTimeout(options.stop, config.client.connectTimeoutMs);
   timer.unref();
   const nativeHost = { hostId: host.hostId, hostEpoch: host.hostEpoch, instanceId: host.instanceId, connectionId: host.connectionId };
-  const start = JSON.stringify(parseDeviceLiveHostStart({ type: "liveHost.start", version: 1, relayNamespace: history.namespace, host: nativeHost, authToken }));
+  const start = JSON.stringify(parseDeviceLiveHostStart({ type: "liveHost.start", version: 1, relayNamespace: history.namespace, host: nativeHost, authToken, receive }));
   if (!history.reconciled || Buffer.byteLength(start) > limits.maxPayloadBytes || ws.bufferedAmount + Buffer.byteLength(start) + 16 > limits.maxPendingBytes) {
     clearTimeout(timer); throw new Error("Device delivery startup refused.");
   }
   ws.send(start, error => { if (error) options.stop(); });
 
-  async function attach(): Promise<void> {
+  async function attach(peer: DeviceLiveHostReceive): Promise<void> {
     check();
-    connection = new DeviceEngineConnection(ws, limits, config.maxQueuedBytes, options.stop);
+    connection = new DeviceEngineConnection(ws, limits, peer, config.maxQueuedBytes, options.stop);
     client = new EngineClient(connection, { authToken, protocolVersion: 2, capabilities: ["blobs"],
       maxFrameBytes: config.client.maxFrameBytes, connectTimeoutMs: config.client.connectTimeoutMs, privateLiveApplication: config.client });
     await client.ready();
@@ -66,11 +71,15 @@ export function createDeviceLiveDelivery(options: {
         check();
         if (binary) {
           if (!connection || bytes.length === 0) throw new Error("Early device bytes.");
+          incoming.receive(bytes.length);
           connection.receive(bytes);
+          receivedBytes += bytes.length + 16;
+          incoming.acknowledge(receivedBytes);
+          connection.acknowledge(receivedBytes);
         } else {
-          if (connection) throw new Error("Duplicate device transport.");
-          parseDeviceLiveHostTransport(JSON.parse(bytes.toString("utf8")));
-          void attach().catch(options.stop);
+          if (connection) { connection.credit(parseDeviceLiveHostCredit(JSON.parse(bytes.toString("utf8")))); return; }
+          const transport = parseDeviceLiveHostTransport(JSON.parse(bytes.toString("utf8")));
+          void attach(transport.receive).catch(options.stop);
         }
       } catch { options.stop(); }
     },

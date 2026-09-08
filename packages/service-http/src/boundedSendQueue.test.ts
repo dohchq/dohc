@@ -41,6 +41,16 @@ describe("bounded transport send queue", () => {
     run.queue.write(Buffer.alloc(1), true);
     expect(run.errors()).toBe(1);
   });
+  it("retains one bounded input buffer when a peer negotiates tiny segments", () => {
+    const sent: Buffer[] = [];
+    const callbacks: (() => void)[] = [];
+    let errors = 0;
+    const queue = new BoundedSendQueue({ maxBytes: 24, maxSegmentBytes: 1,
+      send(bytes, _binary, done) { sent.push(Buffer.from(bytes)); callbacks.push(done); }, onDrain() {}, onError() { errors++; } });
+    queue.write(Buffer.from("12345678"), true);
+    for (let n = 0; n < 8; n++) callbacks[n]!();
+    expect(Buffer.concat(sent).toString()).toBe("12345678"); expect(errors).toBe(0);
+  });
   it("keeps text controls whole and rejects oversize controls", () => {
     const run = fixture();
     run.queue.write(Buffer.from("control"), false);

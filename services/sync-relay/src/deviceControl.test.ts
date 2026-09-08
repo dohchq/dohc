@@ -76,7 +76,7 @@ describe("outbound device control authority", () => {
     if (mode === "early-binary") connection.ws.send(Buffer.from("DOP1"));
     if (mode === "unknown-control") connection.ws.send(JSON.stringify({ type: "native.ready", version: 1 }));
     if (mode === "malformed-native") {
-      connection.ws.send(JSON.stringify({ type: "liveHost.transport", version: 1 }));
+      connection.ws.send(JSON.stringify({ type: "liveHost.transport", version: 1, receive: { maxPayloadBytes: 4096, maxPendingBytes: 8192 } }));
       connection.ws.send(Buffer.alloc(12));
     }
     if (mode === "oversize") connection.ws.send(Buffer.alloc(limits.maxPayloadBytes + 1));
