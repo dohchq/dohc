@@ -276,7 +276,7 @@ describe("outbound backpressure", () => {
 });
 
 describe("private admitted-update upload", () => {
-  it("bounds concurrent uploads and aborts a partial stream without writing queued chunks", async () => {
+  it.each(["abort", "early-response"])("bounds concurrent uploads and closes partial streams after %s", async mode => {
     const peer = new FakePeerConnection();
     const transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
     peer.acknowledge();
@@ -298,10 +298,15 @@ describe("private admitted-update upload", () => {
     const pending = transport.sendLiveApplication({ id: 1, workspace: "ws-0000000000000001", registrationId: 1, deadlineMs: 30_000 }, event, signal.signal).catch((error: unknown) => error);
     await reached.promise;
     await expect(transport.sendLiveApplication({ id: 2, workspace: "ws-0000000000000001", registrationId: 1, deadlineMs: 30_000 }, event)).rejects.toThrow("capacity is full");
-    signal.abort();
+    if (mode === "abort") signal.abort();
+    else {
+      peer.send({ type: "response", id: 1, result: { status: "applied" } });
+      peer.drain();
+    }
     expect(await pending).toBeInstanceOf(EngineClientError);
     peer.drain();
     expect(chunks).toBe(0);
+    await expect(transport.sendRequest(request(99, "after.partial"))).rejects.toThrow("is closed");
   });
   it("captures a valid maximum-size Yjs update through the real client", async () => {
     const maximum = 20 * 1024 * 1024;

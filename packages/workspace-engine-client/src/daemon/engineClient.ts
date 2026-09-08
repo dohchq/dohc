@@ -814,15 +814,16 @@ export class EngineClient implements EngineTransport {
       });
     });
     if (!writeInput) return response;
-    return response.then(async (response) => {
+    try {
+      const result = await response;
       await writeTask;
-      return response;
-    }, async (error: unknown) => {
+      return result;
+    } catch (error: unknown) {
       // A cancelled upload cannot leave a half-written stream on this connection.
       this.close();
       await writeTask.catch(() => undefined);
       throw error;
-    });
+    }
   }
 
   /** Private admitted-event transport. The host has already provisioned registrationId. */
