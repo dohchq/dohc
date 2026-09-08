@@ -392,13 +392,17 @@ describe('public Markdown schema', () => {
       text.delete(0, text.length)
     })
     const evidence = accepted(checkpoint)
+    expect(evidence.checkpoint.bytes).toEqual(checkpoint)
+    expect(evidence.stateUpdate).toEqual(checkpoint)
     expect(accepted(evidence.stateUpdate).stateUpdate).toEqual(evidence.stateUpdate)
   })
   it('refuses excessive child count before malformed parent attributes', () => {
-    const checkpoint = encode('Text', doc => {
-      // Leave one node for the paragraph and none for its child.
-      doc.getMap('frontmatter').set('values', new Array(262_142).fill(0))
-      ;(doc.getXmlFragment('body').get(0) as Y.XmlElement).setAttribute('unknown', 'hidden')
+    const checkpoint = encode('# Text', doc => {
+      // Two children, one node of headroom: refuse before the attribute check.
+      doc.getMap('frontmatter').set('values', new Array(262_141).fill(0))
+      const heading = doc.getXmlFragment('body').get(0) as Y.XmlElement
+      heading.insert(1, [new Y.XmlText('x')])
+      heading.setAttribute('level', 'hidden')
     })
     refused(checkpoint, 'capacity-refused')
   }, 60_000)
