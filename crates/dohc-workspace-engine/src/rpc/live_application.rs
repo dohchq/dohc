@@ -392,10 +392,10 @@ impl EngineService {
         });
         let outcome = tokio::select! {
             biased;
+            outcome = operation => outcome,
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("live settlement"));
             }
-            outcome = operation => outcome,
         };
         retirement.0 = None;
         check_interruption()?;
@@ -1010,6 +1010,100 @@ mod tests {
     #[tokio::test]
     async fn settle_actor_cancel_keeps_exclusion_and_reservation_until_completion() {
         settle_actor_interruption(false).await;
+    }
+
+    #[tokio::test]
+    async fn settle_completed_operation_survives_late_cancel() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountWake(AtomicUsize);
+        impl std::task::Wake for CountWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let configuration = serde_json::from_value(json!({
+            "version": 1, "relayNamespace": "completion-test",
+            "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
+            "workspaces": [{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4}],
+            "ingress": {"aggregateBytes":400_000_000,"applicationWorkingReserveBytes":1_000_000,"maxUploads":1,"uploadDeadlineMs":30_000},
+            "settlement": {"maxApplicationsPerSettlement":4}
+        })).unwrap();
+        let (service, owner, ingress) = EngineService::configured_live_host(configuration)
+            .await
+            .unwrap();
+        let workspace = lock(&service.handles).keys().next().unwrap().clone();
+        let open = service.open(Some(&workspace)).unwrap();
+        open.actor
+            .ensure_main_version(
+                "workspace".into(),
+                0,
+                Arc::new(NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let binding = LiveObjectBinding {
+            workspace_id: "workspace".into(),
+            main_version_id: "main".into(),
+            object_id: "document".into(),
+            lineage_claim_id: hex_sha256(&Ydoc::wire().encode_full_state()),
+            current_path: "document.md".into(),
+            selector_paths: vec!["document.md".into()],
+            restore_fence_generation: 0,
+        };
+        let registration = service
+            .live_application_register(&ctx, Some(workspace.clone()), json!({"binding": binding}))
+            .await
+            .unwrap()["registrationId"]
+            .as_u64()
+            .unwrap();
+        let cancel = ctx.cancel.clone();
+        let request = Request {
+            id: 74,
+            method: "liveApplication.settle".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            params: json!({"registrationId":registration,"terminalReceipt":null}),
+        };
+        let mut waiting = Box::pin(service.live_application_settle(ctx, request));
+        let wakes = Arc::new(CountWake(AtomicUsize::new(0)));
+        let waker = std::task::Waker::from(wakes.clone());
+        assert!(
+            std::future::Future::poll(
+                waiting.as_mut(),
+                &mut std::task::Context::from_waker(&waker),
+            )
+            .is_pending()
+        );
+        // The spawned operation owns this lock until its terminal poll. Keep the
+        // RPC unpolled until that operation finishes, then make cancellation ready.
+        let serial =
+            tokio::time::timeout(std::time::Duration::from_secs(5), open.session_ops.lock())
+                .await
+                .unwrap();
+        drop(serial);
+        let completed_wakes = wakes.0.load(Ordering::SeqCst);
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while wakes.0.load(Ordering::SeqCst) == completed_wakes {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the cancellation bridge wakes the unpolled settlement RPC");
+        assert_eq!(waiting.await.unwrap_err().code, ErrorCode::Cancelled);
+        assert!(ingress.settlement_admission(4).unwrap().reserve().is_ok());
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), registration)
+                .is_ok(),
+            "a terminal settlement must preserve the host when cancellation is also ready"
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
     }
 
     #[tokio::test]
