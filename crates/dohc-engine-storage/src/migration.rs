@@ -1475,6 +1475,30 @@ CREATE UNIQUE INDEX idx_automation_claims_trigger_history
 CREATE INDEX idx_automation_claims_state
     ON automation_claims(workspace_id, state, created_at_ms, claim_id);
 
+CREATE TABLE live_device_bootstraps (
+    relay_database_namespace TEXT NOT NULL CHECK (length(CAST(relay_database_namespace AS BLOB)) > 0),
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    bootstrap_id TEXT NOT NULL CHECK (length(CAST(bootstrap_id AS BLOB)) BETWEEN 1 AND 512),
+    bootstrap_moment_id TEXT NOT NULL CHECK (length(CAST(bootstrap_moment_id AS BLOB)) BETWEEN 1 AND 512),
+    binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+    baseline_digest TEXT NOT NULL CHECK (length(baseline_digest) = 64 AND baseline_digest NOT GLOB '*[^0-9a-f]*'),
+    baseline_byte_length INTEGER NOT NULL CHECK (baseline_byte_length BETWEEN 2 AND 20971520),
+    baseline_moment_relay_sequence INTEGER NOT NULL CHECK (baseline_moment_relay_sequence BETWEEN 0 AND 9007199254740991),
+    baseline_registered_at_ms INTEGER NOT NULL CHECK (baseline_registered_at_ms BETWEEN 0 AND 9007199254740991),
+    projected_markdown_digest TEXT NOT NULL CHECK (length(projected_markdown_digest) = 64 AND projected_markdown_digest NOT GLOB '*[^0-9a-f]*'),
+    projected_markdown_byte_length INTEGER NOT NULL CHECK (projected_markdown_byte_length BETWEEN 0 AND 10485760),
+    local_ydoc_sequence INTEGER NOT NULL CHECK (local_ydoc_sequence BETWEEN 0 AND 9007199254740991),
+    host_coordinate_json TEXT NOT NULL CHECK (json_valid(host_coordinate_json)),
+    PRIMARY KEY (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id),
+    UNIQUE (relay_database_namespace, bootstrap_id),
+    UNIQUE (workspace_id, bootstrap_moment_id),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (baseline_digest) REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+
 CREATE TABLE live_device_application_bindings (
     relay_database_namespace TEXT NOT NULL CHECK (length(CAST(relay_database_namespace AS BLOB)) > 0),
     workspace_id TEXT NOT NULL CHECK (length(CAST(workspace_id AS BLOB)) BETWEEN 1 AND 512),

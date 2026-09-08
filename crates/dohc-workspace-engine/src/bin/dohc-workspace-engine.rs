@@ -39,6 +39,10 @@ static NEXT_SESSION_GENERATION: AtomicU64 = AtomicU64::new(1);
 #[path = "../../tests/support/live_application.rs"]
 mod live_test_support;
 
+#[cfg(test)]
+#[path = "../../tests/support/ordered_consumer.rs"]
+mod ordered_consumer_support;
+
 enum OutputItem {
     Envelope(Envelope),
     Guarded {
@@ -387,7 +391,12 @@ where
             for envelope in envelopes {
                 if let Some(ingress) = &mut ingress {
                     match &envelope {
-                        Envelope::Request(request) if request.method == "liveApplication.apply" => {
+                        Envelope::Request(request)
+                            if matches!(
+                                request.method.as_str(),
+                                "liveApplication.apply" | "liveApplication.bootstrap"
+                            ) =>
+                        {
                             let id = request.id;
                             let result = if !negotiated_capabilities.contains("blobs")
                                 || lock(&active_requests).contains(&id)
@@ -1039,6 +1048,12 @@ mod tests {
     use tokio::sync::Notify;
 
     const TEST_AUTH_TOKEN: &str = "r14-test-token";
+
+    #[tokio::test]
+    #[ignore = "requires an owned external consumer fixture"]
+    async fn ordered_consumer_fixture() {
+        ordered_consumer_support::run().await;
+    }
 
     #[tokio::test]
     async fn live_transport_applies_client_frames_before_ack_and_recovers_the_record() {
