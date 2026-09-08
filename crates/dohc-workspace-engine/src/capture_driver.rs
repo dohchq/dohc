@@ -52,9 +52,8 @@ pub(crate) type ApplyGate = Arc<tokio::sync::Mutex<()>>;
 /// actor work is large enough for the background tail to be user-visible.
 pub const EARLY_IMPORT_MIN_ADDED_FILES: usize = 1_000;
 
-/// Deterministic integration-test seam for proving a switch drains an apply
-/// that has already prepared a reconcile plan. Production builds do not
-/// allocate probe state. The optional probe has one type in every build.
+/// Test controls for capture, workspace lifecycle, and version fences.
+/// The type exists in every build; production builds allocate no probe state.
 #[derive(Clone)]
 #[cfg_attr(any(test, feature = "harness"), derive(Default))]
 pub struct CaptureApplyProbe {
@@ -396,7 +395,7 @@ impl CaptureApplyProbe {
         }
     }
 
-    async fn initial_settle_deadline(&self) {
+    async fn take_manual_initial_deadline(&self) -> bool {
         #[cfg(feature = "harness")]
         if self
             .inner
@@ -404,9 +403,9 @@ impl CaptureApplyProbe {
             .swap(false, Ordering::AcqRel)
         {
             self.inner.manual_initial_deadline.notified().await;
-            return;
+            return true;
         }
-        tokio::time::sleep(EARLY_IMPORT_APPLY_DEADLINE).await;
+        false
     }
 
     pub(crate) fn record_version_scan(&self) {
@@ -1996,23 +1995,35 @@ impl CaptureDriver {
         let (flush_tx, flush_rx) = tokio::sync::mpsc::channel(8);
         let refresh_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let driver_probe = apply_probe.clone();
-        let task = tokio::spawn(drive(
-            root,
-            actor,
-            workspace_id,
-            leases,
-            self_writes,
-            cancel.clone(),
-            Arc::clone(&status),
-            Arc::clone(&author_json),
-            open_ready_tx,
-            flush_rx,
-            apply_gate,
-            store_freshly_created,
-            Arc::clone(&refresh_epoch),
-            events,
-            apply_probe,
-        ));
+        let drive_cancel = cancel.clone();
+        let drive_status = Arc::clone(&status);
+        let drive_author_json = Arc::clone(&author_json);
+        let drive_refresh_epoch = Arc::clone(&refresh_epoch);
+        let task = tokio::spawn(async move {
+            let mut env = RealEnv {
+                root,
+                actor,
+                workspace_id,
+                leases,
+                status: Arc::clone(&drive_status),
+                author_json: drive_author_json,
+                self_writes,
+                apply_gate,
+                store_freshly_created,
+                open_ready_tx: open_ready_tx.clone(),
+                refresh_epoch: drive_refresh_epoch,
+                events,
+                apply_probe,
+            };
+            drive_loop(
+                &mut env,
+                drive_cancel,
+                drive_status,
+                open_ready_tx,
+                flush_rx,
+            )
+            .await;
+        });
         CaptureDriver {
             cancel,
             task: Some(task),
@@ -2888,8 +2899,9 @@ impl RealEnv {
     }
 
     async fn initial_settle_deadline(&self) {
-        if let Some(probe) = &self.apply_probe {
-            probe.initial_settle_deadline().await;
+        if let Some(probe) = &self.apply_probe
+            && probe.take_manual_initial_deadline().await
+        {
             return;
         }
         tokio::time::sleep(EARLY_IMPORT_APPLY_DEADLINE).await;
@@ -3179,42 +3191,6 @@ impl DriverEnv for RealEnv {
     async fn stop_layer(&mut self, layer: FilesLayer) {
         layer.stop().await;
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn drive(
-    root: PathBuf,
-    actor: ActorHandle,
-    workspace_id: String,
-    leases: LeaseRegistry,
-    self_writes: SelfWriteSuppression,
-    cancel: CancellationToken,
-    status: Arc<DriverStatus>,
-    author_json: Arc<Mutex<Option<String>>>,
-    open_ready_tx: tokio::sync::watch::Sender<bool>,
-    flush_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<FlushOutcome>>,
-    apply_gate: ApplyGate,
-    store_freshly_created: bool,
-    refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
-    events: EngineEvents,
-    apply_probe: Option<CaptureApplyProbe>,
-) {
-    let mut env = RealEnv {
-        root,
-        actor,
-        workspace_id,
-        leases,
-        status: Arc::clone(&status),
-        author_json,
-        self_writes,
-        apply_gate,
-        store_freshly_created,
-        open_ready_tx: open_ready_tx.clone(),
-        refresh_epoch,
-        events,
-        apply_probe,
-    };
-    drive_loop(&mut env, cancel, status, open_ready_tx, flush_rx).await;
 }
 
 /// Force the oracle-equivalent pre-switch full scan while the caller owns the
@@ -3903,32 +3879,12 @@ async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<D
 #[cfg(test)]
 mod root_bound_run_tests {
     use super::*;
+    use crate::capture_sink::bound_sink_params;
     use dohc_engine_files::CaptureSink;
     use dohc_engine_runtime::WorkspaceSupervisor;
     use dohc_engine_testkit::ScratchDir;
 
     const WORKSPACE_ID: &str = "ws-root-bound-run";
-
-    fn sink_params(
-        actor: ActorHandle,
-        shadow_root: impl Into<PathBuf>,
-        now_ms: i64,
-    ) -> StoreCaptureSinkParams {
-        let shadow_root = shadow_root.into();
-        let captured_root = CapturedRoot::bind(&shadow_root).map(Arc::new);
-        StoreCaptureSinkParams {
-            actor,
-            workspace_id: WORKSPACE_ID.to_owned(),
-            version_id: "main".to_owned(),
-            shadow_root,
-            captured_root,
-            now_ms,
-            author_json: None,
-            leases: LeaseRegistry::new(),
-            self_writes: SelfWriteSuppression::default(),
-            provenance: CaptureProvenance::default(),
-        }
-    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn seeded_deletes_survive_an_over_cap_policy_hold_and_recovery() {
@@ -3944,7 +3900,13 @@ mod root_bound_run_tests {
         let seed_actor = actor.clone();
         let seed_root = root.clone();
         std::thread::spawn(move || {
-            let mut sink = StoreCaptureSink::new(sink_params(seed_actor, seed_root, 1));
+            let mut sink = StoreCaptureSink::new(bound_sink_params(
+                seed_actor,
+                WORKSPACE_ID,
+                "main",
+                seed_root,
+                1,
+            ));
             for path in ["big.md", "gone.md", ".env"] {
                 assert!(matches!(
                     sink.ingest(path, 0, "advisory-sha", "text/plain", IngestReason::Added)
@@ -4139,15 +4101,21 @@ mod root_bound_run_tests {
         let seed_actor = actor.clone();
         let seed_root = root.clone();
         std::thread::spawn(move || {
-            StoreCaptureSink::new(sink_params(seed_actor, seed_root, 1))
-                .ingest(
-                    "seed.md",
-                    0,
-                    "advisory-sha",
-                    "text/markdown",
-                    IngestReason::Added,
-                )
-                .expect("seed workspace");
+            StoreCaptureSink::new(bound_sink_params(
+                seed_actor,
+                WORKSPACE_ID,
+                "main",
+                seed_root,
+                1,
+            ))
+            .ingest(
+                "seed.md",
+                0,
+                "advisory-sha",
+                "text/markdown",
+                IngestReason::Added,
+            )
+            .expect("seed workspace");
         })
         .join()
         .expect("workspace seed thread");
@@ -4248,33 +4216,13 @@ mod root_bound_run_tests {
 #[cfg(test)]
 mod collection_reconcile_scheduling_tests {
     use super::*;
+    use crate::capture_sink::bound_sink_params;
     use dohc_engine_collab::{ContentKind, DocKey, Ydoc};
     use dohc_engine_files::{CaptureApplyResult, CaptureSink, CapturedIngest};
     use dohc_engine_runtime::WorkspaceSupervisor;
     use dohc_engine_testkit::ScratchDir;
 
     const WORKSPACE_ID: &str = "ws-idle-collection-reconcile";
-
-    fn sink_params(
-        actor: ActorHandle,
-        shadow_root: impl Into<PathBuf>,
-        now_ms: i64,
-    ) -> StoreCaptureSinkParams {
-        let shadow_root = shadow_root.into();
-        let captured_root = CapturedRoot::bind(&shadow_root).map(Arc::new);
-        StoreCaptureSinkParams {
-            actor,
-            workspace_id: WORKSPACE_ID.to_owned(),
-            version_id: "main".to_owned(),
-            shadow_root,
-            captured_root,
-            now_ms,
-            author_json: None,
-            leases: LeaseRegistry::new(),
-            self_writes: SelfWriteSuppression::default(),
-            provenance: CaptureProvenance::default(),
-        }
-    }
 
     fn plan_with(op: CaptureOp) -> ReconcilePlan {
         ReconcilePlan {
@@ -4370,7 +4318,13 @@ mod collection_reconcile_scheduling_tests {
             .map(|path| (*path).to_owned())
             .collect::<Vec<_>>();
         std::thread::spawn(move || {
-            let mut sink = StoreCaptureSink::new(sink_params(seed_actor, seed_root, 2));
+            let mut sink = StoreCaptureSink::new(bound_sink_params(
+                seed_actor,
+                WORKSPACE_ID,
+                "main",
+                seed_root,
+                2,
+            ));
             for path in paths {
                 sink.ingest(
                     &path,
@@ -4717,7 +4671,7 @@ mod collection_reconcile_scheduling_tests {
             let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
                 leases: seed_leases,
                 self_writes: seed_self_writes,
-                ..sink_params(seed_actor, seed_root, 2)
+                ..bound_sink_params(seed_actor, WORKSPACE_ID, "main", seed_root, 2)
             });
             for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
                 sink.ingest(
@@ -4747,7 +4701,7 @@ mod collection_reconcile_scheduling_tests {
                 StoreCaptureSink::new(StoreCaptureSinkParams {
                     leases: adopt_leases,
                     self_writes: adopt_self_writes,
-                    ..sink_params(adopt_actor, adopt_root, 3)
+                    ..bound_sink_params(adopt_actor, WORKSPACE_ID, "main", adopt_root, 3)
                 })
                 .reconcile_collections()
                 .expect("adopt shared-imported record"),
@@ -4918,7 +4872,13 @@ mod collection_reconcile_scheduling_tests {
         let seed_actor = actor.clone();
         let seed_root = scratch.path().to_path_buf();
         std::thread::spawn(move || {
-            let mut sink = StoreCaptureSink::new(sink_params(seed_actor, seed_root, 2));
+            let mut sink = StoreCaptureSink::new(bound_sink_params(
+                seed_actor,
+                WORKSPACE_ID,
+                "main",
+                seed_root,
+                2,
+            ));
             for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
                 sink.ingest(
                     path,
@@ -5150,7 +5110,13 @@ mod collection_reconcile_scheduling_tests {
         let seed_actor = actor.clone();
         let seed_root = scratch.path().to_path_buf();
         std::thread::spawn(move || {
-            let mut sink = StoreCaptureSink::new(sink_params(seed_actor, seed_root, 2));
+            let mut sink = StoreCaptureSink::new(bound_sink_params(
+                seed_actor,
+                WORKSPACE_ID,
+                "main",
+                seed_root,
+                2,
+            ));
             for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
                 sink.ingest(
                     path,
@@ -5169,9 +5135,15 @@ mod collection_reconcile_scheduling_tests {
         let adopt_actor = actor.clone();
         let adopt_root = scratch.path().to_path_buf();
         std::thread::spawn(move || {
-            StoreCaptureSink::new(sink_params(adopt_actor, adopt_root, 3))
-                .reconcile_collections()
-                .expect("adopt seeded record");
+            StoreCaptureSink::new(bound_sink_params(
+                adopt_actor,
+                WORKSPACE_ID,
+                "main",
+                adopt_root,
+                3,
+            ))
+            .reconcile_collections()
+            .expect("adopt seeded record");
         })
         .join()
         .expect("collection adoption thread");
