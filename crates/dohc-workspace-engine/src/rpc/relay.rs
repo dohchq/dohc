@@ -1,7 +1,6 @@
 use crate::EngineService;
 use crate::events::emit_record_events;
 use crate::lock;
-use crate::rpc::error::wire;
 use crate::rpc::error::workspace_unavailable;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::now_ms;
@@ -378,7 +377,7 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
 /// access" told it nothing it could act on.
 fn share_grant(selector: GrantedSelectorParams) -> Result<dohc_engine_sync::ShareGrant, WireError> {
     let access = dohc_engine_sync::ShareAccess::parse(&selector.access).ok_or_else(|| {
-        wire(
+        WireError::new(
             ErrorCode::InvalidParams,
             r#"access must be "view", "comment", or "edit""#,
         )
@@ -397,7 +396,7 @@ fn recovered_origin_id() -> Result<String, WireError> {
 fn sync_identifier(prefix: &'static str) -> Result<String, WireError> {
     let mut entropy = [0_u8; 16];
     getrandom::fill(&mut entropy)
-        .map_err(|_| wire(ErrorCode::Internal, "sync-identity-generation-failed"))?;
+        .map_err(|_| WireError::new(ErrorCode::Internal, "sync-identity-generation-failed"))?;
     Ok(sync_identifier_from_entropy(prefix, entropy))
 }
 
@@ -426,7 +425,7 @@ impl EngineService {
         let configuration = open
             .relay
             .clone()
-            .ok_or_else(|| wire(ErrorCode::InvalidParams, "relay-not-configured"))?;
+            .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "relay-not-configured"))?;
         Ok((open, configuration))
     }
 
@@ -439,7 +438,7 @@ impl EngineService {
         for _ in 0..4 {
             let mut bytes = [0_u8; 32];
             getrandom::fill(&mut bytes)
-                .map_err(|_| wire(ErrorCode::Internal, "pending-cursor-token-failed"))?;
+                .map_err(|_| WireError::new(ErrorCode::Internal, "pending-cursor-token-failed"))?;
             let token = dohc_engine_storage::hex(&bytes);
             let (kind, wire_kind) = match &cursor {
                 IssuedCursor::Relay(_) => (PendingCursorKind::Relay, "relay"),
@@ -468,7 +467,10 @@ impl EngineService {
             );
             return Ok(json!({ "kind": wire_kind, "token": token }));
         }
-        Err(wire(ErrorCode::Internal, "pending-cursor-token-collision"))
+        Err(WireError::new(
+            ErrorCode::Internal,
+            "pending-cursor-token-collision",
+        ))
     }
 
     fn consume_pending_cursor(
@@ -489,12 +491,15 @@ impl EngineService {
                 )
         });
         if !valid {
-            return Err(wire(ErrorCode::InvalidParams, "invalid-pending-cursor"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid-pending-cursor",
+            ));
         }
         pending
             .remove(token)
             .map(|issued| issued.cursor)
-            .ok_or_else(|| wire(ErrorCode::InvalidParams, "invalid-pending-cursor"))
+            .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "invalid-pending-cursor"))
     }
 
     async fn relay_execute(

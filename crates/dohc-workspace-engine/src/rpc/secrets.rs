@@ -1,6 +1,5 @@
 use crate::EngineService;
 use crate::rpc::error::map_runtime;
-use crate::rpc::error::wire;
 use crate::rpc::history::MOMENTS_PAGE_BYTE_BUDGET;
 use crate::rpc::reads::VersionPathParams;
 use crate::rpc::reads::byte_budget_cut_serialized;
@@ -199,7 +198,7 @@ impl EngineService {
             .collect();
         let included = byte_budget_cut_serialized(&row_values, MOMENTS_PAGE_BYTE_BUDGET);
         if included == 0 && !row_values.is_empty() {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::Internal,
                 "a listing row exceeds the response frame budget",
             ));
@@ -248,7 +247,7 @@ impl EngineService {
                 return Err(cancellation.interruption(operation));
             }
             loaded = key_task => loaded
-                .map_err(|_| wire(ErrorCode::Internal, "key-corrupt"))?
+                .map_err(|_| WireError::new(ErrorCode::Internal, "key-corrupt"))?
                 .map_err(|error| map_runtime(RuntimeError::Domain(DomainError::Crypto(error))))?,
         };
         if let Some(key) = loaded {
@@ -262,7 +261,7 @@ impl EngineService {
         )
         .await?;
         if has_state {
-            return Err(wire(ErrorCode::Internal, "key-corrupt"));
+            return Err(WireError::new(ErrorCode::Internal, "key-corrupt"));
         }
 
         let key_root = open.root.clone();
@@ -272,7 +271,7 @@ impl EngineService {
             biased;
             () = cancellation.token.cancelled() => Err(cancellation.interruption(operation)),
             created = key_task => created
-                .map_err(|_| wire(ErrorCode::Internal, "key-corrupt"))?
+                .map_err(|_| WireError::new(ErrorCode::Internal, "key-corrupt"))?
                 .map_err(|error| map_runtime(RuntimeError::Domain(DomainError::Crypto(error)))),
         }
     }
@@ -289,7 +288,10 @@ impl EngineService {
         let path = params.path.clone();
         let text = params.text;
         if text.len() > dohc_engine_domain::MAX_SECRET_FILE_BYTES {
-            return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "content-exceeds-inband-cap",
+            ));
         }
         let origin = validated_origin(Some(&params.origin))?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
@@ -421,7 +423,7 @@ impl EngineService {
         let rows: Vec<Value> = page.moments.iter().map(secret_moment_json).collect();
         let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
         if included == 0 && !rows.is_empty() {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::Internal,
                 "a listing row exceeds the response frame budget",
             ));
@@ -507,10 +509,10 @@ impl EngineService {
                     return Err(cancellation.interruption("secrets.compare (key load)"));
                 }
                 loaded = key_task => loaded
-                    .map_err(|_| wire(ErrorCode::Internal, "key-corrupt"))?
+                    .map_err(|_| WireError::new(ErrorCode::Internal, "key-corrupt"))?
                     .map_err(|error| map_runtime(RuntimeError::Domain(DomainError::Crypto(error))))?,
             };
-            Some(loaded.ok_or_else(|| wire(ErrorCode::Internal, "key-corrupt"))?)
+            Some(loaded.ok_or_else(|| WireError::new(ErrorCode::Internal, "key-corrupt"))?)
         } else {
             None
         };
@@ -544,7 +546,7 @@ impl EngineService {
             .collect();
         let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
         if included == 0 && !rows.is_empty() {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::Internal,
                 "a listing row exceeds the response frame budget",
             ));
@@ -576,7 +578,7 @@ impl EngineService {
         if dohc_engine_files::policy::classify_engine_file_path(&params.path)
             != dohc_engine_files::policy::PathClassification::Secret
         {
-            return Err(wire(ErrorCode::InvalidParams, "not-secret-path"));
+            return Err(WireError::new(ErrorCode::InvalidParams, "not-secret-path"));
         }
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
@@ -602,7 +604,7 @@ impl EngineService {
             match validation {
                 Ok(_) => {}
                 Err(error) if error.message == "invalid-version" => {
-                    return Err(wire(ErrorCode::InvalidParams, "invalid-version"));
+                    return Err(WireError::new(ErrorCode::InvalidParams, "invalid-version"));
                 }
                 Err(error) => return Err(error),
             }
@@ -616,7 +618,7 @@ impl EngineService {
                 return Err(cancellation.interruption("secrets.apply (key load)"));
             }
             loaded = key_task => loaded
-                .map_err(|_| wire(ErrorCode::Internal, "key-corrupt"))?
+                .map_err(|_| WireError::new(ErrorCode::Internal, "key-corrupt"))?
                 .map_err(|error| map_runtime(RuntimeError::Domain(DomainError::Crypto(error))))?,
         };
         let Some(key) = key else {
@@ -627,7 +629,7 @@ impl EngineService {
             )
             .await?;
             if has_state {
-                return Err(wire(ErrorCode::Internal, "key-corrupt"));
+                return Err(WireError::new(ErrorCode::Internal, "key-corrupt"));
             }
             return Ok(json!({ "changed": false, "moment": Value::Null }));
         };
@@ -711,7 +713,10 @@ impl EngineService {
         if dohc_engine_files::policy::classify_engine_file_path(&params.path)
             != dohc_engine_files::policy::PathClassification::Secret
         {
-            return Err(wire(ErrorCode::InvalidParams, "not a secret path"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "not a secret path",
+            ));
         }
         // Query verbatim: the domain stores the spelling the write
         // carried, and a path secrets.list returns must materialize
@@ -754,8 +759,8 @@ impl EngineService {
                 return Err(cancellation.interruption("secrets.materialize (key load)"));
             }
             loaded = key_task => loaded
-                .map_err(|_| wire(ErrorCode::Internal, "secret key unavailable"))?
-                .map_err(|_| wire(ErrorCode::Internal, "secret key unavailable"))?,
+                .map_err(|_| WireError::new(ErrorCode::Internal, "secret key unavailable"))?
+                .map_err(|_| WireError::new(ErrorCode::Internal, "secret key unavailable"))?,
         };
         let Some(key) = key else {
             // Path and version already validated above (gate + stat).
@@ -769,7 +774,10 @@ impl EngineService {
             )
             .await?;
             if has_state {
-                return Err(wire(ErrorCode::Internal, "secret key unavailable"));
+                return Err(WireError::new(
+                    ErrorCode::Internal,
+                    "secret key unavailable",
+                ));
             }
             return Ok(Value::Null);
         };

@@ -6,10 +6,8 @@ pub(super) mod follows;
 pub(super) mod messages;
 pub(super) mod read_state;
 pub(super) mod threads;
-
-use crate::rpc::error::wire;
 use crate::rpc::reads::byte_budget_cut_serialized;
-use crate::rpc::request::deserialize_optional_non_null_string;
+use crate::rpc::request::deserialize_optional_non_null;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use dohc_engine_protocol::error::ErrorCode;
@@ -56,8 +54,8 @@ pub(super) fn chat_cursor_binding(method: &str, workspace_id: &str, filters: &[&
 }
 
 pub(super) fn encode_chat_cursor(cursor: &ChatKeysetCursor) -> Result<String, WireError> {
-    let bytes =
-        serde_json::to_vec(cursor).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+    let bytes = serde_json::to_vec(cursor)
+        .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
@@ -68,7 +66,7 @@ pub(super) fn decode_chat_cursor(
     let Some(encoded) = encoded else {
         return Ok(None);
     };
-    let invalid = || wire(ErrorCode::InvalidParams, "invalid-cursor");
+    let invalid = || WireError::new(ErrorCode::InvalidParams, "invalid-cursor");
     let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| invalid())?;
     let cursor: ChatKeysetCursor = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
     if cursor.version != 1
@@ -84,7 +82,10 @@ pub(super) fn decode_chat_cursor(
 pub(super) fn chat_page_limit(value: Option<i64>) -> Result<i64, WireError> {
     let value = value.unwrap_or(CHAT_PAGE_LIMIT_DEFAULT);
     if !(1..=CHAT_PAGE_LIMIT_MAX).contains(&value) {
-        return Err(wire(ErrorCode::InvalidParams, "invalid-parameters"));
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "invalid-parameters",
+        ));
     }
     Ok(value)
 }
@@ -92,7 +93,10 @@ pub(super) fn chat_page_limit(value: Option<i64>) -> Result<i64, WireError> {
 pub(super) fn bounded_chat_page_len(rows: &[Value]) -> Result<usize, WireError> {
     let included = byte_budget_cut_serialized(rows, CHAT_PAGE_BYTE_BUDGET);
     if included == 0 && !rows.is_empty() {
-        return Err(wire(ErrorCode::LimitExceeded, "row-exceeds-wire-limit"));
+        return Err(WireError::new(
+            ErrorCode::LimitExceeded,
+            "row-exceeds-wire-limit",
+        ));
     }
     Ok(included)
 }
@@ -109,7 +113,7 @@ pub(super) fn chat_page_cursor<T>(
     }
     let last = rows
         .get(included.saturating_sub(1))
-        .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+        .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
     let (first, second) = coordinate(last);
     encode_chat_cursor(&ChatKeysetCursor {
         version: 1,
@@ -126,6 +130,6 @@ pub(super) fn chat_page_cursor<T>(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct ChatPageParams {
     pub(super) page_limit: Option<i64>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     pub(super) cursor: Option<String>,
 }

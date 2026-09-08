@@ -5,7 +5,7 @@ use crate::rpc::chats::messages::message_json;
 use crate::rpc::chats::messages::reaction_json;
 use crate::rpc::chats::threads::thread_b2_json;
 use crate::rpc::request::OperationCancellation;
-use crate::rpc::request::deserialize_optional_non_null_string;
+use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use dohc_engine_domain::ChatChannel;
@@ -23,7 +23,7 @@ use serde_json::json;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatFeedMarkSeenParams {
     owner_user_id: String,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     replication_owner_user_id: Option<String>,
     head_cursor: String,
     now_ms: Option<i64>,

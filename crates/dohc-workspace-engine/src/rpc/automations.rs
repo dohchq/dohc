@@ -1,7 +1,6 @@
 use crate::EngineService;
-use crate::rpc::error::wire;
 use crate::rpc::request::OperationCancellation;
-use crate::rpc::request::deserialize_optional_non_null_string;
+use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use dohc_engine_domain::AutomationClaim;
@@ -44,7 +43,7 @@ struct AutomationClaimNextParams {
 struct AutomationSettleParams {
     claim_id: String,
     state: String,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     error: Option<String>,
     now_ms: Option<i64>,
 }
@@ -198,20 +197,20 @@ impl EngineService {
         let settle = match (params.state.as_str(), params.error) {
             ("done", None) => AutomationSettle::Done,
             ("done", Some(_)) => {
-                return Err(wire(
+                return Err(WireError::new(
                     ErrorCode::InvalidParams,
                     "automation-settle-done-carries-error",
                 ));
             }
             ("failed", Some(error)) => AutomationSettle::Failed { error },
             ("failed", None) => {
-                return Err(wire(
+                return Err(WireError::new(
                     ErrorCode::InvalidParams,
                     "automation-settle-failed-needs-error",
                 ));
             }
             _ => {
-                return Err(wire(
+                return Err(WireError::new(
                     ErrorCode::InvalidParams,
                     "automation-settle-state-unknown",
                 ));
