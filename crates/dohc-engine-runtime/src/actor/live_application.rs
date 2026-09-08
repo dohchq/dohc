@@ -5,8 +5,9 @@ use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, ApplicationError, ApplicationHandle, ApplicationHostCoordinate,
     ApplicationOwner, ApplicationResult, BootstrapResult, LiveApplicationBootstrap,
-    LiveSettlementResult, LiveUpdateReceipt, apply_committed, bootstrap_committed,
-    validate_application_binding, with_settlement,
+    LiveSettlementResult, LiveUpdateReceipt, OwnerAdoptionAck, OwnerAdoptionCut,
+    adopt_owner_committed, apply_committed, bootstrap_committed, validate_application_binding,
+    with_settlement,
 };
 use dohc_engine_collab::{CollabError, WriterDocCache};
 use dohc_engine_storage::{EngineStore, FaultInjector};
@@ -159,6 +160,39 @@ impl ActorLiveApplicationOwner {
 }
 
 impl ActorLiveApplicationHandle {
+    /// Adopt on the captured workspace actor. The reservation remains owned by
+    /// the queued operation when its caller drops the response future.
+    pub async fn adopt_owner(
+        &self,
+        cut: OwnerAdoptionCut,
+        max_bytes: usize,
+        max_events: usize,
+        faults: Arc<dyn FaultInjector>,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<OwnerAdoptionAck, RuntimeError> {
+        current(&self.actor, &self.token)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(Request::AdoptOwner {
+                workspace_id: self.workspace_id.clone(),
+                token: self.token.clone(),
+                application: self.application.clone(),
+                cut,
+                max_bytes,
+                max_events,
+                faults,
+                reservation,
+                reply,
+            })))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        let result = receive
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        current(&self.actor, &self.token)?;
+        Ok(result)
+    }
     #[allow(clippy::too_many_arguments)]
     pub async fn settle(
         &self,
@@ -311,6 +345,17 @@ impl Registry {
 }
 
 pub(super) enum Request {
+    AdoptOwner {
+        workspace_id: String,
+        token: Token,
+        application: ApplicationHandle,
+        cut: OwnerAdoptionCut,
+        max_bytes: usize,
+        max_events: usize,
+        faults: Arc<dyn FaultInjector>,
+        reservation: Arc<dyn Send + Sync>,
+        reply: Reply<OwnerAdoptionAck>,
+    },
     Settle {
         workspace_id: String,
         token: Token,
@@ -372,6 +417,30 @@ impl Request {
         cache: &mut WriterDocCache,
     ) {
         match self {
+            Self::AdoptOwner {
+                workspace_id,
+                token,
+                application,
+                cut,
+                max_bytes,
+                max_events,
+                faults,
+                reservation: _reservation,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|_| {
+                    adopt_owner_committed(
+                        store,
+                        &application,
+                        cut,
+                        max_bytes,
+                        max_events,
+                        faults.as_ref(),
+                    )
+                    .map_err(Into::into)
+                });
+                let _ = reply.send(result);
+            }
             Self::Settle {
                 workspace_id,
                 token,

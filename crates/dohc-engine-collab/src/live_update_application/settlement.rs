@@ -265,7 +265,7 @@ where
 
 type ReceiptIdentity = (String, String, i64, i64, i64, String);
 
-fn validate_historical_binding(
+pub(super) fn validate_historical_binding(
     historical: &LiveObjectBinding,
     current: &LiveObjectBinding,
 ) -> Result<(), ApplicationError> {

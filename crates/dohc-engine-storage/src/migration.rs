@@ -1475,6 +1475,32 @@ CREATE UNIQUE INDEX idx_automation_claims_trigger_history
 CREATE INDEX idx_automation_claims_state
     ON automation_claims(workspace_id, state, created_at_ms, claim_id);
 
+CREATE TABLE live_owner_adoptions (
+    relay_database_namespace TEXT NOT NULL,
+    adoption_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+    source_moment_id TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    source_byte_length INTEGER NOT NULL CHECK (source_byte_length >= 0),
+    baseline_moment_relay_sequence INTEGER NOT NULL CHECK (baseline_moment_relay_sequence >= 0),
+    baseline_registered_at_ms INTEGER NOT NULL CHECK (baseline_registered_at_ms >= 0),
+    evidence_digest TEXT NOT NULL,
+    coverage_digest TEXT NOT NULL,
+    covered_outbox_sequence INTEGER NOT NULL CHECK (covered_outbox_sequence >= 0),
+    local_ydoc_sequence INTEGER NOT NULL CHECK (local_ydoc_sequence >= 0),
+    terminal_cursor INTEGER NOT NULL CHECK (terminal_cursor >= 0),
+    host_coordinate_json TEXT NOT NULL CHECK (json_valid(host_coordinate_json)),
+    PRIMARY KEY (relay_database_namespace, adoption_id),
+    UNIQUE (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (lineage_claim_id) REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (source_digest) REFERENCES blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+
 CREATE TABLE live_device_bootstraps (
     relay_database_namespace TEXT NOT NULL CHECK (length(CAST(relay_database_namespace AS BLOB)) > 0),
     workspace_id TEXT NOT NULL,

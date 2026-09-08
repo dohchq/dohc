@@ -23,7 +23,9 @@ use std::sync::{Arc, Mutex};
 
 const SAFE: i64 = 9_007_199_254_740_991;
 
+mod adoption;
 mod bootstrap;
+pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
 mod settlement;
 pub use bootstrap::{
     bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,

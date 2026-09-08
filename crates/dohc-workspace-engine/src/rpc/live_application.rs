@@ -68,6 +68,7 @@ pub(crate) struct Registration {
     host: Arc<Host>,
     handle: ActorLiveApplicationHandle,
     object_id: String,
+    binding: LiveObjectBinding,
     retired: CancelSignal,
 }
 
@@ -165,6 +166,81 @@ impl OutputGuard for ApplicationOutputGuard {
 }
 
 impl EngineService {
+    /// Trusted owner transport entry. Evidence and budgets come from the
+    /// authenticated journal reader, never from an ordinary renderer RPC.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn adopt_live_application_owner(
+        &self,
+        ctx: RequestContext,
+        request_id: u64,
+        workspace: WorkspaceHandle,
+        registration_id: u64,
+        session_id: String,
+        cut: dohc_engine_collab::live_update_application::OwnerAdoptionCut,
+        max_bytes: usize,
+        max_events: usize,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<ServiceResponse, WireError> {
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        let registration =
+            self.live_application_registration(connection, Some(&workspace), registration_id)?;
+        let host = registration.host.clone();
+        let cancellation = super::request::OperationCancellation::new(&ctx);
+        let serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => return Err(cancellation.interruption("owner adoption (queued)")),
+            serial = Arc::clone(&host.open.session_ops).lock_owned() => serial,
+        };
+        let (open, session) = self.ydoc_session(Some(&workspace), &session_id)?;
+        let b = &registration.binding;
+        if !host.current(connection)
+            || registration.retired.is_cancelled()
+            || !Arc::ptr_eq(&open, &host.open)
+            || session.key.workspace_id != b.workspace_id
+            || session.key.version_id != b.main_version_id
+            || session.key.object_id != b.object_id
+            || session.path != b.current_path
+            || session.lineage_claim_id.as_deref() != Some(&b.lineage_claim_id)
+            || session.content_kind != dohc_engine_collab::ContentKind::Richdoc
+            || session.first_update_pending
+        {
+            return Err(workspace_unavailable());
+        }
+        let guard = Arc::new(ApplicationOutputGuard {
+            registration: registration.clone(),
+            cancel: ctx.cancel,
+            deadline: ctx.deadline,
+            _reservation: reservation.clone(),
+        });
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        let mut retirement = RetireOnCancellation(Some(host));
+        let operation = tokio::spawn(async move {
+            let _serial = serial;
+            registration
+                .handle
+                .adopt_owner(cut, max_bytes, max_events, Arc::new(NoFaults), reservation)
+                .await
+        });
+        let outcome = operation.await;
+        retirement.0 = None;
+        let result = outcome
+            .map_err(|_| WireError::new(ErrorCode::Internal, "owner-adoption-interrupted"))?
+            .map_err(map_runtime)?;
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        Ok(ServiceResponse {
+            response: Response {
+                id: request_id,
+                result: json!({"status":"adopted","adoption":result}),
+            },
+            blob_egress: None,
+            output_guard: Some(guard),
+        })
+    }
     pub(super) async fn live_application_settle(
         &self,
         ctx: RequestContext,
@@ -378,6 +454,7 @@ impl EngineService {
             ));
         }
         let object_id = params.binding.object_id.clone();
+        let binding = params.binding.clone();
         let handle = host
             .owner
             .register(
@@ -401,6 +478,7 @@ impl EngineService {
             host: host.clone(),
             handle,
             object_id,
+            binding,
             retired: CancelSignal::new(),
         });
         {

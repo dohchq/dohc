@@ -1375,7 +1375,7 @@ impl EngineService {
         ))
     }
 
-    fn ydoc_session(
+    pub(super) fn ydoc_session(
         &self,
         handle: Option<&WorkspaceHandle>,
         session_id: &str,
@@ -1528,6 +1528,112 @@ mod tests {
         service.ydoc_record_update(&RequestContext::unbounded(),Some(handle.clone()),Some("owner-source-seed".into()),json!({
             "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&bytes),"seed":true
         })).await.unwrap();
+        let (baseline, lineage, sequence) = {
+            let db = rusqlite::Connection::open_with_flags(
+                &db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            db.query_row("SELECT b.bytes,d.lineage_claim_id,d.head_update_seq FROM ydoc_docs d JOIN ydoc_snapshots s USING(workspace_id,version_id,object_id) JOIN binary_blobs b ON b.sha256=s.snapshot_blob_sha256 WHERE d.object_id=?1 AND s.up_to_seq=0",[&object_id],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?))).unwrap()
+        };
+        let connection = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(connection.handle());
+        service
+            .provision_live_application(
+                connection.handle(),
+                crate::rpc::live_application::LiveApplicationHostConfig {
+                    workspace: handle.clone(),
+                    namespace: "owner-source-relay".into(),
+                    coordinate:
+                        dohc_engine_collab::live_update_application::ApplicationHostCoordinate {
+                            host_id: "host".into(),
+                            host_epoch: 1,
+                            instance_id: "instance".into(),
+                            connection_id: "connection".into(),
+                        },
+                    max_registrations: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let binding = dohc_engine_collab::LiveObjectBinding {
+            workspace_id: "owner-source".into(),
+            main_version_id: "main".into(),
+            object_id: object_id.clone(),
+            lineage_claim_id: lineage,
+            current_path: "owner.md".into(),
+            selector_paths: vec!["owner.md".into()],
+            restore_fence_generation: 0,
+        };
+        let registration = service
+            .live_application_register(&ctx, Some(handle.clone()), json!({"binding":binding}))
+            .await
+            .unwrap();
+        let cut = dohc_engine_collab::live_update_application::OwnerAdoptionCut {
+            relay_database_namespace: "owner-source-relay".into(),
+            adoption_id: "actual-owner".into(),
+            source_moment_id: source_moment.clone(),
+            source_digest: dohc_engine_storage::hex_sha256(markdown.as_bytes()),
+            source_byte_length: markdown.len() as i64,
+            baseline_moment_relay_sequence: 1,
+            baseline_registered_at_ms: 3,
+            baseline_bytes: baseline,
+            expected_local_sequence: sequence,
+            events: vec![],
+            terminal_receipt: None,
+        };
+        for replay in [false, true] {
+            let mut ctx = RequestContext::unbounded();
+            ctx.connection = Some(connection.handle());
+            let adopted = service
+                .adopt_live_application_owner(
+                    ctx,
+                    7,
+                    handle.clone(),
+                    registration["registrationId"].as_u64().unwrap(),
+                    session["sessionId"].as_str().unwrap().into(),
+                    cut.clone(),
+                    1_000_000,
+                    100,
+                    Arc::new(()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                adopted.response.result["adoption"]["adoptionReplayed"],
+                replay
+            );
+            assert_eq!(
+                adopted.response.result["adoption"]["localYDocSequence"],
+                sequence
+            );
+            assert!(adopted.output_guard.unwrap().is_current());
+        }
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("owner.md")).unwrap(),
+            markdown
+        );
+        let edited = dohc_engine_collab::Ydoc::wire();
+        edited.apply(&cut.baseline_bytes).unwrap();
+        edited
+            .rewrite_content_to_markdown(ContentKind::Richdoc, "Later canonical edit")
+            .unwrap();
+        service.ydoc_record_update(&RequestContext::unbounded(),Some(handle.clone()),Some("after-adoption".into()),json!({
+            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(edited.encode_full_state())
+        })).await.unwrap();
+        service
+            .ydoc_settle(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({"sessionId":session["sessionId"]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("owner.md")).unwrap(),
+            "Later canonical edit"
+        );
         service.workspace_close(Some(handle)).await.unwrap();
         {
             let store = dohc_engine_storage::EngineStore::open(&db_path, 3).unwrap();
@@ -1537,10 +1643,14 @@ mod tests {
             )).unwrap();
             assert_eq!(row.0, source_moment);
             assert_eq!(row.1, dohc_engine_storage::hex_sha256(markdown.as_bytes()));
-            assert_eq!(row.3, 1);
-            assert_eq!(row.4, 1, "retaining source must not create a domain moment");
+            assert_eq!(row.3, 2);
+            assert_eq!(
+                row.4, 2,
+                "only the later explicit settlement adds a domain moment"
+            );
             let original: String = store.read_with(|conn|conn.query_row("SELECT snapshot_blob_sha256 FROM ydoc_snapshots WHERE object_id=?1 AND up_to_seq=0",[&object_id],|r|r.get(0))).unwrap();
             assert_eq!(row.2, original);
+            assert_eq!(store.table_row_count("live_owner_adoptions").unwrap(), 1);
         }
     }
 
