@@ -26,10 +26,13 @@ const SAFE: i64 = 9_007_199_254_740_991;
 mod adoption;
 mod bootstrap;
 pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
+mod restore_fence;
 mod settlement;
 pub use bootstrap::{
     bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
 };
+pub(crate) use restore_fence::require_open as require_restore_open;
+pub use restore_fence::{NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin};
 pub use settlement::{with_settlement, LiveSettlementAudit, LiveSettlementResult};
 
 #[derive(Debug, thiserror::Error)]
@@ -470,6 +473,12 @@ impl ApplicationOwner {
         }
         coordinate.validate()?;
         validate_application_binding(store, &self.workspace_id, &binding)?;
+        let key = DocKey::new(
+            &binding.workspace_id,
+            &binding.main_version_id,
+            &binding.object_id,
+        )?;
+        store.read_with(|conn| restore_fence::require_open(conn, &key))?;
         let connection_changed = self.current.iter().any(|entry| {
             entry.lock().map_or(true, |r| {
                 r.namespace != namespace || r.coordinate != coordinate
