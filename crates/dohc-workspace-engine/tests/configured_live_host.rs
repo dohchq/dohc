@@ -179,6 +179,24 @@ fn production_entrypoint_discovers_fixed_roots_after_authentication() {
         };
         assert_eq!(error.error.code, expected);
     }
+    for (index, method) in [
+        "engine.ping",
+        "secrets.read",
+        "versionedText.read",
+        "versionedText.write",
+        "sync.push",
+        "versions.ensureMain",
+        "liveApplication.arbitrary",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let Envelope::Error(error) = daemon.request(10 + index as u64, method, None, json!({}))
+        else {
+            panic!("configured method must refuse")
+        };
+        assert_eq!(error.error.code, ErrorCode::Forbidden, "{method}");
+    }
     daemon.0.stdin.take();
     assert!(daemon.0.wait().unwrap().success());
     let store =

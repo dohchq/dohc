@@ -59,12 +59,31 @@ fn engine_ping() -> Value {
 }
 
 impl EngineService {
+    fn ensure_configured_host_method(&self, method: &str) -> Result<(), WireError> {
+        if self.configured_live_host.get().is_some()
+            && !matches!(
+                method,
+                "liveApplication.hosts"
+                    | "liveApplication.register"
+                    | "liveApplication.bootstrap"
+                    | "liveApplication.apply"
+            )
+        {
+            return Err(WireError::new(
+                ErrorCode::Forbidden,
+                "configured host method is unavailable",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn dispatch_input(
         &self,
         ctx: RequestContext,
         request: Request,
         input: crate::LiveApplicationInput,
     ) -> Result<ServiceResponse, WireError> {
+        self.ensure_configured_host_method(&request.method)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
         self.live_application_apply(ctx, request, input).await
@@ -76,17 +95,7 @@ impl EngineService {
         request: Request,
     ) -> Result<ServiceResponse, WireError> {
         let id = request.id;
-        if self.configured_live_host.get().is_some()
-            && matches!(
-                request.method.as_str(),
-                "workspace.open" | "workspace.close"
-            )
-        {
-            return Err(WireError::new(
-                ErrorCode::Forbidden,
-                "configured host workspaces are fixed",
-            ));
-        }
+        self.ensure_configured_host_method(&request.method)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
         if request.method == "versionedBinary.readBlob" {
