@@ -1,5 +1,6 @@
 import {
   exceedsLiveMarkdownLimit,
+  exceedsUtf8Bytes,
   parseLiveDocumentKey,
   type LiveDocumentKey,
   type LiveUpdateStructRange,
@@ -50,7 +51,9 @@ const PUBLIC_ROOTS = new Set(['body', 'frontmatter', 'meta'])
 const META_KEYS = new Set([
   'schemaVersion', 'dohcMarkdownCrlf',
   'dohcTaggedFrontmatterPrefix', 'dohcTaggedFrontmatterBaseline',
+  'dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256',
 ])
+const SOURCE_META_KEYS = ['dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256'] as const
 const ByteArray = Uint8Array
 const typedArrayPrototype = Object.getPrototypeOf(ByteArray.prototype) as object
 const byteTag = Object.getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag)!.get!
@@ -661,6 +664,15 @@ function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record
     typeof snapshot.dohcTaggedFrontmatterPrefix !== 'string'
     || typeof snapshot.dohcTaggedFrontmatterBaseline !== 'string'
   ))) refuse('invalid-schema')
+  const sourceFields = SOURCE_META_KEYS.filter(key => Object.hasOwn(snapshot, key)).length
+  if (sourceFields !== 0) {
+    if (sourceFields !== 3 || typeof snapshot.dohcMarkdownSource !== 'string'
+      || typeof snapshot.dohcMarkdownSourceSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(snapshot.dohcMarkdownSourceSha256)
+      || typeof snapshot.dohcMarkdownSourceProjectionSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(snapshot.dohcMarkdownSourceProjectionSha256)
+      // The existing native text store bounds retained source at 10 MiB.
+      || exceedsUtf8Bytes(snapshot.dohcMarkdownSource, 10 * 1024 * 1024)
+      || sha256Hex(utf8.encode(snapshot.dohcMarkdownSource)) !== snapshot.dohcMarkdownSourceSha256) refuse('invalid-schema')
+  }
   return snapshot
 }
 
@@ -709,14 +721,30 @@ function validatePublicState(
   }
 
   const projectedMarkdown = yDocToMarkdown(scratch)
+  let preservedSource: string | undefined
   if (exceedsLiveMarkdownLimit(projectedMarkdown)) refuse('capacity-refused')
   if (metadata.dohcMarkdownCrlf === true && !projectedMarkdown.includes('\r\n')) refuse('invalid-schema')
+  if (typeof metadata.dohcMarkdownSourceProjectionSha256 === 'string'
+    && metadata.dohcMarkdownSourceProjectionSha256 === sha256Hex(utf8.encode(projectedMarkdown))) {
+    if (exceedsLiveMarkdownLimit(metadata.dohcMarkdownSource as string)) refuse('capacity-refused')
+    const source = markdownToYDoc(metadata.dohcMarkdownSource as string)
+    try {
+      if (yDocToMarkdown(source) !== projectedMarkdown) refuse('invalid-schema')
+      preservedSource = metadata.dohcMarkdownSource as string
+    }
+    finally { source.destroy() }
+  }
   if (!zeroStructSeed) {
     const reimported = markdownToYDoc(projectedMarkdown)
     try {
       if (!semanticEqual(frontmatterSnapshot, getDohcYDocFrontmatter(reimported))) refuse('invalid-schema')
-      if (!semanticEqual(metadata, Object.fromEntries(reimported.getMap('meta').entries()))) refuse('invalid-schema')
+      let projectedMetadata = metadata
+      if (Object.hasOwn(metadata, 'dohcMarkdownSource')) {
+        projectedMetadata = { ...metadata }
+        for (const key of SOURCE_META_KEYS) delete projectedMetadata[key]
+      }
+      if (!semanticEqual(projectedMetadata, Object.fromEntries(reimported.getMap('meta').entries()))) refuse('invalid-schema')
     } finally { reimported.destroy() }
   }
-  return projectedMarkdown
+  return preservedSource ?? projectedMarkdown
 }
