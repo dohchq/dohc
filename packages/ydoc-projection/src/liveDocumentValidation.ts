@@ -20,12 +20,17 @@ import {
 } from './import-export.js'
 import {
   validateRegistrationCutForProjection,
+  validateJournalCutForProjection,
+  MAX_OLD_SUFFIX_ENTRIES,
   type OrderedLiveUpdateCutPolicy,
   type OrderedLiveUpdateCutFinalizeResult,
-  type RegistrationTopology,
+  type ProjectionTopology,
+  type ValidatedLiveUpdateCut,
+  type OrderedLiveUpdateCutRefusal,
 } from './orderedLiveUpdateCut.js'
 
 const INPUT_FIELDS = ['document', 'currentPath', 'checkpoint'] as const
+const JOURNAL_INPUT_FIELDS = [...INPUT_FIELDS, 'suffix', 'candidate'] as const
 const DOCUMENT_FIELDS = ['workspaceId', 'mainVersionId', 'objectId', 'lineageClaimId'] as const
 const POLICY_FIELDS = [
   'maxStructVisits',
@@ -97,7 +102,9 @@ class Refusal extends Error {
   constructor(readonly reason: LiveMarkdownValidationRefusal) { super(reason) }
 }
 function refuse(reason: LiveMarkdownValidationRefusal): never { throw new Refusal(reason) }
-function refusal(reason: LiveMarkdownValidationRefusal, source: RefusedRegistration['source']): RefusedRegistration {
+function refusal<S extends RefusedRegistration['source'] | RefusedJournal['source']>(
+  reason: LiveMarkdownValidationRefusal, source: S,
+): { readonly kind: 'refused'; readonly reason: LiveMarkdownValidationRefusal; readonly source: S } {
   return Object.freeze({ kind: 'refused', reason, source })
 }
 function exactDataFields(value: unknown, fields: readonly string[]): Record<string, unknown> {
@@ -139,84 +146,243 @@ function sha256Hex(bytes: Uint8Array): string {
   return Array.from(sha256(bytes), byte => byte.toString(16).padStart(2, '0')).join('')
 }
 
-export function createLiveMarkdownRegistrationValidator(
-  policy: OrderedLiveUpdateCutPolicy,
-): (input: unknown) => LiveMarkdownRegistrationResult {
-  let ownedPolicy: OrderedLiveUpdateCutPolicy
+function capturePolicy(policy: OrderedLiveUpdateCutPolicy): OrderedLiveUpdateCutPolicy {
   try {
     const snapshot = exactDataFields(policy, POLICY_FIELDS)
     for (const field of POLICY_FIELDS) {
       const value = snapshot[field]
       if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) refuse('invalid-input')
     }
-    ownedPolicy = Object.freeze(snapshot) as unknown as OrderedLiveUpdateCutPolicy
-  } catch { throw new TypeError('Registration validation requires an exact, positive work policy.') }
+    return Object.freeze(snapshot) as unknown as OrderedLiveUpdateCutPolicy
+  } catch { throw new TypeError('Live Markdown validation requires an exact, positive work policy.') }
+}
 
-  return (input): LiveMarkdownRegistrationResult => {
-    let document: LiveDocumentKey, currentPath: string, checkpointValue: unknown
-    try {
-      const snapshot = exactDataFields(input, INPUT_FIELDS)
-      document = Object.freeze(parseLiveDocumentKey(exactDataFields(snapshot.document, DOCUMENT_FIELDS)))
-      if (document.mainVersionId !== 'main' || typeof snapshot.currentPath !== 'string') refuse('invalid-input')
-      currentPath = snapshot.currentPath
-      const path = validateUserWritePath(currentPath)
-      if (!path.ok || path.normalized !== currentPath || liveDocumentKindForPath(currentPath) !== 'richdoc') {
-        refuse('invalid-input')
-      }
-      checkpointValue = snapshot.checkpoint
-    } catch { return refusal('invalid-input', 'call') }
+export function createLiveMarkdownRegistrationValidator(
+  policy: OrderedLiveUpdateCutPolicy,
+): (input: unknown) => LiveMarkdownRegistrationResult {
+  const ownedPolicy = capturePolicy(policy)
 
-    let checkpoint: Uint8Array
-    try { checkpoint = captureBytes(checkpointValue) }
-    catch { return refusal('invalid-input', 'registration-input') }
-    const result = validateRegistrationCutForProjection({ mode: 'registration', checkpoint }, ownedPolicy)
-    if (result.kind === 'refused') return refusal(result.reason, 'registration-input')
-    const { cut, topology } = result
-    let pending: RefusedRegistration | undefined
-    let projectedMarkdown = '', checkpointCopy: Uint8Array | undefined
-    let finalized: OrderedLiveUpdateCutFinalizeResult | undefined
-    try {
-      checkpointCopy = copyBytes(checkpoint)
-      if (sha256Hex(checkpointCopy) !== cut.checkpoint.updateDigest) refuse('invalid-update')
-      if (topology.kind !== 'compatible') refuse('invalid-schema')
-      projectedMarkdown = validatePublicState(cut.document, topology)
-    } catch (error) {
-      pending = refusal(error instanceof Refusal ? error.reason : 'invalid-schema', 'registration-input')
-    } finally {
-      try { finalized = cut.finishAfterProjection() }
-      catch { pending = refusal('projection-mutated', 'registration-input') }
-      finally {
-        try { if (!cut.document.isDestroyed) cut.document.destroy() }
-        catch { pending = refusal('projection-mutated', 'registration-input') }
+  return input => validateRegistrationInput(input, ownedPolicy, true)
+}
+
+type ValidationOutcome =
+  | { readonly kind: 'accepted' }
+  | { readonly kind: 'refused'; readonly reason: LiveMarkdownValidationRefusal }
+
+function validateRegistrationInput(input: unknown, policy: OrderedLiveUpdateCutPolicy, includeEvidence: true): LiveMarkdownRegistrationResult
+function validateRegistrationInput(input: unknown, policy: OrderedLiveUpdateCutPolicy, includeEvidence: false): ValidationOutcome
+function validateRegistrationInput(
+  input: unknown,
+  ownedPolicy: OrderedLiveUpdateCutPolicy,
+  includeEvidence: boolean,
+): LiveMarkdownRegistrationResult | ValidationOutcome {
+  let document: LiveDocumentKey, currentPath: string, checkpointValue: unknown
+  try {
+    const snapshot = exactDataFields(input, INPUT_FIELDS)
+    document = Object.freeze(parseLiveDocumentKey(exactDataFields(snapshot.document, DOCUMENT_FIELDS)))
+    if (document.mainVersionId !== 'main' || typeof snapshot.currentPath !== 'string') refuse('invalid-input')
+    currentPath = snapshot.currentPath
+    const path = validateUserWritePath(currentPath)
+    if (!path.ok || path.normalized !== currentPath || liveDocumentKindForPath(currentPath) !== 'richdoc') {
+      refuse('invalid-input')
+    }
+    checkpointValue = snapshot.checkpoint
+  } catch { return refusal('invalid-input', 'call') }
+
+  let checkpoint: Uint8Array
+  try { checkpoint = captureBytes(checkpointValue) }
+  catch { return refusal('invalid-input', 'registration-input') }
+  const result = validateRegistrationCutForProjection({ mode: 'registration', checkpoint }, ownedPolicy)
+  if (result.kind === 'refused') return refusal(result.reason, 'registration-input')
+  const { cut, topology } = result
+  let checkpointCopy: Uint8Array | undefined
+  const projected = projectAndFinalize(cut, topology, () => {
+    if (!includeEvidence) return
+    checkpointCopy = copyBytes(checkpoint)
+    if (sha256Hex(checkpointCopy) !== cut.checkpoint.updateDigest) refuse('invalid-update')
+  })
+  if (projected.kind === 'refused') return refusal(projected.reason, 'registration-input')
+  if (!includeEvidence) return { kind: 'accepted' }
+  if (checkpointCopy === undefined) return refusal('projection-mutated', 'registration-input')
+  const { projectedMarkdown, finalized } = projected
+
+  const ownedCheckpoint = checkpointCopy
+  const stateUpdate = copyBytes(finalized.stateUpdate), stateVector = copyBytes(finalized.stateVector)
+  const markdownBytes = utf8.encode(projectedMarkdown)
+  const evidence: LiveMarkdownRegistrationEvidence = Object.freeze({
+    version: 1,
+    document,
+    currentPath,
+    checkpoint: Object.freeze({
+      get bytes() { return copyBytes(ownedCheckpoint) },
+      updateDigest: cut.checkpoint.updateDigest,
+      ranges: Object.freeze(cut.checkpoint.ranges.map(range => Object.freeze({ ...range }))),
+    }),
+    projectedMarkdown,
+    projectedMarkdownSha256: sha256Hex(markdownBytes),
+    projectedMarkdownByteLength: markdownBytes.byteLength,
+    get stateUpdate() { return copyBytes(stateUpdate) },
+    stateUpdateSha256: sha256Hex(stateUpdate),
+    stateUpdateByteLength: stateUpdate.byteLength,
+    get stateVector() { return copyBytes(stateVector) },
+    stateVectorSha256: sha256Hex(stateVector),
+  })
+  return Object.freeze({ kind: 'accepted', evidence })
+}
+
+export interface LiveMarkdownJournalInput extends LiveMarkdownRegistrationInput {
+  readonly suffix: readonly Uint8Array[]
+  readonly candidate: Uint8Array
+}
+export interface LiveMarkdownJournalEvidence {
+  readonly version: 1
+  readonly document: LiveDocumentKey
+  readonly currentPath: string
+  readonly checkpointDigest: string
+  readonly suffixDigests: readonly string[]
+  readonly candidate: {
+    readonly updateDigest: string
+    readonly ranges: readonly LiveUpdateStructRange[]
+  }
+  readonly projectedMarkdownSha256: string
+  readonly projectedMarkdownByteLength: number
+  readonly stateUpdate: Uint8Array
+  readonly stateUpdateSha256: string
+  readonly stateUpdateByteLength: number
+}
+type RefusedJournal = {
+  readonly kind: 'refused'
+  readonly reason: LiveMarkdownValidationRefusal
+  readonly source: 'call' | 'admitted-cut' | 'candidate' | 'final'
+}
+export type LiveMarkdownJournalResult =
+  | { readonly kind: 'accepted'; readonly evidence: LiveMarkdownJournalEvidence }
+  | RefusedJournal
+
+function captureSuffix(value: unknown): Uint8Array[] {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) refuse('invalid-input')
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length')
+  if (lengthDescriptor === undefined || !Object.hasOwn(lengthDescriptor, 'value')) refuse('invalid-input')
+  const length: unknown = lengthDescriptor.value
+  if (typeof length !== 'number' || !Number.isSafeInteger(length) || length < 0) refuse('invalid-input')
+  if (length > MAX_OLD_SUFFIX_ENTRIES) refuse('capacity-refused')
+  const keys = Reflect.ownKeys(value)
+  if (keys.length !== length + 1 || keys.some(key => {
+    if (key === 'length') return false
+    return typeof key !== 'string' || !/^(0|[1-9]\d*)$/.test(key) || Number(key) >= length
+  })) refuse('invalid-input')
+  const suffix: Uint8Array[] = []
+  for (let index = 0; index < length; index++) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+    if (descriptor === undefined || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) refuse('invalid-input')
+    suffix.push(captureBytes(descriptor.value))
+  }
+  return suffix
+}
+
+export function createLiveMarkdownJournalValidator(
+  policy: OrderedLiveUpdateCutPolicy,
+): (input: unknown) => LiveMarkdownJournalResult {
+  const ownedPolicy = capturePolicy(policy)
+
+  function validateCaptured(input: LiveMarkdownJournalInput, diagnose: true): LiveMarkdownJournalResult
+  function validateCaptured(input: LiveMarkdownJournalInput, diagnose: false): ValidationOutcome
+  function validateCaptured(input: LiveMarkdownJournalInput, diagnose: boolean): LiveMarkdownJournalResult | ValidationOutcome {
+    const result = validateJournalCutForProjection({
+      mode: 'journal-candidate', checkpoint: input.checkpoint, suffix: input.suffix, candidate: input.candidate,
+    }, ownedPolicy)
+    let failure: Pick<OrderedLiveUpdateCutRefusal, 'reason' | 'stage'>
+    if (result.kind === 'refused') failure = result
+    else {
+      const { cut, topology } = result
+      const projected = projectAndFinalize(cut, topology)
+      if (projected.kind === 'refused') failure = { reason: projected.reason, stage: { kind: 'final' } }
+      else {
+        if (!diagnose) return { kind: 'accepted' }
+        const stateUpdate = copyBytes(projected.finalized.stateUpdate)
+        const markdownBytes = utf8.encode(projected.projectedMarkdown)
+        const evidence: LiveMarkdownJournalEvidence = Object.freeze({
+          version: 1,
+          document: input.document,
+          currentPath: input.currentPath,
+          checkpointDigest: cut.checkpointDigest,
+          suffixDigests: cut.suffixDigests,
+          candidate: Object.freeze({
+            updateDigest: cut.candidate.updateDigest,
+            ranges: Object.freeze(cut.candidate.ranges.map(range => Object.freeze({ ...range }))),
+          }),
+          projectedMarkdownSha256: sha256Hex(markdownBytes),
+          projectedMarkdownByteLength: markdownBytes.byteLength,
+          get stateUpdate() { return copyBytes(stateUpdate) },
+          stateUpdateSha256: sha256Hex(stateUpdate),
+          stateUpdateByteLength: stateUpdate.byteLength,
+        })
+        return Object.freeze({ kind: 'accepted', evidence })
       }
     }
-    if (finalized?.kind === 'refused') return refusal(finalized.reason, 'registration-input')
-    if (pending) return pending
-    if (finalized?.kind !== 'accepted' || checkpointCopy === undefined) return refusal('projection-mutated', 'registration-input')
-
-    const ownedCheckpoint = checkpointCopy
-    const stateUpdate = copyBytes(finalized.stateUpdate), stateVector = copyBytes(finalized.stateVector)
-    const markdownBytes = utf8.encode(projectedMarkdown)
-    const evidence: LiveMarkdownRegistrationEvidence = Object.freeze({
-      version: 1,
-      document,
-      currentPath,
-      checkpoint: Object.freeze({
-        get bytes() { return copyBytes(ownedCheckpoint) },
-        updateDigest: cut.checkpoint.updateDigest,
-        ranges: Object.freeze(cut.checkpoint.ranges.map(range => Object.freeze({ ...range }))),
-      }),
-      projectedMarkdown,
-      projectedMarkdownSha256: sha256Hex(markdownBytes),
-      projectedMarkdownByteLength: markdownBytes.byteLength,
-      get stateUpdate() { return copyBytes(stateUpdate) },
-      stateUpdateSha256: sha256Hex(stateUpdate),
-      stateUpdateByteLength: stateUpdate.byteLength,
-      get stateVector() { return copyBytes(stateVector) },
-      stateVectorSha256: sha256Hex(stateVector),
-    })
-    return Object.freeze({ kind: 'accepted', evidence })
+    if (failure.stage.kind === 'call') return refusal(failure.reason, 'call')
+    if (failure.stage.kind === 'input') {
+      return refusal(failure.reason, failure.stage.role === 'candidate' ? 'candidate' : 'admitted-cut')
+    }
+    if (diagnose && failure.reason !== 'projection-mutated') {
+      const last = input.suffix.length - 1
+      const prefix = last < 0
+        ? validateRegistrationInput({ document: input.document, currentPath: input.currentPath, checkpoint: input.checkpoint }, ownedPolicy, false)
+        : validateCaptured({ ...input, suffix: input.suffix.slice(0, last), candidate: input.suffix[last] }, false)
+      if (prefix.kind === 'refused') return refusal(prefix.reason, 'admitted-cut')
+    }
+    return refusal(failure.reason, 'final')
   }
+
+  return (input): LiveMarkdownJournalResult => {
+    let captured: LiveMarkdownJournalInput
+    try {
+      const snapshot = exactDataFields(input, JOURNAL_INPUT_FIELDS)
+      const document = Object.freeze(parseLiveDocumentKey(exactDataFields(snapshot.document, DOCUMENT_FIELDS)))
+      if (document.mainVersionId !== 'main' || typeof snapshot.currentPath !== 'string') refuse('invalid-input')
+      const currentPath = snapshot.currentPath
+      const path = validateUserWritePath(currentPath)
+      if (!path.ok || path.normalized !== currentPath || liveDocumentKindForPath(currentPath) !== 'richdoc') refuse('invalid-input')
+      captured = {
+        document, currentPath,
+        checkpoint: captureBytes(snapshot.checkpoint),
+        suffix: captureSuffix(snapshot.suffix),
+        candidate: captureBytes(snapshot.candidate),
+      }
+    } catch (error) { return refusal(error instanceof Refusal ? error.reason : 'invalid-input', 'call') }
+    return validateCaptured(captured, true)
+  }
+}
+
+type ProjectedCut =
+  | { readonly kind: 'accepted'; readonly projectedMarkdown: string; readonly finalized: Extract<OrderedLiveUpdateCutFinalizeResult, { kind: 'accepted' }> }
+  | { readonly kind: 'refused'; readonly reason: LiveMarkdownValidationRefusal }
+
+function projectAndFinalize(
+  cut: ValidatedLiveUpdateCut,
+  topology: ProjectionTopology,
+  beforeProjection?: () => void,
+): ProjectedCut {
+  let pending: LiveMarkdownValidationRefusal | undefined
+  let projectedMarkdown = ''
+  let finalized: OrderedLiveUpdateCutFinalizeResult | undefined
+  try {
+    beforeProjection?.()
+    if (topology.kind !== 'compatible') refuse('invalid-schema')
+    projectedMarkdown = validatePublicState(cut.document, topology)
+  } catch (error) { pending = error instanceof Refusal ? error.reason : 'invalid-schema' }
+  finally {
+    try { finalized = cut.finishAfterProjection() }
+    catch { pending = 'projection-mutated' }
+    finally {
+      try { if (!cut.document.isDestroyed) cut.document.destroy() }
+      catch { pending = 'projection-mutated' }
+    }
+  }
+  if (finalized?.kind === 'refused') return { kind: 'refused', reason: finalized.reason }
+  if (pending) return { kind: 'refused', reason: pending }
+  if (finalized?.kind !== 'accepted') return { kind: 'refused', reason: 'projection-mutated' }
+  return { kind: 'accepted', projectedMarkdown, finalized }
 }
 
 interface ElementFingerprint {
@@ -390,9 +556,18 @@ function validateMarkAttributes(name: string, value: unknown): void {
 function bodyFingerprint(
   body: Y.XmlFragment,
   budget: ProjectionBudget | null,
+  depth = 0,
 ): XmlFingerprint[] {
   if (budget !== null && body.length > budget.remaining) refuse('capacity-refused')
-  return body.toArray().map(child => xmlFingerprint(child, 0, budget))
+  const schema = getDohcProseMirrorSchema()
+  const permitsText = body instanceof Y.XmlElement
+    && schema.nodes[body.nodeName]?.contentMatch.matchType(schema.nodes.text) != null
+  const children: XmlFingerprint[] = []
+  for (const child of body.toArray()) {
+    const fingerprint = xmlFingerprint(child, depth, budget)
+    if (!permitsText || fingerprint.kind !== 'text' || fingerprint.delta.length !== 0) children.push(fingerprint)
+  }
+  return children
 }
 
 function xmlFingerprint(
@@ -416,7 +591,7 @@ function xmlFingerprint(
       kind: 'element',
       nodeName: value.nodeName,
       attributes: entries,
-      children: value.toArray().map(child => xmlFingerprint(child, depth + 1, budget)),
+      children: bodyFingerprint(value, budget, depth + 1),
     }
   }
   if (!(value instanceof Y.XmlText)) refuse('invalid-schema')
@@ -491,7 +666,7 @@ function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record
 
 function validatePublicState(
   scratch: Y.Doc,
-  topology: Extract<RegistrationTopology, { kind: 'compatible' }>,
+  topology: Extract<ProjectionTopology, { kind: 'compatible' }>,
 ): string {
   if (
     scratch.share.size !== 3 || [...scratch.share.keys()].some(key => !PUBLIC_ROOTS.has(key))
