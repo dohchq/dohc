@@ -653,6 +653,9 @@ pub fn read_pending_page(
         let tx = conn.unchecked_transaction().map_err(read_sql)?;
         let parent = read_parent(&tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
         require_workspace(workspace_id, &parent.binding.workspace_id)?;
+        if parent.base_blob_digest != parent.base_update_digest {
+            return Err(OwnerOutboxError::Corrupt);
+        }
         let base_length: i64 = tx.query_row(
             "SELECT base_byte_length FROM owner_ydoc_outboxes WHERE outbox_id=?1",
             [outbox_id], |row| row.get(0),
@@ -705,14 +708,13 @@ pub fn read_pending_page(
                     [outbox_id], |row| row.get(0),
                 ).map_err(read_sql)?;
                 header["pendingEntryCount"] = count.into();
+                header["firstEntryCursor"] = serde_json::to_value(next_entry(0)?)
+                    .map_err(|_| OwnerOutboxError::Corrupt)?;
                 let bytes = page_json(&header)?;
                 let (total, digest, bytes) = slice_header(bytes, cursor.offset, max_bytes)?;
                 (total, digest, bytes, following_part(Base))
             }
             Base => {
-                if parent.base_blob_digest != parent.base_update_digest {
-                    return Err(OwnerOutboxError::Corrupt);
-                }
                 let bytes = slice_blob(&tx, &parent.base_blob_digest, base_length, cursor.offset, max_bytes)?;
                 (base_length, parent.base_update_digest, bytes, next_entry(0)?)
             }
@@ -1225,6 +1227,70 @@ mod tests {
         let header: serde_json::Value = serde_json::from_slice(&parts[0].2).expect("header");
         assert_eq!(header["pendingBytes"], expected.pending_bytes);
         assert_eq!(header["pendingEntryCount"], 2);
+    }
+
+    #[test]
+    fn header_entry_cursor_skips_base_and_tracks_acknowledged_prefixes() {
+        let (_dir, mut store) = store("owner-delivery-head");
+        let mut entry = input("first", b"a", 1);
+        entry.base_update = vec![17; 1_048_576];
+        let appended = append(&mut store, "workspace-1", entry.clone()).expect("first");
+        entry.append_key = "second".to_owned();
+        append(&mut store, "workspace-1", entry.clone()).expect("second");
+        entry.append_key = "third".to_owned();
+        append(&mut store, "workspace-1", entry).expect("third");
+        let pending = read_pending(&store, "workspace-1", &appended.outbox_id).expect("reference");
+        let mut stale_cursor = None;
+        for (index, sequence) in [(0, 1), (2, 3)] {
+            let header = page(&store, &appended.outbox_id, None, 4096);
+            assert_eq!(hex_sha256(&header.bytes), header.digest);
+            let raw: serde_json::Value = serde_json::from_slice(&header.bytes).expect("header");
+            assert_eq!(raw["baseByteLength"], 1_048_576);
+            assert_eq!(
+                header.next_cursor.as_ref().expect("base").part,
+                OwnerOutboxReadPart::Base
+            );
+            let first: OwnerOutboxReadCursor =
+                serde_json::from_value(raw["firstEntryCursor"].clone()).expect("first entry");
+            assert_eq!(first.snapshot, header.cursor.snapshot);
+            assert_eq!(
+                (first.part, first.sequence, first.offset),
+                (OwnerOutboxReadPart::EntryHeader, sequence, 0)
+            );
+            if let Some(stale) = stale_cursor.take() {
+                assert!(matches!(
+                    read_pending_page(
+                        &store,
+                        "workspace-1",
+                        &appended.outbox_id,
+                        Some(stale),
+                        4096
+                    ),
+                    Ok(OwnerOutboxPageResult::ReadChanged)
+                ));
+            }
+            let entry_header = page(&store, &appended.outbox_id, Some(first.clone()), 4096);
+            let update = page(&store, &appended.outbox_id, entry_header.next_cursor, 4096);
+            assert_eq!(update.cursor.part, OwnerOutboxReadPart::Update);
+            assert_eq!(update.bytes, b"a");
+            assert_eq!(hex_sha256(&update.bytes), update.digest);
+            assert!(header.bytes.len() + entry_header.bytes.len() + update.bytes.len() < 4096);
+            stale_cursor = Some(first);
+            acknowledge(
+                &mut store,
+                "workspace-1",
+                &appended.outbox_id,
+                &pending.entries[index..(index + 2).min(pending.entries.len())]
+                    .iter()
+                    .map(receipt)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("ack head");
+        }
+        let header = page(&store, &appended.outbox_id, None, 4096);
+        let raw: serde_json::Value = serde_json::from_slice(&header.bytes).expect("empty header");
+        assert_eq!(raw["pendingEntryCount"], 0);
+        assert!(raw["firstEntryCursor"].is_null());
     }
 
     #[test]
