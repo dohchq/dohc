@@ -242,12 +242,12 @@ impl EngineService {
         if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(&workspace))?, &host.open) {
             return Err(workspace_unavailable());
         }
-        params
-            .binding
-            .validate_canonical()
-            .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-live-registration"))?;
-        if params.binding.workspace_id != host.open.workspace_id {
-            return Err(wire(ErrorCode::InvalidParams, "invalid-live-registration"));
+        host.owner
+            .validate_binding(params.binding.clone())
+            .await
+            .map_err(map_runtime)?;
+        if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(&workspace))?, &host.open) {
+            return Err(workspace_unavailable());
         }
         // Re-registering an object retires its queued acknowledgements under the
         // same fence as output polling, before the replacement writer command.
@@ -417,7 +417,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_live_application_replacement_preserves_the_registration() {
-        let (_scratch, service, owner, workspace, registration, binding) = fixture().await;
+        let (scratch, service, owner, workspace, registration, binding) = fixture().await;
         let workspace = WorkspaceHandle(workspace);
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(owner.handle());
@@ -430,7 +430,9 @@ mod tests {
             .push(noncanonical.current_path.clone());
         let mut wrong_workspace = binding.clone();
         wrong_workspace.workspace_id = "another-workspace".into();
-        for invalid in [noncanonical, wrong_workspace] {
+        let mut wrong_main = binding.clone();
+        wrong_main.main_version_id = "another-main".into();
+        for invalid in [noncanonical, wrong_workspace, wrong_main] {
             assert!(
                 service
                     .live_application_register(
@@ -447,6 +449,19 @@ mod tests {
                     .live_application_registration(&owner.handle(), Some(&workspace), registration)
                     .is_ok()
             );
+            let db = rusqlite::Connection::open_with_flags(
+                scratch.path().join(".dohc/engine/engine.db"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let available: i64 = db
+                .query_row(
+                    "SELECT available FROM live_device_application_bindings WHERE object_id=?1",
+                    [&binding.object_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(available, 1);
         }
         service.workspace_close(Some(workspace)).await.unwrap();
     }
@@ -478,8 +493,6 @@ mod tests {
         let rebound: WorkspaceHandle =
             serde_json::from_value(reopened["workspace"].clone()).unwrap();
         assert_ne!(rebound, handle);
-        service.workspace_close(Some(rebound)).await.unwrap();
-
         assert!(registration.retired.is_cancelled());
         assert!(!registration.host.owner.is_current());
         assert!(owner.handle().is_current());
@@ -489,6 +502,7 @@ mod tests {
         drop(registry);
         drop(registration);
         assert!(old_open.upgrade().is_none());
+        service.workspace_close(Some(rebound)).await.unwrap();
     }
 
     #[tokio::test]

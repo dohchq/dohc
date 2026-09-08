@@ -457,10 +457,7 @@ impl ApplicationOwner {
             return Err(invalid("relay namespace is empty"));
         }
         coordinate.validate()?;
-        binding.validate_canonical().map_err(invalid)?;
-        if binding.workspace_id != self.workspace_id {
-            return Err(ApplicationError::WorkspaceMismatch);
-        }
+        validate_application_binding(store, &self.workspace_id, &binding)?;
         let connection_changed = self.current.iter().any(|entry| {
             entry.lock().map_or(true, |r| {
                 r.namespace != namespace || r.coordinate != coordinate
@@ -543,18 +540,36 @@ impl Drop for ApplicationOwner {
 }
 
 fn require_workspace(tx: &Connection, registration: &Registration) -> Result<(), ApplicationError> {
-    if registration.workspace_id != registration.binding.workspace_id {
+    require_binding_workspace(tx, &registration.workspace_id, &registration.binding)
+}
+
+/// Refuse invalid caller bindings before retiring an existing registration.
+pub fn validate_application_binding(
+    store: &EngineStore,
+    workspace_id: &str,
+    binding: &LiveObjectBinding,
+) -> Result<(), ApplicationError> {
+    binding.validate_canonical().map_err(invalid)?;
+    store.read_with(|conn| require_binding_workspace(conn, workspace_id, binding))
+}
+
+fn require_binding_workspace(
+    tx: &Connection,
+    workspace_id: &str,
+    binding: &LiveObjectBinding,
+) -> Result<(), ApplicationError> {
+    if workspace_id != binding.workspace_id {
         return Err(ApplicationError::WorkspaceMismatch);
     }
     let main: Option<String> = tx
         .query_row(
             "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1",
-            [&registration.workspace_id],
+            [workspace_id],
             |row| row.get(0),
         )
         .optional()
         .map_err(read_sql)?;
-    if main.as_deref() != Some(registration.binding.main_version_id.as_str()) {
+    if main.as_deref() != Some(binding.main_version_id.as_str()) {
         return Err(ApplicationError::MainVersionMismatch);
     }
     Ok(())
