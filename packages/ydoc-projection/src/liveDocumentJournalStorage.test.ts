@@ -365,6 +365,8 @@ it('two connections resolve identical delivery races and retry stale refused cut
 
 it('does not reinterpret post-write COMMIT busy as a retry or expose an accepted event', () => {
   const f = registered()
+  let reopened: ReturnType<typeof openSyncRelayStorage> | undefined
+  let fixtureClosed = false
   try {
     const input = f.capture(f.update()), before = f.journalRows(), original = DatabaseSync.prototype.exec
     const fault = Object.assign(new Error('commit locked'), { code: 'ERR_SQLITE_ERROR', errcode: 5 })
@@ -375,8 +377,16 @@ it('does not reinterpret post-write COMMIT busy as a retry or expose an accepted
     expect(() => f.storage.commitLiveUpdateJournal(input)).toThrow(fault)
     spy.mockRestore()
     expect(f.journalRows()).toEqual(before)
-    expect(f.storage.commitLiveUpdateJournal(input).result).toMatchObject({ kind: 'accepted', receipt: { journalCursor: 1 } })
-  } finally { f.close() }
+    expect(f.storage.unavailable.aborted).toBe(true)
+    expect(() => f.storage.commitLiveUpdateJournal(input)).toThrow('unavailable')
+    f.close()
+    fixtureClosed = true
+    reopened = openSyncRelayStorage(f.path)
+    expect(reopened.commitLiveUpdateJournal(input).result).toMatchObject({ kind: 'accepted', receipt: { journalCursor: 1 } })
+  } finally {
+    reopened?.close()
+    if (!fixtureClosed) f.close()
+  }
 })
 
 it('rolls back a changed inserted row before any receipt escapes', () => {
