@@ -650,7 +650,8 @@ mod tests {
         use dohc_engine_domain::{
             CollectionFieldValue, CollectionIndexedValue, CollectionIndexedValueValidation,
             CollectionRecord, CollectionSchemaStatus, CollectionSummary, FieldDefinition,
-            FieldValueValidation, MAX_TEXT_BYTES, is_record_id, validate_field_value,
+            FieldValueValidation, MAX_TEXT_BYTES, RECORD_ID_RANDOM_BASE32_LENGTH, is_record_id,
+            validate_field_value,
         };
 
         const RECORDS: usize = 8;
@@ -659,7 +660,12 @@ mod tests {
             name: "notes".into(),
         };
         let limit = dohc_engine_storage::MAX_BLOB_BYTES;
-        for (encoded_bytes, blobs) in [(limit, true), (limit + 1, false), (limit + 1, true)] {
+        for (encoded_bytes, blobs) in [
+            (limit, false),
+            (limit, true),
+            (limit + 1, false),
+            (limit + 1, true),
+        ] {
             let mut query = CollectionQueryResult {
                 collection: CollectionSummary {
                     path: "tasks".into(),
@@ -668,7 +674,11 @@ mod tests {
                 },
                 records: (0..RECORDS)
                     .map(|index| CollectionRecord {
-                        id: format!("rec_{}{}", "a".repeat(25), char::from(b'a' + index as u8)),
+                        id: format!(
+                            "rec_{}{}",
+                            "a".repeat(RECORD_ID_RANDOM_BASE32_LENGTH - 1),
+                            char::from(b'a' + index as u8)
+                        ),
                         path: format!("tasks/{index}.md"),
                         conflicted: false,
                         values: vec![CollectionIndexedValue {
@@ -691,15 +701,20 @@ mod tests {
                 assert!(is_record_id(&record.id));
                 let length = text_bytes / RECORDS + usize::from(index < text_bytes % RECORDS);
                 let text = "x".repeat(length);
-                let markdown = format!("---\nid: {}\nnotes: {text}\n---\n", record.id);
+                let markdown_len =
+                    format!("---\nid: {}\nnotes: \n---\n", record.id).len() + text.len();
                 assert!(
-                    markdown.len() < MAX_TEXT_BYTES,
+                    markdown_len < MAX_TEXT_BYTES,
                     "each record fits the text cap"
                 );
+                let value = CollectionFieldValue::Text(text);
                 assert_eq!(
-                    validate_field_value(&field, &CollectionFieldValue::Text(text.clone())),
-                    FieldValueValidation::Valid,
+                    validate_field_value(&field, &value),
+                    FieldValueValidation::Valid
                 );
+                let CollectionFieldValue::Text(text) = value else {
+                    unreachable!("constructed a text field value");
+                };
                 record.values[0].value = Value::String(text);
             }
             let response = collection_query_response_value(query).expect("collection projection");
@@ -724,8 +739,9 @@ mod tests {
                     response,
                 )
                 .await;
-            if encoded_bytes > limit {
-                let refusal = output.expect_err("oversized collection must be refused");
+            if encoded_bytes > limit || !blobs {
+                let refusal =
+                    output.expect_err("collection requires blob support and must fit the limit");
                 assert_eq!(refusal.code, ErrorCode::LimitExceeded, "blobs={blobs}");
                 assert_eq!(refusal.message, "collection-response-exceeds-wire-limit");
                 continue;
