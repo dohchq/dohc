@@ -64,14 +64,7 @@ pub struct EngineService {
     session_epoch: String,
     self_writes: SelfWriteSuppression,
     events: EngineEvents,
-    #[cfg(feature = "harness")]
     capture_apply_probe: Option<capture_driver::CaptureApplyProbe>,
-    #[cfg(test)]
-    open_install_probe: Option<(
-        Arc<tokio::sync::Notify>,
-        Arc<tokio::sync::Notify>,
-        Arc<std::sync::atomic::AtomicBool>,
-    )>,
     #[cfg(test)]
     owner_outbox_append_probe: Option<(
         Arc<tokio::sync::Notify>,
@@ -168,10 +161,7 @@ impl EngineService {
                 GLOBAL_SELF_WRITES.clone()
             },
             events: EngineEvents::default(),
-            #[cfg(feature = "harness")]
             capture_apply_probe: None,
-            #[cfg(test)]
-            open_install_probe: None,
             #[cfg(test)]
             owner_outbox_append_probe: None,
             #[cfg(test)]
