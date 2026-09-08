@@ -1572,6 +1572,56 @@ fn ydoc_settle_disk_preimage(
     }
 }
 
+fn restore_live_settlement_marker(
+    store: &mut EngineStore,
+    root: &std::path::Path,
+    audit: &dohc_engine_collab::live_update_application::LiveSettlementAudit,
+    moment: &str,
+    markdown: &str,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<(), RuntimeError> {
+    let b = audit.binding();
+    if !store.read_with(|conn| audit.covers_projection_in(conn, moment, markdown))? {
+        return Ok(());
+    }
+    let Some(job) = store.load_materialization_job(&format!("ydoc-mat_{moment}"))? else {
+        return Ok(());
+    };
+    if job.workspace_id != b.workspace_id
+        || job.target_path != b.current_path
+        || job.content_sha256 != markdown
+        || job.operation != dohc_engine_storage::MaterializationOperation::Write
+        || !matches!(job.status, JobStatus::Conflict | JobStatus::Complete)
+    {
+        return Ok(());
+    }
+    let permitted_disk =
+        || match probe_projection_target(root, &b.current_path, ProjectionTargetKind::Plaintext) {
+            ProjectionTargetState::Absent => job.preimage == Preimage::Absent,
+            ProjectionTargetState::Text { sha256 } => {
+                sha256 == markdown || job.preimage == Preimage::Present(sha256)
+            }
+            _ => false,
+        };
+    if !permitted_disk() {
+        return Err(DomainError::ConflictStaleTarget.into());
+    }
+    let outcome=store.write_with(faults,|tx| -> Result<(),RuntimeError> {
+        if !audit.covers_projection_in(tx,moment,markdown)? {return Err(DomainError::ConflictStaleTarget.into());}
+        let matches:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM snapshots s JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id AND m.object_id=s.object_id AND m.moment_id=s.latest_moment_id WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 AND s.latest_moment_id=?5 AND s.blob_sha256=?6 AND m.moment_order=?7) AND NOT EXISTS(SELECT 1 FROM materialization_jobs WHERE (workspace_id=?1 OR workspace_id='') AND target_path=?4 AND status='complete' AND job_id NOT LIKE 'version-switch-%' AND target_generation>?7)",params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,moment,markdown,job.target_generation],|row|row.get(0)).map_err(StorageError::persist_public)?;
+        if !matches || !permitted_disk() {return Err(DomainError::ConflictStaleTarget.into());}
+        let changed=tx.execute("UPDATE materialization_jobs SET status='pending',completed_at_ms=NULL WHERE job_id=?1 AND workspace_id=?2 AND target_path=?3 AND content_sha256=?4 AND target_generation=?5 AND status IN ('conflict','complete')",params![job.job_id,b.workspace_id,b.current_path,markdown,job.target_generation]).map_err(StorageError::persist_public)?;
+        if changed!=1 {return Err(DomainError::ConflictStaleTarget.into());}
+        tx.execute("UPDATE ydoc_docs SET settle_seq=?4,last_settled_sha=?5,updated_at_ms=?6 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?7 AND path=?8",params![b.workspace_id,b.main_version_id,b.object_id,job.target_generation,markdown,now_ms,b.lineage_claim_id,b.current_path]).map_err(StorageError::persist_public)?;
+        Ok(())
+    })?;
+    if matches!(outcome, TxnOutcome::Crashed { .. }) {
+        return Err(RuntimeError::OperationCrashed);
+    }
+    Ok(())
+}
+
 fn settled_collection_record_id_mismatch(
     store: &EngineStore,
     key: &DocKey,
@@ -1730,10 +1780,24 @@ pub(super) fn ydoc_settle_on_store(
     // from RPC-side session fields mutated after awaits, which a dropped
     // future (deadline firing after the actor committed a settle) leaves
     // stale and would turn every retry into a false conflict.
-    let expected_head_sha =
-        dohc_engine_collab::read_last_settled_sha(store, key)?.or(expected_head_sha);
     let head_probe =
         VersionedTextStore::new(store).read_text(&key.workspace_id, &key.version_id, path)?;
+    if let (Some(audit), Some(head)) = (live_audit, head_probe.as_ref())
+        && dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
+            != Some(head.blob_sha256.as_str())
+    {
+        restore_live_settlement_marker(
+            store,
+            root_dir,
+            audit,
+            &head.latest_moment_id,
+            &head.blob_sha256,
+            faults,
+            now_ms,
+        )?;
+    }
+    let expected_head_sha =
+        dohc_engine_collab::read_last_settled_sha(store, key)?.or(expected_head_sha);
     let probe_sha = head_probe
         .as_ref()
         .map(|snapshot| snapshot.blob_sha256.clone());

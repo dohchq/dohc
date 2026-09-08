@@ -191,7 +191,6 @@ impl EngineService {
             request.workspace.as_ref(),
             params.registration_id,
         )?;
-        let (max_applications, reservation) = self.configured_settlement_admission(&ctx)?;
         let host = registration.host.clone();
         let serial = Arc::clone(&host.open.session_ops).lock_owned().await;
         if !host.current(connection)
@@ -205,6 +204,7 @@ impl EngineService {
                 "live-application-retired",
             ));
         }
+        let (max_applications, reservation) = self.configured_settlement_admission(&ctx)?;
         let cancellation = super::request::OperationCancellation::new(&ctx);
         let now_ms = super::request::now_ms()?;
         let token = cancellation.token();

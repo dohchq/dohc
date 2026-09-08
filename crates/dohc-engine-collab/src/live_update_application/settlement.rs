@@ -24,14 +24,55 @@ pub struct LiveSettlementAudit {
     terminal_cursor: i64,
     previous_sequence: i64,
     sequence: i64,
-    receipts: Vec<(String, String, i64, i64, i64)>,
+    receipts: Vec<ReceiptIdentity>,
     interval_digest: String,
     bootstrap_moment: String,
     bootstrap_digest: String,
     first: bool,
 }
 
+fn audit_error(error: ApplicationError) -> StorageError {
+    match error {
+        ApplicationError::Storage(error) => error,
+        _ => StorageError::StateCorrupt { source: None },
+    }
+}
+
 impl LiveSettlementAudit {
+    /// A compensated filesystem marker can be restored only for this retained projection.
+    pub fn covers_projection_in(
+        &self,
+        conn: &Connection,
+        moment: &str,
+        markdown: &str,
+    ) -> Result<bool, StorageError> {
+        let b = &self.binding;
+        let registration = Registration {
+            workspace_id: b.workspace_id.clone(),
+            namespace: self.namespace.clone(),
+            coordinate: self.coordinate.clone(),
+            binding: b.clone(),
+            live: true,
+        };
+        require_workspace(conn, &registration).map_err(audit_error)?;
+        if !read_binding(conn, &registration)
+            .map_err(audit_error)?
+            .is_some_and(|(binding, coordinate, available)| {
+                available && binding == *b && coordinate == self.coordinate
+            })
+        {
+            return Err(StorageError::StateCorrupt { source: None });
+        }
+        let saved:Option<(String,String,i64,String)>=conn.query_row("SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY terminal_cursor DESC LIMIT 1",
+            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(StorageError::persist_public)?;
+        let Some((saved_moment, saved_markdown, sequence, binding)) = saved else {
+            return Ok(false);
+        };
+        let binding: LiveObjectBinding =
+            serde_json::from_str(&binding).map_err(StorageError::persist_public)?;
+        validate_historical_binding(&binding, b).map_err(audit_error)?;
+        Ok(saved_moment == moment && saved_markdown == markdown && sequence <= self.sequence)
+    }
     pub fn binding(&self) -> &LiveObjectBinding {
         &self.binding
     }
@@ -69,16 +110,16 @@ impl LiveSettlementAudit {
             binding: b.clone(),
             live: true,
         };
-        require_workspace(tx, &registration).map_err(|_| corrupt())?;
+        require_workspace(tx, &registration).map_err(audit_error)?;
         if !read_binding(tx, &registration)
-            .map_err(|_| corrupt())?
+            .map_err(audit_error)?
             .is_some_and(|(binding, coordinate, available)| {
                 available && binding == *b && coordinate == self.coordinate
             })
         {
             return Err(corrupt());
         }
-        let latest = latest_receipt(tx, &registration).map_err(|_| corrupt())?;
+        let latest = latest_receipt(tx, &registration).map_err(audit_error)?;
         if latest.as_ref().map_or(0, |receipt| receipt.journal_cursor) != self.terminal_cursor {
             return Err(corrupt());
         }
@@ -89,7 +130,7 @@ impl LiveSettlementAudit {
             self.terminal_cursor,
             self.receipts.len(),
         )
-        .map_err(|_| corrupt())?;
+        .map_err(audit_error)?;
         if receipts != self.receipts {
             return Err(corrupt());
         }
@@ -189,11 +230,12 @@ where
         require_workspace(conn, &held)?;
         if !read_binding(conn,&held)?.is_some_and(|(binding,coordinate,available)| available && binding == held.binding && coordinate == held.coordinate) { return Err(ApplicationError::Interrupted); }
         let b = &held.binding;
+        validate_historical_binding(b,b)?;
         let key = DocKey::new(&b.workspace_id,&b.main_version_id,&b.object_id)?;
         let marker = durable::read_marker_in(conn,&key)?.ok_or(ApplicationError::Corrupt)?;
-        if marker.regime != Regime::Replicated || marker.lineage_claim_id.as_deref()!=Some(b.lineage_claim_id.as_str()) || marker.path.as_deref()!=Some(b.current_path.as_str()) { return Err(ApplicationError::Conflict); }
+        if marker.regime != Regime::Replicated || marker.lineage_claim_status != durable::LineageClaimStatus::Exact || marker.content_kind != crate::ContentKind::Richdoc || marker.lineage_claim_id.as_deref()!=Some(b.lineage_claim_id.as_str()) || marker.path.as_deref()!=Some(b.current_path.as_str()) { return Err(ApplicationError::Conflict); }
         let (bootstrap,original_binding,_,_) = bootstrap::read_bootstrap(conn,&held)?.ok_or(ApplicationError::Corrupt)?;
-        if original_binding != *b { return Err(ApplicationError::Conflict); }
+        validate_historical_binding(&original_binding,b)?;
         let latest = latest_receipt(conn,&held)?;
         if latest != terminal { return Err(invalid("settlement terminal is not current")); }
         let terminal_cursor = terminal.as_ref().map_or(0,|r|r.journal_cursor);
@@ -207,7 +249,7 @@ where
         };
         let receipts = read_interval(conn,&held,previous_cursor,terminal_cursor,max_applications)?;
         let mut sequences=HashSet::new();
-        for (delivery,hash,cursor,epoch,sequence) in &receipts {
+        for (delivery,hash,cursor,epoch,sequence,_) in &receipts {
             LiveUpdateReceipt { delivery_id:delivery.clone(),update_digest:hash.clone(),journal_cursor:*cursor,accepting_host_epoch:*epoch }.validate()?;
             integer(*sequence,1,marker.head_update_seq)?;
             if *sequence>previous_sequence { sequences.insert(*sequence); }
@@ -221,7 +263,31 @@ where
     settle(store, &audit)
 }
 
-type ReceiptIdentity = (String, String, i64, i64, i64);
+type ReceiptIdentity = (String, String, i64, i64, i64, String);
+
+fn validate_historical_binding(
+    historical: &LiveObjectBinding,
+    current: &LiveObjectBinding,
+) -> Result<(), ApplicationError> {
+    historical.validate_canonical().map_err(invalid)?;
+    if historical.workspace_id != current.workspace_id
+        || historical.main_version_id != current.main_version_id
+        || historical.object_id != current.object_id
+        || historical.lineage_claim_id != current.lineage_claim_id
+        || historical.current_path != current.current_path
+        || historical.restore_fence_generation != current.restore_fence_generation
+        || !historical.selector_paths.iter().any(|selector| {
+            historical.current_path == *selector
+                || historical
+                    .current_path
+                    .strip_prefix(selector)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+    {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(())
+}
 
 fn latest_receipt(
     conn: &Connection,
@@ -264,18 +330,22 @@ fn read_interval(
         let selectors: Vec<String> =
             serde_json::from_str(&selectors).map_err(|_| ApplicationError::Corrupt)?;
         let generation: i64 = row.get(7).map_err(read_sql)?;
-        if path != b.current_path
-            || selectors != b.selector_paths
-            || generation != b.restore_fence_generation
-        {
-            return Err(ApplicationError::Conflict);
-        }
+        let historical = LiveObjectBinding {
+            current_path: path,
+            selector_paths: selectors,
+            restore_fence_generation: generation,
+            ..b.clone()
+        };
+        validate_historical_binding(&historical, b)?;
+        let binding_digest =
+            hex_sha256(&serde_json::to_vec(&historical).map_err(|_| ApplicationError::Corrupt)?);
         receipts.push((
             row.get(0).map_err(read_sql)?,
             row.get(1).map_err(read_sql)?,
             row.get(2).map_err(read_sql)?,
             row.get(3).map_err(read_sql)?,
             row.get(4).map_err(read_sql)?,
+            binding_digest,
         ));
     }
     Ok(receipts)
