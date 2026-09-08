@@ -7,7 +7,6 @@ use crate::rpc::collections::collection_in_band_cap;
 use crate::rpc::error::initial_capture_updating;
 use crate::rpc::error::map_owner_outbox;
 use crate::rpc::error::map_runtime;
-use crate::rpc::error::wire;
 use crate::rpc::error::workspace_unavailable;
 use crate::rpc::reads::MAX_INBAND_CONTENT_BYTES;
 use crate::rpc::request::OperationCancellation;
@@ -68,16 +67,18 @@ pub(super) struct YdocSessionView {
 fn map_ydoc_open_runtime(error: RuntimeError) -> WireError {
     match error {
         RuntimeError::YdocArtifactAssetsPending => {
-            wire(ErrorCode::Overloaded, "ydoc-artifact-assets-pending")
+            WireError::new(ErrorCode::Overloaded, "ydoc-artifact-assets-pending")
         }
         RuntimeError::YdocArtifactAssetsInvalid => {
-            wire(ErrorCode::Internal, "ydoc-artifact-assets-invalid")
+            WireError::new(ErrorCode::Internal, "ydoc-artifact-assets-invalid")
         }
         error @ RuntimeError::Storage(dohc_engine_storage::StorageError::FileLocked) => {
             map_runtime(error)
         }
-        RuntimeError::Storage(_) => wire(ErrorCode::Internal, "ydoc-open-storage-failed"),
-        RuntimeError::OperationCrashed => wire(ErrorCode::Internal, "ydoc-open-operation-crashed"),
+        RuntimeError::Storage(_) => WireError::new(ErrorCode::Internal, "ydoc-open-storage-failed"),
+        RuntimeError::OperationCrashed => {
+            WireError::new(ErrorCode::Internal, "ydoc-open-operation-crashed")
+        }
         other => map_runtime(other),
     }
 }
@@ -308,7 +309,7 @@ fn validate_owner_outbox_wire_binding(
     if binding.restore_fence_generation < 0
         || binding.restore_fence_generation > dohc_engine_protocol::MAX_WIRE_INTEGER as i64
     {
-        return Err(wire(
+        return Err(WireError::new(
             ErrorCode::InvalidParams,
             "invalid-owner-outbox-binding",
         ));
@@ -318,7 +319,10 @@ fn validate_owner_outbox_wire_binding(
 
 fn validate_owner_outbox_limit(value: i64) -> Result<(), WireError> {
     if value <= 0 || value > dohc_engine_protocol::MAX_WIRE_INTEGER as i64 {
-        return Err(wire(ErrorCode::InvalidParams, "invalid-owner-outbox-limit"));
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "invalid-owner-outbox-limit",
+        ));
     }
     Ok(())
 }
@@ -326,9 +330,9 @@ fn validate_owner_outbox_limit(value: i64) -> Result<(), WireError> {
 fn decode_owner_outbox_base64(value: &str) -> Result<Vec<u8>, WireError> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(value)
-        .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-owner-outbox-base64"))?;
+        .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-owner-outbox-base64"))?;
     if base64::engine::general_purpose::STANDARD.encode(&bytes) != value {
-        return Err(wire(
+        return Err(WireError::new(
             ErrorCode::InvalidParams,
             "invalid-owner-outbox-base64",
         ));
@@ -341,7 +345,10 @@ fn parse_ydoc_content_kind(raw: &str) -> Result<ContentKind, WireError> {
         "plaintext" => Ok(ContentKind::Plaintext),
         "richdoc" => Ok(ContentKind::Richdoc),
         "scene" => Ok(ContentKind::Scene),
-        _ => Err(wire(ErrorCode::InvalidParams, "unknown Y.Doc content kind")),
+        _ => Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "unknown Y.Doc content kind",
+        )),
     }
 }
 
@@ -360,7 +367,10 @@ fn validate_ydoc_path(path: &str) -> Result<(), WireError> {
         {
             Ok(())
         }
-        _ => Err(wire(ErrorCode::InvalidParams, "invalid Y.Doc path")),
+        _ => Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "invalid Y.Doc path",
+        )),
     }
 }
 
@@ -395,7 +405,7 @@ impl EngineService {
             }
             completed = completion => {
                 let (materialization, serial, lease) = completed
-                    .map_err(|_| wire(ErrorCode::Internal, "ydoc scene asset materialization task failed"))?;
+                    .map_err(|_| WireError::new(ErrorCode::Internal, "ydoc scene asset materialization task failed"))?;
                 Ok((materialization.map_err(map_runtime)?, serial, lease))
             }
         }
@@ -474,7 +484,7 @@ impl EngineService {
         // the actual response envelope and this request's negotiated limit.
         let max_bytes = collection_in_band_cap(ctx) / 4 * 3;
         if max_bytes == 0 {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::LimitExceeded,
                 "owner-outbox-page-exceeds-wire-limit",
             ));
@@ -493,7 +503,7 @@ impl EngineService {
                 )
             })
             .await
-            .map_err(|_| wire(ErrorCode::Internal, "owner-outbox-worker-failed"))?
+            .map_err(|_| WireError::new(ErrorCode::Internal, "owner-outbox-worker-failed"))?
             .map_err(map_owner_outbox)
         };
         let pending = tokio::select! {
@@ -524,11 +534,11 @@ impl EngineService {
             result,
         });
         if serde_json::to_vec(&envelope)
-            .map_err(|_| wire(ErrorCode::Internal, "owner-outbox-state-corrupt"))?
+            .map_err(|_| WireError::new(ErrorCode::Internal, "owner-outbox-state-corrupt"))?
             .len()
             > ctx.max_frame_bytes as usize
         {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::LimitExceeded,
                 "owner-outbox-page-exceeds-wire-limit",
             ));
@@ -552,7 +562,7 @@ impl EngineService {
                 || receipt.journal_cursor < 1
                 || receipt.journal_cursor > dohc_engine_protocol::MAX_WIRE_INTEGER as i64
             {
-                return Err(wire(
+                return Err(WireError::new(
                     ErrorCode::InvalidParams,
                     "invalid-owner-outbox-receipt",
                 ));
@@ -655,7 +665,7 @@ impl EngineService {
             .map(parse_ydoc_content_kind)
             .transpose()?;
         if params.seed_from_artifact && requested_kind != Some(ContentKind::Scene) {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "seedFromArtifact requires contentKind scene",
             ));
@@ -691,7 +701,10 @@ impl EngineService {
             .as_deref()
             .is_some_and(|expected| expected != probe.key.object_id.as_str())
         {
-            return Err(wire(ErrorCode::InvalidParams, "ydoc-object-changed"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "ydoc-object-changed",
+            ));
         }
         let capture_phase = lock(&open.capture)
             .as_ref()
@@ -712,7 +725,7 @@ impl EngineService {
                     return Err(cancellation.interruption("ydoc.open (artifact probe)"));
                 }
                 probed = artifact_probe => {
-                    probed.map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?
+                    probed.map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?
                 }
             };
             if !artifact_is_proven_absent {
@@ -728,7 +741,9 @@ impl EngineService {
                 .scoped(&open.root)
                 .acquire(&probe.key)
                 .map_err(|error| match error {
-                    CollabError::LeaseHeld => wire(ErrorCode::InvalidParams, "ydoc-session-busy"),
+                    CollabError::LeaseHeld => {
+                        WireError::new(ErrorCode::InvalidParams, "ydoc-session-busy")
+                    }
                     other => map_runtime(RuntimeError::Collab(other)),
                 })?;
         let state = open
@@ -749,7 +764,10 @@ impl EngineService {
         if state.key != probe.key {
             // The path's owner changed between the probe and the lease: the
             // held lease guards the wrong key. Refuse; the client retries.
-            return Err(wire(ErrorCode::InvalidParams, "ydoc-session-busy"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "ydoc-session-busy",
+            ));
         }
         // Post-commit: the open's drain committed these history rows, and no
         // other path fires a parked update's events. Never claims —
@@ -799,7 +817,7 @@ impl EngineService {
             .blob_egress_budget
             .reserve(
                 i64::try_from(initial_update.len())
-                    .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?,
+                    .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?,
                 &cancellation,
                 "ydoc.open",
             )
@@ -830,7 +848,7 @@ impl EngineService {
                     .as_ref()
                     .is_some_and(|seed| seed.len() > MAX_INBAND_CONTENT_BYTES)
                 {
-                    return Err(wire(
+                    return Err(WireError::new(
                         ErrorCode::InvalidParams,
                         "ydoc-seed-exceeds-inband-cap",
                     ));
@@ -871,7 +889,7 @@ impl EngineService {
         );
         drop(serial);
         let result = serde_json::to_value(result)
-            .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))?;
+            .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))?;
         Ok((
             result,
             BlobEgress {
@@ -910,11 +928,11 @@ impl EngineService {
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
         let update = base64::engine::general_purpose::STANDARD
             .decode(params.update_base64)
-            .map_err(|_| wire(ErrorCode::InvalidParams, "invalid update encoding"))?;
+            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid update encoding"))?;
         if let Some(attribution) = &params.attribution
             && let Err(reason) = attribution.validate()
         {
-            return Err(wire(ErrorCode::InvalidParams, reason));
+            return Err(WireError::new(ErrorCode::InvalidParams, reason));
         }
         let require_empty = session.lineage_absent && session.first_update_pending;
         // A declared seed on anything but the first update of a
@@ -922,7 +940,10 @@ impl EngineService {
         // false seed source and let a later settle skip a write that carried
         // real edits. Refuse instead — a seed can only be the first update.
         if params.seed && !require_empty {
-            return Err(wire(ErrorCode::InvalidParams, "seed-not-first-update"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "seed-not-first-update",
+            ));
         }
         let seed_source_sha256 = params.seed.then(|| session.open_head_sha.clone()).flatten();
         // The record and the first-seed flag transition run in a spawned
@@ -968,13 +989,13 @@ impl EngineService {
             });
             record_task
                 .await
-                .map_err(|_| wire(ErrorCode::Internal, "ydoc record task failed"))?
+                .map_err(|_| WireError::new(ErrorCode::Internal, "ydoc record task failed"))?
                 .map_err(|error| {
                     if matches!(
                         error,
                         RuntimeError::Collab(CollabError::SeedOntoExistingLineage)
                     ) {
-                        wire(ErrorCode::InvalidParams, "seed-onto-existing-lineage")
+                        WireError::new(ErrorCode::InvalidParams, "seed-onto-existing-lineage")
                     } else {
                         map_runtime(error)
                     }
@@ -1005,7 +1026,7 @@ impl EngineService {
             deduped: outcome.deduped,
             lineage_claim_id,
         })
-        .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
+        .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
     pub(super) async fn ydoc_settle(
@@ -1069,7 +1090,7 @@ impl EngineService {
                 for facts in &record_facts {
                     emit_record_events(&self.events, &open.workspace_id, facts);
                 }
-                return Err(wire(
+                return Err(WireError::new(
                     ErrorCode::InvalidParams,
                     "ydoc-remote-updates-pending",
                 ));
@@ -1093,7 +1114,7 @@ impl EngineService {
                 destructive: settled.projection.destructive,
             },
         })
-        .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
+        .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
     pub(super) async fn ydoc_close(
@@ -1239,12 +1260,12 @@ impl EngineService {
         });
         let close_result = close_task
             .await
-            .map_err(|_| wire(ErrorCode::Internal, "ydoc close task failed"))?;
+            .map_err(|_| WireError::new(ErrorCode::Internal, "ydoc close task failed"))?;
         if let Err(error) = close_result {
             return Err(map_runtime(error));
         }
         serde_json::to_value(YdocCloseResult { closed: true })
-            .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
+            .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
     /// End one session without settling and without pruning: the entry — and
@@ -1277,7 +1298,7 @@ impl EngineService {
         self.ydoc_session(handle.as_ref(), &params.session_id)?;
         lock(&self.sessions).remove(&params.session_id);
         serde_json::to_value(YdocEvictResult { evicted: true })
-            .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
+            .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
     pub(super) async fn ydoc_resync(
@@ -1311,7 +1332,7 @@ impl EngineService {
             .blob_egress_budget
             .reserve(
                 i64::try_from(initial_update.len())
-                    .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?,
+                    .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?,
                 &cancellation,
                 "ydoc.resync",
             )
@@ -1334,7 +1355,7 @@ impl EngineService {
                 })
                 .collect(),
         })
-        .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))?;
+        .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))?;
         Ok((
             result,
             BlobEgress {
@@ -1359,7 +1380,7 @@ impl EngineService {
         let session = sessions
             .get(session_id)
             .filter(|session| &session.workspace == handle)
-            .ok_or_else(|| wire(ErrorCode::InvalidParams, "ydoc-session-not-found"))?;
+            .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "ydoc-session-not-found"))?;
         Ok((
             open,
             YdocSessionView {
@@ -1411,7 +1432,6 @@ mod tests {
     use super::*;
     use crate::EngineService;
     use crate::rpc::error::map_owner_outbox;
-    use crate::rpc::error::wire;
     use crate::rpc::request::OperationCancellation;
     use dohc_engine_collab::DocKey;
     use dohc_engine_collab::LeaseRegistry;
@@ -1749,13 +1769,16 @@ mod tests {
                 cursor = page
                     .get("nextCursor")
                     .cloned()
-                    .ok_or_else(|| wire(ErrorCode::Internal, "missing-page-cursor"))?;
+                    .ok_or_else(|| WireError::new(ErrorCode::Internal, "missing-page-cursor"))?;
                 pages.push(page);
                 if cursor.is_null() {
                     return Ok::<_, WireError>(pages);
                 }
             }
-            Err(wire(ErrorCode::Internal, "page-read-did-not-complete"))
+            Err(WireError::new(
+                ErrorCode::Internal,
+                "page-read-did-not-complete",
+            ))
         }
         .await;
         service

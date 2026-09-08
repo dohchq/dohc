@@ -11,12 +11,11 @@ use crate::rpc::chats::encode_chat_cursor;
 use crate::rpc::chats::messages::message_json;
 use crate::rpc::chats::messages::parse_actor_kind;
 use crate::rpc::chats::messages::reaction_json;
-use crate::rpc::error::wire;
 use crate::rpc::request::OperationCancellation;
-use crate::rpc::request::deserialize_optional_non_null_i64;
-use crate::rpc::request::deserialize_optional_non_null_string;
+use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
+use crate::rpc::request::required_idempotency_key;
 use dohc_engine_domain::ChannelThreadSummary;
 use dohc_engine_domain::ChatActorKind;
 use dohc_engine_domain::ChatProjectionFileAccess;
@@ -46,10 +45,7 @@ struct ChatThreadStartParams {
     body: String,
     #[serde(default)]
     needs_decision: bool,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_non_null_attachments"
-    )]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     attachments: Option<Vec<ChatLocalAttachmentParams>>,
     now_ms: Option<i64>,
 }
@@ -58,13 +54,13 @@ struct ChatThreadStartParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct ChatLocalAttachmentParams {
     pub(crate) object_id: String,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     pub(super) path_hint: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     pub(super) heading_text: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     pub(super) heading_anchor: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_i64")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     pub(super) heading_occurrence: Option<i64>,
 }
 
@@ -84,7 +80,7 @@ impl From<ChatLocalAttachmentParams> for LocalAttachmentInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatLinkedFileParams {
     object_id: String,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     path_hint: Option<String>,
 }
 
@@ -102,7 +98,7 @@ struct ChatThreadCreateParams {
 pub(super) struct ChatThreadPageParams {
     pub(crate) thread_id: String,
     pub(super) page_limit: Option<i64>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     pub(crate) cursor: Option<String>,
 }
 
@@ -124,10 +120,7 @@ enum ChatProjectionFileAccessParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatThreadProjectionParams {
     thread_id: String,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_non_null_projection_access"
-    )]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     linked_file_access: Option<ChatProjectionFileAccessParams>,
 }
 
@@ -136,7 +129,7 @@ struct ChatThreadProjectionParams {
 struct ChatThreadsListForFileParams {
     object_id: String,
     page_limit: Option<i64>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     cursor: Option<String>,
 }
 
@@ -145,7 +138,7 @@ struct ChatThreadsListForFileParams {
 struct ChatThreadsListForChannelParams {
     channel_id: String,
     page_limit: Option<i64>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     cursor: Option<String>,
 }
 
@@ -221,24 +214,6 @@ fn channel_thread_summary_json(summary: &ChannelThreadSummary) -> Value {
     value
 }
 
-pub(super) fn deserialize_optional_non_null_attachments<'de, D>(
-    deserializer: D,
-) -> Result<Option<Vec<ChatLocalAttachmentParams>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Vec::<ChatLocalAttachmentParams>::deserialize(deserializer).map(Some)
-}
-
-fn deserialize_optional_non_null_projection_access<'de, D>(
-    deserializer: D,
-) -> Result<Option<ChatProjectionFileAccessParams>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    ChatProjectionFileAccessParams::deserialize(deserializer).map(Some)
-}
-
 impl EngineService {
     pub(crate) async fn chats_threads_start(
         &self,
@@ -292,9 +267,7 @@ impl EngineService {
         request_id: Option<String>,
     ) -> Result<Value, WireError> {
         let params: ChatThreadCreateParams = parse(params)?;
-        let request_id = request_id
-            .filter(|request_id| !request_id.is_empty())
-            .ok_or_else(|| wire(ErrorCode::InvalidParams, "idempotency-key-required"))?;
+        let request_id = required_idempotency_key(request_id)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let thread = Self::read_under_ctx(
@@ -403,7 +376,7 @@ impl EngineService {
         let next_cursor = if has_more {
             let last = rows
                 .get(included.saturating_sub(1))
-                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
@@ -461,7 +434,7 @@ impl EngineService {
         let next_cursor = if rows.len() > included {
             let last = rows
                 .get(included.saturating_sub(1))
-                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
@@ -491,7 +464,10 @@ impl EngineService {
             || params.thread_id.len() > 512
             || params.thread_id.chars().any(char::is_control)
         {
-            return Err(wire(ErrorCode::InvalidParams, "invalid-parameters"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid-parameters",
+            ));
         }
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
@@ -517,7 +493,10 @@ impl EngineService {
             || params.thread_id.len() > 512
             || params.thread_id.chars().any(char::is_control)
         {
-            return Err(wire(ErrorCode::InvalidParams, "invalid-parameters"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid-parameters",
+            ));
         }
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
@@ -560,7 +539,7 @@ impl EngineService {
         )
         .await?;
         if projection.text.len() > dohc_engine_domain::INBAND_CONTENT_CAP_BYTES {
-            return Err(wire(
+            return Err(WireError::new(
                 ErrorCode::LimitExceeded,
                 "projection-exceeds-inband-limit",
             ));
@@ -571,5 +550,71 @@ impl EngineService {
             "threadId": projection.thread_id,
             "text": projection.text,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optional_chat_fields_distinguish_missing_null_and_present_values() {
+        let absent: ChatLocalAttachmentParams =
+            serde_json::from_value(json!({"objectId": "object"})).expect("missing optional fields");
+        assert!(absent.path_hint.is_none());
+        assert!(absent.heading_occurrence.is_none());
+        let present: ChatLocalAttachmentParams = serde_json::from_value(
+            json!({"objectId": "object", "pathHint": "", "headingOccurrence": 0}),
+        )
+        .expect("present optional fields");
+        assert_eq!(present.path_hint.as_deref(), Some(""));
+        assert_eq!(present.heading_occurrence, Some(0));
+        for (field, invalid) in [
+            ("pathHint", json!(null)),
+            ("headingOccurrence", json!(null)),
+            ("pathHint", json!(0)),
+            ("headingOccurrence", json!("0")),
+        ] {
+            let mut value = json!({"objectId": "object"});
+            value[field] = invalid;
+            assert!(
+                serde_json::from_value::<ChatLocalAttachmentParams>(value).is_err(),
+                "{field} must preserve its non-null type"
+            );
+        }
+
+        let mut start = json!({"channelId": "channel", "threadId": "thread", "messageId": "message", "authorKind": "human", "authorDisplayName": "Ada", "body": "hello"});
+        let absent: ChatThreadStartParams =
+            serde_json::from_value(start.clone()).expect("missing attachments");
+        assert!(absent.attachments.is_none());
+        start["attachments"] = json!([]);
+        let empty: ChatThreadStartParams =
+            serde_json::from_value(start.clone()).expect("empty attachments");
+        assert!(
+            empty
+                .attachments
+                .expect("present empty attachments")
+                .is_empty()
+        );
+        start["attachments"] = json!(null);
+        assert!(serde_json::from_value::<ChatThreadStartParams>(start).is_err());
+
+        let absent: ChatThreadProjectionParams =
+            serde_json::from_value(json!({"threadId": "thread"})).expect("missing file access");
+        assert!(absent.linked_file_access.is_none());
+        let denied: ChatThreadProjectionParams = serde_json::from_value(
+            json!({"threadId": "thread", "linkedFileAccess": {"kind": "denied"}}),
+        )
+        .expect("explicit denied access");
+        assert!(matches!(
+            denied.linked_file_access,
+            Some(ChatProjectionFileAccessParams::Denied {})
+        ));
+        assert!(
+            serde_json::from_value::<ChatThreadProjectionParams>(
+                json!({"threadId": "thread", "linkedFileAccess": null})
+            )
+            .is_err()
+        );
     }
 }
