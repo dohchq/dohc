@@ -943,6 +943,19 @@ mod tests {
     use crate::{ContentKind, Ydoc};
     use dohc_test_scratch::ScratchDir;
 
+    #[cfg(feature = "fault-injection")]
+    struct Crash(dohc_engine_storage::FaultPoint);
+    #[cfg(feature = "fault-injection")]
+    impl FaultInjector for Crash {
+        fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+            if point == self.0 {
+                dohc_engine_storage::FaultAction::Crash
+            } else {
+                dohc_engine_storage::FaultAction::Continue
+            }
+        }
+    }
+
     fn shared_parser(name: &str, mut input: Value) -> Result<Value, ApplicationError> {
         normalize_json_integers(&mut input);
         let output = match name {
@@ -1473,8 +1486,45 @@ mod tests {
                     &handle,
                     event("predecessor", 1, predecessor),
                 ));
-                let result = ack(apply(&mut store, &mut cache, &handle, update.clone()));
-                assert!(!result.application_replayed);
+                #[cfg(feature = "fault-injection")]
+                {
+                    warm_cache(&mut store, &mut cache);
+                    producer
+                        .apply(&document(&store).encode_full_state())
+                        .unwrap();
+                    assert!(matches!(
+                        apply_committed(
+                            &mut store,
+                            &mut cache,
+                            &handle,
+                            update.clone(),
+                            &Crash(dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck)
+                        ),
+                        Err(ApplicationError::Interrupted)
+                    ));
+                    assert!(store
+                        .read_with(|conn| cache
+                            .doc_for_consumer(conn, &key())
+                            .map(|doc| doc.is_none()))
+                        .unwrap());
+                    store = reopen(store, &dir);
+                    let persisted_sequence = store
+                        .read_with(|conn| {
+                            read_application(conn, "relay-A", &update.metadata.accepted.receipt)
+                        })
+                        .unwrap()
+                        .unwrap()
+                        .sequence;
+                    assert_eq!(count(&store, "live_device_update_applications"), 2);
+                    let result = ack(apply(&mut store, &mut cache, &handle, update.clone()));
+                    assert!(result.application_replayed);
+                    assert_eq!(result.local_ydoc_sequence, persisted_sequence);
+                }
+                #[cfg(not(feature = "fault-injection"))]
+                {
+                    let result = ack(apply(&mut store, &mut cache, &handle, update.clone()));
+                    assert!(!result.application_replayed);
+                }
                 assert!(!document(&store).has_missing_updates());
                 assert!(
                     crate::replay_parity::structurally_equal_v2(&document(&store), &producer)
@@ -1753,17 +1803,7 @@ mod tests {
     #[cfg(feature = "fault-injection")]
     #[test]
     fn crash_before_commit_and_after_commit_before_ack_recover_distinctly() {
-        use dohc_engine_storage::{FaultAction, FaultPoint};
-        struct Crash(FaultPoint);
-        impl FaultInjector for Crash {
-            fn poll(&self, point: FaultPoint) -> FaultAction {
-                if point == self.0 {
-                    FaultAction::Crash
-                } else {
-                    FaultAction::Continue
-                }
-            }
-        }
+        use dohc_engine_storage::FaultPoint;
         for point in [
             FaultPoint::StorageBeforePersist,
             FaultPoint::StorageAfterCommitBeforeAck,
