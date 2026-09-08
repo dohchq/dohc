@@ -67,7 +67,6 @@ pub(super) enum WorkspaceOpenMode {
     ReadOnly,
 }
 
-#[derive(Debug, PartialEq, Eq)]
 enum WorkspaceHandleKind {
     Owner,
     ReadOnlyAttach { owner: WorkspaceHandle },

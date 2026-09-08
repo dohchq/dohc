@@ -454,7 +454,7 @@ impl EngineService {
         let fence = self
             .fence_version_snapshot(
                 &cancellation,
-                &open,
+                open,
                 handle,
                 "versions.createNamed",
                 "Saved latest edits before creating a version",
@@ -484,14 +484,14 @@ impl EngineService {
     async fn fence_version_snapshot(
         &self,
         cancellation: &OperationCancellation,
-        open: &Arc<OpenWorkspace>,
+        open: Arc<OpenWorkspace>,
         handle: &WorkspaceHandle,
         operation: &str,
         settle_summary: &str,
         intent: VersionFenceIntent,
     ) -> Result<VersionFenceOutcome, WireError> {
         let barriers = self
-            .acquire_workspace_barriers(open, Some(cancellation), operation, true)
+            .acquire_workspace_barriers(&open, Some(cancellation), operation, true)
             .await?;
 
         let (reconcile_version_id, fork_source_version_id) = match &intent {
@@ -584,7 +584,6 @@ impl EngineService {
                     "capture driver unavailable",
                 )
             })?;
-        let open = Arc::clone(open);
         let handle = handle.clone();
         let sessions = Arc::clone(&self.sessions);
         let leases = self.leases.clone();
@@ -890,7 +889,7 @@ impl EngineService {
         let fence = self
             .fence_version_snapshot(
                 &cancellation,
-                &open,
+                open,
                 &handle,
                 "versions.setActive",
                 "Saved latest edits before switching versions",

@@ -46,6 +46,9 @@ use std::path::{Path, PathBuf};
 /// The durable tables whose row counts a restore test compares source-vs-copy.
 /// A mismatch means the copy is not a faithful snapshot — the backup fails.
 const COMPARED_TABLES: &[&str] = &[
+    "live_device_application_bindings",
+    "live_device_update_applications",
+    "live_device_application_first_seen",
     "engine_migrations",
     "engine_ownership",
     "engine_requests",
@@ -465,6 +468,65 @@ fn write_manifest_atomic(
 #[cfg(test)]
 mod tests {
     use super::COMPARED_TABLES;
+
+    #[test]
+    fn restore_comparison_rejects_missing_or_lost_live_application_tables() {
+        use crate::{EngineStore, NoFaults, StorageError};
+        use dohc_test_scratch::ScratchDir;
+        let dir = ScratchDir::new_named("backup-application-comparison").unwrap();
+        let mut store = EngineStore::open(&dir.join("source.db"), 0).unwrap();
+        store.write_with(&NoFaults, |tx| {
+            let sha = crate::put_binary_blob(tx, &[0, 0]).unwrap();
+            tx.execute("INSERT INTO live_device_application_bindings VALUES ('relay','workspace','main','object','lineage','a.md','[\"a.md\"]',0,'host',1,'instance','connection',1)", []).unwrap();
+            tx.execute("INSERT INTO live_device_update_applications VALUES ('relay','workspace','delivery','main','object','lineage','a.md','[\"a.md\"]',0,?1,2,1,1,'owner','person',NULL,NULL,0,1,1,'host',1,'instance','connection')", [&sha]).unwrap();
+            tx.execute("INSERT INTO live_device_application_first_seen VALUES ('relay','workspace','delivery',0,1,0,1)", []).unwrap();
+            Ok::<_, StorageError>(())
+        }).unwrap();
+        for (index, table) in [
+            "live_device_application_bindings",
+            "live_device_update_applications",
+            "live_device_application_first_seen",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for missing in [false, true] {
+                let copy_path = dir.join(format!("copy-{index}-{missing}.db"));
+                store.vacuum_into(&copy_path).unwrap();
+                assert!(super::restore_test(&store, &copy_path, &NoFaults).unwrap());
+                let copy = rusqlite::Connection::open(&copy_path).unwrap();
+                copy.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+                copy.execute_batch(&if missing {
+                    format!("DROP TABLE {table}")
+                } else {
+                    format!("DELETE FROM {table}")
+                })
+                .unwrap();
+                drop(copy);
+                assert!(
+                    matches!(
+                        super::restore_test(&store, &copy_path, &NoFaults),
+                        Err(StorageError::BackupFailed { .. })
+                    ),
+                    "{table}, missing={missing}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn backup_compares_live_application_tables() {
+        for table in [
+            "live_device_application_bindings",
+            "live_device_update_applications",
+            "live_device_application_first_seen",
+        ] {
+            assert!(
+                COMPARED_TABLES.contains(&table),
+                "restore must compare {table}"
+            );
+        }
+    }
 
     #[test]
     fn backup_compares_pending_conflict_bundle_tables() {
