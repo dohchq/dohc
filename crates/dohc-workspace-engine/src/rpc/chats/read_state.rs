@@ -96,7 +96,7 @@ impl EngineService {
             &cancellation,
             "chats.readState.markThreadRead",
             open.actor.chat_read_state_mark_thread_read(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.thread_id,
                 params.up_to_sequence,
                 params.expected_revision,
@@ -121,7 +121,7 @@ impl EngineService {
             &cancellation,
             "chats.readState.get",
             open.actor
-                .chat_read_state_get(open.workspace_id, params.thread_id),
+                .chat_read_state_get(open.workspace_id.clone(), params.thread_id),
         )
         .await?;
         Ok(read_state_json(&state))
@@ -141,7 +141,7 @@ impl EngineService {
             &cancellation,
             "chats.readState.listUnreadFileThreads",
             open.actor.chat_read_state_list_unread_file_threads(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.after_thread_id,
                 page_limit,
             ),
@@ -224,7 +224,7 @@ impl EngineService {
             &cancellation,
             "chats.agentReadState.markThreadRead",
             open.actor.chat_agent_mark_thread_read(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.thread_id,
                 params.up_to.created_at_ms,
                 params.up_to.message_id,

@@ -218,7 +218,7 @@ impl EngineService {
             &cancellation,
             "chats.dispatch.recordEligibleTriggers",
             open.actor.chat_dispatch_record_eligible_triggers(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.verified_user_id,
                 now_ms()?,
                 cancellation.token.clone(),
@@ -241,7 +241,7 @@ impl EngineService {
             &cancellation,
             "chats.dispatch.enqueue",
             open.actor.chat_dispatch_enqueue(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.trigger_message_id,
                 params.thread_id,
                 params.now_ms.unwrap_or(now_ms()?),
@@ -265,7 +265,7 @@ impl EngineService {
             &cancellation,
             "chats.dispatch.claimNextPending",
             open.actor.chat_dispatch_claim_next_pending(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.run_id,
                 params.command.unwrap_or_default(),
                 params.log_path,
@@ -437,7 +437,7 @@ impl EngineService {
             &cancellation,
             "chats.dispatch.runIdForMessage",
             open.actor
-                .chat_dispatch_run_id_for_message(open.workspace_id, params.message_id),
+                .chat_dispatch_run_id_for_message(open.workspace_id.clone(), params.message_id),
         )
         .await?;
         Ok(run_id.map_or(Value::Null, Value::String))
@@ -531,7 +531,7 @@ impl EngineService {
             &cancellation,
             "chats.dispatch.getRunRecord",
             open.actor
-                .chat_dispatch_get_run_record(open.workspace_id, params.run_id),
+                .chat_dispatch_get_run_record(open.workspace_id.clone(), params.run_id),
         )
         .await?;
         Ok(run.as_ref().map(run_json).unwrap_or(Value::Null))
@@ -550,7 +550,7 @@ impl EngineService {
             &cancellation,
             "chats.dispatch.isThreadPaused",
             open.actor
-                .chat_dispatch_thread_paused(open.workspace_id, params.thread_id),
+                .chat_dispatch_thread_paused(open.workspace_id.clone(), params.thread_id),
         )
         .await?;
         Ok(json!(paused))
@@ -569,7 +569,7 @@ impl EngineService {
             &cancellation,
             "chats.dispatch.getThreadPauseState",
             open.actor
-                .chat_dispatch_get_thread_pause_state(open.workspace_id, params.thread_id),
+                .chat_dispatch_get_thread_pause_state(open.workspace_id.clone(), params.thread_id),
         )
         .await?;
         Ok(pause.as_ref().map(pause_json).unwrap_or(Value::Null))
@@ -591,7 +591,7 @@ impl EngineService {
             &cancellation,
             "chats.dispatch.recentCount",
             open.actor.chat_dispatch_recent_count(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.thread_id,
                 params.since_ms,
             ),
@@ -613,7 +613,7 @@ impl EngineService {
             &cancellation,
             "chats.dispatch.failPendingForThread",
             open.actor.chat_dispatch_fail_pending_for_thread(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.thread_id,
                 params.reason,
                 now_ms()?,
@@ -637,7 +637,7 @@ impl EngineService {
             &cancellation,
             "chats.dispatch.recordRunMessage",
             open.actor.chat_dispatch_record_run_message(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.message_id,
                 params.run_id,
                 cancellation.token(),
@@ -660,7 +660,7 @@ impl EngineService {
             &cancellation,
             "chats.dispatch.setThreadPaused",
             open.actor.chat_dispatch_set_thread_paused(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.thread_id,
                 params.paused,
                 params.reason,
@@ -685,7 +685,7 @@ impl EngineService {
             &cancellation,
             "chats.dispatch.markFailureNotePosted",
             open.actor.chat_dispatch_mark_failure_note_posted(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.run_id,
                 cancellation.token(),
             ),
@@ -707,7 +707,7 @@ impl EngineService {
             &cancellation,
             "chats.dispatch.requeueFailedTrigger",
             open.actor.chat_dispatch_requeue_failed_trigger(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.trigger_message_id,
                 params.run_id,
                 now_ms()?,
@@ -779,7 +779,7 @@ impl EngineService {
             &cancellation,
             "chats.dispatch.complete",
             open.actor.chat_dispatch_complete(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.run_id,
                 params.exit_code,
                 params.now_ms.unwrap_or(now_ms()?),
@@ -803,7 +803,7 @@ impl EngineService {
             &cancellation,
             "chats.dispatch.fail",
             open.actor.chat_dispatch_fail(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.run_id,
                 params.reason,
                 params.exit_code,

@@ -244,7 +244,7 @@ impl EngineService {
             "moments.list",
             open.actor
                 .list_moments(dohc_engine_domain::ListMomentsQuery {
-                    workspace_id: open.workspace_id,
+                    workspace_id: open.workspace_id.clone(),
                     version_id: params.version_id,
                     object_id: params.object_id,
                     // Clamped: an unbounded page would load a workspace's whole
@@ -301,7 +301,7 @@ impl EngineService {
             &cancellation,
             "history.page",
             open.actor.history_page(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.limit.unwrap_or(200).min(500),
                 params.before_moment_order,
                 HISTORY_PROTECTED_MOMENT_LIMIT + 1,
@@ -360,7 +360,7 @@ impl EngineService {
         let moment = Self::read_under_ctx(
             &cancellation,
             "moments.get",
-            open.actor.get_moment(open.workspace_id, moment_id),
+            open.actor.get_moment(open.workspace_id.clone(), moment_id),
         )
         .await?;
         Ok(match moment {
