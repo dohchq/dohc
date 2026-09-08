@@ -276,7 +276,7 @@ mod tests {
     use super::*;
     use crate::transport::BlobEgress;
     use serde_json::{Value, json};
-    use tokio::sync::{Notify, Semaphore};
+    use tokio::sync::Notify;
 
     fn request(id: RequestId) -> Request {
         Request {

@@ -1,6 +1,5 @@
 //! Async actor-loop traces: the tokio command path round-trips a write while
-//! the blocking writer thread owns the connection, and close lands in bounded
-//! time under sustained submission.
+//! the blocking writer thread owns the connection.
 
 use dohc_engine_domain::WriteText;
 use dohc_engine_runtime::{ActorHandle, CancellationToken, NoFaults, WorkspaceSupervisor};
