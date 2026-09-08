@@ -354,7 +354,9 @@ const JOB_COLUMNS: &str = "job_id, workspace_id, target_path, content_sha256, pr
 
 /// Every pending job, oldest first (then by id for determinism). The set the
 /// filesystem pipeline replays at startup and executes on enqueue.
-pub fn list_pending_jobs(conn: &Connection) -> Result<Vec<MaterializationJob>, StorageError> {
+pub(crate) fn list_pending_jobs(
+    conn: &Connection,
+) -> Result<Vec<MaterializationJob>, StorageError> {
     let sql = format!(
         "SELECT {JOB_COLUMNS} FROM materialization_jobs \
          WHERE status = 'pending' ORDER BY created_at_ms ASC, job_id ASC"
@@ -371,7 +373,7 @@ pub fn list_pending_jobs(conn: &Connection) -> Result<Vec<MaterializationJob>, S
 }
 
 /// Load a single job by id.
-pub fn load_job(
+pub(crate) fn load_job(
     conn: &Connection,
     job_id: &str,
 ) -> Result<Option<MaterializationJob>, StorageError> {
@@ -406,19 +408,27 @@ fn set_status(
 /// would let a disk delete retire an API-written secret. Ownership is stamped
 /// only where capture itself observed the file — see
 /// [`stamp_secret_capture_owned`].
-pub fn mark_complete(conn: &Connection, job_id: &str, now_ms: i64) -> Result<(), StorageError> {
+pub(crate) fn mark_complete(
+    conn: &Connection,
+    job_id: &str,
+    now_ms: i64,
+) -> Result<(), StorageError> {
     set_status(conn, job_id, JobStatus::Complete, now_ms)
 }
 
 /// Mark a job in conflict (newer external content was preserved; not clobbered).
-pub fn mark_conflict(conn: &Connection, job_id: &str, now_ms: i64) -> Result<(), StorageError> {
+pub(crate) fn mark_conflict(
+    conn: &Connection,
+    job_id: &str,
+    now_ms: i64,
+) -> Result<(), StorageError> {
     set_status(conn, job_id, JobStatus::Conflict, now_ms)
 }
 
 /// Requeue a conflict after the caller has proved that its conflicting disk
 /// preimage is gone. The status predicate prevents an older recovery attempt
 /// from reviving a job that another writer already completed or cancelled.
-pub fn requeue_conflict(conn: &Connection, job_id: &str) -> Result<bool, StorageError> {
+pub(crate) fn requeue_conflict(conn: &Connection, job_id: &str) -> Result<bool, StorageError> {
     conn.execute(
         "UPDATE materialization_jobs SET status = 'pending', completed_at_ms = NULL \
          WHERE job_id = ?1 AND status = 'conflict'",
@@ -429,7 +439,7 @@ pub fn requeue_conflict(conn: &Connection, job_id: &str) -> Result<bool, Storage
 }
 
 /// The number of pending jobs (cheap gauge for tests / startup logging).
-pub fn pending_job_count(conn: &Connection) -> Result<i64, StorageError> {
+pub(crate) fn pending_job_count(conn: &Connection) -> Result<i64, StorageError> {
     conn.query_row(
         "SELECT COUNT(*) FROM materialization_jobs WHERE status = 'pending'",
         [],

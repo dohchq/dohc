@@ -11,8 +11,7 @@
 //!
 //! The complementary "re-encrypt with the same IV → byte-identical
 //! ciphertext+tag" proof lives as an inline unit test in `src/aead.rs`, because
-//! it needs the deterministic `seal_with_iv` (gated behind `test-util` so
-//! production consumers cannot reuse a nonce).
+//! it needs the private, test-only `seal_with_iv`.
 
 use dohc_engine_crypto::{CryptoError, SealedSecret, SecretDataKey, open};
 use serde_json::Value;

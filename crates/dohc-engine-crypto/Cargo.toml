@@ -6,14 +6,6 @@ rust-version.workspace = true
 publish.workspace = true
 description = "Secret-file crypto for the workspace engine: AES-256-GCM AEAD and zeroizing plaintext and key types."
 
-[features]
-# Exposes the deterministic, caller-supplied-IV `seal_with_iv`. OFF by default:
-# a fixed 96-bit nonce reused under one key is CATASTROPHIC for AES-GCM (leaks
-# the GHASH auth key and the XOR of plaintexts), so production consumers must
-# only reach `seal`, which draws a fresh CSPRNG nonce. Deterministic sealing is
-# needed solely by parity fixtures/tests; enable this feature there.
-test-util = []
-
 [dependencies]
 # AES-256-GCM AEAD. RustCrypto's `aes-gcm` is the chosen primitive over `ring`
 # because (a) it is pure Rust, so this crate's `#![forbid(unsafe_code)]` holds
