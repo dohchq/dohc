@@ -176,6 +176,9 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Sync(sync @ SyncError::ProjectionTooLarge { .. }) => {
             return WireError::new(ErrorCode::PayloadTooLarge, sync.to_string());
         }
+        RuntimeError::Sync(SyncError::LiveDocumentBindingActive) => {
+            return WireError::new(ErrorCode::InvalidParams, "live-document-binding-active");
+        }
         _ => {}
     }
     if let RuntimeError::LiveApplication(ref application) = error {
@@ -291,6 +294,7 @@ fn map_domain(error: DomainError) -> WireError {
         }
         DomainError::FileNotFound => (InvalidParams, "file-not-found"),
         DomainError::TargetPathExists => (InvalidParams, "target-path-exists"),
+        DomainError::LiveDocumentBindingActive => (InvalidParams, "live-document-binding-active"),
         DomainError::VersionNotFound => (InvalidParams, "version-not-found"),
         DomainError::InvalidVersion => (InvalidParams, "invalid-version"),
         DomainError::VersionNameConflict => (InvalidParams, "version-name-conflict"),
@@ -377,6 +381,7 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
         | SyncError::RetryableState { .. }
         | SyncError::FaultCrash => ErrorCode::Internal,
         SyncError::InvalidInput { .. }
+        | SyncError::LiveDocumentBindingActive
         | SyncError::UnsupportedOperation
         | SyncError::ShareBoundaryViolation
         | SyncError::ShareVersionMismatch { .. }

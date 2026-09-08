@@ -146,6 +146,13 @@ struct VersionedTextRenameParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedTextCheckMoveParams {
+    version_id: String,
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VersionedTextDeleteParams {
     #[serde(default)]
     workspace_id: Option<String>,
@@ -528,6 +535,24 @@ impl EngineService {
             "materialized": execution.materialized,
             "materializeOutcome": materialize_outcome_name(execution.materialize_outcome),
         }))
+    }
+
+    pub(super) async fn versioned_text_check_move(
+        &self,
+        request: &Request,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedTextCheckMoveParams = parse(params)?;
+        let open = self.open(request.workspace.as_ref())?;
+        open.actor
+            .ensure_no_adopted_owner_under_path(
+                open.workspace_id.clone(),
+                params.version_id,
+                params.path,
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({"allowed":true}))
     }
 
     pub(super) async fn versioned_text_rename(

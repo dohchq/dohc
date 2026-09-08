@@ -78,6 +78,9 @@ pub enum DomainError {
     #[error("target path already exists")]
     TargetPathExists,
 
+    #[error("live document binding is still active")]
+    LiveDocumentBindingActive,
+
     /// The source version is not a named fork of the target, or its durable
     /// fork-base snapshot set is missing.
     #[error("durable fork base not found")]
@@ -221,6 +224,7 @@ impl DomainError {
             DomainError::TextHeadNotBinary => "text-head-not-binary",
             DomainError::CaptureNotOwned => "capture-not-owned",
             DomainError::TargetPathExists => "target-path-exists",
+            DomainError::LiveDocumentBindingActive => "live-document-binding-active",
             DomainError::ForkBaseNotFound => "fork-base-not-found",
             DomainError::ConflictNotFound => "conflict-not-found",
             DomainError::ConflictStaleTarget => "conflict-stale-target",

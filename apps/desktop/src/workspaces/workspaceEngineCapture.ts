@@ -99,6 +99,16 @@ function pathIsAtOrUnder(path: string, pathOrPrefix: string): boolean {
   return path === pathOrPrefix || path.startsWith(`${pathOrPrefix}/`);
 }
 
+function liveDocumentMoveRefusal(error: unknown, path: string): Error | null {
+  if (!(error instanceof DaemonRefusalError) || error.message !== "live-document-binding-active") {
+    return null;
+  }
+  return new Error(
+    `dohc could not move ${path}. Shared live files must keep their current location. Continue editing at the original location.`,
+    { cause: error },
+  );
+}
+
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
 
 export async function probeEngineStoreRefusal(
@@ -5543,6 +5553,16 @@ export function createWorkspaceEngineCapture(
       // payment is the one payment this move needs to land.
       let closeRemovalWindow: () => void = () => undefined;
       return enqueueResult("prepare rename", async () => {
+        const engine = await engineStore();
+        const versionId = await activeVersionIdOf(engine);
+        const ensureMoveAllowed = async (): Promise<void> => {
+          try {
+            await engine.checkMove({ workspaceId, versionId, path: fromPath });
+          } catch (error) {
+            throw liveDocumentMoveRefusal(error, fromPath) ?? error;
+          }
+        };
+        await ensureMoveAllowed();
         // PREFIX, not just exact endpoint: this method also serves directory
         // moves, so a live session or a detached debt for `dir/note.md`
         // rides a move of `dir`. Left unvacated/undrained, either can
@@ -5666,6 +5686,9 @@ export function createWorkspaceEngineCapture(
           operation: "move",
           inProgress: `dohc is still moving ${fromPath}.`,
         });
+        // A handoff can finish while its session is closing. Recheck before
+        // handing a disk move to the caller, including the folder fallback.
+        await ensureMoveAllowed();
         const policy = await readPolicyForTask();
         // THE OUTCOME, then the window — the one rule every finisher here
         // follows. It serves both moves that leave nothing to undo: the ones
@@ -5691,8 +5714,6 @@ export function createWorkspaceEngineCapture(
         if (!toCheck.ok || toCheck.normalized !== toPath) {
           return finishWithoutRollback;
         }
-        const engine = await engineStore();
-        const versionId = await activeVersionIdOf(engine);
         const disk = await readDiskTextState(rootPath, fromPath);
         if (disk.kind !== "text") return finishWithoutRollback;
         try {
@@ -5713,9 +5734,9 @@ export function createWorkspaceEngineCapture(
             },
           });
         } catch (error) {
-          // Best-effort coordination: an engine refusal (for example the
-          // destination already tracked) must never block the disk rename —
-          // the watcher's plain capture takes over.
+          const refusal = liveDocumentMoveRefusal(error, fromPath);
+          if (refusal) throw refusal;
+          // Other engine refusals can fall back to the watcher's capture.
           onError(`prepare rename of ${fromPath}`, error);
           return finishWithoutRollback;
         }

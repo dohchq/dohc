@@ -59,6 +59,28 @@ pub struct RollbackExecutionResult {
 }
 
 impl ActorHandle {
+    pub async fn ensure_no_adopted_owner_under_path(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            let path = dohc_engine_domain::validate_addressable_plaintext_path(&path)?;
+            store
+                .read_with(|conn| {
+                    dohc_engine_sync::ensure_no_adopted_owner_under_path(
+                        conn,
+                        &workspace_id,
+                        &version_id,
+                        &path,
+                    )
+                })
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     /// Execute a versioned-text write on the actor's single writer thread.
     pub async fn versioned_text_write(
         &self,
@@ -2002,6 +2024,9 @@ fn conflict_resolve_on_store(
 /// domain: payload-shaped refusals stay refusals, storage stays storage.
 fn map_fold_error(error: dohc_engine_sync::SyncError) -> dohc_engine_domain::DomainError {
     match error {
+        dohc_engine_sync::SyncError::LiveDocumentBindingActive => {
+            dohc_engine_domain::DomainError::LiveDocumentBindingActive
+        }
         dohc_engine_sync::SyncError::InvalidInput { reason } => {
             dohc_engine_domain::DomainError::InvalidInput { reason }
         }

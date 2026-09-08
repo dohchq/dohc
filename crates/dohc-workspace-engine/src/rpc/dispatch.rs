@@ -30,6 +30,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "versionedText.readBlob"
                 | "versionedText.compare"
                 | "versionedText.rename"
+                | "versionedText.checkMove"
                 | "versionedText.delete"
                 | "versionedText.rollback"
                 | "versionedText.merge"
@@ -248,6 +249,10 @@ impl EngineService {
             }
             "versionedText.rename" => {
                 self.versioned_text_rename(&ctx, &request, request.params.clone())
+                    .await?
+            }
+            "versionedText.checkMove" => {
+                self.versioned_text_check_move(&request, request.params.clone())
                     .await?
             }
             "versionedText.delete" => {
@@ -1028,6 +1033,7 @@ mod tests {
             "versionedBinary.write",
             "versionedBinary.writeBlob",
             "versionedText.compare",
+            "versionedText.checkMove",
             "versionedText.delete",
             "versionedText.list",
             "versionedText.merge",

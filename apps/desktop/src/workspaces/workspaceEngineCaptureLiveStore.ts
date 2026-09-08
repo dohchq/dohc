@@ -134,6 +134,7 @@ export interface CaptureTextFileMetadata {
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
+  checkMove(input: { workspaceId: string; versionId: string; path: string }): Promise<void>;
   listPendingCollectionAdoptions?(input?: {
     limit?: number;
     cursor?: CollectionPendingAdoptionCursor;
@@ -799,6 +800,9 @@ export function createCaptureLiveStores(
       const value = await runRead(async (adapter) => await adapter.readTextFile(input));
       return value === null ? null : snapshotFromWire(value);
     },
+
+    checkMove: (input: { workspaceId: string; versionId: string; path: string }) =>
+      runRead(async (adapter) => await adapter.checkMove(input)),
 
     async listTextFileMetadata(input: {
       workspaceId: string;

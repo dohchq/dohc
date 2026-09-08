@@ -1204,11 +1204,61 @@ pub enum ResultingHead<'a> {
     BinaryOrAbsent,
 }
 
+/// A folder move must check durable owner bindings, including owners that
+/// have never queued an update. Closing a session does not end adoption.
+pub fn ensure_no_adopted_owner_under_path(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<(), SyncError> {
+    let adopted: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions
+         WHERE workspace_id=?1 AND main_version_id=?2
+           AND (json_extract(binding_json,'$.currentPath')=?3
+             OR substr(json_extract(binding_json,'$.currentPath'),1,length(?3)+1)=?3||'/'))",
+            params![workspace_id, version_id, path],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if adopted {
+        return Err(SyncError::LiveDocumentBindingActive);
+    }
+    Ok(())
+}
+
+fn ensure_adopted_owner_binding_unchanged(
+    conn: &Connection,
+    key: &DocKey,
+    resulting_path: Option<&str>,
+) -> Result<(), SyncError> {
+    let changes_binding: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions
+         WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3
+           AND (?4 IS NULL OR json_extract(binding_json,'$.currentPath') IS NOT ?4))",
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                resulting_path
+            ],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if changes_binding {
+        return Err(SyncError::LiveDocumentBindingActive);
+    }
+    Ok(())
+}
+
 pub(crate) fn retire_complete_ydoc_lineage_in_tx(
     tx: &rusqlite::Transaction<'_>,
     complete: &CompleteYdocLineage,
 ) -> Result<(), SyncError> {
     let key = &complete.key;
+    ensure_adopted_owner_binding_unchanged(tx, key, None)?;
     for statement in [
         "DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         "DELETE FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -1470,6 +1520,7 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
     match resulting {
         ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, complete),
         ResultingHead::Text { path, text } => {
+            ensure_adopted_owner_binding_unchanged(tx, &complete.key, Some(path))?;
             let Some((marker, doc)) = complete.state.as_ref() else {
                 return Ok(());
             };
@@ -1565,6 +1616,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
     journal: bool,
 ) -> Result<(), SyncError> {
     let key = &complete.key;
+    ensure_adopted_owner_binding_unchanged(tx, key, Some(path))?;
     let Some((marker, doc)) = complete.state.as_ref() else {
         return Ok(());
     };

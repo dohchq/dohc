@@ -9,6 +9,7 @@ export const VERSIONED_METHOD = {
   textRead: "versionedText.read",
   textReadBlob: "versionedText.readBlob",
   textRename: "versionedText.rename",
+  textCheckMove: "versionedText.checkMove",
   textDelete: "versionedText.delete",
   textRollback: "versionedText.rollback",
   textList: "versionedText.list",
@@ -433,6 +434,7 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.textRead]: VersionedTextReadParams;
   [VERSIONED_METHOD.textReadBlob]: VersionedTextReadBlobParams;
   [VERSIONED_METHOD.textRename]: VersionedTextRenameParams;
+  [VERSIONED_METHOD.textCheckMove]: JsonObject & { versionId: string; path: string };
   [VERSIONED_METHOD.textDelete]: VersionedTextDeleteParams;
   [VERSIONED_METHOD.textRollback]: VersionedTextRollbackParams;
   [VERSIONED_METHOD.textList]: VersionedTextListParams;
@@ -470,6 +472,7 @@ export type VersionedMethodResultMap = {
   [VERSIONED_METHOD.textRead]: VersionedTextReadResult;
   [VERSIONED_METHOD.textReadBlob]: VersionedTextReadBlobResult;
   [VERSIONED_METHOD.textRename]: VersionedTextRenameResult;
+  [VERSIONED_METHOD.textCheckMove]: { allowed: true };
   [VERSIONED_METHOD.textDelete]: VersionedTextDeleteResult;
   [VERSIONED_METHOD.textRollback]: VersionedTextRollbackResult;
   [VERSIONED_METHOD.textList]: VersionedTextListResult;
@@ -909,6 +912,7 @@ const VersionedResultSchemas = {
   [VERSIONED_METHOD.textRead]: Schema.NullOr(VersionedTextReadValueSchema),
   [VERSIONED_METHOD.textReadBlob]: BlobReadResultSchema,
   [VERSIONED_METHOD.textRename]: TextRenameResultSchema,
+  [VERSIONED_METHOD.textCheckMove]: mutableStruct({ allowed: Schema.Literal(true) }),
   [VERSIONED_METHOD.textDelete]: TextDeleteResultSchema,
   [VERSIONED_METHOD.textRollback]: TextRollbackResultSchema,
   [VERSIONED_METHOD.textList]: TextListResultSchema,

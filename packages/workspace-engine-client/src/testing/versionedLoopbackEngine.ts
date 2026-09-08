@@ -176,6 +176,7 @@ const VERSIONED_PARAM_SHAPES = {
     optionalJson: ["author"],
   },
   [VERSIONED_METHOD.textRead]: { requiredStrings: ["versionId", "path"] },
+  [VERSIONED_METHOD.textCheckMove]: { requiredStrings: ["versionId", "path"] },
   [VERSIONED_METHOD.textReadBlob]: {
     requiredStrings: ["workspaceId", "sha256"],
   },
@@ -1152,6 +1153,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.textWrite(state, workspace, params, parsedTextWrite!);
       case VERSIONED_METHOD.textRead:
         return this.textRead(state, workspace, params);
+      case VERSIONED_METHOD.textCheckMove:
+        return { allowed: true };
       case VERSIONED_METHOD.textReadBlob:
         return this.textReadBlob(state, params);
       case VERSIONED_METHOD.binaryWrite:

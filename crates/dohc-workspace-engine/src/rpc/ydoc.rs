@@ -1466,7 +1466,8 @@ mod tests {
         let markdown = vector["markdown"].as_str().unwrap().to_owned();
         let bytes: Vec<u8> = serde_json::from_value(vector["bytes"].clone()).unwrap();
         let scratch = ScratchDir::new().unwrap();
-        std::fs::write(scratch.path().join("owner.md"), &markdown).unwrap();
+        std::fs::create_dir(scratch.path().join("notes")).unwrap();
+        std::fs::write(scratch.path().join("notes/owner.md"), &markdown).unwrap();
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = EngineService::with_supervisor(supervisor);
@@ -1480,7 +1481,7 @@ mod tests {
                 dohc_engine_runtime::CaptureIngest {
                     workspace_id: "owner-source".into(),
                     version_id: "main".into(),
-                    path: "owner.md".into(),
+                    path: "notes/owner.md".into(),
                     text: markdown.clone(),
                     metadata_origin: "capture".into(),
                     metadata_summary: None,
@@ -1512,13 +1513,13 @@ mod tests {
         let reopened_workspace = service.workspace_open(&RequestContext::unbounded(), json!({
             "rootDir":scratch.path().to_string_lossy(),"workspaceId":"owner-source","captureMode":"none"
         })).await.unwrap();
-        let handle: WorkspaceHandle =
+        let mut handle: WorkspaceHandle =
             serde_json::from_value(reopened_workspace["workspace"].clone()).unwrap();
-        let (session, egress) = service
+        let (mut session, egress) = service
             .ydoc_open(
                 &RequestContext::unbounded(),
                 Some(handle.clone()),
-                json!({"versionId":"main","path":"owner.md","contentKind":"richdoc"}),
+                json!({"versionId":"main","path":"notes/owner.md","contentKind":"richdoc"}),
                 1,
             )
             .await
@@ -1562,8 +1563,8 @@ mod tests {
             main_version_id: "main".into(),
             object_id: object_id.clone(),
             lineage_claim_id: lineage,
-            current_path: "owner.md".into(),
-            selector_paths: vec!["owner.md".into()],
+            current_path: "notes/owner.md".into(),
+            selector_paths: vec!["notes/owner.md".into()],
             restore_fence_generation: 0,
         };
         let registration = service
@@ -1614,8 +1615,16 @@ mod tests {
             );
             assert!(adopted.output_guard.unwrap().is_current());
         }
+        session = assert_adopted_owner_move_refused(
+            &service,
+            &mut handle,
+            session,
+            scratch.path(),
+            &db_path,
+        )
+        .await;
         assert_eq!(
-            std::fs::read_to_string(scratch.path().join("owner.md")).unwrap(),
+            std::fs::read_to_string(scratch.path().join("notes/owner.md")).unwrap(),
             markdown
         );
         let edited = dohc_engine_collab::Ydoc::wire();
@@ -1638,6 +1647,14 @@ mod tests {
                 .await
                 .unwrap();
         }
+        session = assert_adopted_owner_move_refused(
+            &service,
+            &mut handle,
+            session,
+            scratch.path(),
+            &db_path,
+        )
+        .await;
         edited
             .rewrite_content_to_markdown(ContentKind::Richdoc, "Must not commit without delivery")
             .unwrap();
@@ -1655,7 +1672,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            std::fs::read_to_string(scratch.path().join("owner.md")).unwrap(),
+            std::fs::read_to_string(scratch.path().join("notes/owner.md")).unwrap(),
             "Later canonical edit"
         );
         service.workspace_close(Some(handle)).await.unwrap();
@@ -1669,8 +1686,8 @@ mod tests {
             assert_eq!(row.1, dohc_engine_storage::hex_sha256(markdown.as_bytes()));
             assert_eq!(row.3, 2);
             assert_eq!(
-                row.4, 2,
-                "only the later explicit settlement adds a domain moment"
+                row.4, 3,
+                "only the two explicit settlements add domain moments; refused moves add none"
             );
             let original: String = store.read_with(|conn|conn.query_row("SELECT snapshot_blob_sha256 FROM ydoc_snapshots WHERE object_id=?1 AND up_to_seq=0",[&object_id],|r|r.get(0))).unwrap();
             assert_eq!(row.2, original);
@@ -1748,6 +1765,114 @@ mod tests {
                 .unwrap();
             assert_eq!(limits, (10, 100_000));
         }
+    }
+
+    async fn assert_adopted_owner_move_refused(
+        service: &EngineService,
+        handle: &mut WorkspaceHandle,
+        session: Value,
+        root: &std::path::Path,
+        db_path: &std::path::Path,
+    ) -> Value {
+        service
+            .ydoc_close(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({"sessionId":session["sessionId"],"settle":true}),
+            )
+            .await
+            .unwrap();
+        service.workspace_close(Some(handle.clone())).await.unwrap();
+        let reopened = service.workspace_open(&RequestContext::unbounded(),json!({
+            "rootDir":root.to_string_lossy(),"workspaceId":"owner-source","captureMode":"none"
+        })).await.unwrap();
+        *handle = serde_json::from_value(reopened["workspace"].clone()).unwrap();
+        let snapshot = || {
+            let db = rusqlite::Connection::open_with_flags(
+                db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            db.query_row("SELECT (SELECT COUNT(*) FROM moments), (SELECT COUNT(*) FROM binary_blobs), (SELECT COUNT(*) FROM owner_ydoc_outbox_entries), (SELECT path FROM ydoc_docs LIMIT 1), (SELECT binding_json FROM live_owner_adoptions LIMIT 1)",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?))).unwrap()
+        };
+        let before = snapshot();
+        for path in ["notes/owner.md", "notes", "note"] {
+            let request = serde_json::from_value(
+                json!({"id":90,"method":"versionedText.checkMove","workspace":handle,
+                "params":{"versionId":"main","path":path}}),
+            )
+            .unwrap();
+            let checked = service
+                .versioned_text_check_move(&request, request.params.clone())
+                .await;
+            if path == "note" {
+                assert!(checked.is_ok(), "a sibling prefix remains movable");
+            } else {
+                assert_eq!(checked.unwrap_err().message, "live-document-binding-active");
+            }
+        }
+        let request = serde_json::from_value(json!({"id":91,"method":"versionedText.rename","workspace":handle,
+            "params":{"versionId":"main","fromPath":"notes/owner.md","toPath":"moved.md","origin":"local-file"}})).unwrap();
+        assert_eq!(
+            service
+                .versioned_text_rename(
+                    &RequestContext::unbounded(),
+                    &request,
+                    request.params.clone()
+                )
+                .await
+                .unwrap_err()
+                .message,
+            "live-document-binding-active"
+        );
+        assert_eq!(
+            snapshot(),
+            before,
+            "native rename must roll back every mutation"
+        );
+
+        std::fs::rename(root.join("notes/owner.md"), root.join("moved.md")).unwrap();
+        let actor = service.open(Some(handle)).unwrap().actor.clone();
+        let retire = actor
+            .capture_retire(
+                dohc_engine_runtime::CaptureRetire {
+                    workspace_id: "owner-source".into(),
+                    version_id: "main".into(),
+                    path: "notes/owner.md".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 10,
+                    request_id: None,
+                    only_if_text_head: true,
+                    only_if_capture_origin: true,
+                    allow_ydoc_origin: true,
+                },
+                LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(
+            map_runtime(retire.unwrap_err()).message,
+            "live-document-binding-active"
+        );
+        assert_eq!(
+            snapshot(),
+            before,
+            "external moves retain the original lineage and pending delivery"
+        );
+        std::fs::rename(root.join("moved.md"), root.join("notes/owner.md")).unwrap();
+        let (session, egress) = service
+            .ydoc_open(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({"versionId":"main","path":"notes/owner.md","contentKind":"richdoc"}),
+                92,
+            )
+            .await
+            .unwrap();
+        drop(egress);
+        session
     }
 
     fn owner_outbox_append_params(workspace_id: &str, append_key: &str) -> Value {

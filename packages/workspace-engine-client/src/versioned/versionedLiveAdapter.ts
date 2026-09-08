@@ -866,6 +866,14 @@ export class VersionedLiveAdapter {
     return files;
   }
 
+  async checkMove(input: { workspaceId: string; versionId: string; path: string }): Promise<void> {
+    this.assertWorkspace(input.workspaceId);
+    await this.request(VERSIONED_METHOD.textCheckMove, {
+      versionId: input.versionId,
+      path: input.path,
+    });
+  }
+
   async renameTextFile(input: {
     workspaceId: string;
     versionId: string;

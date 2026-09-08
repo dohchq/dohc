@@ -23,7 +23,7 @@ import type { launchMarks as launchMarksImplementation } from "../performance/la
 import type { desktopMarks as desktopMarksImplementation } from "../performance/desktopMarks";
 import {EngineClient} from "@dohc/workspace-engine-client/daemon";
 import type {ExistingOwnerDeviceConfig} from "@dohc/sync-relay/device-host";
-import {readDesktopOwnerHostConfig,startDesktopOwnerHost} from "./desktopOwnerHost";
+import type {readDesktopOwnerHostConfig,startDesktopOwnerHost} from "./desktopOwnerHost";
 
 type EngineAuthorityState = {
   pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
@@ -66,11 +66,12 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   let rustEngineRelayClient: EngineRelayClient | null = null;
   let ownerHost: ReturnType<typeof startDesktopOwnerHost> | undefined;
   let ownerHostConfig: ReturnType<typeof readDesktopOwnerHostConfig> | undefined;
+  let ownerHostModule: typeof import("./desktopOwnerHost") | undefined;
   const startOwnerHost = () => {
     ownerHost?.stop(); ownerHost = undefined;
-    if (!ownerHostConfig || !rustEngineDaemon || !rustEngineWorkspaceSessions || !dependencies.existingOwnerFor) return;
+    if (!ownerHostModule || !ownerHostConfig || !rustEngineDaemon || !rustEngineWorkspaceSessions || !dependencies.existingOwnerFor) return;
     const daemon = rustEngineDaemon, sessions = rustEngineWorkspaceSessions, config = ownerHostConfig;
-    ownerHost = startDesktopOwnerHost({config,ownerFor: dependencies.existingOwnerFor,
+    ownerHost = ownerHostModule.startDesktopOwnerHost({config,ownerFor: dependencies.existingOwnerFor,
       onError: error => console.error("[desktop] owner host connection failed:",error),
       bindings: async () => {
         const client = daemon.currentClient();
@@ -164,7 +165,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     try {
       if (process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG) {
         if (!dependencies.existingOwnerFor) throw new Error("Owner session authority is unavailable.");
-        ownerHostConfig = readDesktopOwnerHostConfig(process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG);
+        ownerHostModule = await import("./desktopOwnerHost");
+        ownerHostConfig = ownerHostModule.readDesktopOwnerHostConfig(process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG);
       }
       rustEngineDaemon = createRustEngineDaemon({
         ...(ownerHostConfig ? {privateOwnerHost: {configPath: ownerHostConfig.nativeConfigPath,

@@ -69,6 +69,9 @@ async function reconnectFailureCapture(prefix: string) {
   const state = {
     generation: 0,
     leaseActive: false,
+    moveRefusalAt: null as "preflight" | "native" | null,
+    adoptOnClose: false,
+    moveRequests: [] as string[],
     releaseCalls: [] as Array<{ generation: number; settle?: boolean }>,
   };
   const daemonClient: EngineDaemonClient & EngineTransport = {
@@ -80,6 +83,15 @@ async function reconnectFailureCapture(prefix: string) {
       }
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
+      }
+      if (request.method === "versionedText.checkMove" || request.method === "versionedText.rename") {
+        state.moveRequests.push(request.method);
+        if (state.moveRefusalAt === (request.method === "versionedText.checkMove" ? "preflight" : "native")) {
+          throw new DaemonRefusalError(
+            { code: "INVALID_PARAMS", message: "live-document-binding-active", retry: "no" },
+            new Error("daemon response"),
+          );
+        }
       }
       const lifecycle = daemonCaptureLifecycleAnswer(request);
       if (lifecycle) return lifecycle;
@@ -125,6 +137,7 @@ async function reconnectFailureCapture(prefix: string) {
         };
       },
       async close(closeOptions) {
+        if (state.adoptOnClose) state.moveRefusalAt = "preflight";
         state.releaseCalls.push({
           generation: openedGeneration,
           ...(closeOptions?.settle !== undefined
@@ -146,6 +159,51 @@ async function reconnectFailureCapture(prefix: string) {
   });
   return { capture, outcomes, rootPath, state };
 }
+
+it.each(["notes/note.md", "notes"])("refuses an adopted owner move before vacating the original session (%s)", async fromPath => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-adopted-owner-move-");
+  await mkdir(join(rootPath, "notes"));
+  await writeFile(join(rootPath, "notes/note.md"), "original");
+  const session = await capture.openYDocSession({ path: "notes/note.md", onRemoteUpdate: () => undefined });
+  state.moveRefusalAt = "preflight";
+  await expect(capture.beginFileRename(fromPath, "moved")).rejects.toThrow("Shared live files must keep their current location.");
+  expect(state.releaseCalls).toHaveLength(0);
+  expect(state.leaseActive).toBe(true);
+  expect(state.moveRequests).toEqual(["versionedText.checkMove"]);
+  expect(await readFile(join(rootPath, "notes/note.md"), "utf8")).toBe("original");
+  await session.settleNow();
+  await session.close();
+  await capture.stop();
+});
+
+it("propagates a native adopted-owner rename refusal and releases its move reservation", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-adopted-owner-native-move-");
+  await writeFile(join(rootPath, "note.md"), "original");
+  state.moveRefusalAt = "native";
+  await expect(capture.beginFileRename("note.md", "moved.md")).rejects.toThrow("Shared live files must keep their current location.");
+  expect(state.moveRequests).toEqual(["versionedText.checkMove", "versionedText.checkMove", "versionedText.rename"]);
+  const reopened = await capture.openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined });
+  await reopened.close();
+  state.moveRefusalAt = null;
+  const finish = await capture.beginFileRename("note.md", "ordinary.md");
+  await finish(false);
+  await capture.stop();
+});
+
+it("refuses a folder move when owner adoption finishes during session teardown", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-adopted-owner-close-race-");
+  await mkdir(join(rootPath, "notes"));
+  await writeFile(join(rootPath, "notes/note.md"), "original");
+  await capture.openYDocSession({ path: "notes/note.md", onRemoteUpdate: () => undefined });
+  state.adoptOnClose = true;
+  await expect(capture.beginFileRename("notes", "moved")).rejects.toThrow("Shared live files must keep their current location.");
+  expect(state.releaseCalls).toHaveLength(1);
+  expect(state.moveRequests).toEqual(["versionedText.checkMove", "versionedText.checkMove"]);
+  expect(await readFile(join(rootPath, "notes/note.md"), "utf8")).toBe("original");
+  const reopened = await capture.openYDocSession({ path: "notes/note.md", onRemoteUpdate: () => undefined });
+  await reopened.close();
+  await capture.stop();
+});
 
 async function failRendererUpdate(
   session: Awaited<ReturnType<WorkspaceEngineCapture["openYDocSession"]>>,

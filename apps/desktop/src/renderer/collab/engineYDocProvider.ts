@@ -449,7 +449,9 @@ export async function bindEngineYDoc(
   };
 
   const flushPendingLocalUpdates = (): Promise<void> => {
-    if (ownerHandoffActive) return ownerHandoff!.then(() => flushPendingLocalUpdates());
+    if (ownerHandoffActive) {
+      return ownerHandoff!.then(flushPendingLocalUpdates, flushPendingLocalUpdates);
+    }
     return flushStagedUpdates();
   };
 
