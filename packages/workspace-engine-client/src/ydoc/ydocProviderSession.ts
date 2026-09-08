@@ -107,7 +107,7 @@ export interface EngineYdocProviderSession {
   readonly nativeOwner?: {
     readonly sessionId: string;
     flush(): Promise<void>;
-    refresh(): Promise<void>;
+    applyRemoteUpdate(update: Uint8Array): Promise<void>;
   };
   readonly doc: Y.Doc;
   readonly initialUpdate: Uint8Array;
@@ -365,9 +365,11 @@ export async function openEngineYdocProviderSession(
         await session.resendMissingState();
         if (localEditError !== null) throw localEditError;
       },
-      async refresh() {
+      async applyRemoteUpdate(update) {
         if (closed) throw new Error("Owner session is closed.");
-        await session.resync();
+        // Native application already committed. Event sequence tracking stays
+        // with the daemon event lane; duplicate CRDT delivery is idempotent.
+        session.receiveRemoteUpdate(update);
       },
     },
     get doc() {
