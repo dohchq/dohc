@@ -14,7 +14,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// The versioned prefix of the on-disk key file. The format is versioned so an
 /// OS-keychain wrap can be layered on later without a migration.
-pub const SECRET_KEY_FILE_PREFIX: &str = "dohc-secret-key-v1:";
+const SECRET_KEY_FILE_PREFIX: &str = "dohc-secret-key-v1:";
 
 /// AES-256 key size.
 pub const SECRET_KEY_BYTES: usize = 32;
@@ -52,7 +52,7 @@ impl SecretDataKey {
     /// 32-byte length is the authoritative guard. A missing prefix or wrong
     /// length is `key-corrupt` — dohc never regenerates a key over an existing
     /// file, so a malformed file fails closed rather than orphaning snapshots.
-    pub fn parse_key_file(content: &str) -> Result<Self, CryptoError> {
+    fn parse_key_file(content: &str) -> Result<Self, CryptoError> {
         let trimmed = content.trim();
         let encoded = trimmed
             .strip_prefix(SECRET_KEY_FILE_PREFIX)
@@ -70,7 +70,7 @@ impl SecretDataKey {
     /// Serialize to the versioned key-file content (with trailing newline),
     /// byte-identical to what the TS store writes.
     #[must_use]
-    pub fn to_key_file(&self) -> String {
+    fn to_key_file(&self) -> String {
         format!(
             "{SECRET_KEY_FILE_PREFIX}{}\n",
             base64::encode_standard(&self.0)
@@ -87,19 +87,6 @@ impl core::fmt::Debug for SecretDataKey {
 
 /// Workspace-relative location of the key file.
 pub const SECRET_KEY_FILE_RELATIVE: &str = ".dohc/engine/secret.key";
-
-/// Load the workspace data key from `.dohc/engine/secret.key` under `root`,
-/// creating a fresh one on first use. Ports `loadSecretDataKey`:
-/// a missing file generates + persists a new key
-/// (0600 on Unix); an existing file is parsed and a malformed one fails
-/// closed (`key-corrupt`) — dohc never regenerates a key over an existing
-/// file, because that would silently orphan every sealed snapshot.
-pub fn load_or_create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoError> {
-    match load_key_file(root)? {
-        Some(key) => Ok(key),
-        None => create_key_file(root),
-    }
-}
 
 /// A key file is ~60 bytes; anything past this bound is not a key file and
 /// must fail closed before buffering (a planted multi-GB `secret.key` must
@@ -413,21 +400,22 @@ mod tests {
     }
 
     #[test]
-    fn load_or_create_mints_once_then_reuses_and_fails_closed_on_corruption() {
+    fn created_key_loads_unchanged_and_corruption_fails_closed() {
         let dir = dohc_test_scratch::ScratchDir::new_named("keyfile-test").unwrap();
 
-        let first = load_or_create_key_file(&dir).expect("mint");
+        assert_eq!(load_key_file(&dir).expect("missing key"), None);
+        let first = create_key_file(&dir).expect("mint");
         let file = dir.join(SECRET_KEY_FILE_RELATIVE);
         let content = std::fs::read_to_string(&file).expect("key file written");
         assert!(content.starts_with(SECRET_KEY_FILE_PREFIX));
 
-        let second = load_or_create_key_file(&dir).expect("reuse");
+        let second = load_key_file(&dir).expect("load").expect("existing key");
         assert_eq!(first, second, "an existing key is loaded, never re-minted");
 
         // A malformed existing file fails closed — regenerating over it would
         // silently orphan every sealed snapshot.
         std::fs::write(&file, "garbage").unwrap();
-        assert!(load_or_create_key_file(&dir).is_err());
+        assert!(load_key_file(&dir).is_err());
         // "Fails closed" also means it LEAVES THE FILE ALONE. An error return that
         // truncated, deleted, or re-minted over the file would read as fail-closed
         // to the caller while destroying the only copy of the key — the operator's

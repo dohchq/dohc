@@ -191,6 +191,7 @@ async function fixture() {
         pipeline: new PluginPipeline({
           workspaceRoot: workspace.rootPath, stateDir, hostOwnership: ownership,
           pnpmRunnerEntry: join(scratch, "unused-pnpm-runner.js"),
+          isEngineCaptureAvailable: () => true,
         }),
         agentDrivers: createPluginAgentDrivers({ host }),
         workspaceEvents: events,
