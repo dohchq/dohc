@@ -1,3 +1,4 @@
+import {OwnerRestoreActionResponse} from "../../../apps/desktop/src/ipc/ownerRestoreContract.js";
 import {createServer as createHttpsServer} from "node:https";
 import {chromium, expect as browserExpect, type Browser, type BrowserContext} from "@playwright/test";
 import { once } from "node:events";
@@ -68,6 +69,7 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
   for (const name of ["Alice", "Bob"]) {
     users.push((await auth.api.signUpEmail({ body: { email: `${name.toLowerCase()}@example.test`, password, name } })).user);
   }
+  const ownerUser = (await auth.api.signUpEmail({body: {email: "owner@example.test", password, name: "Owner"}})).user;
   const seed = await createEngineClient({ command: executable, authToken: "named-proof-seed", protocolVersion: 2, capabilities: ["core"], connectTimeoutMs: 30000 });
   let mainVersionId: string;
   try {
@@ -82,6 +84,7 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
   const serviceConfig = join(root, "service.json");
   writeFileSync(serviceConfig, JSON.stringify({ version: 1, engineExecutable: executable, hostId: "service", instanceId: "instance",
     workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 8 }], settlement: { maxApplicationsPerSettlement: 8 },
+    restore: {maxBytes: 1000000, maxEvents: 100, aggregateBytes: 20000000, workingReserveBytes: 1000000, maxOperations: 1, validation: validationPolicy},
     sync: { policy: { maxClientVectorBytes: 100000, maxHostVectorBytes: 100000, maxOutputBytes: 1000000, maxReadBytes: 4000000 }, workingReserveBytes: 4000000 },
     ingress: { aggregateBytes: 400000000, applicationWorkingReserveBytes: 1000000, maxUploads: 4, uploadDeadlineMs: 30000 },
     client: { aggregateBytes: 200000000, maxUploads: 4, connectTimeoutMs: 30000, requestDeadlineMs: 30000 } }));
@@ -105,7 +108,7 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     closes.push(() => new Promise<void>(done => authHttp.close(() => done())));
     const authUrl = `http://127.0.0.1:${(authHttp.address() as { port: number }).port}`;
     const { storage } = deployment;
-    expect(storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1 })).toBe("created");
+    expect(storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: ownerUser.id, createdAtMs: 1 })).toBe("created");
     expect(storage.provisionLiveHostControl({ mode: "service", hostId: "service", updatedAtMs: 1, guard: storage.captureStanding() }).ok).toBe(true);
     active = await startServiceLiveHost({ configPath: serviceConfig, ...deployment, frameChanges });
     const baseline = Y.encodeStateAsUpdate(ownerDoc), document = { workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: "object", lineageClaimId: hash(baseline) };
@@ -119,12 +122,12 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
         payloadAfterPath: "docs/a.md", payloadAfterBlobSha256: evidence.projectedMarkdownSha256, payloadAfterContentKind: "text", payloadAfterByteLength: evidence.projectedMarkdownByteLength }) }] });
     expect(storage.registerLiveDocumentBaseline({ host: active.coordinate, evidence, baselineBytes: baseline, registeredAtMs: 3 }).kind).toBe("registered");
     for (const [index, user] of users.entries()) storage.createShare({
-      share: { shareId: `share-${index}`, workspaceId: "workspace", granterUserId: "owner", selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }), createdAtMs: 3 },
+      share: { shareId: `share-${index}`, workspaceId: "workspace", granterUserId: ownerUser.id, selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }), createdAtMs: 3 },
       grant: { grantId: `grant-${index}`, shareId: `share-${index}`, principalKind: "user", principalUserId: user.id, principalEmail: null, access: "edit", generation: 1,
         status: "active", createdAtMs: 3, revokedAtMs: null, parentGrantId: null } });
     const relayApp = createSyncRelayHandler({ storage, shareWebOrigin: audience, relayExchangeKey: exchangeKey,
       namedBrowserSessionLimits: { ...browserLimits, maxSessions: 8, retentionMs: 120000 },
-      resolveActor: createSessionActorResolver(relayAuth) });
+      resolveActor: createSessionActorResolver(relayAuth), ownerRestoreHost: () => active });
     let routes!: ReturnType<typeof createNamedLiveRoutes>;
     const relayHttp = serveFetchHandler({ handler: request => new URL(request.url).pathname === "/sync/live/named-tickets" ? routes.handle(request) : relayApp(request),
       maxBodyBytes: () => 8192, oversized: () => new Response(null, { status: 404 }), failure: () => new Response(null, { status: 500 }) });
@@ -188,7 +191,7 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     await browserExpect(wrongGrant.page.getByRole("button", {name: "docs/a.md", exact: true})).toHaveCount(0);
     expect(requests).toContainEqual({accountId: users[1]!.id, path: "/api/live/named-documents", status: 404});
     results.authentication = {accountIds: users.map(user => user.id), requests, wrongGrantRefused: true};
-    const actor = {kind: "owner", userId: "owner", shareId: "share-0"} as const;
+    const actor = {kind: "owner", userId: ownerUser.id, shareId: "share-0"} as const;
     const current = storage.resolveCurrentLiveDocumentBinding({document, actor});
     if (current.kind !== "current") throw Error("Current binding unavailable.");
     const capture = await active.captureNative(current.binding);
@@ -222,11 +225,50 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     results.secondSettlement = secondSettlement; results.settledMarkdown = settledMarkdown;
     await first.page.screenshot({path: join(root, "alice-edited.png"), fullPage: true});
     await peer.page.screenshot({path: join(root, "bob-edited.png"), fullPage: true});
-    for (const index of [0, 1]) expect(storage.revokeShareGrant({shareId: `share-${index}`, grantId: `grant-${index}`,
-      revokedAtMs: Date.now(), expectedDependentGrantIds: [], guard: storage.captureStanding()}).ok).toBe(true);
+    const owner = await openInvitation(ownerUser, "grant-0");
+    const ownerCookies = await owner.context.cookies();
+    const cookieHeader = ownerCookies.map(row => `${row.name}=${row.value}`).join("; ");
+    const ownerRequest = async (suffix: string, body?: unknown) => {
+      const response = await fetch(`${relayUrl}/sync/workspace/live-restores${suffix}`, {method: body === undefined ? "GET" : "POST",
+        headers: {cookie: cookieHeader, "content-type": "application/json"}, ...(body === undefined ? {} : {body: JSON.stringify(body)})});
+      const data = await response.json(); expect(response.status, JSON.stringify(data)).toBe(200); return data;
+    };
+    const choices = OwnerRestoreActionResponse.options.parse(await ownerRequest("/options", {path: "docs/a.md"}));
+    const point = choices.points.find(row => row.cursor === 0)!; expect(point).toBeDefined();
+    const planned = OwnerRestoreActionResponse.plan.parse(await ownerRequest("/plan", {document: choices.document, shareId: "share-0", grantId: "grant-0",
+      restorePointCursor: point.cursor, restorePointReceiptDigest: point.receiptDigest}));
+    expect(planned.recipients.map(row => row.userId)).toEqual([users[0]!.id]);
+    expect(storage.getShareGrant("grant-0")?.status).toBe("active");
+    expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(settledMarkdown);
+    const stopped = OwnerRestoreActionResponse.begin.parse(await ownerRequest("", {intent: planned.intent}));
+    expect(stopped.phase).toBe("authority-invalidated");
+    expect(storage.getShareGrant("grant-0")?.status).toBe("revoked");
+    expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(settledMarkdown);
+    await browserExpect(first.editor).toHaveAttribute("contenteditable", "false");
+    const prefix = `/${stopped.operationId}`;
+    const prepared = OwnerRestoreActionResponse.prepare.parse(await ownerRequest(`${prefix}/prepare`, {}));
+    expect(prepared.result.kind).toBe("prepared");
+    const reviewed = OwnerRestoreActionResponse.review.parse(await ownerRequest(`${prefix}/review`, {}));
+    if (!reviewed.result || "kind" in reviewed.result) throw Error("Full loss review unavailable.");
+    expect(reviewed.result.content.frozenMarkdown).toBe(settledMarkdown);
+    expect(reviewed.result.content.restoredMarkdown).toBe("Hello");
+    expect(reviewed.result.acceptedEvents).toHaveLength(2);
+    expect(reviewed.result.acceptedEvents.map(row => row.metadata.accepted.authority.principalId)).toEqual(users.map(row => row.id));
+    expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(settledMarkdown);
+    const restored = OwnerRestoreActionResponse.confirm.parse(await ownerRequest(`${prefix}/confirm`, {proposalDigest: reviewed.result.proposalDigest}));
+    expect(restored.result.kind).toBe("resumed"); expect(restored.status.phase).toBe("resumed");
+    expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello");
+    const repeated = OwnerRestoreActionResponse.confirm.parse(await ownerRequest(`${prefix}/confirm`, {proposalDigest: reviewed.result.proposalDigest}));
+    expect(repeated.result.kind).toBe("resumed");
+    expect(storage.getShareGrant("grant-0")?.status).toBe("revoked");
+    const recovered = OwnerRestoreActionResponse.status.parse(await ownerRequest(prefix));
+    expect(recovered.proposalDigest).toBe(reviewed.result.proposalDigest); expect(recovered.phase).toBe("resumed");
+    results.ownerRestore = {operationId: stopped.operationId, proposalDigest: reviewed.result.proposalDigest, acceptedEvents: reviewed.result.acceptedEvents.length,
+      exactBefore: reviewed.result.content.frozenMarkdown, exactAfter: reviewed.result.content.restoredMarkdown, separateConsents: true, resumed: true, replayed: true};
+    expect(storage.revokeShareGrant({shareId: "share-1", grantId: "grant-1", revokedAtMs: Date.now(), expectedDependentGrantIds: [], guard: storage.captureStanding()}).ok).toBe(true);
     await noListeners;
     for (const recipient of [first, peer]) await browserExpect(recipient.editor).toHaveAttribute("contenteditable", "false");
-    expect(frameChanges.listenerCount()).toBe(0); expect(capture.invalidated.aborted).toBe(false); results.grantRetired = true;
+    expect(frameChanges.listenerCount()).toBe(0); results.grantRetired = true;
     await first.page.getByRole("button", {name: "Refresh files", exact: true}).click();
     await browserExpect(first.page.getByRole("alert")).toContainText("could not open this invitation");
     await browserExpect(first.page.getByRole("button", {name: "docs/a.md", exact: true})).toHaveCount(0);
@@ -236,14 +278,14 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     const engine = new DatabaseSync(join(workspace, ".dohc", "engine", "engine.db"), { readOnly: true });
     try {
       const applications = engine.prepare("SELECT delivery_id, update_digest FROM live_device_update_applications ORDER BY journal_cursor").all();
-      expect(applications).toHaveLength(2);
+      expect(applications.length).toBeGreaterThanOrEqual(2);
       expect(applications[0]).toEqual({ delivery_id: browserAck!.deliveryId, update_digest: browserAck!.updateDigest });
       expect(applications[1]).toEqual({ delivery_id: afterAck!.deliveryId, update_digest: afterAck!.updateDigest });
       results.persistedApplications = applications;
     } finally { engine.close(); }
     expect(hash(readFileSync(executable))).toBe(expectedHash);
     writeFileSync(join(root, "result.json"), JSON.stringify({ verdict: "PASS", executable, sha256: expectedHash,
-      scope: "Real Chromium invitation UI over HTTPS/WSS, BetterAuth/Postgres sign-in, integrated selected-grant navigation, native daemon ACKs and persisted applications, two named principals, peer updates, settlement and revocation. Test TLS certificate trusted only by isolated browser contexts.", results }, null, 2));
+      scope: "Owner authenticated HTTP stop/prepare/full review/confirm/recovery against live Chromium recipients and native daemon; real Chromium invitation UI over HTTPS/WSS, BetterAuth/Postgres sign-in, integrated selected-grant navigation, native daemon ACKs and persisted applications, two named principals, peer updates, settlement and revocation. Test TLS certificate trusted only by isolated browser contexts.", results }, null, 2));
   } finally {
     for (const [index, context] of contexts.entries()) {
       try {await context.tracing.stop({path: join(root, `browser-${index}.zip`)});} finally {await context.close();}

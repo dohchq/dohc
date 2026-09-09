@@ -98,6 +98,7 @@ export function createOwnerRestoreRoutes(options: {
     ticketRecord(raw, []);
     try {
       if (route.action === "prepare") {
+        storage.advanceStopRestoreFence(lookup!, options.nowMs());
         const result = await host.prepareRestore(lookup!, signal);
         return response({status: read(), result});
       }

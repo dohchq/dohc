@@ -560,6 +560,7 @@ export interface SyncRelayStorage {
   readOwnerRestoreStatus(input: StopRestoreLookup): OwnerRestoreStatus;
   readStopRestorePlan(input: StopRestorePlanInput): StopRestorePlan;
   beginStopRestore(input: StopRestoreIntent, now: number): StopRestoreOperation;
+  advanceStopRestoreFence(input: StopRestoreLookup, now: number): StopRestoreOperation;
   readStopRestore(input: StopRestoreLookup): StopRestoreOperation | null;
   readonly unavailable: AbortSignal;
   captureStanding(): () => void;

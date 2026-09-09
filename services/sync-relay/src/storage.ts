@@ -339,6 +339,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   beginStopRestore(input: Parameters<typeof liveRestoreOperationStorage.beginStopRestore>[1], now: number) {
     return liveRestoreOperationStorage.beginStopRestore(this, input, now);
   }
+  advanceStopRestoreFence(input: Parameters<typeof liveRestoreOperationStorage.advanceStopRestoreFence>[1], now: number) {
+    return liveRestoreOperationStorage.advanceStopRestoreFence(this, input, now);
+  }
   readStopRestore(input: Parameters<typeof liveRestoreOperationStorage.readStopRestore>[1]) {
     return liveRestoreOperationStorage.readStopRestore(this, input);
   }

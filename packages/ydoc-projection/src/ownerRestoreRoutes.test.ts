@@ -95,12 +95,35 @@ it("returns a missing proposal to review and preserves offline preparation for r
     const plan = await f.plan(); await f.request("", {intent: plan.intent});
     const prepared = await f.request("/restore/prepare", {});
     expect(prepared.status).toBe(409);
-    expect(await prepared.json()).toMatchObject({status: {operationId: "restore", phase: "authority-invalidated"}, result: {kind: "pending"}});
+    expect(await prepared.json()).toMatchObject({status: {operationId: "restore", phase: "fenced"}, result: {kind: "pending"}});
     const confirmed = await f.request("/restore/confirm", {proposalDigest: "a".repeat(64)});
     expect(confirmed.status).toBe(409);
     expect(await confirmed.json()).toMatchObject({result: {kind: "review-required"}});
     expect(f.host.confirmRestore).toHaveBeenCalledWith({workspaceId: "workspace", ownerUserId: "owner", operationId: "restore"}, "a".repeat(64), expect.any(AbortSignal));
     expect(f.storage.getShareGrant("grant")).toMatchObject({status: "revoked"});
+  } finally {f.close();}
+});
+
+it("closes admission before host preparation and preserves the same cut on retry", async () => {
+  const f = fixture();
+  try {
+    const plan = await f.plan(); await f.request("", {intent: plan.intent});
+    const lookup = {workspaceId: "workspace", ownerUserId: "owner", operationId: "restore"};
+    let cut: unknown;
+    vi.mocked(f.host.prepareRestore).mockImplementation(async () => {
+      const operation = f.storage.readStopRestore(lookup)!;
+      expect(operation.phase).toBe("fenced");
+      expect(operation.newFence).toBe(operation.oldFence + 1);
+      if (cut) expect(operation).toEqual(cut);
+      else cut = operation;
+      return {kind: "pending", reason: "Host unavailable"};
+    });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await f.request("/restore/prepare", {});
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({status: {phase: "fenced"}, result: {kind: "pending"}});
+    }
+    expect(f.host.prepareRestore).toHaveBeenCalledTimes(2);
   } finally {f.close();}
 });
 
