@@ -2202,13 +2202,14 @@ pub fn project_and_write_in_tx(
         .filter(|snapshot| snapshot.blob_sha256 == projected_sha)
     {
         tx.execute(
-            "UPDATE ydoc_docs SET last_settled_sha = ?4, updated_at_ms = ?5              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            "UPDATE ydoc_docs SET last_settled_sha = ?4, updated_at_ms = ?5, path = ?6              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             params![
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
                 snapshot.blob_sha256,
                 now_ms,
+                path,
             ],
         )
         .map_err(SyncError::persist)?;
@@ -2259,7 +2260,7 @@ pub fn project_and_write_in_tx(
     // old locally-settled sha behind would make the next session's settle
     // expectation trail the remote head — permanent ConflictStaleTarget.
     tx.execute(
-        "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+        "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6, path = ?7          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
         params![
             key.workspace_id,
             key.version_id,
@@ -2267,6 +2268,7 @@ pub fn project_and_write_in_tx(
             result.moment.moment_order,
             projected_sha,
             now_ms,
+            path,
         ],
     )
     .map_err(SyncError::persist)?;
