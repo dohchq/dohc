@@ -27,6 +27,8 @@ import { createNamedFrameChanges } from "../../sync-relay/src/liveHostChanges.js
 import { createShareWebApplication } from "./server.js";
 import { createLiveGateway } from "./liveGateway.js";
 import { createNamedLiveRelayRoute, namedLiveGatewayRequest } from "./namedLiveRelayRoute.js";
+import {prepareHostileRestoreProof} from "./hostileRestoreProof.integration-helper.js";
+import {createNamedBrowserQuarantineProof} from "./namedBrowserQuarantineProof.integration-helper.js";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 // Explicit proof inputs, not product limits or release defaults.
@@ -39,8 +41,11 @@ const routeLimits = { maxConnections: 4, maxConnectionsPerSession: 3, maxConnect
   maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 8192, maxPendingBytes: 2000000, maxFragments: 8, maxBufferedChunks: 64,
   upgradeTimeoutMs: 30000, idleTimeoutMs: 60000, drainTimeoutMs: 1000 };
 const exchangeKey = "native-network-exchange-".repeat(2), ticketKey = "native-network-tickets-".repeat(2);
+const hostileMode = process.env.DOHC_HOSTILE_RESTORE_PROOF === "1";
+const quarantineMode = process.env.DOHC_BROWSER_QUARANTINE_PROOF === "1";
 // Opt-in integration filename. The pinned serial harness must select this file explicitly.
 it("edits through real Chromium invitations, BetterAuth and the native daemon over HTTPS and WSS", async () => {
+  if (hostileMode && quarantineMode) throw new Error("Run hostile restore and browser quarantine in separate proof invocations.");
   const executable = process.env.DOHC_SERVICE_HOST_PROOF_BINARY ? resolve(process.env.DOHC_SERVICE_HOST_PROOF_BINARY) : undefined;
   const expectedHash = process.env.DOHC_SERVICE_HOST_PROOF_SHA256?.toLowerCase(), output = process.env.DOHC_SERVICE_HOST_PROOF_OUTPUT;
   if (!executable || !expectedHash || !output) throw new Error("Pinned named network proof binary, digest, and output are required.");
@@ -80,7 +85,7 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
   } finally { seed.close(); await seed.waitForExit(); }
   const configPath = join(root, "deployment.json");
   initializeRelayDeployment({ configPath, relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity") });
-  const deployment = openRelayDeployment(configPath, { liveTickets: { retainedTicketsPerPrincipalGrant: 4, expiredTicketCleanupBatchSize: 2, now: Date.now } });
+  const deployment = openRelayDeployment(configPath, { liveTickets: { retainedTicketsPerPrincipalGrant: hostileMode ? 8 : 4, expiredTicketCleanupBatchSize: 2, now: Date.now } });
   const serviceConfig = join(root, "service.json");
   writeFileSync(serviceConfig, JSON.stringify({ version: 1, engineExecutable: executable, hostId: "service", instanceId: "instance",
     workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 8 }], settlement: { maxApplicationsPerSettlement: 8 },
@@ -101,6 +106,8 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
   const browserErrors: string[] = [];
   const requests: {accountId: string; path: string; status: number}[] = [];
   const results: Record<string, unknown> = {};
+  let hostile: Awaited<ReturnType<typeof prepareHostileRestoreProof>> | undefined;
+  let quarantine: Awaited<ReturnType<typeof createNamedBrowserQuarantineProof>> | undefined;
   try {
     const authHttp = serveFetchHandler({ handler: request => auth.handler(request), maxBodyBytes: () => 8192,
       oversized: () => new Response(null, { status: 404 }), failure: () => new Response(null, { status: 500 }) });
@@ -146,12 +153,16 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
       viewerAssetsDir: resolve(new URL("../viewer/dist", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")),
       namedRecipientBrowserLimits: {provider: {frames, maxPendingUpdateBytes: 2000000, maxPendingUpdates: 4, maxDeliveryAttempts: 3},
         maxHttpResponseBytes: 8192, maxSocketBufferedBytes: 2000000, connectTimeoutMs: 30000, sendTimeoutMs: 30000, drainPollMs: 10} });
+    if (quarantineMode) {
+      quarantine = await createNamedBrowserQuarantineProof({relayUrl, root, workspace, frames, timeoutMs: browserLimits.timeoutMs});
+      closes.push(() => quarantine!.close());
+    }
     const gateway = createLiveGateway({ publicOrigin: audience, publicHosts: new Set([new URL(audience).host]),
       limits: { maxConnections: 4, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxFrameBytes: 65536,
         maxPendingBytes: 2000000, maxPendingFrames: 64, maxFragments: 8, maxBufferedChunks: 64, upgradeTimeoutMs: 30000, idleTimeoutMs: 60000, drainTimeoutMs: 1000 },
       resolveSession: async (request, discriminator, signal) => { const authenticated = namedLiveGatewayRequest(request, audience, signal);
         return authenticated ? application.resolveNamedBrowserSession(authenticated, discriminator) : null; },
-      openHostRoute: createNamedLiveRelayRoute({ relayUrl, publicOrigin: audience, exchangeKey, handshakeTimeoutMs: 30000 }),
+      openHostRoute: createNamedLiveRelayRoute({ relayUrl: quarantine?.relayProxyUrl ?? relayUrl, publicOrigin: audience, exchangeKey, handshakeTimeoutMs: 30000 }),
     });
     const publicHttp = serveFetchHandler({ handler: application.handle, maxBodyBytes: () => 8192,
       oversized: () => new Response(null, { status: 404 }), failure: () => new Response(null, { status: 500 }) });
@@ -163,6 +174,14 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
       const context = await browser!.newContext({ignoreHTTPSErrors: true, viewport: {width: 1280, height: 860}});
       contexts.push(context); await context.tracing.start({screenshots: true, snapshots: true, sources: true});
       const page = await context.newPage();
+      let resolveDiscriminator!: (value: string) => void;
+      const discriminator = new Promise<string>(resolve => {resolveDiscriminator = resolve;});
+      page.on("response", async response => {
+        if (new URL(response.url()).pathname === "/api/live/named-session" && response.status() === 200) {
+          try {const body = await response.json() as {discriminator: string}; resolveDiscriminator(body.discriminator);}
+          catch (error) {browserErrors.push(String(error));}
+        }
+      });
       page.on("pageerror", error => browserErrors.push(String(error)));
       page.on("response", response => {const url = new URL(response.url());
         if (url.pathname.startsWith("/api/")) requests.push({accountId: user.id, path: url.pathname, status: response.status()});});
@@ -175,12 +194,12 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
       const cookie = (await context.cookies()).find(row => row.name === cookieName);
       expect(cookie).toMatchObject({secure: true, httpOnly: true, sameSite: "Lax", path: "/", domain: "127.0.0.1"});
       const editor = page.getByRole("textbox", {name: "Shared file editor"});
-      return {context, page, editor};
+      return {context, page, editor, discriminator};
     }
     const first = await openInvitation(users[0]!, "grant-0"), peer = await openInvitation(users[1]!, "grant-1");
     for (const recipient of [first, peer]) {
       await recipient.page.getByRole("button", {name: "docs/a.md", exact: true}).click();
-      await browserExpect(recipient.editor).toHaveAttribute("contenteditable", "true");
+      await browserExpect(recipient.editor).toHaveAttribute("contenteditable", "true", {timeout: browserLimits.timeoutMs});
       await browserExpect(recipient.editor).toHaveText("Hello");
       await browserExpect(recipient.page.getByRole("status")).toContainText("Ready to edit");
       await browserExpect(recipient.page.getByRole("status")).not.toContainText("Changes saved");
@@ -242,10 +261,14 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     expect(planned.recipients.map(row => row.userId)).toEqual([users[0]!.id]);
     expect(storage.getShareGrant("grant-0")?.status).toBe("active");
     expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(settledMarkdown);
+    if (hostileMode) hostile = await prepareHostileRestoreProof({audience, root, workspace, frames,
+      stoppedContext: first.context, allowedContext: peer.context});
+    if (quarantine) await quarantine.interrupt(peer, await peer.discriminator);
     const stopped = OwnerRestoreActionResponse.begin.parse(await ownerRequest("", {intent: planned.intent}));
     expect(stopped.phase).toBe("authority-invalidated");
     expect(storage.getShareGrant("grant-0")?.status).toBe("revoked");
     expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(settledMarkdown);
+    await hostile?.stopped();
     await browserExpect(first.editor).toHaveAttribute("contenteditable", "false");
     const prefix = `/${stopped.operationId}`;
     const prepared = OwnerRestoreActionResponse.prepare.parse(await ownerRequest(`${prefix}/prepare`, {}));
@@ -267,6 +290,11 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     expect(recovered.proposalDigest).toBe(reviewed.result.proposalDigest); expect(recovered.phase).toBe("resumed");
     results.ownerRestore = {operationId: stopped.operationId, proposalDigest: reviewed.result.proposalDigest, acceptedEvents: reviewed.result.acceptedEvents.length,
       exactBefore: reviewed.result.content.frozenMarkdown, exactAfter: reviewed.result.content.restoredMarkdown, separateConsents: true, resumed: true, replayed: true};
+    if (hostile) {
+      results.hostileRestore = await hostile.restored(() => active!.settle(document));
+      expect(results.hostileRestore).toMatchObject({verdict: "PASS", novelOfflineRequiresRootAnalysis: true, staleClientQuarantineProven: false});
+    }
+    if (quarantine) results.browserQuarantine = await quarantine.recover(peer, () => active!.settle(document));
     expect(storage.revokeShareGrant({shareId: "share-1", grantId: "grant-1", revokedAtMs: Date.now(), expectedDependentGrantIds: [], guard: storage.captureStanding()}).ok).toBe(true);
     await noListeners;
     for (const recipient of [first, peer]) await browserExpect(recipient.editor).toHaveAttribute("contenteditable", "false");
@@ -286,9 +314,13 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
       results.persistedApplications = applications;
     } finally { engine.close(); }
     expect(hash(readFileSync(executable))).toBe(expectedHash);
+    await hostile?.close(); hostile = undefined;
+    await quarantine?.close();
     writeFileSync(join(root, "result.json"), JSON.stringify({ verdict: "PASS", executable, sha256: expectedHash,
+      proofMode: hostileMode ? "hostile-restore" : quarantineMode ? "browser-quarantine" : "authenticated-native",
       scope: "Owner authenticated HTTP stop/prepare/full review/confirm/recovery against live Chromium recipients and native daemon; real Chromium invitation UI over HTTPS/WSS, BetterAuth/Postgres sign-in, integrated selected-grant navigation, native daemon ACKs and persisted applications, two named principals, peer updates, settlement and revocation. Test TLS certificate trusted only by isolated browser contexts.", results }, null, 2));
   } finally {
+    await hostile?.close();
     for (const [index, context] of contexts.entries()) {
       try {await context.tracing.stop({path: join(root, `browser-${index}.zip`)});} finally {await context.close();}
     }
@@ -303,4 +335,4 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     if (schemaCreated) await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
     await admin.end();
   }
-}, 120000);
+}, hostileMode || quarantineMode ? 180000 : 120000);
