@@ -391,7 +391,13 @@ pub(super) fn append(
         let state = history
             .doc
             .encode_full_state_bounded(budget.remaining.min(CHECKPOINT_BYTES as usize))
-            .ok_or(invalid("accepted checkpoint exceeds update limit"))?;
+            .ok_or_else(|| {
+                if budget.remaining < CHECKPOINT_BYTES as usize {
+                    ApplicationError::ConfiguredByteBudgetExceeded
+                } else {
+                    invalid("accepted checkpoint exceeds update limit")
+                }
+            })?;
         budget.charge(state.len())?;
         history.doc.validate_public_baseline(&state)?;
         insert_checkpoint(

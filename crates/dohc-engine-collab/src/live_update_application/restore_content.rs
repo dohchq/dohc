@@ -81,9 +81,10 @@ pub(super) struct Budget {
 }
 impl Budget {
     pub(super) fn charge(&mut self, bytes: usize) -> Result<(), ApplicationError> {
-        self.remaining = self.remaining.checked_sub(bytes).ok_or(invalid(
-            "restore preparation exceeds configured byte budget",
-        ))?;
+        self.remaining = self
+            .remaining
+            .checked_sub(bytes)
+            .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
         Ok(())
     }
     fn blob_length(&mut self, conn: &Connection, digest: &str) -> Result<usize, ApplicationError> {
@@ -116,12 +117,14 @@ impl Budget {
         struct Bounded<'a> {
             budget: &'a mut Budget,
             bytes: Vec<u8>,
+            exceeded: bool,
         }
         impl Write for Bounded<'_> {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.budget
-                    .charge(bytes.len())
-                    .map_err(std::io::Error::other)?;
+                if let Err(error) = self.budget.charge(bytes.len()) {
+                    self.exceeded = true;
+                    return Err(std::io::Error::other(error));
+                }
                 self.bytes.extend_from_slice(bytes);
                 Ok(bytes.len())
             }
@@ -132,15 +135,27 @@ impl Budget {
         let mut writer = Bounded {
             budget: self,
             bytes: Vec::new(),
+            exceeded: false,
         };
-        serde_json::to_writer(&mut writer, value)
-            .map_err(|_| invalid("restore metadata exceeds configured byte budget"))?;
+        if serde_json::to_writer(&mut writer, value).is_err() {
+            return Err(if writer.exceeded {
+                ApplicationError::ConfiguredByteBudgetExceeded
+            } else {
+                ApplicationError::Corrupt
+            });
+        }
         Ok(writer.bytes)
     }
     fn state(&mut self, doc: &Ydoc) -> Result<Vec<u8>, ApplicationError> {
         let bytes = doc
             .encode_full_state_bounded(self.remaining.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
-            .ok_or(invalid("restore state exceeds configured byte budget"))?;
+            .ok_or_else(|| {
+                if self.remaining < crate::limits::MAX_YDOC_UPDATE_BYTES {
+                    ApplicationError::ConfiguredByteBudgetExceeded
+                } else {
+                    invalid("restore state exceeds update limit")
+                }
+            })?;
         self.charge(bytes.len())?;
         Ok(bytes)
     }
@@ -282,9 +297,7 @@ fn prepare_in(
         held,
         input.point.journal_cursor,
         &mut budget,
-        max_events
-            .checked_sub(accepted_history.proof.suffix.len())
-            .ok_or(ApplicationError::Corrupt)?,
+        max_events.saturating_sub(accepted_history.proof.suffix.len()),
     )?;
     if selected_history
         .proof

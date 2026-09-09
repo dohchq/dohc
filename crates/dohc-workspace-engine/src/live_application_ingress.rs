@@ -32,7 +32,7 @@ pub(crate) use restore::RestoreConfig;
 #[derive(Clone)]
 pub struct LiveApplicationIngressConfig {
     pub aggregate_bytes: usize,
-    /// Admission accounting for historical reconstruction, not a heap limiter.
+    /// Positive admission allowance for accepted history reconstruction, not a heap limiter.
     pub application_working_reserve_bytes: usize,
     pub max_uploads: usize,
     pub upload_deadline: Duration,
@@ -280,6 +280,9 @@ impl LiveApplicationIngress {
         service: Arc<EngineService>,
         config: LiveApplicationIngressConfig,
     ) -> Result<Self, WireError> {
+        if config.application_working_reserve_bytes == 0 {
+            return Err(invalid("applicationWorkingReserveBytes must be positive"));
+        }
         if config.max_uploads == 0
             || config.upload_deadline.is_zero()
             || config.aggregate_bytes > Semaphore::MAX_PERMITS
@@ -809,6 +812,26 @@ pub(crate) mod tests {
             application_working_reserve_bytes: 32 * 1024 * 1024,
             max_uploads: 2,
             upload_deadline: Duration::from_secs(30),
+        }
+    }
+
+    #[test]
+    fn ordinary_ingress_rejects_zero_reserve_and_keeps_positive_operator_limits() {
+        let service = Arc::new(EngineService::new());
+        let mut configured = config();
+        configured.application_working_reserve_bytes = 0;
+        let Err(error) = LiveApplicationIngress::new(service.clone(), configured.clone()) else {
+            panic!("zero working reserve was accepted");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(
+            error.message,
+            "applicationWorkingReserveBytes must be positive"
+        );
+        for bytes in [1, 1_000_000] {
+            configured.application_working_reserve_bytes = bytes;
+            let ingress = LiveApplicationIngress::new(service.clone(), configured.clone()).unwrap();
+            assert_eq!(ingress.config.application_working_reserve_bytes, bytes);
         }
     }
 

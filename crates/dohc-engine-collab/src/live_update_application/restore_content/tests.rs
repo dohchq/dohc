@@ -3,6 +3,36 @@ use dohc_engine_storage::{FaultAction, FaultPoint};
 use dohc_test_scratch::ScratchDir;
 use serde_json::json;
 
+#[test]
+fn restore_serialized_byte_refusals_keep_the_configured_budget_error() {
+    assert!(matches!(
+        Budget { remaining: 1 }.json(&"retained metadata"),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+    let doc = Ydoc::wire();
+    doc.plaintext_insert(0, "retained state");
+    assert!(matches!(
+        Budget { remaining: 1 }.state(&doc),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+}
+
+#[test]
+fn empty_bootstrap_outbox_does_not_require_owner_adoption() {
+    let mut f = Fixture::new("baseline");
+    let b = &f.binding;
+    let outbox =
+        crate::owner_outbox::outbox_id(b, &b.lineage_claim_id, &serde_json::to_string(b).unwrap());
+    f.store.write_with(&NoFaults,|tx| -> Result<(),ApplicationError> {
+        tx.execute("INSERT INTO owner_ydoc_outboxes VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?5,?5,?9,'active',0,NULL,1,NULL,NULL,0)",
+            params![outbox,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,serde_json::to_string(&b.selector_paths).unwrap(),b.restore_fence_generation,f.doc.encode_full_state().len() as i64]).map_err(write_sql)?;
+        Ok(())
+    }).unwrap();
+    let input = f.freeze(f.baseline_point.clone());
+    let proposal = f.prepare(input).unwrap();
+    assert!(proposal.receipt().native_sources.is_empty());
+}
+
 fn append_history_copies(f: &mut Fixture, copies: i64, bytes: Vec<u8>) -> Vec<LiveUpdateReceipt> {
     let held = f.handle.registration.lock().unwrap();
     let outcome = f
@@ -238,17 +268,19 @@ fn due_accepted_checkpoint_refuses_small_working_reserve_and_rolls_back_the_appl
     let retained_metadata = checkpoint_metadata + prior_metadata;
     let sufficient = replay_bytes + retained_metadata;
     // Replay alone fits, but the checkpoint and prior binding remain live too.
-    for reserve in [4096, replay_bytes, sufficient - 1] {
+    for reserve in [4096, 1_000_000, replay_bytes, sufficient - 1] {
         assert!(
-            apply_committed(
-                &mut f.store,
-                &mut WriterDocCache::new(),
-                &f.handle,
-                event.clone(),
-                &NoFaults,
-                reserve
-            )
-            .is_err(),
+            matches!(
+                apply_committed(
+                    &mut f.store,
+                    &mut WriterDocCache::new(),
+                    &f.handle,
+                    event.clone(),
+                    &NoFaults,
+                    reserve
+                ),
+                Err(ApplicationError::ConfiguredByteBudgetExceeded)
+            ),
             "accepted under {reserve} bytes; requires {sufficient}"
         );
         assert_eq!(snapshot(&f.store), before);

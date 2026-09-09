@@ -122,6 +122,16 @@ pub(super) fn classify(
             .map_err(read_sql)?;
         let mut total = 0_i64;
         let mut observed_oldest = None;
+        let owner = match &operation.origin {
+            RestoreDeliveryOrigin::Owner { id } => {
+                let covered: i64 = conn.query_row(
+                    "SELECT covered_outbox_sequence FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND adoption_id=?2",
+                    params![held.namespace,id], |row|row.get(0),
+                ).map_err(read_sql)?;
+                Some((id, covered))
+            }
+            RestoreDeliveryOrigin::Bootstrap { .. } => None,
+        };
         while let Some(row) = rows.next().map_err(read_sql)? {
             if sources.len() + event_count >= max_events {
                 return Err(invalid("restore source count exceeds configured budget"));
@@ -161,13 +171,7 @@ pub(super) fn classify(
             source
                 .verify_retained_row(conn)
                 .map_err(|_| ApplicationError::Corrupt)?;
-            let RestoreDeliveryOrigin::Owner { id } = &operation.origin else {
-                return Err(ApplicationError::Conflict);
-            };
-            let covered: i64 = conn.query_row(
-                "SELECT covered_outbox_sequence FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND adoption_id=?2",
-                params![held.namespace,id], |row|row.get(0),
-            ).map_err(read_sql)?;
+            let (id, covered) = owner.ok_or(ApplicationError::Conflict)?;
             if sequence <= covered {
                 return Err(ApplicationError::Corrupt);
             }

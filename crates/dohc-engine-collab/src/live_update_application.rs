@@ -57,6 +57,8 @@ pub enum ApplicationError {
     Conflict,
     #[error("owner outbox configured budget is below the persisted adoption budget")]
     ConfiguredBudgetMismatch,
+    #[error("live application exceeds its configured byte budget")]
+    ConfiguredByteBudgetExceeded,
     #[error("live application commit acknowledgement was interrupted")]
     Interrupted,
     #[error(transparent)]

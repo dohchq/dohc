@@ -183,6 +183,7 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
     }
     if let RuntimeError::LiveApplication(ref application) = error {
         let code = match application {
+            ApplicationError::ConfiguredByteBudgetExceeded => ErrorCode::LimitExceeded,
             ApplicationError::InvalidInput(_)
             | ApplicationError::WorkspaceMismatch
             | ApplicationError::MainVersionMismatch => ErrorCode::InvalidParams,
@@ -453,6 +454,10 @@ mod tests {
                 ErrorCode::InvalidParams,
             ),
             (ApplicationError::Conflict, ErrorCode::Conflict),
+            (
+                ApplicationError::ConfiguredByteBudgetExceeded,
+                ErrorCode::LimitExceeded,
+            ),
             (ApplicationError::Corrupt, ErrorCode::Internal),
             (ApplicationError::Interrupted, ErrorCode::Internal),
         ] {
