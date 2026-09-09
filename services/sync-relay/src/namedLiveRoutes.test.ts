@@ -8,7 +8,7 @@ import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { createLiveFrameSession, decodeLiveFrame, type LiveFrame } from "@dohc/live-session-contract/live-frame";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import { createSyncRelayHandler } from "./server.js";
-import { createNamedLiveRoutes, type NamedLiveRouteLimits } from "./namedLiveRoutes.js";
+import { createOwnerLiveRoutes, createNamedLiveRoutes, type NamedLiveRouteLimits } from "./namedLiveRoutes.js";
 import { createLinkLiveBrowserResolver } from "./linkLiveBrowserAuth.js";
 import { hashLinkBearer, hashLinkProfileSecret } from "./linkSecurity.js";
 import { createNamedLiveProvider } from "../../share-web/viewer/src/namedLiveProvider.js";
@@ -37,7 +37,7 @@ function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve };
 }
-async function fixture(routeLimits = limits, link = false, membershipPolicy: LiveMembershipPolicy = {maxSessions: 16, maxMembers: 8, maxSnapshotBytes: 153}) {
+async function fixture(routeLimits = limits, link = false, membershipPolicy: LiveMembershipPolicy = {maxSessions: 16, maxMembers: 8, maxSnapshotBytes: 153}, owner = false) {
   const state = await ticketFixture();
   const routeKind = link ? "link" : "named";
   const memberships = createLiveMembershipRegistry(membershipPolicy, state.storage.readLiveAuthority.bind(state.storage));
@@ -63,6 +63,11 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
   };
   const captureNative = vi.fn(async () => native);
   const actor = vi.fn(async (request: Request, workspaceId: string) => {
+    if (owner) {
+      const bearer = request.headers.get("authorization");
+      if (!bearer) throw new UnauthorizedError();
+      return {userId: bearer === "Bearer owner-token" ? "owner-1" : "reader-1", workspaceId};
+    }
     const cookie = request.headers.get("cookie");
     if (!cookie || cookie === "anonymous") throw new UnauthorizedError();
     return { userId: cookie === "account=reader" ? scope.userId : "other-user", workspaceId };
@@ -70,7 +75,8 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
   const application = createSyncRelayHandler({ storage: state.storage, resolveActor: actor, shareWebOrigin: audience, relayExchangeKey: exchangeKey, nowMs: () => 1000,
     namedBrowserSessionLimits: { maxSessions: 8, retentionMs: 30000, maxPendingRequests: 4, maxRequestBytes: 16384, maxResponseBytes: 16384, timeoutMs: 1000 } });
   const tickets = createLiveTickets({ storage: state.storage, audience, key, hostReports: createLiveHostReports({ storage: state.storage, captureNative }) });
-  const routes = createNamedLiveRoutes({ kind: routeKind, membership: memberships, storage: state.storage, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey, frames, bounds, limits: routeLimits,
+  const routes = owner ? createOwnerLiveRoutes({storage: state.storage, resolveActor: actor, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey,
+    frames, bounds, limits: routeLimits, validate: createLiveMarkdownJournalValidator(policy), captureNative}) : createNamedLiveRoutes({ kind: routeKind, membership: memberships, storage: state.storage, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey, frames, bounds, limits: routeLimits,
     validate: createLiveMarkdownJournalValidator(policy), sessions: link ? createLinkLiveBrowserResolver({storage: state.storage, linkKey: key}) : { resolve: application.resolveNamedBrowserSession }, tickets, captureNative });
   const http = serveFetchHandler({ handler: request => new URL(request.url).pathname === `/sync/live/${routeKind}-tickets` ? routes.handle(request) : application(request),
     maxBodyBytes: () => 16384, oversized: () => Response.json({}, { status: 404 }), failure: () => Response.json({}, { status: 500 }) });
@@ -90,7 +96,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     });
   }
   cleanups.push(async () => { routes.close(); sockets.forEach(ws => ws.terminate()); await Promise.all(upgrades); await new Promise<void>(done => http.close(() => done())); await state.close(); });
-  const bootstrap = link ? Response.json({ discriminator: "abcdefghijkl" }) : await post("/sync/live/named-sessions", { grantId: scope.grantId });
+  const bootstrap = link || owner ? Response.json({ discriminator: "abcdefghijkl" }) : await post("/sync/live/named-sessions", { grantId: scope.grantId });
   expect(bootstrap.status).toBe(200);
   const { discriminator } = await bootstrap.json() as { discriminator: string };
   async function mint() {
@@ -99,9 +105,10 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     const response = await post(`/sync/live/${routeKind}-tickets`, { discriminator, objectId: binding.objectId });
     expect(response.status).toBe(200); return await response.json() as { token: string; expiresAtMs: number };
   }
-  function connect(token: string, cookie = "account=reader", extra: Record<string, string> = {}) {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/sync/live/${routeKind}?session=${discriminator}`, ["dohc-live-v1", `dohc-live-ticket.${token}`], {
-      headers: { host: relayHost, origin: audience, "x-dohc-relay-exchange-key": exchangeKey, cookie, ...linkHeaders, ...extra }, perMessageDeflate: false });
+  function connect(token: string, cookie = "account=reader", extra: Record<string, string> = {}, ownerQuery = "") {
+    const target = owner ? `/sync/workspaces/${binding.workspaceId}/live/owner?shareId=${scope.shareId}&objectId=${binding.objectId}&lineageClaimId=${binding.lineageClaimId}${ownerQuery}` : `/sync/live/${routeKind}?session=${discriminator}`;
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${target}`, owner ? ["dohc-live-v1"] : ["dohc-live-v1", `dohc-live-ticket.${token}`], {
+      headers: owner ? {host: relayHost, authorization: "Bearer owner-token", ...extra} : { host: relayHost, origin: audience, "x-dohc-relay-exchange-key": exchangeKey, cookie, ...linkHeaders, ...extra }, perMessageDeflate: false });
     sockets.push(ws); ws.on("error", () => undefined);
     const received: LiveFrame[] = [], watchers = new Set<() => void>();
     ws.on("message", bytes => { received.push(decodeLiveFrame(Buffer.from(bytes as Buffer), frames.receive.maxFrameBytes)); for (const notify of watchers) notify(); });
@@ -342,4 +349,55 @@ it("closes a host capture when membership is full and leaves its redeemed ticket
   expect(await f.connect(second.token).status).toBe(404);
   expect(f.changes.listenerCount()).toBe(0);
   expect(f.invalidated.signal.aborted).toBe(false);
+});
+
+
+it("opens the owner bearer route without a recipient, browser cookie, ticket, or exchange key", async () => {
+  const f = await fixture(limits, false, undefined, true);
+  f.raw.exec("DELETE FROM sync_relay_share_grants");
+  const client = f.connect("");
+  expect(await client.status).toBe(101);
+  await client.until(() => client.received.some(frame => frame.kind === "welcome"));
+  expect(client.received[0]).toMatchObject({kind: "welcome", hostEpoch: host.hostEpoch});
+  expect(f.actor.mock.calls[0]![0].headers.get("cookie")).toBeNull();
+  expect(f.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_session_tickets").get()).toEqual({count: 0});
+});
+
+it.each<Record<string, string>>([{authorization: ""}, {authorization: "Bearer reader-token"}, {origin: "https://foreign.example"}, {host: "foreign.example"}])(
+  "refuses unauthenticated, non-owner and foreign owner upgrades %j", async headers => {
+    const f = await fixture(limits, false, undefined, true);
+    expect(await f.connect("", "", headers).status).toBe(404);
+    expect(f.captureNative).not.toHaveBeenCalled();
+  });
+
+it("refuses additional identity and duplicate selector fields on owner upgrades", async () => {
+  const f = await fixture(limits, false, undefined, true);
+  for (const query of ["&userId=owner-1", "&shareId=share-1"]) expect(await f.connect("", "", {}, query).status).toBe(404);
+  expect(f.actor).not.toHaveBeenCalled();
+});
+
+it.each(["owner", "fence", "selector"])("rechecks owner %s standing after native capture awaits", async changed => {
+  const f = await fixture(limits, false, undefined, true);
+  f.captureNative.mockImplementationOnce(async () => {
+    f.raw.exec(changed === "owner" ? "UPDATE sync_relay_workspaces SET owner_user_id='other'" : changed === "selector" ?
+      `UPDATE sync_relay_shares SET selector_json='{"paths":["elsewhere"],"versionId":null}'` :
+      "UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1");
+    return f.native;
+  });
+  expect(await f.connect("").status).toBe(404);
+});
+
+it("applies owner connection limits and closes captured owners on host invalidation", async () => {
+  const f = await fixture({...limits, maxConnectionsPerSession: 1}, false, undefined, true);
+  const first = f.connect(""); expect(await first.status).toBe(101);
+  expect(await f.connect("").status).toBe(404);
+  const closed = once(first.ws, "close"); f.invalidated.abort(); await closed;
+});
+
+
+it("refuses a stale owner lineage before native capture", async () => {
+  const f = await fixture(limits, false, undefined, true);
+  f.raw.exec("UPDATE sync_relay_live_documents SET lineage_state='retired', admission_state='closed', retired_at_ms=1000");
+  expect(await f.connect("").status).toBe(404);
+  expect(f.captureNative).not.toHaveBeenCalled();
 });

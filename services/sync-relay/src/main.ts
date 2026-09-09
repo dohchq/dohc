@@ -27,7 +27,7 @@ import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost } from "./serviceLiveHost";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
 import { createNamedFrameChanges } from "./liveHostChanges";
-import { createNamedLiveRoutes } from "./namedLiveRoutes";
+import { createOwnerLiveRoutes, createNamedLiveRoutes } from "./namedLiveRoutes";
 import { createLiveTickets } from "./liveTickets";
 import { createLiveHostReports } from "./namedLiveHostReports";
 import type { NamedFrameNativeHost } from "./namedLiveFrameHost";
@@ -386,7 +386,7 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
 }
 if (deviceControl) {
   server.on("upgrade", (request, socket, head) => {
-    if (namedLiveConfig && request.url?.startsWith("/sync/live/named?")) return;
+    if (namedLiveConfig && (request.url?.startsWith("/sync/live/named?") || /^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? ""))) return;
     deviceControl!.handleUpgrade(request, socket, head);
   });
   process.once("SIGINT", deviceControl.close);
@@ -420,8 +420,14 @@ if (namedLiveConfig) {
     publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
     frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
     sessions: { resolve: relayApplication.resolveNamedBrowserSession }, tickets, captureNative });
+  const ownerLive = createOwnerLiveRoutes({ storage, resolveActor, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
+    publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
+    frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate, captureNative });
+  server.once("close", ownerLive.close);
+  process.once("SIGINT", ownerLive.close); process.once("SIGTERM", ownerLive.close);
   server.on("upgrade", (request, socket, head) => {
-    if (request.url?.startsWith("/sync/live/named?")) void namedLive!.handleUpgrade(request, socket, head);
+    if (/^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? "")) void ownerLive.handleUpgrade(request, socket, head);
+    else if (request.url?.startsWith("/sync/live/named?")) void namedLive!.handleUpgrade(request, socket, head);
     else if (!deviceControl) socket.destroy();
   });
   server.once("close", namedLive.close);
