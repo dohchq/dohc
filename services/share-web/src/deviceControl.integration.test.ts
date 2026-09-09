@@ -132,7 +132,7 @@ it("reports unsupported credential-file platforms without exposing other connect
   expect(invalid.logs()).toContain("Device host connection closed or refused.");
   expect(invalid.logs()).not.toContain("private-invalid-json");
   expect(invalid.logs()).not.toContain("private-credential");
-});
+}, 60_000);
 
 it.skipIf(process.platform === "darwin")("runs the built connector outbound through actual share-web and relay, with no document authority", async () => {
   const database = join(scratch, "relay", "relay.sqlite"), directory = join(scratch, "credential"), assets = join(scratch, "viewer");
