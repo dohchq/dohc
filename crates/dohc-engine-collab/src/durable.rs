@@ -2124,14 +2124,22 @@ pub(crate) fn record_authorized_update_in_tx(
 /// it already holds: a fresh seed would mint new Yjs item ids, leave those rows
 /// on the origin alone, and every clean peer would be permanently missing them.
 ///
-/// `None` means "do not originate yet": the lineage has an unresolved
-/// dependency, so a full-state encode would silently drop the pending row. A
+/// `None` means there is no retained lineage, or it has an unresolved
+/// dependency and a full-state encode would silently drop the pending row. A
 /// later append retries once the predecessor lands. This is the same condition
 /// [`maybe_compact`] skips on, for the same reason.
 pub fn encode_origination_base_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
 ) -> Result<Option<OriginationBase>, CollabError> {
+    let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.head_update_seq == 0
+        && marker.head_snapshot_seq == 0
+        && !marker.lineage_claim_status.has_claimed_base()
+    {
+        // A closed local cache has no lineage to publish. Its saved file is authoritative.
+        return Ok(None);
+    }
     let doc = load_doc_in(tx, key)?;
     if doc.has_missing_updates() {
         return Ok(None);
