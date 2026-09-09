@@ -542,14 +542,20 @@ mod tests {
     }
     #[test]
     fn draft_open_refuses_marker_kind_or_regime_drift_without_a_head_change() {
-        for assignment in ["content_kind='plaintext'", "regime='local-only'"] {
+        for assignment in [
+            "content_kind='plaintext'",
+            "regime='local-only', lineage_claim_status='unclaimed', lineage_claim_id=NULL, lineage_parent_claim_id=NULL, lineage_epoch_tag=NULL",
+        ] {
             let (_dir, mut store, observed, checkpoint) = fixture();
             install(&mut store, &observed, &checkpoint);
             store
                 .write_with(&NoFaults, |tx| {
                     tx.execute(&format!("UPDATE ydoc_docs SET {assignment}"), [])
                         .unwrap();
-                    assert!(open_draft_in(tx, &observed.binding, 1).is_err());
+                    assert!(matches!(
+                        open_draft_in(tx, &observed.binding, 1),
+                        Err(OwnerOutboxError::ParentMismatch)
+                    ));
                     Ok::<_, OwnerOutboxError>(())
                 })
                 .unwrap();
