@@ -3,7 +3,7 @@ import {
   createLiveFrameSession, encodeLiveFrame, encodeLiveFrameSync, LiveFrameError,
   type LiveFrame, type LiveFrameBegin, type LiveFrameLease, type LiveFrameSessionPolicy, type LiveFrameSync,
 } from "@dohc/live-session-contract/live-frame";
-import type { RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
+import type { HostEpoch } from "@dohc/live-session-contract/host-control";
 import type { LiveUpdateHostApplicationAck, LiveUpdateRefusal, LiveUpdateRetry } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveMembershipSession } from "./liveMembership";
 
@@ -20,7 +20,7 @@ export type NamedFrameSubmissionResult =
 
 /** A browser owns this capture, never the shared native host or its registration. */
 export interface NamedFrameHostSession {
-  readonly ticket: RedeemedLiveTicket;
+  readonly hostEpoch: HostEpoch;
   readonly invalidated: AbortSignal;
   assertCurrent(): void;
   openSync(clientVector: Uint8Array, signal: AbortSignal): Promise<NamedFrameSync>;
@@ -128,7 +128,7 @@ export function createNamedLiveFrameSession(options: {
           check();
           let frame: LiveFrame;
           const held = transfer;
-          if (!greeted) frame = { kind: "welcome", hostEpoch: host.ticket.hostEpoch, receivePolicy: frames.receive };
+          if (!greeted) frame = { kind: "welcome", hostEpoch: host.hostEpoch, receivePolicy: frames.receive };
           else if (credit) frame = credit;
           else if (result) frame = result;
           else if (held && !held.begun) frame = held.begin;

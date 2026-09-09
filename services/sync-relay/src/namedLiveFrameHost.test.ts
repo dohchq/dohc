@@ -6,7 +6,7 @@ import type { Envelope, JsonValue } from "../../../packages/workspace-engine-cli
 import { createLiveTickets } from "./liveTickets.js";
 import { audience, binding, fixture, host, key, report, scope } from "./liveTickets.test-helper.js";
 import { liveBrowserActor } from "./liveBrowserContext.js";
-import { captureNamedLiveFrameHost, createNamedFrameChanges } from "./namedLiveFrameHost.js";
+import { captureNamedLiveFrameHost, captureOwnerLiveFrameHost, createNamedFrameChanges } from "./namedLiveFrameHost.js";
 import type { LiveUpdateJournalCut, LiveUpdateJournalCommitInput } from "./storage/types.js";
 import { observeRelayWrites } from "./relayWriteChanges.js";
 import { queueLiveHostRequests } from "./liveHostRequests.js";
@@ -280,6 +280,70 @@ function journal(f: Awaited<ReturnType<typeof setup>>) {
       metadata: { accepted: { binding, receipt, authority: input.expectedAuthority, receivedAtMs: input.receivedAtMs }, firstSeen: [] } } };
   });
 }
+
+function ownerCapture(f: Awaited<ReturnType<typeof setup>>, authenticatedUserId = "owner-1") {
+  const capture = captureOwnerLiveFrameHost({authenticatedUserId, shareId: scope.shareId,
+    storage: f.storage, native: f.native, bounds: f.bounds, validate: f.validate});
+  cleanup.push(async () => {capture.close();});
+  return capture;
+}
+
+it("opens the owner on the same native feed without a recipient ticket or grant", async () => {
+  const f = await setup();
+  f.raw.prepare("DELETE FROM sync_relay_share_grants").run();
+  f.raw.prepare("DELETE FROM sync_relay_live_session_tickets").run();
+  const capture = ownerCapture(f);
+  expect(capture.hostEpoch).toBe(host.hostEpoch);
+  expect(capture).not.toHaveProperty("ticket");
+  const sync = await capture.openSync(Uint8Array.of(0), new AbortController().signal);
+  expect(sync.binding).toEqual(binding);
+  expect([...sync.missingStateUpdate]).toEqual([0, 0]);
+  expect(f.raw.prepare("SELECT count(*) AS count FROM sync_relay_live_session_tickets").get()).toEqual({count: 0});
+  sync.close(); capture.close();
+  expect(f.peer.closed).toBe(false);
+});
+
+it("refuses a recipient account on the owner path", async () => {
+  const f = await setup();
+  expect(() => ownerCapture(f, scope.userId)).toThrow("Owner live authority is unavailable");
+  expect(f.peer.requests).toEqual([]);
+});
+
+it.each(["applied", "missing", "ambiguous"])("requires exact native evidence for owner delivery: %s", async mode => {
+  const f = await setup(), capture = ownerCapture(f), commit = journal(f);
+  if (mode === "ambiguous") f.drain.mockRejectedValueOnce(new Error("Lost response"));
+  if (mode === "missing") f.peer.response = request => f.peer.send({type: "response", id: request.id, result: {status: "missing"}});
+  expect(await capture.submit({deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal))
+    .toEqual(mode === "missing" ? {result: "retry", reason: "application-pending"} : {result: "success", ack});
+  expect(commit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+    actor: {kind: "owner", userId: "owner-1", shareId: scope.shareId},
+    expectedAuthority: {principalKind: "owner", principalId: "owner-1", grantId: null, grantGeneration: null},
+    metadata: {deliveryId: ack.deliveryId, updateDigest: hash(bytes), binding}, updateBytes: bytes,
+  }));
+});
+
+it.each(["owner", "selector", "restore"])("invalidates owner capture when %s changes", async kind => {
+  const f = await setup(), capture = ownerCapture(f);
+  if (kind === "owner") f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='different-owner'").run();
+  if (kind === "selector") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?")
+    .run(JSON.stringify({paths: ["other"], versionId: null}), scope.shareId);
+  if (kind === "restore") f.raw.prepare("UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1").run();
+  f.changes.notify(); await Promise.resolve();
+  expect(capture.invalidated.aborted).toBe(true);
+  await expect(capture.submit({deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal)).rejects.toThrow();
+  expect(f.peer.requests).toEqual([]);
+});
+
+it("does not report an owner ACK after restore changes during application", async () => {
+  const f = await setup(), capture = ownerCapture(f); journal(f);
+  f.drain.mockImplementationOnce(async () => {
+    f.raw.prepare("UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1").run();
+  });
+  await expect(capture.submit({deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal))
+    .rejects.toThrow("standing changed");
+  expect(f.peer.requests).toEqual([]);
+});
+
 it.each(["applied", "missing", "ambiguous", "receipt-only"])("uses exact durable ACK evidence for %s delivery", async mode => {
   const f = await setup(); const commit = journal(f);
   if (mode === "ambiguous") f.drain.mockRejectedValueOnce(new Error("Lost application response."));

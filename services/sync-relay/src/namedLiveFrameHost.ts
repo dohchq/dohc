@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { EngineClient, NativeAppliedPosition } from "@dohc/workspace-engine-client/daemon";
 import { parseRedeemedLiveTicket, type RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
-import { parseLiveUpdateDigest, parseLiveUpdateIdentifier, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
+import { parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseServerDerivedLiveUpdateAuthority, type ServerDerivedLiveUpdateAuthority, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { CurrentLiveBindingRequest, LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
@@ -41,12 +41,50 @@ export function captureNamedLiveFrameHost(options: {
   native: NamedFrameNativeHost;
   bounds: NamedFrameHostBounds;
   validate: OwnerOutboxAdmission["validate"];
-}): NamedFrameHostSession {
+}): NamedFrameHostSession & {readonly ticket: RedeemedLiveTicket} {
   const ticket = parseRedeemedLiveTicket(options.ticket);
   Object.freeze(ticket.binding.selectorPaths);
   Object.freeze(ticket.binding);
   Object.freeze(ticket.authority);
   Object.freeze(ticket);
+  if (ticket.authority.principalKind !== "named" && ticket.authority.principalKind !== "link") throw new TypeError("Invalid live host capture.");
+  return { ...captureLiveFrameHost({...options, binding: ticket.binding, authority: ticket.authority, hostEpoch: ticket.hostEpoch}), ticket };
+}
+
+/** The owner route supplies the authenticated account, never an identity from a frame. */
+export function captureOwnerLiveFrameHost(options: {
+  authenticatedUserId: string;
+  shareId: string;
+  storage: SyncRelayStorage;
+  native: NamedFrameNativeHost;
+  bounds: NamedFrameHostBounds;
+  validate: OwnerOutboxAdmission["validate"];
+}): NamedFrameHostSession {
+  const binding = parseLiveObjectBinding(options.native.binding);
+  const document = {workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId,
+    objectId: binding.objectId, lineageClaimId: binding.lineageClaimId};
+  const request = snapshotCurrentBindingRequest({document,
+    actor: {kind: "owner", userId: options.authenticatedUserId, shareId: options.shareId}});
+  const current = options.storage.resolveCurrentLiveDocumentBinding(request);
+  if (current.kind !== "current") throw new Error("Owner live authority is unavailable.");
+  return captureLiveFrameHost({...options, actor: request.actor, binding: current.binding,
+    authority: current.authority, hostEpoch: current.host.hostEpoch});
+}
+
+function captureLiveFrameHost(options: {
+  actor: CurrentLiveBindingRequest["actor"];
+  binding: LiveObjectBinding;
+  authority: ServerDerivedLiveUpdateAuthority;
+  hostEpoch: NamedFrameNativeHost["coordinate"]["hostEpoch"];
+  storage: SyncRelayStorage;
+  native: NamedFrameNativeHost;
+  bounds: NamedFrameHostBounds;
+  validate: OwnerOutboxAdmission["validate"];
+}): NamedFrameHostSession {
+  const binding = parseLiveObjectBinding(options.binding);
+  Object.freeze(binding.selectorPaths); Object.freeze(binding);
+  const authority = Object.freeze(parseServerDerivedLiveUpdateAuthority(options.authority));
+  const hostEpoch = options.hostEpoch;
   const { storage } = options;
   const original = options.native;
   const native = { ...original, coordinate: { ...original.coordinate }, binding: parseLiveObjectBinding(original.binding),
@@ -57,14 +95,14 @@ export function captureNamedLiveFrameHost(options: {
     bounds.maxSubmissionBytes, bounds.maxAdmissionBytes, native.registrationId, native.deadlineMs]) {
     if (!Number.isSafeInteger(value) || value < 1) throw new TypeError("Invalid named native frame bound.");
   }
-  if (native.deadlineMs > 0xffff_ffff || (ticket.authority.principalKind !== "named" && ticket.authority.principalKind !== "link")) throw new TypeError("Invalid live host capture.");
+  if (native.deadlineMs > 0xffff_ffff) throw new TypeError("Invalid live host capture.");
   for (const field of ["workspaceId", "mainVersionId", "objectId", "lineageClaimId", "currentPath", "restoreFenceGeneration"] as const) {
-    if (native.binding[field] !== ticket.binding[field]) throw new Error("Native registration binding changed.");
+    if (native.binding[field] !== binding[field]) throw new Error("Native registration binding changed.");
   }
-  const document: LiveDocumentKey = { workspaceId: ticket.binding.workspaceId, mainVersionId: ticket.binding.mainVersionId,
-    objectId: ticket.binding.objectId, lineageClaimId: ticket.binding.lineageClaimId };
+  const document: LiveDocumentKey = { workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId,
+    objectId: binding.objectId, lineageClaimId: binding.lineageClaimId };
   const actor = Object.freeze(snapshotCurrentBindingRequest({ document, actor: options.actor }).actor);
-  if (actor.kind !== ticket.authority.principalKind) throw new TypeError("Live host actor kind changed.");
+  if (actor.kind !== authority.principalKind) throw new TypeError("Live host actor kind changed.");
   const standing = storage.captureStanding();
   const lifetime = new AbortController();
   let opened = false, submitting = false;
@@ -80,8 +118,8 @@ export function captureNamedLiveFrameHost(options: {
     try {
       standing();
       const current = storage.resolveCurrentLiveDocumentBinding({ document, actor });
-      if (native.invalidated.aborted || current.kind !== "current" || ticket.hostEpoch !== native.coordinate.hostEpoch ||
-        !isDeepStrictEqual(current.binding, ticket.binding) || !isDeepStrictEqual(current.authority, ticket.authority) ||
+      if (native.invalidated.aborted || current.kind !== "current" || hostEpoch !== native.coordinate.hostEpoch ||
+        !isDeepStrictEqual(current.binding, binding) || !isDeepStrictEqual(current.authority, authority) ||
         !isDeepStrictEqual(current.host, native.coordinate)) throw new Error("Named host standing changed.");
     } catch (error) { close(); throw error; }
   }
@@ -103,7 +141,7 @@ export function captureNamedLiveFrameHost(options: {
     return { promise, dispose() { remove(); signal.removeEventListener("abort", resolve); } };
   }
   return {
-    ticket, invalidated: lifetime.signal, assertCurrent: () => check(), close,
+    hostEpoch, invalidated: lifetime.signal, assertCurrent: () => check(), close,
     async openSync(clientVector, caller): Promise<NamedFrameSync> {
       check(caller);
       if (opened || clientVector.byteLength > bounds.maxClientVectorBytes) throw new Error("Named sync is unavailable.");
@@ -119,7 +157,7 @@ export function captureNamedLiveFrameHost(options: {
       const feed = new AbortController();
       const feedSignal = AbortSignal.any([signal, feed.signal]);
       return {
-        binding: ticket.binding, hostVector: initial.hostVector, missingStateUpdate: initial.missingStateUpdate,
+        binding, hostVector: initial.hostVector, missingStateUpdate: initial.missingStateUpdate,
         appliedThroughJournalCursor: position.journalCursor,
         close() { feed.abort(); },
         async nextApplied(callerSignal): Promise<LiveFrameLease<NamedFrameAppliedUpdate>> {
@@ -166,11 +204,11 @@ export function captureNamedLiveFrameHost(options: {
         if (cut.checkpoint.bytes.length + cut.suffix.reduce((sum, row) => sum + row.bytes.length, updateBytes.length) > bounds.maxAdmissionBytes) {
           return { result: "refused", reason: "capacity-refused" };
         }
-        const validation = validate({ document, currentPath: ticket.binding.currentPath, checkpoint: cut.checkpoint.bytes,
+        const validation = validate({ document, currentPath: binding.currentPath, checkpoint: cut.checkpoint.bytes,
           suffix: cut.suffix.map(row => row.bytes), candidate: updateBytes });
         check(signal);
-        const committed = storage.commitLiveUpdateJournal({ host: native.coordinate, actor, expectedAuthority: ticket.authority,
-          metadata: { deliveryId, updateDigest, binding: ticket.binding }, cutToken: cut, validation, updateBytes, receivedAtMs: Date.now() });
+        const committed = storage.commitLiveUpdateJournal({ host: native.coordinate, actor, expectedAuthority: authority,
+          metadata: { deliveryId, updateDigest, binding }, cutToken: cut, validation, updateBytes, receivedAtMs: Date.now() });
         if (committed.result.kind === "refused") return { result: "refused", reason: committed.result.reason };
         if (committed.result.kind === "retry") return { result: "retry", reason: committed.result.reason };
         // An ambiguous drain can still have committed the application. Read the exact durable ACK.
