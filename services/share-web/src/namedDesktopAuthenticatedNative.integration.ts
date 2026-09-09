@@ -110,7 +110,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
     expect(hash(markdown)).toBe(evidence.projectedMarkdownSha256);
     storage.putBlob({ workspaceId: "workspace", sha256: hash(markdown), content: markdown, createdAtMs: 2 });
     storage.appendLogBatch({ workspaceId: "workspace", originId: "owner", ops: [{ originSeq: 0, opKind: "moment.append", recordedAtMs: 2,
-      payloadJson: JSON.stringify({ objectId: "object", momentId: "baseline", versionId: mainVersionId!, recordedAtMs: 2, operation: "write", path: "docs/a.md",
+      payloadJson: JSON.stringify({ objectId: "object", momentId: "baseline", versionId: mainVersionId!, recordedAtMs: 2, operation: "write", path: "docs/a.md", metadata: { origin: "sync" }, beforePresent: "absent",
         payloadAfterPath: "docs/a.md", payloadAfterBlobSha256: evidence.projectedMarkdownSha256, payloadAfterContentKind: "text", payloadAfterByteLength: evidence.projectedMarkdownByteLength }) }] });
     storage.putBlob({workspaceId: "workspace", sha256: hash(baseline), content: baseline, createdAtMs: 2});
     storage.appendLogBatch({workspaceId: "workspace", originId: "owner", ops: [{originSeq: 1, opKind: "ydoc.update", recordedAtMs: 2,
