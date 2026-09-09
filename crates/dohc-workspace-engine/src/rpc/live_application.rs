@@ -331,10 +331,8 @@ impl EngineService {
         }
         let params: Params = serde_json::from_value(params)
             .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid owner state request"))?;
-        if self.ordinary_live_host.get().is_none() {
-            return Err(workspace_unavailable());
-        }
         let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        self.owner_adoption_config(connection, workspace.as_ref())?;
         let registration = self.live_application_registration(
             connection,
             workspace.as_ref(),

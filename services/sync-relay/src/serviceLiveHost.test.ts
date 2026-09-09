@@ -62,6 +62,8 @@ it("prepares attached ordinary replication without registering a partly activate
   const f = await fixture(); let captured!: ReturnType<typeof clientFrom>;
   const attachment = {relay: {baseUrl: "https://relay.example", bearerToken: "actual-owner-credential"},
     identity: {kind: "join", replicationEpoch: "actual-epoch", streamIdentity: "actual-stream"}, maxPagesPerPull: 1};
+  const adoption = {maxBytes: 1_000_000, maxEvents: 10, ownerOutbox: {maxPendingBytes: 1_000_000, maxPendingAgeMs: 60_000}};
+  Object.assign(f.config, {adoption});
   Object.assign(f.config.workspaces[0]!, {ordinaryReplication: attachment}); await f.save();
   spawn.mockImplementation(async options => {
     captured = clientFrom(options);
@@ -83,6 +85,7 @@ it("prepares attached ordinary replication without registering a partly activate
   try {
     expect(captured.config.workspaces[0]).toEqual({root: f.config.workspaces[0]!.root, workspaceId: "workspace", maxRegistrations: 8, relay: attachment.relay});
     expect(captured.config.workspaces[0]).not.toHaveProperty("ordinaryReplication");
+    expect(captured.config.adoption).toEqual(adoption);
     expect(f.storage.getLiveHostControl()).toEqual(before);
     expect(f.storage.getLiveHostControl()?.registeredConnectionId).toBeNull();
     await expect(host.drain({workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64)})).rejects.toThrow("retired");

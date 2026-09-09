@@ -392,17 +392,12 @@ impl LiveApplicationIngress {
         } else if request.method == "liveApplication.adoptOwner" {
             let config = self
                 .service
-                .ordinary_live_host
-                .get()
-                .ok_or_else(|| invalid("owner-adoption-not-configured"))?;
-            if !config.connection.same_connection(connection) || !connection.is_current() {
-                return Err(invalid("owner-adoption-connection-retired"));
-            }
+                .owner_adoption_config(connection, request.workspace.as_ref())?;
             let params: AdoptionParams =
                 serde_json::from_value(std::mem::take(&mut request.params))
                     .map_err(|_| invalid("invalid-owner-adoption-upload"))?;
             if params.byte_length == 0
-                || params.byte_length > config.max_adoption_bytes
+                || params.byte_length > config.max_bytes
                 || params.session_id.is_empty()
                 || params.session_id.len() > 256
             {
@@ -413,8 +408,8 @@ impl LiveApplicationIngress {
                 Metadata::Adoption {
                     registration_id: params.registration_id,
                     session_id: params.session_id,
-                    max_bytes: config.max_adoption_bytes,
-                    max_events: config.max_adoption_events,
+                    max_bytes: config.max_bytes,
+                    max_events: config.max_events,
                     outbox_limits: config.owner_outbox.clone(),
                 },
                 params.registration_id,

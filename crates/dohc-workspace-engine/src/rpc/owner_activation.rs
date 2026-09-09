@@ -42,6 +42,65 @@ impl OutputGuard for ActivationOutputGuard {
 }
 
 impl EngineService {
+    pub(super) async fn release_owner_activation(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+    ) -> Result<ServiceResponse, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            activation_id: String,
+            session_id: String,
+        }
+        let namespace = self.configured_ordinary_namespace(&ctx, &request)?;
+        let params: Params = parse(request.params.clone())?;
+        let workspace = request
+            .workspace
+            .as_ref()
+            .ok_or_else(workspace_unavailable)?;
+        let (open, session) = self.ydoc_session(Some(workspace), &params.session_id)?;
+        let cancellation = OperationCancellation::new(&ctx);
+        let serial = tokio::select! {biased;
+            ()=cancellation.token.cancelled()=>return Err(cancellation.interruption("ordinary activation release")),
+            serial=Arc::clone(&open.session_ops).lock_owned()=>serial,
+        };
+        let db_path = open.db_path.clone();
+        let activation_id = params.activation_id;
+        let (result, serial) = tokio::task::spawn_blocking(move || {
+            let result = (|| {
+                let store = dohc_engine_storage::EngineStore::open_read_only(&db_path).map_err(|_|workspace_unavailable())?;
+                let permitted: bool = store.read_with(|conn|conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM ydoc_owner_activation_sources WHERE activation_id=?1 AND relay_database_namespace=?2
+                     AND workspace_id=?3 AND version_id=?4 AND object_id=?5 AND lineage_claim_id=?6)
+                     AND NOT EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?3 AND main_version_id=?4 AND object_id=?5)",
+                    rusqlite::params![activation_id,namespace,session.key.workspace_id,session.key.version_id,session.key.object_id,session.lineage_claim_id],
+                    |row|row.get(0))).map_err(|_|workspace_unavailable())?;
+                if !permitted { return Err(workspace_unavailable()); }
+                Ok(())
+            })();
+            (result, serial)
+        }).await.map_err(|_|workspace_unavailable())?;
+        result?;
+        let (current, _) = self.ydoc_session(Some(workspace), &params.session_id)?;
+        if !Arc::ptr_eq(&open, &current) || cancellation.token.is_cancelled() {
+            return Err(workspace_unavailable());
+        }
+        let removed = lock(&self.sessions)
+            .remove(&params.session_id)
+            .ok_or_else(workspace_unavailable)?;
+        drop(removed);
+        drop(serial);
+        Ok(ServiceResponse {
+            response: Response {
+                id: request.id,
+                result: json!({"released":true}),
+            },
+            blob_egress: None,
+            output_guard: None,
+        })
+    }
+
     pub(super) async fn capture_owner_activation(
         &self,
         ctx: RequestContext,

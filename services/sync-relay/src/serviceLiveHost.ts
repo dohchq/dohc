@@ -32,6 +32,8 @@ interface ServiceLiveHostConfig {
   readonly settlement?: LiveSettlementConfig;
   readonly restore?: LiveRestoreConfig;
   readonly sync?: ReturnType<typeof parseNativeLiveSyncConfig>;
+  readonly adoption?: { readonly maxBytes: number; readonly maxEvents: number;
+    readonly ownerOutbox: { readonly maxPendingBytes: number; readonly maxPendingAgeMs: number } };
 }
 
 function record(value: unknown, keys: string[], optional: string[] = []): Record<string, unknown> {
@@ -54,7 +56,7 @@ function path(value: unknown, directory: boolean): string {
 /** Operator configuration only. Incoming document fields never supply these paths. */
 function readServiceLiveHostConfig(configPath: string): ServiceLiveHostConfig {
   const value = record(JSON.parse(readFileSync(path(configPath, false), "utf8")),
-    ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"], ["settlement", "restore", "sync"]);
+    ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"], ["settlement", "restore", "sync", "adoption"]);
   if (value.version !== 1 || !Array.isArray(value.workspaces) || !value.workspaces.length) throw new TypeError("Invalid service host configuration.");
   const workspaces = value.workspaces.map(item => {
     const row = record(item, ["root", "workspaceId", "maxRegistrations"], ["ordinaryReplication"]);
@@ -67,12 +69,19 @@ function readServiceLiveHostConfig(configPath: string): ServiceLiveHostConfig {
   const client = record(value.client, ["aggregateBytes", "maxUploads", "connectTimeoutMs", "requestDeadlineMs"]);
   const settlement = parseLiveSettlementConfig(value.settlement);
   const restore = parseLiveRestoreConfig(value.restore);
+  const adoption = value.adoption === undefined ? undefined : (() => {
+    const row = record(value.adoption, ["maxBytes", "maxEvents", "ownerOutbox"]);
+    const outbox = record(row.ownerOutbox, ["maxPendingBytes", "maxPendingAgeMs"]);
+    if (!workspaces.some(workspace => workspace.ordinaryReplication)) throw new TypeError("Service owner adoption requires ordinary replication.");
+    return Object.freeze({maxBytes: integer(row.maxBytes), maxEvents: integer(row.maxEvents),
+      ownerOutbox: Object.freeze({maxPendingBytes: integer(outbox.maxPendingBytes), maxPendingAgeMs: integer(outbox.maxPendingAgeMs)})});
+  })();
   const applicationWorkingReserveBytes = integer(ingress.applicationWorkingReserveBytes, 0);
   if (applicationWorkingReserveBytes === 0) throw new TypeError("Live application requires a positive applicationWorkingReserveBytes limit.");
   return Object.freeze({ version: 1, engineExecutable: path(value.engineExecutable, false),
     hostId: parseLiveUpdateIdentifier(value.hostId, "host ID"), instanceId: parseLiveUpdateIdentifier(value.instanceId, "instance ID"),
     workspaces: Object.freeze(workspaces),
-    settlement, restore, sync: parseNativeLiveSyncConfig(value.sync, integer(ingress.aggregateBytes)),
+    settlement, restore, adoption, sync: parseNativeLiveSyncConfig(value.sync, integer(ingress.aggregateBytes)),
     ingress: Object.freeze({ aggregateBytes: integer(ingress.aggregateBytes), applicationWorkingReserveBytes,
       maxUploads: integer(ingress.maxUploads), uploadDeadlineMs: integer(ingress.uploadDeadlineMs, 1, 2_147_483_647) }),
     client: Object.freeze({ aggregateBytes: integer(client.aggregateBytes), maxUploads: integer(client.maxUploads),
@@ -179,7 +188,7 @@ export async function startServiceLiveHost(options: {
     await writeFile(nativeConfig, JSON.stringify({ version: 1, relayNamespace: history.namespace, host,
       workspaces: config.workspaces.map(({ordinaryReplication, ...workspace}) => ({...workspace,
         ...(ordinaryReplication ? {relay: ordinaryReplication.relay} : {})})),
-      ingress: config.ingress, settlement: config.settlement, sync: config.sync,
+      ingress: config.ingress, settlement: config.settlement, sync: config.sync, adoption: config.adoption,
       restore: config.restore ? {maxBytes: config.restore.maxBytes, maxEvents: config.restore.maxEvents} : undefined }), { flag: "wx", mode: 0o600 });
     client = await createEngineClient({ command: config.engineExecutable, authToken: randomBytes(32).toString("base64url"),
       protocolVersion: 2, capabilities: ["blobs"], privateLiveApplication: config.client, connectTimeoutMs: config.client.connectTimeoutMs,

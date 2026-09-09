@@ -29,6 +29,15 @@ pub struct ConfiguredLiveHostConfig {
     settlement: Option<SettlementConfig>,
     restore: Option<crate::live_application_ingress::RestoreConfig>,
     sync: Option<super::live_application::sync::SyncConfig>,
+    adoption: Option<ConfiguredOwnerAdoption>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ConfiguredOwnerAdoption {
+    pub max_bytes: usize,
+    pub max_events: usize,
+    pub owner_outbox: dohc_engine_collab::OwnerOutboxLimits,
 }
 
 #[derive(Deserialize)]
@@ -184,6 +193,7 @@ pub(crate) struct Discovery {
     result: Value,
     settlement: Option<(usize, SettlementAdmission)>,
     restore: Option<crate::live_application_ingress::RestoreConfig>,
+    adoption: Option<ConfiguredOwnerAdoption>,
 }
 
 impl EngineService {
@@ -194,6 +204,24 @@ impl EngineService {
         let ingress_config = config.canonicalize_and_validate()?;
         let service = Arc::new(Self::new());
         let ingress = LiveApplicationIngress::new(service.clone(), ingress_config)?;
+        if let Some(adoption) = &config.adoption {
+            adoption
+                .owner_outbox
+                .validate()
+                .map_err(super::error::map_owner_outbox)?;
+            if adoption.owner_outbox.max_pending_bytes > MAX_WIRE_INTEGER as i64
+                || adoption.owner_outbox.max_pending_age_ms > MAX_WIRE_INTEGER as i64
+                || adoption.max_bytes == 0
+                || adoption.max_events == 0
+                || !config
+                    .workspaces
+                    .iter()
+                    .any(|workspace| workspace.relay.is_some())
+            {
+                return Err(invalid("invalid configured owner adoption"));
+            }
+            ingress.validate_adoption_budget(adoption.max_bytes, adoption.max_events)?;
+        }
         if let Some(config) = &config.restore {
             ingress.validate_restore_budget(config)?;
         }
@@ -229,6 +257,22 @@ impl EngineService {
                 if workspace.relay.is_some() {
                     ordinary_workspaces.insert(handle.clone());
                 }
+                if let Some(adoption) = &config.adoption {
+                    let opened = service.open(Some(&handle))?;
+                    let db_path = opened.db_path.clone();
+                    let workspace_id = workspace.workspace_id.clone();
+                    let limits = adoption.owner_outbox.clone();
+                    let mismatch = tokio::task::spawn_blocking(move || {
+                        let store = dohc_engine_storage::EngineStore::open_read_only(&db_path).map_err(|_|invalid("owner adoption budget read failed"))?;
+                        store.read_with(|conn|conn.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions a JOIN ydoc_docs d
+                             ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id
+                             AND d.lineage_claim_id=a.lineage_claim_id WHERE a.workspace_id=?1 AND (a.max_pending_bytes>?2 OR a.max_pending_age_ms>?3))",
+                            rusqlite::params![workspace_id,limits.max_pending_bytes,limits.max_pending_age_ms],|row|row.get::<_,bool>(0)))
+                            .map_err(|_|invalid("owner adoption budget read failed"))
+                    }).await.map_err(|_|invalid("owner adoption budget read interrupted"))??;
+                    if mismatch { return Err(invalid("configured owner outbox budget is smaller than retained adoption")); }
+                }
                 service.provision_live_application(owner.handle(), LiveApplicationHostConfig {
                     workspace: handle.clone(), namespace: config.relay_namespace.clone(),
                     coordinate: config.host.coordinate(), max_registrations: workspace.max_registrations,
@@ -249,6 +293,7 @@ impl EngineService {
                     settlement,
                     sync,
                     restore: config.restore,
+                    adoption: config.adoption,
                 });
                 Ok((service, owner, ingress))
             }
@@ -276,6 +321,36 @@ impl EngineService {
             .and_then(|host| host.result["relayNamespace"].as_str())
             .map(str::to_owned)
             .ok_or_else(|| invalid("ordinary service namespace unavailable"))
+    }
+
+    pub(crate) fn owner_adoption_config(
+        &self,
+        connection: &ConnectionHandle,
+        workspace: Option<&WorkspaceHandle>,
+    ) -> Result<ConfiguredOwnerAdoption, WireError> {
+        if let Some(host) = self.ordinary_live_host.get() {
+            if !host.connection.same_connection(connection) || !connection.is_current() {
+                return Err(invalid("owner adoption connection retired"));
+            }
+            return Ok(ConfiguredOwnerAdoption {
+                max_bytes: host.max_adoption_bytes,
+                max_events: host.max_adoption_events,
+                owner_outbox: host.owner_outbox.clone(),
+            });
+        }
+        let host = self
+            .configured_live_host
+            .get()
+            .ok_or_else(|| invalid("owner adoption not configured"))?;
+        if !host.connection.same_connection(connection)
+            || !connection.is_current()
+            || !workspace.is_some_and(|workspace| host.ordinary_workspaces.contains(workspace))
+        {
+            return Err(invalid("owner adoption connection retired"));
+        }
+        host.adoption
+            .clone()
+            .ok_or_else(|| invalid("owner adoption not configured"))
     }
 
     pub(super) fn configured_ordinary_request(
@@ -459,6 +534,58 @@ mod tests {
         for handle in handles {
             service.workspace_close(Some(handle)).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn owner_adoption_is_limited_to_the_configured_connection_and_attached_workspace() {
+        let attached = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let private = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let mut config = config(&[(attached.path(), "attached"), (private.path(), "private")]);
+        config.workspaces[0].relay = Some(
+            serde_json::from_value(
+                json!({"baseUrl":"https://relay.invalid","bearerToken":"owner"}),
+            )
+            .unwrap(),
+        );
+        config.adoption = Some(ConfiguredOwnerAdoption {
+            max_bytes: 1_000_000,
+            max_events: 10,
+            owner_outbox: dohc_engine_collab::OwnerOutboxLimits {
+                max_pending_bytes: 1_000_000,
+                max_pending_age_ms: 60_000,
+            },
+        });
+        let (service, owner, _ingress) = EngineService::configured_live_host(config).await.unwrap();
+        let discovery = service.configured_live_host.get().unwrap();
+        let attached: WorkspaceHandle =
+            serde_json::from_value(discovery.result["workspaces"][0]["workspaceHandle"].clone())
+                .unwrap();
+        let private: WorkspaceHandle =
+            serde_json::from_value(discovery.result["workspaces"][1]["workspaceHandle"].clone())
+                .unwrap();
+        assert!(
+            service
+                .owner_adoption_config(&owner.handle(), Some(&attached))
+                .is_ok()
+        );
+        assert!(
+            service
+                .owner_adoption_config(&owner.handle(), Some(&private))
+                .is_err()
+        );
+        let other = ConnectionOwner::authenticated();
+        assert!(
+            service
+                .owner_adoption_config(&other.handle(), Some(&attached))
+                .is_err()
+        );
+        owner.retire();
+        assert!(
+            service
+                .owner_adoption_config(&owner.handle(), Some(&attached))
+                .is_err()
+        );
+        close(&service).await;
     }
 
     #[tokio::test]

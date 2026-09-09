@@ -73,6 +73,11 @@ impl EngineService {
                 | "sync.adoptJoinIdentity"
                 | "sync.pull"
                 | "liveApplication.captureOwnerActivation"
+                | "liveApplication.releaseOwnerActivation"
+                | "liveApplication.ownerState"
+                | "liveApplication.adoptOwner"
+                | "ydoc.ownerOutbox.readPending"
+                | "ydoc.ownerOutbox.acknowledge"
                 | "sync.materializePendingCursor"
                 | "sync.commitCursor"
                 | "sync.push"
@@ -183,6 +188,9 @@ impl EngineService {
         }
         if request.method == "liveApplication.captureOwnerActivation" {
             return self.capture_owner_activation(ctx, request).await;
+        }
+        if request.method == "liveApplication.releaseOwnerActivation" {
+            return self.release_owner_activation(ctx, request).await;
         }
         if request.method == "ydoc.open" {
             let (result, blob_egress) = self
