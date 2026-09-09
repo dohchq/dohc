@@ -3,13 +3,13 @@ import {act} from "react";
 import {createRoot, type Root} from "react-dom/client";
 import {afterEach, beforeEach, expect, it, vi} from "vitest";
 import {markdownToYDoc, getDohcYDocBodyFragment} from "@dohc/ydoc-projection";
-import type {NamedLiveBrowserState} from "./namedLiveBrowserTransport";
+import type {NamedLiveBrowserState} from "@dohc/ydoc-projection/named-live-browser-transport";
 import NamedRecipientApp from "./NamedRecipientApp";
 import {jsonResponse, settle, setControlValue} from "./testing";
 
 const sessions: {state: NamedLiveBrowserState; close: ReturnType<typeof vi.fn>; notify(): void; path: string}[] = [];
-vi.mock("./namedLiveBrowserTransport", async importOriginal => {
-  const actual = await importOriginal<typeof import("./namedLiveBrowserTransport")>();
+vi.mock("@dohc/ydoc-projection/named-live-browser-transport", async importOriginal => {
+  const actual = await importOriginal<typeof import("@dohc/ydoc-projection/named-live-browser-transport")>();
   return {...actual, createNamedLiveBrowserTransport: vi.fn(() => {
     let close = () => {};
     return {close: () => close(), select(selection: {objectId: string}) {

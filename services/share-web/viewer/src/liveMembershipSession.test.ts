@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { parseRedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
 import { decodeLiveFrame, type LiveFrame, type LiveMembershipFrame } from "@dohc/live-session-contract/live-frame";
-import { createNamedLiveProvider } from "./namedLiveProvider";
+import { createNamedLiveProvider } from "@dohc/ydoc-projection/named-live-provider";
 import { createNamedLiveFrameSession, type NamedFrameHostSession } from "../../../sync-relay/src/namedLiveFrameSession";
 import { createLiveMembershipRegistry } from "../../../sync-relay/src/liveMembership";
 

@@ -1,5 +1,5 @@
 import {createNamedRecipientDocumentsClient} from "./namedRecipientDocuments";
-import type {NamedLiveBrowserLimits} from "../viewer/src/namedLiveBrowserTransport";
+import type {NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";

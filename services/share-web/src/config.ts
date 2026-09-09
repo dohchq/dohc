@@ -2,7 +2,7 @@ import { canonicalRelayUrl } from "@dohc/workspace-contracts/relay-values";
 import type { AccountAuthConfig } from "./accountAuth";
 import { parseNamedLiveBrowserClientLimits, type NamedLiveBrowserClientLimits } from "./namedLiveBrowserClient";
 import {parseLiveGatewayLimits, type LiveGatewayLimits} from "./liveGateway";
-import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "../viewer/src/namedLiveBrowserTransport";
+import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 
 export interface ShareWebConfig {
   relayUrl: string;

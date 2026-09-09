@@ -6,7 +6,7 @@ import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import { createLiveFrameSession, encodeLiveFrame, encodeLiveFrameSync,
   type LiveFrame, type LiveFrameBegin } from "@dohc/live-session-contract/live-frame";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import { createNamedLiveProvider, type NamedLiveProviderLimits } from "./namedLiveProvider";
+import { createNamedLiveProvider, type NamedLiveProviderLimits } from "@dohc/ydoc-projection/named-live-provider";
 
 const limits = (): NamedLiveProviderLimits => ({
   frames: { receive: { maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384 },

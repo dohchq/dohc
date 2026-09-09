@@ -5,7 +5,7 @@ import { getDohcYDocBodyFragment } from "@dohc/ydoc-projection/body-fragment";
 import { createLiveFrameSession, encodeLiveFrameSync, type LiveFrame, type LiveFrameBegin } from "@dohc/live-session-contract/live-frame";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import { createNamedLiveBrowserTransport, type NamedLiveBrowserLimits } from "./namedLiveBrowserTransport";
+import { createNamedLiveBrowserTransport, type NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
 
 const selection = { accountId: "reader", workspaceId: "workspace", grantId: "grant", objectId: "document" };
 const binding: LiveObjectBinding = { workspaceId: "workspace", mainVersionId: "main", objectId: "document",

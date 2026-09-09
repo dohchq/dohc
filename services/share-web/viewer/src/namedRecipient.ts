@@ -1,5 +1,5 @@
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
-import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "./namedLiveBrowserTransport";
+import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {RETRY_BUDGET_MS} from "./retry";
 
 // The existing share-web authenticated metadata ceiling also bounds invitation and account responses.

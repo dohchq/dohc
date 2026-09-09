@@ -6,7 +6,7 @@ import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import { decodeLiveFrame, encodeLiveFrame, encodeLiveFrameSync, type LiveFrame } from "@dohc/live-session-contract/live-frame";
 import { createNamedLiveFrameSession, type NamedFrameAppliedUpdate, type NamedFrameHostSession,
   type NamedFrameSubmissionResult } from "../../../sync-relay/src/namedLiveFrameSession.js";
-import { createNamedLiveProvider } from "./namedLiveProvider";
+import { createNamedLiveProvider } from "@dohc/ydoc-projection/named-live-provider";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const frames = { receive: { maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384 },

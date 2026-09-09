@@ -1,5 +1,5 @@
 import {useCallback, useEffect, useRef, useState, type FormEvent} from "react";
-import {createNamedLiveBrowserTransport, type NamedLiveBrowserState} from "./namedLiveBrowserTransport";
+import {createNamedLiveBrowserTransport, type NamedLiveBrowserState} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {accountUser, namedFiles, namedRequest, type NamedRecipientFiles} from "./namedRecipient";
 import {NamedDocumentEditor, type NamedDocumentSession} from "./NamedDocumentEditor";
 

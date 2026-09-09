@@ -2,7 +2,7 @@ import {readBoundedJson} from "@dohc/service-http";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import {namedAccountCookie} from "./namedAccountCookie";
 import {parseNamedLiveBrowserClientLimits, type NamedLiveBrowserClientLimits} from "./namedLiveBrowserClient";
-import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "../viewer/src/namedLiveBrowserTransport";
+import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 
 export function createNamedRecipientDocumentsClient(options: {relayUrl: string; publicOrigin: string; exchangeKey: string;
   limits: NamedLiveBrowserClientLimits; browserLimits: NamedLiveBrowserLimits; fetchRelay(request: Request): Promise<Response>}) {

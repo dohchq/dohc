@@ -79,7 +79,7 @@ const REMOTE = Symbol("named-live-remote");
  * an in-memory draft; reconnecting a quarantined provider is deliberately forbidden.
  */
 export function createNamedLiveProvider(input: NamedLiveProviderLimits,
-  expectedDocument?: Pick<LiveObjectBinding, "workspaceId" | "objectId">) {
+  expectedDocument?: Pick<LiveObjectBinding, "objectId"> & Partial<Pick<LiveObjectBinding, "workspaceId">>) {
   const expected = expectedDocument && { ...expectedDocument };
   const limits: NamedLiveProviderLimits = {
     frames: { ...input.frames, receive: { ...input.frames.receive } },
@@ -246,7 +246,7 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits,
           if (begin.purpose === "initial-sync") {
             const sync = decodeLiveFrameSync(content, limits.frames.receive);
             if (sync.binding.mainVersionId !== "main" ||
-                (expected && (sync.binding.workspaceId !== expected.workspaceId || sync.binding.objectId !== expected.objectId)) ||
+                (expected && ((expected.workspaceId !== undefined && sync.binding.workspaceId !== expected.workspaceId) || sync.binding.objectId !== expected.objectId)) ||
                 (binding && !sameBinding(binding, sync.binding))) { quarantine("binding-changed"); return; }
             if (begin.appliedThroughJournalCursor < highestObservedCursor) { quarantine("stale-sync-cut"); return; }
             const hostVector = Y.decodeStateVector(sync.hostVector);

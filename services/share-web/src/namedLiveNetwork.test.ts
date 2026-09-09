@@ -18,7 +18,7 @@ import { fixture as ticketFixture, audience, binding, host, key, scope } from ".
 import { createShareWebApplication } from "./server.js";
 import { createLiveGateway } from "./liveGateway.js";
 import { createNamedLiveRelayRoute, namedLiveGatewayRequest } from "./namedLiveRelayRoute.js";
-import { createNamedLiveProvider } from "../viewer/src/namedLiveProvider.js";
+import { createNamedLiveProvider } from "@dohc/ydoc-projection/named-live-provider";
 
 const exchangeKey = "network-test-key-".repeat(3), cookieName = getCookies({ baseURL: audience }).sessionToken.name;
 const cookie = `${cookieName}=reader-account`, otherCookie = `${cookieName}=other-account`;

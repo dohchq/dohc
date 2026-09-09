@@ -26,7 +26,7 @@ import { createNamedFrameChanges } from "../../sync-relay/src/liveHostChanges.js
 import { createShareWebApplication } from "./server.js";
 import { createLiveGateway } from "./liveGateway.js";
 import { createNamedLiveRelayRoute, namedLiveGatewayRequest } from "./namedLiveRelayRoute.js";
-import { createNamedLiveBrowserTransport, type NamedLiveBrowserState } from "../viewer/src/namedLiveBrowserTransport.js";
+import { createNamedLiveBrowserTransport, type NamedLiveBrowserState } from "@dohc/ydoc-projection/named-live-browser-transport";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 // Explicit proof inputs, not product limits or release defaults.

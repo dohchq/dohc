@@ -1,7 +1,7 @@
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
 import {createLiveFrameSession} from "@dohc/live-session-contract/live-frame";
-import { createNamedLiveProvider, type NamedLiveProviderLimits, type NamedLiveProviderState } from "./namedLiveProvider";
+import { createNamedLiveProvider, type NamedLiveProviderLimits, type NamedLiveProviderState } from "@dohc/ydoc-projection/named-live-provider";
 
 /** Account ID is a stale-selection guard, never an authentication credential. */
 export interface NamedLiveSelection {
@@ -23,7 +23,9 @@ export interface NamedLiveBrowserState extends Omit<NamedLiveProviderState, "sta
 }
 type BrowserSocket = Pick<WebSocket, "readyState" | "bufferedAmount" | "protocol" | "extensions" | "binaryType" |
   "send" | "close" | "addEventListener" | "removeEventListener">;
-interface Options {
+export interface LiveSelection { objectId: string; workspaceId?: string }
+interface Options<Selection extends LiveSelection> {
+  authorize?(selection: Selection, signal: AbortSignal): Promise<{ticketToken: string; discriminator: string; websocketUrl: string}>;
   publicOrigin: string;
   limits: NamedLiveBrowserLimits;
   fetch?: typeof fetch;
@@ -53,14 +55,14 @@ export function parseNamedLiveBrowserLimits(value: unknown): NamedLiveBrowserLim
 }
 
 /** One current selection. Retired handles retain only their in-memory draft for caller-owned recovery. */
-export function createNamedLiveBrowserTransport(options: Options) {
+export function createNamedLiveBrowserTransport<Selection extends LiveSelection = NamedLiveSelection>(options: Options<Selection>) {
   const origin = new URL(options.publicOrigin), limits = parseNamedLiveBrowserLimits(options.limits);
   if (origin.protocol !== "https:" || origin.origin !== options.publicOrigin) throw new TypeError("Named editing requires an HTTPS origin.");
   const request = options.fetch ?? globalThis.fetch.bind(globalThis);
   const openSocket = options.openSocket ?? ((url, protocols) => new WebSocket(url, protocols));
   let selected: ReturnType<typeof session> | undefined;
 
-  function session(selection: NamedLiveSelection) {
+  function session(selection: Selection) {
     const target = { ...selection };
     for (const value of Object.values(target)) parseLiveUpdateIdentifier(value);
     const provider = createNamedLiveProvider(limits.provider, target);
@@ -197,6 +199,10 @@ export function createNamedLiveBrowserTransport(options: Options) {
         try {
           await retiring;
           if (!current(held)) return;
+          let admitted: {discriminator: string; ticketToken: string; websocketUrl: string};
+          if (options.authorize) admitted = await options.authorize(target, held.controller.signal);
+          else {
+          if (!("accountId" in target) || !("grantId" in target)) throw new Error("Named account selection required.");
           const account = await json(held, "/api/account/session");
           if (!exact(account, "user")) throw new Error("Invalid account response.");
           if (account.user === null) throw new Refused();
@@ -207,10 +213,15 @@ export function createNamedLiveBrowserTransport(options: Options) {
               typeof bootstrap.expiresAtMs !== "number" || !Number.isSafeInteger(bootstrap.expiresAtMs) || bootstrap.expiresAtMs <= Date.now()) throw new Error("Invalid session.");
           const ticket = await json(held, "/api/live/named-ticket", { discriminator: bootstrap.discriminator, objectId: target.objectId });
           if (!exact(ticket, "expiresAtMs,token") || typeof ticket.expiresAtMs !== "number" || !Number.isSafeInteger(ticket.expiresAtMs) || ticket.expiresAtMs <= Date.now()) throw new Error("Invalid ticket.");
-          parseLiveTicketToken(ticket.token);
-          const token = ticket.token as string;
+          const namedUrl = new URL("/api/live", origin); namedUrl.protocol = "wss:"; namedUrl.searchParams.set("session", bootstrap.discriminator);
+          admitted = {discriminator: bootstrap.discriminator, ticketToken: ticket.token as string, websocketUrl: namedUrl.href};
+          }
+          if (!/^[A-Za-z0-9_-]{12}$/.test(admitted.discriminator)) throw new Error("Invalid admission.");
+          parseLiveTicketToken(admitted.ticketToken);
+          const token = admitted.ticketToken;
           if (!current(held)) return;
-          const url = new URL("/api/live", origin); url.protocol = "wss:"; url.searchParams.set("session", bootstrap.discriminator);
+          const url = new URL(admitted.websocketUrl);
+          if (url.protocol !== "wss:" || url.host !== origin.host || url.username || url.password || url.hash || url.searchParams.get("session") !== admitted.discriminator) throw new Error("Invalid live route.");
           await attach(held, openSocket(url.href, ["dohc-live-v1", `dohc-live-ticket.${token}`]));
         } catch (error) {
           fail(held, error instanceof Refused ? (provider.state().pendingUpdates ? "quarantined" : "refused") : "disconnected",
@@ -228,7 +239,7 @@ export function createNamedLiveBrowserTransport(options: Options) {
     };
   }
   return {
-    select(selection: NamedLiveSelection) { selected?.close(); selected = session(selection); return selected; },
+    select(selection: Selection) { selected?.close(); selected = session(selection); return selected; },
     close() { selected?.close(); selected = undefined; },
   };
 }

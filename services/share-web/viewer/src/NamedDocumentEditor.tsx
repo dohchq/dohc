@@ -1,6 +1,6 @@
 import {useEffect, useRef, useState} from "react";
 import {mountLiveBodyEditor} from "@dohc/ydoc-projection/browser-editor";
-import type {createNamedLiveBrowserTransport, NamedLiveBrowserState} from "./namedLiveBrowserTransport";
+import type {createNamedLiveBrowserTransport, NamedLiveBrowserState} from "@dohc/ydoc-projection/named-live-browser-transport";
 import "./namedRecipient.css";
 
 export type NamedDocumentSession = ReturnType<ReturnType<typeof createNamedLiveBrowserTransport>["select"]>;
