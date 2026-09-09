@@ -70,6 +70,7 @@ it("prepares attached ordinary replication without registering a partly activate
       const request = args[0] as {method: string};
       if (request.method === "liveApplication.hosts") return discovery();
       if (request.method === "sync.adoptJoinIdentity") return {result: {adopted: true}} as never;
+      if (request.method === "sync.materializePendingCursor") return {result: {materialized: true}} as never;
       if (request.method === "sync.commitCursor") return {result: {committed: true, sharingDeclined: []}} as never;
       return {result: {status: "complete", nextCursor: 7, pendingCursor: {kind: "relay", token: "native-issued-token"},
         hasMore: false, fetched: 1, applied: 1, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [],
@@ -85,23 +86,22 @@ it("prepares attached ordinary replication without registering a partly activate
     expect(f.storage.getLiveHostControl()).toEqual(before);
     expect(f.storage.getLiveHostControl()?.registeredConnectionId).toBeNull();
     await expect(host.drain({workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64)})).rejects.toThrow("retired");
-    const materialize = vi.fn(async () => {});
-    expect(await host.prepareOrdinary("workspace", materialize)).toMatchObject({nextCursor: 7, hasMore: false});
-    expect(materialize).toHaveBeenCalledWith([{versionId: "main", path: "work.md", operation: "write", contentKind: "text"}],
-      expect.objectContaining({client: captured.client, workspace: "actual-open-handle", workspaceId: "workspace", root: f.config.workspaces[0]!.root}));
+    expect(await host.prepareOrdinary("workspace")).toMatchObject({nextCursor: 7, hasMore: false});
+    expect(captured.client.sendRequest).toHaveBeenCalledWith(expect.objectContaining({method: "sync.materializePendingCursor",
+      workspace: "actual-open-handle", params: {workspaceId: "workspace", pendingCursor: {kind: "relay", token: "native-issued-token"}}}), expect.any(AbortSignal));
     expect(f.storage.getLiveHostControl()).toEqual(before);
   } finally { await host.close(); }
   expect(f.storage.getLiveHostControl()).toEqual(before);
 });
 
-it("requires a materializer before starting an attached pull", async () => {
+it("rejects an unconfigured ordinary workspace before starting a pull", async () => {
   const f = await fixture(); let captured!: ReturnType<typeof clientFrom>;
   Object.assign(f.config.workspaces[0]!, {ordinaryReplication: {relay: {baseUrl: "https://relay.example", bearerToken: "owner"},
     identity: {kind: "claim"}, maxPagesPerPull: 1}}); await f.save();
   spawn.mockImplementation(async options => {captured = clientFrom(options); return captured.client;});
   const host = await startServiceLiveHost(f);
   try {
-    await expect(host.prepareOrdinary("workspace", undefined as never)).rejects.toThrow("materialization");
+    await expect(host.prepareOrdinary("other")).rejects.toThrow("attachment");
     expect(captured.client.sendRequest).toHaveBeenCalledTimes(1);
   } finally {await host.close();}
 });

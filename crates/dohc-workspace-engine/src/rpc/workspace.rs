@@ -2182,6 +2182,8 @@ mod tests {
             PendingCursor {
                 handle: handle.clone(),
                 workspace_id: "evicted-cursor-cleanup".to_owned(),
+                materialization_paths: Vec::new(),
+                materialized: false,
                 cursor: IssuedCursor::Relay(dohc_engine_sync::RelayCursor {
                     cursor: 7,
                     replication_epoch: "epoch".to_owned(),

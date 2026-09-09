@@ -1,5 +1,5 @@
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
-import type { MaterializeRelayPullPage, RelayMaterializedPath, SharingDeclined } from "@dohc/workspace-contracts/relay";
+import type { SharingDeclined } from "@dohc/workspace-contracts/relay";
 
 export interface ServiceOrdinaryReplicationConfig {
   readonly relay: { readonly baseUrl: string; readonly bearerToken: string };
@@ -73,16 +73,7 @@ function declines(value: unknown): SharingDeclined[] {
     return {path: text(row.path), constraint: text(row.constraint), limitBytes: integer(row.limitBytes), observedBytes: integer(row.observedBytes)};
   });
 }
-function paths(value: unknown): RelayMaterializedPath[] {
-  return array(value).map(value => {
-    const row = record(value), operation = row.operation, contentKind = row.contentKind;
-    if ((operation !== "write" && operation !== "delete") ||
-      (contentKind !== "text" && contentKind !== "binary" && contentKind !== "secret")) throw new Error("Invalid ordinary materialization path.");
-    return {versionId: text(row.versionId), path: text(row.path), operation, contentKind};
-  });
-}
-
-/** One pass at a time. A caller must finish real workspace materialization before its callback resolves. */
+/** One pass at a time. Native materialization must finish before the cursor commits. */
 export class ServiceOrdinaryReplication {
   readonly #config: ServiceOrdinaryReplicationConfig;
   #initialized = false;
@@ -119,8 +110,7 @@ export class ServiceOrdinaryReplication {
       return await task(signal);
     } finally { this.#running = false; }
   }
-  async pull(materializePage: MaterializeRelayPullPage, callerSignal?: AbortSignal) {
-    if (typeof materializePage !== "function") throw new Error("Ordinary pull requires workspace materialization.");
+  async pull(callerSignal?: AbortSignal) {
     return this.#run(callerSignal, async signal => {
       const pages: ServiceOrdinaryPullPage[] = [];
       let previous: number | undefined;
@@ -134,7 +124,6 @@ export class ServiceOrdinaryReplication {
         const pending = fields(result.pendingCursor, ["kind", "token"]);
         if (pending.kind !== "relay") throw new Error("Ordinary pull returned a foreign cursor.");
         const cursor = {kind: "relay", token: text(pending.token)};
-        const changedPaths = paths(result.changedPaths);
         const page = {nextCursor, fetched: integer(result.fetched), applied: integer(result.applied), refused: integer(result.refused),
           skipped: integer(result.skipped), conflictsOpened: integer(result.conflictsOpened),
           refusals: array(result.refusals).map(value => {
@@ -142,7 +131,8 @@ export class ServiceOrdinaryReplication {
             return {workspaceId: text(row.workspaceId), originId: text(row.originId), originSeq: integer(row.originSeq),
               opKind: text(row.opKind), code: text(row.code), reason: text(row.reason)};
           }), sharingDeclined: declines(result.sharingDeclined)};
-        await materializePage(changedPaths);
+        const materialized = await this.#request("sync.materializePendingCursor", {pendingCursor: cursor}, signal);
+        if (materialized.materialized !== true) throw new Error("Ordinary workspace materialization did not complete.");
         this.#check(signal);
         const committed = await this.#request("sync.commitCursor", {pendingCursor: cursor}, signal);
         if (committed.committed !== true) throw new Error("Ordinary relay cursor did not commit.");

@@ -841,3 +841,88 @@ pub(super) fn ensure_mutation_version_on_store(
     versions.ensure_main_version(workspace_id, "main", now_ms, faults)?;
     Ok(())
 }
+
+impl ActorHandle {
+    /// Materialize only paths owned by one native ordinary pull page.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn materialize_relay_page(
+        &self,
+        workspace_id: String,
+        root_dir: PathBuf,
+        changes: Vec<dohc_engine_sync::MomentMaterializationChange>,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        token: CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+            if changes.is_empty() { return Ok(()); }
+            let active = VersionedTextStore::new(store).get_active_version(&workspace_id)?.version_id;
+            let policy = read_engine_search_policy(&root_dir);
+            if policy.is_degraded() {
+                return Err(DomainError::StateCorrupt { reason: "ordinary materialization policy unavailable" }.into());
+            }
+            let mut secret_key = None;
+            for change in changes {
+                if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+                // A retry from a former active version cannot repaint the current version.
+                if change.version_id != active { continue; }
+                let secret = change.content_kind == "secret";
+                if !secret && !resolve_effective_policy(&change.path, policy.files_policy.as_deref(), policy.visibility_policy.as_deref()).tracked {
+                    return Err(DomainError::InvalidPath { reason: "ordinary materialization path is not tracked" }.into());
+                }
+                let state = probe_projection_target(&root_dir, &change.path,
+                    if secret { ProjectionTargetKind::Secret } else { ProjectionTargetKind::Plaintext });
+                let preimage = projection_preimage(&state).ok_or(DomainError::InvalidPath {
+                    reason: "ordinary materialization target is unsafe or unreadable",
+                })?;
+                let desired = if secret {
+                    if secret_key.is_none() { secret_key = Some(load_projection_secret_key(&root_dir)?); }
+                    let plaintext = SecretFileStore::new(store, secret_key.as_ref().expect("secret key loaded"))
+                        .materialize_secret_file(&workspace_id, &active, &change.path)?;
+                    if let Some(plaintext) = plaintext {
+                        let equal = matches!(&state, ProjectionTargetState::Text {sha256} if sha256 == &hex_sha256(plaintext.as_bytes()));
+                        drop(plaintext);
+                        Some((secret_ciphertext_sha(store, &workspace_id, &active, &change.path)?, None, equal))
+                    } else { None }
+                } else if change.content_kind == "binary" {
+                    VersionedTextStore::new(store).read_binary(&workspace_id, &active, &change.path)?
+                        .map(|head| { let equal = matches!(&state, ProjectionTargetState::Binary {sha256} if sha256 == &head.sha256);
+                            (head.sha256, None, equal) })
+                } else if change.content_kind == "text" {
+                    VersionedTextStore::new(store).read_text(&workspace_id, &active, &change.path)?
+                        .map(|head| { let equal = matches!(&state, ProjectionTargetState::Text {sha256} if sha256 == &head.blob_sha256);
+                            (head.blob_sha256, Some(head.text.into_bytes()), equal) })
+                } else { return Err(DomainError::StateCorrupt { reason: "ordinary materialization kind is invalid" }.into()); };
+                let (operation, sha, inline) = match (change.operation, desired) {
+                    ("write", Some((_, _, true))) => continue,
+                    ("write", Some((sha, inline, false))) => (MaterializationOperation::Write, sha, inline),
+                    ("delete", None) if matches!(state, ProjectionTargetState::Absent) => continue,
+                    ("delete", None) => (MaterializationOperation::Delete, hex_sha256(&[]), Some(Vec::new())),
+                    _ => return Err(DomainError::StateCorrupt { reason: "ordinary materialization head changed" }.into()),
+                };
+                let projection = planned_projection(&workspace_id, &active, change.path, operation, sha,
+                    preimage, now_ms, now_ms, secret, inline);
+                if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+                let outcome = store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                    if let Some(bytes) = projection.inline_content.as_deref() {
+                        if put_binary_blob(tx, bytes)? != projection.spec.content_sha256 {
+                            return Err(StorageError::corrupt_public(rusqlite::Error::InvalidQuery));
+                        }
+                    }
+                    upsert_projection_job(tx, &projection.spec, projection.operation)?;
+                    Ok::<_, StorageError>(())
+                })?;
+                if matches!(outcome, TxnOutcome::Crashed {..}) { return Err(RuntimeError::OperationCrashed); }
+                let selected = HashSet::from([projection.spec.job_id]);
+                let replay = replay_pending_materializations(store, &root_dir,
+                    MaterializationReplayScope {workspace_id: &workspace_id, self_writes: Some(self_writes.as_ref())},
+                    now_ms, &dohc_engine_storage::NoFaults, Some(&selected), false)?;
+                let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
+                if failed_jobs > 0 { return Err(RuntimeError::ActiveVersionMaterializationIncomplete {failed_jobs}); }
+            }
+            if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+            Ok(())
+        }).await
+    }
+}

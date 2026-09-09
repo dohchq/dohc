@@ -20,13 +20,6 @@ import {snapshotStopRestoreLookup} from "./liveRestoreDelivery.js";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
 import {parseLiveRestoreConfig, LiveRestorePreparation, type LiveRestoreConfig} from "./liveRestorePreparation.js";
 import {parseServiceOrdinaryReplicationConfig, ServiceOrdinaryReplication, type ServiceOrdinaryReplicationConfig} from "./serviceOrdinaryReplication.js";
-import type {RelayMaterializedPath} from "@dohc/workspace-contracts/relay";
-
-export type ServiceOrdinaryMaterializer = (paths: readonly RelayMaterializedPath[], native: {
-  readonly client: EngineClient; readonly workspace: string; readonly workspaceId: string; readonly root: string;
-  readonly signal: AbortSignal; assertCurrent(): void;
-}) => Promise<void>;
-
 interface ServiceLiveHostConfig {
   readonly version: 1;
   readonly engineExecutable: string;
@@ -227,15 +220,10 @@ export async function startServiceLiveHost(options: {
     }
     finishStartup();
     return Object.freeze({ coordinate, invalidated: signal,
-      async prepareOrdinary(workspaceId: string, materializePage: ServiceOrdinaryMaterializer, callerSignal?: AbortSignal) {
+      async prepareOrdinary(workspaceId: string, callerSignal?: AbortSignal) {
         const driver = ordinary.get(workspaceId);
         if (!driver) throw new Error("Workspace has no ordinary replication attachment.");
-        if (typeof materializePage !== "function") throw new Error("Ordinary pull requires workspace materialization.");
-        const joined = callerSignal ? AbortSignal.any([signal, callerSignal]) : signal;
-        const native = Object.freeze({client: client!, workspace: driver.connection.workspace, workspaceId,
-          root: config.workspaces.find(row => row.workspaceId === workspaceId)!.root, signal: joined,
-          assertCurrent() {joined.throwIfAborted(); checkPreparing();}});
-        return driver.pull(paths => materializePage(paths, native), joined);
+        return driver.pull(callerSignal);
       },
       async captureNative(value: LiveObjectBinding, callerSignal?: AbortSignal) {
         if (!changes || !config.sync) throw new Error("Named frame sync is not configured on this service host.");

@@ -72,6 +72,7 @@ impl EngineService {
             "sync.claim"
                 | "sync.adoptJoinIdentity"
                 | "sync.pull"
+                | "sync.materializePendingCursor"
                 | "sync.commitCursor"
                 | "sync.push"
         ) && self.configured_ordinary_request(ctx, request)
@@ -245,6 +246,14 @@ impl EngineService {
             }
             "sync.pull" => {
                 Box::pin(self.sync_pull(&ctx, request.workspace, request.params)).await?
+            }
+            "sync.materializePendingCursor" => {
+                Box::pin(self.sync_materialize_pending_cursor(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                ))
+                .await?
             }
             "sync.commitCursor" => {
                 Box::pin(self.sync_commit_cursor(&ctx, request.workspace, request.params)).await?
@@ -917,6 +926,7 @@ mod tests {
             "sync.claim",
             "sync.adoptJoinIdentity",
             "sync.pull",
+            "sync.materializePendingCursor",
             "sync.commitCursor",
             "sync.push",
         ] {
@@ -1178,6 +1188,7 @@ mod tests {
             "share.view.recordIdentity",
             "sync.adoptJoinIdentity",
             "sync.claim",
+            "sync.materializePendingCursor",
             "sync.commitCursor",
             "sync.probe",
             "sync.pull",
