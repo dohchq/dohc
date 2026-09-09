@@ -101,7 +101,7 @@ beforeEach(() => {
   recoverMock.mockReset();
   pushMock.mockImplementation(async () => ({
     pushed: 0,
-    originsPushed: [],
+    originsPushed: [], ownerAdmissionPending: [],
     sharingDeclined: [],
   }));
   pullMock.mockImplementation(async () => pullResult());
@@ -122,7 +122,7 @@ describe("relaySyncEngine", () => {
     const operations: RelaySyncOperations = {
       push: vi.fn(async () => ({
         pushed: 1,
-        originsPushed: [],
+        originsPushed: [], ownerAdmissionPending: [],
         sharingDeclined: [],
       })),
       pull: vi.fn(async () => pullResult()),
@@ -152,7 +152,7 @@ describe("relaySyncEngine", () => {
         .mockRejectedValueOnce(new RelayOriginDivergedError())
         .mockResolvedValue({
           pushed: 1,
-          originsPushed: [],
+          originsPushed: [], ownerAdmissionPending: [],
           sharingDeclined: [],
         }),
       pull: vi.fn(async () => pullResult()),
@@ -306,7 +306,7 @@ describe("relaySyncEngine", () => {
       .mockRejectedValueOnce(new RelayOriginDivergedError())
       .mockResolvedValue({
         pushed: 1,
-        originsPushed: ["origin_new"],
+        originsPushed: ["origin_new"], ownerAdmissionPending: [],
         sharingDeclined: [],
       });
     const sync = engine({ capture: cap });
@@ -549,4 +549,16 @@ describe("relaySyncEngine", () => {
     sync.queueSync();
     expect(sync.snapshot().pendingChangeCount).toBe(0);
   });
+});
+
+it("keeps owner admission pending after a successful pull and clears it only after publication", async () => {
+  const pending={workspaceId:"workspace",originId:"origin",originSeq:4,versionId:"main",objectId:"object",path:"notes.md"};
+  pushMock.mockResolvedValueOnce({pushed:0,originsPushed:[],sharingDeclined:[],ownerAdmissionPending:[pending]});
+  const sync=engine({capture:capture()});await sync.start();
+  expect(sync.snapshot().ownerAdmissionPending).toEqual([pending]);
+  expect(sync.snapshot().pendingChangeCount).toBe(1);
+  await vi.advanceTimersByTimeAsync(500);
+  expect(sync.snapshot().ownerAdmissionPending).toEqual([]);
+  expect(sync.snapshot().pendingChangeCount).toBe(0);
+  await sync.stop();
 });

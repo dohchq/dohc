@@ -82,7 +82,7 @@ class MockDaemon implements EngineDaemonClient {
         case "sync.push":
           return {
             status: "complete",
-            pushed: 3,
+            pushed: 3, ownerAdmissionPending: [],
             fetched: 0,
             applied: 0,
             skipped: 0,
@@ -96,7 +96,7 @@ class MockDaemon implements EngineDaemonClient {
         case "sync.pull":
           return {
             status: "complete",
-            pushed: 0,
+            pushed: 0, ownerAdmissionPending: [],
             fetched: 4,
             applied: 2,
             skipped: 2,
@@ -246,7 +246,7 @@ describe("EngineRelayClient", () => {
     const { daemon, sessions, client } = await harness();
 
     await expect(client.push()).resolves.toEqual({
-      pushed: 3,
+      pushed: 3, ownerAdmissionPending: [],
       originsPushed: [],
       sharingDeclined: [],
     });
@@ -335,7 +335,7 @@ describe("EngineRelayClient", () => {
       pulls += 1;
       return {
         status: "complete",
-        pushed: 0,
+        pushed: 0, ownerAdmissionPending: [],
         fetched: 1,
         applied: 1,
         skipped: 0,
@@ -387,7 +387,7 @@ describe("EngineRelayClient", () => {
         const page = committedPages + 1;
         return {
           status: "complete",
-          pushed: 0,
+          pushed: 0, ownerAdmissionPending: [],
           fetched: 1,
           applied: 1,
           skipped: 0,
@@ -462,7 +462,7 @@ describe("EngineRelayClient", () => {
       if (request.method !== "sync.pull") return undefined;
       return {
         status: "complete",
-        pushed: 0,
+        pushed: 0, ownerAdmissionPending: [],
         fetched: 1,
         applied: 1,
         skipped: 0,
@@ -493,7 +493,7 @@ describe("EngineRelayClient", () => {
       if (request.method !== "sync.push") return undefined;
       return {
         status: "complete",
-        pushed: 0,
+        pushed: 0, ownerAdmissionPending: [],
         sharingDeclined: [
           {
             path: "notes/oversized.md",
@@ -507,7 +507,7 @@ describe("EngineRelayClient", () => {
     const { sessions, client } = await harness(daemon);
 
     await expect(client.push()).resolves.toEqual({
-      pushed: 0,
+      pushed: 0, ownerAdmissionPending: [],
       originsPushed: [],
       sharingDeclined: [
         {
@@ -526,7 +526,7 @@ describe("EngineRelayClient", () => {
       if (request.method !== "sync.push") return undefined;
       return {
         status: "complete",
-        pushed: 0,
+        pushed: 0, ownerAdmissionPending: [],
         sharingDeclined: [
           {
             constraint: "MAX_YDOC_UPDATE_BYTES",
@@ -549,7 +549,7 @@ describe("EngineRelayClient", () => {
       if (request.method === "sync.pull") {
         return {
           status: "complete",
-          pushed: 0,
+          pushed: 0, ownerAdmissionPending: [],
           fetched: 0,
           applied: 0,
           skipped: 0,
@@ -1885,7 +1885,7 @@ describe("EngineRelayClient", () => {
         const first = workspacePulls === 1;
         return {
           status: "complete",
-          pushed: 0,
+          pushed: 0, ownerAdmissionPending: [],
           fetched: first ? 2 : 3,
           hasMore: first,
           applied: first ? 1 : 2,

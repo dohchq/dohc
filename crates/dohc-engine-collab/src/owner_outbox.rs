@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 pub mod accepted;
 pub mod draft;
 pub mod enrollment;
+pub mod publication;
 mod native_source;
 pub(crate) use native_source::retain_native_source;
 pub use native_source::{OwnerOutboxNativeOrigin, OwnerOutboxNativeSource};

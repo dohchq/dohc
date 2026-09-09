@@ -876,6 +876,7 @@ fn version_create_with_shipped_snapshots(
 
 // Keep child modules after assert_invalid_refusal so they inherit its macro scope.
 mod chat;
+mod owner_publication;
 mod recover;
 mod relay_pull;
 mod secret;

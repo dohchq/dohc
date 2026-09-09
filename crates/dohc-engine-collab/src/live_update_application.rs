@@ -24,6 +24,8 @@ use std::sync::{Arc, Mutex};
 const SAFE: i64 = 9_007_199_254_740_991;
 
 mod accepted_history;
+mod publication;
+pub(crate) use publication::read_native_accepted_in;
 mod ack_read;
 mod sync;
 pub use ack_read::{read_application_ack, LiveApplicationAckIdentity};

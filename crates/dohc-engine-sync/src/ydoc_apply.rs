@@ -58,6 +58,7 @@ fn live_ordinary_classification(
     conn: &Connection,
     key: &DocKey,
     payload: &YdocUpdatePayload,
+    update: &[u8],
 ) -> Result<Option<bool>, SyncError> {
     let bound: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
@@ -69,6 +70,18 @@ fn live_ordinary_classification(
     }
     if payload.content_kind != "richdoc" {
         return Ok(Some(false));
+    }
+    if let Some(contained) =
+        dohc_engine_collab::owner_outbox::publication::contains_observed_update_in(
+            conn,
+            key,
+            &payload.path,
+            &payload.lineage_claim_id,
+            update,
+        )
+        .unwrap_or(Some(false))
+    {
+        return Ok(Some(contained));
     }
     let applied: bool = conn.query_row(
         "SELECT EXISTS(
@@ -83,14 +96,7 @@ fn live_ordinary_classification(
                  WHERE a.relay_database_namespace=b.relay_database_namespace AND a.workspace_id=b.workspace_id
                    AND a.main_version_id=b.main_version_id AND a.object_id=b.object_id
                    AND a.lineage_claim_id=?4 AND a.baseline_digest=?6)))
-         OR EXISTS(SELECT 1 FROM ydoc_owner_bindings b
-           WHERE b.workspace_id=?1 AND b.main_version_id=?2 AND b.object_id=?3
-             AND b.lineage_claim_id=?4 AND json_extract(b.binding_json,'$.currentPath')=?5 AND (
-               b.checkpoint_digest=?6 OR EXISTS(SELECT 1 FROM ydoc_owner_applied_frames f
-                 WHERE f.workspace_id=b.workspace_id AND f.main_version_id=b.main_version_id
-                   AND f.object_id=b.object_id AND f.lineage_claim_id=b.lineage_claim_id
-                   AND f.relay_database_namespace=b.relay_database_namespace AND f.binding_json=b.binding_json
-                   AND f.update_digest=?6)))",
+",
         params![key.workspace_id,key.version_id,key.object_id,payload.lineage_claim_id,payload.path,payload.update_blob_sha256],
         |row| row.get(0),
     ).map_err(SyncError::corrupt)?;
@@ -785,17 +791,17 @@ fn drain_deferred_ydoc(
     let mut record_facts = Vec::new();
     let mut projection_refusal = None;
     for (origin_id, origin_seq, relay_seq, recorded_at_ms, lineage_claim_id, payload) in pending {
+        let bytes = store
+            .get_binary_blob(&payload.update_blob_sha256)?
+            .ok_or(SyncError::BlobInvalid)?;
         let live_classification =
-            store.read_with(|conn| live_ordinary_classification(conn, key, &payload))?;
+            store.read_with(|conn| live_ordinary_classification(conn, key, &payload, &bytes))?;
         if let DeferredDrainMode::Live(expected_claim_id) = mode
             && Some(lineage_claim_id.as_str()) != expected_claim_id
             && live_classification.is_none()
         {
             break;
         }
-        let bytes = store
-            .get_binary_blob(&payload.update_blob_sha256)?
-            .ok_or(SyncError::BlobInvalid)?;
         if dohc_engine_storage::hex_sha256(&bytes) != payload.update_blob_sha256 {
             return Err(SyncError::BlobInvalid);
         }
@@ -2377,14 +2383,14 @@ pub fn apply_ydoc_envelope(
         });
     };
     if let Some(echo) =
-        store.read_with(|conn| live_ordinary_classification(conn, &key, &payload))?
+        store.read_with(|conn| live_ordinary_classification(conn, &key, &payload, &bytes))?
     {
         return crate::apply::apply_envelope_with_mutation_outcome(
             store,
             envelope,
             faults,
             |tx, _| {
-                if live_ordinary_classification(tx, &key, &payload)? != Some(echo) {
+                if live_ordinary_classification(tx, &key, &payload, &bytes)? != Some(echo) {
                     return Err(SyncError::RetryableState {
                         reason: "native live binding changed",
                     });

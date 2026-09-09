@@ -176,6 +176,7 @@ fn relay_cursor_json(cursor: &RelayCursor) -> Value {
 fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
     match outcome {
         SyncPassOutcome::Complete {
+            owner_admission_pending,
             pushed,
             fetched,
             has_more,
@@ -191,6 +192,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             record_facts: _,
         } => json!({
             "status": "complete",
+            "ownerAdmissionPending":owner_admission_pending,
             "pushed": pushed,
             "fetched": fetched,
             "hasMore": has_more,
@@ -514,6 +516,18 @@ impl EngineService {
         operation: RelayOperation,
         label: &str,
     ) -> Result<RelayOperationOutcome, WireError> {
+        let reservation = if matches!(
+            operation,
+            RelayOperation::Push { .. } | RelayOperation::SubmitShareProposal { .. }
+        ) {
+            self.ordinary_live_host
+                .get()
+                .and_then(|h| h.sync.as_ref())
+                .map(|(_, admission)| admission.reserve())
+                .transpose()?
+        } else {
+            None
+        };
         let cancellation = OperationCancellation::new(ctx);
         Self::read_under_ctx(
             &cancellation,
@@ -523,6 +537,7 @@ impl EngineService {
                 operation,
                 self.leases.scoped(&open.root),
                 cancellation.token(),
+                reservation,
             ),
         )
         .await
@@ -544,6 +559,11 @@ impl EngineService {
                 RelayOperation::Push {
                     workspace_id: open.workspace_id.clone(),
                     now_ms: now_ms()?,
+                    max_read_bytes: self
+                        .ordinary_live_host
+                        .get()
+                        .and_then(|h| h.sync.as_ref())
+                        .map_or(0, |(policy, _)| policy.max_read_bytes),
                 },
                 "sync.push",
             )
@@ -1043,6 +1063,11 @@ impl EngineService {
                     share_id: params.share_id,
                     granted,
                     submit_id: params.submit_id,
+                    max_read_bytes: self
+                        .ordinary_live_host
+                        .get()
+                        .and_then(|h| h.sync.as_ref())
+                        .map_or(0, |(policy, _)| policy.max_read_bytes),
                 },
                 "share.proposal.submit",
             )
@@ -1120,6 +1145,7 @@ mod tests {
     #[test]
     fn sync_outcome_json_surfaces_an_undrained_complete_pass() {
         let value = sync_outcome_json(SyncPassOutcome::Complete {
+            owner_admission_pending: Vec::new(),
             pushed: 0,
             fetched: 500,
             has_more: true,

@@ -1179,6 +1179,8 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Files that are safe locally but cannot fit in the relay's
   // encoded payload limit. The notice center keeps this visible until a
   // later successful sync no longer reports the path.
+  ownerAdmissionPending: z.array(z.object({workspaceId: z.string(), originId: z.string(), originSeq: z.number().int().nonnegative(),
+    versionId: z.string(), objectId: z.string(), path: PATH_STRING})).optional(),
   sharingDeclined: z
     .array(
       z.object({

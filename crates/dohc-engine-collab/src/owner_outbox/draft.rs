@@ -150,21 +150,16 @@ pub fn list_drafts_in(
             )
         })
         .unwrap_or(("", "", ""));
-    let mut stmt = conn.prepare("SELECT binding_json FROM ydoc_owner_bindings WHERE workspace_id=?1 AND (main_version_id,object_id,lineage_claim_id)>(?2,?3,?4) ORDER BY main_version_id,object_id,lineage_claim_id LIMIT ?5").map_err(read_sql)?;
+    let mut stmt = conn.prepare("SELECT binding_json,relay_database_namespace,binding_revision,accepted_cursor,native_head_sequence,checkpoint_digest,max_pending_bytes,max_pending_age_ms FROM ydoc_owner_bindings WHERE workspace_id=?1 AND (main_version_id,object_id,lineage_claim_id)>(?2,?3,?4) ORDER BY main_version_id,object_id,lineage_claim_id LIMIT ?5").map_err(read_sql)?;
     let rows = stmt
         .query_map(
             params![workspace_id, version, object, lineage, limit as i64],
-            |r| r.get::<_, String>(0),
+            read_observed_row,
         )
         .map_err(read_sql)?;
     rows.map(|row| {
-        let binding: LiveObjectBinding =
-            serde_json::from_str(&row.map_err(read_sql)?).map_err(|_| OwnerOutboxError::Corrupt)?;
-        binding
-            .validate_canonical()
-            .map_err(OwnerOutboxError::InvalidInput)?;
-        require_workspace(workspace_id, &binding.workspace_id)?;
-        let observed = read_observed_in(conn, &binding)?.ok_or(OwnerOutboxError::Corrupt)?;
+        let observed = decode_observed(row.map_err(read_sql)?)?;
+        require_workspace(workspace_id, &observed.binding.workspace_id)?;
         describe_draft(conn, observed)
     })
     .collect()
@@ -247,7 +242,7 @@ pub fn append_draft_cached(
             Some(entry) if entry.proof == proof => entry.draft,
             _ => open_draft_in(tx, &input.binding, input.expected_revision)?,
         };
-        let result = append_prepared_draft_in_tx(
+        let (result, encoded_len) = append_prepared_draft_in_tx(
             tx,
             workspace_id,
             &draft,
@@ -256,8 +251,7 @@ pub fn append_draft_cached(
             input.now_ms,
         )?;
         let proof = draft_proof(tx, &input.binding, input.expected_revision)?;
-        let approx_bytes = bounded(&draft.doc)?
-            .len()
+        let approx_bytes = encoded_len
             .saturating_add(proof.binding_json.len().saturating_mul(2))
             .saturating_add(proof.namespace.len());
         retained = Some(CachedOwnerDraft {
@@ -419,35 +413,53 @@ pub(super) fn bounded_blob(conn: &Connection, digest: &str) -> Result<Vec<u8>, O
     }
     Ok(bytes)
 }
+type ObservedBindingRow = (String, String, i64, i64, i64, String, i64, i64);
+fn read_observed_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ObservedBindingRow> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+        r.get(7)?,
+    ))
+}
+fn decode_observed(r: ObservedBindingRow) -> Result<ObservedOwnerBinding, OwnerOutboxError> {
+    let binding: LiveObjectBinding =
+        serde_json::from_str(&r.0).map_err(|_| OwnerOutboxError::Corrupt)?;
+    binding
+        .validate_canonical()
+        .map_err(OwnerOutboxError::InvalidInput)?;
+    Ok(ObservedOwnerBinding {
+        binding,
+        relay_database_namespace: r.1,
+        revision: r.2,
+        accepted_cursor: r.3,
+        native_head_sequence: r.4,
+        checkpoint_digest: r.5,
+        limits: OwnerOutboxLimits {
+            max_pending_bytes: r.6,
+            max_pending_age_ms: r.7,
+        },
+    })
+}
 pub(super) fn read_observed_in(
     conn: &Connection,
     binding: &LiveObjectBinding,
 ) -> Result<Option<ObservedOwnerBinding>, OwnerOutboxError> {
-    type ObservedBindingRow = (String, String, i64, i64, i64, String, i64, i64);
     let b = binding;
-    let raw: Option<ObservedBindingRow> = conn.query_row(
+    let raw:Option<ObservedBindingRow>=conn.query_row(
         &format!("SELECT binding_json,relay_database_namespace,binding_revision,accepted_cursor,native_head_sequence,checkpoint_digest,max_pending_bytes,max_pending_age_ms FROM ydoc_owner_bindings WHERE {SCOPE}"),
-        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)),
+        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],read_observed_row,
     ).optional().map_err(read_sql)?;
-    raw.map(|r| {
-        let saved: LiveObjectBinding =
-            serde_json::from_str(&r.0).map_err(|_| OwnerOutboxError::Corrupt)?;
-        if &saved != binding {
+    raw.map(|row| {
+        let observed = decode_observed(row)?;
+        if &observed.binding != binding {
             return Err(OwnerOutboxError::ParentMismatch);
         }
-        Ok(ObservedOwnerBinding {
-            binding: saved,
-            relay_database_namespace: r.1,
-            revision: r.2,
-            accepted_cursor: r.3,
-            native_head_sequence: r.4,
-            checkpoint_digest: r.5,
-            limits: OwnerOutboxLimits {
-                max_pending_bytes: r.6,
-                max_pending_age_ms: r.7,
-            },
-        })
+        Ok(observed)
     })
     .transpose()
 }
@@ -523,6 +535,7 @@ pub fn append_draft_in_tx(
     require_workspace(workspace_id, &binding.workspace_id)?;
     let draft = open_draft_in(tx, binding, expected_revision)?;
     append_prepared_draft_in_tx(tx, workspace_id, &draft, append_key, update, now_ms)
+        .map(|(result, _)| result)
 }
 
 fn append_prepared_draft_in_tx(
@@ -532,7 +545,7 @@ fn append_prepared_draft_in_tx(
     append_key: String,
     update: Vec<u8>,
     now_ms: i64,
-) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
+) -> Result<(OwnerOutboxAppendResult, usize), OwnerOutboxError> {
     let binding = &draft.observed.binding;
     require_workspace(workspace_id, &binding.workspace_id)?;
     if update.is_empty() || update.len() > crate::limits::MAX_YDOC_UPDATE_BYTES {
@@ -547,8 +560,8 @@ fn append_prepared_draft_in_tx(
         .doc
         .project(crate::ContentKind::Richdoc)
         .map_err(collab)?;
-    bounded(&draft.doc)?;
-    append_with_retained_base(
+    let encoded_len = bounded(&draft.doc)?.len();
+    let result = append_with_retained_base(
         tx,
         workspace_id,
         OwnerOutboxAppendInput {
@@ -560,7 +573,8 @@ fn append_prepared_draft_in_tx(
             created_at_ms: now_ms,
         },
         None,
-    )
+    )?;
+    Ok((result, encoded_len))
 }
 
 #[cfg(test)]

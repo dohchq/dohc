@@ -18,6 +18,7 @@ import {
   type PullShareViewResult,
   type ShareViewRefusal,
   type SharingDeclined,
+  type OwnerAdmissionPending,
   type PullWorkspaceFromRelayResult,
   type PushSharedChannelResult,
   type PushWorkspaceToRelayResult,
@@ -396,6 +397,16 @@ function shareViewRefusals(
   });
 }
 
+function ownerAdmissionPending(value: unknown): OwnerAdmissionPending[] {
+  if (!Array.isArray(value)) throw new Error("Rust engine sync.push.ownerAdmissionPending must be an array.");
+  return value.map(item => {
+    const row = resultRecord(item, "sync.push.ownerAdmissionPending");
+    const text = (key: string) => stringField(row, key, "sync.push.ownerAdmissionPending");
+    return {workspaceId: text("workspaceId"), originId: text("originId"), originSeq: numberField(row, "originSeq", "sync.push.ownerAdmissionPending"),
+      versionId: text("versionId"), objectId: text("objectId"), path: text("path")};
+  });
+}
+
 function sharingDeclined(
   value: JsonValue | undefined,
   label: string,
@@ -731,6 +742,7 @@ export class EngineRelayClient {
           // The daemon owns all origin selection; desktop callers only consume
           // the count, so no origin identifiers cross the process boundary.
           originsPushed: [],
+          ownerAdmissionPending: ownerAdmissionPending(result.ownerAdmissionPending),
           sharingDeclined: sharingDeclined(
             result.sharingDeclined,
             "sync.push",

@@ -712,7 +712,7 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
     );
 
     client
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_200)
+        .push_workspace(&mut engine, "ws", &NoFaults, 1_200, 0)
         .expect("push recovered suffix");
     client
         .pull_chat_workspace(

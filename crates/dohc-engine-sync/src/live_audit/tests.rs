@@ -275,7 +275,7 @@ fn first_push_exports_native_history_after_actual_contact() {
     accept_enrollment_event(&mut f, 1);
     let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
     let outcome = client
-        .push_workspace(&mut f.store, "ws", &NoFaults, 201)
+        .push_workspace(&mut f.store, "ws", &NoFaults, 201, 0)
         .unwrap();
     assert!(matches!(
         outcome,

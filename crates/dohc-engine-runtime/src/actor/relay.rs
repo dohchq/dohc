@@ -42,6 +42,7 @@ pub enum RelayOperation {
     Push {
         workspace_id: String,
         now_ms: i64,
+        max_read_bytes: usize,
     },
     Pull {
         workspace_id: String,
@@ -125,6 +126,7 @@ pub enum RelayOperation {
         /// answers with the proposal the relay already holds and never opens a
         /// second one.
         submit_id: String,
+        max_read_bytes: usize,
     },
     CommitShareViewCursor {
         workspace_id: String,
@@ -921,6 +923,7 @@ impl ActorHandle {
         operation: RelayOperation,
         leases: LeaseRegistry,
         token: CancellationToken,
+        reservation: Option<Arc<dyn Send + Sync>>,
     ) -> Result<RelayOperationOutcome, RuntimeError> {
         let transport = DeferredRelayTransport::default();
         if token.is_cancelled() {
@@ -935,8 +938,10 @@ impl ActorHandle {
             let queued_operation = operation.clone();
             let queued_leases = leases.clone();
             let queued_token = token.clone();
+            let queued_reservation = reservation.clone();
             let outcome = self
                 .run(move |store, cache| {
+                    let _reservation = queued_reservation;
                     let outcome = if queued_token.is_cancelled() {
                         Err(RuntimeError::Cancelled)
                     } else {
@@ -1175,8 +1180,9 @@ fn execute_relay_operation(
         RelayOperation::Push {
             workspace_id,
             now_ms,
+            max_read_bytes,
         } => client
-            .push_workspace(store, &workspace_id, &NoFaults, now_ms)
+            .push_workspace(store, &workspace_id, &NoFaults, now_ms, max_read_bytes)
             .map(RelayOperationOutcome::Sync)
             .map_err(RuntimeError::from),
         RelayOperation::Pull {
@@ -1372,6 +1378,7 @@ fn execute_relay_operation(
             share_id,
             granted,
             submit_id,
+            max_read_bytes,
         } => client
             .submit_share_proposal(
                 store,
@@ -1380,6 +1387,7 @@ fn execute_relay_operation(
                 &granted,
                 &submit_id,
                 &NoFaults,
+                max_read_bytes,
             )
             .map(RelayOperationOutcome::ShareProposalSubmitted)
             .map_err(RuntimeError::from),

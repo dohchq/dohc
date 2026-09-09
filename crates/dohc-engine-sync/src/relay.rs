@@ -572,6 +572,7 @@ pub trait RelayTransport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncPassOutcome {
     Complete {
+        owner_admission_pending: Vec<crate::OwnerAdmissionPending>,
         pushed: usize,
         fetched: usize,
         has_more: bool,
@@ -971,6 +972,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         workspace_id: &str,
         faults: &dyn FaultInjector,
         now_ms: i64,
+        max_read_bytes: usize,
     ) -> Result<SyncPassOutcome, RelayError> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
@@ -980,6 +982,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .map_err(local)?;
         let mut origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         let mut pushed = 0_usize;
+        let mut owner_admission_pending = Vec::new();
 
         let has_position = store
             .read_with(|conn| has_relay_position(conn, workspace_id))
@@ -1037,6 +1040,17 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     crate::MAX_PULL_OPS,
                 )
                 .map_err(local)?;
+                if ops.is_empty() {
+                    break;
+                }
+                let prefix =
+                    crate::owner_publication_prefix(store, workspace_id, &ops, max_read_bytes)
+                        .map_err(local)?;
+                let blocked = prefix.pending.is_some();
+                let ops = &ops[..prefix.allowed_ops];
+                if let Some(pending) = prefix.pending {
+                    owner_admission_pending.push(pending);
+                }
                 if ops.is_empty() {
                     break;
                 }
@@ -1106,6 +1120,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     cursor = response.current_max_origin_seq;
                 }
                 if !conflict {
+                    if blocked {
+                        break;
+                    }
                     continue;
                 }
 
@@ -1141,6 +1158,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
 
         Ok(SyncPassOutcome::Complete {
+            owner_admission_pending,
             pushed,
             fetched: 0,
             has_more: store
@@ -1352,6 +1370,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             });
         }
         Ok(SyncPassOutcome::Complete {
+            owner_admission_pending: Vec::new(),
             pushed: 0,
             fetched,
             has_more,
@@ -1926,6 +1945,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         granted: &crate::ShareGrant,
         submit_id: &str,
         faults: &dyn FaultInjector,
+        max_read_bytes: usize,
     ) -> Result<ShareProposalSubmitOutcome, RelayError> {
         // The PINNED level is read here rather than trusted from the relay's
         // own refusal. A recipient offers nothing it was not granted, so a
@@ -1946,6 +1966,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             &identity.origin_id,
             scanned,
             submit_through,
+            max_read_bytes,
         )?;
         if scan.changes.is_empty() {
             // Nothing to offer, but this window is read. Recording it keeps
@@ -3565,6 +3586,7 @@ fn collect_share_proposal_changes(
     origin_id: &str,
     scanned_seq: i64,
     submit_through: i64,
+    max_read_bytes: usize,
 ) -> Result<ShareProposalScan, RelayError> {
     let mut order: Vec<String> = Vec::new();
     let mut by_object: BTreeMap<String, ShareProposalChange> = BTreeMap::new();
@@ -3601,6 +3623,19 @@ fn collect_share_proposal_changes(
                     {
                         more_pending = true;
                         break 'pages;
+                    }
+                    let proof = crate::owner_publication_prefix(
+                        store,
+                        workspace_id,
+                        std::slice::from_ref(&op),
+                        max_read_bytes,
+                    )
+                    .map_err(local)?;
+                    if let Some(pending) = proof.pending {
+                        return Err(RelayError::Local(format!(
+                            "owner-admission-pending: {}:{} {}",
+                            pending.origin_id, pending.origin_seq, pending.path
+                        )));
                     }
                     let mut change = proposed_change(&op);
                     match by_object.get(&object_id) {

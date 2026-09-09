@@ -350,6 +350,16 @@ export function NoticeCenter(props: {
       });
     }
 
+    for (const pending of props.syncStatus?.ownerAdmissionPending ?? []) {
+      next.push({
+        id: `owner-admission-pending-${pending.originId}-${pending.originSeq}`,
+        tone: "warning",
+        title: "Saved locally · Pending share",
+        body: `Your edits to "${pending.path}" are saved on this device. The shared file update is pending.`,
+        Icon: CloudOff,
+      });
+    }
+
     for (const declined of props.syncStatus?.sharingDeclined ?? []) {
       next.push({
         id: `sharing-declined-${declined.path}`,

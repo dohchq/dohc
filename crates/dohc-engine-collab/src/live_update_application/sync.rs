@@ -61,7 +61,7 @@ pub struct NextAppliedUpdate {
     pub update_bytes: Vec<u8>,
 }
 
-fn current(conn: &Connection, held: &Registration) -> Result<durable::Marker, ApplicationError> {
+pub(super) fn current(conn: &Connection, held: &Registration) -> Result<durable::Marker, ApplicationError> {
     if !held.live {
         return Err(ApplicationError::Interrupted);
     }
