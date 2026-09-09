@@ -2182,6 +2182,7 @@ describe("RelayShareDialog", () => {
               "drops-user",
               "comment",
             ),
+            dependent("drops-edit", "editor@example.test", "editor-user", "edit"),
           ],
         }),
       ],
@@ -2217,7 +2218,7 @@ describe("RelayShareDialog", () => {
     );
     confirmation = screen.getByTestId("share-link-confirmation");
     expect(confirmation.querySelector("p")?.textContent).toBe(
-      "Turn off comments for this link? The same link keeps working, for viewing only. These people drop to view too: drops@example.test.",
+      "Turn off comments for this link? The same link keeps working, for viewing only. These people drop to view too: drops@example.test, editor@example.test.",
     );
     expect(
       within(confirmation).getByRole("button", { name: "Turn off comments" }),

@@ -1052,6 +1052,35 @@ describe("owner link contract", () => {
     },
   );
 
+  it.each([
+    ["view", "comment", true], ["view", "edit", true], ["comment", "edit", true],
+    ["comment", "view", false], ["edit", "comment", false], ["edit", "view", false],
+  ] as const)("storage %s to %s rotates credentials only when widening", async (from, access, widening) => {
+    const storage = await newStorage();
+    await seedFileShare(handler(storage));
+    const grantId = "rank-transition";
+    const original = {credentialId: "rank-original", grantId, secretHash: hmac("o".repeat(43)), generation: 1,
+      mintedAtMs: 2000, retiredAtMs: null};
+    expect(storage.createLinkGrant({
+      grant: {grantId, shareId: "share-existing", principalKind: "link", principalUserId: null,
+        principalEmail: null, access: from, generation: 1, status: "active", createdAtMs: 2000,
+        revokedAtMs: null, parentGrantId: null}, credential: original,
+    })).toBe(true);
+    const mintCredential = vi.fn(() => ({credentialId: "rank-replacement", secretHash: hmac("n".repeat(43))}));
+    const input = {shareId: "share-existing", grantId, access, changedAtMs: 3000,
+      expectedDependentGrantIds: [], guard: () => undefined};
+    expect(storage.retuneShareGrant({...input, ...(widening ? {} : {mintCredential})})).toEqual({ok: false});
+    expect(mintCredential).not.toHaveBeenCalled();
+    expect(storage.getShareGrant(grantId)).toMatchObject({access: from, generation: 1});
+    expect(storage.getCurrentLinkCredential(grantId)).toEqual(original);
+    expect(storage.retuneShareGrant({...input, ...(widening ? {mintCredential} : {})})).toMatchObject({ok: true});
+    expect(storage.getShareGrant(grantId)).toMatchObject({access, generation: widening ? 2 : 1});
+    expect(mintCredential).toHaveBeenCalledTimes(widening ? 1 : 0);
+    expect(storage.getCurrentLinkCredential(grantId)).toMatchObject(widening
+      ? {credentialId: "rank-replacement", generation: 2}
+      : original);
+  });
+
   it("refuses attach creation and retuning to edit", async () => {
     const access = "edit";
     const storage = await newStorage();

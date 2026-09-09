@@ -449,11 +449,11 @@ export function registerRelaySharesIpcHandlers<
             dependents: conflict.data.dependents,
           });
         }
-        if (input.access === "comment") {
-          const widened = RelayShareLinkRetuneWidenResponse.safeParse(
-            relayResult.body,
-          );
-          if (!widened.success) {
+        const widened = RelayShareLinkRetuneWidenResponse.safeParse(
+          relayResult.body,
+        );
+        if (widened.success) {
+          if (widened.data.access !== input.access) {
             throw new Error(relayShareErrorCopy(500, null));
           }
           return RetuneRelayShareLinkResult.parse({
@@ -464,7 +464,7 @@ export function registerRelaySharesIpcHandlers<
         const narrowed = RelayShareLinkRetuneNarrowResponse.safeParse(
           relayResult.body,
         );
-        if (!narrowed.success) {
+        if (!narrowed.success || narrowed.data.access !== input.access) {
           throw new Error(relayShareErrorCopy(500, null));
         }
         return RetuneRelayShareLinkResult.parse({ outcome: "narrowed" });

@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
+import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import type {
   CreateRelayShareLinkPayload,
   RelayShareDiscussionMessage,
@@ -489,11 +490,15 @@ export function useRelayShareLinkPane(props: {
       ) ?? null
     : null;
   const narrowerDependents =
-    confirmation?.kind === "retune" && confirmation.access === "view"
+    confirmation?.kind === "retune"
       ? (confirmationRow?.dependents.filter(
-          (dependent) => dependent.access !== "view",
+          (dependent) =>
+            shareAccessRank(dependent.access) > shareAccessRank(confirmation.access),
         ) ?? [])
       : [];
+  const confirmationWidens =
+    confirmation?.kind === "retune" && confirmationRow !== null &&
+    shareAccessRank(confirmation.access) > shareAccessRank(confirmationRow.access);
   const confirmationActionLabel =
     confirmation?.kind === "reset"
       ? "Reset link"
@@ -1446,7 +1451,8 @@ export function useRelayShareLinkPane(props: {
       minted?.grantId === row.grantId &&
       (action.kind === "reset" ||
         action.kind === "end" ||
-        (action.kind === "retune" && action.access === "comment"));
+        (action.kind === "retune" &&
+          shareAccessRank(action.access) > shareAccessRank(row.access)));
     setMutationBusy({ kind: action.kind, grantId: row.grantId });
     setLifecycleError(null);
 
@@ -1490,25 +1496,20 @@ export function useRelayShareLinkPane(props: {
         latestCopyRequest.current += 1;
         setMinted({ grantId: row.grantId, url: result.url });
         setLinkCopied(false);
-        setLinks((current) =>
-          current.map((currentRow) =>
-            currentRow.shareId === row.shareId && currentRow.grantId === row.grantId
-              ? { ...currentRow, access: "comment" }
-              : currentRow,
-          ),
-        );
-      } else if (result.outcome === "narrowed") {
-        setLinks((current) =>
-          current.map((currentRow) =>
-            currentRow.shareId === row.shareId && currentRow.grantId === row.grantId
-              ? { ...currentRow, access: "view" }
-              : currentRow,
-          ),
-        );
-      } else {
+      } else if (result.outcome !== "narrowed") {
         latestCopyRequest.current += 1;
         setMinted((current) =>
           current?.grantId === row.grantId ? null : current,
+        );
+      }
+      if (action.kind === "retune" &&
+          (result.outcome === "widened" || result.outcome === "narrowed")) {
+        setLinks((current) =>
+          current.map((currentRow) =>
+            currentRow.shareId === row.shareId && currentRow.grantId === row.grantId
+              ? { ...currentRow, access: action.access }
+              : currentRow,
+          ),
         );
       }
       setConfirmation(null);
@@ -2243,7 +2244,7 @@ export function useRelayShareLinkPane(props: {
             >
               <p className="m-0 text-xs leading-relaxed text-ink">
                 {confirmation.kind === "retune" ? (
-                  confirmation.access === "comment" ? (
+                  confirmationWidens ? (
                     <>
                       Turn on comments for this link? The current link stops working
                       right away, and dohc shows the new link once.
@@ -2257,11 +2258,12 @@ export function useRelayShareLinkPane(props: {
                     </>
                   ) : (
                     <>
-                      Turn off comments for this link? The same link keeps working, for
-                      viewing only.
+                      {confirmation.access === "view"
+                        ? "Turn off comments for this link? The same link keeps working, for viewing only."
+                        : "Use Comment access for this link? The same link keeps working. Holders can view and comment."}
                       {narrowerDependents.length > 0 ? (
                         <>
-                          {" "}These people drop to view too:{" "}
+                          {" "}These people drop to {confirmation.access} too:{" "}
                           <DependentNames dependents={narrowerDependents} />.
                         </>
                       ) : null}

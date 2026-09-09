@@ -1,4 +1,5 @@
 import { jsonResponse } from "@dohc/service-http";
+import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, RELAY_ERRORS, relayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
@@ -193,7 +194,7 @@ export function createShareGrantRoutes(
         "expectedDependentGrantIds",
       ]);
       const access = validatePublicLinkAccess(input.access);
-      const widening = grant.access === "view" && access === "comment";
+      const widening = shareAccessRank(access) > shareAccessRank(grant.access);
       if (widening && (!linkKey || !shareWebOrigin)) throw notFound();
       let secret: string | null = null;
       const result = storage.retuneShareGrant({

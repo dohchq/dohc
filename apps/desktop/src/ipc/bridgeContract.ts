@@ -1,7 +1,7 @@
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
 import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
-import { SHARE_ACCESS_VALUES } from "@dohc/security-contract/share-selector";
+import { SHARE_ACCESS_VALUES, shareAccessRank } from "@dohc/security-contract/share-selector";
 import {
   hasEngineIgnoredSegment,
   WORKSPACE_KINDS,
@@ -4087,13 +4087,13 @@ export const RelayShareLinkRotateResponse = z.object({
 
 export const RelayShareLinkRetuneWidenResponse = z.object({
   ok: z.literal(true),
-  access: z.literal("comment"),
+  access: SHARE_ACCESS.refine((access) => shareAccessRank(access) > shareAccessRank("view")),
   url: RELAY_SHARE_LINK_URL,
 });
 
 export const RelayShareLinkRetuneNarrowResponse = z.object({
   ok: z.literal(true),
-  access: z.literal("view"),
+  access: SHARE_ACCESS,
   url: z.never().optional(),
 });
 

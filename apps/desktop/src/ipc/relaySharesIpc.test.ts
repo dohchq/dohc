@@ -202,6 +202,42 @@ describe("registered owner restore handler", () => {
 });
 
 describe("registered relay share handlers", () => {
+  it.each([
+    ["comment", {ok: true, access: "comment", url: "https://relay.example/new"}, {outcome: "widened", url: "https://relay.example/new"}],
+    ["comment", {ok: true, access: "comment"}, {outcome: "narrowed"}],
+    ["view", {ok: true, access: "view"}, {outcome: "narrowed"}],
+  ])("reports the relay's actual credential transition for %s", async (access, response, expected) => {
+    const h = harness();
+    h.request.mockResolvedValue({kind: "success", body: response});
+    await expect(h.invoke(CHANNELS.retuneRelayShareLink, {
+      workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: [], access,
+    })).resolves.toEqual(expected);
+  });
+
+  it.each([
+    {ok: true, access: "view"},
+    {ok: true, access: "edit", url: "https://relay.example/new"},
+    {ok: true, access: "comment", url: "not a URL"},
+    {ok: true, access: "comment", url: null},
+    {ok: false, access: "comment", url: "https://relay.example/new"},
+  ])("rejects a malformed or mismatched retune response %j", async response => {
+    const h = harness();
+    h.request.mockResolvedValue({kind: "success", body: response});
+    await expect(h.invoke(CHANNELS.retuneRelayShareLink, {
+      workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: [], access: "comment",
+    })).rejects.toThrow("sharing failed (500)");
+  });
+
+  it("rejects a replacement URL for View and keeps Edit requests closed", async () => {
+    const h = harness();
+    h.request.mockResolvedValue({kind: "success", body: {ok: true, access: "view", url: "https://relay.example/new"}});
+    const payload = {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: []};
+    await expect(h.invoke(CHANNELS.retuneRelayShareLink, {...payload, access: "view"})).rejects.toThrow();
+    h.request.mockClear();
+    await expect(h.invoke(CHANNELS.retuneRelayShareLink, {...payload, access: "edit"})).rejects.toThrow();
+    expect(h.request).not.toHaveBeenCalled();
+  });
+
   it("registers only this family and authenticates every channel before parsing or work", async () => {
     const h = harness();
     expect([...h.handlers.keys()]).toEqual([
