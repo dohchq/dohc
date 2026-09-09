@@ -429,6 +429,8 @@ where
                             if matches!(
                                 request.method.as_str(),
                                 "liveApplication.apply"
+                                    | "ydoc.ownerDelivery.applyAcceptedFrame"
+                                    | "ydoc.ownerDelivery.applyInitialSync"
                                     | "liveApplication.bootstrap"
                                     | "liveApplication.adoptOwner"
                                     | "liveApplication.prepareRestore"

@@ -99,6 +99,7 @@ struct SyncParams {
 }
 
 enum Metadata {
+    Owner(crate::rpc::owner_delivery::OwnerUploadParams),
     Sync(dohc_engine_collab::live_update_application::AppliedSyncPolicy),
     Apply(RelayAcceptedLiveUpdate),
     Bootstrap(LiveApplicationBootstrap),
@@ -186,7 +187,7 @@ impl Stream {
 struct Upload {
     request: Request,
     metadata: Metadata,
-    registration: Arc<Registration>,
+    registration: Option<Arc<Registration>>,
     update: Stream,
     ranges: Option<Stream>,
     bytes: Vec<u8>,
@@ -240,6 +241,22 @@ pub struct LiveApplicationIngress {
 }
 
 impl LiveApplicationIngress {
+    pub(crate) fn owner_admission(&self) -> Result<SettlementAdmission, WireError> {
+        // Two input buffers plus decoded vector, checkpoint and output scratch.
+        // The configured working reserve remains charged while the actor hydrates Yrs.
+        let bytes = self
+            .config
+            .reservation_bytes(MAX_YDOC_UPDATE_BYTES * 2, 0)
+            .and_then(|n| n.checked_add(MAX_YDOC_UPDATE_BYTES * 10))
+            .filter(|n| *n <= self.config.aggregate_bytes)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(overloaded)?;
+        Ok(SettlementAdmission {
+            budget: self.budget.clone(),
+            slots: self.upload_slots.clone(),
+            bytes,
+        })
+    }
     pub(crate) fn sync_admission(
         &self,
         config: crate::rpc::live_application::sync::SyncConfig,
@@ -341,6 +358,8 @@ impl LiveApplicationIngress {
         if !matches!(
             request.method.as_str(),
             "liveApplication.apply"
+                | "ydoc.ownerDelivery.applyAcceptedFrame"
+                | "ydoc.ownerDelivery.applyInitialSync"
                 | "liveApplication.bootstrap"
                 | "liveApplication.adoptOwner"
                 | "liveApplication.syncOpen"
@@ -356,9 +375,19 @@ impl LiveApplicationIngress {
             .clone()
             .try_acquire_owned()
             .map_err(|_| overloaded())?;
-        let (metadata, registration_id, update, ranges, range_count) = if request.method
-            == "liveApplication.adoptOwner"
+        let (metadata, registration_id, update, ranges, range_count) = if request
+            .method
+            .starts_with("ydoc.ownerDelivery.")
         {
+            self.service
+                .owner_delivery_connection(connection, request.workspace.as_ref())?;
+            let params: crate::rpc::owner_delivery::OwnerUploadParams =
+                serde_json::from_value(std::mem::take(&mut request.params))
+                    .map_err(|_| invalid("invalid owner delivery upload"))?;
+            params.validate(&request.method)?;
+            let stream = Stream::new(params.stream_id, params.byte_length, params.digest.clone())?;
+            (Metadata::Owner(params), 0, stream, None, 0)
+        } else if request.method == "liveApplication.adoptOwner" {
             let config = self
                 .service
                 .ordinary_live_host
@@ -464,12 +493,18 @@ impl LiveApplicationIngress {
         }) {
             return Err(invalid("invalid-live-application-bounds"));
         }
-        let registration = self.service.live_application_registration(
-            connection,
-            request.workspace.as_ref(),
-            registration_id,
-        )?;
-        let reserved = if let Metadata::Sync(_) = &metadata {
+        let registration = if matches!(&metadata, Metadata::Owner(_)) {
+            None
+        } else {
+            Some(self.service.live_application_registration(
+                connection,
+                request.workspace.as_ref(),
+                registration_id,
+            )?)
+        };
+        let reserved = if matches!(&metadata, Metadata::Owner(_)) {
+            Some(self.owner_admission()?.bytes as usize)
+        } else if let Metadata::Sync(_) = &metadata {
             Some(self.service.sync_admission(connection)?.1.bytes as usize)
         } else if let Metadata::Adoption { max_bytes, .. } = &metadata {
             // First adoption can seed a native head larger than the relay baseline.
@@ -622,7 +657,24 @@ impl LiveApplicationIngress {
             return Ok(None);
         }
         let mut upload = self.uploads.remove(&id).expect("completed upload");
+        // Preserve the original deadline for both owner and canonical-host dispatch.
+        let remaining = upload
+            .deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis();
+        upload.request.deadline_ms = Some(u32::try_from(remaining).unwrap_or(u32::MAX));
+        if let Metadata::Owner(params) = upload.metadata {
+            return Ok(Some((
+                upload.request,
+                LiveApplicationInput::Owner(Box::new(crate::rpc::owner_delivery::OwnerInput {
+                    params,
+                    bytes: upload.bytes,
+                    reservation: upload.permit,
+                })),
+            )));
+        }
         let operation = match upload.metadata {
+            Metadata::Owner(_) => unreachable!("owner dispatched above"),
             Metadata::Sync(policy) => LiveApplicationOperation::SyncOpen(upload.bytes, policy),
             Metadata::Apply(accepted) => LiveApplicationOperation::Apply(AdmittedLiveUpdate {
                 metadata: AdmittedLiveUpdateMetadata {
@@ -657,7 +709,9 @@ impl LiveApplicationIngress {
         Ok(Some((
             upload.request,
             LiveApplicationInput::Admitted(Box::new(AdmittedApplicationInput {
-                registration: upload.registration,
+                registration: upload
+                    .registration
+                    .expect("canonical host upload registration"),
                 operation,
                 reservation: upload.permit,
                 working_reserve_bytes: self.config.application_working_reserve_bytes,

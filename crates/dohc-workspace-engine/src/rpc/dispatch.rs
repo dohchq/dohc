@@ -19,6 +19,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || method.starts_with("search.")
         || method.starts_with("collections.")
         || method.starts_with("liveApplication.")
+        || method.starts_with("ydoc.ownerDelivery.")
         || (method.starts_with("versions.") && method != "versions.ensureMain")
         || method.starts_with("conflicts.")
         || (method.starts_with("secrets.") && method != "secrets.write")
@@ -119,6 +120,9 @@ impl EngineService {
             crate::LiveApplicationInput::Restore(input) => {
                 self.live_application_restore(ctx, request, *input).await
             }
+            crate::LiveApplicationInput::Owner(input) => {
+                self.owner_delivery_apply(ctx, request, *input).await
+            }
         }
     }
 
@@ -131,6 +135,12 @@ impl EngineService {
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
+        if matches!(
+            request.method.as_str(),
+            "ydoc.ownerDelivery.readState" | "ydoc.ownerDelivery.isReceiptApplied"
+        ) {
+            return self.owner_delivery_read(ctx, request).await;
+        }
         if request.method == "liveApplication.settle" {
             return self.live_application_settle(ctx, request).await;
         }

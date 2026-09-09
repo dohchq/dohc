@@ -90,14 +90,38 @@ pub fn apply_frame_in_tx(
     input: &OwnerAcceptedFrameInput,
     now_ms: i64,
 ) -> Result<OwnerAcceptedFrameResult, OwnerOutboxError> {
+    apply_ordered_in_tx(tx, workspace_id, input, None, now_ms)
+}
+
+/// Advance from the captured accepted checkpoint to an authenticated host cut.
+/// The vector authenticates the resulting struct clocks; the update also carries
+/// delete sets, which must be applied even when those clocks have not changed.
+pub fn apply_sync_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    input: &OwnerAcceptedFrameInput,
+    host_vector: &[u8],
+    now_ms: i64,
+) -> Result<OwnerAcceptedFrameResult, OwnerOutboxError> {
+    apply_ordered_in_tx(tx, workspace_id, input, Some(host_vector), now_ms)
+}
+
+fn apply_ordered_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    input: &OwnerAcceptedFrameInput,
+    host_vector: Option<&[u8]>,
+    now_ms: i64,
+) -> Result<OwnerAcceptedFrameResult, OwnerOutboxError> {
     let b = &input.binding;
     b.validate_canonical()
         .map_err(OwnerOutboxError::InvalidInput)?;
     require_workspace(workspace_id, &b.workspace_id)?;
     if input.update_bytes.is_empty()
         || input.update_bytes.len() > crate::limits::MAX_YDOC_UPDATE_BYTES
-        || !(1..=SAFE).contains(&input.journal_cursor)
-        || !(0..input.journal_cursor).contains(&input.previous_accepted_cursor)
+        || !(0..=SAFE).contains(&input.journal_cursor)
+        || !(0..=input.journal_cursor).contains(&input.previous_accepted_cursor)
+        || (host_vector.is_none() && input.previous_accepted_cursor == input.journal_cursor)
         || !(1..SAFE).contains(&input.expected_revision)
         || !(0..=SAFE).contains(&input.expected_native_head_sequence)
         || !(0..=SAFE).contains(&now_ms)
@@ -108,7 +132,51 @@ pub fn apply_frame_in_tx(
     if observed.relay_database_namespace != input.relay_database_namespace {
         return Err(OwnerOutboxError::ParentMismatch);
     }
-    let digest = hex_sha256(&input.update_bytes);
+    let digest = if let Some(vector) = host_vector {
+        use sha2::{Digest, Sha256};
+        use yrs::updates::decoder::Decode;
+        if vector.len() > crate::limits::MAX_YDOC_UPDATE_BYTES {
+            return Err(OwnerOutboxError::InvalidInput(
+                "host vector exceeds document limit",
+            ));
+        }
+        crate::replay_parity::prevalidate_state_vector_bytes(vector).map_err(collab)?;
+        let host = yrs::StateVector::decode_v1(vector)
+            .map_err(|_| OwnerOutboxError::InvalidInput("invalid host vector"))?;
+        let scratch = crate::Ydoc::wire();
+        scratch
+            .apply(&super::draft::bounded_blob(
+                tx,
+                &observed.checkpoint_digest,
+            )?)
+            .map_err(collab)?;
+        scratch.apply(&input.update_bytes).map_err(collab)?;
+        if scratch.has_pending_dependencies() || scratch.state_vector() != host {
+            return Err(OwnerOutboxError::ParentMismatch);
+        }
+        let checkpoint = bounded(&scratch)?;
+        if input.journal_cursor == input.previous_accepted_cursor {
+            if observed.revision != input.expected_revision
+                || observed.native_head_sequence != input.expected_native_head_sequence
+                || observed.accepted_cursor != input.previous_accepted_cursor
+                || hex_sha256(&checkpoint) != observed.checkpoint_digest
+            {
+                return Err(OwnerOutboxError::ParentMismatch);
+            }
+            return Ok(OwnerAcceptedFrameResult {
+                revision: observed.revision,
+                accepted_cursor: observed.accepted_cursor,
+                native_head_sequence: observed.native_head_sequence,
+            });
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"owner-accepted-sync-v1\0");
+        hash.update(hex_sha256(&scratch.encode_state_vector()).as_bytes());
+        hash.update(&input.update_bytes);
+        dohc_engine_storage::hex(&hash.finalize())
+    } else {
+        hex_sha256(&input.update_bytes)
+    };
     let json = binding_json(b)?;
     type AppliedFrameRow = (String, String, String, i64, i64, i64, i64);
     let prior:Option<AppliedFrameRow>=tx.query_row(

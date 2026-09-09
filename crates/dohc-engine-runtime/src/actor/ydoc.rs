@@ -176,6 +176,54 @@ impl ActorHandle {
         input: dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput,
         now_ms: i64,
         token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<
+        Result<
+            dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameResult,
+            OwnerOutboxError,
+        >,
+        RuntimeError,
+    > {
+        self.owner_ydoc_apply_ordered(workspace_id, input, None, now_ms, token, reservation)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn owner_ydoc_apply_initial_sync(
+        &self,
+        workspace_id: String,
+        input: dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput,
+        host_vector: Vec<u8>,
+        now_ms: i64,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<
+        Result<
+            dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameResult,
+            OwnerOutboxError,
+        >,
+        RuntimeError,
+    > {
+        self.owner_ydoc_apply_ordered(
+            workspace_id,
+            input,
+            Some(host_vector),
+            now_ms,
+            token,
+            reservation,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn owner_ydoc_apply_ordered(
+        &self,
+        workspace_id: String,
+        input: dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput,
+        host_vector: Option<Vec<u8>>,
+        now_ms: i64,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
     ) -> Result<
         Result<
             dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameResult,
@@ -184,6 +232,7 @@ impl ActorHandle {
         RuntimeError,
     > {
         self.run(move |store, cache| {
+            let _reservation = reservation;
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
@@ -194,12 +243,22 @@ impl ActorHandle {
             )?;
             cache.remove(&key);
             let result = store.write_with(&NoFaults, |tx| {
-                dohc_engine_collab::owner_outbox::accepted::apply_frame_in_tx(
-                    tx,
-                    &workspace_id,
-                    &input,
-                    now_ms,
-                )
+                if let Some(vector) = &host_vector {
+                    dohc_engine_collab::owner_outbox::accepted::apply_sync_in_tx(
+                        tx,
+                        &workspace_id,
+                        &input,
+                        vector,
+                        now_ms,
+                    )
+                } else {
+                    dohc_engine_collab::owner_outbox::accepted::apply_frame_in_tx(
+                        tx,
+                        &workspace_id,
+                        &input,
+                        now_ms,
+                    )
+                }
             });
             let result = match result {
                 Ok(TxnOutcome::Committed(result)) => Ok(result),
@@ -226,11 +285,13 @@ impl ActorHandle {
         binding: dohc_engine_collab::LiveObjectBinding,
         relay_database_namespace: String,
         token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
     ) -> Result<
         Result<dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedState, OwnerOutboxError>,
         RuntimeError,
     > {
         self.run(move |store, _cache| {
+            let _reservation = reservation;
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
@@ -252,8 +313,10 @@ impl ActorHandle {
         relay_database_namespace: String,
         receipt: OwnerDeliveryReceipt,
         token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
     ) -> Result<Result<bool, OwnerOutboxError>, RuntimeError> {
         self.run(move |store, _cache| {
+            let _reservation = reservation;
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }

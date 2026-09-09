@@ -47,6 +47,8 @@ impl OrdinaryLiveHostConfig {
 }
 
 pub(crate) struct OrdinaryHost {
+    pub service: std::sync::Weak<EngineService>,
+    pub owner_delivery_admission: Option<crate::live_application_ingress::SettlementAdmission>,
     pub sync: Option<(
         dohc_engine_collab::live_update_application::AppliedSyncPolicy,
         crate::live_application_ingress::SettlementAdmission,
@@ -105,6 +107,8 @@ impl EngineService {
         );
         let owner = ConnectionOwner::authenticated();
         let _ = service.ordinary_live_host.set(OrdinaryHost {
+            service: Arc::downgrade(&service),
+            owner_delivery_admission: ingress.owner_admission().ok(),
             max_registrations: config.max_registrations,
             max_adoption_bytes: config.max_adoption_bytes,
             max_adoption_events: config.max_adoption_events,

@@ -108,6 +108,7 @@ impl Registry {
 pub enum LiveApplicationInput {
     Admitted(Box<AdmittedApplicationInput>),
     Restore(Box<restore::RestoreInput>),
+    Owner(Box<super::owner_delivery::OwnerInput>),
 }
 
 #[doc(hidden)]

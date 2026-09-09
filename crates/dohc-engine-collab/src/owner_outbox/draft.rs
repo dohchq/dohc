@@ -822,4 +822,90 @@ mod tests {
             .unwrap());
         super::super::acknowledge(&mut store, "workspace", &append.outbox_id, &[receipt]).unwrap();
     }
+
+    #[test]
+    fn initial_sync_advances_a_cut_retries_and_keeps_pending_separate() {
+        use super::super::accepted::{apply_sync_in_tx, read_state_in, OwnerAcceptedFrameInput};
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let pending_update = owner.richdoc_append_paragraph("private pending");
+        let append = pending(&mut store, &observed, pending_update);
+        let host = Ydoc::wire();
+        host.apply(&checkpoint).unwrap();
+        let update = host.richdoc_append_paragraph("remote accepted");
+        let input = OwnerAcceptedFrameInput {
+            binding: observed.binding.clone(),
+            relay_database_namespace: observed.relay_database_namespace.clone(),
+            expected_revision: observed.revision,
+            expected_native_head_sequence: observed.native_head_sequence,
+            previous_accepted_cursor: 0,
+            journal_cursor: 19,
+            update_bytes: update,
+        };
+        let wrong_vector = owner.encode_state_vector();
+        assert!(store
+            .write_with(&NoFaults, |tx| apply_sync_in_tx(
+                tx,
+                "workspace",
+                &input,
+                &wrong_vector,
+                20
+            ))
+            .is_err());
+        let vector = host.encode_state_vector();
+        store
+            .write_with(&NoFaults, |tx| {
+                apply_sync_in_tx(tx, "workspace", &input, &vector, 20)
+            })
+            .unwrap();
+        let before = store
+            .read_with(|c| read_state_in(c, &observed.binding, "relay"))
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                apply_sync_in_tx(tx, "workspace", &input, &vector, 21)
+            })
+            .unwrap();
+        let after = store
+            .read_with(|c| read_state_in(c, &observed.binding, "relay"))
+            .unwrap();
+        assert_eq!(before.native_head_sequence, after.native_head_sequence);
+        assert_eq!(after.revision, 2);
+        assert_eq!(after.accepted_cursor, 19);
+        assert_eq!(after.state_vector, vector);
+        let receipt = OwnerDeliveryReceipt {
+            delivery_id: append.delivery_id,
+            update_digest: append.update_digest,
+            journal_cursor: 3,
+            accepting_host_epoch: 1,
+        };
+        assert!(!store
+            .read_with(|c| super::super::accepted::is_receipt_applied_in(
+                c,
+                &observed.binding,
+                "relay",
+                &receipt
+            ))
+            .unwrap());
+        let unchanged = OwnerAcceptedFrameInput {
+            expected_revision: after.revision,
+            expected_native_head_sequence: after.native_head_sequence,
+            previous_accepted_cursor: 19,
+            journal_cursor: 19,
+            update_bytes: vec![0, 0],
+            ..input
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                apply_sync_in_tx(tx, "workspace", &unchanged, &vector, 22)
+            })
+            .unwrap();
+        let final_state = store
+            .read_with(|c| read_state_in(c, &observed.binding, "relay"))
+            .unwrap();
+        assert_eq!(after.native_head_sequence, final_state.native_head_sequence);
+        assert_eq!(after.revision, final_state.revision);
+    }
 }
