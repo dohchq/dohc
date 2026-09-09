@@ -58,7 +58,9 @@ import { LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_PROPOSALS } from "./liveRestoreOp
 
 type RestoreProposalInput = StopRestoreLookup & {host: LiveHostConnectionCoordinate} & RestoreProofBudget;
 const proposalCharge = (bytes: number, operationId: string, workspaceId: string, proposalDigest: string, candidateDigest: string, recordedAtMs: number) =>
-  authorityInteger(bytes + Buffer.byteLength(JSON.stringify([operationId, workspaceId, proposalDigest, candidateDigest, recordedAtMs, Number.MAX_SAFE_INTEGER])), 1);
+  authorityInteger(bytes + Buffer.byteLength(JSON.stringify([operationId, workspaceId, proposalDigest, candidateDigest, recordedAtMs, Number.MAX_SAFE_INTEGER, "f".repeat(64)])), 1);
+const proposalRecordDigest = (operationId: string, workspaceId: string, proposalDigest: string, candidateDigest: string, recordedAtMs: number, charge: number) =>
+  createHash("sha256").update(JSON.stringify([operationId, workspaceId, proposalDigest, candidateDigest, recordedAtMs, charge])).digest("hex");
 
 export interface CommittedBootstrap {
   readonly bootstrapId: string;
@@ -952,27 +954,32 @@ export class LiveCommittedDeliveryStore {
   }
   recordStopRestoreProposal(input: RestoreProposalInput,
     bytes: Uint8Array, policy: OrderedLiveUpdateCutPolicy, now: number) {
-    const at = authorityInteger(now), decoded = decodeNativeRestoreProposal(bytes, input);
-    const {capture, assertCurrentInTransaction} = this.#captureStopRestoreProposal(input, decoded.receiptJson);
-    const content = validateLiveRestoreProposal(capture, decoded.bytes, policy, input);
+    const budget = {maxBytes: authorityInteger(input.maxBytes, 1), maxEvents: authorityInteger(input.maxEvents, 1)};
+    const request = {operationId: parseLiveUpdateIdentifier(input.operationId), workspaceId: parseLiveUpdateIdentifier(input.workspaceId),
+      ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId), host: snapshotHostCoordinate(input.host), ...budget};
+    const at = authorityInteger(now), decoded = decodeNativeRestoreProposal(bytes, budget);
+    const {capture, assertCurrentInTransaction} = this.#captureStopRestoreProposal(request, decoded.receiptJson);
+    const content = validateLiveRestoreProposal(capture, decoded.bytes, policy, budget);
     const proposalDigest = createHash("sha256").update(decoded.captured).digest("hex");
     const operationId = capture.receipt.fence.operation.operationId, workspaceId = capture.selected.binding.workspaceId;
     const charge = proposalCharge(decoded.captured.byteLength, operationId, workspaceId, proposalDigest, content.content.candidateDigest, at);
     return this.#storage.tx(() => {
       assertCurrentInTransaction();
-      const old = this.#storage.db.prepare(`SELECT workspace_id,proposal_sha256,candidate_sha256,recorded_at_ms,accounted_bytes,length(proposal_bytes) AS bytes
+      const old = this.#storage.db.prepare(`SELECT workspace_id,proposal_sha256,candidate_sha256,recorded_at_ms,accounted_bytes,record_sha256,length(proposal_bytes) AS bytes
         FROM ${LIVE_RESTORE_PROPOSALS} WHERE operation_id=?`).get(operationId);
       if (old) {
         integrity(old.workspace_id === workspaceId && old.proposal_sha256 === proposalDigest && old.candidate_sha256 === content.content.candidateDigest && old.bytes === decoded.captured.byteLength);
         const recordedAtMs = authorityInteger(old.recorded_at_ms);
         integrity(old.accounted_bytes === proposalCharge(decoded.captured.byteLength, operationId, workspaceId, proposalDigest, content.content.candidateDigest, recordedAtMs));
+        integrity(old.record_sha256 === proposalRecordDigest(operationId, workspaceId, proposalDigest, content.content.candidateDigest, recordedAtMs, authorityInteger(old.accounted_bytes, 1)));
         const row = this.#storage.db.prepare(`SELECT proposal_bytes FROM ${LIVE_RESTORE_PROPOSALS} WHERE operation_id=?`).get(operationId)!;
         integrity(row.proposal_bytes instanceof Uint8Array && Buffer.compare(row.proposal_bytes, decoded.captured) === 0);
         return {proposalDigest, candidateDigest: content.content.candidateDigest, recordedAtMs, replayed: true};
       }
       assertWorkspaceQuota(this.#storage, workspaceId, charge);
-      const changed = this.#storage.db.prepare(`INSERT INTO ${LIVE_RESTORE_PROPOSALS}(operation_id,workspace_id,proposal_bytes,proposal_sha256,candidate_sha256,recorded_at_ms,accounted_bytes)
-        VALUES (?,?,?,?,?,?,?)`).run(operationId, workspaceId, decoded.captured, proposalDigest, content.content.candidateDigest, at, charge);
+      const recordDigest = proposalRecordDigest(operationId, workspaceId, proposalDigest, content.content.candidateDigest, at, charge);
+      const changed = this.#storage.db.prepare(`INSERT INTO ${LIVE_RESTORE_PROPOSALS}(operation_id,workspace_id,proposal_bytes,proposal_sha256,candidate_sha256,recorded_at_ms,accounted_bytes,record_sha256)
+        VALUES (?,?,?,?,?,?,?,?)`).run(operationId, workspaceId, decoded.captured, proposalDigest, content.content.candidateDigest, at, charge, recordDigest);
       integrity(changed.changes === 1);
       const usage = this.#storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, workspaceId);
       integrity(usage.changes === 1);
@@ -994,6 +1001,7 @@ export class LiveCommittedDeliveryStore {
       integrity(row.proposal_bytes instanceof Uint8Array && row.proposal_bytes.byteLength === header.bytes);
       const proposalDigest = parseLiveUpdateDigest(row.proposal_sha256), candidateDigest = parseLiveUpdateDigest(row.candidate_sha256), recordedAtMs = authorityInteger(row.recorded_at_ms);
       integrity(row.accounted_bytes === proposalCharge(row.proposal_bytes.byteLength, lookup.operationId, lookup.workspaceId, proposalDigest, candidateDigest, recordedAtMs));
+      integrity(row.record_sha256 === proposalRecordDigest(lookup.operationId, lookup.workspaceId, proposalDigest, candidateDigest, recordedAtMs, authorityInteger(row.accounted_bytes, 1)));
       return {bytes: new Uint8Array(row.proposal_bytes), proposalDigest, candidateDigest, recordedAtMs};
     });
     if (!saved) return null;

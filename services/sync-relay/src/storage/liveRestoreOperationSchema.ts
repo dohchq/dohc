@@ -38,6 +38,7 @@ const schema = {
     proposal_bytes BLOB NOT NULL CHECK (length(proposal_bytes)>0),
     proposal_sha256 TEXT NOT NULL CHECK (length(proposal_sha256)=64 AND proposal_sha256 NOT GLOB '*[^0-9a-f]*'),
     candidate_sha256 TEXT NOT NULL CHECK (length(candidate_sha256)=64 AND candidate_sha256 NOT GLOB '*[^0-9a-f]*'),
+    record_sha256 TEXT NOT NULL CHECK (length(record_sha256)=64 AND record_sha256 NOT GLOB '*[^0-9a-f]*'),
     recorded_at_ms INTEGER NOT NULL CHECK (recorded_at_ms BETWEEN 0 AND ${safe}),
     accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND ${safe})
   ) STRICT`,

@@ -249,7 +249,7 @@ it("charges the full framed proposal exactly once and refuses one byte beyond wo
   const f = contentProposalFixture();
   try {
     const digest = hash(f.encoded), candidate = hash(f.bytes.candidateBytes), at = 200;
-    const charge = f.encoded.byteLength + Buffer.byteLength(JSON.stringify(["restore", "workspace", digest, candidate, at, Number.MAX_SAFE_INTEGER]));
+    const charge = f.encoded.byteLength + Buffer.byteLength(JSON.stringify(["restore", "workspace", digest, candidate, at, Number.MAX_SAFE_INTEGER, "f".repeat(64)]));
     const before = proposalRows(f);
     f.context.options.workspaceQuotaBytes = Number(before.usage) + charge - 1;
     expect(() => f.store.recordStopRestoreProposal(f.input, f.encoded, policy, at)).toThrow(/quota/);
@@ -278,7 +278,7 @@ it.each(["before-insert", "after-insert", "ignored-insert", "ignored-usage", "fa
     } finally {f.close();}
   });
 
-it.each(["bytes", "proposal digest", "candidate digest", "charge", "recorded time"])(
+it.each(["bytes", "proposal digest", "candidate digest", "charge", "recorded time", "same-width recorded time"])(
   "rejects corrupted stored proposal %s on read and replay without mutation", damage => {
     const f = contentProposalFixture();
     try {
@@ -288,12 +288,29 @@ it.each(["bytes", "proposal digest", "candidate digest", "charge", "recorded tim
       if (damage === "candidate digest") f.raw.prepare(`UPDATE ${proposalTable} SET candidate_sha256=?`).run("f".repeat(64));
       if (damage === "charge") f.raw.exec(`UPDATE ${proposalTable} SET accounted_bytes=accounted_bytes-1`);
       if (damage === "recorded time") f.raw.exec(`UPDATE ${proposalTable} SET recorded_at_ms=1000000`);
+      if (damage === "same-width recorded time") f.raw.exec(`UPDATE ${proposalTable} SET recorded_at_ms=999`);
       const before = proposalRows(f);
       expect(() => f.store.readStopRestoreProposal(f.input, policy)).toThrow();
       expect(() => f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 201)).toThrow();
       expect(proposalRows(f)).toEqual(before);
     } finally {f.close();}
   });
+
+it("captures restore proposal budgets once before validation and persistence", () => {
+  const f = contentProposalFixture();
+  try {
+    const reads = new Map<string, number>();
+    const input = new Proxy(f.input, {get(target, key, receiver) {
+      if (key === "maxBytes" || key === "maxEvents") {
+        const count = (reads.get(key) ?? 0) + 1;reads.set(key, count);
+        if (count > 1) throw new Error("caller budget was reread");
+      }
+      return Reflect.get(target, key, receiver);
+    }});
+    expect(f.store.recordStopRestoreProposal(input, f.encoded, policy, 200).replayed).toBe(false);
+    expect(reads).toEqual(new Map([["maxBytes", 1], ["maxEvents", 1]]));
+  } finally {f.close();}
+});
 
 it("refuses a second proposal for the operation and bounded or foreign reads without mutation", () => {
   const f = contentProposalFixture();
