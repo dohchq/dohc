@@ -1803,7 +1803,11 @@ mod tests {
             )
             .unwrap();
             let checked = service
-                .versioned_text_check_move(&request, request.params.clone())
+                .versioned_text_check_move(
+                    &RequestContext::unbounded(),
+                    &request,
+                    request.params.clone(),
+                )
                 .await;
             if path == "note" {
                 assert!(checked.is_ok(), "a sibling prefix remains movable");

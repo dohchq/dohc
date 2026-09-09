@@ -252,7 +252,7 @@ impl EngineService {
                     .await?
             }
             "versionedText.checkMove" => {
-                self.versioned_text_check_move(&request, request.params.clone())
+                self.versioned_text_check_move(&ctx, &request, request.params.clone())
                     .await?
             }
             "versionedText.delete" => {

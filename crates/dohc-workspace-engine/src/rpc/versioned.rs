@@ -539,19 +539,23 @@ impl EngineService {
 
     pub(super) async fn versioned_text_check_move(
         &self,
+        ctx: &RequestContext,
         request: &Request,
         params: Value,
     ) -> Result<Value, WireError> {
         let params: VersionedTextCheckMoveParams = parse(params)?;
         let open = self.open(request.workspace.as_ref())?;
-        open.actor
-            .ensure_no_adopted_owner_under_path(
+        let cancellation = OperationCancellation::new(ctx);
+        Self::read_under_ctx(
+            &cancellation,
+            "versionedText.checkMove",
+            open.actor.ensure_no_adopted_owner_under_path(
                 open.workspace_id.clone(),
                 params.version_id,
                 params.path,
-            )
-            .await
-            .map_err(map_runtime)?;
+            ),
+        )
+        .await?;
         Ok(json!({"allowed":true}))
     }
 

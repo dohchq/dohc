@@ -65,6 +65,12 @@ pub struct CaptureApplyProbe {
     open_install_reached: Arc<tokio::sync::Notify>,
     #[cfg(any(test, feature = "harness"))]
     open_install_release: Arc<tokio::sync::Notify>,
+    #[cfg(any(test, feature = "harness"))]
+    open_budget_armed: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(any(test, feature = "harness"))]
+    open_budget_reached: Arc<tokio::sync::Notify>,
+    #[cfg(any(test, feature = "harness"))]
+    open_budget_release: Arc<tokio::sync::Notify>,
 }
 
 #[cfg(any(test, feature = "harness"))]
@@ -79,6 +85,18 @@ impl CaptureApplyProbe {
 
     pub fn release_open_install(&self) {
         self.open_install_release.notify_one();
+    }
+
+    pub fn pause_next_open_budget(&self) {
+        self.open_budget_armed.store(true, Ordering::Release);
+    }
+
+    pub async fn wait_until_open_budget_paused(&self) {
+        self.open_budget_reached.notified().await;
+    }
+
+    pub fn release_open_budget(&self) {
+        self.open_budget_release.notify_one();
     }
 }
 
@@ -280,6 +298,14 @@ impl CaptureApplyProbe {
             self.open_install_reached.notify_one();
             // The open guard must stay owned here after caller cancellation.
             tokio::runtime::Handle::current().block_on(self.open_install_release.notified());
+        }
+    }
+
+    pub(crate) fn pause_open_budget_if_armed(&self) {
+        #[cfg(any(test, feature = "harness"))]
+        if self.open_budget_armed.swap(false, Ordering::AcqRel) {
+            self.open_budget_reached.notify_one();
+            tokio::runtime::Handle::current().block_on(self.open_budget_release.notified());
         }
     }
 
