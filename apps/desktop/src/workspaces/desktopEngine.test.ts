@@ -103,6 +103,7 @@ function fixture() {
   const spawns: EngineClientSpawnOptions[] = [];
   let quitting = false;
   const dependencies: Dependencies = {
+    findWorkspace: id => rows.get(id) ?? null,
     app: { isPackaged: false, getAppPath: vi.fn(() => "app-root"), quit: vi.fn() },
     dialog: { showErrorBox: vi.fn() },
     process: { env: {}, resourcesPath: "resources" },
@@ -164,6 +165,32 @@ function fixture() {
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("desktop engine construction", () => {
+  it("discovers remaining configured owners after another workspace closes", async () => {
+    const f = fixture();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    for (const workspaceId of ["first","second"]) {
+      const rootPath = await createTestScratch(`dohc-owner-workspace-close-${workspaceId}-`);
+      f.rows.set(workspaceId,{workspaceId,rootPath,kind:"personal",mode:"local-first"});
+    }
+    f.dependencies.process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG = "test-config";
+    f.dependencies.existingOwnerFor = vi.fn(() => {throw new Error("No editor in this discovery test.");});
+    ownerHostMock.read.mockReturnValue({nativeConfigPath:"native-config",workspaceIds:["first","second"],transport:{aggregateBytes:1024,maxUploads:1}});
+    ownerHostMock.start.mockImplementation(() => ({stop:vi.fn()}));
+    const originalSend = f.client.sendRequest.bind(f.client);
+    f.client.sendRequest = async request => request.method === "workspace.open" && ["first","second"].includes(String(workspaceIdOf(request)))
+      ? {id:request.id,result:{workspace:`handle-${workspaceIdOf(request)}`}} : originalSend(request);
+    try {
+      expect(f.authorities.workspaceIds()).toEqual([]);
+      expect(await f.engine.start()).toBe(true);
+      const discover = ownerHostMock.start.mock.calls.at(-1)![0].bindings;
+      expect((await discover()).workspaces).toHaveLength(2);
+      await f.authorities.invalidate("first"); f.rows.delete("first");
+      const remaining = await discover();
+      expect(remaining.workspaces).toEqual([{workspaceId:"second",workspaceHandle:"handle-second"}]);
+      expect(() => remaining.assertCurrent()).not.toThrow();
+    } finally {await f.close(); ownerHostMock.read.mockReset(); ownerHostMock.start.mockReset();}
+  });
+
   it.each(["closed", "reopened"])("rejects discovered owner handles after a capture directly closes its %s session", async mode => {
     const f = fixture();
     Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));

@@ -56,7 +56,8 @@ export function startExistingOwnerDeviceTransport(options: {
   config: ExistingOwnerDeviceConfig; start: DeviceLiveHostStart; ws: WebSocket; limits: DeviceControlLimits; stop(): void;
 }) {
   const { config, start, ws, limits } = options;
-  for (const value of [config.maxQueuedBytes,config.maxUploads,config.maxRegistrations,config.aggregateBytes,config.maxAdoptionBytes,config.maxAdoptionEvents,config.requestDeadlineMs]) integer(value,1);
+  for (const value of [config.maxQueuedBytes,config.maxUploads,config.maxRegistrations,config.aggregateBytes,config.maxAdoptionBytes,config.maxAdoptionEvents]) integer(value,1);
+  integer(config.requestDeadlineMs,1,2_147_483_647);
   integer(config.maxFrameBytes,1_048_576,16_777_216);
   if (config.maxAdoptionBytes * 3 + config.maxFrameBytes > config.aggregateBytes || config.maxQueuedBytes < Math.max(limits.maxPayloadBytes + 16,config.maxFrameBytes + 36)) throw new Error("Invalid existing owner transport budget.");
   const workspaces = new Map(config.workspaces.map(row => [row.workspaceHandle, row.workspaceId]));
@@ -74,13 +75,16 @@ export function startExistingOwnerDeviceTransport(options: {
     registrations.clear(); options.stop(); };
   const connection = new DeviceEngineConnection(ws,limits,start.receive,config.maxQueuedBytes,stop);
   const check = () => { if (closed || retired.signal.aborted) throw new Error("Owner device connection retired."); };
-  const send = (value: unknown): Promise<void> => new Promise((resolve,reject) => {
-    check();
-    const drained = () => { connection.offDrain(drained); connection.offClose(gone); resolve(); };
-    const gone = () => { connection.offDrain(drained); connection.offClose(gone); reject(new Error("Owner device connection retired.")); };
+  const send = (value: unknown,signal?: AbortSignal): Promise<void> => new Promise((resolve,reject) => {
+    check(); signal?.throwIfAborted();
+    const cleanup = () => {connection.offDrain(drained); connection.offClose(gone); signal?.removeEventListener("abort",aborted);};
+    const drained = () => { cleanup(); resolve(); };
+    const gone = () => { cleanup(); reject(new Error("Owner device connection retired.")); };
+    const aborted = () => {cleanup(); reject(signal!.reason);};
     connection.onDrain(drained); connection.onClose(gone);
+    signal?.addEventListener("abort",aborted,{once:true});
     try { if (connection.write(encodeFrame(FrameType.Control,0,Buffer.from(JSON.stringify(value)),config.maxFrameBytes))) drained(); }
-    catch (error) { connection.offDrain(drained); connection.offClose(gone); reject(error); }
+    catch (error) { cleanup(); reject(error); }
   });
   const registrationFor = (operation: Operation): Registration => {
     const registration = registrations.get(integer(operation.params.registrationId,1));
@@ -163,7 +167,8 @@ export function startExistingOwnerDeviceTransport(options: {
         } else throw new Error("Owner device method is unavailable.");
       }
       check(); if (operation.signal.signal.aborted) throw operation.signal.signal.reason;
-      await send({ type: "response",id: operation.id,result });
+      await send({ type: "response",id: operation.id,result },signal);
+      check(); signal.throwIfAborted();
       if (operation.method === "liveApplication.adoptOwner") {
         await owner!.finishHandoff(true);
         clearTimeout(registration!.handoffTimer); registration!.handoffTimer = undefined; registration!.adopting = false;
@@ -174,7 +179,7 @@ export function startExistingOwnerDeviceTransport(options: {
         clearTimeout(registration?.handoffTimer); if (registration) { registration.handoffTimer = undefined; registration.adopting = false; }
         await owner.finishHandoff(false).catch(() => undefined);
       }
-      if (!closed) await send({ type: "error",id: operation.id,error: { code: "FORBIDDEN",message: "owner-device-operation-refused",retryability: "no" } }).catch(stop);
+      if (!closed && !operation.signal.signal.aborted) await send({ type: "error",id: operation.id,error: { code: "FORBIDDEN",message: "owner-device-operation-refused",retryability: "no" } },operation.signal.signal).catch(() => {if (!operation.signal.signal.aborted) stop();});
     } finally { operations.delete(operation.id); charged -= operation.charge; clearTimeout(operation.timer); }
   }
   function attachment(id: unknown,size: unknown,digest: unknown,maximum: number): Attachment {

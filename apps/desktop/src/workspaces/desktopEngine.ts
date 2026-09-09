@@ -31,6 +31,7 @@ type EngineAuthorityState = {
 
 interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   existingOwnerFor?: ExistingOwnerDeviceConfig["ownerFor"];
+  findWorkspace(workspaceId: string): RegistryEntry | null;
   app: Pick<App, "isPackaged" | "getAppPath" | "quit">;
   dialog: Pick<Dialog, "showErrorBox">;
   process: { env: NodeJS.ProcessEnv; resourcesPath?: string };
@@ -89,6 +90,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         const workspaces = [];
         const bindingChecks: (() => void)[] = [];
         for (const workspaceId of config.workspaceIds) {
+          if (!dependencies.findWorkspace(workspaceId)) continue;
           workspaces.push(await workspaceAuthorities.withAuthority(workspaceId,async lease => {
             lease.assertCurrent();
             const workspace = {workspaceId,rootPath: lease.binding.canonicalRootPath,attachmentId: lease.binding.attachmentId};

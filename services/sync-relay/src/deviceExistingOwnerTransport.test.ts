@@ -1,11 +1,58 @@
 import { expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import type { WebSocket } from "ws";
-import { EngineClient } from "@dohc/workspace-engine-client/daemon";
+import { EngineClient,FrameDecoder,FrameType,encodeFrame } from "@dohc/workspace-engine-client/daemon";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { DeviceControlLimits } from "@dohc/live-session-contract/device-control";
 import { DeviceEngineConnection } from "./deviceEngineConnection.js";
 import { startExistingOwnerDeviceTransport } from "./deviceExistingOwnerTransport.js";
+
+it("releases a cancelled owner-state handoff while its response is still backpressured",async () => {
+  const deferred = () => {let resolve!: () => void; const promise = new Promise<void>(done => {resolve = done;}); return {promise,resolve};};
+  const started = deferred(), held = deferred();
+  const replies = new Map<number,ReturnType<typeof deferred>>();
+  const decoder = new FrameDecoder(1_048_576,256*1024);
+  let release: (() => void) | undefined;
+  const ws = {readyState:1,bufferedAmount:0,send(bytes:Buffer,options:{binary:boolean},done:() => void) {
+    let hold = false;
+    if (options.binary) decoder.push(bytes,frame => {
+      const value = JSON.parse(frame.payload.toString());
+      replies.get(value.id)?.resolve();
+      if (value.id === 3) {hold = true; release = done; held.resolve();}
+    });
+    else if (JSON.parse(bytes.toString()).type === "liveHost.transport") started.resolve();
+    if (!hold) done();
+  }} as unknown as WebSocket;
+  const limits = {maxPayloadBytes:4096,maxPendingBytes:2_000_000} as DeviceControlLimits;
+  const start = {type:"liveHost.start" as const,version:1 as const,relayNamespace:"namespace",authToken:"A".repeat(43),
+    host:{hostId:"host",hostEpoch:parseHostEpoch(1),instanceId:"instance",connectionId:"connection"},receive:limits};
+  const owner = {nativeSessionId:"session",assertCurrent:vi.fn(),prepareHandoff:vi.fn(async () => undefined),
+    finishHandoff:vi.fn(async (_adopted:boolean) => undefined),remoteApplied:vi.fn(async () => undefined)};
+  const client = {ready:async () => undefined,sendRequest:async (request:{method:string}) => ({result:
+    request.method === "liveApplication.register" ? {registrationId:9} : {adoptionId:"adoption",expectedLocalSequence:0,throughCursor:null,outboxId:null,pendingBytes:0,outboxState:null}})} as unknown as EngineClient;
+  const stop = vi.fn();
+  const transport = startExistingOwnerDeviceTransport({config:{client,workspaces:[{workspaceId:"workspace",workspaceHandle:"handle"}],ownerFor:() => owner,
+    maxQueuedBytes:2_000_000,maxFrameBytes:1_048_576,maxUploads:2,maxRegistrations:10,aggregateBytes:200_000_000,
+    maxAdoptionBytes:1_000_000,maxAdoptionEvents:10,requestDeadlineMs:30_000},start,ws,limits,stop});
+  const send = (value:unknown) => transport.receive(encodeFrame(FrameType.Control,0,Buffer.from(JSON.stringify(value)),1_048_576));
+  const request = (id:number,method:string,params:object) => {
+    const response = deferred(); replies.set(id,response);
+    send({type:"request",id,method,workspace:"handle",params}); return response.promise;
+  };
+  try {
+    await started.promise;
+    send({type:"hello",protocolVersion:2,authToken:start.authToken,capabilities:["blobs"],maxFrameBytes:1_048_576,lastSessionGeneration:null});
+    await request(2,"liveApplication.register",{binding:{workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),
+      currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:1}});
+    void request(3,"liveApplication.ownerState",{registrationId:9}); await held.promise;
+    send({type:"cancel",id:3});
+    await expect.poll(() => owner.finishHandoff.mock.calls,{timeout:1000}).toEqual([[false]]);
+    expect(stop).not.toHaveBeenCalled();
+    release!(); release = undefined;
+    await request(4,"liveApplication.ownerState",{registrationId:9});
+    expect(owner.prepareHandoff).toHaveBeenCalledTimes(2);
+  } finally {release?.(); await transport.close();}
+});
 
 it("uses an existing client for bounded owner adoption and refuses ordinary remote methods", async () => {
   let transport!: ReturnType<typeof startExistingOwnerDeviceTransport>, peerConnection: DeviceEngineConnection | undefined, peer: EngineClient | undefined;
