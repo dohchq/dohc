@@ -1,4 +1,5 @@
 import { createNamedDesktopLive } from "./namedDesktopLive";
+import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
 import { once } from "node:events";
 import { request as httpRequest } from "node:http";
 import { createHash } from "node:crypto";
@@ -47,7 +48,7 @@ it("admits the authenticated desktop recipient through the named ticket and host
 it("refuses desktop cross-account, scope, Origin, cookie, and host changes", async () => {
   const f = await fixture(limits, false, undefined, false, true);
   const body = {shareId: scope.shareId, path: binding.currentPath};
-  for (const headers of [{authorization: "Bearer other-token"}, {origin: "https://evil.test"}, {cookie: "account=reader"}, {host: "evil.test"}]) {
+  for (const headers of [{authorization: "Bearer other-token"}, {origin: "https://evil.test"}, {cookie: "account=reader"}, {host: "evil.test"}] as Record<string, string>[]) {
     expect((await f.post("/sync/live/desktop-open", body, "", headers)).status).toBe(404);
   }
   for (const path of ["other/a.md", "docs/missing.md", "docs/a.excalidraw", "../docs/a.md"]) {
@@ -64,7 +65,7 @@ function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve };
 }
-async function fixture(routeLimits = limits, link = false, membershipPolicy: LiveMembershipPolicy = {maxSessions: 16, maxMembers: 8, maxSnapshotBytes: 153}, owner = false, desktop = false) {
+async function fixture(routeLimits = limits, link = false, membershipPolicy: LiveMembershipPolicy = {maxSessions: 16, maxMembers: 8, maxSnapshotBytes: 153}, owner = false, desktop = false, admission?: ReturnType<typeof createLiveConnectionAdmission>) {
   const state = await ticketFixture();
   const routeKind = desktop ? "desktop" : link ? "link" : "named";
   const memberships = createLiveMembershipRegistry(membershipPolicy, state.storage.readLiveAuthority.bind(state.storage));
@@ -108,8 +109,8 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     editorLimits: {provider: {frames, maxPendingUpdateBytes: 8192, maxPendingUpdates: 4, maxDeliveryAttempts: 3},
       maxHttpResponseBytes: 4096, maxSocketBufferedBytes: 4096, connectTimeoutMs: 1000, sendTimeoutMs: 1000, drainPollMs: 10} }) : undefined;
   const routes = owner ? createOwnerLiveRoutes({storage: state.storage, resolveActor: actor, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey,
-    frames, bounds, limits: routeLimits, validate: createLiveMarkdownJournalValidator(policy), captureNative}) : createNamedLiveRoutes({ kind: link ? "link" : "named", desktopBearer: desktop, membership: memberships, storage: state.storage, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey, frames, bounds, limits: routeLimits,
-    validate: createLiveMarkdownJournalValidator(policy), sessions: desktopAdmission ?? (link ? createLinkLiveBrowserResolver({storage: state.storage, linkKey: key}) : { resolve: application.resolveNamedBrowserSession }), tickets, captureNative });
+    frames, bounds, limits: routeLimits, validate: createLiveMarkdownJournalValidator(policy), captureNative, admission}) : createNamedLiveRoutes({ kind: link ? "link" : "named", desktopBearer: desktop, membership: memberships, storage: state.storage, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey, frames, bounds, limits: routeLimits,
+    validate: createLiveMarkdownJournalValidator(policy), sessions: desktopAdmission ?? (link ? createLinkLiveBrowserResolver({storage: state.storage, linkKey: key}) : { resolve: application.resolveNamedBrowserSession }), tickets, captureNative, admission });
   const http = serveFetchHandler({ handler: request => new URL(request.url).pathname === "/sync/live/desktop-open" && desktopAdmission ? desktopAdmission.handle(request) : new URL(request.url).pathname === `/sync/live/${routeKind}-tickets` ? routes.handle(request) : application(request),
     maxBodyBytes: () => 16384, oversized: () => Response.json({}, { status: 404 }), failure: () => Response.json({}, { status: 500 }) });
   const upgrades: Promise<void>[] = [], sockets: WebSocket[] = [];
@@ -156,6 +157,20 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
   }
   return { ...state, post, discriminator, mint, connect, currentScope, bearer, profile, memberships, tickets, captureNative, native, changes, invalidated, actor, application, routes };
 }
+
+it.each(["link", "desktop", "owner"])("shares total connection capacity with the %s route", async kind => {
+  const admission = createLiveConnectionAdmission(), routeLimits = {...limits, maxConnections: 1};
+  const first = await fixture(routeLimits, false, undefined, false, false, admission);
+  const second = await fixture(routeLimits, kind === "link", undefined, kind === "owner", kind === "desktop", admission);
+  const firstTicket = await first.mint(), secondTicket = kind === "owner" ? {token: ""} : await second.mint();
+  const current = first.connect(firstTicket.token); expect(await current.status).toBe(101);
+  expect(await second.connect(secondTicket.token).status).toBe(404);
+  const released = once(current.ws, "close"); current.ws.terminate(); await released;
+  await vi.waitFor(() => {
+    const release = admission.reserve([["connections", 1]]); expect(release).not.toBeNull(); release?.();
+  });
+  expect(await second.connect(secondTicket.token).status).toBe(101);
+});
 
 it.each([false, true])("mints through actual HTTP auth and redeems once before exposing only live frames; link=%s", async link => {
   const f = await fixture(limits, link), minted = await f.mint();

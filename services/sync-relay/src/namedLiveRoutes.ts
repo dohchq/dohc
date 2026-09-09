@@ -16,6 +16,7 @@ import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity.js"
 import { captureNamedLiveFrameHost, captureOwnerLiveFrameHost, type NamedFrameHostBounds, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
 import { createNamedLiveFrameSession, type NamedFrameHostSession } from "./namedLiveFrameSession.js";
 import type { createLiveMembershipRegistry, LiveMembershipSession } from "./liveMembership.js";
+import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
 
 export interface NamedLiveRouteLimits {
   readonly maxConnections: number;
@@ -52,6 +53,7 @@ interface LiveRouteOptions {
   bounds: NamedFrameHostBounds;
   captureNative(binding: LiveObjectBinding, signal: AbortSignal): Promise<NamedFrameNativeHost>;
   validate: OwnerOutboxAdmission["validate"];
+  admission?: ReturnType<typeof createLiveConnectionAdmission>;
 }
 type BrowserRouteOptions = LiveRouteOptions & {
   kind: "named" | "link";
@@ -84,7 +86,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
     maxPayload: frames.receive.maxFrameBytes, maxFragments: limits.maxFragments, maxBufferedChunks: limits.maxBufferedChunks,
     closeTimeout: limits.drainTimeoutMs, handleProtocols: () => "dohc-live-v1" };
   const server = new WebSocketServer(wsOptions);
-  const connections = new Set<() => void>(), counts = new Map<string, number>();
+  const connections = new Set<() => void>(), admission = options.admission ?? createLiveConnectionAdmission();
   const shutdown = new AbortController();
   const storage = options.storage;
   const captureNative = options.captureNative.bind(options), validate = options.validate;
@@ -168,18 +170,19 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
     if (closed || storage.unavailable.aborted || connections.size >= limits.maxConnections || head.length > limits.maxPendingBytes) {
       refuseDeviceControl(socket, limits.drainTimeoutMs); return;
     }
+    const releaseConnection = admission.reserve([["connections", limits.maxConnections]]);
+    if (!releaseConnection) {refuseDeviceControl(socket, limits.drainTimeoutMs); return;}
     socket.pause();
     const lifetime = new AbortController(), signal = AbortSignal.any([lifetime.signal, storage.unavailable, shutdown.signal]);
     let ws: WebSocket | undefined, host: NamedFrameHostSession | undefined, session: ReturnType<typeof createNamedLiveFrameSession> | undefined;
     let membership: LiveMembershipSession | undefined;
-    let done = false, opening = true, keys: string[] = [];
+    let done = false, opening = true, releaseAuthority: (() => void) | undefined;
     let timer = setTimeout(stop, limits.upgradeTimeoutMs);
     async function release() {
       if (opening || !done) return;
       await session?.settled();
-      connections.delete(stop);
-      for (const key of keys) { const count = counts.get(key)! - 1; if (count) counts.set(key, count); else counts.delete(key); }
-      keys = [];
+      if (!connections.delete(stop)) return;
+      releaseAuthority?.(); releaseConnection!();
     }
     function stop() {
       if (done) return;
@@ -199,9 +202,9 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
       const check = storage.captureStanding();
       const authenticated = new Request(new URL(request.url!, `https://${headers.get("host")}`), { headers: credentials(headers), signal });
       function reserve(reservations: [string, number][]) {
-        if (reservations.some(([key, bound]) => (counts.get(key) ?? 0) >= bound)) throw new Error("Live connection limit reached.");
-        keys = reservations.map(([key]) => key);
-        for (const key of keys) counts.set(key, (counts.get(key) ?? 0) + 1);
+        const release = admission.reserve(reservations);
+        if (!release) throw new Error("Live connection limit reached.");
+        releaseAuthority = release;
       }
       if (options.kind === "owner") {
         const {document, shareId} = ownerTarget!;
