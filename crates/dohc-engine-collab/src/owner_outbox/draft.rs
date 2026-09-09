@@ -267,14 +267,11 @@ pub fn append_draft_in_tx(
     if update.is_empty() || update.len() > crate::limits::MAX_YDOC_UPDATE_BYTES {
         return Err(OwnerOutboxError::InvalidInput("invalid draft update size"));
     }
-    let epoch = draft
-        .doc
-        .lineage_epoch_tag()
-        .ok_or(OwnerOutboxError::ParentMismatch)?;
-    draft
-        .doc
-        .apply_preserving_lineage_epoch(&update, &epoch)
-        .map_err(collab)?;
+    let epoch = draft.doc.lineage_epoch_tag();
+    draft.doc.apply(&update).map_err(collab)?;
+    if draft.doc.has_pending_dependencies() || draft.doc.lineage_epoch_tag() != epoch {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
     draft
         .doc
         .project(crate::ContentKind::Richdoc)
@@ -503,6 +500,38 @@ mod tests {
         );
     }
     #[test]
+    fn original_claim_draft_refuses_an_update_that_introduces_a_lineage_epoch() {
+        use yrs::{updates::decoder::Decode, Doc, Map, ReadTxn, Transact, Update};
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let changed = Doc::new();
+        let meta = changed.get_or_insert_map(crate::ydoc::ROOT_META);
+        let update = {
+            let mut tx = changed.transact_mut();
+            tx.apply_update(Update::decode_v1(&checkpoint).unwrap())
+                .unwrap();
+            let before = tx.state_vector();
+            meta.insert(&mut tx, crate::ydoc::LINEAGE_EPOCH_META_KEY, "injected");
+            tx.encode_state_as_update_v1(&before)
+        };
+        assert!(matches!(
+            store.write_with(&NoFaults, |tx| append_draft_in_tx(
+                tx,
+                "workspace",
+                &observed.binding,
+                1,
+                "injected-epoch".into(),
+                update,
+                3
+            )),
+            Err(OwnerOutboxError::ParentMismatch)
+        ));
+        assert_eq!(
+            store.table_row_count("owner_ydoc_outbox_entries").unwrap(),
+            0
+        );
+    }
+    #[test]
     fn observation_retains_original_base_without_an_outbox_or_native_snapshot() {
         let (_dir, mut store, mut observed, checkpoint) = fixture();
         let doc = Ydoc::wire();
@@ -625,7 +654,7 @@ mod tests {
             &mut store,
             "workspace",
             &append.outbox_id,
-            &[receipt.clone()]
+            std::slice::from_ref(&receipt)
         )
         .is_err());
         let remote = Ydoc::wire();
@@ -683,7 +712,7 @@ mod tests {
             &mut store,
             "workspace",
             &append.outbox_id,
-            &[receipt.clone()],
+            std::slice::from_ref(&receipt),
         )
         .unwrap();
         drop(store);
@@ -692,7 +721,7 @@ mod tests {
             &mut reopened,
             "workspace",
             &append.outbox_id,
-            &[receipt.clone()],
+            std::slice::from_ref(&receipt),
         )
         .unwrap();
         let mut altered = receipt;
