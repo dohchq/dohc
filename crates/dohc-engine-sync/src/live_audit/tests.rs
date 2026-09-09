@@ -224,6 +224,171 @@ fn identity_alone_does_not_publish_and_later_publication_uses_event_zero() {
     );
 }
 
+fn accept_enrollment_event(f: &mut Fixture, cursor: i64) {
+    use dohc_engine_collab::live_update_application::{
+        AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationError, LiveUpdateReceipt,
+        RelayAcceptedLiveUpdate, ServerDerivedLiveUpdateAuthority, apply_committed,
+    };
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: format!("enrollment-{cursor}"),
+                    update_digest: hex_sha256(&f.bytes),
+                    journal_cursor: cursor,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: cursor,
+            },
+            first_seen: Vec::new(),
+        },
+        update_bytes: f.bytes.clone(),
+    };
+    apply_committed(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.handle,
+        event,
+        &NoFaults,
+        100_000_000,
+        |tx, namespace, binding, count| {
+            journal_live_event_or_defer_in_tx(tx, namespace, binding, count, 200)
+                .map(|_| ())
+                .map_err(|error| {
+                    ApplicationError::Storage(dohc_engine_storage::StorageError::persist_public(
+                        error,
+                    ))
+                })
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn first_push_exports_native_history_after_actual_contact() {
+    let mut f = fixture(false);
+    bootstrap(&mut f, false).unwrap();
+    accept_enrollment_event(&mut f, 1);
+    let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
+    let outcome = client
+        .push_workspace(&mut f.store, "ws", &NoFaults, 201)
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        crate::SyncPassOutcome::Complete {
+            has_more: false,
+            ..
+        }
+    ));
+    assert_eq!(count(&f.store, "live_audit_base_publications"), 1);
+    assert_eq!(count(&f.store, "live_audit_event_publications"), 1);
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 0);
+    assert_eq!(
+        crate::cursor::read_pushed_seq(&f.store, "ws", "owner-origin").unwrap(),
+        operations(&f.store).last().unwrap().origin_seq
+    );
+}
+
+#[test]
+fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
+    use dohc_engine_storage::FaultPoint;
+    use dohc_engine_testkit::ScriptedFaults;
+    let mut f = fixture(false);
+    bootstrap(&mut f, false).unwrap();
+    accept_enrollment_event(&mut f, 1);
+    accept_enrollment_event(&mut f, 2);
+    f.store.write_with(&NoFaults,|tx|{
+        tx.execute("INSERT INTO replication_pending_conflict_bundles(workspace_id,conflict_id,format_version,pre_effect_moment_order,created_at_ms) VALUES ('ws','successor',1,0,201)",[]).map_err(SyncError::persist)?;
+        let bundle=tx.last_insert_rowid();
+        tx.execute("INSERT INTO replication_pending_conflict_ops(bundle_order,op_index,op_kind,payload_json,recorded_at_ms) VALUES (?1,0,'conflict.resolve',?2,201)",params![bundle,json!({"formatVersion":1,"workspaceId":"ws","conflictId":"successor","status":"resolved"}).to_string()]).map_err(SyncError::persist)?;
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    assert_eq!(count(&f.store, "live_audit_event_publications"), 0);
+    contact(&mut f.store);
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 1);
+    assert_eq!(count(&f.store, "replication_pending_conflict_bundles"), 1);
+    let before = operations(&f.store);
+    let fault = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
+    assert!(matches!(
+        enrollment::prepare_exports(&mut f.store, "ws", fault.as_ref(), 201),
+        Err(SyncError::FaultCrash)
+    ));
+    assert_eq!(operations(&f.store), before);
+    let fault = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
+    assert!(matches!(
+        enrollment::prepare_exports(&mut f.store, "ws", fault.as_ref(), 202),
+        Err(SyncError::FaultCrash)
+    ));
+    assert_eq!(count(&f.store, "live_audit_event_publications"), 1);
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 1);
+    f.store = EngineStore::open(&f.path, 203).unwrap();
+    accept_enrollment_event(&mut f, 3);
+    assert_eq!(
+        count(&f.store, "live_audit_event_publications"),
+        1,
+        "new writes defer behind unfinished history"
+    );
+    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, 204).unwrap();
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 0);
+    assert_eq!(count(&f.store, "live_audit_event_publications"), 3);
+    assert_eq!(count(&f.store, "replication_pending_conflict_bundles"), 0);
+    let ops = operations(&f.store);
+    let audit: Vec<_> = ops
+        .iter()
+        .filter(|op| op.op_kind == BASE_OP || op.op_kind == application_record::EVENT_OP)
+        .collect();
+    assert_eq!(audit[0].op_kind, BASE_OP);
+    for (offset, op) in audit.iter().skip(1).enumerate() {
+        assert_eq!(op.payload["eventCount"], offset + 1);
+    }
+    let successor = ops
+        .iter()
+        .find(|op| op.op_kind == "conflict.resolve")
+        .unwrap();
+    assert!(
+        successor.origin_seq > audit.last().unwrap().origin_seq,
+        "retained predecessor history precedes successor bundle"
+    );
+    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, 205).unwrap();
+    assert_eq!(operations(&f.store), ops);
+    accept_enrollment_event(&mut f, 4);
+    assert_eq!(
+        count(&f.store, "live_audit_event_publications"),
+        4,
+        "caught-up writes publish atomically"
+    );
+}
+
+#[test]
+fn retained_base_export_does_not_reclaim_a_replaced_lineage() {
+    let mut f = fixture(false);
+    bootstrap(&mut f, false).unwrap();
+    let replacement = "f".repeat(64);
+    f.store.write_with(&NoFaults,|tx| {
+        tx.execute("UPDATE ydoc_docs SET lineage_claim_id=?1 WHERE workspace_id='ws' AND version_id='main' AND object_id='object'",[&replacement]).map_err(SyncError::persist)?;
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    contact(&mut f.store);
+    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, 201).unwrap();
+    assert_eq!(count(&f.store, "live_audit_base_publications"), 1);
+    let key = DocKey::new("ws", "main", "object").unwrap();
+    let marker = f
+        .store
+        .read_with(|conn| dohc_engine_collab::read_marker_in(conn, &key))
+        .unwrap()
+        .unwrap();
+    assert_eq!(marker.lineage_claim_id, Some(replacement));
+    assert_eq!(marker.base_origin_id, None);
+    assert_eq!(
+        published(&f).payload["record"]["checkpoint"]["binding"]["lineageClaimId"],
+        f.binding.lineage_claim_id
+    );
+}
+
 #[test]
 fn an_existing_scoped_content_coordinate_keeps_its_original_attribution() {
     let mut f = fixture(true);

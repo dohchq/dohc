@@ -60,7 +60,9 @@ pub use journal::{
     record_share_view_identity, workspace_journals_file_moments_in_tx,
     workspace_replicates_with_relay_in_tx,
 };
-pub use live_audit::{journal_live_base_in_tx, journal_live_event_in_tx};
+pub use live_audit::{
+    journal_live_base_in_tx, journal_live_event_in_tx, journal_live_event_or_defer_in_tx,
+};
 pub use model::{
     MAX_BLOB_HAVE_BATCH, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, MAX_PUSH_OPS_PER_BATCH,
     MAX_SHARE_PROPOSAL_OPS, MAX_WIRE_INTEGER, ReplicationEnvelope,

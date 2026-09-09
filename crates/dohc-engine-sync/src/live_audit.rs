@@ -13,7 +13,9 @@ use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, journal_local_op_in_tx
 
 mod application_record;
 mod chunks;
+pub(crate) mod enrollment;
 pub use application_record::journal_live_event_in_tx;
+pub use enrollment::journal_live_event_or_defer_in_tx;
 
 pub(crate) fn apply_audit_envelope(
     store: &mut EngineStore,
@@ -294,36 +296,87 @@ pub fn journal_live_base_in_tx(
         &binding.object_id,
     )
     .map_err(SyncError::corrupt)?;
-    let marker = dohc_engine_collab::read_marker_in(tx, &key)
-        .map_err(SyncError::corrupt)?
-        .ok_or_else(|| invalid("native base marker is unavailable"))?;
-    if marker.lineage_claim_id.as_deref() != Some(&binding.lineage_claim_id)
-        || marker.content_kind != ContentKind::Richdoc
-        || marker.lineage_claim_status != dohc_engine_collab::LineageClaimStatus::Exact
-        || marker.regime != dohc_engine_collab::Regime::Replicated
-    {
-        return Err(invalid(
-            "native audit lineage differs from the ordinary base",
-        ));
-    }
-    let base_coordinate = match (marker.base_origin_id, marker.base_origin_seq) {
-        (Some(origin_id), Some(origin_seq)) => BaseCoordinate {
-            origin_id,
-            origin_seq,
-        },
-        (None, None) => {
-            let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_base_relay_candidates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
+    let marker = dohc_engine_collab::read_marker_in(tx, &key).map_err(SyncError::corrupt)?;
+    let current = marker
+        .filter(|marker| marker.lineage_claim_id.as_deref() == Some(&binding.lineage_claim_id));
+    let base_coordinate = if let Some(marker) = current {
+        if marker.content_kind != ContentKind::Richdoc
+            || marker.lineage_claim_status != dohc_engine_collab::LineageClaimStatus::Exact
+            || marker.regime != dohc_engine_collab::Regime::Replicated
+        {
+            return Err(invalid(
+                "native audit lineage differs from the ordinary base",
+            ));
+        }
+        match (marker.base_origin_id, marker.base_origin_seq) {
+            (Some(origin_id), Some(origin_seq)) => BaseCoordinate {
+                origin_id,
+                origin_seq,
+            },
+            (None, None) => {
+                let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_base_relay_candidates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
                 params![key.workspace_id,key.version_id,key.object_id,binding.lineage_claim_id], |row| row.get(0)).map_err(SyncError::corrupt)?;
-            if existing {
-                return Err(invalid(
-                    "native base has an unresolved publication coordinate",
-                ));
+                if existing {
+                    return Err(invalid(
+                        "native base has an unresolved publication coordinate",
+                    ));
+                }
+                let origin_id: String = tx
+                    .query_row(
+                        "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
+                        [&binding.workspace_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(SyncError::corrupt)?;
+                let origin_seq = journal_local_op_in_tx(
+                    tx,
+                    &binding.workspace_id,
+                    "ydoc.update",
+                    &crate::ydoc_update_payload(
+                        &key,
+                        &source_binding.current_path,
+                        ContentKind::Richdoc,
+                        &checkpoint.1,
+                        &binding.lineage_claim_id,
+                        None,
+                        None,
+                        true,
+                    ),
+                    now_ms,
+                )?;
+                dohc_engine_collab::record_base_coordinate_in_tx(
+                    tx,
+                    dohc_engine_collab::BaseCoordinateRecord {
+                        key: &key,
+                        lineage_claim_id: &binding.lineage_claim_id,
+                        origin_id: &origin_id,
+                        origin_seq,
+                        relay_seq: None,
+                        now_ms,
+                    },
+                )
+                .map_err(SyncError::corrupt)?;
+                tx.execute("INSERT INTO ydoc_base_relay_candidates(workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![key.workspace_id,key.version_id,key.object_id,binding.lineage_claim_id,origin_id,origin_seq]).map_err(SyncError::persist)?;
+                BaseCoordinate {
+                    origin_id,
+                    origin_seq,
+                }
             }
-            let origin_id: String = tx
+            _ => return Err(invalid("native base coordinate is incomplete")),
+        }
+    } else {
+        // A retained predecessor may have no active marker after replacement.
+        // Its publication must not stamp or mutate the current lineage.
+        let existing:Option<BaseCoordinate>=tx.query_row("SELECT origin_id,origin_seq FROM replication_log WHERE workspace_id=?1 AND op_kind='ydoc.update' AND json_extract(payload_json,'$.versionId')=?2 AND json_extract(payload_json,'$.objectId')=?3 AND json_extract(payload_json,'$.lineageClaimId')=?4 AND json_extract(payload_json,'$.updateBlobSha256')=?4 AND json_extract(payload_json,'$.contentKind')='richdoc' AND json_extract(payload_json,'$.isBaseState')=1 ORDER BY origin_id,origin_seq LIMIT 1",params![key.workspace_id,key.version_id,key.object_id,binding.lineage_claim_id],|r|Ok(BaseCoordinate{origin_id:r.get(0)?,origin_seq:r.get(1)?})).optional().map_err(SyncError::corrupt)?;
+        if let Some(existing) = existing {
+            existing
+        } else {
+            let origin_id = tx
                 .query_row(
                     "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
                     [&binding.workspace_id],
-                    |row| row.get(0),
+                    |r| r.get(0),
                 )
                 .map_err(SyncError::corrupt)?;
             let origin_seq = journal_local_op_in_tx(
@@ -342,26 +395,11 @@ pub fn journal_live_base_in_tx(
                 ),
                 now_ms,
             )?;
-            dohc_engine_collab::record_base_coordinate_in_tx(
-                tx,
-                dohc_engine_collab::BaseCoordinateRecord {
-                    key: &key,
-                    lineage_claim_id: &binding.lineage_claim_id,
-                    origin_id: &origin_id,
-                    origin_seq,
-                    relay_seq: None,
-                    now_ms,
-                },
-            )
-            .map_err(SyncError::corrupt)?;
-            tx.execute("INSERT INTO ydoc_base_relay_candidates(workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq) VALUES (?1,?2,?3,?4,?5,?6)",
-                params![key.workspace_id,key.version_id,key.object_id,binding.lineage_claim_id,origin_id,origin_seq]).map_err(SyncError::persist)?;
             BaseCoordinate {
                 origin_id,
                 origin_seq,
             }
         }
-        _ => return Err(invalid("native base coordinate is incomplete")),
     };
     let record = make_record(base_coordinate);
     record.validate(&binding.workspace_id)?;

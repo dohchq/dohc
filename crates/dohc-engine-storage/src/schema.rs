@@ -42,6 +42,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "live_audit_bases",
     "live_audit_base_conflicts",
     "live_audit_record_manifests",
+    "live_audit_pending_exports",
     "live_audit_record_chunks",
     "live_audit_events",
     "live_audit_event_publications",

@@ -1859,6 +1859,16 @@ CREATE TABLE live_audit_record_manifests (
     update_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
 ) STRICT;
 CREATE INDEX live_audit_manifest_updates ON live_audit_record_manifests(update_sha256);
+CREATE TABLE live_audit_pending_exports (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    after_event_count INTEGER NOT NULL CHECK(after_event_count BETWEEN 0 AND 9007199254740991),
+    PRIMARY KEY(workspace_id,relay_database_namespace,main_version_id,object_id,lineage_claim_id)
+) STRICT;
+CREATE INDEX live_accepted_enrollment_streams ON live_accepted_checkpoints(workspace_id,event_count,relay_database_namespace,main_version_id,object_id,lineage_claim_id);
 CREATE TABLE live_audit_record_chunks (
     record_digest TEXT NOT NULL REFERENCES live_audit_record_manifests(record_digest) ON DELETE RESTRICT,
     ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 1024),

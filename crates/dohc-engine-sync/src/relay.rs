@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use dohc_engine_domain::{DeleteTextFile, DomainError, VersionedTextStore, WriteBinary, WriteText};
 use dohc_engine_storage::{
@@ -975,13 +975,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
+        let mut sharing_declined =
+            crate::live_audit::enrollment::prepare_exports(store, workspace_id, faults, now_ms)
+                .map_err(local)?;
         let mut origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         let mut pushed = 0_usize;
-        let mut sharing_declined = Vec::new();
 
         let has_position = store
             .read_with(|conn| has_relay_position(conn, workspace_id))
             .map_err(local)?;
+        let mut enrollment_prepared = has_position;
         if origins.is_empty() && !has_position {
             let response = self.transport.push(push_probe_request(
                 workspace_id,
@@ -1008,11 +1011,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
                 }
             }
-            // Re-read so the probe's same-transaction backfill enters the push loop.
+            sharing_declined.extend(
+                crate::live_audit::enrollment::prepare_exports(store, workspace_id, faults, now_ms)
+                    .map_err(local)?,
+            );
+            enrollment_prepared = true;
+            // Re-read so the probe's backfill enters the push loop.
             origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         }
 
-        for origin_id in origins {
+        let mut seen_origins: BTreeSet<_> = origins.iter().cloned().collect();
+        let mut origins: VecDeque<_> = origins.into();
+        while let Some(origin_id) = origins.pop_front() {
             let mut local_max =
                 local_max_origin_seq(store, workspace_id, &origin_id).map_err(local)?;
             let mut cursor = read_pushed_seq(store, workspace_id, &origin_id).map_err(local)?;
@@ -1071,6 +1081,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
                         }
                     }
+                    if !enrollment_prepared {
+                        sharing_declined.extend(
+                            crate::live_audit::enrollment::prepare_exports(
+                                store,
+                                workspace_id,
+                                faults,
+                                now_ms,
+                            )
+                            .map_err(local)?,
+                        );
+                        enrollment_prepared = true;
+                        for added in list_workspace_origins(store, workspace_id).map_err(local)? {
+                            if seen_origins.insert(added.clone()) {
+                                origins.push_back(added);
+                            }
+                        }
+                    }
                     local_max =
                         local_max_origin_seq(store, workspace_id, &origin_id).map_err(local)?;
                     pushed = pushed
@@ -1116,7 +1143,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         Ok(SyncPassOutcome::Complete {
             pushed,
             fetched: 0,
-            has_more: false,
+            has_more: store
+                .read_with(|conn| crate::live_audit::enrollment::pending_in_tx(conn, workspace_id))
+                .map_err(local)?,
             applied: 0,
             refused: 0,
             skipped: 0,

@@ -1082,7 +1082,66 @@ fn apply_restore(
         100,
         90,
         faults,
+        |_, _, _, _| Ok(()),
     )
+}
+
+#[test]
+fn restore_publication_callback_rolls_back_with_content_and_does_not_repeat() {
+    let mut f = Fixture::new("# Original\n");
+    f.edit("# Later\n", 7);
+    let prep = f.freeze(f.baseline_point.clone());
+    let input = admitted_restore(&mut f, prep);
+    let before = f.canonical();
+    let before_count = f.store.table_row_count("live_accepted_updates").unwrap();
+    let failed=f.owner.apply_restore(&mut f.store,&mut WriterDocCache::new(),input.clone(),f.host.clone(),2_000_000,100,90,&NoFaults,|tx,namespace,binding,count| {
+        assert_eq!(namespace,"namespace");
+        assert_eq!(binding.restore_fence_generation,1);
+        let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM live_accepted_updates WHERE relay_database_namespace=?1 AND event_count=?2)",params![namespace,count],|row|row.get(0)).unwrap();
+        assert!(exists);
+        Err(ApplicationError::Interrupted)
+    });
+    assert!(matches!(failed, Err(ApplicationError::Interrupted)));
+    assert!(crate::replay_parity::structurally_equal_v2(&before, &f.canonical()).unwrap());
+    assert_eq!(
+        f.store.table_row_count("live_accepted_updates").unwrap(),
+        before_count
+    );
+    let mut called = false;
+    let receipt = f
+        .owner
+        .apply_restore(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            input.clone(),
+            f.host.clone(),
+            2_000_000,
+            100,
+            91,
+            &NoFaults,
+            |_, _, binding, _| {
+                assert_eq!(binding.restore_fence_generation, 1);
+                called = true;
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert!(called);
+    let replay = f
+        .owner
+        .apply_restore(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            input,
+            f.host.clone(),
+            2_000_000,
+            100,
+            92,
+            &NoFaults,
+            |_, _, _, _| panic!("exact restore replay must not publish again"),
+        )
+        .unwrap();
+    assert_eq!(receipt, replay);
 }
 
 #[test]
@@ -1373,7 +1432,8 @@ fn native_restore_apply_enforces_budget_on_first_apply_and_replay() {
                     bytes,
                     events,
                     90,
-                    &NoFaults
+                    &NoFaults,
+                    |_, _, _, _| Ok(()),
                 )
                 .is_err());
             assert!(crate::replay_parity::structurally_equal_v2(&before, &f.canonical()).unwrap());

@@ -236,9 +236,15 @@ impl ApplicationOwner {
         max_events: usize,
         now_ms: i64,
         faults: &dyn FaultInjector,
+        follow_up: impl FnOnce(
+            &Transaction<'_>,
+            &str,
+            &LiveObjectBinding,
+            i64,
+        ) -> Result<(), ApplicationError>,
     ) -> Result<NativeRestoreApplicationReceipt, ApplicationError> {
         self.apply_restore_with_facts(
-            store, cache, input, coordinate, max_bytes, max_events, now_ms, faults,
+            store, cache, input, coordinate, max_bytes, max_events, now_ms, faults, follow_up,
         )
         .map(|(receipt, _)| receipt)
     }
@@ -255,6 +261,12 @@ impl ApplicationOwner {
         max_events: usize,
         now_ms: i64,
         faults: &dyn FaultInjector,
+        follow_up: impl FnOnce(
+            &Transaction<'_>,
+            &str,
+            &LiveObjectBinding,
+            i64,
+        ) -> Result<(), ApplicationError>,
     ) -> Result<
         (
             NativeRestoreApplicationReceipt,
@@ -351,6 +363,10 @@ impl ApplicationOwner {
                 return Err(ApplicationError::Conflict);
             }
             accepted_history::append_restore(tx, &application_held, &event, &projected, &operation.operation_id, &mut budget)?;
+            let count:Option<i64>=tx.query_row("SELECT event_count FROM live_accepted_updates WHERE relay_database_namespace=?1 AND delivery_id=?2",params![held.namespace,event.metadata.accepted.receipt.delivery_id],|r|r.get(0)).optional().map_err(read_sql)?;
+            if let Some(count)=count {
+                follow_up(tx,&held.namespace,&application_held.binding,count)?;
+            }
             Ok((receipt,record_facts))
         });
         cache.remove(&key);

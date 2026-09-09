@@ -1035,6 +1035,17 @@ impl Request {
                             max_events,
                             now_ms,
                             faults.as_ref(),
+                            |tx, namespace, binding, count| {
+                                dohc_engine_sync::journal_live_event_or_defer_in_tx(
+                                    tx, namespace, binding, count, now_ms,
+                                )
+                                .map(|_| ())
+                                .map_err(|error| {
+                                    ApplicationError::Storage(
+                                        dohc_engine_storage::StorageError::persist_public(error),
+                                    )
+                                })
+                            },
                         )
                         .map(|(receipt, facts)| {
                             if let (Some(observer), Some(facts)) = (&observer, &facts) {
@@ -1270,7 +1281,7 @@ impl Request {
                         faults.as_ref(),
                         working_reserve_bytes,
                         |tx,namespace,binding,count| {
-                            dohc_engine_sync::journal_live_event_in_tx(tx,namespace,binding,count,now_ms)
+                            dohc_engine_sync::journal_live_event_or_defer_in_tx(tx,namespace,binding,count,now_ms)
                                 .map(|_|())
                                 .map_err(|error|dohc_engine_collab::live_update_application::ApplicationError::Storage(dohc_engine_storage::StorageError::persist_public(error)))
                         },

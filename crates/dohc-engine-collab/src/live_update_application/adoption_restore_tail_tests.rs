@@ -775,6 +775,7 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
             100,
             90,
             &NoFaults,
+            |_, _, _, _| Ok(()),
         )
         .unwrap();
     assert_eq!(receipt.local_head_sequence, 3);
@@ -810,7 +811,8 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
                 2_000_000,
                 100,
                 110,
-                &NoFaults
+                &NoFaults,
+                |_, _, _, _| Ok(()),
             )
             .unwrap()
     );
@@ -852,7 +854,8 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
                 2_000_000,
                 100,
                 140,
-                &NoFaults
+                &NoFaults,
+                |_, _, _, _| Ok(()),
             )
             .unwrap()
     );
@@ -939,6 +942,7 @@ fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generati
             100,
             90,
             &NoFaults,
+            |_, _, _, _| Ok(()),
         )
         .unwrap();
     let canonical = f

@@ -46,10 +46,26 @@ pub(crate) fn backfill_enrolment_window_in_tx(
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
     backfill_versions(tx, workspace_id)?;
-    let sharing_declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, now_ms)?;
-    backfill_moments_and_conflict_bundles(tx, workspace_id)?;
+    crate::live_audit::enrollment::queue_history_in_tx(tx, workspace_id)?;
+    let sharing_declined = if !crate::live_audit::enrollment::pending_in_tx(tx, workspace_id)? {
+        let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, now_ms)?;
+        backfill_moments_and_conflict_bundles(tx, workspace_id)?;
+        declined
+    } else {
+        Vec::new()
+    };
     backfill_secret_moments(tx, workspace_id)?;
     Ok(sharing_declined)
+}
+
+pub(crate) fn finish_live_history_enrolment_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    now_ms: i64,
+) -> Result<Vec<SharingDeclined>, SyncError> {
+    let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, now_ms)?;
+    backfill_moments_and_conflict_bundles(tx, workspace_id)?;
+    Ok(declined)
 }
 
 pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(

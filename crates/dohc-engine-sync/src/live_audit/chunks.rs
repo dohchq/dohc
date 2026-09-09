@@ -59,7 +59,7 @@ impl<'a> ChunkWriter<'a> {
     pub fn new(conn: &'a Connection) -> Self {
         Self {
             conn,
-            buffer: Vec::with_capacity(CHUNK_BYTES),
+            buffer: Vec::new(),
             chunks: Vec::new(),
             hash: Sha256::new(),
             length: 0,
