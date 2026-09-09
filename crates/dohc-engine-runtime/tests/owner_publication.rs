@@ -430,3 +430,153 @@ async fn observed_owner_cannot_use_ordinary_runtime_settlement() {
     );
     supervisor.close_all().unwrap();
 }
+
+#[tokio::test]
+async fn enrolled_owner_keeps_its_lineage_when_an_old_conflict_is_resolved_after_editor_close() {
+    use dohc_engine_collab::owner_outbox::enrollment::{
+        OwnerEnrollmentInput, capture_in, enroll_in_tx,
+    };
+    use dohc_engine_domain::{
+        ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus, ResolveConflictKind,
+        ResolveTextConflict, TextConflict, VersionedTextStore,
+    };
+    let mut f = Fixture::new();
+    let current = VersionedTextStore::new(&mut f.store)
+        .read_text("workspace", "main", &f.binding.current_path)
+        .unwrap()
+        .unwrap();
+    let mut incoming = current.clone();
+    incoming.version_id = "incoming-version".into();
+    incoming.object_id = "incoming-object".into();
+    incoming.text = "Incoming peer edit".into();
+    incoming.blob_sha256 = hex_sha256(incoming.text.as_bytes());
+    incoming.latest_moment_id = "incoming-moment".into();
+    incoming.updated_at_ms = 3;
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    actor
+        .conflict_open(
+            Box::new(TextConflict {
+                conflict_id: "before-enrollment".into(),
+                workspace_id: "workspace".into(),
+                path: current.path.clone(),
+                target_version_id: "main".into(),
+                source_version_id: "incoming-version".into(),
+                created_at_ms: 3,
+                updated_at_ms: 3,
+                status: ConflictStatus::Open,
+                chosen_from: ConflictChoice::Current,
+                resolution: None,
+                metadata: ConflictMetadata::origin("sync"),
+                base: ConflictFileState::text(&current.path, None),
+                current: ConflictFileState::text(&current.path, Some(current.clone())),
+                incoming: ConflictFileState::text(&current.path, Some(incoming)),
+            }),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let leases = dohc_engine_collab::LeaseRegistry::new();
+    let editor = leases.acquire(&key).unwrap();
+    let input = OwnerEnrollmentInput {
+        binding: f.binding.clone(),
+        relay_database_namespace: "relay".into(),
+        captured: f
+            .store
+            .read_with(|conn| capture_in(conn, &f.binding))
+            .unwrap(),
+        journal_cursor: 0,
+        checkpoint: f.doc.encode_full_state(),
+        host_vector: f.doc.encode_state_vector(),
+    };
+    f.store
+        .write_with(&NoFaults, |tx| {
+            enroll_in_tx(
+                tx,
+                "workspace",
+                &input,
+                &dohc_engine_collab::OwnerOutboxLimits {
+                    max_pending_bytes: 1_000_000,
+                    max_pending_age_ms: 100_000,
+                },
+                4,
+            )
+        })
+        .unwrap();
+    drop(editor);
+    let before_counts = f.counts();
+    let state = || {
+        f.store
+            .read_with(|conn| {
+                [
+                    "conflicts",
+                    "ydoc_docs",
+                    "ydoc_owner_bindings",
+                    "owner_ydoc_outboxes",
+                    "owner_ydoc_outbox_entries",
+                    "binary_blobs",
+                ]
+                .into_iter()
+                .map(|table| {
+                    let mut stmt =
+                        conn.prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))?;
+                    let columns = stmt.column_count();
+                    stmt.query_map([], |row| {
+                        (0..columns)
+                            .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                            .collect::<Result<Vec<_>, _>>()
+                    })?
+                    .collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<Vec<_>, rusqlite::Error>>()
+            })
+            .unwrap()
+    };
+    let before_state = state();
+    let before_native = dohc_engine_collab::load_persisted(&f.store, &key)
+        .unwrap()
+        .unwrap()
+        .doc
+        .encode_full_state();
+    let refusal = actor
+        .conflict_resolve(
+            ResolveTextConflict {
+                workspace_id: "workspace".into(),
+                conflict_id: "before-enrollment".into(),
+                resolution: ResolveConflictKind::KeepCurrent,
+                object_id: "resolution-object".into(),
+                write_moment_id: "resolution-write".into(),
+                delete_moment_id: "resolution-delete".into(),
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 5,
+                request_id: Some("resolve-after-close".into()),
+                conflict_answer_budget_bytes: usize::MAX,
+            },
+            leases,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("durable owner binding survives editor closure");
+    assert_eq!(refusal.code(), "live-document-binding-active");
+    assert_eq!(f.counts(), before_counts);
+    assert_eq!(state(), before_state);
+    assert_eq!(
+        dohc_engine_collab::load_persisted(&f.store, &key)
+            .unwrap()
+            .unwrap()
+            .doc
+            .encode_full_state(),
+        before_native
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.root.path().join(&f.binding.current_path)).unwrap(),
+        f.text
+    );
+    supervisor.close_all().unwrap();
+}
