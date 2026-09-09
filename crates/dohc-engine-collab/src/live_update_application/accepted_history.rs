@@ -692,21 +692,12 @@ fn restore_stamp(
     id: &str,
     budget: &mut restore_content::Budget,
 ) -> Result<String, ApplicationError> {
-    let sql="SELECT json_array(input_json,receipt_json,proposal_json,proposal_candidate_sha256,proposal_frozen_sha256,proposal_point_sha256,application_json,application_delivery_id) FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5";
-    let p = params![
-        held.namespace,
-        id,
-        held.workspace_id,
-        held.binding.main_version_id,
-        held.binding.object_id
-    ];
-    let length: i64 = conn
-        .query_row(&format!("SELECT length(CAST(({sql}) AS BLOB))"), p, |r| {
-            r.get(0)
-        })
-        .map_err(read_sql)?;
-    budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
-    let json: String = conn.query_row(sql, p, |r| r.get(0)).map_err(read_sql)?;
+    let json = budget.sql_json_array(
+        conn,
+        &["input_json", "receipt_json", "proposal_json", "proposal_candidate_sha256", "proposal_frozen_sha256", "proposal_point_sha256", "application_json", "application_delivery_id"],
+        "FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5",
+        params![held.namespace,id,held.workspace_id,held.binding.main_version_id,held.binding.object_id],
+    )?;
     Ok(hex_sha256(json.as_bytes()))
 }
 

@@ -80,6 +80,60 @@ pub(super) struct Budget {
     pub(super) remaining: usize,
 }
 impl Budget {
+    pub(super) fn sql_json_array(
+        &mut self,
+        conn: &Connection,
+        columns: &[&str],
+        source: &str,
+        parameters: &[&dyn rusqlite::ToSql],
+    ) -> Result<String, ApplicationError> {
+        use rusqlite::types::ValueRef;
+        use serde::ser::{Error, SerializeSeq};
+
+        let lengths = columns
+            .iter()
+            .map(|column| format!("coalesce(length(CAST({column} AS BLOB)),0)"))
+            .collect::<Vec<_>>()
+            .join("+");
+        let length: i64 = conn
+            .query_row(&format!("SELECT {lengths} {source}"), parameters, |row| {
+                row.get(0)
+            })
+            .map_err(read_sql)?;
+        if usize::try_from(length).map_err(|_| ApplicationError::Corrupt)? > self.remaining {
+            return Err(ApplicationError::ConfiguredByteBudgetExceeded);
+        }
+        // Bound the raw columns before reading them, then charge JSON escaping
+        // through the same incremental writer as other configured metadata.
+        struct SqlArray<'a>(&'a rusqlite::Row<'a>);
+        impl Serialize for SqlArray<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let count = self.0.as_ref().column_count();
+                let mut array = serializer.serialize_seq(Some(count))?;
+                for index in 0..count {
+                    match self.0.get_ref(index).map_err(S::Error::custom)? {
+                        ValueRef::Null => array.serialize_element(&Option::<u8>::None)?,
+                        ValueRef::Integer(value) => array.serialize_element(&value)?,
+                        ValueRef::Text(value) => array.serialize_element(
+                            std::str::from_utf8(value).map_err(S::Error::custom)?,
+                        )?,
+                        _ => return Err(S::Error::custom("invalid evidence column type")),
+                    }
+                }
+                array.end()
+            }
+        }
+        let mut statement = conn
+            .prepare(&format!("SELECT {} {source}", columns.join(",")))
+            .map_err(read_sql)?;
+        let mut rows = statement.query(parameters).map_err(read_sql)?;
+        let row = rows
+            .next()
+            .map_err(read_sql)?
+            .ok_or(ApplicationError::Corrupt)?;
+        String::from_utf8(self.json(&SqlArray(row))?).map_err(|_| ApplicationError::Corrupt)
+    }
+
     pub(super) fn charge(&mut self, bytes: usize) -> Result<(), ApplicationError> {
         self.remaining = self
             .remaining

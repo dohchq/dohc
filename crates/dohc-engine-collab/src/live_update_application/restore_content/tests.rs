@@ -1,4 +1,56 @@
 use super::*;
+
+#[test]
+fn evidence_json_precharges_raw_columns_and_bounds_escaping_without_changing_digest_bytes() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE evidence (text_value TEXT, number_value INTEGER, absent TEXT);",
+    )
+    .unwrap();
+    let text = format!(
+        "quotes\" slashes\\ unicode🦀 {}",
+        (0_u8..32).map(char::from).collect::<String>()
+    );
+    conn.execute(
+        "INSERT INTO evidence VALUES (?1,?2,NULL)",
+        params![text, i64::MIN],
+    )
+    .unwrap();
+    let expected: String = conn
+        .query_row(
+            "SELECT json_array(text_value,number_value,absent) FROM evidence",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let columns = &["text_value", "number_value", "absent"];
+    let mut exact = Budget {
+        remaining: expected.len(),
+    };
+    assert_eq!(
+        exact
+            .sql_json_array(&conn, columns, "FROM evidence", &[])
+            .unwrap(),
+        expected
+    );
+    assert_eq!(exact.remaining, 0);
+    let mut escaped_refusal = Budget {
+        remaining: expected.len() - 1,
+    };
+    assert!(matches!(
+        escaped_refusal.sql_json_array(&conn, columns, "FROM evidence", &[]),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+    let mut raw_refusal = Budget {
+        remaining: text.len() - 1,
+    };
+    let before = raw_refusal.remaining;
+    assert!(matches!(
+        raw_refusal.sql_json_array(&conn, columns, "FROM evidence", &[]),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+    assert_eq!(raw_refusal.remaining, before);
+}
 use dohc_engine_storage::{FaultAction, FaultPoint};
 use dohc_test_scratch::ScratchDir;
 use serde_json::json;
@@ -1368,9 +1420,8 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
         application: input.clone(),
         settlement_id: "missing".into(),
     };
-    assert!(f
-        .owner
-        .resume_restore(
+    assert!(matches!(
+        f.owner.resume_restore(
             &mut f.store,
             missing,
             f.host.clone(),
@@ -1379,8 +1430,9 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
             100,
             &NoFaults,
             |_, _, _, _| Ok(())
-        )
-        .is_err());
+        ),
+        Err(ApplicationError::Conflict)
+    ));
     let settlement = f
         .owner
         .with_restore_settlement(

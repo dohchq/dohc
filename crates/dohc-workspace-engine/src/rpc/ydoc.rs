@@ -1137,27 +1137,24 @@ impl EngineService {
         let params: YdocCloseParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
         let open = self.open(handle.as_ref())?;
-        let _serial = tokio::select! {
+        let serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.close (queued)"));
             }
-            serial = open.session_ops.lock() => serial,
+            serial = Arc::clone(&open.session_ops).lock_owned() => serial,
         };
-        self.ydoc_close_inner(&cancellation, handle.as_ref(), params)
+        self.ydoc_close_inner(&cancellation, handle.as_ref(), params, serial)
             .await
     }
 
-    /// Close one session while the caller already owns the workspace's
-    /// `session_ops`.
-    /// `versions.setActive` uses the same primitive for its all-session sweep,
-    /// so manual close and switch-time close have identical settle/retry/prune
-    /// behavior.
+    /// Keep session serialization through close, including a refused close's reinsert.
     async fn ydoc_close_inner(
         &self,
         cancellation: &OperationCancellation,
         handle: Option<&WorkspaceHandle>,
         params: YdocCloseParams,
+        serial: tokio::sync::OwnedMutexGuard<()>,
     ) -> Result<Value, WireError> {
         // Missing `settle` means settle — the TS driver treats close() as
         // settle-unless-explicitly-false, and defaulting to false here would
@@ -1228,14 +1225,11 @@ impl EngineService {
         let session_key = session.key.clone();
         let close_root = open.root.clone();
         let close_self_writes = Arc::new(self.self_writes.scoped(&open.root));
-        // The take happens synchronously before the spawn: if this future is
-        // dropped right after spawning, `session_ops` releases while the task
-        // has not yet run — a concurrent recordUpdate/settle must not be able
-        // to find the session and race edits against the in-flight close.
         let taken = lock(&self.sessions).remove(&params.session_id);
         let close_events = self.events.clone();
         let close_workspace_id = open.workspace_id.clone();
         let close_task = tokio::spawn(async move {
+            let _serial = serial;
             let close_result = actor
                 .ydoc_close_session_materialized(
                     close_root,
@@ -1467,6 +1461,146 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_close_retains_serialization_until_refused_session_is_reinserted() {
+        use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
+        struct Pause {
+            started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl FaultInjector for Pause {
+            fn poll(&self, point: FaultPoint) -> FaultAction {
+                if point == FaultPoint::StorageBeforePersist
+                    && let Some(started) = self.started.lock().unwrap().take()
+                {
+                    started.send(()).unwrap();
+                    self.release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10))
+                        .unwrap();
+                }
+                FaultAction::Continue
+            }
+        }
+        let scratch = ScratchDir::new().unwrap();
+        std::fs::write(scratch.path().join("note.md"), "before").unwrap();
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = Arc::new(EngineService::with_supervisor(supervisor));
+        let opened = service.workspace_open(&RequestContext::unbounded(), json!({
+            "rootDir":scratch.path().to_string_lossy(),"workspaceId":"close-cancel","captureMode":"none"
+        })).await.unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let open = service.open(Some(&handle)).unwrap();
+        let capture = |path: &str| dohc_engine_runtime::CaptureIngest {
+            workspace_id: "close-cancel".into(),
+            version_id: "main".into(),
+            path: path.into(),
+            text: "before".into(),
+            metadata_origin: "capture".into(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 1,
+            request_id: Some(path.into()),
+            claim_foreign_head: true,
+        };
+        open.actor
+            .capture_ingest(
+                capture("note.md"),
+                LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let (session, egress) = service
+            .ydoc_open(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({"versionId":"main","path":"note.md","contentKind":"plaintext"}),
+                1,
+            )
+            .await
+            .unwrap();
+        drop(egress);
+        let id = session["sessionId"].as_str().unwrap().to_owned();
+        let doc = dohc_engine_collab::Ydoc::wire();
+        let seed = doc.plaintext_insert(0, "before");
+        let edit = doc.plaintext_insert(6, " dirty");
+        for (seed_flag, bytes, request) in [(true, seed, "seed"), (false, edit, "edit")] {
+            service.ydoc_record_update(&RequestContext::unbounded(),Some(handle.clone()),Some(request.into()),json!({
+                "sessionId":id,"updateBase64":base64::engine::general_purpose::STANDARD.encode(bytes),"seed":seed_flag
+            })).await.unwrap();
+        }
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let actor = open.actor.clone();
+        let blocking_capture = capture("block.md");
+        let blocker = tokio::spawn(async move {
+            actor
+                .capture_ingest(
+                    blocking_capture,
+                    LeaseRegistry::new(),
+                    Arc::new(Pause {
+                        started: std::sync::Mutex::new(Some(started_tx)),
+                        release: std::sync::Mutex::new(release_rx),
+                    }),
+                    CancellationToken::new(),
+                )
+                .await
+        });
+        started_rx.await.unwrap();
+        let caller_service = Arc::clone(&service);
+        let caller_handle = handle.clone();
+        let caller_id = id.clone();
+        let caller = tokio::spawn(async move {
+            caller_service
+                .ydoc_close(
+                    &RequestContext::unbounded(),
+                    Some(caller_handle),
+                    json!({"sessionId":caller_id,"settle":false}),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while lock(&service.sessions).contains_key(&id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(
+            open.session_ops.try_lock().is_err(),
+            "a cancelled caller must not release the detached close's serialization"
+        );
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        let serial = tokio::time::timeout(
+            Duration::from_secs(5),
+            Arc::clone(&open.session_ops).lock_owned(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            lock(&service.sessions).contains_key(&id),
+            "the dirty session is restored before the serial is released"
+        );
+        drop(serial);
+        service
+            .ydoc_evict(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({"sessionId":id}),
+            )
+            .await
+            .unwrap();
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn captured_owner_seed_retains_exact_original_source_moment() {

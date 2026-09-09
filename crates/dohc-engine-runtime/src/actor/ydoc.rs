@@ -1178,6 +1178,7 @@ pub(super) fn ydoc_open_state_on_store(
     // read side-effect-free for the foreign key.
     let mut record_facts = Vec::new();
     if drain_deferred
+        && restore_generation.is_none()
         && expected_key_matches
         && dohc_engine_collab::read_marker(store, &key)?
             .is_some_and(|marker| marker.regime == Regime::Replicated)
@@ -1191,7 +1192,7 @@ pub(super) fn ydoc_open_state_on_store(
     // A post-lease open starts a live session on this doc: prefer keeping its
     // cache entry resident (eviction order only; a leaked pin never affects
     // correctness).
-    if drain_deferred && expected_key_matches && restore_generation.is_none() {
+    if drain_deferred && expected_key_matches {
         doc_cache.pin(&key);
     }
     let mut persisted = dohc_engine_collab::load_persisted(store, &key)?;
@@ -2449,12 +2450,17 @@ fn ydoc_close_session_on_store(
     // every outcome, including a mid-close crash, leaves no entry behind.
     doc_cache.remove(key);
     doc_cache.unpin(key);
-    let has_restore:bool=store.read_with(|conn|conn.query_row("SELECT EXISTS(SELECT 1 FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",params![key.workspace_id,key.version_id,key.object_id],|r|r.get(0)).map_err(StorageError::corrupt_public))?;
-    if has_restore {
-        return Ok(YdocCloseSessionOutcome {
-            outcome: None,
-            record_facts: Vec::new(),
-        });
+    let restore_generation = match store.read_with(|conn| {
+        dohc_engine_collab::live_update_application::restore_generation(conn, key)
+    }) {
+        Ok(generation) => generation,
+        Err(dohc_engine_collab::CollabError::RestoreFenced) => {
+            return Ok(YdocCloseSessionOutcome {
+                outcome: None,
+                record_facts: Vec::new(),
+            });
+        }
+        Err(error) => return Err(error.into()),
     };
     let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
         return Ok(YdocCloseSessionOutcome {
@@ -2490,7 +2496,7 @@ fn ydoc_close_session_on_store(
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
     let mut record_facts = Vec::new();
-    if marker.regime == Regime::Replicated {
+    if marker.regime == Regime::Replicated && restore_generation.is_none() {
         // The drain projects internally now (idempotent-by-sha, dependency-
         // gated): drained remote content reaches the visible head with no
         // session left to settle it. The drain holds its queue-row cleanup

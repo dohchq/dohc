@@ -27,7 +27,7 @@ pub struct LiveSettlementAudit {
     previous_cursor: i64,
     terminal_cursor: i64,
     previous_sequence: i64,
-    sequence: i64,
+    pub(super) sequence: i64,
     receipts: Vec<ReceiptIdentity>,
     interval_digest: String,
     bootstrap_moment: String,

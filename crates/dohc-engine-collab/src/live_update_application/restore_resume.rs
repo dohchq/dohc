@@ -39,24 +39,35 @@ fn evidence(
     settlement: &str,
     budget: &mut Budget,
 ) -> Result<String, ApplicationError> {
-    let sql = "SELECT json_array(f.input_json,f.receipt_json,f.proposal_json,f.application_json,f.previous_operation_id,p.resume_receipt_json,p.resume_evidence_digest,s.settlement_id,s.previous_cursor,s.terminal_cursor,s.previous_ydoc_sequence,s.local_ydoc_sequence,s.application_count,s.interval_digest,s.moment_id,s.markdown_digest,s.source_state_vector_digest,s.binding_json,s.host_coordinate_json,s.recorded_at_ms,s.settlement_kind,s.restore_operation_id) AS value FROM live_restore_fences f JOIN live_device_settlements s ON s.relay_database_namespace=f.relay_database_namespace AND s.restore_operation_id=f.operation_id LEFT JOIN live_restore_fences p ON p.relay_database_namespace=f.relay_database_namespace AND p.operation_id=f.previous_operation_id WHERE f.relay_database_namespace=?1 AND f.operation_id=?2 AND s.settlement_id=?3";
-    let length: i64 = conn
-        .query_row(
-            &format!("SELECT length(CAST(value AS BLOB)) FROM ({sql})"),
-            params![held.namespace, operation, settlement],
-            |r| r.get(0),
-        )
-        .map_err(read_sql)?;
-    budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
-    let json: String = conn
-        .query_row(sql, params![held.namespace, operation, settlement], |r| {
-            r.get(0)
-        })
-        .map_err(read_sql)?;
-    Ok(hex_sha256(
-        &serde_json::to_vec(&(json, accepted_history::origin_stamp(conn, held)?))
-            .map_err(|_| ApplicationError::Corrupt)?,
-    ))
+    let json = budget.sql_json_array(
+        conn,
+        &["f.input_json", "f.receipt_json", "f.proposal_json", "f.application_json", "f.previous_operation_id", "p.resume_receipt_json", "p.resume_evidence_digest", "s.settlement_id", "s.previous_cursor", "s.terminal_cursor", "s.previous_ydoc_sequence", "s.local_ydoc_sequence", "s.application_count", "s.interval_digest", "s.moment_id", "s.markdown_digest", "s.source_state_vector_digest", "s.binding_json", "s.host_coordinate_json", "s.recorded_at_ms", "s.settlement_kind", "s.restore_operation_id"],
+        "FROM live_restore_fences f JOIN live_device_settlements s ON s.relay_database_namespace=f.relay_database_namespace AND s.restore_operation_id=f.operation_id LEFT JOIN live_restore_fences p ON p.relay_database_namespace=f.relay_database_namespace AND p.operation_id=f.previous_operation_id WHERE f.relay_database_namespace=?1 AND f.operation_id=?2 AND s.settlement_id=?3",
+        params![held.namespace,operation,settlement],
+    )?;
+    use sha2::Digest;
+    struct Hasher(sha2::Sha256);
+    impl std::io::Write for Hasher {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut hasher = Hasher(sha2::Sha256::new());
+    serde_json::to_writer(
+        &mut hasher,
+        &(json, accepted_history::origin_stamp(conn, held)?),
+    )
+    .map_err(|_| ApplicationError::Corrupt)?;
+    Ok(hasher
+        .0
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 pub(super) fn saved(
@@ -231,10 +242,10 @@ impl ApplicationOwner {
         let result=self.with_restore_settlement(store,input.application.clone(),coordinate,max_bytes,max_events,|store,audit| {
             let outcome=store.write_with(faults,|tx|->Result<_,ApplicationError>{
                 let b=audit.binding();
-                let (moment,markdown,vector):(String,String,String)=tx.query_row("SELECT moment_id,markdown_digest,source_state_vector_digest FROM live_device_settlements WHERE settlement_id=?1 AND relay_database_namespace=?2 AND restore_operation_id=?3",params![input.settlement_id,held.namespace,operation.operation_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(read_sql)?;
+                let (moment,markdown,vector):(String,String,String)=tx.query_row("SELECT moment_id,markdown_digest,source_state_vector_digest FROM live_device_settlements WHERE settlement_id=?1 AND relay_database_namespace=?2 AND restore_operation_id=?3",params![input.settlement_id,held.namespace,operation.operation_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(read_sql)?.ok_or(ApplicationError::Conflict)?;
                 if audit.record_in_tx(tx,&moment,&markdown,&vector,now_ms)?!=input.settlement_id {return Err(ApplicationError::Conflict)};
                 verify_materialized(tx,b,&moment,&markdown)?;
-                let receipt=NativeRestoreResumeReceipt{relay_database_namespace:held.namespace.clone(),operation_id:operation.operation_id.clone(),binding:b.clone(),application_receipt:input.application.admitted.accepted.receipt.clone(),settlement_id:input.settlement_id.clone(),moment_id:moment,markdown_digest:markdown,local_head_sequence:restore_fence::marker(tx,b)?.head_update_seq,recorded_at_ms:now_ms};
+                let receipt=NativeRestoreResumeReceipt{relay_database_namespace:held.namespace.clone(),operation_id:operation.operation_id.clone(),binding:b.clone(),application_receipt:input.application.admitted.accepted.receipt.clone(),settlement_id:input.settlement_id.clone(),moment_id:moment,markdown_digest:markdown,local_head_sequence:audit.sequence,recorded_at_ms:now_ms};
                 let mut budget=Budget{remaining:max_bytes};
                 let stamp=evidence(tx,&held,&operation.operation_id,&input.settlement_id,&mut budget)?;
                 let json=String::from_utf8(budget.json(&receipt)?).map_err(|_|ApplicationError::Corrupt)?;

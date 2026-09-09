@@ -690,7 +690,23 @@ mod tests {
             .unwrap();
         assert_eq!(before.restore_generation, None);
         let header = f.settled_resume_header().await;
+        let stopped_close = actor
+            .ydoc_close_session(
+                key.clone(),
+                19,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stopped_close.outcome, None);
         drop(f.restore("liveApplication.resumeRestore", &header).await);
+        let db =
+            rusqlite::Connection::open(f._scratch.path().join(".dohc/engine/engine.db")).unwrap();
+        let lineage = before.lineage_claim_id.as_ref().unwrap();
+        let parked = json!({"versionId":"main","objectId":"object","path":"notes/a.md","contentKind":"richdoc","updateBlobSha256":lineage,"lineageClaimId":lineage,"isBaseState":false});
+        db.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('workspace','parked-peer',1,'ydoc.update',?1,19,1)",[parked.to_string()]).unwrap();
+        db.execute("INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,lineage_claim_id,relay_seq) VALUES ('workspace','main','object','parked-peer',1,19,?1,1)",[lineage]).unwrap();
         let fresh = actor
             .ydoc_open_state(
                 "workspace".into(),
@@ -708,8 +724,6 @@ mod tests {
         let editor = Ydoc::wire();
         editor.apply(&fresh.initial_update).unwrap();
         let update = editor.richdoc_append_paragraph("Fresh resumed edit");
-        let db =
-            rusqlite::Connection::open(f._scratch.path().join(".dohc/engine/engine.db")).unwrap();
         db.execute("INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('workspace','native-origin','epoch','stream',1)",[]).unwrap();
         let inventory = || {
             db.query_row("SELECT head_update_seq,(SELECT count(*) FROM moments),(SELECT count(*) FROM ydoc_updates) FROM ydoc_docs WHERE workspace_id='workspace' AND version_id='main' AND object_id='object'",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).unwrap()
@@ -782,8 +796,8 @@ mod tests {
         assert_eq!(recorded.outcome.seq, prior.0 + 1);
         let resynced = actor
             .ydoc_resync(
-                key,
-                fresh.lineage_claim_id,
+                key.clone(),
+                fresh.lineage_claim_id.clone(),
                 CancellationToken::new(),
                 fresh.restore_generation,
             )
@@ -794,6 +808,60 @@ mod tests {
         assert!(
             dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&editor, &observed)
                 .unwrap()
+        );
+        let closed = actor
+            .ydoc_close_session(
+                key.clone(),
+                50,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            closed.outcome,
+            Some(dohc_engine_collab::CloseOutcome::Compacted(
+                dohc_engine_collab::CompactOutcome::Compacted { .. }
+            ))
+        ));
+        assert_eq!(inventory(), (recorded.outcome.seq, prior.1, 0));
+        let snapshot: i64 = db
+            .query_row(
+                "SELECT head_snapshot_seq FROM ydoc_docs WHERE workspace_id='workspace' AND version_id='main' AND object_id='object'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(snapshot, recorded.outcome.seq);
+        let reopened = actor
+            .ydoc_open_state(
+                "workspace".into(),
+                60,
+                true,
+                Some(key),
+                "main".into(),
+                "notes/a.md".into(),
+                Some(ContentKind::Richdoc),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reopened.restore_generation, Some(1));
+        let observed = Ydoc::wire();
+        observed.apply(&reopened.initial_update).unwrap();
+        assert!(
+            dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&editor, &observed)
+                .unwrap()
+        );
+        drop(f.restore("liveApplication.resumeRestore", &header).await);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM ydoc_deferred_updates", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            1,
+            "open, resync, close, and reopen retain the unauthenticated parked update"
         );
         drop(db);
         drop(actor);
