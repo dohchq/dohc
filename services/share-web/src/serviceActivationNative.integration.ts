@@ -103,7 +103,8 @@ vi.mock("../../../packages/workspace-engine-client/src/daemon/index.js", async i
     const capture = client.captureOwnerActivation.bind(client), adopt = client.sendLiveOwnerAdoption.bind(client);
     async function trace<T>(method: string, operation: () => Promise<T>): Promise<T> {
       const record = (status: "started" | "complete" | "failed", error?: unknown) => {
-        harness.calls.push({method, status, ...(error instanceof Error ? {message: error.message, code: String((error as {code?: unknown}).code ?? "")} : {})});
+        const wire = error as {wireError?: {code?: string}; code?: string} | undefined;
+        harness.calls.push({method, status, ...(error instanceof Error ? {message: error.message, code: wire?.wireError?.code ?? wire?.code ?? ""} : {})});
         writeFileSync(harness.tracePath, JSON.stringify({calls: harness.calls, transforms: harness.transforms, captures: harness.captures}, null, 2));
       };
       record("started");
