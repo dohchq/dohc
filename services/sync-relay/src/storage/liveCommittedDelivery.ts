@@ -1239,6 +1239,21 @@ export class LiveCommittedDeliveryStore {
     integrity(active?.operation_id===operation.intent.operationId);
   }
   admitStopRestoreProposal(input: RestoreProposalInput, expectedProposalDigest:string, policy: OrderedLiveUpdateCutPolicy, now:number):RestoreLifecycle {
+    return this.#admitStopRestoreProposal(input, expectedProposalDigest, policy, now);
+  }
+  admitReviewedStopRestoreProposal(input: RestoreProposalInput & {maxOutputBytes: number}, expectedProposalDigest: string,
+    policy: OrderedLiveUpdateCutPolicy, now: number, signal?: AbortSignal): RestoreLifecycle {
+    signal?.throwIfAborted();
+    const assertReviewCurrent = captureSqliteReadRevision(this.#storage.db);
+    const review = this.readStopRestoreReview(input, policy);
+    integrity(review && review.proposalDigest === expectedProposalDigest);
+    return this.#admitStopRestoreProposal(input, expectedProposalDigest, policy, now, () => {
+      signal?.throwIfAborted();
+      assertReviewCurrent();
+    });
+  }
+  #admitStopRestoreProposal(input: RestoreProposalInput, expectedProposalDigest:string, policy: OrderedLiveUpdateCutPolicy,
+    now:number, assertReviewCurrent?: () => void):RestoreLifecycle {
     const assertProposalCurrent=captureSqliteReadRevision(this.#storage.db);
     input=lifecycleInput(input);
     expectedProposalDigest=parseLiveUpdateDigest(expectedProposalDigest);
@@ -1267,6 +1282,7 @@ export class LiveCommittedDeliveryStore {
       return raw?decodeJournalRow(this.#storage.db,raw).admitted.metadata:null;
     });
     this.#storage.tx(()=>{
+      assertReviewCurrent?.();
       assertProposalCurrent();
       assertCurrentInTransaction();
       const operation=readStopRestoreInTransaction(this.#storage,input);integrity(operation);

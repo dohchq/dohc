@@ -116,16 +116,9 @@ export class LiveRestorePreparation {
     const check = () => {if (signal?.aborted) throw signal.reason;};
     return this.#reserved(signal, async () => {
       const retained = store.readStopRestoreLifecycle(input);
-      if (!retained) {
-        if (requireReview) {
-          const review = store.readStopRestoreReview({...input, maxOutputBytes: config.maxBytes}, config.validation);
-          if (!review || review.proposalDigest !== proposalDigest) {
-            throw new Error("Restore confirmation does not match a complete review.");
-          }
-          check();
-        }
-      }
-      let current = retained ?? store.admitStopRestoreProposal(input, proposalDigest, config.validation, Date.now());
+      let current = retained ?? (requireReview
+        ? store.admitReviewedStopRestoreProposal({...input, maxOutputBytes: config.maxBytes}, proposalDigest, config.validation, Date.now(), signal)
+        : store.admitStopRestoreProposal(input, proposalDigest, config.validation, Date.now()));
       const verify = () => {
         check();
         if (current.proposalDigest !== proposalDigest || current.preparation.fence.operation.origin.kind !== deliveryKind) {

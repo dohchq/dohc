@@ -1393,7 +1393,7 @@ function repeatedReviewFixture() {
   } catch (error) {f.close(); throw error;}
 }
 
-it.each(["complete", "missing-event", "wrong-proposal", "budget"])("confirms only an authenticated complete host restore review: %s", async state => {
+it.each(["complete", "missing-event", "wrong-proposal", "budget", "changed-after-review", "cancelled-after-review"])("confirms only an authenticated complete host restore review: %s", async state => {
   const f = repeatedReviewFixture();
   try {
     const driver = new LiveRestorePreparation({...preparationConfig(), maxEvents: state === "budget" ? 3 : 40});
@@ -1407,6 +1407,16 @@ it.each(["complete", "missing-event", "wrong-proposal", "budget"])("confirms onl
       expect(lifecycleRows(f)).toEqual(before);
     }
     if (state === "missing-event") f.raw.exec("DELETE FROM sync_relay_live_update_journal WHERE journal_cursor=1");
+    const abort = new AbortController();
+    if (state === "changed-after-review" || state === "cancelled-after-review") {
+      const read = f.store.readStopRestoreReview.bind(f.store);
+      vi.spyOn(f.store, "readStopRestoreReview").mockImplementation((...args) => {
+        const review = read(...args);
+        if (state === "changed-after-review") f.raw.exec("DELETE FROM sync_relay_live_update_journal WHERE journal_cursor=1");
+        else abort.abort(Error("confirmation cancelled"));
+        return review;
+      });
+    }
     const before = lifecycleRows(f);
     const expected = state === "wrong-proposal" ? "f".repeat(64) : f.saved.proposalDigest;
     if (state === "complete") {
@@ -1414,8 +1424,12 @@ it.each(["complete", "missing-event", "wrong-proposal", "budget"])("confirms onl
       expect(f.store.readStopRestoreLifecycle(f.input)?.phase).toBe("relay-admitted");
       expect(sendLiveRestore).toHaveBeenCalledTimes(1);
     } else {
-      await expect(driver.confirm(options, expected)).rejects.toThrow();
-      expect(lifecycleRows(f)).toEqual(before);
+      await expect(driver.confirm({...options, signal: abort.signal}, expected)).rejects.toThrow();
+      if (state === "changed-after-review") {
+        expect(f.store.readStopRestoreLifecycle(f.input)).toBeNull();
+        expect(lifecycleRows(f).lifecycle).toEqual(before.lifecycle);
+        expect(lifecycleRows(f).operations).toEqual(before.operations);
+      } else expect(lifecycleRows(f)).toEqual(before);
       expect(sendLiveRestore).not.toHaveBeenCalled();
     }
   } finally {f.close();}

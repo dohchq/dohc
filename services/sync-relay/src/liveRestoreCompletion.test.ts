@@ -21,6 +21,7 @@ function fixture(phase: "relay-admitted" | "native-applied" | "settled" | "resum
     readStopRestoreReview: vi.fn((): {proposalDigest: string} | null => ({proposalDigest: digest})),
     readStopRestoreLifecycle: vi.fn(() => current),
     admitStopRestoreProposal: vi.fn(() => save("relay-admitted")),
+    admitReviewedStopRestoreProposal: vi.fn(() => save("relay-admitted")),
     acknowledgeStopRestoreReplacement: vi.fn(() => save("native-applied")),
     acknowledgeStopRestoreSettlement: vi.fn(() => save("settled")),
     acknowledgeStopRestoreResume: vi.fn(() => save("resumed")),
@@ -44,16 +45,15 @@ describe("owner restore review boundary", () => {
     await expect(f.review()).resolves.toEqual({proposalDigest: digest});
     expect(f.store.admitStopRestoreProposal).not.toHaveBeenCalled();
     await expect(f.confirm()).resolves.toHaveProperty("kind", "resumed");
-    expect(f.store.readStopRestoreReview).toHaveBeenCalledTimes(2);
-    expect(f.store.readStopRestoreReview.mock.invocationCallOrder[1]).toBeLessThan(f.store.admitStopRestoreProposal.mock.invocationCallOrder[0]!);
+    expect(f.store.readStopRestoreReview).toHaveBeenCalledTimes(1);
+    expect(f.store.admitReviewedStopRestoreProposal).toHaveBeenCalledTimes(1);
+    expect(f.store.admitStopRestoreProposal).not.toHaveBeenCalled();
   });
 
-  it.each(["missing", "changed", "incomplete", "cancelled"])("refuses %s review before any durable admission", async damage => {
+  it.each(["refused", "cancelled"])("stops confirmation when review admission is %s", async damage => {
     const f = fixture(), abort = new AbortController();
-    if (damage === "missing") f.store.readStopRestoreReview.mockReturnValue(null);
-    if (damage === "changed") f.store.readStopRestoreReview.mockReturnValue({proposalDigest: "d".repeat(64)});
-    if (damage === "incomplete") f.store.readStopRestoreReview.mockImplementation(() => {throw Error("review budget exceeded");});
-    if (damage === "cancelled") f.store.readStopRestoreReview.mockImplementation(() => {abort.abort(Error("cancelled"));return {proposalDigest: digest};});
+    if (damage === "refused") f.store.admitReviewedStopRestoreProposal.mockImplementation(() => {throw Error("review refused");});
+    if (damage === "cancelled") abort.abort(Error("cancelled"));
     await expect(f.confirm(digest, abort.signal)).rejects.toThrow();
     expect(f.store.admitStopRestoreProposal).not.toHaveBeenCalled();
     expect(f.send).not.toHaveBeenCalled();
@@ -64,6 +64,7 @@ describe("owner restore review boundary", () => {
     f.store.readStopRestoreReview.mockImplementation(() => {throw Error("proposal is no longer readable before admission");});
     await expect(f.confirm()).resolves.toHaveProperty("kind", "resumed");
     expect(f.store.readStopRestoreReview).not.toHaveBeenCalled();
+    expect(f.store.admitReviewedStopRestoreProposal).not.toHaveBeenCalled();
     await expect(f.confirm("d".repeat(64))).rejects.toThrow("retained proposal");
   });
 
