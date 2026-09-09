@@ -51,8 +51,14 @@ import {
 import { bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
 import { nativeRestoreFence, requireStopRestoreCut, requireStopRestoreOwnerOrigin, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
 import {parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
-import {parseNativeRestoreProposalReceipt, type RestoreProofBudget} from "../liveRestoreProposal";
-import { LIVE_RESTORE_OPERATIONS } from "./liveRestoreOperationSchema";
+import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, type RestoreProofBudget} from "../liveRestoreProposal";
+import {validateLiveRestoreProposal, type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
+import {assertWorkspaceQuota} from "./workspaces";
+import { LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_PROPOSALS } from "./liveRestoreOperationSchema";
+
+type RestoreProposalInput = StopRestoreLookup & {host: LiveHostConnectionCoordinate} & RestoreProofBudget;
+const proposalCharge = (bytes: number, operationId: string, workspaceId: string, proposalDigest: string, candidateDigest: string, recordedAtMs: number) =>
+  authorityInteger(bytes + Buffer.byteLength(JSON.stringify([operationId, workspaceId, proposalDigest, candidateDigest, recordedAtMs, Number.MAX_SAFE_INTEGER])), 1);
 
 export interface CommittedBootstrap {
   readonly bootstrapId: string;
@@ -944,7 +950,63 @@ export class LiveCommittedDeliveryStore {
   }): RestoreHistoryCapture<"selected"> {
     return this.#captureRestoreHistory(input, "selected");
   }
-  captureStopRestoreProposal(input: StopRestoreLookup & {host: LiveHostConnectionCoordinate} & RestoreProofBudget, receiptJson: string) {
+  recordStopRestoreProposal(input: RestoreProposalInput,
+    bytes: Uint8Array, policy: OrderedLiveUpdateCutPolicy, now: number) {
+    const at = authorityInteger(now), decoded = decodeNativeRestoreProposal(bytes, input);
+    const {capture, assertCurrentInTransaction} = this.#captureStopRestoreProposal(input, decoded.receiptJson);
+    const content = validateLiveRestoreProposal(capture, decoded.bytes, policy, input);
+    const proposalDigest = createHash("sha256").update(decoded.captured).digest("hex");
+    const operationId = capture.receipt.fence.operation.operationId, workspaceId = capture.selected.binding.workspaceId;
+    const charge = proposalCharge(decoded.captured.byteLength, operationId, workspaceId, proposalDigest, content.content.candidateDigest, at);
+    return this.#storage.tx(() => {
+      assertCurrentInTransaction();
+      const old = this.#storage.db.prepare(`SELECT workspace_id,proposal_sha256,candidate_sha256,recorded_at_ms,accounted_bytes,length(proposal_bytes) AS bytes
+        FROM ${LIVE_RESTORE_PROPOSALS} WHERE operation_id=?`).get(operationId);
+      if (old) {
+        integrity(old.workspace_id === workspaceId && old.proposal_sha256 === proposalDigest && old.candidate_sha256 === content.content.candidateDigest && old.bytes === decoded.captured.byteLength);
+        const recordedAtMs = authorityInteger(old.recorded_at_ms);
+        integrity(old.accounted_bytes === proposalCharge(decoded.captured.byteLength, operationId, workspaceId, proposalDigest, content.content.candidateDigest, recordedAtMs));
+        const row = this.#storage.db.prepare(`SELECT proposal_bytes FROM ${LIVE_RESTORE_PROPOSALS} WHERE operation_id=?`).get(operationId)!;
+        integrity(row.proposal_bytes instanceof Uint8Array && Buffer.compare(row.proposal_bytes, decoded.captured) === 0);
+        return {proposalDigest, candidateDigest: content.content.candidateDigest, recordedAtMs, replayed: true};
+      }
+      assertWorkspaceQuota(this.#storage, workspaceId, charge);
+      const changed = this.#storage.db.prepare(`INSERT INTO ${LIVE_RESTORE_PROPOSALS}(operation_id,workspace_id,proposal_bytes,proposal_sha256,candidate_sha256,recorded_at_ms,accounted_bytes)
+        VALUES (?,?,?,?,?,?,?)`).run(operationId, workspaceId, decoded.captured, proposalDigest, content.content.candidateDigest, at, charge);
+      integrity(changed.changes === 1);
+      const usage = this.#storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, workspaceId);
+      integrity(usage.changes === 1);
+      return {proposalDigest, candidateDigest: content.content.candidateDigest, recordedAtMs: at, replayed: false};
+    });
+  }
+  readStopRestoreProposal(input: RestoreProposalInput,
+    policy: OrderedLiveUpdateCutPolicy) {
+    const lookup = {operationId: parseLiveUpdateIdentifier(input.operationId), workspaceId: parseLiveUpdateIdentifier(input.workspaceId),
+      ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)}, host = snapshotHostCoordinate(input.host);
+    const budget = {maxBytes: authorityInteger(input.maxBytes, 1), maxEvents: authorityInteger(input.maxEvents, 1)};
+    const saved = this.#storage.readTx(() => {
+      this.#restore(lookup, host);
+      const header = this.#storage.db.prepare(`SELECT workspace_id,length(proposal_bytes) AS bytes FROM ${LIVE_RESTORE_PROPOSALS} WHERE operation_id=?`).get(lookup.operationId);
+      if (!header) return null;
+      integrity(header.workspace_id === lookup.workspaceId);
+      if (authorityInteger(header.bytes, 1) > budget.maxBytes) throw new Error("Stored restore proposal exceeds configured bounds.");
+      const row = this.#storage.db.prepare(`SELECT * FROM ${LIVE_RESTORE_PROPOSALS} WHERE operation_id=?`).get(lookup.operationId)!;
+      integrity(row.proposal_bytes instanceof Uint8Array && row.proposal_bytes.byteLength === header.bytes);
+      const proposalDigest = parseLiveUpdateDigest(row.proposal_sha256), candidateDigest = parseLiveUpdateDigest(row.candidate_sha256), recordedAtMs = authorityInteger(row.recorded_at_ms);
+      integrity(row.accounted_bytes === proposalCharge(row.proposal_bytes.byteLength, lookup.operationId, lookup.workspaceId, proposalDigest, candidateDigest, recordedAtMs));
+      return {bytes: new Uint8Array(row.proposal_bytes), proposalDigest, candidateDigest, recordedAtMs};
+    });
+    if (!saved) return null;
+    integrity(createHash("sha256").update(saved.bytes).digest("hex") === saved.proposalDigest);
+    const decoded = decodeNativeRestoreProposal(saved.bytes, budget), capture = this.captureStopRestoreProposal({...lookup, host, ...budget}, decoded.receiptJson);
+    const validated = validateLiveRestoreProposal(capture, decoded.bytes, policy, budget);
+    integrity(validated.content.candidateDigest === saved.candidateDigest);
+    return {...saved, receipt: capture.receipt};
+  }
+  captureStopRestoreProposal(input: RestoreProposalInput, receiptJson: string) {
+    return this.#captureStopRestoreProposal(input, receiptJson).capture;
+  }
+  #captureStopRestoreProposal(input: RestoreProposalInput, receiptJson: string) {
     const lookup = {operationId: parseLiveUpdateIdentifier(input.operationId), workspaceId: parseLiveUpdateIdentifier(input.workspaceId),
       ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)}, host = snapshotHostCoordinate(input.host);
     const budget = {maxBytes: authorityInteger(input.maxBytes, 1), maxEvents: authorityInteger(input.maxEvents, 1)};
@@ -957,7 +1019,7 @@ export class LiveCommittedDeliveryStore {
     for (const source of receipt.nativeSources) {
       if (source.source.origin.kind === "adoptionSeed") integrity(ownerOrigin && source.source.nativeSequence === ownerOrigin.cut.expectedLocalSequence);
     }
-    const verifySources = () => this.#storage.readTx(() => {
+    const verifySources = () => {
       const {operation} = this.#restore(lookup, host);
       integrity(operation.phase === "native-fenced" && isDeepStrictEqual(operation.nativeReceipt, receipt.fence));
       const through = operation.terminal?.journalCursor ?? 0, document = operation.intent.document;
@@ -992,15 +1054,16 @@ export class LiveCommittedDeliveryStore {
           projectedMarkdownDigest: b.projected_markdown_digest, projectedMarkdownByteLength: b.projected_markdown_byte_length};
       }
       integrity(createHash("sha256").update(JSON.stringify(origin)).digest("hex") === receipt.originEvidenceDigest);
-    });
+    };
     const fingerprint = createHash("sha256").update(JSON.stringify(receipt)).digest("hex");
-    const assertCurrent = () => {
+    const assertCurrentInTransaction = () => {
       this.#storage.captureStanding();
       integrity(createHash("sha256").update(JSON.stringify(receipt)).digest("hex") === fingerprint);
       selected.assertCurrent(); accepted.assertCurrent(); ownerOrigin?.assertCurrent(); verifySources();
     };
+    const assertCurrent = () => this.#storage.readTx(assertCurrentInTransaction);
     assertCurrent();
-    return Object.freeze({receipt, selected, accepted, ownerOrigin, assertCurrent});
+    return {capture: Object.freeze({receipt, selected, accepted, ownerOrigin, assertCurrent}), assertCurrentInTransaction};
   }
   captureStopRestoreAcceptedCut(input: StopRestoreLookup & {
     host: LiveHostConnectionCoordinate; maxBytes: number; maxEvents: number;

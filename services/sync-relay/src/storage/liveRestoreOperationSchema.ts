@@ -1,6 +1,7 @@
 import type { SqliteDb } from "./types";
 
 export const LIVE_RESTORE_OPERATIONS = "sync_relay_live_restore_operations";
+export const LIVE_RESTORE_PROPOSALS = "sync_relay_live_restore_proposals";
 const marker = "live-restore-operation-v1";
 const safe = Number.MAX_SAFE_INTEGER;
 const schema = {
@@ -31,6 +32,15 @@ const schema = {
     FOREIGN KEY (workspace_id,main_version_id,object_id,lineage_claim_id)
       REFERENCES sync_relay_live_documents(workspace_id,main_version_id,object_id,lineage_claim_id) ON DELETE CASCADE
   ) STRICT`,
+  [LIVE_RESTORE_PROPOSALS]: `CREATE TABLE ${LIVE_RESTORE_PROPOSALS} (
+    operation_id TEXT PRIMARY KEY REFERENCES ${LIVE_RESTORE_OPERATIONS}(operation_id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+    proposal_bytes BLOB NOT NULL CHECK (length(proposal_bytes)>0),
+    proposal_sha256 TEXT NOT NULL CHECK (length(proposal_sha256)=64 AND proposal_sha256 NOT GLOB '*[^0-9a-f]*'),
+    candidate_sha256 TEXT NOT NULL CHECK (length(candidate_sha256)=64 AND candidate_sha256 NOT GLOB '*[^0-9a-f]*'),
+    recorded_at_ms INTEGER NOT NULL CHECK (recorded_at_ms BETWEEN 0 AND ${safe}),
+    accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND ${safe})
+  ) STRICT`,
 };
 
 export function initializeLiveRestoreOperationSchema(db: SqliteDb): void {
@@ -51,6 +61,11 @@ export function initializeLiveRestoreOperationSchema(db: SqliteDb): void {
   }
   if (db.prepare(`PRAGMA foreign_key_check(${LIVE_RESTORE_OPERATIONS})`).all().length) {
     throw new Error("Live restore parent is damaged.");
+  }
+  const proposalIndexes = db.prepare(`PRAGMA index_list(${LIVE_RESTORE_PROPOSALS})`).all();
+  if (proposalIndexes.length !== 1 || proposalIndexes[0]!.unique !== 1 || proposalIndexes[0]!.origin !== "pk" ||
+    proposalIndexes[0]!.partial !== 0 || db.prepare(`PRAGMA foreign_key_check(${LIVE_RESTORE_PROPOSALS})`).all().length) {
+    throw new Error("Live restore proposal storage is damaged.");
   }
   if (!marked) db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(marker, Date.now());
 }

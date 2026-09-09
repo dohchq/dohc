@@ -26,6 +26,15 @@ function contentProposalFixture() {
     pointStateBytes: input.point.checkpoint, nativeSourceBytes: input.nativeSources};
   return {capture, bytes};
 }
+it("snapshots the checked native source count when the caller grows its array during an indexed read", () => {
+  const f = contentProposalFixture(), sources = [...f.bytes.nativeSourceBytes];
+  const nativeSourceBytes = new Proxy(sources, {get(target, key, receiver) {
+    if (key === "0") target.push(Uint8Array.of(0, 0));
+    return Reflect.get(target, key, receiver);
+  }});
+  expect(validateLiveRestoreProposal(f.capture, {...f.bytes, nativeSourceBytes}, policy, budget).content.candidateDigest).toBe(f.capture.receipt.candidateDigest);
+  expect(sources).toHaveLength(2);
+});
 it("validates proposal bytes, selected content and native vectors under one proof input budget", () => {
   const f = contentProposalFixture(), result = validateLiveRestoreProposal(f.capture, f.bytes, policy, budget);
   expect(result.content.candidateDigest).toBe(hash(f.bytes.candidateBytes));

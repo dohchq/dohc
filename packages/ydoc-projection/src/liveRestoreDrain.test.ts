@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import { registered, host, policy, hash, cleanupLiveDeliveryFixtures } from "./liveCommittedDeliveryTestSupport.js";
@@ -11,7 +11,8 @@ import type { StopRestoreCutCapture, CommittedBootstrap } from "../../../service
 import type {NativeRestoreFenceReceipt} from "../../../services/sync-relay/src/liveRestoreFence.js";
 import { openSyncRelayStorage } from "../../../services/sync-relay/src/storage.js";
 import {decodeJournalRow} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
-import {parseNativeRestoreProposalReceipt} from "../../../services/sync-relay/src/liveRestoreProposal.js";
+import {parseNativeRestoreProposalReceipt, encodeNativeRestoreProposal, decodeNativeRestoreProposal} from "../../../services/sync-relay/src/liveRestoreProposal.js";
+import {initializeLiveRestoreOperationSchema} from "../../../services/sync-relay/src/storage/liveRestoreOperationSchema.js";
 import {validateLiveRestoreProposal} from "./liveRestoreProof.js";
 import {createLiveMarkdownJournalValidator} from "./liveDocumentValidation.js";
 
@@ -93,12 +94,30 @@ it("bounds restore proposal metadata and refuses corrupt native source manifests
   } finally {f.close();}
 });
 
-it("carries authenticated store targets into real proposal content validation", () => {
-  const f = proposalSourcesFixture("owner", "device"), point = new Y.Doc({gc: false}), head = new Y.Doc({gc: false});
+function pendingSource(binding: NativeRestoreFenceReceipt["operation"]["oldBinding"], bytes: Uint8Array, sequence: number) {
+  const updateDigest = hash(bytes), outboxId = `owner-outbox-${hash(Buffer.from(`${binding.workspaceId}\0${JSON.stringify(binding)}\0${binding.lineageClaimId}`))}`;
+  const source = {binding, adoptionId: "adoption", nativeSequence: sequence + 9, updateDigest,
+    origin: {kind: "nativeUpdate", actorOriginId: "owner-device", actorKind: "agent", onBehalfOf: "owner", chainDepth: 64, recordedAtMs: 100}};
+  return {outboxId, outboxSequence: sequence, binding, appendKey: `adopted-local:${jsonHash(source)}`,
+    deliveryId: `owner-delivery-${hash(Buffer.from(`${outboxId}\0${sequence}\0${updateDigest}`))}`, updateDigest,
+    byteLength: bytes.byteLength, createdAtMs: 100, source, acceptedReceipt: null};
+}
+
+function contentProposalFixture(kind: "bootstrap" | "owner" = "owner", mode: "service" | "device" = "device", pending = false) {
+  const f = proposalSourcesFixture(kind, mode), point = new Y.Doc({gc: false}), head = new Y.Doc({gc: false});
   try {
     const selected = f.store.captureStopRestorePoint(f.input), accepted = f.store.captureStopRestoreAcceptedCut(f.input);
     Y.applyUpdate(point, selected.checkpoint.bytes);for (const e of selected.events) Y.applyUpdate(point, e.updateBytes);
     Y.applyUpdate(head, accepted.checkpoint.bytes);for (const e of accepted.events) Y.applyUpdate(head, e.updateBytes);
+    const nativeSourceBytes: Uint8Array[] = [];
+    if (pending) {
+      for (const name of ["pending-one", "pending-two"]) {
+        const before = Y.encodeStateVector(head);
+        head.getMap("frontmatter").set(name, "retained owner work");
+        nativeSourceBytes.push(Y.encodeStateAsUpdate(head, before));
+      }
+    }
+    const nativeSources = nativeSourceBytes.map((bytes, index) => pendingSource(f.receipt.operation.oldBinding, bytes, index + 1));
     const frozen = Y.encodeStateAsUpdate(head), pointBytes = Y.encodeStateAsUpdate(point), vector = Y.encodeStateVector(head);
     const used = Y.decodeStateVector(vector);let client = 1;while (used.has(client)) client++;head.clientID = client;
     head.transact(() => {
@@ -115,13 +134,258 @@ it("carries authenticated store targets into real proposal content validation", 
       checkpoint: frozen, suffix: [], candidate});
     if (validated.kind !== "accepted") throw Error(validated.reason);
     const receipt = {...f.proposal, candidateDigest: hash(candidate), frozenStateDigest: hash(frozen), pointStateDigest: hash(pointBytes),
-      beforeStateVector: [...vector], afterStateVector: [...Y.encodeStateVector(head)], replacementRanges: [...validated.evidence.candidate.ranges]};
+      beforeStateVector: [...vector], afterStateVector: [...Y.encodeStateVector(head)], replacementRanges: [...validated.evidence.candidate.ranges],
+      nativeSources, nativeSourceManifestDigest: jsonHash([f.receipt, nativeSources])};
     const capture = f.store.captureStopRestoreProposal(f.input, JSON.stringify(receipt));
-    const bytes = {candidateBytes: candidate, frozenStateBytes: frozen, pointStateBytes: pointBytes, nativeSourceBytes: []};
-    expect(validateLiveRestoreProposal(capture, bytes, policy, f.input).content.candidateDigest).toBe(hash(candidate));
-    expect(() => validateLiveRestoreProposal({...capture, selected: capture.accepted, accepted: capture.selected} as never, bytes, policy, f.input)).toThrow();
+    const bytes = {candidateBytes: candidate, frozenStateBytes: frozen, pointStateBytes: pointBytes, nativeSourceBytes};
+    return {...f, receipt, capture, bytes, encoded: encodeNativeRestoreProposal(JSON.stringify(receipt), bytes, f.input)};
+  } catch (error) {f.close();throw error;}
+  finally {point.destroy();head.destroy();}
+}
+
+it("carries authenticated store targets into real proposal content validation", () => {
+  const f = contentProposalFixture();
+  try {
+    expect(validateLiveRestoreProposal(f.capture, f.bytes, policy, f.input).content.candidateDigest).toBe(hash(f.bytes.candidateBytes));
+    expect(() => validateLiveRestoreProposal({...f.capture, selected: f.capture.accepted, accepted: f.capture.selected} as never, f.bytes, policy, f.input)).toThrow();
     expect(f.raw.prepare("SELECT admission_state FROM sync_relay_live_documents").get()!.admission_state).toBe("closed");
-  } finally {point.destroy();head.destroy();f.close();}
+  } finally {f.close();}
+});
+
+const proposalTable = "sync_relay_live_restore_proposals";
+const proposalRows = (f: ReturnType<typeof contentProposalFixture>) => ({...f.journalRows(),
+  proposals: f.raw.prepare(`SELECT * FROM ${proposalTable}`).all(),
+  operations: f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(),
+  documents: f.raw.prepare("SELECT * FROM sync_relay_live_documents").all()});
+
+it("persists a generated owner rewrite with two retained native updates and refuses missing or changed pending bytes", () => {
+  const f = contentProposalFixture("owner", "device", true);
+  let reopened: ReturnType<typeof openSyncRelayStorage> | undefined, closed = false;
+  try {
+    const before = proposalRows(f);
+    expect(decodeNativeRestoreProposal(f.encoded, f.input).bytes.nativeSourceBytes).toEqual(f.bytes.nativeSourceBytes);
+    const altered = f.bytes.nativeSourceBytes.map(bytes => bytes.slice());altered[0]![0] ^= 1;
+    for (const nativeSourceBytes of [altered, [f.bytes.nativeSourceBytes[1]!, f.bytes.nativeSourceBytes[0]!]]) {
+      const bad = encodeNativeRestoreProposal(JSON.stringify(f.receipt), {...f.bytes, nativeSourceBytes}, f.input);
+      expect(() => f.store.recordStopRestoreProposal(f.input, bad, policy, 200)).toThrow();
+      expect(proposalRows(f)).toEqual(before);
+    }
+    const omitted = {...f.receipt, nativeSources: [], nativeSourceManifestDigest: jsonHash([f.receipt.fence, []])};
+    const noNative = encodeNativeRestoreProposal(JSON.stringify(omitted), {...f.bytes, nativeSourceBytes: []}, f.input);
+    expect(() => f.store.recordStopRestoreProposal(f.input, noNative, policy, 200)).toThrow(/frozen context/);
+    expect(proposalRows(f)).toEqual(before);
+    const recorded = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    expect(recorded.replayed).toBe(false);
+    expect(f.store.readStopRestoreProposal(f.input, policy)!.receipt.nativeSources).toEqual(f.receipt.nativeSources);
+    f.close();closed = true;
+    reopened = openSyncRelayStorage(f.path);
+    const store = reopened.createLiveCommittedDeliveryStore(createLiveJournalHistoryAuthority({namespace: "restore-test", reconciled: true}));
+    expect(store.readStopRestoreProposal(f.input, policy)!.bytes).toEqual(f.encoded);
+    expect(store.recordStopRestoreProposal(f.input, f.encoded, policy, 201)).toEqual({...recorded, replayed: true});
+  } finally {if (!closed) f.close();reopened?.close();}
+});
+
+it.each([
+  {actorKind: "unknown", chainDepth: 0}, {actorKind: "agent", chainDepth: 65},
+  {actorKind: "agent", chainDepth: null}, {actorKind: null, chainDepth: 0},
+  {actorKind: null, chainDepth: null, onBehalfOf: "owner"},
+])("refuses native provenance outside the engine contract: %j", patch => {
+  const f = contentProposalFixture("owner", "device", true);
+  try {
+    const receipt = structuredClone(f.receipt), native = receipt.nativeSources[0]!;
+    Object.assign(native.source.origin, patch);
+    native.appendKey = `adopted-local:${jsonHash(native.source)}`;
+    receipt.nativeSourceManifestDigest = jsonHash([receipt.fence, receipt.nativeSources]);
+    expect(() => parseNativeRestoreProposalReceipt(JSON.stringify(receipt), f.input)).toThrow();
+    expect(proposalRows(f).proposals).toEqual([]);
+  } finally {f.close();}
+});
+
+it("accepts native human, agent, automation and absent attribution at their depth boundaries", () => {
+  const f = contentProposalFixture("owner", "device", true);
+  try {
+    for (const patch of [{actorKind: "human", chainDepth: 0, onBehalfOf: null},
+      {actorKind: "agent", chainDepth: 64, onBehalfOf: "owner"}, {actorKind: "automation", chainDepth: 1, onBehalfOf: null},
+      {actorKind: null, chainDepth: null, onBehalfOf: null}]) {
+      const receipt = structuredClone(f.receipt), native = receipt.nativeSources[0]!;
+      Object.assign(native.source.origin, patch);native.appendKey = `adopted-local:${jsonHash(native.source)}`;
+      receipt.nativeSourceManifestDigest = jsonHash([receipt.fence, receipt.nativeSources]);
+      expect(parseNativeRestoreProposalReceipt(JSON.stringify(receipt), f.input).nativeSources[0]!.source.origin).toMatchObject(patch);
+    }
+  } finally {f.close();}
+});
+
+it.each([["bootstrap", "service"], ["bootstrap", "device"], ["owner", "service"], ["owner", "device"]] as const)(
+  "persists the generated %s proposal on %s and replays its bytes after relay restart", (kind, mode) => {
+    const f = contentProposalFixture(kind, mode);
+    let reopened: ReturnType<typeof openSyncRelayStorage> | undefined, closed = false;
+    try {
+      expect(f.store.readStopRestoreProposal(f.input, policy)).toBeNull();
+      const before = proposalRows(f);
+      const recorded = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+      expect(recorded).toEqual({proposalDigest: hash(f.encoded), candidateDigest: hash(f.bytes.candidateBytes), recordedAtMs: 200, replayed: false});
+      const after = proposalRows(f), row = after.proposals[0]!;
+      expect(after.journal).toEqual(before.journal);
+      expect(after.operations).toEqual(before.operations);
+      expect(after.documents).toEqual(before.documents);
+      expect(after.usage).toBe(Number(before.usage) + Number(row.accounted_bytes));
+      expect(row.proposal_bytes).toEqual(f.encoded);
+      expect(f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 1_000_000)).toEqual({...recorded, replayed: true});
+      expect(proposalRows(f)).toEqual(after);
+      const read = f.store.readStopRestoreProposal(f.input, policy)!;
+      expect(read).toMatchObject({bytes: f.encoded, receipt: f.receipt, proposalDigest: recorded.proposalDigest, recordedAtMs: 200});
+      read.bytes.fill(0);
+      expect(f.store.readStopRestoreProposal(f.input, policy)!.bytes).toEqual(f.encoded);
+      f.close();closed = true;
+      reopened = openSyncRelayStorage(f.path);
+      const store = reopened.createLiveCommittedDeliveryStore(createLiveJournalHistoryAuthority({namespace: "restore-test", reconciled: true}));
+      expect(store.readStopRestoreProposal(f.input, policy)!.bytes).toEqual(f.encoded);
+      expect(store.recordStopRestoreProposal(f.input, f.encoded, policy, 999)).toEqual({...recorded, replayed: true});
+      expect((reopened as StorageContext).db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage").get()!.usage_bytes).toBe(after.usage);
+    } finally {if (!closed) f.close();reopened?.close();}
+  });
+
+it("charges the full framed proposal exactly once and refuses one byte beyond workspace quota", () => {
+  const f = contentProposalFixture();
+  try {
+    const digest = hash(f.encoded), candidate = hash(f.bytes.candidateBytes), at = 200;
+    const charge = f.encoded.byteLength + Buffer.byteLength(JSON.stringify(["restore", "workspace", digest, candidate, at, Number.MAX_SAFE_INTEGER]));
+    const before = proposalRows(f);
+    f.context.options.workspaceQuotaBytes = Number(before.usage) + charge - 1;
+    expect(() => f.store.recordStopRestoreProposal(f.input, f.encoded, policy, at)).toThrow(/quota/);
+    expect(proposalRows(f)).toEqual(before);
+    f.context.options.workspaceQuotaBytes++;
+    f.store.recordStopRestoreProposal(f.input, f.encoded, policy, at);
+    expect(f.journalRows().usage).toBe(f.context.options.workspaceQuotaBytes);
+    expect(f.raw.prepare(`SELECT accounted_bytes FROM ${proposalTable}`).get()!.accounted_bytes).toBe(charge);
+    expect(f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 201).replayed).toBe(true);
+    expect(f.journalRows().usage).toBe(f.context.options.workspaceQuotaBytes);
+  } finally {f.close();}
+});
+
+it.each(["before-insert", "after-insert", "ignored-insert", "ignored-usage", "failed-usage"])(
+  "rolls back proposal and quota changes after %s", boundary => {
+    const f = contentProposalFixture();
+    try {
+      const usage = boundary.endsWith("usage"), timing = boundary === "after-insert" ? "AFTER" : "BEFORE";
+      const action = boundary.startsWith("ignored") ? "IGNORE" : "ABORT,'injected proposal failure'";
+      f.raw.exec(`CREATE TRIGGER reject_proposal ${timing} ${usage ? "UPDATE ON sync_relay_workspace_usage" : `INSERT ON ${proposalTable}`} BEGIN SELECT RAISE(${action}); END`);
+      const before = proposalRows(f);
+      expect(() => f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200)).toThrow();
+      expect(proposalRows(f)).toEqual(before);
+      f.raw.exec("DROP TRIGGER reject_proposal");
+      expect(f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200).replayed).toBe(false);
+    } finally {f.close();}
+  });
+
+it.each(["bytes", "proposal digest", "candidate digest", "charge", "recorded time"])(
+  "rejects corrupted stored proposal %s on read and replay without mutation", damage => {
+    const f = contentProposalFixture();
+    try {
+      f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+      if (damage === "bytes") {const bad = f.encoded.slice();bad[bad.length - 1] ^= 1;f.raw.prepare(`UPDATE ${proposalTable} SET proposal_bytes=?`).run(bad);}
+      if (damage === "proposal digest") f.raw.prepare(`UPDATE ${proposalTable} SET proposal_sha256=?`).run("f".repeat(64));
+      if (damage === "candidate digest") f.raw.prepare(`UPDATE ${proposalTable} SET candidate_sha256=?`).run("f".repeat(64));
+      if (damage === "charge") f.raw.exec(`UPDATE ${proposalTable} SET accounted_bytes=accounted_bytes-1`);
+      if (damage === "recorded time") f.raw.exec(`UPDATE ${proposalTable} SET recorded_at_ms=1000000`);
+      const before = proposalRows(f);
+      expect(() => f.store.readStopRestoreProposal(f.input, policy)).toThrow();
+      expect(() => f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 201)).toThrow();
+      expect(proposalRows(f)).toEqual(before);
+    } finally {f.close();}
+  });
+
+it("refuses a second proposal for the operation and bounded or foreign reads without mutation", () => {
+  const f = contentProposalFixture();
+  try {
+    f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    const before = proposalRows(f);
+    const changed = encodeNativeRestoreProposal(JSON.stringify({...f.receipt, finalContentDigest: "e".repeat(64)}), f.bytes, f.input);
+    expect(() => f.store.recordStopRestoreProposal(f.input, changed, policy, 201)).toThrow();
+    for (const patch of [{maxBytes: f.encoded.byteLength - 1}, {maxEvents: 1}, {ownerUserId: "foreign"},
+      {workspaceId: "foreign"}, {host: {...f.input.host, connectionId: "foreign"}}]) {
+      expect(() => f.store.readStopRestoreProposal({...f.input, ...patch}, policy)).toThrow();
+      expect(() => f.store.recordStopRestoreProposal({...f.input, ...patch}, f.encoded, policy, 201)).toThrow();
+    }
+    expect(proposalRows(f)).toEqual(before);
+  } finally {f.close();}
+});
+
+it("checks stored proposal length before materializing an oversized saved payload on read or replay", () => {
+  const f = contentProposalFixture();
+  try {
+    f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    f.raw.prepare(`UPDATE ${proposalTable} SET proposal_bytes=zeroblob(?)`).run(f.input.maxBytes + 1);
+    const before = proposalRows(f), prepare = vi.spyOn(f.context.db, "prepare");
+    expect(() => f.store.readStopRestoreProposal(f.input, policy)).toThrow(/bounds/);
+    expect(() => f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 201)).toThrow();
+    const proposalReads = prepare.mock.calls.map(([sql]) => sql).filter(sql => sql.includes(`FROM ${proposalTable}`));
+    expect(proposalReads).toHaveLength(2);
+    expect(proposalReads.every(sql => sql.includes("length(proposal_bytes)"))).toBe(true);
+    prepare.mockRestore();
+    expect(proposalRows(f)).toEqual(before);
+  } finally {vi.restoreAllMocks();f.close();}
+});
+
+it("rechecks closed admission inside the proposal write transaction and rolls back late authority drift", () => {
+  const f = contentProposalFixture();
+  try {
+    const before = proposalRows(f), transaction = f.context.tx.bind(f.context);
+    vi.spyOn(f.context, "tx").mockImplementationOnce(run => transaction(() => {
+      f.context.db.prepare("UPDATE sync_relay_live_documents SET admission_state='open'").run();
+      return run();
+    }));
+    expect(() => f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200)).toThrow();
+    expect(proposalRows(f)).toEqual(before);
+  } finally {vi.restoreAllMocks();f.close();}
+});
+
+it("frames exact byte views, snapshots caller storage, and refuses truncation, invalid UTF-8, trailing data and shared buffers", () => {
+  const f = contentProposalFixture();
+  try {
+    const container = new Uint8Array(f.encoded.length + 2);container.set(f.encoded, 1);
+    const view = container.subarray(1, -1), decoded = decodeNativeRestoreProposal(view, {...f.input, maxBytes: view.length});
+    expect(decoded.bytes).toEqual(f.bytes);
+    expect(decoded.receipt).toEqual(f.receipt);
+    container.fill(0);
+    expect(decoded.captured).toEqual(f.encoded);
+    for (const bad of [f.encoded.subarray(0, 3), f.encoded.subarray(0, f.encoded.length - 1),
+      Uint8Array.from([...f.encoded, 0]), new Uint8Array(new SharedArrayBuffer(f.encoded.length))]) {
+      expect(() => decodeNativeRestoreProposal(bad, f.input)).toThrow();
+    }
+    const utf8 = f.encoded.slice();utf8[4] = 255;
+    expect(() => decodeNativeRestoreProposal(utf8, f.input)).toThrow();
+    const length = f.encoded.slice();new DataView(length.buffer).setUint32(0, 0xffff_ffff, true);
+    expect(() => decodeNativeRestoreProposal(length, f.input)).toThrow();
+    expect(() => decodeNativeRestoreProposal(f.encoded, {...f.input, maxBytes: f.encoded.length - 1})).toThrow();
+    expect(() => encodeNativeRestoreProposal(JSON.stringify(f.receipt), f.bytes, {...f.input, maxBytes: f.encoded.length - 1})).toThrow();
+    expect(() => encodeNativeRestoreProposal(JSON.stringify(f.receipt), {...f.bytes, candidateBytes: new Uint8Array(new SharedArrayBuffer(2))}, f.input)).toThrow();
+    expect(() => encodeNativeRestoreProposal(JSON.stringify(f.receipt), {...f.bytes, nativeSourceBytes: [Uint8Array.of(0, 0)]}, f.input)).toThrow();
+  } finally {f.close();}
+});
+
+it.each(["table", "index", "parent"])("rejects damaged proposal schema %s", damage => {
+  const f = contentProposalFixture();
+  try {
+    f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    if (damage === "table") f.raw.exec(`DROP TABLE ${proposalTable}`);
+    if (damage === "index") f.raw.exec(`CREATE INDEX unexpected_proposal ON ${proposalTable}(recorded_at_ms)`);
+    if (damage === "parent") {
+      f.raw.exec("PRAGMA foreign_keys=OFF");f.raw.exec(`UPDATE ${proposalTable} SET operation_id='missing'`);f.raw.exec("PRAGMA foreign_keys=ON");
+    }
+    expect(() => initializeLiveRestoreOperationSchema(f.context.db)).toThrow(/damaged/);
+  } finally {f.close();}
+});
+
+it("workspace deletion removes the proposal and its usage row through existing cascades", () => {
+  const f = contentProposalFixture();
+  try {
+    f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    f.write(db => {db.prepare("DELETE FROM sync_relay_workspaces WHERE workspace_id='workspace'").run();});
+    expect(f.raw.prepare(`SELECT * FROM ${proposalTable}`).all()).toEqual([]);
+    expect(f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all()).toEqual([]);
+    expect(f.raw.prepare("SELECT * FROM sync_relay_workspace_usage").all()).toEqual([]);
+  } finally {f.close();}
 });
 
 it("authenticates bounded native pending identities and refuses a different adoption or local head", () => {

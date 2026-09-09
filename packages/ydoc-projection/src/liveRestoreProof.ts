@@ -27,8 +27,8 @@ export function validateLiveRestoreProposal(capture: ProposalCapture, input: Liv
   policy: OrderedLiveUpdateCutPolicy, budget: {maxBytes: number; maxEvents: number}) {
   capture.assertCurrent();
   require(Number.isSafeInteger(budget.maxBytes) && budget.maxBytes > 0 && Number.isSafeInteger(budget.maxEvents) && budget.maxEvents > 0);
-  require(Array.isArray(input.nativeSourceBytes) && input.nativeSourceBytes.length <= budget.maxEvents &&
-    input.nativeSourceBytes.length === capture.receipt.nativeSources.length);
+  const nativeSourceBytes = input.nativeSourceBytes, count = capture.receipt.nativeSources.length;
+  require(Array.isArray(nativeSourceBytes) && count <= budget.maxEvents && nativeSourceBytes.length === count);
   let bytes = 0;
   const snapshot = (value: Uint8Array) => {
     require(value instanceof Uint8Array && !(value.buffer instanceof SharedArrayBuffer));
@@ -37,7 +37,7 @@ export function validateLiveRestoreProposal(capture: ProposalCapture, input: Liv
   };
   const candidate = snapshot(input.candidateBytes), frozen = snapshot(input.frozenStateBytes), point = snapshot(input.pointStateBytes);
   const native: Uint8Array[] = [];
-  for (let i = 0; i < input.nativeSourceBytes.length; i++) native.push(snapshot(input.nativeSourceBytes[i]!));
+  for (let i = 0; i < count; i++) native.push(snapshot(nativeSourceBytes[i]!));
   const receipt = capture.receipt;
   require(hash(candidate) === receipt.candidateDigest && hash(frozen) === receipt.frozenStateDigest && hash(point) === receipt.pointStateDigest);
   for (let i = 0; i < native.length; i++) require(native[i]!.byteLength === receipt.nativeSources[i]!.byteLength && hash(native[i]!) === receipt.nativeSources[i]!.updateDigest);
@@ -66,4 +66,4 @@ export function validateLiveRestoreProposal(capture: ProposalCapture, input: Liv
   } finally {frozenDoc.destroy();restoredDoc.destroy();}
 }
 
-export {resolveLiveRestorePoint};
+export type {OrderedLiveUpdateCutPolicy};

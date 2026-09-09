@@ -6,6 +6,7 @@ import {parseAdmittedLiveUpdateMetadata, parseLiveUpdateDigest, parseLiveUpdateI
 import {parseNativeRestoreFenceReceipt} from "./liveRestoreFence";
 import {configRecord} from "./deviceLiveHostConfig";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
+import type {LiveRestoreProposalBytes} from "@dohc/ydoc-projection/restore-proof";
 
 export type RestoreProofBudget = {maxBytes: number; maxEvents: number};
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -28,10 +29,11 @@ function nativeSource(value: unknown) {
   else {
     require(origin.kind === "nativeUpdate");
     configRecord(origin, ["kind", "actorOriginId", "actorKind", "onBehalfOf", "chainDepth", "recordedAtMs"]);
-    for (const field of ["actorOriginId", "actorKind", "onBehalfOf"] as const) {
+    for (const field of ["actorOriginId", "onBehalfOf"] as const) {
       if (origin[field] !== null) parseLiveUpdateIdentifier(origin[field]);
     }
-    if (origin.chainDepth !== null) integer(origin.chainDepth);
+    if (origin.actorKind !== null) require(origin.actorKind === "human" || origin.actorKind === "agent" || origin.actorKind === "automation");
+    if (origin.chainDepth !== null) require(integer(origin.chainDepth) <= 64);
     integer(origin.recordedAtMs);
     require((origin.actorKind === null) === (origin.chainDepth === null));
     if (origin.actorKind === null) require(origin.onBehalfOf === null);
@@ -95,3 +97,40 @@ export function parseNativeRestoreProposalReceipt(json: string, budget: RestoreP
     nativeSourceManifestDigest: manifestDigest};
 }
 export type NativeRestoreProposalReceipt = ReturnType<typeof parseNativeRestoreProposalReceipt>;
+
+export function decodeNativeRestoreProposal(bytes: Uint8Array, budget: RestoreProofBudget) {
+  integer(budget.maxBytes, 1);integer(budget.maxEvents, 1);
+  if (!(bytes instanceof Uint8Array) || bytes.buffer instanceof SharedArrayBuffer || bytes.byteLength > budget.maxBytes) {
+    throw new TypeError("Native restore binary exceeds its configured bound.");
+  }
+  const captured = new Uint8Array(bytes), view = new DataView(captured.buffer);
+  let offset = 0;
+  const field = () => {
+    require(offset + 4 <= captured.byteLength);
+    const length = view.getUint32(offset, true);offset += 4;
+    require(length <= captured.byteLength - offset);
+    const value = captured.subarray(offset, offset + length);offset += length;return value;
+  };
+  const receiptJson = new TextDecoder("utf-8", {fatal: true}).decode(field());
+  const receipt = parseNativeRestoreProposalReceipt(receiptJson, budget);
+  const candidateBytes = field(), frozenStateBytes = field(), pointStateBytes = field(), nativeSourceBytes: Uint8Array[] = [];
+  for (let index = 0; index < receipt.nativeSources.length; index++) nativeSourceBytes.push(field());
+  require(offset === captured.byteLength);
+  return {receiptJson, receipt, bytes: {candidateBytes, frozenStateBytes, pointStateBytes, nativeSourceBytes}, captured};
+}
+
+export function encodeNativeRestoreProposal(receiptJson: string, input: LiveRestoreProposalBytes, budget: RestoreProofBudget): Uint8Array {
+  const receipt = parseNativeRestoreProposalReceipt(receiptJson, budget);
+  const nativeSourceBytes = input.nativeSourceBytes, count = receipt.nativeSources.length;
+  require(Array.isArray(nativeSourceBytes) && nativeSourceBytes.length === count);
+  const fields = [Buffer.from(receiptJson), input.candidateBytes, input.frozenStateBytes, input.pointStateBytes];
+  for (let index = 0; index < count; index++) fields.push(nativeSourceBytes[index]!);
+  let length = 0;
+  for (const field of fields) {
+    require(field instanceof Uint8Array && !(field.buffer instanceof SharedArrayBuffer) && field.byteLength <= 0xffff_ffff);
+    length += 4 + field.byteLength;require(length <= budget.maxBytes);
+  }
+  const result = new Uint8Array(length), view = new DataView(result.buffer);let offset = 0;
+  for (const field of fields) {view.setUint32(offset, field.byteLength, true);offset += 4;result.set(field, offset);offset += field.byteLength;}
+  return result;
+}
