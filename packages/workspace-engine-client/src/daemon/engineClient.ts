@@ -836,14 +836,18 @@ export class EngineClient implements EngineTransport {
     path: string,
     maxBytes: number,
     signal?: AbortSignal,
+    activationId?: string,
   ): Promise<NativeOwnerActivation> {
     if (typeof path !== "string" || path.length < 1 || path.length > 4096 || path.includes("\0") ||
         !Number.isSafeInteger(maxBytes) || maxBytes < 4 || maxBytes > this.maxBlobBytes) {
       throw new TypeError("Invalid owner activation capture bounds.");
     }
+    if (activationId !== undefined && !/^ordinary-activation-[a-f0-9]{64}$/.test(activationId)) {
+      throw new TypeError("Invalid retained activation ID.");
+    }
     const output: PrivateLiveOutput = { status: "captured", maxBytes, started: false };
     const response = await this.sendLiveUpload(request, "liveApplication.captureOwnerActivation",
-      maxBytes + 3 * 1024 * 1024, () => ({ params: { path, maxBytes }, streams: [] }), signal, output);
+      maxBytes + 3 * 1024 * 1024, () => ({ params: { path, maxBytes, ...(activationId === undefined ? {} : {activationId}) }, streams: [] }), signal, output);
     return parseNativeOwnerActivation(response.result, output.blob!.bytes, path, maxBytes);
   }
   async openLiveAppliedSync(request:LiveApplicationRequest, clientVector:Uint8Array, bounds:{maxInputBytes:number;maxOutputBytes:number}, signal?:AbortSignal):Promise<{

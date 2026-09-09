@@ -128,3 +128,91 @@ pub fn capture_imported_owner_activation(
         TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
     }
 }
+
+pub fn resume_imported_owner_activation(
+    store: &mut EngineStore,
+    namespace: &str,
+    key: &DocKey,
+    path: &str,
+    activation_id: &str,
+    max_bytes: usize,
+) -> Result<ImportedOwnerActivation, ApplicationError> {
+    identifier(namespace, 1024)?;
+    identifier(activation_id, 1024)?;
+    if key.version_id != "main" || max_bytes == 0 {
+        return Err(invalid("invalid ordinary activation resume"));
+    }
+    store.read_with(|conn| {
+        let sizes: (i64,i64,i64) = conn.query_row(
+            "SELECT length(CAST(a.descriptor_json AS BLOB)),length(b.bytes),length(f.bytes)
+             FROM ydoc_owner_activation_sources a JOIN binary_blobs b ON b.sha256=a.lineage_claim_id
+             JOIN binary_blobs f ON f.sha256=a.full_state_digest WHERE a.activation_id=?1
+             AND a.relay_database_namespace=?2 AND a.workspace_id=?3 AND a.version_id=?4 AND a.object_id=?5",
+            params![activation_id,namespace,key.workspace_id,key.version_id,key.object_id],
+            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(read_sql)?;
+        let mut total=0usize;
+        for length in [sizes.0,sizes.1,sizes.2] {
+            let length=usize::try_from(length).map_err(|_|ApplicationError::Corrupt)?;
+            total=total.checked_add(length).ok_or(ApplicationError::Corrupt)?;
+            if total>max_bytes { return Err(ApplicationError::ConfiguredByteBudgetExceeded); }
+        }
+        if sizes.1<2 || sizes.2<2 || sizes.1 as usize>crate::limits::MAX_YDOC_UPDATE_BYTES
+            || sizes.2 as usize>crate::limits::MAX_YDOC_UPDATE_BYTES { return Err(ApplicationError::Corrupt); }
+        let json:String=conn.query_row("SELECT descriptor_json FROM ydoc_owner_activation_sources WHERE activation_id=?1",[activation_id],|r|r.get(0)).map_err(read_sql)?;
+        if format!("ordinary-activation-{}",hex_sha256(json.as_bytes()))!=activation_id { return Err(ApplicationError::Corrupt); }
+        let source:ImportedOwnerSource=serde_json::from_str(&json).map_err(|_|ApplicationError::Corrupt)?;
+        let marker=durable::read_marker_in(conn,key)?.ok_or(ApplicationError::Conflict)?;
+        if marker.content_kind!=ContentKind::Richdoc || marker.regime!=Regime::Replicated
+            || marker.lineage_claim_status!=durable::LineageClaimStatus::Exact
+            || marker.lineage_claim_id.as_deref()!=Some(source.lineage_claim_id.as_str())
+            || marker.path.as_deref()!=Some(path) || source.current_path!=path
+            || marker.base_origin_id.as_deref()!=Some(source.base_origin_id.as_str())
+            || marker.base_origin_seq!=Some(source.base_origin_seq) || marker.base_relay_seq!=Some(source.base_relay_seq)
+        { return Err(ApplicationError::Conflict); }
+        let binding=LiveObjectBinding {workspace_id:key.workspace_id.clone(),main_version_id:key.version_id.clone(),
+            object_id:key.object_id.clone(),lineage_claim_id:source.lineage_claim_id.clone(),current_path:path.to_owned(),
+            selector_paths:vec![path.to_owned()],restore_fence_generation:1};
+        let verified=adoption::read_adoption_source(conn,namespace,activation_id,&binding)?
+            .and_then(|(_,_,_,_,source)|source).ok_or(ApplicationError::Corrupt)?;
+        if verified!=source { return Err(ApplicationError::Corrupt); }
+        let (cursor,epoch,stream):(String,String,String)=conn.query_row(
+            "SELECT cursor,replication_epoch,stream_identity FROM sync_relay_cursors WHERE workspace_id=?1",
+            [&key.workspace_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(read_sql)?;
+        let cursor:i64=cursor.parse().map_err(|_|ApplicationError::Corrupt)?;
+        if cursor<source.committed_cursor || epoch!=source.replication_epoch || stream!=source.stream_identity {
+            return Err(ApplicationError::Conflict);
+        }
+        let adopted:Option<(String,String,i64,String,String,i64)>=conn.query_row(
+            "SELECT relay_database_namespace,adoption_id,local_ydoc_sequence,source_moment_id,source_digest,source_byte_length
+             FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+            params![key.workspace_id,key.version_id,key.object_id,source.lineage_claim_id],
+            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(read_sql)?;
+        if let Some((saved_namespace,id,sequence,moment,digest,length))=adopted {
+            if saved_namespace!=namespace || id!=activation_id || sequence!=source.native_head_sequence
+                || marker.head_update_seq<sequence || moment!=source.source_moment_id
+                || digest!=source.source_digest || length!=source.source_byte_length { return Err(ApplicationError::Conflict); }
+        } else {
+            if marker.head_update_seq!=source.native_head_sequence { return Err(ApplicationError::Conflict); }
+            adoption::require_local_replay_budget(conn,key,max_bytes)?;
+            let local=durable::load_doc_in(conn,key)?;
+            let full=local.encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
+                .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
+            if local.has_missing_updates() || full.len()!=source.full_state_byte_length
+                || hex_sha256(&full)!=source.full_state_digest { return Err(ApplicationError::Conflict); }
+            let current:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM snapshots s JOIN path_aliases p USING(workspace_id,version_id,object_id,path)
+                WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 AND s.content_kind='text' AND s.blob_sha256=?5)",
+                params![key.workspace_id,key.version_id,key.object_id,path,source.source_digest],|r|r.get(0)).map_err(read_sql)?;
+            if !current { return Err(ApplicationError::Conflict); }
+        }
+        let original:String=conn.query_row("SELECT snapshot_blob_sha256 FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND up_to_seq=0",
+            params![key.workspace_id,key.version_id,key.object_id],|r|r.get(0)).map_err(read_sql)?;
+        if original!=source.lineage_claim_id { return Err(ApplicationError::Conflict); }
+        let baseline_bytes=get_binary_blob(conn,&source.lineage_claim_id)?.ok_or(ApplicationError::Corrupt)?;
+        let full_state=get_binary_blob(conn,&source.full_state_digest)?.ok_or(ApplicationError::Corrupt)?;
+        if hex_sha256(&baseline_bytes)!=source.lineage_claim_id || hex_sha256(&full_state)!=source.full_state_digest {
+            return Err(ApplicationError::Corrupt);
+        }
+        let restore_generation=super::restore_generation(conn,key)?;
+        Ok(ImportedOwnerActivation {activation_id:activation_id.to_owned(),source,baseline_bytes,full_state,restore_generation})
+    })
+}

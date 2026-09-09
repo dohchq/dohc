@@ -1356,12 +1356,14 @@ fn settle_audited(
 }
 
 impl ActorHandle {
+    #[allow(clippy::too_many_arguments)]
     pub async fn capture_imported_owner_activation(
         &self,
         namespace: String,
         key: dohc_engine_collab::DocKey,
         path: String,
         max_bytes: usize,
+        activation_id: Option<String>,
         token: tokio_util::sync::CancellationToken,
         reservation: Arc<dyn Send + Sync>,
     ) -> Result<dohc_engine_collab::live_update_application::ImportedOwnerActivation, RuntimeError>
@@ -1387,7 +1389,11 @@ impl ActorHandle {
                 }
                 .into());
             }
-            let result =
+            let result = if let Some(activation_id) = activation_id {
+                dohc_engine_collab::live_update_application::resume_imported_owner_activation(
+                    store, &namespace, &key, &path, &activation_id, max_bytes,
+                )?
+            } else {
                 dohc_engine_collab::live_update_application::capture_imported_owner_activation(
                     store,
                     &namespace,
@@ -1395,7 +1401,8 @@ impl ActorHandle {
                     &path,
                     max_bytes,
                     &dohc_engine_storage::NoFaults,
-                )?;
+                )?
+            };
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }

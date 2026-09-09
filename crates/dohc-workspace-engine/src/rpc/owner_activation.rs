@@ -111,6 +111,7 @@ impl EngineService {
         struct Params {
             path: String,
             max_bytes: usize,
+            activation_id: Option<String>,
         }
         let namespace = self.configured_ordinary_namespace(&ctx, &request)?;
         let params: Params = parse(request.params.clone())?;
@@ -191,6 +192,7 @@ impl EngineService {
                     capture_key,
                     params.path,
                     params.max_bytes,
+                    params.activation_id,
                     token,
                     reservation,
                 )

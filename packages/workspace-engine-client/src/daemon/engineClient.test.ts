@@ -116,13 +116,13 @@ describe("private imported owner capture", () => {
     peer.acknowledge(); await transport.ready();
     const closed = vi.spyOn(peer, "close");
     const arrived = Promise.withResolvers<void>();
-    let respond = false;
+    let respond = false, retained = false;
     const baseline = Buffer.from([0, 0]), full = Buffer.from([1, 1, 1]), bytes = Buffer.concat([baseline, full]);
     const digest = (value: Buffer) => createHash("sha256").update(value).digest("hex");
     peer.onEnvelope = envelope => {
       if (envelope.type !== "request") return;
       expect(envelope.method).toBe("liveApplication.captureOwnerActivation");
-      expect(envelope.params).toEqual({ path: "owner.md", maxBytes: 1000 });
+      expect(envelope.params).toEqual({ path: "owner.md", maxBytes: 1000, ...(retained ? {activationId:`ordinary-activation-${"a".repeat(64)}`} : {}) });
       arrived.resolve();
       if (!respond) return;
       const id = envelope.id;
@@ -149,6 +149,10 @@ describe("private imported owner capture", () => {
       const captured = await transport.captureOwnerActivation({ ...request, id: 976 }, "owner.md", 1000);
       expect(captured.sessionId).toBe("native-session");
       expect(captured.fullState).toEqual(full);
+      retained = true;
+      const resumed = await transport.captureOwnerActivation({...request,id:977}, "owner.md", 1000, undefined, captured.activationId);
+      expect(resumed.activationId).toBe(captured.activationId);
+      expect(resumed.source).toEqual(captured.source);
     } finally { transport.close(); }
   });
 });

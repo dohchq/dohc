@@ -33,7 +33,8 @@ pub use sync::{
 };
 mod activation;
 pub use activation::{
-    capture_imported_owner_activation, ImportedOwnerActivation, ImportedOwnerSource,
+    capture_imported_owner_activation, resume_imported_owner_activation, ImportedOwnerActivation,
+    ImportedOwnerSource,
 };
 mod adoption;
 pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};

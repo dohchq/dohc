@@ -187,3 +187,185 @@ fn owner_adoption_publication_failure_rolls_back_and_replay_skips_publication() 
     );
     assert!(ack.unwrap().adoption_replayed);
 }
+
+fn resume_imported(
+    f: &mut Fixture,
+    id: &str,
+    max_bytes: usize,
+) -> Result<ImportedOwnerActivation, ApplicationError> {
+    resume_imported_owner_activation(&mut f.store, "namespace", &f.key, "owner.md", id, max_bytes)
+}
+
+#[test]
+fn retained_activation_keeps_its_cut_after_the_ordinary_cursor_advances() {
+    let mut f = imported_fixture();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE sync_relay_cursors SET cursor='10'", [])
+                .map_err(write_sql)
+        })
+        .unwrap();
+    let resumed = resume_imported(&mut f, &captured.activation_id, 1_000_000).unwrap();
+    assert_eq!(resumed.activation_id, captured.activation_id);
+    assert_eq!(resumed.source, captured.source);
+    assert_eq!(resumed.baseline_bytes, captured.baseline_bytes);
+    assert_eq!(resumed.full_state, captured.full_state);
+    assert_ne!(
+        capture_imported(&mut f, 1_000_000).unwrap().activation_id,
+        captured.activation_id
+    );
+}
+
+#[test]
+fn retained_activation_reopens_after_adoption_and_a_later_native_head() {
+    let mut f = imported_fixture();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    f.cut.adoption_id = captured.activation_id.clone();
+    f.adopt().unwrap();
+    assert_eq!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000)
+            .unwrap()
+            .source,
+        captured.source
+    );
+    f.edit(true);
+    let resumed = resume_imported(&mut f, &captured.activation_id, 1_000_000).unwrap();
+    assert_eq!(resumed.source, captured.source);
+    assert_eq!(resumed.full_state, captured.full_state);
+    assert!(f.cut.expected_local_sequence > resumed.source.native_head_sequence);
+}
+
+#[test]
+fn retained_activation_rejects_unadopted_native_changes_and_epoch_changes() {
+    let mut f = imported_fixture();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE sync_relay_cursors SET replication_epoch='other'",
+                [],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    assert!(resume_imported(&mut f, &captured.activation_id, 1_000_000).is_err());
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE sync_relay_cursors SET replication_epoch='epoch'",
+                [],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    f.local_edit_before_adoption();
+    assert!(resume_imported(&mut f, &captured.activation_id, 1_000_000).is_err());
+}
+
+#[test]
+fn retained_activation_checks_saved_bytes_before_loading_them() {
+    let mut f = imported_fixture();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    assert!(matches!(
+        resume_imported(&mut f, &captured.activation_id, 1),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_owner_activation_sources SET descriptor_json='{}'",
+                [],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    assert!(resume_imported(&mut f, &captured.activation_id, 1_000_000).is_err());
+}
+
+#[test]
+fn retained_activation_reopens_after_the_seed_application_and_outbox_ack() {
+    let mut f = imported_fixture();
+    f.local_edit_before_adoption();
+    let text = "edited before connecting".to_owned();
+    VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "object".into(),
+                path: "owner.md".into(),
+                text: text.clone(),
+                moment_id: "imported-edit".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    f.cut.adoption_id = captured.activation_id.clone();
+    f.cut.source_moment_id = captured.source.source_moment_id.clone();
+    f.cut.source_digest = captured.source.source_digest.clone();
+    f.cut.source_byte_length = captured.source.source_byte_length;
+    f.adopt().unwrap();
+    let (outbox_id,delivery_id,digest):(String,String,String)=f.store.read_with(|conn|conn.query_row(
+        "SELECT outbox_id,delivery_id,update_digest FROM owner_ydoc_outbox_entries WHERE pending=1",[],
+        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))).unwrap();
+    let receipt = LiveUpdateReceipt {
+        delivery_id: delivery_id.clone(),
+        update_digest: digest.clone(),
+        journal_cursor: 1,
+        accepting_host_epoch: 1,
+    };
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: receipt.clone(),
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 5,
+            },
+            first_seen: vec![],
+        },
+        update_bytes: captured.full_state.clone(),
+    };
+    let applied = apply_committed(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.handle,
+        event,
+        &NoFaults,
+        100_000_000,
+        |_, _, _, _| Ok(()),
+    )
+    .unwrap();
+    assert!(matches!(applied, ApplicationResult::Applied(_)));
+    owner_outbox::acknowledge(
+        &mut f.store,
+        "workspace",
+        &outbox_id,
+        &[owner_outbox::OwnerDeliveryReceipt {
+            delivery_id,
+            update_digest: digest,
+            journal_cursor: 1,
+            accepting_host_epoch: 1,
+        }],
+    )
+    .unwrap();
+    assert!(
+        owner_outbox::read_pending(&f.store, "workspace", &outbox_id)
+            .unwrap()
+            .is_empty()
+    );
+    let resumed = resume_imported(&mut f, &captured.activation_id, 1_000_000).unwrap();
+    assert_eq!(resumed.source, captured.source);
+    assert_eq!(resumed.full_state, captured.full_state);
+    assert!(f.adopt().unwrap().adoption_replayed);
+}

@@ -1134,7 +1134,7 @@ type VerifiedAdoptionSource = (
     String,
     Option<super::activation::ImportedOwnerSource>,
 );
-fn read_adoption_source(
+pub(super) fn read_adoption_source(
     conn: &Connection,
     namespace: &str,
     adoption_id: &str,
