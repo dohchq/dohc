@@ -1508,6 +1508,22 @@ CREATE TABLE ydoc_owner_bindings (
     PRIMARY KEY (workspace_id, main_version_id, object_id, lineage_claim_id)
 ) STRICT;
 
+CREATE TABLE ydoc_owner_applied_frames (
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    binding_json TEXT NOT NULL CHECK(json_valid(binding_json)),
+    relay_database_namespace TEXT NOT NULL,
+    journal_cursor INTEGER NOT NULL CHECK(journal_cursor > 0),
+    previous_cursor INTEGER NOT NULL CHECK(previous_cursor >= 0 AND previous_cursor < journal_cursor),
+    update_digest TEXT NOT NULL,
+    previous_revision INTEGER NOT NULL CHECK(previous_revision > 0),
+    previous_native_head INTEGER NOT NULL CHECK(previous_native_head >= 0),
+    native_head_sequence INTEGER NOT NULL CHECK(native_head_sequence >= 0),
+    PRIMARY KEY(workspace_id,main_version_id,object_id,lineage_claim_id,journal_cursor)
+) STRICT;
+
 CREATE TABLE live_owner_adoptions (
     relay_database_namespace TEXT NOT NULL,
     adoption_id TEXT NOT NULL,
@@ -1844,6 +1860,7 @@ CREATE TABLE owner_ydoc_outbox_entries (
     delivery_id              TEXT NOT NULL UNIQUE,
     update_digest            TEXT NOT NULL,
     native_source_json       TEXT CHECK (native_source_json IS NULL OR json_valid(native_source_json)),
+    accepted_receipt_json    TEXT CHECK (accepted_receipt_json IS NULL OR json_valid(accepted_receipt_json)),
     update_blob_digest       TEXT,
     byte_length              INTEGER NOT NULL CHECK (byte_length > 0),
     created_at_ms            INTEGER NOT NULL CHECK (created_at_ms >= 0),

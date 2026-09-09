@@ -22,13 +22,13 @@ pub struct OwnerDraft {
     pub doc: Ydoc,
 }
 
-fn collab(error: CollabError) -> OwnerOutboxError {
+pub(super) fn collab(error: CollabError) -> OwnerOutboxError {
     match error {
         CollabError::Storage(error) => OwnerOutboxError::Storage(error),
         _ => OwnerOutboxError::InvalidInput("invalid owner draft state"),
     }
 }
-fn key(binding: &LiveObjectBinding) -> Result<DocKey, OwnerOutboxError> {
+pub(super) fn key(binding: &LiveObjectBinding) -> Result<DocKey, OwnerOutboxError> {
     DocKey::new(
         &binding.workspace_id,
         &binding.main_version_id,
@@ -36,7 +36,7 @@ fn key(binding: &LiveObjectBinding) -> Result<DocKey, OwnerOutboxError> {
     )
     .map_err(collab)
 }
-fn bounded(doc: &Ydoc) -> Result<Vec<u8>, OwnerOutboxError> {
+pub(super) fn bounded(doc: &Ydoc) -> Result<Vec<u8>, OwnerOutboxError> {
     doc.encode_full_state_bounded(crate::limits::MAX_YDOC_UPDATE_BYTES)
         .ok_or(OwnerOutboxError::InvalidInput(
             "owner draft exceeds document limit",
@@ -150,7 +150,7 @@ pub fn install_observed_binding_in_tx(
     Ok(())
 }
 
-fn bounded_blob(conn: &Connection, digest: &str) -> Result<Vec<u8>, OwnerOutboxError> {
+pub(super) fn bounded_blob(conn: &Connection, digest: &str) -> Result<Vec<u8>, OwnerOutboxError> {
     validate_digest(digest)?;
     let bytes: Vec<u8> = conn.query_row(
         "SELECT bytes FROM binary_blobs WHERE sha256=?1 AND byte_length=length(bytes) AND byte_length BETWEEN 1 AND ?2",
@@ -161,7 +161,7 @@ fn bounded_blob(conn: &Connection, digest: &str) -> Result<Vec<u8>, OwnerOutboxE
     }
     Ok(bytes)
 }
-fn read_observed_in(
+pub(super) fn read_observed_in(
     conn: &Connection,
     binding: &LiveObjectBinding,
 ) -> Result<Option<ObservedOwnerBinding>, OwnerOutboxError> {
@@ -560,5 +560,237 @@ mod tests {
                 })
                 .unwrap();
         }
+    }
+    fn feed(
+        store: &mut EngineStore,
+        observed: &ObservedOwnerBinding,
+        cursor: i64,
+        update: Vec<u8>,
+    ) -> super::super::accepted::OwnerAcceptedFrameInput {
+        let current = store
+            .read_with(|c| read_observed_in(c, &observed.binding))
+            .unwrap()
+            .unwrap();
+        let input = super::super::accepted::OwnerAcceptedFrameInput {
+            binding: observed.binding.clone(),
+            relay_database_namespace: observed.relay_database_namespace.clone(),
+            expected_revision: current.revision,
+            expected_native_head_sequence: current.native_head_sequence,
+            previous_accepted_cursor: current.accepted_cursor,
+            journal_cursor: cursor,
+            update_bytes: update,
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                super::super::accepted::apply_frame_in_tx(tx, "workspace", &input, 10)
+            })
+            .unwrap();
+        input
+    }
+    fn pending(
+        store: &mut EngineStore,
+        observed: &ObservedOwnerBinding,
+        update: Vec<u8>,
+    ) -> OwnerOutboxAppendResult {
+        let result = store
+            .write_with(&NoFaults, |tx| {
+                append_draft_in_tx(
+                    tx,
+                    "workspace",
+                    &observed.binding,
+                    1,
+                    "owner-edit".into(),
+                    update,
+                    3,
+                )
+            })
+            .unwrap();
+        committed(result).unwrap()
+    }
+    #[test]
+    fn ordered_feed_contains_late_ack_and_preserves_exact_receipt_retry() {
+        let (dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let delta = owner.richdoc_append_paragraph("pending owner");
+        let append = pending(&mut store, &observed, delta.clone());
+        let receipt = OwnerDeliveryReceipt {
+            delivery_id: append.delivery_id,
+            update_digest: append.update_digest,
+            journal_cursor: 4,
+            accepting_host_epoch: 1,
+        };
+        assert!(super::super::acknowledge(
+            &mut store,
+            "workspace",
+            &append.outbox_id,
+            &[receipt.clone()]
+        )
+        .is_err());
+        let remote = Ydoc::wire();
+        remote.apply(&checkpoint).unwrap();
+        let remote_delta = remote.richdoc_append_paragraph("remote first");
+        feed(&mut store, &observed, 2, remote_delta);
+        let mut wrong = receipt.clone();
+        wrong.journal_cursor = 1;
+        assert!(!store
+            .read_with(|c| super::super::accepted::is_receipt_applied_in(
+                c,
+                &observed.binding,
+                &observed.relay_database_namespace,
+                &wrong
+            ))
+            .unwrap());
+        let ordinary_before = store.table_row_count("replication_log").unwrap();
+        let retry = feed(&mut store, &observed, 4, delta);
+        assert_eq!(
+            store.table_row_count("replication_log").unwrap(),
+            ordinary_before
+        );
+        let before = store.table_row_count("ydoc_updates").unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                super::super::accepted::apply_frame_in_tx(tx, "workspace", &retry, 11)
+            })
+            .unwrap();
+        assert_eq!(store.table_row_count("ydoc_updates").unwrap(), before);
+        let mut wrong_retry = retry.clone();
+        wrong_retry.relay_database_namespace = "other-relay".into();
+        assert!(store
+            .write_with(&NoFaults, |tx| super::super::accepted::apply_frame_in_tx(
+                tx,
+                "workspace",
+                &wrong_retry,
+                11
+            ))
+            .is_err());
+        let later = remote.richdoc_append_paragraph("remote later");
+        feed(&mut store, &observed, 9, later);
+        assert_eq!(
+            store.table_row_count("ydoc_owner_applied_frames").unwrap(),
+            1
+        );
+        assert!(store
+            .read_with(|c| super::super::accepted::is_receipt_applied_in(
+                c,
+                &observed.binding,
+                &observed.relay_database_namespace,
+                &receipt
+            ))
+            .unwrap());
+        super::super::acknowledge(
+            &mut store,
+            "workspace",
+            &append.outbox_id,
+            &[receipt.clone()],
+        )
+        .unwrap();
+        drop(store);
+        let mut reopened = EngineStore::open(&dir.join("engine.db"), 12).unwrap();
+        super::super::acknowledge(
+            &mut reopened,
+            "workspace",
+            &append.outbox_id,
+            &[receipt.clone()],
+        )
+        .unwrap();
+        let mut altered = receipt;
+        altered.accepting_host_epoch += 1;
+        assert!(super::super::acknowledge(
+            &mut reopened,
+            "workspace",
+            &append.outbox_id,
+            &[altered]
+        )
+        .is_err());
+        let state = reopened
+            .read_with(|c| read_observed_in(c, &observed.binding))
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.accepted_cursor, 9);
+        assert_eq!(
+            super::super::read_pending(&reopened, "workspace", &append.outbox_id)
+                .unwrap()
+                .entries
+                .len(),
+            0
+        );
+    }
+    #[test]
+    fn accepted_write_failure_rolls_back_native_state_cursor_and_pending_work() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let delta = owner.richdoc_append_paragraph("pending owner");
+        let append = pending(&mut store, &observed, delta.clone());
+        store.write_with(&NoFaults,|tx| {
+            tx.execute_batch("CREATE TRIGGER refuse_owner_advance BEFORE UPDATE ON ydoc_owner_bindings BEGIN SELECT RAISE(ABORT,'test write failure'); END;").unwrap();
+            Ok::<_,OwnerOutboxError>(())
+        }).unwrap();
+        let input = super::super::accepted::OwnerAcceptedFrameInput {
+            binding: observed.binding.clone(),
+            relay_database_namespace: "relay".into(),
+            expected_revision: 1,
+            expected_native_head_sequence: observed.native_head_sequence,
+            previous_accepted_cursor: 0,
+            journal_cursor: 4,
+            update_bytes: delta,
+        };
+        assert!(store
+            .write_with(&NoFaults, |tx| super::super::accepted::apply_frame_in_tx(
+                tx,
+                "workspace",
+                &input,
+                4
+            ))
+            .is_err());
+        let state = store
+            .read_with(|c| read_observed_in(c, &observed.binding))
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.accepted_cursor, 0);
+        assert_eq!(state.native_head_sequence, observed.native_head_sequence);
+        assert_eq!(
+            super::super::read_pending(&store, "workspace", &append.outbox_id)
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        assert_eq!(
+            store.table_row_count("ydoc_owner_applied_frames").unwrap(),
+            0
+        );
+    }
+    #[test]
+    fn late_receipt_containment_includes_delete_sets_and_overlapping_state() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let delta = owner
+            .rewrite_content_to_markdown(crate::ContentKind::Richdoc, "replacement\n")
+            .unwrap();
+        let append = pending(&mut store, &observed, delta.clone());
+        let receipt = OwnerDeliveryReceipt {
+            delivery_id: append.delivery_id,
+            update_digest: append.update_digest,
+            journal_cursor: 4,
+            accepting_host_epoch: 1,
+        };
+        feed(&mut store, &observed, 4, delta);
+        let full = bounded(&owner).unwrap();
+        feed(&mut store, &observed, 8, full);
+        assert!(store
+            .read_with(|c| super::super::accepted::is_receipt_applied_in(
+                c,
+                &observed.binding,
+                &observed.relay_database_namespace,
+                &receipt
+            ))
+            .unwrap());
+        super::super::acknowledge(&mut store, "workspace", &append.outbox_id, &[receipt]).unwrap();
     }
 }

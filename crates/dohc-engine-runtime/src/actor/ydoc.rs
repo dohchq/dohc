@@ -169,6 +169,106 @@ struct YdocCloseMaterialization {
 }
 
 impl ActorHandle {
+    /// Main-owned authenticated feed only. A delivery ACK never calls this method.
+    pub async fn owner_ydoc_apply_accepted(
+        &self,
+        workspace_id: String,
+        input: dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput,
+        now_ms: i64,
+        token: CancellationToken,
+    ) -> Result<
+        Result<
+            dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameResult,
+            OwnerOutboxError,
+        >,
+        RuntimeError,
+    > {
+        self.run(move |store, cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            let key = DocKey::new(
+                &input.binding.workspace_id,
+                &input.binding.main_version_id,
+                &input.binding.object_id,
+            )?;
+            cache.remove(&key);
+            let result = store.write_with(&NoFaults, |tx| {
+                dohc_engine_collab::owner_outbox::accepted::apply_frame_in_tx(
+                    tx,
+                    &workspace_id,
+                    &input,
+                    now_ms,
+                )
+            });
+            let result = match result {
+                Ok(TxnOutcome::Committed(result)) => Ok(result),
+                Ok(TxnOutcome::Crashed { .. }) => Err(OwnerOutboxError::Corrupt),
+                Err(error) => Err(error),
+            };
+            if result.is_ok() {
+                dohc_engine_collab::maybe_compact(
+                    store,
+                    &key,
+                    dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD,
+                    &NoFaults,
+                    now_ms,
+                )?;
+            }
+            Ok(result)
+        })
+        .await
+    }
+
+    /// Main-owned accepted position used to resume the ordered native feed.
+    pub async fn owner_ydoc_accepted_state(
+        &self,
+        binding: dohc_engine_collab::LiveObjectBinding,
+        relay_database_namespace: String,
+        token: CancellationToken,
+    ) -> Result<
+        Result<dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedState, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::accepted::read_state_in(
+                    conn,
+                    &binding,
+                    &relay_database_namespace,
+                )
+            }))
+        })
+        .await
+    }
+
+    /// Local containment check for the current observed binding, never host authority.
+    pub async fn owner_ydoc_is_receipt_applied(
+        &self,
+        binding: dohc_engine_collab::LiveObjectBinding,
+        relay_database_namespace: String,
+        receipt: OwnerDeliveryReceipt,
+        token: CancellationToken,
+    ) -> Result<Result<bool, OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::accepted::is_receipt_applied_in(
+                    conn,
+                    &binding,
+                    &relay_database_namespace,
+                    &receipt,
+                )
+            }))
+        })
+        .await
+    }
+
     pub async fn owner_ydoc_outbox_append(
         &self,
         workspace_id: String,

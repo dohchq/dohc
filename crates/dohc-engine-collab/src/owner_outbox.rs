@@ -14,6 +14,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod accepted;
 pub mod draft;
 mod native_source;
 pub(crate) use native_source::retain_native_source;
@@ -166,7 +167,8 @@ pub enum OwnerOutboxPageResult {
     ReadChanged,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OwnerDeliveryReceipt {
     pub delivery_id: String,
     pub update_digest: String,
@@ -827,7 +829,11 @@ pub fn acknowledge(
     if receipts.is_empty() {
         return Err(OwnerOutboxError::InvalidInput("receipts must not be empty"));
     }
+    let mut delivery_ids = BTreeSet::new();
     for receipt in receipts {
+        if !delivery_ids.insert(&receipt.delivery_id) {
+            return Err(OwnerOutboxError::ReceiptMismatch);
+        }
         validate_identifier(
             &receipt.delivery_id,
             "delivery id must be non-empty and bounded",
@@ -848,12 +854,11 @@ pub fn acknowledge(
     let outcome = store.write_with(&NoFaults, |tx| {
         let parent = read_parent(tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
         require_workspace(workspace_id, &parent.binding.workspace_id)?;
-        let key = crate::DocKey::new(&parent.binding.workspace_id, &parent.binding.main_version_id, &parent.binding.object_id)
-            .map_err(|_| OwnerOutboxError::Corrupt)?;
-        // Observed drafts need a durable accepted checkpoint before pending refs can be released.
-        draft::require_ordinary_write(tx, &key).map_err(map_restore_error)?;
-        if parent.state == OwnerOutboxState::Quarantined {
-            return Err(OwnerOutboxError::Frozen);
+        if parent.state == OwnerOutboxState::Quarantined { return Err(OwnerOutboxError::Frozen); }
+        let observed = draft::read_observed_in(tx, &parent.binding)?.is_some();
+        if observed && accepted::check_release_in(tx, &parent, receipts)? {
+            return Ok(OwnerOutboxAcknowledgeResult {acknowledged: receipts.len() as i64,
+                pending_bytes: parent.pending_bytes, oldest_entry_at_ms: parent.oldest_entry_at_ms});
         }
         let mut statement = tx
             .prepare(
@@ -886,6 +891,12 @@ pub fn acknowledge(
             .iter()
             .map(|(_, _, digest, _)| digest.clone())
             .collect::<BTreeSet<_>>();
+        if observed {
+            for receipt in receipts {
+                tx.execute("UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1",
+                    params![outbox_id,receipt.delivery_id,serde_json::to_string(receipt).map_err(|_|OwnerOutboxError::Corrupt)?]).map_err(write_sql)?;
+            }
+        }
         let acknowledged = tx
             .execute(
                 "UPDATE owner_ydoc_outbox_entries SET pending=0,update_blob_digest=NULL \
@@ -918,6 +929,7 @@ pub fn acknowledge(
             params![outbox_id, pending_bytes, oldest_entry_at_ms],
         )
         .map_err(write_sql)?;
+        if observed { accepted::prune_in(tx, &parent.binding)?; }
         Ok(OwnerOutboxAcknowledgeResult {
             acknowledged: i64::try_from(receipts.len())
                 .map_err(|_| OwnerOutboxError::InvalidInput("too many receipts"))?,
