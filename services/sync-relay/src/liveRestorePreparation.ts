@@ -48,16 +48,26 @@ export class LiveRestorePreparation {
     this.#reservationBytes = reservationBytes(this.config.maxBytes, this.config.workingReserveBytes);
   }
 
-  async #reserved<T>(signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T> {
+  #reserve(signal: AbortSignal | undefined): () => void {
     const config = this.config;
     if (signal?.aborted) throw signal.reason;
     if (this.#operations >= config.maxOperations || this.#reservationBytes > config.aggregateBytes - this.#bytes) {
       throw new Error("Restore preparation capacity is full.");
     }
     this.#bytes += this.#reservationBytes; this.#operations++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#bytes -= this.#reservationBytes; this.#operations--;
+    };
+  }
+
+  async #reserved<T>(signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T> {
+    const release = this.#reserve(signal);
     try {
       return await run();
-    } finally {this.#bytes -= this.#reservationBytes; this.#operations--;}
+    } finally {release();}
   }
 
   async prepare(options: Parameters<typeof deliverStopRestore>[0]) {
@@ -84,16 +94,35 @@ export class LiveRestorePreparation {
     });
   }
 
-  /** Compute the complete owner review under the host-wide working reservation. */
+  /** Keep the complete review charged until its response closes or expires. */
   async review(options: Parameters<typeof deliverStopRestore>[0]) {
     const config = this.config, signal = options.signal;
     const input = {...snapshotStopRestoreLookup(options.lookup), host: snapshotHostCoordinate(options.connection.host),
       maxBytes: config.maxBytes, maxEvents: config.maxEvents, maxOutputBytes: config.maxBytes};
-    return this.#reserved(signal, async () => {
+    const deadlineMs = Math.min(authorityInteger(options.connection.deadlineMs, 1), 2_147_483_647);
+    const release = this.#reserve(signal), lifetime = new AbortController();
+    const startedAt = performance.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const close = (reason: unknown = new Error("Restore review closed.")) => {
+      if (lifetime.signal.aborted) return;
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      release();
+      lifetime.abort(reason);
+    };
+    const abort = () => close(signal?.reason);
+    signal?.addEventListener("abort", abort, {once: true});
+    timer = setTimeout(() => close(new Error("Restore review expired.")), deadlineMs);
+    timer.unref();
+    try {
       const review = options.store.readStopRestoreReview(input, config.validation);
       if (signal?.aborted) throw signal.reason;
-      return review;
-    });
+      if (performance.now() - startedAt >= deadlineMs) throw new Error("Restore review expired.");
+      return {review, close: () => close(), invalidated: lifetime.signal, maxOutputBytes: config.maxBytes} as const;
+    } catch (error) {
+      close(error);
+      throw error;
+    }
   }
 
   /** The caller must authenticate the owner before using this confirmation boundary. */

@@ -36,13 +36,16 @@ function fixture(phase: "relay-admitted" | "native-applied" | "settled" | "resum
   const run = (expected = digest, signal?: AbortSignal) => driver.complete({...options, signal} as unknown as Parameters<typeof driver.complete>[0], expected);
   const confirm = (expected = digest, signal?: AbortSignal) => driver.confirm({...options, signal} as unknown as Parameters<typeof driver.confirm>[0], expected);
   const review = (signal?: AbortSignal) => driver.review({...options, signal} as unknown as Parameters<typeof driver.review>[0]);
-  return {store, send, run, save, options, base, confirm, review};
+  const prepare = () => driver.prepare(options as unknown as Parameters<typeof driver.prepare>[0]);
+  return {store, send, run, save, options, base, confirm, review, prepare};
 }
 
 describe("owner restore review boundary", () => {
   it("rederives complete review before durable admission", async () => {
     const f = fixture();
-    await expect(f.review()).resolves.toEqual({proposalDigest: digest});
+    const lease = await f.review();
+    expect(lease.review).toEqual({proposalDigest: digest});
+    lease.close();
     expect(f.store.admitStopRestoreProposal).not.toHaveBeenCalled();
     await expect(f.confirm()).resolves.toHaveProperty("kind", "resumed");
     expect(f.store.readStopRestoreReview).toHaveBeenCalledTimes(1);
@@ -75,9 +78,69 @@ describe("owner restore review boundary", () => {
     f.send.mockImplementationOnce(async () => {await pending;return {response: {result: {status: "apply"}}, bytes: Buffer.from("{}")};});
     const active = f.confirm();
     await expect(f.review()).rejects.toThrow("capacity is full");
+    await expect(f.prepare()).rejects.toThrow("capacity is full");
     await expect(f.confirm()).rejects.toThrow("capacity is full");
     release();
     await active;
+  });
+
+  it("holds review capacity through response delivery and releases exactly once", async () => {
+    const f = fixture(), first = await f.review();
+    expect(first.maxOutputBytes).toBe(config.maxBytes);
+    await expect(f.review()).rejects.toThrow("capacity is full");
+    await expect(f.prepare()).rejects.toThrow("capacity is full");
+    await expect(f.confirm()).rejects.toThrow("capacity is full");
+    expect(first.invalidated.aborted).toBe(false);
+    first.close();
+    expect(first.invalidated.aborted).toBe(true);
+    const second = await f.review();
+    first.close();
+    await expect(f.review()).rejects.toThrow("capacity is full");
+    second.close();
+    await expect(f.confirm()).resolves.toHaveProperty("kind", "resumed");
+  });
+
+  it("invalidates a parked review and frees capacity at the connection deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture(), lease = await f.review(), invalidated = vi.fn();
+      lease.invalidated.addEventListener("abort", invalidated);
+      await vi.advanceTimersByTimeAsync(f.options.connection.deadlineMs - 1);
+      await expect(f.review()).rejects.toThrow("capacity is full");
+      await vi.advanceTimersByTimeAsync(1);
+      expect(invalidated).toHaveBeenCalledTimes(1);
+      expect(lease.invalidated.reason.message).toBe("Restore review expired.");
+      const next = await f.review();
+      next.close();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {vi.useRealTimers();}
+  });
+
+  it("cancels a parked review when its caller disconnects", async () => {
+    const f = fixture(), abort = new AbortController(), lease = await f.review(abort.signal);
+    const reason = new Error("socket closed");
+    abort.abort(reason);
+    expect(lease.invalidated.reason).toBe(reason);
+    const next = await f.review();
+    next.close();
+  });
+
+  it.each(["failed", "cancelled", "expired"])("releases capacity when review construction is %s", async damage => {
+    const f = fixture(), abort = new AbortController();
+    const now = vi.spyOn(performance, "now");
+    if (damage === "expired") now.mockReturnValueOnce(0).mockReturnValueOnce(f.options.connection.deadlineMs);
+    f.store.readStopRestoreReview.mockImplementationOnce(() => {
+      if (damage === "failed") throw new Error("invalid review");
+      if (damage === "cancelled") abort.abort(new Error("disconnected"));
+      return {proposalDigest: digest};
+    });
+    try {
+      await expect(f.review(abort.signal)).rejects.toThrow();
+    } finally {now.mockRestore();}
+    const next = await f.review();
+    next.close();
+    expect(f.store.admitStopRestoreProposal).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
   });
 });
 
