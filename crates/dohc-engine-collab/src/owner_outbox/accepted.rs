@@ -63,7 +63,7 @@ pub fn read_state_in(
     })
 }
 
-fn current(
+pub(super) fn current(
     conn: &Connection,
     binding: &LiveObjectBinding,
 ) -> Result<ObservedOwnerBinding, OwnerOutboxError> {

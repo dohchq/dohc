@@ -34,6 +34,27 @@ const LIMITS = {
 describe("private owner delivery transport", () => {
   const request={id:970,workspace:"workspace",deadlineMs:30_000};
   const target={binding:{workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"cd".repeat(32),currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:0},relayDatabaseNamespace:"relay"};
+  it("discovers durable drafts, opens their binary state and appends without a caller base", async () => {
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge();await transport.ready();
+    const descriptor={...target,revision:1,acceptedCursor:0,nativeHeadSequence:2,outboxId:null,pendingBytes:0,state:null};
+    let wireId=0,digest="";
+    peer.onEnvelope=e=>{
+      if(e.type!=="request")return;
+      if(e.method==="ydoc.ownerDelivery.listDrafts") peer.send({type:"response",id:e.id,result:{drafts:[descriptor],next:null}});
+      else if(e.method==="ydoc.ownerDelivery.openDraft") {
+        const bytes=Buffer.from([0,0]),sha=createHash("sha256").update(bytes).digest("hex");
+        peer.send({type:"blobStart",requestId:e.id,streamId:e.id,totalBytes:2,sha256:sha});peer.sendRaw(blobChunkFrame(e.id,bytes,true));
+        peer.send({type:"response",id:e.id,result:{status:"draft",draft:descriptor,streamId:e.id,byteLength:2,digest:sha}});
+      } else { expect(e.method).toBe("ydoc.ownerDelivery.appendDraft");expect(e.params).not.toHaveProperty("baseUpdate");expect(e.params).not.toHaveProperty("registrationId");wireId=e.id;digest=(e.params as Record<string,string>).digest; }
+    };
+    peer.onBlobChunk=frame=>{if(frame.fin)peer.send({type:"response",id:wireId,result:{outboxId:"outbox",sequence:1,deliveryId:"delivery",updateDigest:digest,pendingBytes:2,oldestEntryAtMs:3,state:"active"}});};
+    try {
+      expect(await transport.ownerYDocListDrafts(request,{after:null,limit:8})).toEqual({drafts:[descriptor],next:null});
+      expect(await transport.ownerYDocOpenDraft({...request,id:971},{binding:target.binding,expectedRevision:1})).toEqual({draft:descriptor,initialUpdate:Buffer.from([0,0])});
+      expect(await transport.ownerYDocAppendDraft({...request,id:972},{binding:target.binding,expectedRevision:1,appendKey:"edit",updateBytes:Uint8Array.of(0,0)})).toMatchObject({outboxId:"outbox",sequence:1,pendingBytes:2});
+    } finally {transport.close();}
+  });
   it("reads a bounded accepted vector without a host registration", async () => {
     const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
     peer.acknowledge();await transport.ready();

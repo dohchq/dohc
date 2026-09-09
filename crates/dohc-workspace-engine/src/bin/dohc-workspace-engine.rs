@@ -431,6 +431,7 @@ where
                                 "liveApplication.apply"
                                     | "ydoc.ownerDelivery.applyAcceptedFrame"
                                     | "ydoc.ownerDelivery.applyInitialSync"
+                                    | "ydoc.ownerDelivery.appendDraft"
                                     | "liveApplication.bootstrap"
                                     | "liveApplication.adoptOwner"
                                     | "liveApplication.prepareRestore"

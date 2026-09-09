@@ -99,7 +99,7 @@ struct SyncParams {
 }
 
 enum Metadata {
-    Owner(crate::rpc::owner_delivery::OwnerUploadParams),
+    Owner(crate::rpc::owner_delivery::OwnerUpload),
     Sync(dohc_engine_collab::live_update_application::AppliedSyncPolicy),
     Apply(RelayAcceptedLiveUpdate),
     Bootstrap(LiveApplicationBootstrap),
@@ -360,6 +360,7 @@ impl LiveApplicationIngress {
             "liveApplication.apply"
                 | "ydoc.ownerDelivery.applyAcceptedFrame"
                 | "ydoc.ownerDelivery.applyInitialSync"
+                | "ydoc.ownerDelivery.appendDraft"
                 | "liveApplication.bootstrap"
                 | "liveApplication.adoptOwner"
                 | "liveApplication.syncOpen"
@@ -381,11 +382,12 @@ impl LiveApplicationIngress {
         {
             self.service
                 .owner_delivery_connection(connection, request.workspace.as_ref())?;
-            let params: crate::rpc::owner_delivery::OwnerUploadParams =
-                serde_json::from_value(std::mem::take(&mut request.params))
-                    .map_err(|_| invalid("invalid owner delivery upload"))?;
-            params.validate(&request.method)?;
-            let stream = Stream::new(params.stream_id, params.byte_length, params.digest.clone())?;
+            let params = crate::rpc::owner_delivery::OwnerUpload::parse(
+                &request.method,
+                std::mem::take(&mut request.params),
+            )?;
+            let (stream_id, byte_length, digest) = params.stream();
+            let stream = Stream::new(stream_id, byte_length, digest)?;
             (Metadata::Owner(params), 0, stream, None, 0)
         } else if request.method == "liveApplication.adoptOwner" {
             let config = self

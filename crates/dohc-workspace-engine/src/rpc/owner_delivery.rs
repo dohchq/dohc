@@ -11,10 +11,54 @@ use dohc_engine_protocol::{
     wire::{Request, Response, WorkspaceHandle},
 };
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{sync::Arc, time::Instant};
 
 const MAX: usize = dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct OwnerDraftUploadParams {
+    binding: LiveObjectBinding,
+    expected_revision: i64,
+    append_key: String,
+    stream_id: u64,
+    byte_length: usize,
+    digest: String,
+}
+
+#[derive(Clone)]
+pub(crate) enum OwnerUpload {
+    Accepted(OwnerUploadParams),
+    Draft(OwnerDraftUploadParams),
+}
+
+impl OwnerUpload {
+    pub(crate) fn parse(method: &str, value: Value) -> Result<Self, WireError> {
+        if method == "ydoc.ownerDelivery.appendDraft" {
+            let params: OwnerDraftUploadParams =
+                serde_json::from_value(value).map_err(|_| invalid())?;
+            if !(2..=MAX).contains(&params.byte_length)
+                || params.append_key.is_empty()
+                || params.append_key.len() > 256
+            {
+                return Err(invalid());
+            }
+            params.binding.validate_canonical().map_err(|_| invalid())?;
+            Ok(Self::Draft(params))
+        } else {
+            let params: OwnerUploadParams = serde_json::from_value(value).map_err(|_| invalid())?;
+            params.validate(method)?;
+            Ok(Self::Accepted(params))
+        }
+    }
+    pub(crate) fn stream(&self) -> (u64, usize, String) {
+        match self {
+            Self::Accepted(p) => (p.stream_id, p.byte_length, p.digest.clone()),
+            Self::Draft(p) => (p.stream_id, p.byte_length, p.digest.clone()),
+        }
+    }
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -47,7 +91,7 @@ impl OwnerUploadParams {
 
 #[derive(Clone)]
 pub struct OwnerInput {
-    pub(crate) params: OwnerUploadParams,
+    pub(crate) params: OwnerUpload,
     pub(crate) bytes: Vec<u8>,
     pub(crate) reservation: Arc<dyn Send + Sync>,
 }
@@ -110,6 +154,208 @@ fn invalid() -> WireError {
 }
 
 impl EngineService {
+    fn reserve_owner_delivery(&self) -> Result<Arc<dyn Send + Sync>, WireError> {
+        self.ordinary_live_host
+            .get()
+            .and_then(|host| host.owner_delivery_admission.as_ref())
+            .ok_or_else(|| WireError::new(ErrorCode::Overloaded, "owner delivery capacity"))?
+            .reserve()
+    }
+
+    async fn owner_delivery_append_draft(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+        params: OwnerDraftUploadParams,
+        bytes: Vec<u8>,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<ServiceResponse, WireError> {
+        let guard = self.owner_delivery_guard(
+            &ctx,
+            request.workspace.as_ref(),
+            Some(&params.binding),
+            reservation,
+        )?;
+        let cancellation = OperationCancellation::new(&ctx);
+        let _serial = self
+            .mutation_session_guard(&guard.open, &cancellation, "owner draft (queued)")
+            .await?;
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        let result = guard
+            .open
+            .actor
+            .owner_ydoc_append_draft(
+                guard.open.workspace_id.clone(),
+                dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                    binding: params.binding,
+                    expected_revision: params.expected_revision,
+                    append_key: params.append_key,
+                    update: bytes,
+                    now_ms: now_ms()?,
+                },
+                cancellation.token(),
+                guard.reservation.clone(),
+            )
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        self.events.emit(
+            "ydoc.ownerDraftChanged",
+            json!({"workspaceId":guard.open.workspace_id,"outboxId":result.outbox_id}),
+        );
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        Ok(ServiceResponse {
+            response: Response {
+                id: request.id,
+                result: json!({
+                    "outboxId":result.outbox_id,"sequence":result.sequence,"deliveryId":result.delivery_id,"updateDigest":result.update_digest,"pendingBytes":result.pending_bytes,"oldestEntryAtMs":result.oldest_entry_at_ms,"state":result.state.as_str(),
+                }),
+            },
+            blob_egress: None,
+            output_guard: Some(guard),
+        })
+    }
+
+    pub(crate) async fn owner_delivery_open_draft(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+    ) -> Result<ServiceResponse, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            binding: LiveObjectBinding,
+            expected_revision: i64,
+        }
+        let params: Params = serde_json::from_value(request.params).map_err(|_| invalid())?;
+        if !ctx.capabilities.iter().any(|c| c == "blobs") {
+            return Err(invalid());
+        }
+        let guard = self.owner_delivery_guard(
+            &ctx,
+            request.workspace.as_ref(),
+            Some(&params.binding),
+            self.reserve_owner_delivery()?,
+        )?;
+        let cancellation = OperationCancellation::new(&ctx);
+        let state = guard
+            .open
+            .actor
+            .owner_ydoc_open_draft(
+                params.binding,
+                params.expected_revision,
+                cancellation.token(),
+                guard.reservation.clone(),
+            )
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        let digest = dohc_engine_storage::hex_sha256(&state.initial_update);
+        let result = json!({"status":"draft","draft":state.descriptor,"streamId":request.id,"byteLength":state.initial_update.len(),"digest":digest});
+        Ok(ServiceResponse {
+            response: Response {
+                id: request.id,
+                result,
+            },
+            blob_egress: Some(BlobEgress {
+                stream_id: request.id,
+                sha256: digest,
+                bytes: state.initial_update,
+                cancel: ctx.cancel,
+                deadline: ctx.deadline,
+                byte_permit: None,
+            }),
+            output_guard: Some(guard),
+        })
+    }
+
+    pub(crate) async fn owner_delivery_list_drafts(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+    ) -> Result<ServiceResponse, WireError> {
+        use dohc_engine_collab::owner_outbox::draft::OwnerDraftCursor;
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            after: Option<OwnerDraftCursor>,
+            limit: usize,
+        }
+        let params: Params = serde_json::from_value(request.params).map_err(|_| invalid())?;
+        let guard = self.owner_delivery_guard(
+            &ctx,
+            request.workspace.as_ref(),
+            None,
+            self.reserve_owner_delivery()?,
+        )?;
+        let cancellation = OperationCancellation::new(&ctx);
+        let rows = guard
+            .open
+            .actor
+            .owner_ydoc_list_drafts(
+                guard.open.workspace_id.clone(),
+                params.after,
+                params.limit,
+                cancellation.token(),
+                guard.reservation.clone(),
+            )
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        let fetched = rows.len();
+        let mut drafts = Vec::new();
+        let mut next = None;
+        let mut byte_length = 256usize;
+        let mut truncated = false;
+        for row in rows {
+            let bytes = serde_json::to_vec(&row).map_err(|_| invalid())?.len();
+            let cursor = OwnerDraftCursor {
+                main_version_id: row.binding.main_version_id.clone(),
+                object_id: row.binding.object_id.clone(),
+                lineage_claim_id: row.binding.lineage_claim_id.clone(),
+            };
+            let cursor_bytes = serde_json::to_vec(&cursor).map_err(|_| invalid())?.len();
+            if byte_length
+                .saturating_add(bytes)
+                .saturating_add(cursor_bytes)
+                > ctx.max_frame_bytes as usize
+            {
+                truncated = true;
+                break;
+            }
+            byte_length += bytes + 1;
+            next = Some(cursor);
+            drafts.push(row);
+        }
+        if truncated && drafts.is_empty() {
+            return Err(WireError::new(
+                ErrorCode::LimitExceeded,
+                "owner draft descriptor exceeds frame limit",
+            ));
+        }
+        if !truncated && fetched < params.limit {
+            next = None;
+        }
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        Ok(ServiceResponse {
+            response: Response {
+                id: request.id,
+                result: json!({"drafts":drafts,"next":next}),
+            },
+            blob_egress: None,
+            output_guard: Some(guard),
+        })
+    }
+
     pub(crate) fn owner_delivery_connection(
         &self,
         connection: &ConnectionHandle,
@@ -130,15 +376,17 @@ impl EngineService {
         &self,
         ctx: &RequestContext,
         workspace: Option<&WorkspaceHandle>,
-        binding: &LiveObjectBinding,
+        binding: Option<&LiveObjectBinding>,
         reservation: Arc<dyn Send + Sync>,
     ) -> Result<Arc<OwnerOutputGuard>, WireError> {
         let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
         self.owner_delivery_connection(connection, workspace)?;
         let open = self.open(workspace)?;
-        binding.validate_canonical().map_err(|_| invalid())?;
-        if open.workspace_id != binding.workspace_id {
-            return Err(workspace_unavailable());
+        if let Some(binding) = binding {
+            binding.validate_canonical().map_err(|_| invalid())?;
+            if open.workspace_id != binding.workspace_id {
+                return Err(workspace_unavailable());
+            }
         }
         let guard = Arc::new(OwnerOutputGuard {
             service: self
@@ -166,16 +414,32 @@ impl EngineService {
         request: Request,
         input: OwnerInput,
     ) -> Result<ServiceResponse, WireError> {
-        input.params.validate(&request.method)?;
-        if input.bytes.len() != input.params.byte_length
-            || dohc_engine_storage::hex_sha256(&input.bytes) != input.params.digest
-        {
+        let (_, length, digest) = input.params.stream();
+        if input.bytes.len() != length || dohc_engine_storage::hex_sha256(&input.bytes) != digest {
             return Err(invalid());
         }
+        let params = match input.params {
+            OwnerUpload::Draft(params) => {
+                if request.method != "ydoc.ownerDelivery.appendDraft" {
+                    return Err(invalid());
+                }
+                return self
+                    .owner_delivery_append_draft(
+                        ctx,
+                        request,
+                        params,
+                        input.bytes,
+                        input.reservation,
+                    )
+                    .await;
+            }
+            OwnerUpload::Accepted(params) => params,
+        };
+        params.validate(&request.method)?;
         let guard = self.owner_delivery_guard(
             &ctx,
             request.workspace.as_ref(),
-            &input.params.binding,
+            Some(&params.binding),
             input.reservation,
         )?;
         let cancellation = OperationCancellation::new(&ctx);
@@ -185,7 +449,7 @@ impl EngineService {
         if !guard.is_current() {
             return Err(workspace_unavailable());
         }
-        let p = input.params;
+        let p = params;
         let mut bytes = input.bytes;
         let vector = if let Some(n) = p.host_vector_byte_length {
             let update = bytes.split_off(n);
@@ -264,14 +528,13 @@ impl EngineService {
         }
         let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
         self.owner_delivery_connection(connection, request.workspace.as_ref())?;
-        let reservation = self
-            .ordinary_live_host
-            .get()
-            .and_then(|host| host.owner_delivery_admission.as_ref())
-            .ok_or_else(|| WireError::new(ErrorCode::Overloaded, "owner delivery capacity"))?
-            .reserve()?;
-        let guard =
-            self.owner_delivery_guard(&ctx, request.workspace.as_ref(), &p.binding, reservation)?;
+        let reservation = self.reserve_owner_delivery()?;
+        let guard = self.owner_delivery_guard(
+            &ctx,
+            request.workspace.as_ref(),
+            Some(&p.binding),
+            reservation,
+        )?;
         let cancellation = OperationCancellation::new(&ctx);
         let (result, blob_egress) = if let Some(receipt) = p.receipt {
             let applied = guard

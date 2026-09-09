@@ -169,6 +169,84 @@ struct YdocCloseMaterialization {
 }
 
 impl ActorHandle {
+    pub async fn owner_ydoc_list_drafts(
+        &self,
+        workspace_id: String,
+        after: Option<dohc_engine_collab::owner_outbox::draft::OwnerDraftCursor>,
+        limit: usize,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<
+        Result<
+            Vec<dohc_engine_collab::owner_outbox::draft::OwnerDraftDescriptor>,
+            OwnerOutboxError,
+        >,
+        RuntimeError,
+    > {
+        self.run(move |store, _cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::draft::list_drafts_in(
+                    conn,
+                    &workspace_id,
+                    after.as_ref(),
+                    limit,
+                )
+            }))
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_open_draft(
+        &self,
+        binding: dohc_engine_collab::LiveObjectBinding,
+        revision: i64,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<
+        Result<dohc_engine_collab::owner_outbox::draft::OwnerDraftSnapshot, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(dohc_engine_collab::owner_outbox::draft::open_draft_cached(
+                store, cache, &binding, revision,
+            ))
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_append_draft(
+        &self,
+        workspace_id: String,
+        input: dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<Result<OwnerOutboxAppendResult, OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(
+                dohc_engine_collab::owner_outbox::draft::append_draft_cached(
+                    store,
+                    cache,
+                    &workspace_id,
+                    input,
+                    &NoFaults,
+                ),
+            )
+        })
+        .await
+    }
+
     /// Main-owned authenticated feed only. A delivery ACK never calls this method.
     pub async fn owner_ydoc_apply_accepted(
         &self,

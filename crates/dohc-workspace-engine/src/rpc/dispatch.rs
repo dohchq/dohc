@@ -136,6 +136,12 @@ impl EngineService {
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
+        if request.method == "ydoc.ownerDelivery.listDrafts" {
+            return self.owner_delivery_list_drafts(ctx, request).await;
+        }
+        if request.method == "ydoc.ownerDelivery.openDraft" {
+            return self.owner_delivery_open_draft(ctx, request).await;
+        }
         if matches!(
             request.method.as_str(),
             "ydoc.ownerDelivery.readState" | "ydoc.ownerDelivery.isReceiptApplied"

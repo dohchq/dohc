@@ -7,6 +7,7 @@ import { TextDecoder } from "node:util";
 import { parseRelayAcceptedLiveUpdate, parseLiveUpdateIdentifier, parseLiveUpdateDigest, parseLiveUpdateHostApplicationAck, type LiveUpdateHostApplicationAck, type AdmittedLiveUpdate, parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract";
 import type { BlobStart, Envelope, Event, Request, Response, WireError } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
+import type { OwnerYDocOutboxAppendResult } from "../ydoc/ownerYDocOutbox";
 
 const FRAME_MAGIC = Buffer.from("DOP1", "ascii");
 const FRAME_HEADER_BYTES = 12;
@@ -71,6 +72,21 @@ export interface OwnerYDocDeliveryApplyInput extends OwnerYDocDeliveryTarget {
   readonly previousAcceptedCursor: number; readonly journalCursor: number; readonly updateBytes: Uint8Array;
 }
 export interface OwnerYDocDeliveryReceipt { readonly deliveryId: string; readonly updateDigest: string; readonly journalCursor: number; readonly acceptingHostEpoch: number }
+export interface OwnerYDocDraftCursor { readonly mainVersionId:string; readonly objectId:string; readonly lineageClaimId:string }
+export interface OwnerYDocDraftDescriptor extends OwnerYDocDeliveryTarget, OwnerYDocDeliveryPosition {
+  readonly outboxId:string|null; readonly pendingBytes:number; readonly state:"active"|"sealed"|"quarantined"|null;
+}
+
+function ownerDraftCursor(value: OwnerYDocDraftCursor): OwnerYDocDraftCursor {
+  if (!value || Object.keys(value).sort().join()!=="lineageClaimId,mainVersionId,objectId") throw new TypeError("Invalid draft cursor.");
+  return {mainVersionId:parseLiveUpdateIdentifier(value.mainVersionId,"main version ID"),objectId:parseLiveUpdateIdentifier(value.objectId,"object ID"),lineageClaimId:parseLiveUpdateDigest(value.lineageClaimId)};
+}
+function ownerDraftDescriptor(value: unknown): OwnerYDocDraftDescriptor {
+  if (!value || typeof value!=="object" || Array.isArray(value) || Object.keys(value).sort().join()!=="acceptedCursor,binding,nativeHeadSequence,outboxId,pendingBytes,relayDatabaseNamespace,revision,state") throw new TypeError("Invalid draft descriptor.");
+  const row=value as OwnerYDocDraftDescriptor;
+  if (!Number.isSafeInteger(row.pendingBytes) || row.pendingBytes<0 || ![null,"active","sealed","quarantined"].includes(row.state) || (row.outboxId===null)!==(row.state===null)) throw new TypeError("Invalid draft queue state.");
+  return {...ownerDeliveryTarget(row),...ownerDeliveryPosition(row),outboxId:row.outboxId===null?null:parseLiveUpdateIdentifier(row.outboxId,"outbox ID"),pendingBytes:row.pendingBytes,state:row.state};
+}
 
 function ownerDeliveryTarget(target: OwnerYDocDeliveryTarget) {
   const binding=parseLiveObjectBinding(target.binding);
@@ -93,7 +109,7 @@ function appliedPosition(value: unknown): NativeAppliedPosition {
 
 interface PrivateLiveOutput {
   readonly maxBytes: number;
-  readonly status: "prepared" | "applied" | "settled" | "resumed" | "sync" | "update" | "state";
+  readonly status: "prepared" | "applied" | "settled" | "resumed" | "sync" | "update" | "state" | "draft";
   readonly allowEmpty?: boolean;
   wireId?: number;
   started: boolean;
@@ -696,6 +712,44 @@ interface PendingBlob {
 type HelloAckEnvelope = Extract<Envelope, { type: "helloAck" }>;
 
 export class EngineClient implements EngineTransport {
+  async ownerYDocListDrafts(request:OwnerYDocDeliveryRequest, input:{after:OwnerYDocDraftCursor|null;limit:number}, signal?:AbortSignal):Promise<{drafts:readonly OwnerYDocDraftDescriptor[];next:OwnerYDocDraftCursor|null}> {
+    if (!Number.isSafeInteger(input.limit) || input.limit<1 || input.limit>64) throw new TypeError("Invalid draft page size.");
+    const after=input.after===null?null:ownerDraftCursor(input.after),limit=input.limit;
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.listDrafts",16*1024*1024,()=>({params:{after:after&&{...after},limit},streams:[]}),signal);
+    const row=response.result as {drafts?:unknown;next?:OwnerYDocDraftCursor|null};
+    if (!row || Object.keys(row).sort().join()!=="drafts,next" || !Array.isArray(row.drafts) || row.drafts.length>limit) throw new TypeError("Invalid draft page.");
+    const drafts=row.drafts.map(ownerDraftDescriptor),next=row.next===null?null:ownerDraftCursor(row.next!);
+    if (next && (!drafts.length || next.mainVersionId!==drafts.at(-1)!.binding.mainVersionId || next.objectId!==drafts.at(-1)!.binding.objectId || next.lineageClaimId!==drafts.at(-1)!.binding.lineageClaimId)) throw new TypeError("Draft cursor differs from page.");
+    return {drafts,next};
+  }
+
+  async ownerYDocOpenDraft(request:OwnerYDocDeliveryRequest, input:{binding:LiveObjectBinding;expectedRevision:number}, signal?:AbortSignal):Promise<{draft:OwnerYDocDraftDescriptor;initialUpdate:Buffer}> {
+    const binding=parseLiveObjectBinding(input.binding),expectedRevision=input.expectedRevision;
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision<1) throw new TypeError("Invalid draft revision.");
+    const output:PrivateLiveOutput={status:"draft",maxBytes:MAX_LIVE_UPDATE_BYTES,started:false};
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.openDraft",MAX_LIVE_UPDATE_BYTES+3*1024*1024,()=>({params:{binding:{...binding,selectorPaths:[...binding.selectorPaths]},expectedRevision},streams:[]}),signal,output);
+    if (Object.keys(response.result as object).sort().join()!=="byteLength,digest,draft,status,streamId") throw new TypeError("Invalid draft open response.");
+    const draft=ownerDraftDescriptor((response.result as Record<string,unknown>).draft);
+    if (JSON.stringify(draft.binding)!==JSON.stringify(binding) || draft.revision!==expectedRevision) throw new TypeError("Draft open differs from requested binding.");
+    return {draft,initialUpdate:output.blob!.bytes};
+  }
+
+  async ownerYDocAppendDraft(request:OwnerYDocDeliveryRequest, input:{binding:LiveObjectBinding;expectedRevision:number;appendKey:string;updateBytes:Uint8Array}, signal?:AbortSignal):Promise<OwnerYDocOutboxAppendResult> {
+    const binding=parseLiveObjectBinding(input.binding),expectedRevision=input.expectedRevision,appendKey=parseLiveUpdateIdentifier(input.appendKey,"append key");
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision<1 || input.updateBytes.byteLength<2 || input.updateBytes.byteLength>MAX_LIVE_UPDATE_BYTES) throw new TypeError("Invalid draft update.");
+    let digest="";
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.appendDraft",input.updateBytes.byteLength+3*1024*1024,()=>{
+      const bytes=Buffer.from(input.updateBytes),streamId=this.nextLiveStreamId++;
+      if (!Number.isSafeInteger(streamId)) throw new TypeError("Owner stream identifiers exhausted.");
+      digest=createHash("sha256").update(bytes).digest("hex");
+      return {params:{binding:{...binding,selectorPaths:[...binding.selectorPaths]},expectedRevision,appendKey,streamId,byteLength:bytes.length,digest},streams:[{streamId,bytes,digest}]};
+    },signal);
+    const row=response.result as unknown as OwnerYDocOutboxAppendResult;
+    if (!row || Object.keys(row).sort().join()!=="deliveryId,oldestEntryAtMs,outboxId,pendingBytes,sequence,state,updateDigest" || row.updateDigest!==digest || !["active","sealed"].includes(row.state)
+      || !Number.isSafeInteger(row.sequence) || row.sequence<1 || !Number.isSafeInteger(row.pendingBytes) || row.pendingBytes<1 || !Number.isSafeInteger(row.oldestEntryAtMs) || row.oldestEntryAtMs<0) throw new TypeError("Invalid draft append response.");
+    return {...row,outboxId:parseLiveUpdateIdentifier(row.outboxId,"outbox ID"),deliveryId:parseLiveUpdateIdentifier(row.deliveryId,"delivery ID")};
+  }
+
   async ownerYDocReadState(request: OwnerYDocDeliveryRequest, target: OwnerYDocDeliveryTarget, signal?: AbortSignal): Promise<OwnerYDocDeliveryPosition & {stateVector: Buffer}> {
     const params=ownerDeliveryTarget(target);
     const output:PrivateLiveOutput={status:"state",maxBytes:MAX_LIVE_UPDATE_BYTES,started:false};
@@ -1325,7 +1379,7 @@ export class EngineClient implements EngineTransport {
       throw new TypeError("Private live application uploads require a positive blob chunk limit.");
     }
     if (
-      (!restoreOutput && !["ydoc.ownerDelivery.applyAcceptedFrame","ydoc.ownerDelivery.applyInitialSync","ydoc.ownerDelivery.isReceiptApplied"].includes(method) && (!Number.isSafeInteger(request.registrationId) ||
+      (!restoreOutput && !["ydoc.ownerDelivery.applyAcceptedFrame","ydoc.ownerDelivery.applyInitialSync","ydoc.ownerDelivery.isReceiptApplied","ydoc.ownerDelivery.listDrafts","ydoc.ownerDelivery.appendDraft"].includes(method) && (!Number.isSafeInteger(request.registrationId) ||
       request.registrationId! < 1)) ||
       !Number.isSafeInteger(request.deadlineMs) ||
       request.deadlineMs < 1 ||

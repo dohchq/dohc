@@ -22,6 +22,234 @@ pub struct OwnerDraft {
     pub doc: Ydoc,
 }
 
+#[derive(PartialEq, Eq)]
+struct DraftProof {
+    binding_json: String,
+    namespace: String,
+    revision: i64,
+    native_head: i64,
+    accepted_cursor: i64,
+    checkpoint_digest: String,
+    parent: Option<(String, i64, i64, OwnerOutboxState)>,
+}
+
+pub(crate) struct CachedOwnerDraft {
+    draft: OwnerDraft,
+    proof: DraftProof,
+    pub(crate) approx_bytes: usize,
+    pub(crate) last_used: u64,
+}
+
+fn draft_proof(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    revision: i64,
+) -> Result<DraftProof, OwnerOutboxError> {
+    let observed = super::accepted::current(conn, binding)?;
+    if observed.revision != revision {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    let parent = find_parent_for_binding(conn, binding)?;
+    if parent
+        .as_ref()
+        .is_some_and(|p| p.binding != *binding || p.state == OwnerOutboxState::Quarantined)
+    {
+        return Err(OwnerOutboxError::Frozen);
+    }
+    Ok(DraftProof {
+        binding_json: binding_json(binding)?,
+        namespace: observed.relay_database_namespace,
+        revision,
+        native_head: observed.native_head_sequence,
+        accepted_cursor: observed.accepted_cursor,
+        checkpoint_digest: observed.checkpoint_digest,
+        parent: parent.map(|p| (p.outbox_id, p.next_sequence, p.pending_bytes, p.state)),
+    })
+}
+
+pub struct OwnerDraftAppendInput {
+    pub binding: LiveObjectBinding,
+    pub expected_revision: i64,
+    pub append_key: String,
+    pub update: Vec<u8>,
+    pub now_ms: i64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnerDraftCursor {
+    pub main_version_id: String,
+    pub object_id: String,
+    pub lineage_claim_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnerDraftDescriptor {
+    pub binding: LiveObjectBinding,
+    pub relay_database_namespace: String,
+    pub revision: i64,
+    pub accepted_cursor: i64,
+    pub native_head_sequence: i64,
+    pub outbox_id: Option<String>,
+    pub pending_bytes: i64,
+    pub state: Option<String>,
+}
+
+pub fn list_drafts_in(
+    conn: &Connection,
+    workspace_id: &str,
+    after: Option<&OwnerDraftCursor>,
+    limit: usize,
+) -> Result<Vec<OwnerDraftDescriptor>, OwnerOutboxError> {
+    validate_identifier(workspace_id, "invalid workspace")?;
+    if !(1..=64).contains(&limit) {
+        return Err(OwnerOutboxError::InvalidInput("invalid draft page size"));
+    }
+    if let Some(cursor) = after {
+        validate_identifier(&cursor.main_version_id, "invalid draft cursor")?;
+        validate_identifier(&cursor.object_id, "invalid draft cursor")?;
+        validate_digest(&cursor.lineage_claim_id)?;
+    }
+    let (version, object, lineage) = after
+        .map(|c| {
+            (
+                c.main_version_id.as_str(),
+                c.object_id.as_str(),
+                c.lineage_claim_id.as_str(),
+            )
+        })
+        .unwrap_or(("", "", ""));
+    let mut stmt = conn.prepare("SELECT binding_json FROM ydoc_owner_bindings WHERE workspace_id=?1 AND (main_version_id,object_id,lineage_claim_id)>(?2,?3,?4) ORDER BY main_version_id,object_id,lineage_claim_id LIMIT ?5").map_err(read_sql)?;
+    let rows = stmt
+        .query_map(
+            params![workspace_id, version, object, lineage, limit as i64],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(read_sql)?;
+    rows.map(|row| {
+        let binding: LiveObjectBinding =
+            serde_json::from_str(&row.map_err(read_sql)?).map_err(|_| OwnerOutboxError::Corrupt)?;
+        binding
+            .validate_canonical()
+            .map_err(OwnerOutboxError::InvalidInput)?;
+        require_workspace(workspace_id, &binding.workspace_id)?;
+        let observed = read_observed_in(conn, &binding)?.ok_or(OwnerOutboxError::Corrupt)?;
+        describe_draft(conn, observed)
+    })
+    .collect()
+}
+
+fn describe_draft(
+    conn: &Connection,
+    observed: ObservedOwnerBinding,
+) -> Result<OwnerDraftDescriptor, OwnerOutboxError> {
+    let parent = find_parent_for_binding(conn, &observed.binding)?;
+    Ok(OwnerDraftDescriptor {
+        binding: observed.binding,
+        relay_database_namespace: observed.relay_database_namespace,
+        revision: observed.revision,
+        accepted_cursor: observed.accepted_cursor,
+        native_head_sequence: observed.native_head_sequence,
+        outbox_id: parent.as_ref().map(|p| p.outbox_id.clone()),
+        pending_bytes: parent.as_ref().map_or(0, |p| p.pending_bytes),
+        state: parent.map(|p| p.state.as_str().to_owned()),
+    })
+}
+
+pub struct OwnerDraftSnapshot {
+    pub descriptor: OwnerDraftDescriptor,
+    pub initial_update: Vec<u8>,
+}
+
+pub fn open_draft_cached(
+    store: &EngineStore,
+    cache: &mut crate::WriterDocCache,
+    binding: &LiveObjectBinding,
+    revision: i64,
+) -> Result<OwnerDraftSnapshot, OwnerOutboxError> {
+    let key = key(binding)?;
+    let cached = cache.take_owner_draft(&key);
+    let (snapshot, cached) = store.read_with(|conn| {
+        let proof = draft_proof(conn, binding, revision)?;
+        let draft = match cached {
+            Some(entry) if entry.proof == proof => entry.draft,
+            _ => open_draft_in(conn, binding, revision)?,
+        };
+        let initial_update = bounded(&draft.doc)?;
+        let approx_bytes = initial_update
+            .len()
+            .saturating_add(proof.binding_json.len().saturating_mul(2))
+            .saturating_add(proof.namespace.len());
+        let snapshot = OwnerDraftSnapshot {
+            descriptor: describe_draft(conn, draft.observed.clone())?,
+            initial_update,
+        };
+        Ok::<_, OwnerOutboxError>((
+            snapshot,
+            CachedOwnerDraft {
+                draft,
+                proof,
+                approx_bytes,
+                last_used: 0,
+            },
+        ))
+    })?;
+    cache.put_owner_draft(key, cached);
+    Ok(snapshot)
+}
+
+/// The cache owns no durable authority. A refused or rolled-back candidate is
+/// dropped; a committed candidate names the exact checkpoint and pending queue.
+pub fn append_draft_cached(
+    store: &mut EngineStore,
+    cache: &mut crate::WriterDocCache,
+    workspace_id: &str,
+    input: OwnerDraftAppendInput,
+    faults: &dyn dohc_engine_storage::FaultInjector,
+) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
+    let key = key(&input.binding)?;
+    let cached = cache.take_owner_draft(&key);
+    let mut retained = None;
+    let result = store.write_with(faults, |tx| {
+        let proof = draft_proof(tx, &input.binding, input.expected_revision)?;
+        let draft = match cached {
+            Some(entry) if entry.proof == proof => entry.draft,
+            _ => open_draft_in(tx, &input.binding, input.expected_revision)?,
+        };
+        let result = append_prepared_draft_in_tx(
+            tx,
+            workspace_id,
+            &draft,
+            input.append_key,
+            input.update,
+            input.now_ms,
+        )?;
+        let proof = draft_proof(tx, &input.binding, input.expected_revision)?;
+        let approx_bytes = bounded(&draft.doc)?
+            .len()
+            .saturating_add(proof.binding_json.len().saturating_mul(2))
+            .saturating_add(proof.namespace.len());
+        retained = Some(CachedOwnerDraft {
+            draft,
+            proof,
+            approx_bytes,
+            last_used: 0,
+        });
+        Ok(result)
+    });
+    match result {
+        Ok(TxnOutcome::Committed(result)) => {
+            if let Some(draft) = retained {
+                cache.put_owner_draft(key, draft);
+            }
+            Ok(result)
+        }
+        Ok(TxnOutcome::Crashed { .. }) => Err(OwnerOutboxError::Corrupt),
+        Err(error) => Err(error),
+    }
+}
+
 pub(super) fn collab(error: CollabError) -> OwnerOutboxError {
     match error {
         CollabError::Storage(error) => OwnerOutboxError::Storage(error),
@@ -264,6 +492,19 @@ pub fn append_draft_in_tx(
 ) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
     require_workspace(workspace_id, &binding.workspace_id)?;
     let draft = open_draft_in(tx, binding, expected_revision)?;
+    append_prepared_draft_in_tx(tx, workspace_id, &draft, append_key, update, now_ms)
+}
+
+fn append_prepared_draft_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    draft: &OwnerDraft,
+    append_key: String,
+    update: Vec<u8>,
+    now_ms: i64,
+) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
+    let binding = &draft.observed.binding;
+    require_workspace(workspace_id, &binding.workspace_id)?;
     if update.is_empty() || update.len() > crate::limits::MAX_YDOC_UPDATE_BYTES {
         return Err(OwnerOutboxError::InvalidInput("invalid draft update size"));
     }
@@ -285,7 +526,7 @@ pub fn append_draft_in_tx(
             base_update: bounded_blob(tx, &binding.lineage_claim_id)?,
             append_key,
             update,
-            limits: draft.observed.limits,
+            limits: draft.observed.limits.clone(),
             created_at_ms: now_ms,
         },
         None,
@@ -297,6 +538,77 @@ mod tests {
     use super::*;
     use dohc_engine_domain::{VersionedTextStore, WriteText};
     use dohc_test_scratch::ScratchDir;
+
+    #[test]
+    fn cached_drafts_discard_refused_mutations_and_reopen_after_eviction() {
+        for capacity in [0, 64 * 1024 * 1024] {
+            let (_dir, mut store, observed, checkpoint) = fixture();
+            install(&mut store, &observed, &checkpoint);
+            let mut cache = crate::WriterDocCache::with_limits_for_test(16, capacity);
+            let owner = Ydoc::wire();
+            owner.apply(&checkpoint).unwrap();
+            let first = owner.richdoc_append_paragraph("first retained");
+            let input = |append_key: &str, update: Vec<u8>| OwnerDraftAppendInput {
+                binding: observed.binding.clone(),
+                expected_revision: 1,
+                append_key: append_key.into(),
+                update,
+                now_ms: 3,
+            };
+            append_draft_cached(
+                &mut store,
+                &mut cache,
+                "workspace",
+                input("first", first),
+                &NoFaults,
+            )
+            .unwrap();
+            let fork = Ydoc::wire();
+            fork.apply(&bounded(&owner).unwrap()).unwrap();
+            let refused = fork.richdoc_append_paragraph("must not survive");
+            assert!(append_draft_cached(
+                &mut store,
+                &mut cache,
+                "workspace",
+                input("first", refused),
+                &NoFaults
+            )
+            .is_err());
+            let second = owner.richdoc_append_paragraph("second retained");
+            append_draft_cached(
+                &mut store,
+                &mut cache,
+                "workspace",
+                input("second", second),
+                &NoFaults,
+            )
+            .unwrap();
+            let snapshot = open_draft_cached(&store, &mut cache, &observed.binding, 1).unwrap();
+            let cold = store
+                .read_with(|conn| bounded(&open_draft_in(conn, &observed.binding, 1)?.doc))
+                .unwrap();
+            assert_eq!(snapshot.initial_update, cold);
+            assert_eq!(snapshot.initial_update, bounded(&owner).unwrap());
+            let page = store
+                .read_with(|conn| list_drafts_in(conn, "workspace", None, 1))
+                .unwrap();
+            assert_eq!(page.len(), 1);
+            assert_eq!(page[0].pending_bytes, snapshot.descriptor.pending_bytes);
+            let cursor = OwnerDraftCursor {
+                main_version_id: observed.binding.main_version_id.clone(),
+                object_id: observed.binding.object_id.clone(),
+                lineage_claim_id: observed.binding.lineage_claim_id.clone(),
+            };
+            assert!(store
+                .read_with(|conn| list_drafts_in(conn, "workspace", Some(&cursor), 1))
+                .unwrap()
+                .is_empty());
+            assert!(store
+                .read_with(|conn| list_drafts_in(conn, "other-workspace", None, 1))
+                .unwrap()
+                .is_empty());
+        }
+    }
 
     fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
         let dir = ScratchDir::new_named("observed-owner-draft").unwrap();
