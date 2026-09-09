@@ -202,6 +202,20 @@ it("resumes a real configured service activation after a lost native adoption re
     }
     results.claim = await rpc("sync.claim", {workspaceId: "workspace"});
     const mainVersionId = (await rpc("versions.ensureMain", {})).id as string;
+    async function push() {
+      const pages: Record<string, any>[] = [];
+      for (let page = 0; page < 8; page++) {
+        const result = await rpc("sync.push", {workspaceId: "workspace"});
+        pages.push(result);
+        expect(result.status).toBe("complete");
+        expect(result.refusals).toEqual([]);
+        expect(result.sharingDeclined).toEqual([]);
+        expect(result.ownerAdmissionPending).toEqual([]);
+        if (!result.hasMore) return pages;
+      }
+      throw new Error("Owner push exceeded its eight-page bound.");
+    }
+    results.ownerEnrollmentPush = await push();
     const written = await rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path: "docs/a.md", text: "Hello", origin: "api", requestId: randomUUID()});
     const objectId = written.object.id as string;
     expect(typeof objectId).toBe("string");
@@ -212,7 +226,7 @@ it("resumes a real configured service activation after a lost native adoption re
     const vector = Y.encodeStateVector(ownerDoc); ownerDoc.getMap("frontmatter").set("beforeActivation", "ordinary-owner");
     await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(Y.encodeStateAsUpdate(ownerDoc, vector)).toString("base64")});
     await rpc("ydoc.settle", {sessionId: editor.sessionId}); await rpc("ydoc.close", {sessionId: editor.sessionId});
-    results.initialPush = await rpc("sync.push", {workspaceId: "workspace"});
+    results.initialPush = await push();
     expect(storage.workspaceIsOwnedBy("workspace", ownerUser.id)).toBe(true);
     expect(relayRead.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_documents").get()!.count).toBe(0);
     storage.createShare({share: {shareId: "share", workspaceId: "workspace", granterUserId: ownerUser.id, selectorJson: JSON.stringify({paths: ["docs"], versionId: null}), createdAtMs: Date.now()},
