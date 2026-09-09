@@ -3,15 +3,15 @@ import {expect, it, vi} from "vitest";
 import * as Y from "yjs";
 import {markdownToYDoc, yDocToMarkdown} from "./import-export.js";
 import {compareLiveRestoreContent} from "./liveRestoreContent.js";
-import {validateLiveRestoreProposal} from "./liveRestoreProof.js";
+import {projectLiveRestoreReviewContent, validateLiveRestoreProposal} from "./liveRestoreProof.js";
 import {createLiveMarkdownJournalValidator} from "./liveDocumentValidation.js";
 const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
   maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000};
 const budget = {maxBytes: 1_000_000, maxEvents: 20};
 const document = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "lineage"};
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
-function contentProposalFixture() {
-  const input = fixture(), doc = new Y.Doc({gc: false});
+function contentProposalFixture(nativeText?: string) {
+  const input = fixture(undefined, true, false, nativeText), doc = new Y.Doc({gc: false});
   Y.applyUpdate(doc, input.frozenState);const beforeStateVector = [...Y.encodeStateVector(doc)];
   Y.applyUpdate(doc, input.candidate);const afterStateVector = [...Y.encodeStateVector(doc)];doc.destroy();
   const point = {journalCursor: 0, receiptDigest: hash(input.point.checkpoint), markdownDigest: input.pointMarkdownDigest, projectionDigest: input.pointProjectionDigest};
@@ -62,14 +62,18 @@ it("charges the separate proposal point and refuses omitted native input or reti
   f.capture.assertCurrent.mockImplementation(() => {throw Error("retired");});
   expect(() => validateLiveRestoreProposal(f.capture, f.bytes, policy, budget)).toThrow("retired");
 });
-function fixture(markdown = "Selected **bold** and 🦀.", fresh = true, changeSharedType = false) {
+function fixture(markdown = "Selected **bold** and 🦀.", fresh = true, changeSharedType = false, nativeText?: string) {
   const point = markdownToYDoc(markdown), head = new Y.Doc({gc: false});
   if (changeSharedType) {const nested = new Y.Map();nested.set("x", 1);point.getMap("frontmatter").set("nested", nested);}
   const baseline = Y.encodeStateAsUpdate(point);
   Y.applyUpdate(head, baseline);
   const previous = Y.encodeStateVector(head);
   const body = head.getXmlFragment("body");
-  head.transact(() => {body.insert(0, [new Y.XmlElement("paragraph")]);});
+  head.transact(() => {
+    const paragraph = new Y.XmlElement("paragraph");
+    if (nativeText !== undefined) {const text = new Y.XmlText(); text.insert(0, nativeText); paragraph.insert(0, [text]);}
+    body.insert(0, [paragraph]);
+  });
   const native = Y.encodeStateAsUpdate(head, previous), frozen = Y.encodeStateAsUpdate(head);
   if (fresh) {const used = Y.decodeStateVector(Y.encodeStateVector(head));let next = 1;while (used.has(next)) next++;head.clientID = next;}
   const beforeRestore = Y.encodeStateVector(head);
@@ -88,6 +92,24 @@ function fixture(markdown = "Selected **bold** and 🦀.", fresh = true, changeS
   point.destroy();head.destroy();
   return input;
 }
+it("returns the validated frozen and restored Markdown with their exact byte digests", () => {
+  const f = contentProposalFixture("Native work 🦀"), result = projectLiveRestoreReviewContent(f.capture, f.bytes, policy, {...budget,maxOutputBytes:1_000_000});
+  expect(result.frozenMarkdown).toContain("Native work 🦀");
+  expect(result.frozenMarkdown).toContain("Selected **bold** and 🦀.");
+  expect(result.restoredMarkdown).toContain("Selected **bold** and 🦀.");
+  expect(result.restoredMarkdown).not.toContain("Native work");
+  expect(result.frozenMarkdownDigest).toBe(hash(result.frozenMarkdown));
+  expect(result.restoredMarkdownDigest).toBe(hash(result.restoredMarkdown));
+  expect(result.restoredMarkdownDigest).toBe(f.capture.receipt.point.markdownDigest);
+  expect(result.frozenMarkdownByteLength).toBe(Buffer.byteLength(result.frozenMarkdown));
+  expect(result.restoredMarkdownByteLength).toBe(Buffer.byteLength(result.restoredMarkdown));
+  expect(result.frozenMarkdownByteLength).toBeGreaterThan(result.frozenMarkdown.length);
+  const exact=result.frozenMarkdownByteLength+result.restoredMarkdownByteLength;
+  expect(projectLiveRestoreReviewContent(f.capture,f.bytes,policy,{...budget,maxOutputBytes:exact})).toEqual(result);
+  expect(()=>projectLiveRestoreReviewContent(f.capture,f.bytes,policy,{...budget,maxOutputBytes:exact-1})).toThrow("output budget");
+  f.capture.assertCurrent.mockImplementation(()=>{throw Error("retired");});
+  expect(()=>projectLiveRestoreReviewContent(f.capture,f.bytes,policy,{...budget,maxOutputBytes:exact})).toThrow("retired");
+});
 it.each(["Selected **bold** and 🦀.", "# Title\n\n- one\n- two", "[Selected](https://example.com)"])(
   "verifies a fresh owner rewrite with retained native context: %s", markdown => {
     const input = fixture(markdown), original = input.nativeSources.map(bytes => [...bytes]);

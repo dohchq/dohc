@@ -80,5 +80,31 @@ export function validateLiveRestoreProposal(capture: ProposalCapture, input: Liv
   } finally {frozenDoc.destroy();restoredDoc.destroy();}
 }
 
+/** Validated artifact text for a separate owner review. This does not establish a complete loss list or consent. */
+export function projectLiveRestoreReviewContent(capture: ProposalCapture, input: LiveRestoreProposalBytes,
+  policy: OrderedLiveUpdateCutPolicy, budget: {maxBytes: number; maxEvents: number; maxOutputBytes: number}) {
+  capture.assertCurrent();
+  require(Number.isSafeInteger(budget.maxOutputBytes) && budget.maxOutputBytes > 0);
+  const validated = validateLiveRestoreProposal(capture, input, policy, budget);
+  const binding = capture.selected.binding;
+  const document = {workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId,
+    objectId: binding.objectId, lineageClaimId: binding.lineageClaimId};
+  const registration = createLiveMarkdownRegistrationValidator(policy);
+  const frozen = registration({document,currentPath:binding.currentPath,checkpoint:input.frozenStateBytes});
+  const restored = registration({document,currentPath:binding.currentPath,checkpoint:validated.content.stateUpdate});
+  if (frozen.kind !== "accepted" || restored.kind !== "accepted") throw new Error("Restore review content refused.");
+  require(frozen.evidence.checkpoint.updateDigest === validated.content.frozenStateDigest);
+  require(restored.evidence.projectedMarkdownSha256 === capture.receipt.point.markdownDigest);
+  if (frozen.evidence.projectedMarkdownByteLength > budget.maxOutputBytes - restored.evidence.projectedMarkdownByteLength) {
+    throw new Error("Restore review exceeds its output budget.");
+  }
+  capture.assertCurrent();
+  return Object.freeze({candidateDigest:validated.content.candidateDigest,
+    frozenMarkdown:frozen.evidence.projectedMarkdown, frozenMarkdownDigest:frozen.evidence.projectedMarkdownSha256,
+    frozenMarkdownByteLength:frozen.evidence.projectedMarkdownByteLength,
+    restoredMarkdown:restored.evidence.projectedMarkdown, restoredMarkdownDigest:restored.evidence.projectedMarkdownSha256,
+    restoredMarkdownByteLength:restored.evidence.projectedMarkdownByteLength});
+}
+
 export type {OrderedLiveUpdateCutPolicy};
 export {resolveLiveRestorePoint};
