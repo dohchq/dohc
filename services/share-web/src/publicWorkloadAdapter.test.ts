@@ -100,11 +100,11 @@ it("rejects a product-refused checkpoint without shrinking it", () => fixture(f 
   expect(() => preparePublicWorkload(f.seal(), join(f.root, "refused"), renderPublicFixture)).toThrow("Registration refused");
 }));
 it("uses distinct production Markdown, editor and View rendering with explicit image resolution", () => {
-  const path = `/api/view/blob/${"a".repeat(64)}`, doc = markdownToYDoc(`Before\n\n![Cat](${path})\n\nAfter`);
+  const path = `/api/view/blob/${"a".repeat(64)}`, doc = markdownToYDoc("Before\n\n![Cat](cat.png)\n\nAfter");
   try {
-    const checkpoint = Y.encodeStateAsUpdate(doc), context = {version: 1 as const, environment: "jsdom-production-components" as const, images: {[path]: path}, links: {}};
+    const checkpoint = Y.encodeStateAsUpdate(doc), context = {version: 1 as const, environment: "jsdom-production-components" as const, images: {"cat.png": path}, links: {}};
     const rendered = renderPublicFixture(checkpoint, context);
     expect(rendered.markdown).toContain("![Cat]"); expect(rendered.editorText).toContain("[Image: Cat]"); expect(rendered.viewText).not.toContain("Cat");
-    expect(renderPublicFixture(checkpoint, {...context, images: {[path]: null}}).viewText).toContain("Cat");
+    expect(renderPublicFixture(checkpoint, {...context, images: {"cat.png": null}}).viewText).toContain("Cat");
   } finally {doc.destroy();}
 });
