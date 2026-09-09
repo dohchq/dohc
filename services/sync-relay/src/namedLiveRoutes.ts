@@ -13,6 +13,7 @@ import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity.js";
 import { captureNamedLiveFrameHost, type NamedFrameHostBounds, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
 import { createNamedLiveFrameSession, type NamedFrameHostSession } from "./namedLiveFrameSession.js";
+import type { createLiveMembershipRegistry, LiveMembershipSession } from "./liveMembership.js";
 
 export interface NamedLiveRouteLimits {
   readonly maxConnections: number;
@@ -51,6 +52,7 @@ export function createNamedLiveRoutes(options: {
   bounds: NamedFrameHostBounds;
   sessions: { resolve(request: Request, discriminator: string): Promise<LiveBrowserContext | null> };
   tickets: ReturnType<typeof createLiveTickets>;
+  membership?: Pick<ReturnType<typeof createLiveMembershipRegistry>, "join">;
   captureNative(binding: LiveObjectBinding, signal: AbortSignal): Promise<NamedFrameNativeHost>;
   validate: OwnerOutboxAdmission["validate"];
 }) {
@@ -72,6 +74,7 @@ export function createNamedLiveRoutes(options: {
   const shutdown = new AbortController();
   const storage = options.storage, tickets = options.tickets, resolve = options.sessions.resolve.bind(options.sessions);
   const captureNative = options.captureNative.bind(options), validate = options.validate;
+  const memberships = options.membership;
   let closed = false, pendingRequests = 0;
   const refusal = () => Response.json({ ok: false, error: "not found" }, { status: 404, headers: { "cache-control": "private, no-store" } });
   const trusted = (headers: Headers) => hosts.has(headers.get("host") ?? "") && headers.get("origin") === origin &&
@@ -138,6 +141,7 @@ export function createNamedLiveRoutes(options: {
     socket.pause();
     const lifetime = new AbortController(), signal = AbortSignal.any([lifetime.signal, storage.unavailable, shutdown.signal]);
     let ws: WebSocket | undefined, host: NamedFrameHostSession | undefined, session: ReturnType<typeof createNamedLiveFrameSession> | undefined;
+    let membership: LiveMembershipSession | undefined;
     let done = false, opening = true, keys: string[] = [];
     let timer = setTimeout(stop, limits.upgradeTimeoutMs);
     async function release() {
@@ -152,6 +156,8 @@ export function createNamedLiveRoutes(options: {
       done = true; clearTimeout(timer); lifetime.abort();
       signal.removeEventListener("abort", stop);
       host?.invalidated.removeEventListener("abort", stop);
+      membership?.invalidated.removeEventListener("abort", stop);
+      membership?.close();
       session?.close(); host?.close();
       if (ws) ws.terminate(); else refuseDeviceControl(socket, limits.drainTimeoutMs);
       void release();
@@ -182,6 +188,8 @@ export function createNamedLiveRoutes(options: {
       host = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(context), storage, native, bounds, validate });
       host.invalidated.addEventListener("abort", stop, { once: true });
       host.assertCurrent();
+      membership = memberships?.join({ ticket, invalidated: host.invalidated, assertCurrent: host.assertCurrent.bind(host) });
+      membership?.invalidated.addEventListener("abort", stop, { once: true });
       if (done || host.invalidated.aborted || socket.destroyed || !socket.readable || !socket.writable) { stop(); return; }
       server.handleUpgrade(request, socket, head, accepted => {
         ws = accepted; accepted.binaryType = "nodebuffer";
@@ -194,7 +202,7 @@ export function createNamedLiveRoutes(options: {
           controlBytes += bytes.length; controlFrames++;
           accepted.pong(bytes, undefined, error => { controlBytes -= bytes.length; controlFrames--; if (error) stop(); });
         });
-        session = createNamedLiveFrameSession({ host: host!, frames, transport: {
+        session = createNamedLiveFrameSession({ host: host!, frames, membership, transport: {
           send(bytes) {
             if (done || accepted.readyState !== WebSocket.OPEN || accepted.bufferedAmount > limits.maxPendingBytes - bytes.length) return Promise.reject(new Error("Named transport unavailable."));
             return new Promise<void>((resolve, reject) => accepted.send(bytes, { binary: true, compress: false }, error => {

@@ -11,6 +11,10 @@ import { createSyncRelayHandler } from "./server.js";
 import { createNamedLiveRoutes, type NamedLiveRouteLimits } from "./namedLiveRoutes.js";
 import { createLinkLiveBrowserResolver } from "./linkLiveBrowserAuth.js";
 import { hashLinkBearer, hashLinkProfileSecret } from "./linkSecurity.js";
+import { createNamedLiveProvider } from "../../share-web/viewer/src/namedLiveProvider.js";
+import { createLiveMembershipRegistry, type LiveMembershipPolicy } from "./liveMembership.js";
+import { liveBrowserActor } from "./liveBrowserContext.js";
+import { captureNamedLiveFrameHost } from "./namedLiveFrameHost.js";
 import { createLiveTickets } from "./liveTickets.js";
 import { createLiveHostReports } from "./namedLiveHostReports.js";
 import { createNamedFrameChanges, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
@@ -32,9 +36,10 @@ function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve };
 }
-async function fixture(routeLimits = limits, link = false) {
+async function fixture(routeLimits = limits, link = false, membershipPolicy: LiveMembershipPolicy = {maxSessions: 16, maxMembers: 8, maxSnapshotBytes: 153}) {
   const state = await ticketFixture();
   const routeKind = link ? "link" : "named";
+  const memberships = createLiveMembershipRegistry(membershipPolicy);
   const bearer = Buffer.alloc(32, 1).toString("base64url"), profile = Buffer.alloc(32, 2).toString("base64url");
   const currentScope = link ? { kind: "link" as const, workspaceId: scope.workspaceId, shareId: scope.shareId, grantId: scope.grantId,
     sessionId: "link-session", capabilityHash: hashLinkBearer(bearer, key), profileTokenHash: hashLinkProfileSecret(profile, key) } : scope;
@@ -64,7 +69,7 @@ async function fixture(routeLimits = limits, link = false) {
   const application = createSyncRelayHandler({ storage: state.storage, resolveActor: actor, shareWebOrigin: audience, relayExchangeKey: exchangeKey, nowMs: () => 1000,
     namedBrowserSessionLimits: { maxSessions: 8, retentionMs: 30000, maxPendingRequests: 4, maxRequestBytes: 16384, maxResponseBytes: 16384, timeoutMs: 1000 } });
   const tickets = createLiveTickets({ storage: state.storage, audience, key, hostReports: createLiveHostReports({ storage: state.storage, captureNative }) });
-  const routes = createNamedLiveRoutes({ kind: routeKind, storage: state.storage, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey, frames, bounds, limits: routeLimits,
+  const routes = createNamedLiveRoutes({ kind: routeKind, membership: memberships, storage: state.storage, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey, frames, bounds, limits: routeLimits,
     validate: createLiveMarkdownJournalValidator(policy), sessions: link ? createLinkLiveBrowserResolver({storage: state.storage, linkKey: key}) : { resolve: application.resolveNamedBrowserSession }, tickets, captureNative });
   const http = serveFetchHandler({ handler: request => new URL(request.url).pathname === `/sync/live/${routeKind}-tickets` ? routes.handle(request) : application(request),
     maxBodyBytes: () => 16384, oversized: () => Response.json({}, { status: 404 }), failure: () => Response.json({}, { status: 500 }) });
@@ -109,7 +114,7 @@ async function fixture(routeLimits = limits, link = false) {
     }
     return { ws, status, received, until };
   }
-  return { ...state, post, discriminator, mint, connect, currentScope, bearer, profile, captureNative, native, changes, invalidated, actor, application, routes };
+  return { ...state, post, discriminator, mint, connect, currentScope, bearer, profile, memberships, tickets, captureNative, native, changes, invalidated, actor, application, routes };
 }
 
 it.each([false, true])("mints through actual HTTP auth and redeems once before exposing only live frames; link=%s", async link => {
@@ -259,4 +264,78 @@ it.each<Record<string, string>>([
   expect(await f.connect(minted.token, "anonymous", headers).status).toBe(404);
   expect(f.raw.prepare("SELECT redeemed_at_ms FROM sync_relay_live_session_tickets").get()).toEqual({redeemed_at_ms: null});
   expect(await f.connect(minted.token, "anonymous").status).toBe(101);
+});
+
+
+async function startProvider(browser: ReturnType<Awaited<ReturnType<typeof fixture>>["connect"]>) {
+  const provider = createNamedLiveProvider({frames, maxPendingUpdateBytes: 4096, maxPendingUpdates: 4, maxDeliveryAttempts: 2});
+  const route = provider.connect({send: bytes => new Promise<void>((resolve, reject) => browser.ws.send(bytes, error => error ? reject(error) : resolve())),
+    close: () => browser.ws.terminate()});
+  const {encodeLiveFrame} = await import("@dohc/live-session-contract/live-frame");
+  for (const frame of browser.received) void route.receive(encodeLiveFrame(frame, frames.receive.maxFrameBytes));
+  browser.ws.on("message", bytes => {void route.receive(Buffer.from(bytes as Buffer));});
+  const until = (check: () => boolean) => check() ? Promise.resolve() : new Promise<void>(resolve => {
+    const remove = provider.subscribe(() => {if (check()) {remove(); resolve();}});
+  });
+  cleanups.push(async () => {provider.close(); await route.settled(); provider.doc.destroy();});
+  await until(() => provider.state().membership !== null);
+  return {provider, until};
+}
+
+async function namedMember(f: Awaited<ReturnType<typeof fixture>>) {
+  f.storage.createShare({share: {shareId: "named-other-share", workspaceId: scope.workspaceId, granterUserId: "owner-1",
+    selectorJson: JSON.stringify({paths: [binding.currentPath], versionId: null}), createdAtMs: 1},
+    grant: {grantId: "named-other-grant", shareId: "named-other-share", principalKind: "user", principalUserId: scope.userId,
+      principalEmail: null, access: "edit", generation: 1, status: "active", revokedAtMs: null, createdAtMs: 1, parentGrantId: null}});
+  const boot = await f.post("/sync/live/named-sessions", {grantId: "named-other-grant"});
+  const {discriminator} = await boot.json() as {discriminator: string};
+  const context = await f.application.resolveNamedBrowserSession(new Request("https://relay.example.test", {headers: {cookie: "account=reader"}}), discriminator);
+  if (!context) throw new Error("Named member authentication missing");
+  const minted = await f.tickets.mint({objectId: binding.objectId}, context), ticket = await f.tickets.redeem(minted!.token, context);
+  if (!ticket) throw new Error("Named member ticket missing");
+  const host = captureNamedLiveFrameHost({ticket, actor: liveBrowserActor(context), storage: f.storage, native: f.native, bounds,
+    validate: createLiveMarkdownJournalValidator(policy)});
+  const member = f.memberships.join({ticket, invalidated: host.invalidated, assertCurrent: host.assertCurrent});
+  cleanups.push(async () => {member.close(); host.close();});
+  return member;
+}
+
+it("shares authenticated named and link membership on the same path across grants and selectors", async () => {
+  const f = await fixture(limits, true), minted = await f.mint(), browser = f.connect(minted.token);
+  expect(await browser.status).toBe(101);
+  const live = await startProvider(browser), named = await namedMember(f);
+  await live.until(() => live.provider.state().membership?.members.length === 2);
+  const first = live.provider.state().membership!;
+  expect(named.snapshot(1024)).toEqual(first);
+  expect(first.overflow).toBe(false);
+  for (const secret of [scope.userId, scope.grantId, f.bearer, f.profile, "link-session"]) expect(JSON.stringify(first)).not.toContain(secret);
+  named.close();
+  await live.until(() => live.provider.state().membership?.members.length === 1);
+});
+
+it.each(["expiry", "blocked", "paused"])("prunes an idle link member after %s when an authenticated named peer reads membership", async change => {
+  const f = await fixture(limits, true), minted = await f.mint(), browser = f.connect(minted.token);
+  expect(await browser.status).toBe(101);
+  const live = await startProvider(browser), named = await namedMember(f);
+  await live.until(() => live.provider.state().membership?.members.length === 2);
+  const closed = once(browser.ws, "close");
+  if (change === "expiry") vi.spyOn(Date, "now").mockReturnValue(61_000);
+  if (change === "blocked") f.raw.exec("UPDATE sync_relay_link_principals SET blocked_at_ms=1000");
+  if (change === "paused") f.raw.exec("UPDATE sync_relay_shares SET link_writes_paused_at_ms=1000");
+  expect(named.snapshot(1024).members).toHaveLength(1);
+  await closed;
+  expect(f.invalidated.signal.aborted).toBe(false);
+});
+
+it("closes a host capture when membership is full and leaves its redeemed ticket consumed", async () => {
+  const f = await fixture(limits, true, {maxSessions: 1, maxMembers: 1, maxSnapshotBytes: 41});
+  const first = await f.mint(), second = await f.mint(), browser = f.connect(first.token);
+  expect(await browser.status).toBe(101);
+  expect(await f.connect(second.token).status).toBe(404);
+  expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_session_tickets WHERE redeemed_at_ms IS NOT NULL").get()).toEqual({n: 2});
+  expect(f.changes.listenerCount()).toBe(1);
+  const closed = once(browser.ws, "close"); browser.ws.terminate(); await closed;
+  expect(await f.connect(second.token).status).toBe(404);
+  expect(f.changes.listenerCount()).toBe(0);
+  expect(f.invalidated.signal.aborted).toBe(false);
 });
