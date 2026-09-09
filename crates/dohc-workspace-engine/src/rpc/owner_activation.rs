@@ -67,7 +67,9 @@ impl EngineService {
         };
         let session = if lock(&self.sessions).contains_key(&params.session_id) {
             Some(self.ydoc_session(Some(workspace), &params.session_id)?.1)
-        } else { None };
+        } else {
+            None
+        };
         let had_session = session.is_some();
         let workspace_id = open.workspace_id.clone();
         let db_path = open.db_path.clone();
@@ -94,7 +96,9 @@ impl EngineService {
             return Err(workspace_unavailable());
         }
         if had_session {
-            let removed = lock(&self.sessions).remove(&params.session_id).ok_or_else(workspace_unavailable)?;
+            let removed = lock(&self.sessions)
+                .remove(&params.session_id)
+                .ok_or_else(workspace_unavailable)?;
             drop(removed);
         }
         drop(serial);
@@ -222,7 +226,9 @@ impl EngineService {
             if resuming {
                 let mut sessions = lock(&self.sessions);
                 let session = sessions.get_mut(&id).ok_or_else(workspace_unavailable)?;
-                if session.lineage_claim_id.as_deref() != Some(captured.source.lineage_claim_id.as_str()) {
+                if session.lineage_claim_id.as_deref()
+                    != Some(captured.source.lineage_claim_id.as_str())
+                {
                     return Err(workspace_unavailable());
                 }
                 session.restore_generation = captured.restore_generation;
