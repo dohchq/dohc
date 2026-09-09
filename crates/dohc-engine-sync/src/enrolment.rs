@@ -1475,7 +1475,7 @@ mod tests {
     }
 
     fn assert_enrollment_after_live_edit(close_before_enrollment: bool) {
-        let (_scratch, _, mut store) = open_store();
+        let (scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -1518,8 +1518,39 @@ mod tests {
         );
 
         if close_before_enrollment {
+            let settled =
+                match dohc_engine_collab::settle(&mut store, &key, "live-object.md", &NoFaults, 13)
+                    .expect("settle the live document")
+                {
+                    dohc_engine_storage::TxnOutcome::Committed(outcome) => outcome,
+                    dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+                };
+            let job = store
+                .load_materialization_job(&settled.job_id)
+                .expect("load settlement job")
+                .expect("settlement queues materialization");
+            assert_eq!(
+                dohc_engine_files::materialize_one(
+                    &store,
+                    &scratch,
+                    &job,
+                    &dohc_engine_files::MaterializeOptions {
+                        policy: dohc_engine_files::DurabilityPolicy::none(),
+                        replacer: &dohc_engine_files::StdReplacer,
+                        backoff: &dohc_engine_files::NoBackoff,
+                        now_ms: 14,
+                        faults: &NoFaults,
+                    },
+                )
+                .expect("materialize the saved document"),
+                dohc_engine_files::JobOutcome::Completed
+            );
+            assert_eq!(
+                std::fs::read(scratch.join("live-object.md")).expect("read saved document"),
+                b"edited in the live session"
+            );
             assert!(matches!(
-                dohc_engine_collab::close_session(&mut store, &key, false, None, &NoFaults, 13)
+                dohc_engine_collab::close_session(&mut store, &key, false, None, &NoFaults, 15)
                     .expect("close the saved local document"),
                 dohc_engine_storage::TxnOutcome::Committed(
                     dohc_engine_collab::CloseOutcome::Pruned { .. }
