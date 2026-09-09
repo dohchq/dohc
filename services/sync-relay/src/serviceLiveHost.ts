@@ -59,8 +59,7 @@ function readServiceLiveHostConfig(configPath: string): ServiceLiveHostConfig {
   const settlement = parseLiveSettlementConfig(value.settlement);
   const restore = parseLiveRestoreConfig(value.restore);
   const applicationWorkingReserveBytes = integer(ingress.applicationWorkingReserveBytes, 0);
-  if (settlement && applicationWorkingReserveBytes === 0) throw new TypeError("Settlement requires a positive applicationWorkingReserveBytes limit.");
-  if (restore && applicationWorkingReserveBytes === 0) throw new TypeError("Restore requires a positive applicationWorkingReserveBytes limit.");
+  if (applicationWorkingReserveBytes === 0) throw new TypeError("Live application requires a positive applicationWorkingReserveBytes limit.");
   return Object.freeze({ version: 1, engineExecutable: path(value.engineExecutable, false),
     hostId: parseLiveUpdateIdentifier(value.hostId, "host ID"), instanceId: parseLiveUpdateIdentifier(value.instanceId, "instance ID"),
     workspaces: Object.freeze(workspaces),

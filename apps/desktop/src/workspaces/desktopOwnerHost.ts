@@ -39,7 +39,9 @@ export function readDesktopOwnerHostConfig(path: string): DesktopOwnerHostConfig
   const credentialBytes = readBoundedFile(input.credentialPath,16_384,"Owner host credential is too large.");
   const transport = input.transport;
   const fields = ["aggregateBytes","maxAdoptionBytes","maxAdoptionEvents","maxFrameBytes","maxQueuedBytes","maxRegistrations","maxUploads","requestDeadlineMs"];
-  if (!transport || Object.keys(transport).sort().join() !== fields.join() || fields.some(field => !Number.isSafeInteger(transport[field]) || transport[field] < 1) || transport.requestDeadlineMs > 2_147_483_647) throw new Error("Invalid private owner host transport budget.");
+  if (!transport || Object.keys(transport).filter(field => field !== "maxRestoreBytes").sort().join() !== fields.join() ||
+    fields.some(field => !Number.isSafeInteger(transport[field]) || transport[field] < 1) || transport.requestDeadlineMs > 2_147_483_647 ||
+    (transport.maxRestoreBytes !== undefined && (!Number.isSafeInteger(transport.maxRestoreBytes) || transport.maxRestoreBytes < 5 || transport.maxRestoreBytes > 0xffff_ffff))) throw new Error("Invalid private owner host transport budget.");
   return {nativeConfigPath: input.nativeConfigPath,url: input.url,workspaceIds: input.workspaceIds,reconnectDelayMs: input.reconnectDelayMs,
     transport,credential: parseDeviceHostCredential(JSON.parse(credentialBytes.toString("utf8"))),control: parseDeviceControlLimits(input.control)};
 }

@@ -31,6 +31,8 @@ export interface ExistingOwnerDeviceConfig {
   aggregateBytes: number;
   maxAdoptionBytes: number;
   maxAdoptionEvents: number;
+  /** Explicit private input and output bound. Omission disables restore forwarding. */
+  maxRestoreBytes?: number;
   requestDeadlineMs: number;
 }
 
@@ -51,6 +53,14 @@ function string(value: unknown): string {
   if (typeof value !== "string" || !value || Buffer.byteLength(value) > 512) throw new Error("Invalid device owner identifier.");
   return value;
 }
+function restoreOperation(method: string): "prepare" | "apply" | "settle" | "resume" | undefined {
+  switch (method) {
+    case "liveApplication.prepareRestore": return "prepare";
+    case "liveApplication.applyRestore": return "apply";
+    case "liveApplication.settleRestore": return "settle";
+    case "liveApplication.resumeRestore": return "resume";
+  }
+}
 
 /** Curated remote host facade. It never forwards an arbitrary daemon method. */
 export function startExistingOwnerDeviceTransport(options: {
@@ -60,6 +70,8 @@ export function startExistingOwnerDeviceTransport(options: {
   for (const value of [config.maxQueuedBytes,config.maxUploads,config.maxRegistrations,config.aggregateBytes,config.maxAdoptionBytes,config.maxAdoptionEvents]) integer(value,1);
   integer(config.requestDeadlineMs,1,2_147_483_647);
   integer(config.maxFrameBytes,1_048_576,16_777_216);
+  const maxRestoreBytes = config.maxRestoreBytes === undefined ? undefined : integer(config.maxRestoreBytes,5,0xffff_ffff);
+  if (maxRestoreBytes !== undefined && maxRestoreBytes * 5 + config.maxFrameBytes > config.aggregateBytes) throw new Error("Invalid owner restore transport budget.");
   if (config.maxAdoptionBytes * 3 + config.maxFrameBytes > config.aggregateBytes || config.maxQueuedBytes < Math.max(limits.maxPayloadBytes + 16,config.maxFrameBytes + 36)) throw new Error("Invalid existing owner transport budget.");
   const workspaces = new Map(config.workspaces.map(row => [row.workspaceHandle, row.workspaceId]));
   if (!workspaces.size || workspaces.size !== config.workspaces.length || new Set(workspaces.values()).size !== workspaces.size) throw new Error("Invalid existing owner workspaces.");
@@ -76,7 +88,7 @@ export function startExistingOwnerDeviceTransport(options: {
     registrations.clear(); options.stop(); };
   const connection = new DeviceEngineConnection(ws,limits,start.receive,config.maxQueuedBytes,stop);
   const check = () => { if (closed || retired.signal.aborted) throw new Error("Owner device connection retired."); };
-  const send = (value: unknown,signal?: AbortSignal): Promise<void> => new Promise((resolve,reject) => {
+  const write = (bytes: Buffer,signal?: AbortSignal): Promise<void> => new Promise((resolve,reject) => {
     check(); signal?.throwIfAborted();
     const cleanup = () => {connection.offDrain(drained); connection.offClose(gone); signal?.removeEventListener("abort",aborted);};
     const drained = () => { cleanup(); resolve(); };
@@ -84,9 +96,10 @@ export function startExistingOwnerDeviceTransport(options: {
     const aborted = () => {cleanup(); reject(signal!.reason);};
     connection.onDrain(drained); connection.onClose(gone);
     signal?.addEventListener("abort",aborted,{once:true});
-    try { if (connection.write(encodeFrame(FrameType.Control,0,Buffer.from(JSON.stringify(value)),config.maxFrameBytes))) drained(); }
+    try { if (connection.write(bytes)) drained(); }
     catch (error) { cleanup(); reject(error); }
   });
+  const send = (value: unknown,signal?: AbortSignal) => write(encodeFrame(FrameType.Control,0,Buffer.from(JSON.stringify(value)),config.maxFrameBytes),signal);
   const registrationFor = (operation: Operation): Registration => {
     const registration = registrations.get(integer(operation.params.registrationId,1));
     if (!registration || workspaces.get(operation.workspace) !== registration.binding.workspaceId) throw new Error("Owner registration is unavailable.");
@@ -100,9 +113,29 @@ export function startExistingOwnerDeviceTransport(options: {
       check();
       const signal = AbortSignal.any([retired.signal,operation.signal.signal]);
       const request = { id: next(),workspace: operation.workspace,deadlineMs: config.requestDeadlineMs };
+      const restoring = restoreOperation(operation.method);
       if (operation.method === "liveApplication.hosts") {
         if (operation.workspace || Object.keys(operation.params).length) throw new Error("Invalid owner discovery.");
         result = { relayNamespace: start.relayNamespace,host: start.host,workspaces: config.workspaces,ownerSessions: { maxBytes: config.maxAdoptionBytes,maxEvents: config.maxAdoptionEvents } };
+      } else if (restoring) {
+        if (maxRestoreBytes === undefined) throw new Error("Owner restore forwarding is not configured.");
+        const bytes = operation.streams[0]!.bytes;
+        if (bytes.length < 5 || bytes.readUInt32LE(0) !== bytes.length - 4) throw new Error("Invalid owner restore header framing.");
+        const header = configRecord(JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(bytes.subarray(4))),
+          ["fence","point",...(restoring === "prepare" ? [] : ["candidateDigest","nativeSourceManifestDigest","admitted"]),...(restoring === "resume" ? ["settlementId"] : [])]);
+        const fence = parseNativeRestoreFenceReceipt(header.fence).operation;
+        if (workspaces.get(operation.workspace) !== fence.oldBinding.workspaceId || fence.relayDatabaseNamespace !== start.relayNamespace || fence.hostId !== start.host.hostId) throw new Error("Restore host identity mismatch.");
+        const output = await config.client.sendLiveRestore(request,restoring,bytes,maxRestoreBytes,signal);
+        check(); signal.throwIfAborted();
+        if (output.bytes.length > maxRestoreBytes) throw new Error("Owner restore response exceeds its bound.");
+        const digest = createHash("sha256").update(output.bytes).digest("hex"), streamId = operation.id;
+        await send({type:"blobStart",requestId:operation.id,streamId,totalBytes:output.bytes.length,sha256:digest},signal);
+        const chunkBytes = 256 * 1024;
+        for (let offset = 0; offset < output.bytes.length || offset === 0; offset += chunkBytes) {
+          const end = Math.min(offset + chunkBytes,output.bytes.length);
+          await write(encodeFrame(FrameType.BlobChunk,end === output.bytes.length ? 1 : 0,{streamId,bytes:output.bytes.subarray(offset,end)},chunkBytes),signal);
+        }
+        result = {status:({prepare:"prepared",apply:"applied",settle:"settled",resume:"resumed"} as const)[restoring],streamId,byteLength:output.bytes.length,digest};
       } else if (operation.method === "liveApplication.fenceRestore") {
         const params = configRecord(operation.params,["operation"]), fence = parseNativeRestoreFence(params.operation);
         if (workspaces.get(operation.workspace) !== fence.oldBinding.workspaceId || fence.relayDatabaseNamespace !== start.relayNamespace || fence.hostId !== start.host.hostId) throw new Error("Restore host identity mismatch.");
@@ -250,19 +283,22 @@ export function startExistingOwnerDeviceTransport(options: {
     }
     if (value.type !== "request" || operations.size >= config.maxUploads) throw new Error("Owner operation capacity exceeded.");
     const id = integer(value.id,lastId+1), method = string(value.method), workspace = value.workspace == null ? "" : string(value.workspace);
-    if (!["liveApplication.hosts","liveApplication.register","liveApplication.fenceRestore","liveApplication.ownerState","liveApplication.ownerOutbox","liveApplication.readOwnerOutbox","liveApplication.acknowledgeOwnerOutbox","liveApplication.adoptOwner","liveApplication.apply","liveApplication.settle"].includes(method) || (method !== "liveApplication.hosts" && !workspaces.has(workspace)) || value.idempotencyKey != null) throw new Error("Owner method is unavailable.");
+    const restoring = restoreOperation(method);
+    if ((!restoring && !["liveApplication.hosts","liveApplication.register","liveApplication.fenceRestore","liveApplication.ownerState","liveApplication.ownerOutbox","liveApplication.readOwnerOutbox","liveApplication.acknowledgeOwnerOutbox","liveApplication.adoptOwner","liveApplication.apply","liveApplication.settle"].includes(method)) || (restoring && maxRestoreBytes === undefined) || (method !== "liveApplication.hosts" && !workspaces.has(workspace)) || value.idempotencyKey != null) throw new Error("Owner method is unavailable.");
     const params = value.params as Record<string,unknown>;
     if (!params || typeof params !== "object" || Array.isArray(params)) throw new Error("Invalid owner params.");
     const updateBytes = method === "liveApplication.apply" ? integer(params.updateByteLength,2,20_971_520) : 0;
     const rangeBytes = method === "liveApplication.apply" ? integer(params.rangeCount,0,Math.floor((updateBytes-2)/5))*16 : 0;
-    const bytes = method === "liveApplication.adoptOwner" ? integer(params.byteLength,1,config.maxAdoptionBytes) : updateBytes + rangeBytes;
-    const charge = bytes * 3 + config.maxFrameBytes;
+    if (restoring) configRecord(params,["streamId","byteLength","digest"]);
+    const bytes = restoring ? integer(params.byteLength,5,maxRestoreBytes!) : method === "liveApplication.adoptOwner" ? integer(params.byteLength,1,config.maxAdoptionBytes) : updateBytes + rangeBytes;
+    const charge = bytes * 3 + (restoring ? 2 * maxRestoreBytes! : 0) + config.maxFrameBytes;
     if (!Number.isSafeInteger(charge) || charged + charge > config.aggregateBytes) throw new Error("Owner operation capacity exceeded.");
     charged += charge; lastId = id;
     const signal = new AbortController(), timer = setTimeout(stop,Math.min(integer(value.deadlineMs ?? config.requestDeadlineMs,1),config.requestDeadlineMs)); timer.unref();
     const operation: Operation = { id,method,workspace,params,signal,timer,streams: [],charge };
     operations.set(id,operation);
-    if (method === "liveApplication.adoptOwner") operation.streams = [attachment(params.streamId,params.byteLength,params.digest,config.maxAdoptionBytes)];
+    if (restoring) operation.streams = [attachment(params.streamId,params.byteLength,params.digest,maxRestoreBytes!)];
+    else if (method === "liveApplication.adoptOwner") operation.streams = [attachment(params.streamId,params.byteLength,params.digest,config.maxAdoptionBytes)];
     else if (method === "liveApplication.apply") {
       const accepted = configRecord(params.accepted,["receipt","binding","authority","receivedAtMs"]);
       const receipt = configRecord(accepted.receipt,["deliveryId","updateDigest","journalCursor","acceptingHostEpoch"]);

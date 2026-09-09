@@ -47,3 +47,14 @@ it.each(["config","credential"] as const)("bounds %s reads before allocating the
   const reads = vi.mocked(readSync).mock.results.filter(result => result.type === "return").map(result => result.value as number);
   expect(reads.reduce((total,length) => total+length,0)).toBeLessThanOrEqual(limit+1+(kind === "credential" ? JSON.stringify(f.config).length : 0));
 });
+
+it("keeps restore forwarding disabled unless its explicit bound is valid",()=>{
+  const f=fixture();
+  expect(readDesktopOwnerHostConfig(f.path).transport.maxRestoreBytes).toBeUndefined();
+  for(const maxRestoreBytes of [0,4,-1,1.5,0x1_0000_0000]){
+    Object.assign(f.config.transport,{maxRestoreBytes});f.write();
+    expect(()=>readDesktopOwnerHostConfig(f.path)).toThrow("transport budget");
+  }
+  Object.assign(f.config.transport,{maxRestoreBytes:1_000_000});f.write();
+  expect(readDesktopOwnerHostConfig(f.path).transport.maxRestoreBytes).toBe(1_000_000);
+});

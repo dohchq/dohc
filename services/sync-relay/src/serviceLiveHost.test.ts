@@ -112,17 +112,16 @@ it("preserves a replacement connection when an older host closes", async () => {
   expect(f.storage.getLiveHostControl()).toMatchObject({ registeredConnectionId: "replacement", admissionState: "open" });
 });
 
-it("rejects settlement without an application reserve before spawning", async () => {
+it("rejects zero application reserve before spawning with or without settlement", async () => {
   const f = await fixture();
   f.config.ingress.applicationWorkingReserveBytes = 0;
   const settlement = { maxApplicationsPerSettlement: 8 };
   await writeFile(f.configPath, JSON.stringify({ ...f.config, settlement }));
-  await expect(startServiceLiveHost(f)).rejects.toThrow("Settlement requires a positive applicationWorkingReserveBytes limit.");
+  await expect(startServiceLiveHost(f)).rejects.toThrow("Live application requires a positive applicationWorkingReserveBytes limit.");
   expect(spawn).not.toHaveBeenCalled();
   spawn.mockImplementation(async options => clientFrom(options).client);
   await f.save();
-  const host = await startServiceLiveHost(f);
-  await host.close();
+  await expect(startServiceLiveHost(f)).rejects.toThrow("Live application requires a positive applicationWorkingReserveBytes limit.");
   f.config.ingress.applicationWorkingReserveBytes = 1;
   await writeFile(f.configPath, JSON.stringify({ ...f.config, settlement }));
   const withSettlement = await startServiceLiveHost(f);
@@ -137,7 +136,7 @@ it("requires a restore working reserve and passes only native restore bounds to 
     maxOperations: 1, validation};
   f.config.ingress.applicationWorkingReserveBytes = 0;
   await writeFile(f.configPath, JSON.stringify({...f.config, restore}));
-  await expect(startServiceLiveHost(f)).rejects.toThrow("Restore requires a positive applicationWorkingReserveBytes limit.");
+  await expect(startServiceLiveHost(f)).rejects.toThrow("Live application requires a positive applicationWorkingReserveBytes limit.");
   expect(spawn).not.toHaveBeenCalled();
   f.config.ingress.applicationWorkingReserveBytes = 50_000_000;
   await writeFile(f.configPath, JSON.stringify({...f.config, restore}));

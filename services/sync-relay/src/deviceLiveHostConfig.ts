@@ -41,8 +41,7 @@ export function readDeviceLiveHostConfig(file: string, limits: DeviceControlLimi
   const restoreRow = row.restore === undefined ? undefined : configRecord(row.restore, ["maxBytes", "maxEvents"]);
   const restore = restoreRow ? Object.freeze({maxBytes: integer(restoreRow.maxBytes, 5), maxEvents: integer(restoreRow.maxEvents)}) : undefined;
   const applicationWorkingReserveBytes = integer(ingress.applicationWorkingReserveBytes, 0);
-  if (settlement && applicationWorkingReserveBytes === 0) throw new TypeError("Settlement requires a positive applicationWorkingReserveBytes limit.");
-  if (restore && applicationWorkingReserveBytes === 0) throw new TypeError("Restore requires a positive applicationWorkingReserveBytes limit.");
+  if (applicationWorkingReserveBytes === 0) throw new TypeError("Live application requires a positive applicationWorkingReserveBytes limit.");
   return Object.freeze({ version: 1 as const, engineExecutable: path(row.engineExecutable, false),
     settlement, restore,
     shutdownGraceMs: integer(row.shutdownGraceMs),

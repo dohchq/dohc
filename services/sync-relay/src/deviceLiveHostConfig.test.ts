@@ -57,12 +57,13 @@ it("requires explicit relay workspace routing and compatible upload and frame bu
   }
 });
 
-it("requires a positive application reserve only when settlement is configured", () => {
+it("requires a positive application reserve before any live updates", () => {
   const run = fixture();
   const value = { ...run.value, ingress: { ...run.value.ingress, applicationWorkingReserveBytes: 0 } };
-  expect(readDeviceLiveHostConfig(run.write(value), limits).ingress.applicationWorkingReserveBytes).toBe(0);
+  expect(() => readDeviceLiveHostConfig(run.write(value), limits)).toThrow("Live application requires a positive applicationWorkingReserveBytes limit.");
   const settlement = { maxApplicationsPerSettlement: 8 };
-  expect(() => readDeviceLiveHostConfig(run.write({ ...value, settlement }), limits)).toThrow("Settlement requires a positive applicationWorkingReserveBytes limit.");
+  expect(() => readDeviceLiveHostConfig(run.write({ ...value, settlement }), limits)).toThrow("Live application requires a positive applicationWorkingReserveBytes limit.");
+  expect(readDeviceLiveHostConfig(run.write({...value, ingress: {...value.ingress, applicationWorkingReserveBytes: 1}}), limits).ingress.applicationWorkingReserveBytes).toBe(1);
   expect(readDeviceLiveHostConfig(run.write({ ...run.value, settlement }), limits).settlement).toEqual(settlement);
 });
 
@@ -73,7 +74,7 @@ it("requires bounded native restore configuration and a working reserve", () => 
     expect(() => readDeviceLiveHostConfig(run.write({...run.value, restore: bad}), limits)).toThrow();
   }
   expect(() => readDeviceLiveHostConfig(run.write({...run.value, restore,
-    ingress: {...run.value.ingress, applicationWorkingReserveBytes: 0}}), limits)).toThrow("Restore requires a positive applicationWorkingReserveBytes limit.");
+    ingress: {...run.value.ingress, applicationWorkingReserveBytes: 0}}), limits)).toThrow("Live application requires a positive applicationWorkingReserveBytes limit.");
 });
 
 it("rejects relay queues smaller than an advertised payload before connecting", () => {
