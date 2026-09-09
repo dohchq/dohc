@@ -36,6 +36,8 @@ use serde_json::Value;
 use serde_json::json;
 use std::sync::Arc;
 
+type EditorDraftRead = (Option<OwnerDraftSnapshot>, Option<Arc<dyn Send + Sync>>);
+
 pub(crate) struct YdocSession {
     pub(super) owner_draft: Option<OwnerDraftDescriptor>,
     pub(super) workspace: WorkspaceHandle,
@@ -63,6 +65,7 @@ impl YdocSession {
         lease: Lease,
     ) -> Self {
         Self {
+            owner_draft: None,
             workspace,
             key,
             path: captured.source.current_path.clone(),
@@ -416,7 +419,7 @@ impl EngineService {
         open: &Arc<OpenWorkspace>,
         key: &DocKey,
         cancellation: &OperationCancellation,
-    ) -> Result<(Option<OwnerDraftSnapshot>, Option<Arc<dyn Send + Sync>>), WireError> {
+    ) -> Result<EditorDraftRead, WireError> {
         let descriptor = open
             .actor
             .owner_ydoc_draft_for_key(key.clone(), cancellation.token())
