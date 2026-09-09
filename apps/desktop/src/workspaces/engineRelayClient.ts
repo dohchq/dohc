@@ -562,6 +562,8 @@ export interface EngineRelayWorkspaceClient {
 export interface EngineRelayClientOptions {
   sessions: EngineWorkspaceSessions;
   routes: RelayTransportRouteGuard;
+  /** Closes the captured binding without re-entering this client's request lane. */
+  closeWorkspaceBinding?(workspace: EngineWorkspace): Promise<void>;
   allowInsecureLoopbackForTests?: boolean;
   requestDeadlineMs?: number;
 }
@@ -571,6 +573,7 @@ const DEFAULT_RELAY_REQUEST_DEADLINE_MS = 30_000;
 export class EngineRelayClient {
   private readonly sessions: EngineWorkspaceSessions;
   private readonly routes: RelayTransportRouteGuard;
+  private readonly closeWorkspaceBinding: (workspace: EngineWorkspace) => Promise<void>;
   private readonly allowInsecureLoopbackForTests: boolean;
   private readonly requestDeadlineMs: number;
   private readonly activeLocations = new Map<string | symbol, string>();
@@ -580,6 +583,8 @@ export class EngineRelayClient {
   constructor(options: EngineRelayClientOptions) {
     this.sessions = options.sessions;
     this.routes = options.routes;
+    this.closeWorkspaceBinding = options.closeWorkspaceBinding ??
+      (workspace => this.sessions.closeWorkspaceBinding(workspace).catch(() => undefined));
     this.allowInsecureLoopbackForTests =
       options.allowInsecureLoopbackForTests === true;
     this.requestDeadlineMs =
@@ -620,9 +625,7 @@ export class EngineRelayClient {
     ): Promise<JsonValue> =>
       await runInKeyedLane(this.lanes, workspaceKey, async () => {
         if (this.activeLocations.get(workspaceKey) !== connectionKey) {
-          await this.sessions
-            .closeWorkspaceBinding(workspace)
-            .catch(() => undefined);
+          await this.closeWorkspaceBinding(workspace);
           this.activeLocations.set(workspaceKey, connectionKey);
         }
         try {

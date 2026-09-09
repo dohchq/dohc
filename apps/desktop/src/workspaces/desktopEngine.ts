@@ -72,7 +72,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   let ownerWorkspaceCloses = 0;
   const stopOwnerHost = () => {
     ownerHostGeneration += 1;
-    ownerHost?.stop(); ownerHost = undefined;
+    const previous = ownerHost;
+    ownerHost = undefined;
+    previous?.stop();
   };
   const startOwnerHost = () => {
     stopOwnerHost();
@@ -125,29 +127,39 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     return rustEngineWorkspaceSessions;
   }
 
+  async function withOwnerHostPaused<Result>(
+    pause: boolean,
+    work: () => Promise<Result>,
+  ): Promise<Result> {
+    if (!pause) return work();
+    ownerWorkspaceCloses += 1;
+    try {
+      stopOwnerHost();
+      return await work();
+    } finally {
+      ownerWorkspaceCloses -= 1;
+      if (!ownerWorkspaceCloses) startOwnerHost();
+    }
+  }
+
   async function closeRelayTransportWorkspace(
     workspace: string | EngineWorkspace,
   ): Promise<void> {
     const workspaceId =
       typeof workspace === "string" ? workspace : workspace.workspaceId;
     const reconnectOwner = ownerHostConfig?.workspaceIds.includes(workspaceId) === true;
-    if (reconnectOwner) { ownerWorkspaceCloses += 1; stopOwnerHost(); }
-    try {
+    await withOwnerHostPaused(reconnectOwner, async () => {
       if (rustEngineRelayClient) {
         await rustEngineRelayClient.closeWorkspace(workspace);
         return;
       }
       await rustEngineWorkspaceSessions?.closeWorkspace(workspace);
       relayTransportRoutes.releaseWorkspace(workspaceId);
-    } finally {
-      if (reconnectOwner) { ownerWorkspaceCloses -= 1; if (!ownerWorkspaceCloses) startOwnerHost(); }
-    }
+    });
   }
 
   async function closeAllRelayTransportWorkspaces(): Promise<void> {
-    ownerWorkspaceCloses += 1;
-    stopOwnerHost();
-    try {
+    await withOwnerHostPaused(true, async () => {
       if (rustEngineRelayClient) {
         await rustEngineRelayClient.closeAll();
         return;
@@ -156,10 +168,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       for (const workspaceId of relayTransportRoutes.workspaceIds()) {
         relayTransportRoutes.releaseWorkspace(workspaceId);
       }
-    } finally {
-      ownerWorkspaceCloses -= 1;
-      if (!ownerWorkspaceCloses) startOwnerHost();
-    }
+    });
   }
 
   // Test-only daemon restart seam (hermetic E2E: the daemon-kill spec needs the
@@ -281,9 +290,14 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource, {
         workspaceOpenDeadlineMs: 120_000,
       });
+      const sessions = rustEngineWorkspaceSessions;
       rustEngineRelayClient = new EngineRelayClient({
-        sessions: rustEngineWorkspaceSessions,
+        sessions,
         routes: relayTransportRoutes,
+        closeWorkspaceBinding: workspace => withOwnerHostPaused(
+          ownerHostConfig?.workspaceIds.includes(workspace.workspaceId) === true,
+          () => sessions.closeWorkspaceBinding(workspace).catch(() => undefined),
+        ),
       });
       startOwnerHost();
       console.info(
