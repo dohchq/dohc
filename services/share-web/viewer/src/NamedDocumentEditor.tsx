@@ -1,14 +1,15 @@
 import {useEffect, useRef, useState} from "react";
 import {mountLiveBodyEditor} from "@dohc/ydoc-projection/browser-editor";
 import type {createNamedLiveBrowserTransport, NamedLiveBrowserState} from "./namedLiveBrowserTransport";
+import "./namedRecipient.css";
 
 export type NamedDocumentSession = ReturnType<ReturnType<typeof createNamedLiveBrowserTransport>["select"]>;
 function statusText(state: NamedLiveBrowserState): string {
-  if (state.status === "live") return state.pendingUpdates ? "Sending changes…" : state.lastApplied ? "Changes reached the host. File settlement is separate." : "Live editing";
-  if (["authorizing", "connecting", "syncing"].includes(state.status)) return "Opening the live file…";
+  if (state.status === "live") return state.pendingUpdates ? "Saving changes…" : state.lastApplied ? "Changes saved" : "Ready to edit";
+  if (["authorizing", "connecting", "syncing"].includes(state.status)) return "Opening the file…";
   if (state.status === "quarantined") return "Editing stopped. Review your draft before opening the current file.";
   if (state.status === "refused") return "This account cannot open the file. Sign in with the invited account.";
-  return "Editing paused. Retry when the host and your connection are available.";
+  return "Editing paused. Check your connection, then retry.";
 }
 export function NamedDocumentEditor({session, path, onState}: {session: NamedDocumentSession; path: string;
   onState(state: NamedLiveBrowserState): void}) {
@@ -22,10 +23,10 @@ export function NamedDocumentEditor({session, path, onState}: {session: NamedDoc
     const unsubscribe = session.subscribe(receive);
     return () => {unsubscribe(); editor.destroy();};
   }, [session, onState]);
-  return <section className="content" aria-label="Shared file">
+  return <section className="content named-document" aria-label="Shared file">
     <h1>{path}</h1>
-    <p role="status">{statusText(state)}</p>
+    <p className="named-document-status" role="status">{statusText(state)}</p>
     {state.status === "disconnected" && <button className="handoff-button secondary" onClick={() => void session.reconnect()}>Retry connection</button>}
-    <div ref={element} />
+    <div className="named-body-editor" ref={element} />
   </section>;
 }

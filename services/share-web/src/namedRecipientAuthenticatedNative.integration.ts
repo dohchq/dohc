@@ -88,8 +88,8 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
   const ownerDoc = markdownToYDoc("Hello"), sharedChanges = createNamedFrameChanges(16), validate = createLiveMarkdownJournalValidator(validationPolicy);
   let released!: () => void;
   const noListeners = new Promise<void>(resolve => { released = resolve; });
-  const frameChanges = { ...sharedChanges, subscribe(changed: () => void) {
-    const remove = sharedChanges.subscribe(changed);
+  const frameChanges = { ...sharedChanges, subscribe(...args: Parameters<typeof sharedChanges.subscribe>) {
+    const remove = sharedChanges.subscribe(...args);
     return () => { remove(); if (sharedChanges.listenerCount() === 0) released(); };
   } };
   let active: Awaited<ReturnType<typeof startServiceLiveHost>> | undefined;
@@ -204,7 +204,7 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
       expect(ack).toMatchObject(receipt); return ack;
     };
     await first.editor.click(); await first.page.keyboard.press("Control+End"); await first.page.keyboard.insertText(" From Alice in Chromium.");
-    await browserExpect(first.page.getByRole("status")).toContainText("Changes reached the host");
+    await browserExpect(first.page.getByRole("status")).toContainText("Changes saved");
     await browserExpect(peer.editor).toContainText("From Alice in Chromium.");
     const browserAck = await nativeAck(); results.browserAck = browserAck;
     const firstSettlement = await active.settle(document); expect(firstSettlement.materialized).toBe(true);
@@ -212,7 +212,7 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     expect(firstMarkdown).toContain("From Alice in Chromium."); results.firstSettlement = firstSettlement;
     expect((await active.captureNative(current.binding)).registrationId).toBe(capture.registrationId);
     await peer.editor.click(); await peer.page.keyboard.press("Control+End"); await peer.page.keyboard.insertText(" From Bob after settlement.");
-    await browserExpect(peer.page.getByRole("status")).toContainText("Changes reached the host");
+    await browserExpect(peer.page.getByRole("status")).toContainText("Changes saved");
     await browserExpect(first.editor).toContainText("From Bob after settlement.");
     const afterAck = await nativeAck(); results.afterSettlementAck = afterAck;
     expect(afterAck!.journalCursor).toBeGreaterThan(browserAck!.journalCursor);
