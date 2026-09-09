@@ -124,8 +124,9 @@ export function startExistingOwnerDeviceTransport(options: {
           await send({type: "response",id: operation.id,result: {status: "pending",reason: "The existing owner session is unavailable."}}); return;
         }
         const nativeId = existing?.nativeId ?? integer(configRecord((await config.client.sendRequest({...request,method: operation.method,params: {binding: {...binding,selectorPaths: [...binding.selectorPaths]}}},signal)).result,["registrationId"]).registrationId,1);
+        registration = existing ?? {nativeId,binding,owner,adopted: false};
+        registrations.set(nativeId,registration);
         owner.assertCurrent();
-        let adopted = existing?.adopted ?? false;
         if (resumeAdoptionId !== undefined) {
           if (existing?.handoffTimer) throw new Error("Owner handoff is already active.");
           const response = await config.client.sendRequest({...request,id: next(),method: "liveApplication.ownerState",params: {registrationId: nativeId,sessionId: owner.nativeSessionId}},signal);
@@ -136,9 +137,9 @@ export function startExistingOwnerDeviceTransport(options: {
           }
           integer(state.throughCursor);
           if (state.adoptionId !== resumeAdoptionId) throw new Error("Owner adoption identity mismatch.");
-          adopted = true;
+          registration.adopted = true;
         }
-        registrations.set(nativeId,{nativeId,binding,owner,adopted}); result = {registrationId: nativeId};
+        result = {registrationId: nativeId};
       } else {
         registration = registrationFor(operation); owner = registration.owner; owner.assertCurrent();
         const native = { ...request,registrationId: registration.nativeId,sessionId: owner.nativeSessionId };
