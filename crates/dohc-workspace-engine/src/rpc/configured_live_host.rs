@@ -447,6 +447,23 @@ impl EngineService {
         Ok((*max, admission.reserve()?))
     }
 
+    pub(super) fn relay_sync_admission(
+        &self,
+    ) -> Option<(
+        dohc_engine_collab::live_update_application::AppliedSyncPolicy,
+        SettlementAdmission,
+    )> {
+        self.ordinary_live_host
+            .get()
+            .and_then(|host| host.sync.as_ref())
+            .or_else(|| {
+                self.configured_live_host
+                    .get()
+                    .and_then(|host| host.sync.as_ref())
+            })
+            .cloned()
+    }
+
     pub(crate) fn sync_admission(
         &self,
         connection: &ConnectionHandle,
@@ -457,17 +474,17 @@ impl EngineService {
         ),
         WireError,
     > {
-        let (owner, sync) = if let Some(host) = self.ordinary_live_host.get() {
-            (&host.connection, &host.sync)
+        let owner = if let Some(host) = self.ordinary_live_host.get() {
+            &host.connection
         } else if let Some(host) = self.configured_live_host.get() {
-            (&host.connection, &host.sync)
+            &host.connection
         } else {
             return Err(invalid("applied sync is not provisioned"));
         };
         if !owner.same_connection(connection) || !owner.is_current() {
             return Err(invalid("applied sync connection retired"));
         }
-        sync.clone()
+        self.relay_sync_admission()
             .ok_or_else(|| invalid("applied sync is not provisioned"))
     }
 
@@ -534,6 +551,71 @@ mod tests {
         for handle in handles {
             service.workspace_close(Some(handle)).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn configured_relay_publication_uses_the_sync_budget_and_reservation() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let mut configured = config(&[(scratch.path(), "workspace")]);
+        configured.workspaces[0].relay = Some(
+            serde_json::from_value(json!({
+                "baseUrl":"https://relay.invalid", "bearerToken":"owner"
+            }))
+            .unwrap(),
+        );
+        configured.sync = Some(
+            serde_json::from_value(json!({
+                "policy":{"maxClientVectorBytes":100_000,"maxHostVectorBytes":100_000,
+                    "maxOutputBytes":1_000_000,"maxReadBytes":4_000_000},
+                "workingReserveBytes":4_000_000
+            }))
+            .unwrap(),
+        );
+        let (service, owner, _ingress) = EngineService::configured_live_host(configured)
+            .await
+            .unwrap();
+        assert!(service.ordinary_live_host.get().is_none());
+        let (policy, admission) = service.relay_sync_admission().unwrap();
+        assert_eq!(policy.max_read_bytes, 4_000_000);
+        assert_eq!(
+            service
+                .sync_admission(&owner.handle())
+                .unwrap()
+                .0
+                .max_read_bytes,
+            policy.max_read_bytes
+        );
+        let handle: WorkspaceHandle = serde_json::from_value(
+            service.configured_live_host.get().unwrap().result["workspaces"][0]["workspaceHandle"]
+                .clone(),
+        )
+        .unwrap();
+        let mut reservations = Vec::new();
+        loop {
+            match admission.reserve() {
+                Ok(reservation) => reservations.push(reservation),
+                Err(error) => {
+                    assert_eq!(error.code, ErrorCode::Overloaded);
+                    break;
+                }
+            }
+            assert!(reservations.len() < 100, "the aggregate budget is bounded");
+        }
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let refused = service
+            .sync_push(&ctx, Some(handle), json!({"workspaceId":"workspace"}))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Overloaded);
+        drop(reservations);
+        assert!(admission.reserve().is_ok());
+        let other = ConnectionOwner::authenticated();
+        assert!(service.sync_admission(&other.handle()).is_err());
+        owner.retire();
+        assert!(service.sync_admission(&owner.handle()).is_err());
+        close(&service).await;
+        assert!(EngineService::new().relay_sync_admission().is_none());
     }
 
     #[tokio::test]

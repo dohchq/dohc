@@ -520,9 +520,7 @@ impl EngineService {
             operation,
             RelayOperation::Push { .. } | RelayOperation::SubmitShareProposal { .. }
         ) {
-            self.ordinary_live_host
-                .get()
-                .and_then(|h| h.sync.as_ref())
+            self.relay_sync_admission()
                 .map(|(_, admission)| admission.reserve())
                 .transpose()?
         } else {
@@ -560,9 +558,7 @@ impl EngineService {
                     workspace_id: open.workspace_id.clone(),
                     now_ms: now_ms()?,
                     max_read_bytes: self
-                        .ordinary_live_host
-                        .get()
-                        .and_then(|h| h.sync.as_ref())
+                        .relay_sync_admission()
                         .map_or(0, |(policy, _)| policy.max_read_bytes),
                 },
                 "sync.push",
@@ -1064,9 +1060,7 @@ impl EngineService {
                     granted,
                     submit_id: params.submit_id,
                     max_read_bytes: self
-                        .ordinary_live_host
-                        .get()
-                        .and_then(|h| h.sync.as_ref())
+                        .relay_sync_admission()
                         .map_or(0, |(policy, _)| policy.max_read_bytes),
                 },
                 "share.proposal.submit",

@@ -1078,10 +1078,6 @@ impl EngineService {
             .map_err(|_| WireError::new(ErrorCode::Internal, "ydoc record task failed"))?
             .map_err(map_runtime)?
             .map_err(map_owner_outbox)?;
-            self.events.emit(
-                "ydoc.ownerDraftChanged",
-                json!({"workspaceId":open.workspace_id,"outboxId":append.outbox_id}),
-            );
             return Ok(json!({
                 "lineageClaimId": session.lineage_claim_id,
                 "ownerDraft": {
