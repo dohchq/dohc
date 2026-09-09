@@ -39,6 +39,7 @@ export function createPublicLinkWireProof(input: {audience: string; root: string
     let sentDataBytes = 0, sentDataFrames = 0;
     let initialServerCredit: Extract<LiveFrame, {kind: "credit"}> | undefined;
     let initialBinding: ReturnType<typeof decodeLiveFrameSync>["binding"] | undefined;
+    const receiptTimes = new Map<string, number>();
     const doc = new Y.Doc({gc: false}), waiters = new Set<() => void>(); documents.add(doc);
     const notify = () => {for (const waiter of [...waiters]) waiter();};
     function until(condition: () => boolean) {
@@ -69,6 +70,7 @@ export function createPublicLinkWireProof(input: {audience: string; root: string
         const {frame, transfer} = lease.value;
         // Chunk payloads are held by the transfer and document, not the control history.
         if (frame.kind !== "chunk") received.push(frame);
+        if (frame.kind === "result" && frame.result === "success") receiptTimes.set(frame.ack.deliveryId, Date.now());
         events.push({label, received: frame.kind === "chunk" ? {...frame, bytes: {sha256: hash(frame.bytes), byteLength: frame.bytes.length}} : frame});
         try {
           if (transfer) {
@@ -115,6 +117,30 @@ export function createPublicLinkWireProof(input: {audience: string; root: string
       events.push({label, partialBeginAcknowledged: deliveryId, initialServerCredit, sentDataBytes, sentDataFrames,
         target, witnessedCredit: received.find(coversBegin), at: Date.now()}); save(); return chunk;
     }
+    async function partialTransfer(bytes: Uint8Array, deliveryId: string) {
+      const welcome = received.find((frame): frame is Extract<LiveFrame, {kind: "welcome"}> => frame.kind === "welcome");
+      if (!welcome) throw new Error("Server receive policy missing.");
+      const maximum = welcome.receivePolicy.maxFrameBytes, id = nextTransfer++;
+      const begin: LiveFrame = {kind: "begin", purpose: "submit-update", transferId: id, totalBytes: bytes.length, digest: hash(bytes), deliveryId};
+      await until(() => protocol.usage().outgoing.promisedFrames >= 1 && protocol.usage().outgoing.promisedBytes >= encodeLiveFrame(begin, maximum).length);
+      send(begin);
+      const overhead = encodeLiveFrame({kind: "chunk", transferId: id, offset: 0, bytes: new Uint8Array(1)}, maximum).length - 1;
+      let offset = 0;
+      while (offset < bytes.length) {
+        await until(() => protocol.usage().outgoing.promisedFrames >= 1 && protocol.usage().outgoing.promisedBytes > overhead);
+        const length = Math.min(maximum, frames.maxQueuedBytes, protocol.usage().outgoing.promisedBytes) - overhead;
+        if (length < 1) throw new Error("No admitted chunk capacity.");
+        const frame = {kind: "chunk" as const, transferId: id, offset, bytes: bytes.subarray(offset, offset + length)};
+        if (offset + frame.bytes.length === bytes.length) {
+          const targetBytes = initialServerCredit!.grantedBytes + sentDataBytes, targetFrames = initialServerCredit!.grantedFrames + sentDataFrames;
+          await until(() => received.some(item => item.kind === "credit" && item.grantedBytes >= targetBytes && item.grantedFrames >= targetFrames));
+          events.push({label, partialTransferAcknowledged: deliveryId, byteLength: bytes.length, prefixBytes: offset,
+            heldChunkBytes: frame.bytes.length, targetBytes, targetFrames, at: Date.now()}); save(); return frame;
+        }
+        send(frame); offset += frame.bytes.length;
+      }
+      throw new Error("Interrupted update is empty.");
+    }
     async function submit(bytes: Uint8Array, deliveryId: string): Promise<Outcome> {
       const welcome = received.find((frame): frame is Extract<LiveFrame, {kind: "welcome"}> => frame.kind === "welcome");
       if (!welcome) throw new Error("Server receive policy missing.");
@@ -147,7 +173,8 @@ export function createPublicLinkWireProof(input: {audience: string; root: string
         readyState: state, byteLength: bytes.length, sha256: hash(bytes), error, at: Date.now()}); save();
     }
     async function close() {if (closed === undefined) {ws.close(); await until(() => closed !== undefined);} protocol.close(); doc.destroy(); documents.delete(doc);}
-    return {ws, status, sync, doc, partial, submit, hostileSend, close, until,
+    return {ws, status, sync, doc, partial, partialTransfer, submit, hostileSend, close, until, receiptTimes,
+      get membership() {return received.findLast((frame): frame is Extract<LiveFrame, {kind: "membership"}> => frame.kind === "membership");},
       get binding() {return initialBinding;}, get hostEpoch() {return received.find((frame): frame is Extract<LiveFrame, {kind: "welcome"}> => frame.kind === "welcome")?.hostEpoch;}, get closed() {return closed;}};
   }
 
