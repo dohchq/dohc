@@ -60,7 +60,7 @@ try{
  result.process={pid:job.pid,code:job.code};assert.equal(job.code,0);
  const cases=await readdir(caseOutput);assert.equal(cases.length,1);
  const casePath=join(caseOutput,cases[0],'result.json'),bytes=await readFile(casePath),proof=JSON.parse(bytes);
- assert.equal(proof.verdict,'PASS');assert.ok(proof.results.delivery.heldEvidence);assert.ok(proof.results.delivery.deletion);
+ assert.equal(proof.verdict,'PASS');assert.ok(proof.results.delivery.heldEvidence);assert.ok(proof.results.delivery.deletion);assert.ok(proof.results.delivery.receiptWhileHeld);assert.equal(proof.results.delayedEcho.acceptedDescriptorUnchanged,true);
  result.caseResult={path:casePath,sha256:hash(bytes)};result.scope=proof.scope;result.omitted=proof.omitted;result.verdict='PASS';
 }catch(error){result.verdict='FAIL';result.error=String(error);}
 finally{

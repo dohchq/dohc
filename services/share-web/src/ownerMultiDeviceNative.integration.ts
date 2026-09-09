@@ -1,3 +1,4 @@
+import type {NamedFrameNativeHost} from "../../sync-relay/src/namedLiveFrameHost.js";
 import {createOwnerLiveRoutes} from "../../sync-relay/src/namedLiveRoutes.js";
 import { once } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
@@ -117,15 +118,26 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     relayHttp.listen(0, "127.0.0.1"); await once(relayHttp, "listening");
     closes.push(() => new Promise<void>(done => relayHttp.close(() => done())));
     const relayUrl = `http://127.0.0.1:${(relayHttp.address() as { port: number }).port}`;
+    let heldFeed: {digest: string; release: Promise<void>} | undefined;
     let heldCapture: {remaining: number; arrived(): void; release: Promise<void>} | undefined;
-    const captureNative: typeof active.captureNative = async (...args) => {
+    const captureNative = async (...args: Parameters<NonNullable<typeof active>["captureNative"]>): Promise<NamedFrameNativeHost> => {
       const barrier = heldCapture;
       if (barrier && --barrier.remaining === 0) {
         barrier.arrived();
         await barrier.release;
         heldCapture = undefined;
       }
-      return active!.captureNative(...args);
+      const native = await active!.captureNative(...args);
+      return {...native, client: {
+        openLiveAppliedSync: native.client.openLiveAppliedSync.bind(native.client),
+        readLiveApplicationAck: native.client.readLiveApplicationAck.bind(native.client),
+        async readNextLiveApplied(...params: Parameters<typeof native.client.readNextLiveApplied>) {
+          const next = await native.client.readNextLiveApplied(...params);
+          const barrier = heldFeed;
+          if (barrier && next?.ack.updateDigest === barrier.digest) await barrier.release;
+          return next;
+        },
+      }};
     };
     routes = createOwnerLiveRoutes({ storage, hosts: new Set([new URL(relayUrl).host]), publicOrigin: audience, exchangeKey, frames, limits: routeLimits,
       bounds: { maxClientVectorBytes: 100000, maxSyncOutputBytes: 1000000, maxAppliedUpdateBytes: 1000000, maxSubmissionBytes: 1000000, maxAdmissionBytes: 4000000 },
@@ -174,8 +186,15 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         throw new Error("Owner pull exceeded explicit 16-page proof budget.");
       }
       expect((await rpc("versions.ensureMain", {})).id).toBe(mainVersionId);
+      async function descriptor() {
+        const result = await client.ownerYDocPrepareEnrollment(request(), target);
+        if (result.status !== "observed") throw new Error("Expected durable enrolled owner state.");
+        return result.draft;
+      }
       const outbox = new OwnerYDocOutbox(client, workspaceHandle);
-      return {client, workspaceHandle, request, rpc, pull, outbox, dir,
+      return {client, workspaceHandle, request, rpc, pull, outbox, dir, descriptor,
+        openDraft: async () => client.ownerYDocOpenDraft(request(), {binding, expectedRevision: (await descriptor()).revision}),
+        appendDraft: async (appendKey: string, updateBytes: Uint8Array) => client.ownerYDocAppendDraft(request(), {binding, expectedRevision: (await descriptor()).revision, appendKey, updateBytes}),
         pass: () => runNativeOwnerDeliveryPass({client, workspaceHandle, document: selected, config: deliveryConfig,
           signal: AbortSignal.timeout(30000), bearer, assertCurrent() {expect(storage.unavailable.aborted).toBe(false);}}),
         async close() {outbox.dispose(); client.close(); await client.waitForExit(); ownerClients.delete(client);}};
@@ -243,7 +262,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       if (enrolled.status !== "observed" || !enrolled.draft.outboxId) throw new Error("Enrollment lost the divergent local draft.");
       const retained = await recovered.outbox.readPending(enrolled.draft.outboxId);
       expect(retained.entries).toHaveLength(1);
-      const localDraft = await recovered.client.ownerYDocOpenDraft(recovered.request(), {binding, expectedRevision: 1});
+      const localDraft = await recovered.openDraft();
       expect(hash(localDraft.initialUpdate)).toBe(captured.captured.localStateDigest);
       expect(storage.getBlob("workspace", hash(divergent))).toBeNull();
       const push = await recovered.rpc("sync.push", {workspaceId: "workspace"});
@@ -268,16 +287,15 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     const settledPending = await recovered.outbox.readPending(discovered.draft.outboxId);
     expect(settledPending.entries).toHaveLength(0);
     await expectProviderText(yDocToMarkdown(local), () => first.pass());
-    const a = await first.client.ownerYDocOpenDraft(first.request(), {binding, expectedRevision: 1});
-    const b = await recovered.client.ownerYDocOpenDraft(recovered.request(), {binding, expectedRevision: 1});
+    const a = await first.openDraft();
+    const b = await recovered.openDraft();
     const render = (bytes: Uint8Array) => {const doc = new Y.Doc(); try {Y.applyUpdate(doc, bytes); return yDocToMarkdown(doc);} finally {doc.destroy();}};
     expect(render(a.initialUpdate)).toContain("Owner B offline edit");
     expect(render(a.initialUpdate)).toBe(render(b.initialUpdate));
     // A durable draft waits while the bounded native delivery pass is deliberately not running.
     Y.applyUpdate(local, b.initialUpdate);
     const pendingUpdate = append("Pending across restart");
-    const pending = await recovered.client.ownerYDocAppendDraft(recovered.request(), {binding, expectedRevision: 1,
-      appendKey: "pending-restart", updateBytes: pendingUpdate});
+    const pending = await recovered.appendDraft("pending-restart", pendingUpdate);
     const beforeRestart = await recovered.outbox.readPending(pending.outboxId);
     expect(beforeRestart.entries.map(row => row.deliveryId)).toContain(pending.deliveryId);
     expect(await recovered.client.ownerYDocIsReceiptApplied(recovered.request(), {...target,
@@ -288,8 +306,8 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     expect(await reopened.pass()).toBe("acknowledged");
     expect((await reopened.outbox.readPending(pending.outboxId)).entries).toHaveLength(0);
     await expectProviderText(yDocToMarkdown(local), () => first.pass());
-    const convergedA = await first.client.ownerYDocOpenDraft(first.request(), {binding, expectedRevision: 1});
-    const convergedB = await reopened.client.ownerYDocOpenDraft(reopened.request(), {binding, expectedRevision: 1});
+    const convergedA = await first.openDraft();
+    const convergedB = await reopened.openDraft();
     expect(render(convergedA.initialUpdate)).toBe(render(convergedB.initialUpdate));
     expect(render(convergedB.initialUpdate)).toContain("Pending across restart");
     // Delete-only updates do not advance the vector. Containment must still wait for native application.
@@ -298,21 +316,73 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     local.getXmlFragment("body").delete(0, local.getXmlFragment("body").length);
     const deletion = Y.encodeStateAsUpdate(local, beforeDelete);
     expect(Y.encodeStateVector(local)).toEqual(beforeDelete);
-    const deleted = await reopened.client.ownerYDocAppendDraft(reopened.request(), {binding, expectedRevision: 1, appendKey: "delete-only", updateBytes: deletion});
+    const deleted = await reopened.appendDraft("delete-only", deletion);
     expect((await reopened.outbox.readPending(deleted.outboxId)).entries).toHaveLength(1);
-    expect(await reopened.pass()).toBe("acknowledged");
+    let releaseFeed!: () => void, observedReceipt!: () => void;
+    const feedRelease = new Promise<void>(resolve => {releaseFeed = resolve;});
+    const receiptSeen = new Promise<void>(resolve => {observedReceipt = resolve;});
+    heldFeed = {digest: deleted.updateDigest, release: feedRelease};
+    const nativeReceiptCheck = reopened.client.ownerYDocIsReceiptApplied.bind(reopened.client);
+    let receiptWhileHeld: unknown;
+    reopened.client.ownerYDocIsReceiptApplied = async (...params) => {
+      const applied = await nativeReceiptCheck(...params);
+      if (params[1].receipt.deliveryId === deleted.deliveryId && !applied) {
+        receiptWhileHeld = params[1].receipt; observedReceipt();
+      }
+      return applied;
+    };
+    let deliveryFinished = false;
+    const deletionPass = reopened.pass().finally(() => {deliveryFinished = true;});
+    try {
+      await Promise.race([receiptSeen, deletionPass.then(result => {throw new Error(`Delete delivery ended before receipt barrier: ${result}`);})]);
+      expect(deliveryFinished).toBe(false);
+      expect((await reopened.outbox.readPending(deleted.outboxId)).entries).toHaveLength(1);
+      expect((await reopened.descriptor()).acceptedCursor).toBeLessThan((receiptWhileHeld as {journalCursor: number}).journalCursor);
+    } finally {
+      releaseFeed(); heldFeed = undefined;
+      reopened.client.ownerYDocIsReceiptApplied = nativeReceiptCheck;
+    }
+    expect(await deletionPass).toBe("acknowledged");
     await expectProviderText("", () => first.pass());
-    expect(render((await first.client.ownerYDocOpenDraft(first.request(), {binding, expectedRevision: 1})).initialUpdate)).toBe("");
+    expect(render((await first.openDraft()).initialUpdate)).toBe("");
     expect((await reopened.outbox.readPending(deleted.outboxId)).entries).toHaveLength(0);
-    results.delivery = {enrollment, captured, heldEvidence, pending: {deliveryId: pending.deliveryId, updateDigest: pending.updateDigest},
+    const beforeEcho = await first.descriptor();
+    const ownerRead = new DatabaseSync(join(first.dir, ".dohc", "engine", "engine.db"), {readOnly: true});
+    let retainedFrames: unknown;
+    try {
+      const rows = ownerRead.prepare("SELECT journal_cursor FROM ydoc_owner_applied_frames WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? ORDER BY journal_cursor")
+        .all(binding.workspaceId, binding.mainVersionId, binding.objectId, binding.lineageClaimId);
+      expect(rows).toEqual([{journal_cursor: beforeEcho.acceptedCursor}]);
+      expect(beforeEcho.acceptedCursor).toBeGreaterThan(discovered.draft.acceptedCursor);
+      retainedFrames = rows;
+    } finally {ownerRead.close();}
+    // Re-deliver old content through ordinary authenticated sync after production pruning.
+    storage.appendLogBatch({workspaceId: "workspace", originId: "delayed-replica", ops: [
+      {originSeq: 0, opKind: "ydoc.update", recordedAtMs: Date.now(), payloadJson: JSON.stringify({
+        versionId: mainVersionId!, objectId: "object", path: "docs/a.md", contentKind: "richdoc",
+        updateBlobSha256: hash(divergent), lineageClaimId: binding.lineageClaimId, isBaseState: false})},
+      {originSeq: 1, opKind: "ydoc.update", recordedAtMs: Date.now(), payloadJson: JSON.stringify({
+        versionId: mainVersionId!, objectId: "object", path: "docs/a.md", contentKind: "richdoc",
+        updateBlobSha256: hash(baseline), lineageClaimId: binding.lineageClaimId, isBaseState: true})},
+    ]});
+    const echoPull = await first.pull();
+    expect(echoPull.refused).toBe(0);
+    expect(echoPull.refusals).toEqual([]);
+    expect(echoPull.hasMore).toBe(false);
+    expect(await first.descriptor()).toEqual(beforeEcho);
+    expect(render((await first.openDraft()).initialUpdate)).toBe("");
+    expect(yDocToMarkdown(provider.doc)).toBe("");
+    results.delayedEcho = {retainedFrames, oldAcceptedCursor: discovered.draft.acceptedCursor, echoPull,
+      acceptedDescriptorUnchanged: true, ordinaryOriginalBaseAndOldUpdateReplayed: true};
+    results.delivery = {enrollment, captured, heldEvidence, receiptWhileHeld, pending: {deliveryId: pending.deliveryId, updateDigest: pending.updateDigest},
       deletion: {deliveryId: deleted.deliveryId, updateDigest: deleted.updateDigest}, convergedMarkdown: render(convergedB.initialUpdate)};
     await provider.evict(); rendererDoc.destroy();
     expect(results.providerError).toBeUndefined();
     local.destroy(); await first.close(); await reopened.close();
     expect(hash(readFileSync(executable))).toBe(expectedHash);
     writeFileSync(join(root, "result.json"), JSON.stringify({verdict: "PASS", executable, sha256: expectedHash,
-      scope: "Real BetterAuth/Postgres owner bearer, configured native service, two ordinary native replicas, production owner WS delivery, divergent enrollment, held publication, exact origin release, durable restart, native ACK, peer convergence, delete-only update.",
-      omitted: ["Electron renderer UI (production provider and renderer update callback are exercised)", "Held receipt versus accepted-feed race", "ordinary publication carrier matrix beyond pending ydoc update", "delayed ordinary echo after pruning"], results}, null, 2));
+      scope: "Real BetterAuth/Postgres owner bearer, configured native service, two ordinary native replicas, production owner WS delivery, divergent enrollment, held publication, exact origin release, durable restart, receipt held before accepted feed, native ACK, open provider convergence, delete-only update, old echo and original base after real pruning.",
+      omitted: ["Electron renderer UI (production provider and renderer update callback are exercised)", "ordinary publication carrier matrix beyond pending ydoc update"], results}, null, 2));
   } finally {
     const cleanupErrors: unknown[] = [];
     for (const client of ownerClients) {try {client.close(); await client.waitForExit();} catch (error) {cleanupErrors.push(error);}}
