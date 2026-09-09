@@ -503,6 +503,19 @@ it("revalidates both restore proofs inside a write transaction and observes its 
   } finally {f.close();}
 });
 
+it("retires both captured proofs when relay durability becomes unavailable while SQLite stays open", () => {
+  const f = ownerOriginProofFixture();
+  try {
+    f.store.acknowledgeStopRestoreFence(f.lookup, f.nativeReceipt);
+    const proofs = [f.store.captureStopRestoreOwnerOrigin(f.input), f.store.captureStopRestorePoint(f.input)];
+    // Losing the transaction before COMMIT makes the real write owner invalidate its standing.
+    expect(() => f.context.tx(() => f.context.db.exec("ROLLBACK"))).toThrow();
+    expect(f.context.db.prepare("SELECT 1 AS alive").get()).toEqual({alive: 1});
+    expect(() => f.context.captureStanding()).toThrow("Relay storage is unavailable");
+    for (const proof of proofs) expect(() => proof.assertCurrent()).toThrow("Relay storage is unavailable");
+  } finally {f.close();}
+});
+
 it.each(["bytes", "authority", "receipt", "bound"])("refuses selected restore point %s drift", damage => {
   const f = ownerOriginProofFixture();
   try {

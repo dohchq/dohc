@@ -910,7 +910,9 @@ export class LiveCommittedDeliveryStore {
       for (const raw of this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=? ORDER BY journal_cursor`)
         .iterate(...documentParams(document), through)) {
         const event = decodeJournalRow(this.#storage.db, raw);
-        assertJournalCheckpointPosition(this.#storage.db, event);
+        if (event.checkpoint || event.admitted.metadata.accepted.receipt.journalCursor === through) {
+          assertJournalCheckpointPosition(this.#storage.db, event);
+        }
         verifyJournalRow(event);
         bytes += event.admitted.updateBytes.byteLength + Buffer.byteLength(JSON.stringify(event.admitted.metadata)) + 8;
         if (bytes > maxBytes || events.length === maxEvents) throw new Error("Restore owner origin exceeds configured bounds.");
@@ -923,6 +925,7 @@ export class LiveCommittedDeliveryStore {
       nativeReceipt: structuredClone(saved.operation.nativeReceipt!),
       point: {journalCursor: saved.operation.intent.restorePointCursor, receiptDigest: saved.operation.intent.restorePointReceiptDigest},
       assertCurrent: () => {
+        this.#storage.captureStanding();
         integrity(fingerprint === digest());
         const current = this.#restore(lookup, host, undefined, saved.baselineBytes);
         integrity(isDeepStrictEqual(current.operation, saved.operation));
@@ -985,6 +988,7 @@ export class LiveCommittedDeliveryStore {
     const capture: RestorePointCapture = Object.freeze({binding: structuredClone(binding), checkpoint: saved.checkpoint,
       events: saved.events, point: {journalCursor: saved.operation.intent.restorePointCursor, receiptDigest: saved.operation.intent.restorePointReceiptDigest},
       nativeReceipt: structuredClone(saved.operation.nativeReceipt!), assertCurrent: () => {
+        this.#storage.captureStanding();
         integrity(fingerprint === digest());
         integrity(isDeepStrictEqual(this.#restore(lookup, host, undefined, saved.baselineBytes).operation, saved.operation));
       }});
