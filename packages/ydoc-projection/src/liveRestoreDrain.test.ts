@@ -25,8 +25,8 @@ const jsonHash = (value: unknown) => hash(Buffer.from(JSON.stringify(value)));
 const ownerOriginDigest = ({binding, cut: c}: Pick<OwnerCutCapture, "binding" | "cut">) => jsonHash([binding,
   c.relayDatabaseNamespace, c.sourceMomentId, c.sourceDigest, c.sourceByteLength, c.baselineMomentRelaySequence,
   c.baselineRegisteredAtMs, c.expectedLocalSequence, c.events.map(event => canonicalAcceptedMetadata(event.metadata))]);
-function proposalSourcesFixture(kind: "bootstrap" | "owner", mode: "service" | "device") {
-  const f = readyNativeFence(kind, mode, true);
+function proposalSourcesFixture(kind: "bootstrap" | "owner", mode: "service" | "device", acceptedNative = false) {
+  const f = readyNativeFence(kind, mode, acceptedNative ? "native" : true);
   f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt);
   const input = {...f.lookup, maxBytes: 1_000_000, maxEvents: 10};
   const selectedHistory = f.store.captureStopRestorePoint(input).proof;
@@ -108,21 +108,25 @@ function pendingSource(binding: NativeRestoreFenceReceipt["operation"]["oldBindi
     byteLength: bytes.byteLength, createdAtMs: 100, source, acceptedReceipt: null};
 }
 
-function contentProposalFixture(kind: "bootstrap" | "owner" = "owner", mode: "service" | "device" = "device", pending = false) {
-  const f = proposalSourcesFixture(kind, mode), point = new Y.Doc({gc: false}), head = new Y.Doc({gc: false});
+function contentProposalFixture(kind: "bootstrap" | "owner" = "owner", mode: "service" | "device" = "device", pending: boolean | "deleted" = false, acceptedNative = false) {
+  return buildContentProposal(proposalSourcesFixture(kind, mode, acceptedNative), pending);
+}
+function buildContentProposal<F extends Pick<ReturnType<typeof proposalSourcesFixture>, "store" | "input" | "document" | "receipt" | "proposal" | "close"> & {acceptedNative?: AcceptedNative}>(f: F, pending: boolean | "deleted" = false) {
+  const point = new Y.Doc({gc: false}), head = new Y.Doc({gc: false});
   try {
     const selected = f.store.captureStopRestorePoint(f.input), accepted = f.store.captureStopRestoreAcceptedCut(f.input);
     Y.applyUpdate(point, selected.checkpoint.bytes);for (const e of selected.events) Y.applyUpdate(point, e.updateBytes);
     Y.applyUpdate(head, accepted.checkpoint.bytes);for (const e of accepted.events) Y.applyUpdate(head, e.updateBytes);
-    const nativeSourceBytes: Uint8Array[] = [];
+    const nativeSourceBytes: Uint8Array[] = f.acceptedNative ? [f.acceptedNative.bytes] : [];
     if (pending) {
       for (const name of ["pending-one", "pending-two"]) {
         const before = Y.encodeStateVector(head);
-        head.getMap("frontmatter").set(name, "retained owner work");
+        if (pending === "deleted" && name === "pending-two") head.getMap("frontmatter").delete("pending-one");
+        else head.getMap("frontmatter").set(name, "retained owner work");
         nativeSourceBytes.push(Y.encodeStateAsUpdate(head, before));
       }
     }
-    const nativeSources = nativeSourceBytes.map((bytes, index) => pendingSource(f.receipt.operation.oldBinding, bytes, index + 1));
+    const nativeSources = nativeSourceBytes.map((bytes, index) => index === 0 && f.acceptedNative ? f.acceptedNative.source : pendingSource(f.receipt.operation.oldBinding, bytes, index + 1));
     const frozen = Y.encodeStateAsUpdate(head), pointBytes = Y.encodeStateAsUpdate(point), vector = Y.encodeStateVector(head);
     const used = Y.decodeStateVector(vector);let client = 1;while (used.has(client)) client++;head.clientID = client;
     head.transact(() => {
@@ -890,10 +894,21 @@ it("rolls back owner ACK reservation and quota changes when its progress UPDATE 
   }finally{f.close();}
 });
 
-function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device", events = false) {
+type AcceptedNative = {bytes: Uint8Array; source: Omit<ReturnType<typeof pendingSource>, "acceptedReceipt"> & {acceptedReceipt: ReturnType<ReturnType<typeof fixture>["add"]>}};
+function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device", events: boolean | "native" = false) {
   const f = fixture(kind, mode);
   if (kind === "owner") f.adopt();
-  const receipts = events ? [f.add("first"), f.add("last")] : [];
+  let acceptedNative: AcceptedNative | undefined;
+  const receipts: ReturnType<typeof f.add>[] = [];
+  if (events === "native") {
+    const current = f.storage.resolveCurrentLiveDocumentBinding({document: f.document, actor: f.actor});
+    if (current.kind !== "current") throw Error(current.kind);
+    const bytes = f.update("first", "first"), source = pendingSource(current.binding, bytes, 1);
+    const committed = f.storage.commitLiveUpdateJournal(f.journalCapture(bytes, source.deliveryId)).result;
+    if (committed.kind !== "accepted") throw Error(committed.kind);
+    receipts.push(committed.receipt); acceptedNative = {bytes, source: {...source, acceptedReceipt: committed.receipt}};
+  } else if (events) receipts.push(f.add("first"));
+  if (events) receipts.push(f.add("last"));
   f.fence();
   const capture = f.open();
   if (kind === "bootstrap") {
@@ -907,7 +922,7 @@ function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device
   f.store.completeStopRestoreCut(capture);
   const operation = f.store.pendingStopRestoreFence(f.lookup).operation;
   const receipt: NativeRestoreFenceReceipt = {operation, localHeadSequence: 11, recordedAtMs: 100};
-  return {...f, capture, receipt};
+  return {...f, capture, receipt, acceptedNative};
 }
 
 function ownerOriginProofFixture(mode: "service" | "device" = "device") {
@@ -1333,7 +1348,7 @@ it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as c
   }finally{f.close();}
 });
 
-function admittedRestoreFixture(kind:"owner"|"bootstrap"="owner",pending=true) {
+function admittedRestoreFixture(kind:"owner"|"bootstrap"="owner",pending: boolean | "deleted"=true) {
   const f=contentProposalFixture(kind,"device",pending),proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200);
   const admitted=f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201);
   const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,
@@ -1351,6 +1366,120 @@ const lifecycleRows=(f:Pick<ReturnType<typeof contentProposalFixture>,"raw"|"jou
   lifecycle:f.raw.prepare("SELECT * FROM sync_relay_live_restore_lifecycles").all(),sources:f.raw.prepare("SELECT * FROM sync_relay_live_restore_source_ranges").all(),
   operations:f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(),owners:f.raw.prepare("SELECT * FROM sync_relay_live_delivery_owners").all(),
   edges:f.raw.prepare("SELECT * FROM sync_relay_live_delivery_edges").all()});
+
+function repeatedReviewFixture() {
+  const f = admittedRestoreFixture("owner", "deleted");
+  try {
+    f.complete();
+    f.raw.exec("UPDATE sync_relay_share_grants SET status='active',generation=6,revoked_at_ms=NULL WHERE grant_id='grant'");
+    const intent = {...f.intent, operationId: "review-second", expectedFence: 2, expectedGrantGeneration: 6};
+    beginStopRestore(f.context, intent, 300);
+    const lookup = {...f.lookup, operationId: intent.operationId};
+    advanceStopRestoreFence(f.context, lookup, 301);
+    const opened = f.store.openStopRestoreCut(lookup);
+    if (opened.kind !== "ready") throw Error(opened.kind);
+    expect(f.store.nextStopRestoreCut(opened.capture).kind).toBe("done");
+    f.store.completeStopRestoreCut(opened.capture);
+    const receipt = {operation: f.store.pendingStopRestoreFence(lookup).operation, localHeadSequence: 12, recordedAtMs: 302};
+    f.store.acknowledgeStopRestoreFence(lookup, receipt);
+    const input = {...lookup, maxBytes: 1_000_000, maxEvents: 40};
+    const proposal = {...f.receipt, fence: receipt, point: resolveLiveRestorePoint(f.store.captureStopRestorePoint(input), policy),
+      selectedHistory: f.store.captureStopRestorePoint(input).proof, acceptedHistory: f.store.captureStopRestoreAcceptedCut(input).proof,
+      originEvidenceDigest: f.store.captureStopRestoreOwnerOrigin(input).evidenceDigest,
+      nativeSources: [], nativeSourceManifestDigest: jsonHash([receipt, []])};
+    const second = buildContentProposal({...f, input, lookup, receipt, proposal});
+    const saved = f.store.recordStopRestoreProposal(input, second.encoded, policy, 303);
+    return {...second, first: f, saved, reviewInput: {...input, maxOutputBytes: 1_000_000}};
+  } catch (error) {f.close(); throw error;}
+}
+
+it("returns a complete private review across a restore checkpoint, including already-deleted native work", () => {
+  const f = repeatedReviewFixture();
+  try {
+    expect(f.receipt.acceptedHistory.suffix).toHaveLength(0);
+    expect(f.receipt.acceptedHistory.checkpoint.eventCount).toBe(3);
+    expect(Y.decodeUpdate(f.first.bytes.nativeSourceBytes[1]!).structs).toHaveLength(0);
+    expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_restore_source_ranges WHERE source_ordinal=1").get()!.n).toBe(0);
+    const before = lifecycleRows(f), review = f.store.readStopRestoreReview(f.reviewInput, policy)!;
+    expect(review.proposalDigest).toBe(f.saved.proposalDigest);
+    expect(review.acceptedEvents.map(event => event.metadata.accepted.receipt.journalCursor)).toEqual([1, 2, 3]);
+    expect(review.nativeSources).toHaveLength(2);
+    expect(review.nativeSources.map(source => source.acceptedRelation)).toEqual(["not-relay-accepted", "not-relay-accepted"]);
+    expect(review.nativeSources[1]!.source.deliveryId).toBe(f.first.receipt.nativeSources[1]!.deliveryId);
+    for (const source of review.nativeSources) expect(source.occurrences).toEqual([{
+      operationId: "restore", proposalDigest: f.first.proposal.proposalDigest, context: "prior-restore", acceptedReceipt: null,
+    }]);
+    expect(review.content.frozenMarkdownDigest).toBe(hash(Buffer.from(review.content.frozenMarkdown)));
+    expect(review.content.restoredMarkdownDigest).toBe(f.receipt.point.markdownDigest);
+    expect(lifecycleRows(f)).toEqual(before);
+  } finally {f.close();}
+});
+
+it.each(["owner", "workspace", "host", "events", "bytes", "output", "metadata", "missing-event", "historical-proposal", "restore-marker"])(
+  "refuses the complete restore review for %s without admitting a replacement", damage => {
+    const f = repeatedReviewFixture();
+    try {
+      const input = structuredClone(f.reviewInput);
+      if (damage === "owner") input.ownerUserId = "foreign";
+      if (damage === "workspace") input.workspaceId = "foreign";
+      if (damage === "host") Object.assign(input.host, {connectionId: "foreign"});
+      if (damage === "events") input.maxEvents = 3;
+      if (damage === "bytes") input.maxBytes = 1;
+      if (damage === "output") input.maxOutputBytes = 1;
+      if (damage === "metadata") f.raw.exec("UPDATE sync_relay_live_update_journal SET received_at_ms=received_at_ms+1 WHERE journal_cursor=1");
+      if (damage === "missing-event") f.raw.exec("DELETE FROM sync_relay_live_update_journal WHERE journal_cursor=1");
+      if (damage === "historical-proposal") f.raw.exec("UPDATE sync_relay_live_restore_proposals SET proposal_bytes=zeroblob(length(proposal_bytes)) WHERE operation_id='restore'");
+      if (damage === "restore-marker") f.raw.exec("UPDATE sync_relay_live_update_journal SET restore_operation_id=NULL WHERE journal_cursor=3");
+      const before = lifecycleRows(f);
+      expect(() => f.store.readStopRestoreReview(input, policy)).toThrow();
+      expect(lifecycleRows(f)).toEqual(before);
+    } finally {f.close();}
+  });
+
+it("enforces complete serialized review output bytes and reports current native sources separately", () => {
+  const f = contentProposalFixture("owner", "device", true);
+  try {
+    f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    const input = {...f.input, maxOutputBytes: 1_000_000};
+    const review = f.store.readStopRestoreReview(input, policy)!;
+    const outputBytes = Buffer.byteLength(JSON.stringify(review));
+    expect(f.store.readStopRestoreReview({...input, maxOutputBytes: outputBytes}, policy)).toEqual(review);
+    expect(() => f.store.readStopRestoreReview({...input, maxOutputBytes: outputBytes - 1}, policy)).toThrow("output budget");
+    expect(review.nativeSources).toHaveLength(2);
+    expect(review.nativeSources.every(source => source.occurrences[0]!.context === "current-fence")).toBe(true);
+  } finally {f.close();}
+});
+
+it("associates an acknowledged native source with its single accepted delivery in the complete review", () => {
+  const f = contentProposalFixture("owner", "device", false, true);
+  try {
+    f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    const review = f.store.readStopRestoreReview({...f.input, maxOutputBytes: 1_000_000}, policy)!;
+    const source = f.acceptedNative!.source;
+    expect(review.acceptedEvents.filter(event => event.metadata.accepted.receipt.deliveryId === source.deliveryId)).toHaveLength(1);
+    expect(review.nativeSources).toHaveLength(1);
+    expect(review.nativeSources[0]).toMatchObject({acceptedRelation: "after-selected", acceptedReceipt: source.acceptedReceipt,
+      occurrences: [{context: "current-fence", acceptedReceipt: source.acceptedReceipt}]});
+  } finally {f.close();}
+});
+
+it.each(["metadata", "provenance"])("preflights actual historical %s before materializing an oversized review row", damage => {
+  const f = repeatedReviewFixture();
+  try {
+    if (damage === "metadata") f.raw.prepare("UPDATE sync_relay_live_update_journal SET selector_paths_json=? WHERE journal_cursor=1")
+      .run(JSON.stringify(["x".repeat(200_000)]));
+    else f.raw.exec(`WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM n WHERE value<20000)
+      INSERT INTO sync_relay_live_update_struct_provenance(workspace_id,main_version_id,object_id,lineage_claim_id,client_id,start_clock,end_clock,journal_cursor)
+      SELECT workspace_id,main_version_id,object_id,lineage_claim_id,8000000000000000+value,0,1,journal_cursor FROM sync_relay_live_update_journal,n WHERE journal_cursor=1`);
+    const prepare = f.context.db.prepare.bind(f.context.db);
+    const spy = vi.spyOn(f.context.db, "prepare").mockImplementation(sql => {
+      if (sql.startsWith("SELECT journal_cursor,relay_database_namespace,")) throw Error("materialized review row before preflight");
+      return prepare(sql);
+    });
+    try {expect(() => f.store.readStopRestoreReview({...f.reviewInput, maxBytes: 100_000}, policy)).toThrow("byte bounds");}
+    finally {spy.mockRestore();}
+  } finally {f.close();}
+});
 
 it.each(["none","all deleted","one deleted","manifest changed"])("keeps pending source attribution complete after restore: %s",damage=>{
   const f=admittedRestoreFixture(),doc=new Y.Doc({gc:false});

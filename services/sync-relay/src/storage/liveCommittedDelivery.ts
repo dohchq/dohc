@@ -64,7 +64,8 @@ import { bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from ".
 import { nativeRestoreFence, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
 import {parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
 import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, type RestoreProofBudget} from "../liveRestoreProposal";
-import {validateLiveRestoreProposal, type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
+import {projectLiveRestoreReviewContent,validateLiveRestoreProposal, type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
+import {readRestoreReviewHistory} from "./liveRestoreReview";
 import {assertWorkspaceQuota} from "./workspaces";
 import { LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_PROPOSALS, LIVE_RESTORE_LIFECYCLES,LIVE_RESTORE_SOURCE_RANGES } from "./liveRestoreOperationSchema";
 
@@ -742,7 +743,7 @@ export class LiveCommittedDeliveryStore {
   }
   #checkpointPosition(
     capture: DrainCapture,
-    row: Parameters<typeof assertJournalCheckpointPosition>[1],
+    row: ReturnType<typeof decodeJournalRow>,
   ): NonNullable<DrainCapture["checkpoint"]> {
     const restored=verifyRestoreCheckpoint(this.#storage.db,row);
     const current = row.admitted.metadata.accepted.receipt,
@@ -1064,6 +1065,36 @@ export class LiveCommittedDeliveryStore {
   }
   captureStopRestoreProposal(input: RestoreProposalInput, receiptJson: string) {
     return this.#captureStopRestoreProposal(input, receiptJson).capture;
+  }
+  /** Private complete projection only. Reading it does not authorize replacement or resume. */
+  readStopRestoreReview(input: RestoreProposalInput & {maxOutputBytes: number}, policy: OrderedLiveUpdateCutPolicy) {
+    const request = lifecycleInput(input), maxOutputBytes = authorityInteger(input.maxOutputBytes, 1);
+    const assertDatabaseCurrent = captureSqliteReadRevision(this.#storage.db);
+    const saved = this.readStopRestoreProposal(request, policy);
+    if (!saved) return null;
+    const budget = new RestoreHistoryBudget(request.maxBytes, request.maxEvents);
+    budget.chargeBytes(saved.bytes.byteLength);
+    const decoded = decodeNativeRestoreProposal(saved.bytes, request);
+    budget.chargeEvents(decoded.receipt.selectedHistory.suffix.length + decoded.receipt.acceptedHistory.suffix.length);
+    const capture = this.captureStopRestoreProposal(request, decoded.receiptJson);
+    const content = projectLiveRestoreReviewContent(capture, decoded.bytes, policy, {...request, maxOutputBytes});
+    capture.assertCurrent();
+    const history = this.#storage.readTx(() => {
+      assertDatabaseCurrent(); this.#restore(request, request.host);
+      return readRestoreReviewHistory(this.#storage, {document: capture.selected.binding,
+        namespace: this.#history.namespace, proposalDigest: saved.proposalDigest, receipt: capture.receipt}, budget);
+    });
+    const review = {operationId: request.operationId, workspaceId: request.workspaceId, binding: capture.selected.binding,
+      proposalDigest: saved.proposalDigest, candidateDigest: saved.candidateDigest, recordedAtMs: saved.recordedAtMs,
+      point: capture.receipt.point, frozenTerminal: capture.receipt.acceptedHistory.terminal,
+      selectedEventCount: capture.receipt.selectedHistory.eventCount, acceptedEventCount: capture.receipt.acceptedHistory.eventCount,
+      selectedHistoryDigest: capture.receipt.selectedHistory.evidenceDigest, acceptedHistoryDigest: capture.receipt.acceptedHistory.evidenceDigest,
+      nativeSourceManifestDigest: capture.receipt.nativeSourceManifestDigest, content, ...history};
+    const outputBytes = Buffer.byteLength(JSON.stringify(review));
+    if (outputBytes > maxOutputBytes) throw new Error("Restore review exceeds its output budget.");
+    budget.chargeBytes(outputBytes);
+    capture.assertCurrent(); assertDatabaseCurrent();
+    return review;
   }
   #captureStopRestoreProposal(input: RestoreProposalInput, receiptJson: string,ownedSourceBytes?:readonly Uint8Array[]) {
     const assertDatabaseCurrent=captureSqliteReadRevision(this.#storage.db);

@@ -5,7 +5,8 @@ import {canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextAcceptedHis
 import type {NativeRestoreHistoryProof} from "../liveRestoreProposal";
 import type {StorageContext} from "./context";
 import {authorityInteger} from "./liveDocumentAuthority";
-import {assertJournalCheckpointPosition, decodeJournalRow, documentParams, verifyJournalHistoryRow, verifyJournalRow} from "./liveUpdateJournal";
+import {assertJournalCheckpointPosition, decodeJournalMetadata, decodeJournalRow, documentParams, verifyJournalHistoryMetadata, verifyJournalHistoryRow, verifyJournalRow} from "./liveUpdateJournal";
+import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import {LIVE_JOURNAL_TABLE, LIVE_JOURNAL_PROVENANCE} from "./schema";
 
 const documentWhere = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
@@ -20,6 +21,76 @@ export class RestoreHistoryBudget {
 }
 
 type HistoryInput = {document: LiveDocumentKey; namespace: string; through: number; baseline: Uint8Array; baselineDigest: string; originBinding: LiveObjectBinding};
+
+const metadataColumns = "journal_cursor,relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,delivery_id,update_digest,accepting_host_epoch,principal_kind,principal_id,grant_id,grant_generation,received_at_ms,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes,restore_operation_id,validation_checkpoint_sha256";
+// Actual stored string lengths, independent of the cached accepted_metadata_bytes.
+const metadataLengths = ["relay_database_namespace", "workspace_id", "main_version_id", "object_id", "lineage_claim_id", "current_path", "selector_paths_json", "delivery_id", "update_digest", "principal_kind", "principal_id", "grant_id", "accepted_evidence_digest", "restore_operation_id", "validation_checkpoint_sha256"]
+  .map(column => `COALESCE(length(CAST(${column} AS BLOB)),0)`).join("+");
+function boundedMetadata(storage: StorageContext, document: LiveDocumentKey, cursor: number, budget: RestoreHistoryBudget) {
+  const params = documentParams(document);
+  const header = storage.db.prepare(`SELECT ${metadataLengths}+8*7 AS bytes FROM ${LIVE_JOURNAL_TABLE}
+    WHERE ${documentWhere} AND journal_cursor=?`).get(...params, cursor);
+  require(header);
+  const provenance = storage.db.prepare(`SELECT COUNT(*) AS count,COALESCE(SUM(length(CAST(workspace_id AS BLOB))+length(CAST(main_version_id AS BLOB))+
+    length(CAST(object_id AS BLOB))+length(CAST(lineage_claim_id AS BLOB))+8*4),0) AS bytes FROM ${LIVE_JOURNAL_PROVENANCE} WHERE journal_cursor=?`).get(cursor)!;
+  budget.chargeBytes(authorityInteger(header.bytes, 1) + authorityInteger(provenance.bytes));
+  const raw = storage.db.prepare(`SELECT ${metadataColumns} FROM ${LIVE_JOURNAL_TABLE} WHERE ${documentWhere} AND journal_cursor=?`).get(...params, cursor)!;
+  const ranges = storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_PROVENANCE} WHERE journal_cursor=? ORDER BY client_id,start_clock`).all(cursor);
+  require(ranges.length === provenance.count);
+  const metadata = canonicalAcceptedMetadata(decodeJournalMetadata(storage.db, raw, ranges));
+  require(raw.accepted_metadata_bytes === Buffer.byteLength(JSON.stringify(metadata)));
+  return {raw, metadata};
+}
+
+/** Metadata lookup for native-source association; does not load historical update/checkpoint blobs. */
+export function readAcceptedHistoryDeliveryMetadata(storage: StorageContext, input: HistoryDeliveryInput, budget: RestoreHistoryBudget) {
+  const header = storage.db.prepare(`SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE} WHERE delivery_id=? AND ${documentWhere}`)
+    .get(input.deliveryId, ...documentParams(input.document));
+  if (!header) return null;
+  budget.chargeEvents(1);
+  const {raw, metadata} = boundedMetadata(storage, input.document, authorityInteger(header.journal_cursor, 1), budget);
+  const history = {namespace: parseLiveUpdateIdentifier(raw.relay_database_namespace), eventCount: authorityInteger(raw.accepted_event_count, 1),
+    evidenceDigest: parseLiveUpdateDigest(raw.accepted_evidence_digest), metadataBytes: authorityInteger(raw.accepted_metadata_bytes, 1)};
+  require(history.namespace === input.namespace && metadata.accepted.receipt.journalCursor <= input.through && history.eventCount <= input.eventCount);
+  verifyJournalHistoryMetadata(storage.db, metadata, history);
+  return metadata;
+}
+
+/** Complete metadata between authenticated cuts, including events folded into checkpoints. */
+export function readAcceptedHistoryInterval(storage: StorageContext, input: {
+  document: LiveDocumentKey; namespace: string;
+  selected: Pick<NativeRestoreHistoryProof, "eventCount" | "terminal" | "evidenceDigest">;
+  accepted: Pick<NativeRestoreHistoryProof, "eventCount" | "terminal" | "evidenceDigest">;
+}, budget: RestoreHistoryBudget) {
+  const {document, namespace, selected, accepted} = input, params = documentParams(document);
+  const from = selected.terminal?.journalCursor ?? 0, through = accepted.terminal?.journalCursor ?? 0;
+  const count = authorityInteger(accepted.eventCount - selected.eventCount);
+  require(from <= through);
+  const actual = storage.db.prepare(`SELECT COUNT(*) AS count FROM ${LIVE_JOURNAL_TABLE}
+    WHERE ${documentWhere} AND journal_cursor>? AND journal_cursor<=?`).get(...params, from, through)!;
+  require(actual.count === count); budget.chargeEvents(count);
+  let cursor = from, eventCount = selected.eventCount, evidenceDigest = selected.evidenceDigest, terminal = selected.terminal;
+  const events: {metadata: AdmittedLiveUpdate["metadata"]; restoreOperationId: string | null}[] = [];
+  for (let index = 0; index < count; index++) {
+    const header = storage.db.prepare(`SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE}
+      WHERE ${documentWhere} AND journal_cursor>? AND journal_cursor<=? ORDER BY journal_cursor LIMIT 1`).get(...params, cursor, through);
+    require(header); const next = authorityInteger(header.journal_cursor, 1);
+    const {raw, metadata} = boundedMetadata(storage, document, next, budget);
+    require(raw.relay_database_namespace === namespace);
+    const restoreOperationId = raw.restore_operation_id === null ? null : parseLiveUpdateIdentifier(raw.restore_operation_id);
+    if (raw.validation_checkpoint_sha256 !== null || restoreOperationId !== null) {
+      assertJournalCheckpointPosition(storage.db, {admitted: {metadata}, restoreOperationId, history: {namespace},
+        checkpoint: raw.validation_checkpoint_sha256 === null ? null : {digest: parseLiveUpdateDigest(raw.validation_checkpoint_sha256)}}, budget);
+    }
+    evidenceDigest = nextAcceptedHistoryDigest(evidenceDigest, ++eventCount, metadata);
+    require(raw.accepted_event_count === eventCount && raw.accepted_evidence_digest === evidenceDigest);
+    terminal = metadata.accepted.receipt; cursor = terminal.journalCursor;
+    events.push({metadata, restoreOperationId});
+  }
+  require(eventCount === accepted.eventCount && evidenceDigest === accepted.evidenceDigest && isDeepStrictEqual(terminal, accepted.terminal));
+  return events;
+}
+
 export function readAcceptedHistory(storage:StorageContext,input:HistoryInput,budget:RestoreHistoryBudget) {
   return captureAcceptedHistory(storage,input,budget,verifyJournalRow);
 }

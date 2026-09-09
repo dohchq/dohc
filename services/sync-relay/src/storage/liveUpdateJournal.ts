@@ -78,7 +78,7 @@ interface DecodedJournalRow {
   restoreOperationId: string | null;
   history: {namespace: string; eventCount: number; evidenceDigest: string; metadataBytes: number};
 }
-function decodeJournalMetadata(db: SqliteDb, raw: Record<string, unknown>, provenance?: Record<string, unknown>[]): AdmittedLiveUpdate["metadata"] {
+export function decodeJournalMetadata(db: SqliteDb, raw: Record<string, unknown>, provenance?: Record<string, unknown>[]): AdmittedLiveUpdate["metadata"] {
   const binding = parseLiveObjectBinding({ workspaceId: raw.workspace_id, mainVersionId: raw.main_version_id,
     objectId: raw.object_id, lineageClaimId: raw.lineage_claim_id, currentPath: raw.current_path,
     selectorPaths: typeof raw.selector_paths_json === "string" ? JSON.parse(raw.selector_paths_json) : null,
@@ -117,7 +117,7 @@ export function decodeJournalRow(db: SqliteDb, raw: Record<string, unknown>, pro
 export function verifyJournalHistoryRow(db: SqliteDb, row: DecodedJournalRow): void {
   verifyJournalHistoryMetadata(db, row.admitted.metadata, row.history);
 }
-function verifyJournalHistoryMetadata(db: SqliteDb, metadata: AdmittedLiveUpdate["metadata"], history: DecodedJournalRow["history"]): void {
+export function verifyJournalHistoryMetadata(db: SqliteDb, metadata: AdmittedLiveUpdate["metadata"], history: DecodedJournalRow["history"]): void {
   const {binding, receipt} = metadata.accepted;
   journalIntegrity(history.metadataBytes === Buffer.byteLength(JSON.stringify(canonicalAcceptedMetadata(metadata))));
   const predecessor = db.prepare(`SELECT relay_database_namespace,accepted_event_count,accepted_evidence_digest FROM ${LIVE_JOURNAL_TABLE}
@@ -128,7 +128,8 @@ function verifyJournalHistoryMetadata(db: SqliteDb, metadata: AdmittedLiveUpdate
   journalIntegrity(previousCount < Number.MAX_SAFE_INTEGER && history.eventCount === previousCount + 1 &&
     history.evidenceDigest === nextAcceptedHistoryDigest(previousDigest, history.eventCount, metadata));
 }
-export function assertJournalCheckpointPosition(db: SqliteDb, row: DecodedJournalRow, budget?:{bytes:number;chargeBytes(value:number):void}): { count: number; bytes: number } {
+export function assertJournalCheckpointPosition(db: SqliteDb, row: {admitted: {metadata: AdmittedLiveUpdate["metadata"]}; checkpoint: {digest: string} | null;
+  restoreOperationId: string | null; history: {namespace: string}}, budget?:{bytes:number;chargeBytes(value:number):void}): { count: number; bytes: number } {
   const restored = verifyRestoreCheckpoint(db, row,budget?.bytes,budget?value=>budget.chargeBytes(value):undefined);
   const { binding, receipt } = row.admitted.metadata.accepted;
   const predecessor=db.prepare(`SELECT current_path,restore_fence_generation FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE} AND journal_cursor<? ORDER BY journal_cursor DESC LIMIT 1`).get(...documentParams(binding),receipt.journalCursor);

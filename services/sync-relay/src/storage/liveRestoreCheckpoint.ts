@@ -59,7 +59,7 @@ export function readRestoreAdmission(db:SqliteDb,namespace:string,operationId:st
     admission.preparation.point.journalCursor===intent.restorePointCursor && admission.preparation.point.receiptDigest===intent.restorePointReceiptDigest);
   return admission;
 }
-export function verifyRestoreCheckpoint(db:SqliteDb,row:{admitted:{metadata:AdmittedLiveUpdateMetadata};checkpoint:{digest:string;bytes:Uint8Array}|null;
+export function verifyRestoreCheckpoint(db:SqliteDb,row:{admitted:{metadata:AdmittedLiveUpdateMetadata};checkpoint:{digest:string}|null;
   restoreOperationId:string|null;history:{namespace:string}},maxBytes=Number.MAX_SAFE_INTEGER,chargeBytes?:(value:number)=>void):RestoreAdmission|null {
   if (row.restoreOperationId===null) return null;
   const admission=readRestoreAdmission(db,row.history.namespace,parseLiveUpdateIdentifier(row.restoreOperationId),maxBytes,chargeBytes);
