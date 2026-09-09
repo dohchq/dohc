@@ -355,7 +355,7 @@ it("closes a host capture when membership is full and leaves its redeemed ticket
 it("opens the owner bearer route without a recipient, browser cookie, ticket, or exchange key", async () => {
   const f = await fixture(limits, false, undefined, true);
   f.raw.exec("DELETE FROM sync_relay_share_grants");
-  const client = f.connect("");
+  const client = f.connect("", "", {cookie: "account=reader"});
   expect(await client.status).toBe(101);
   await client.until(() => client.received.some(frame => frame.kind === "welcome"));
   expect(client.received[0]).toMatchObject({kind: "welcome", hostEpoch: host.hostEpoch});

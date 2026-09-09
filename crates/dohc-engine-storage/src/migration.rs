@@ -1492,6 +1492,22 @@ CREATE UNIQUE INDEX idx_automation_claims_trigger_history
 CREATE INDEX idx_automation_claims_state
     ON automation_claims(workspace_id, state, created_at_ms, claim_id);
 
+CREATE TABLE ydoc_owner_bindings (
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+    relay_database_namespace TEXT NOT NULL,
+    binding_revision INTEGER NOT NULL CHECK (binding_revision > 0),
+    accepted_cursor INTEGER NOT NULL CHECK (accepted_cursor >= 0),
+    native_head_sequence INTEGER NOT NULL CHECK (native_head_sequence >= 0),
+    checkpoint_digest TEXT NOT NULL REFERENCES binary_blobs(sha256),
+    max_pending_bytes INTEGER NOT NULL CHECK (max_pending_bytes > 0),
+    max_pending_age_ms INTEGER NOT NULL CHECK (max_pending_age_ms > 0),
+    PRIMARY KEY (workspace_id, main_version_id, object_id, lineage_claim_id)
+) STRICT;
+
 CREATE TABLE live_owner_adoptions (
     relay_database_namespace TEXT NOT NULL,
     adoption_id TEXT NOT NULL,

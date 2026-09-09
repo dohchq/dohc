@@ -44,6 +44,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "live_accepted_updates",
     "live_accepted_checkpoints",
     "live_restore_fences",
+    "ydoc_owner_bindings",
     "live_owner_adoptions",
     "live_device_bootstraps",
     "live_device_settlements",

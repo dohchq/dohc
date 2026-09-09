@@ -535,6 +535,7 @@ where
     let mut probe = GateBaseProbe::default();
     let mut pending_after_append = None;
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
+        crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
         crate::live_update_application::require_restore_generation(tx, key, restore_generation)?;
         if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
             let recorded: Option<(String, i64)> = tx
@@ -2081,6 +2082,7 @@ pub fn record_update_in_tx(
     attribution: Option<&ChangeAttribution>,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
+    crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
     crate::live_update_application::require_restore_open(tx, key)?;
     record_authorized_update_in_tx(tx, key, update, actor_origin_id, attribution, now_ms)
 }
@@ -2165,6 +2167,7 @@ pub fn settle(
     let sv_bytes = persisted.doc.encode_state_vector();
 
     store.write_with(faults, |tx| {
+        crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
         crate::live_update_application::require_restore_open(tx, key)?;
         // Persist the content and its provenance state vector as blobs. The
         // content digest was computed once above; the settle rows below reuse

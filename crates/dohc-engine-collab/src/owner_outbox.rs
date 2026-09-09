@@ -14,6 +14,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod draft;
 mod native_source;
 pub(crate) use native_source::retain_native_source;
 pub use native_source::{OwnerOutboxNativeOrigin, OwnerOutboxNativeSource};
@@ -222,6 +223,7 @@ pub fn append_in_tx(
         &input.binding.object_id,
     )
     .map_err(|_| OwnerOutboxError::InvalidInput("invalid document identity"))?;
+    draft::require_ordinary_write(tx, &key).map_err(map_restore_error)?;
     let current = crate::live_update_application::restore_fence::resumed_binding(tx, &key)
         .map_err(map_restore_error)?;
     if current
@@ -846,6 +848,10 @@ pub fn acknowledge(
     let outcome = store.write_with(&NoFaults, |tx| {
         let parent = read_parent(tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
         require_workspace(workspace_id, &parent.binding.workspace_id)?;
+        let key = crate::DocKey::new(&parent.binding.workspace_id, &parent.binding.main_version_id, &parent.binding.object_id)
+            .map_err(|_| OwnerOutboxError::Corrupt)?;
+        // Observed drafts need a durable accepted checkpoint before pending refs can be released.
+        draft::require_ordinary_write(tx, &key).map_err(map_restore_error)?;
         if parent.state == OwnerOutboxState::Quarantined {
             return Err(OwnerOutboxError::Frozen);
         }
@@ -1123,7 +1129,9 @@ fn write_sql(error: rusqlite::Error) -> OwnerOutboxError {
 
 fn map_restore_error(error: crate::CollabError) -> OwnerOutboxError {
     match error {
-        crate::CollabError::RestoreFenced => OwnerOutboxError::Frozen,
+        crate::CollabError::RestoreFenced | crate::CollabError::OwnerOutboxFrozen => {
+            OwnerOutboxError::Frozen
+        }
         crate::CollabError::Storage(error) => OwnerOutboxError::Storage(error),
         _ => OwnerOutboxError::Corrupt,
     }
