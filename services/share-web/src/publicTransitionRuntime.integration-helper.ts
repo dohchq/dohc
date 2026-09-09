@@ -1,17 +1,18 @@
-import {readFileSync} from "node:fs";
+import {mkdirSync, readFileSync, writeFileSync} from "node:fs";
 import {join} from "node:path";
 import {DatabaseSync} from "node:sqlite";
 import {WebSocket} from "ws";
 import type {BrowserContext, Locator, Page} from "@playwright/test";
 import {expect as browserExpect} from "@playwright/test";
 import {expect} from "vitest";
+import * as Y from "yjs";
 import {yDocToMarkdown} from "@dohc/ydoc-projection";
 import type {LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import {OwnerRestoreActionResponse} from "../../../apps/desktop/src/ipc/ownerRestoreContract.js";
 import type {startServiceLiveHost} from "../../sync-relay/src/serviceLiveHost.js";
 import type {SyncRelayStorage} from "../../sync-relay/src/storage.js";
 import type {createPublicLinkWireProof} from "./publicLinkWireProof.integration-helper.js";
-import {transitionNames, workloadHash as hash, validateInterruptedPublicUpdate, type LoadedPublicTransitions} from "./publicTransitionWorkload.integration-helper.js";
+import {transitionNames, workloadHash as hash, deriveRestoreContinuation, validateInterruptedPublicUpdate, type LoadedPublicTransitions} from "./publicTransitionWorkload.integration-helper.js";
 
 export interface PublicProofPage {context: BrowserContext; page: Page; editor: Locator; discriminator: string}
 export interface PublicTransitionFixture {document: LiveDocumentKey; path: string; link: {url: string; shareId: string; grantId: string}}
@@ -53,6 +54,8 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
     for (const peer of peers) await browserExpect.poll(async () => hash(Buffer.from(await peer.editor.textContent() ?? "")), {timeout: h.timeoutMs}).toBe(hash(selected.baseline.editorText));
     const writer = peers.pop()!;
     const extraContexts: BrowserContext[] = [];
+    let restoredViewer: Page | undefined;
+    let continuationEvidence: Record<string, unknown> | undefined;
     await writer.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
     await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency - 1);
     let socket = await h.wire.connect(writer.context, await h.wire.ticket(writer.context, writer.discriminator, fixture.document.objectId), `transition-${name}`);
@@ -128,7 +131,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
         const denied = await writer.context.request.post(h.audience + "/api/live/link-ticket", {data: {discriminator: writer.discriminator, objectId: fixture.document.objectId}, headers: {origin: h.audience}});
         expect(denied.status()).toBe(404);
       }
-      if (selected.resumed) {
+      if (selected.resumed || selected.continuation) {
         if (name === "restore") {
           for (const peer of peers) await peer.context.close(); peers.length = 0;
           const fresh = await h.ownerRequest(`/sync/${fixture.document.workspaceId}/shares/${fixture.link.shareId}/links`, {access: "edit"});
@@ -137,6 +140,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
           const identity = await h.openLink(fresh.url, h.concurrency - 1);
           extraContexts.push(identity.context);
           await identity.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
+          restoredViewer = identity.page;
           socket = await h.wire.connect(identity.context, await h.wire.ticket(identity.context, identity.discriminator, fixture.document.objectId), `resumed-${name}`);
         } else {
           if (name === "restart") for (const peer of peers) {await peer.page.getByRole("button", {name: "Retry connection", exact: true}).click(); await browserExpect(peer.editor).toHaveAttribute("contenteditable", "true", {timeout: h.timeoutMs});}
@@ -145,12 +149,50 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
         await socket.sync();
         if (name === "restart") expect(socket.hostEpoch!).toBeGreaterThan(oldEpoch!);
         await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency);
-        await apply(selected.resumed);
+        if (selected.continuation) {
+          const continuation = selected.continuation;
+          for (const peer of peers) await browserExpect.poll(async () => hash(Buffer.from(await peer.editor.textContent() ?? "")), {timeout: h.timeoutMs}).toBe(hash(selected.baseline.editorText));
+          const directory = join(h.root, "restore-continuation"); mkdirSync(directory);
+          const save = (name: string, bytes: Uint8Array) => {
+            const path = join(directory, name); writeFileSync(path, bytes, {flag: "wx"});
+            return {path, sha256: hash(bytes), byteLength: bytes.length};
+          };
+          const checkpoint = Y.encodeStateAsUpdate(socket.doc), restoredCheckpoint = save("restored-checkpoint.bin", checkpoint);
+          const generated = deriveRestoreContinuation(checkpoint, continuation.recipe, selected.baseline.markdown, continuation.expected.markdown,
+            [...selected.updates.map(update => update.bytes), selected.interrupted!.bytes]);
+          continuationEvidence = {kind: "runtime-derived-after-native-restore", manifest: workload.manifestPin,
+            recipe: continuation.recipePin, deliveryId: continuation.deliveryId, restoredCheckpoint,
+            candidate: save("candidate.bin", generated.bytes), projectedMarkdown: save("projected.md", generated.markdown),
+            writerClientId: generated.clientId, restoredStateVectorSha256: generated.restoredStateVectorSha256,
+            expected: {markdownSha256: hash(continuation.expected.markdown), editorTextSha256: hash(continuation.expected.editorText), viewTextSha256: hash(continuation.expected.viewText)},
+            preselectedCandidate: false, verdict: "INCOMPLETE"};
+          Object.assign(stage, {continuation: continuationEvidence});
+          save("derivation.json", Buffer.from(JSON.stringify(continuationEvidence, null, 2) + "\n"));
+          const actual = h.storage.readLiveUpdateJournalCut({document: fixture.document});
+          if (actual.kind !== "cut") throw new Error("Restore continuation lacks a current journal cut.");
+          const admission = validateInterruptedPublicUpdate({document: fixture.document, currentPath: fixture.path,
+            checkpoint: actual.cut.checkpoint.bytes, suffix: actual.cut.suffix.map(row => row.bytes), candidate: generated.bytes,
+            bounds: h.interruptedBounds, validate: h.validate});
+          expect(admission.projectedMarkdownSha256).toBe(hash(continuation.expected.markdown));
+          const binding = h.storage.resolveCurrentLiveDocumentBinding({document: fixture.document,
+            actor: {kind: "owner", userId: h.ownerUserId, shareId: fixture.link.shareId}});
+          if (binding.kind !== "current") throw new Error("Restored continuation binding missing.");
+          const admissionReceipt = save("admission.json", Buffer.from(JSON.stringify({admission, binding: binding.binding,
+            bounds: h.interruptedBounds, checkpointSha256: hash(actual.cut.checkpoint.bytes),
+            suffixSha256: actual.cut.suffix.map(row => hash(row.bytes))}, null, 2) + "\n"));
+          Object.assign(continuationEvidence, {admission, admissionReceipt});
+          await apply({deliveryId: continuation.deliveryId, bytes: generated.bytes, expected: continuation.expected});
+        } else await apply(selected.resumed!);
       }
       if (name !== "selectorDrift") {
-        const expected = selected.resumed?.expected ?? before;
+        const expected = selected.continuation?.expected ?? selected.resumed?.expected ?? before;
         const settled = await h.host().settle(fixture.document); expect(settled.materialized).toBe(true);
         expect(hash(readFileSync(join(h.workspace, fixture.path)))).toBe(hash(expected.markdown));
+        if (restoredViewer && continuationEvidence) {
+          await browserExpect.poll(async () => hash(Buffer.from(await restoredViewer!.locator("article.markdown").textContent() ?? "")), {timeout: h.timeoutMs}).toBe(hash(expected.viewText));
+          Object.assign(continuationEvidence, {editorWitnessVerified: true, viewWitnessVerified: true, verdict: "PASS"});
+          writeFileSync(join(h.root, "restore-continuation", "result.json"), JSON.stringify(continuationEvidence, null, 2) + "\n", {flag: "wx"});
+        }
       }
       Object.assign(stage, {interruptedAt, restored, verdict: "PASS"});
     } finally {

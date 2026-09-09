@@ -75,7 +75,8 @@ const projectionPins=value=>[value.markdown,value.editorText,value.viewText];
 const transitionPins=Object.values(transitionManifest.cases).flatMap(value=>[
  value.baseline.checkpoint,...projectionPins(value.baseline),
  ...value.updates.flatMap(update=>[update.bytes,...projectionPins(update.expected)]),
- ...(value.interrupted?[value.interrupted.bytes]:[]),...(value.resumed?[value.resumed.bytes,...projectionPins(value.resumed.expected)]:[])
+ ...(value.interrupted?[value.interrupted.bytes]:[]),...(value.resumed?[value.resumed.bytes,...projectionPins(value.resumed.expected)]:[]),
+ ...(value.continuation?[value.continuation.recipe,...projectionPins(value.continuation.expected)]:[])
 ]).map(pin=>({...pin,path:resolve(dirname(release.transitions.path),pin.path)}));
 async function verifyTransitions(){await verify(release.transitions);for(const pin of transitionPins)assert.equal((await verify(pin)).length,pin.byteLength);}
 await verifyTransitions();
@@ -119,6 +120,14 @@ try{
  assert.deepEqual(proof.results.suppliedWireWorkload.manifest,release.workload);
  assert.deepEqual(proof.results.loadedTransitions.map(row=>row.name),transitionNames);
  for(const row of proof.results.loadedTransitions){assert.equal(row.verdict,'PASS');assert.equal(row.concurrency,release.admittedConcurrency);}
+ const continuation=proof.results.loadedTransitions.find(row=>row.name==='restore').continuation;
+ assert.equal(continuation.kind,'runtime-derived-after-native-restore');assert.equal(continuation.preselectedCandidate,false);
+ assert.equal(continuation.verdict,'PASS');assert.equal(continuation.editorWitnessVerified,true);assert.equal(continuation.viewWitnessVerified,true);
+ assert.deepEqual(continuation.manifest,release.transitions);assert.equal(continuation.deliveryId,transitionManifest.cases.restore.continuation.deliveryId);
+ assert.equal(continuation.recipe.sha256,transitionManifest.cases.restore.continuation.recipe.sha256);
+ for(const pin of [continuation.restoredCheckpoint,continuation.candidate,continuation.projectedMarkdown,continuation.admissionReceipt])assert.equal((await verify(pin)).length,pin.byteLength);
+ assert.equal(continuation.admission.updateSha256,continuation.candidate.sha256);
+ assert.equal(continuation.admission.projectedMarkdownSha256,transitionManifest.cases.restore.continuation.expected.markdown.sha256);
  assert.equal(proof.results.publicMixedPresence.verdict,'PASS');assert.equal(proof.results.publicMixedPresence.concurrency,release.admittedConcurrency);
  assert.equal(proof.results.automaticView.verdict,'PASS');assert.equal(proof.results.automaticView.readContexts,release.automaticView.readContexts);
  assert.equal(proof.results.automaticView.manualSettlementsDuringMeasurement,0);assert.equal(proof.results.automaticView.acceptedEnvelopeMs,5000);
