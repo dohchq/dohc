@@ -31,6 +31,7 @@ type EngineAuthorityState = {
 
 interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   existingOwnerFor?: ExistingOwnerDeviceConfig["ownerFor"];
+  findWorkspace(workspaceId: string): RegistryEntry | null;
   app: Pick<App, "isPackaged" | "getAppPath" | "quit">;
   dialog: Pick<Dialog, "showErrorBox">;
   process: { env: NodeJS.ProcessEnv; resourcesPath?: string };
@@ -70,14 +71,15 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   let ownerHostModule: typeof import("./desktopOwnerHost") | undefined;
   let ownerHostGeneration = 0;
   let ownerWorkspaceCloses = 0;
-  let ownerHostShutdown = false;
   const stopOwnerHost = () => {
     ownerHostGeneration += 1;
-    ownerHost?.stop(); ownerHost = undefined;
+    const previous = ownerHost;
+    ownerHost = undefined;
+    previous?.stop();
   };
   const startOwnerHost = () => {
     stopOwnerHost();
-    if (ownerHostShutdown || ownerWorkspaceCloses || !ownerHostModule || !ownerHostConfig || !rustEngineDaemon || !rustEngineWorkspaceSessions || !rustEngineSessionSource || !dependencies.existingOwnerFor) return;
+    if (isQuitting() || ownerWorkspaceCloses || !ownerHostModule || !ownerHostConfig || !rustEngineDaemon || !rustEngineWorkspaceSessions || !rustEngineSessionSource || !dependencies.existingOwnerFor) return;
     const daemon = rustEngineDaemon, sessions = rustEngineWorkspaceSessions, source = rustEngineSessionSource, config = ownerHostConfig;
     const generation = ownerHostGeneration;
     ownerHost = ownerHostModule.startDesktopOwnerHost({config,ownerFor: dependencies.existingOwnerFor,
@@ -86,19 +88,24 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         const client = daemon.currentClient();
         if (!(client instanceof EngineClient)) throw new Error("Owner host requires the desktop daemon client.");
         const workspaces = [];
+        const bindingChecks: (() => void)[] = [];
         for (const workspaceId of config.workspaceIds) {
+          if (!dependencies.findWorkspace(workspaceId)) continue;
           workspaces.push(await workspaceAuthorities.withAuthority(workspaceId,async lease => {
             lease.assertCurrent();
             const workspace = {workspaceId,rootPath: lease.binding.canonicalRootPath,attachmentId: lease.binding.attachmentId};
             return sessions.run(workspace, async binding => {
               lease.assertCurrent();
               if (daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("Owner host daemon changed.");
+              bindingChecks.push(() => sessions.assertCurrentBinding(workspace, binding));
               return {workspaceId,workspaceHandle: binding.workspace};
             });
           }));
         }
+        if (!workspaces.length) throw new Error("Owner host has no registered workspaces.");
         return {client,workspaces,assertCurrent: () => {
           if (isQuitting() || ownerHostGeneration !== generation || daemon.currentClient() !== client) throw new Error("Owner host daemon retired.");
+          for (const check of bindingChecks) check();
         }};
       },
     });
@@ -126,36 +133,48 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     return rustEngineWorkspaceSessions;
   }
 
+  async function withOwnerHostPaused<Result>(
+    pause: boolean,
+    work: () => Promise<Result>,
+  ): Promise<Result> {
+    if (!pause) return work();
+    ownerWorkspaceCloses += 1;
+    try {
+      stopOwnerHost();
+      return await work();
+    } finally {
+      ownerWorkspaceCloses -= 1;
+      if (!ownerWorkspaceCloses) startOwnerHost();
+    }
+  }
+
   async function closeRelayTransportWorkspace(
     workspace: string | EngineWorkspace,
   ): Promise<void> {
     const workspaceId =
       typeof workspace === "string" ? workspace : workspace.workspaceId;
     const reconnectOwner = ownerHostConfig?.workspaceIds.includes(workspaceId) === true;
-    if (reconnectOwner) { ownerWorkspaceCloses += 1; stopOwnerHost(); }
-    try {
+    await withOwnerHostPaused(reconnectOwner, async () => {
       if (rustEngineRelayClient) {
         await rustEngineRelayClient.closeWorkspace(workspace);
         return;
       }
       await rustEngineWorkspaceSessions?.closeWorkspace(workspace);
       relayTransportRoutes.releaseWorkspace(workspaceId);
-    } finally {
-      if (reconnectOwner) { ownerWorkspaceCloses -= 1; if (!ownerWorkspaceCloses) startOwnerHost(); }
-    }
+    });
   }
 
   async function closeAllRelayTransportWorkspaces(): Promise<void> {
-    ownerHostShutdown = true;
-    stopOwnerHost();
-    if (rustEngineRelayClient) {
-      await rustEngineRelayClient.closeAll();
-      return;
-    }
-    await rustEngineWorkspaceSessions?.closeAll();
-    for (const workspaceId of relayTransportRoutes.workspaceIds()) {
-      relayTransportRoutes.releaseWorkspace(workspaceId);
-    }
+    await withOwnerHostPaused(true, async () => {
+      if (rustEngineRelayClient) {
+        await rustEngineRelayClient.closeAll();
+        return;
+      }
+      await rustEngineWorkspaceSessions?.closeAll();
+      for (const workspaceId of relayTransportRoutes.workspaceIds()) {
+        relayTransportRoutes.releaseWorkspace(workspaceId);
+      }
+    });
   }
 
   // Test-only daemon restart seam (hermetic E2E: the daemon-kill spec needs the
@@ -277,9 +296,14 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource, {
         workspaceOpenDeadlineMs: 120_000,
       });
+      const sessions = rustEngineWorkspaceSessions;
       rustEngineRelayClient = new EngineRelayClient({
-        sessions: rustEngineWorkspaceSessions,
+        sessions,
         routes: relayTransportRoutes,
+        closeWorkspaceBinding: workspace => withOwnerHostPaused(
+          ownerHostConfig?.workspaceIds.includes(workspace.workspaceId) === true,
+          () => sessions.closeWorkspaceBinding(workspace).catch(() => undefined),
+        ),
       });
       startOwnerHost();
       console.info(

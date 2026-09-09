@@ -736,6 +736,16 @@ export class EngineWorkspaceSessions {
     await this.closeWorkspaceEntry(this.sessionKey(workspace), true);
   }
 
+  /** Checks a retained binding without opening a workspace or acquiring a run. */
+  assertCurrentBinding(workspace: EngineWorkspace, binding: EngineWorkspaceBinding): void {
+    const key = this.sessionKey(workspace), entry = this.entries.get(key);
+    if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry || entry.closing ||
+      entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath ||
+      entry.binding !== binding || binding.client !== this.source.currentClient()) {
+      throw new Error("Rust engine workspace binding retired.");
+    }
+  }
+
   /** Closes the daemon binding but preserves its session claim and policy. */
   async closeWorkspaceBinding(workspace: EngineWorkspace): Promise<void> {
     await this.closeWorkspaceEntry(this.sessionKey(workspace), false);

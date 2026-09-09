@@ -1,4 +1,4 @@
-import {readFileSync} from "node:fs";
+import {openSync,readSync,closeSync} from "node:fs";
 import {isAbsolute} from "node:path";
 import {EngineClient} from "@dohc/workspace-engine-client/daemon";
 import {connectDeviceHost,parseDeviceHostCredential,type ExistingOwnerDeviceConfig} from "@dohc/sync-relay/device-host";
@@ -14,20 +14,32 @@ interface DesktopOwnerHostConfig {
   transport: Omit<ExistingOwnerDeviceConfig,"client"|"workspaces"|"ownerFor">;
 }
 
+function readBoundedFile(path: string,limit: number,message: string): Buffer {
+  const buffer = Buffer.alloc(limit+1), fd = openSync(path,"r");
+  let length = 0;
+  try {
+    while (length < buffer.length) {
+      const read = readSync(fd,buffer,length,buffer.length-length,null);
+      if (!read) break;
+      length += read;
+    }
+  } finally {closeSync(fd);}
+  if (length > limit) throw new Error(message);
+  return buffer.subarray(0,length);
+}
+
 export function readDesktopOwnerHostConfig(path: string): DesktopOwnerHostConfig {
   if (!isAbsolute(path)) throw new Error("Owner host configuration path must be absolute.");
-  const bytes = readFileSync(path);
-  if (bytes.length > 1_048_576) throw new Error("Owner host configuration is too large.");
+  const bytes = readBoundedFile(path,1_048_576,"Owner host configuration is too large.");
   const input = JSON.parse(bytes.toString("utf8"));
   if (!input || Object.keys(input).sort().join() !== "control,credentialPath,nativeConfigPath,reconnectDelayMs,transport,url,version,workspaceIds" || input.version !== 1 ||
     typeof input.nativeConfigPath !== "string" || !isAbsolute(input.nativeConfigPath) || typeof input.credentialPath !== "string" || !isAbsolute(input.credentialPath) ||
     typeof input.url !== "string" || !Array.isArray(input.workspaceIds) || !input.workspaceIds.length || input.workspaceIds.some((id: unknown) => typeof id !== "string" || !id) ||
-    new Set(input.workspaceIds).size !== input.workspaceIds.length || !Number.isSafeInteger(input.reconnectDelayMs) || input.reconnectDelayMs < 1) throw new Error("Invalid private owner host configuration.");
-  const credentialBytes = readFileSync(input.credentialPath);
-  if (credentialBytes.length > 16_384) throw new Error("Owner host credential is too large.");
+    new Set(input.workspaceIds).size !== input.workspaceIds.length || !Number.isSafeInteger(input.reconnectDelayMs) || input.reconnectDelayMs < 1 || input.reconnectDelayMs > 2_147_483_647) throw new Error("Invalid private owner host configuration.");
+  const credentialBytes = readBoundedFile(input.credentialPath,16_384,"Owner host credential is too large.");
   const transport = input.transport;
   const fields = ["aggregateBytes","maxAdoptionBytes","maxAdoptionEvents","maxFrameBytes","maxQueuedBytes","maxRegistrations","maxUploads","requestDeadlineMs"];
-  if (!transport || Object.keys(transport).sort().join() !== fields.join() || fields.some(field => !Number.isSafeInteger(transport[field]) || transport[field] < 1)) throw new Error("Invalid private owner host transport budget.");
+  if (!transport || Object.keys(transport).sort().join() !== fields.join() || fields.some(field => !Number.isSafeInteger(transport[field]) || transport[field] < 1) || transport.requestDeadlineMs > 2_147_483_647) throw new Error("Invalid private owner host transport budget.");
   return {nativeConfigPath: input.nativeConfigPath,url: input.url,workspaceIds: input.workspaceIds,reconnectDelayMs: input.reconnectDelayMs,
     transport,credential: parseDeviceHostCredential(JSON.parse(credentialBytes.toString("utf8"))),control: parseDeviceControlLimits(input.control)};
 }
@@ -45,13 +57,19 @@ export function startDesktopOwnerHost(options: {
       const bound = await options.bindings();
       if (stopped) return;
       bound.assertCurrent();
-      const ownerFor: ExistingOwnerDeviceConfig["ownerFor"] = binding => {
-        bound.assertCurrent(); const owner = options.ownerFor(binding);
-        return {...owner,assertCurrent() {bound.assertCurrent(); owner.assertCurrent();}};
+      let connected: ReturnType<typeof connectDeviceHost> | undefined;
+      const assertCurrent = () => {
+        try {bound.assertCurrent();}
+        catch (error) {connected?.stop(); throw error;}
       };
-      connection = connectDeviceHost({url: options.config.url,credential: options.config.credential,limits: options.config.control,
-        onRegistered: () => bound.assertCurrent(),existingOwner: {...options.config.transport,...bound,ownerFor}});
-      await connection.closed;
+      const ownerFor: ExistingOwnerDeviceConfig["ownerFor"] = binding => {
+        assertCurrent(); const owner = options.ownerFor(binding);
+        return {...owner,assertCurrent() {assertCurrent(); owner.assertCurrent();}};
+      };
+      connected = connectDeviceHost({url: options.config.url,credential: options.config.credential,limits: options.config.control,
+        onRegistered: assertCurrent,existingOwner: {...options.config.transport,...bound,ownerFor}});
+      connection = connected;
+      await connected.closed;
     } catch (error) { if (!stopped) options.onError(error); }
     if (!stopped) {retry = setTimeout(() => {void connect();},options.config.reconnectDelayMs); retry.unref();}
   };

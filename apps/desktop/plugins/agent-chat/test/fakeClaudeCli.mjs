@@ -7,7 +7,6 @@
 //
 // Usage: node fakeClaudeCli.mjs <mode> [--version | auth status | -p ...]
 
-import { writeFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -61,11 +60,6 @@ function runSession() {
     const id = claudeArgs[claudeArgs.indexOf("--resume") + 1] ?? "unknown";
     process.stderr.write(`No conversation found with session ID: ${id}\n`);
     process.exit(1);
-  }
-
-  if (mode === "no-handshake") {
-    // Names the process that must not survive dohc giving up on it.
-    writeFileSync(join(process.cwd(), "no-handshake.pid"), String(process.pid));
   }
 
   const write = (text) => process.stdout.write(text);

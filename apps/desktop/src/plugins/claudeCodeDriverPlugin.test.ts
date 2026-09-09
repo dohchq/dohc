@@ -2,6 +2,7 @@ import { mkdir, cp, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { PLUGIN_CHILD_PROCESS_METHODS } from "@dohc/sdk/node";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   type AgentDriver,
@@ -46,6 +47,7 @@ interface ClaudeFixture {
   drivers: PluginAgentDrivers;
   host: PluginHost;
   workspaceRoot: string;
+  commandPids: Array<number | null>;
 }
 
 /**
@@ -70,6 +72,7 @@ async function startClaudePlugin(
 
   const broker = new PluginChildProcessBroker({ dohcDir: root, workspaceRoot });
   liveBrokers.push(broker);
+  const commandPids: Array<number | null> = [];
 
   let host: PluginHost | null = null;
   const drivers = createPluginAgentDrivers({
@@ -119,8 +122,15 @@ async function startClaudePlugin(
     stateDir: join(root, "state"),
     workspaceRoot,
     spawnTransport,
-    routeSdkRequest: (pluginId, method, params, spawnId, signal, emitEvent) =>
-      broker.invoke({ pluginId, spawnId, signal, emitEvent }, method, params),
+    routeSdkRequest: async (pluginId, method, params, spawnId, signal, emitEvent) => {
+      const result = await broker.invoke(
+        { pluginId, spawnId, signal, emitEvent }, method, params,
+      );
+      if (method === PLUGIN_CHILD_PROCESS_METHODS.spawnCommand) {
+        commandPids.push((result as { pid: number | null }).pid);
+      }
+      return result;
+    },
     onDriversRegistered: (pluginId, spawnId, declared) =>
       drivers.register(pluginId, spawnId, declared),
     onDriverEvent: (pluginId, spawnId, params) => drivers.handleEvent(pluginId, spawnId, params),
@@ -155,7 +165,7 @@ async function startClaudePlugin(
     20_000,
   );
 
-  return { drivers, host, workspaceRoot };
+  return { drivers, host, workspaceRoot, commandPids };
 }
 
 function claudeDriver(fixture: ClaudeFixture): AgentDriver {
@@ -584,10 +594,10 @@ describe("dohc's Claude Code driver, as a plugin", () => {
     );
 
     // And the harness dohc gave up on is gone, not left running.
-    const pid = Number(
-      await readFile(join(fixture.workspaceRoot, "no-handshake.pid"), "utf8"),
-    );
-    expect(Number.isFinite(pid)).toBe(true);
+    expect(fixture.commandPids).toHaveLength(1);
+    const pid = fixture.commandPids[0];
+    expect(pid).toBeGreaterThan(0);
+    if (pid == null || pid <= 0) throw new Error("The broker did not report a child PID.");
     await until(
       () => {
         try {

@@ -94,6 +94,41 @@ function daemonRefusal(
 }
 
 describe("EngineWorkspaceSessions", () => {
+  it("retires retained binding checks across a same-client retry even if the native handle is reused", async () => {
+    const workspace = await tempWorkspace(), client = new MockClient("same-handle");
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+    try {
+      const retained = await sessions.run(workspace, async binding => binding);
+      expect(() => sessions.assertCurrentBinding(workspace, retained)).not.toThrow();
+      let calls = 0;
+      const rebound = await sessions.run(workspace, async binding => {
+        if (++calls === 1) throw daemonRefusal("CONFLICT", "workspace moved", "afterReconnect");
+        return binding;
+      });
+      expect(rebound.workspace).toBe(retained.workspace);
+      expect(rebound.client).toBe(retained.client);
+      expect(() => sessions.assertCurrentBinding(workspace, retained)).toThrow("binding retired");
+      expect(() => sessions.assertCurrentBinding(workspace, rebound)).not.toThrow();
+    } finally { await sessions.closeAll(); }
+  });
+
+  it("retires retained binding checks while a close waits for an active run", async () => {
+    const workspace = await tempWorkspace(), client = new MockClient("held-handle");
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+    const entered = deferred<void>(), release = deferred<void>();
+    const retained = await sessions.run(workspace, async binding => binding);
+    const active = sessions.run(workspace, async () => { entered.resolve(); await release.promise; });
+    let closing: Promise<void> | undefined;
+    try {
+      await entered.promise;
+      closing = sessions.closeWorkspaceBinding(workspace);
+      expect(() => sessions.assertCurrentBinding(workspace, retained)).toThrow("binding retired");
+      expect(client.requests.filter(row => row.method === "workspace.close")).toHaveLength(0);
+      release.resolve(); await active; await closing;
+      expect(() => sessions.assertCurrentBinding(workspace, retained)).toThrow("binding retired");
+    } finally { release.resolve(); await active; await closing; await sessions.closeAll(); }
+  });
+
   it("keeps a committed scene read-only while asset materialization is pending", () => {
     const refusal = daemonRefusal(
       "OVERLOADED",
