@@ -1054,7 +1054,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 if ops.is_empty() {
                     break;
                 }
-                self.upload_missing_blobs(store, workspace_id, &identity, &ops)?;
+                self.upload_missing_blobs(store, workspace_id, &identity, ops)?;
 
                 let mut conflict = false;
                 for batch in ops.chunks(crate::MAX_PUSH_OPS_PER_BATCH) {
@@ -1937,6 +1937,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// stops at that bound instead of failing after it, and records the
     /// journal position it stopped at, so the rest travels in the next submit.
     /// `more_pending` on the outcome says a further submit has more to offer.
+    #[allow(clippy::too_many_arguments)]
     pub fn submit_share_proposal(
         &self,
         store: &mut EngineStore,

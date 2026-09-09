@@ -333,16 +333,12 @@ fn workspace_push_keeps_blocked_origin_position_and_continues_other_origins() {
         &NoFaults,
     )
     .unwrap();
-    journal_local_replication_op(
+    apply_replication_envelope(
         &mut store,
-        "ws",
-        "other",
-        "epoch-1",
-        "stream-1",
-        "doc.put",
-        &json!({"id":"safe"}),
-        11,
+        &mut WriterDocCache::new(),
+        &envelope("other", 0, "probe.safe", json!({})),
         &NoFaults,
+        &NoLiveLeases,
     )
     .unwrap();
     let client = RelaySyncClient::new(FakeRelay::default());

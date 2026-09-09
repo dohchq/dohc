@@ -30,6 +30,9 @@ async fn earlier_page_write_materializes_the_current_deletion_before_cursor_comm
         let mut store = EngineStore::open(&db, 1).unwrap();
         let mut domain = VersionedTextStore::new(&mut store);
         domain
+            .ensure_main_version("workspace", "main", 0, &NoFaults)
+            .unwrap();
+        domain
             .write_text(&write("old", "write", 1), &NoFaults)
             .unwrap();
         domain
@@ -85,6 +88,9 @@ async fn earlier_page_delete_materializes_the_current_write_instead_of_erasing_i
     {
         let mut store = EngineStore::open(&db, 1).unwrap();
         let mut domain = VersionedTextStore::new(&mut store);
+        domain
+            .ensure_main_version("workspace", "main", 0, &NoFaults)
+            .unwrap();
         domain
             .write_text(&write("new head", "recreated", 2), &NoFaults)
             .unwrap();

@@ -38,7 +38,7 @@ impl Fixture {
                     path: "notes/owner.md".into(),
                     text: text.clone(),
                     moment_id: "original".into(),
-                    metadata_origin: "test".into(),
+                    metadata_origin: "api".into(),
                     metadata_summary: None,
                     metadata_correlation_id: None,
                     author_json: None,
@@ -216,7 +216,7 @@ async fn ordinary_same_path_moment_on_adopted_owner_is_retained_and_acknowledged
             "payloadAfterPath":f.binding.current_path, "metadata":{"origin":"sync"},
             "beforePresent":"present", "beforeObjectId":"object", "beforeVersionId":"main",
             "beforePath":f.binding.current_path, "beforeBlobSha256":hex_sha256(f.text.as_bytes()),
-            "beforeUpdatedAtMs":1, "beforeLatestMomentId":"original", "beforeMetadata":{"origin":"test"}
+            "beforeUpdatedAtMs":1, "beforeLatestMomentId":"original", "beforeMetadata":{"origin":"api"}
         }),
     };
     let mut cache = dohc_engine_collab::WriterDocCache::new();
