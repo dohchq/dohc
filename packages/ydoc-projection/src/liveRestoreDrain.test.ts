@@ -1,6 +1,9 @@
 import { afterEach, expect, it } from "vitest";
+import * as Y from "yjs";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
-import { registered, host, cleanupLiveDeliveryFixtures } from "./liveCommittedDeliveryTestSupport.js";
+import { registered, host, policy, hash, cleanupLiveDeliveryFixtures } from "./liveCommittedDeliveryTestSupport.js";
+import {resolveLiveRestorePoint} from "./liveRestorePoint.js";
+import {markdownToYDoc, yDocToMarkdown} from "./import-export.js";
 import { createLiveJournalHistoryAuthority } from "../../../services/sync-relay/src/storage/liveJournalHistory.js";
 import { beginStopRestore, advanceStopRestoreFence, readStopRestore, type StopRestoreIntent } from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
@@ -9,8 +12,8 @@ import type {NativeRestoreFenceReceipt} from "../../../services/sync-relay/src/l
 import { openSyncRelayStorage } from "../../../services/sync-relay/src/storage.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
-function fixture(kind: "bootstrap" | "owner" = "bootstrap",mode: "service" | "device" = "device") {
-  const coordinate = {...host,mode}, f = registered({host: coordinate}), context = f.storage as StorageContext;
+function fixture(kind: "bootstrap" | "owner" = "bootstrap",mode: "service" | "device" = "device", baselineBytes?: Uint8Array) {
+  const coordinate = {...host,mode}, f = registered({host: coordinate, baselineBytes}), context = f.storage as StorageContext;
   const history = createLiveJournalHistoryAuthority({namespace: "restore-test",reconciled: true});
   const store = f.storage.createLiveCommittedDeliveryStore(history), document = f.input.evidence.document;
   const intent: StopRestoreIntent = {deliveryKind: kind,operationId: "restore",ownerUserId: "owner",document,
@@ -365,6 +368,86 @@ function ownerOriginProofFixture(mode: "service" | "device" = "device") {
   const input = {...f.lookup, maxBytes: 1_000_000, maxEvents: 10};
   return {...f, original: structuredClone({binding: original.binding, cut: original.cut}), nativeReceipt, input};
 }
+
+it.each(["service", "device"] as const)("resolves the selected owner restore point from retained %s bytes, excluding later edits", mode => {
+  const f = ownerOriginProofFixture(mode);
+  try {
+    expect(() => f.store.captureStopRestorePoint(f.input)).toThrow();
+    f.store.acknowledgeStopRestoreFence(f.lookup, f.nativeReceipt);
+    const before = f.journalRows();
+    const capture = f.store.captureStopRestorePoint(f.input);
+    expect(capture.checkpoint.cursor).toBe(0);
+    expect(capture.events).toHaveLength(1);
+    const point = resolveLiveRestorePoint(capture, policy);
+    const expected = "---\npoint: point\n---\n\nHello";
+    expect(point).toEqual({...capture.point, markdownDigest: hash(Buffer.from(expected)), projectionDigest: hash(Buffer.from(expected))});
+    expect(point.markdownDigest).not.toBe(hash(Buffer.from(yDocToMarkdown(f.doc))));
+    expect(f.journalRows()).toEqual(before);
+    expect(() => resolveLiveRestorePoint(capture, {...policy, maxStructVisits: 1})).toThrow(/capacity-refused/);
+  } finally {f.close();}
+});
+
+it("resolves a baseline restore point after native bootstrap fencing", () => {
+  const f = readyNativeFence("bootstrap", "service", true);
+  try {
+    f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt);
+    const capture = f.store.captureStopRestorePoint({...f.lookup, maxBytes: 1_000_000, maxEvents: 10});
+    expect(capture.events).toHaveLength(0);
+    expect(resolveLiveRestorePoint(capture, policy)).toEqual({journalCursor: 0, receiptDigest: f.intent.restorePointReceiptDigest,
+      markdownDigest: hash(Buffer.from("Hello")), projectionDigest: hash(Buffer.from("Hello"))});
+  } finally {f.close();}
+});
+
+it("keeps exact source and canonical projection digests distinct for a restore point", () => {
+  const source = "# Hello\n\n", doc = markdownToYDoc(source);
+  const projection = yDocToMarkdown(doc), meta = doc.getMap("meta");
+  meta.set("dohcMarkdownSource", source);
+  meta.set("dohcMarkdownSourceSha256", hash(Buffer.from(source)));
+  meta.set("dohcMarkdownSourceProjectionSha256", hash(Buffer.from(projection)));
+  const baseline = Y.encodeStateAsUpdate(doc); doc.destroy();
+  const f = fixture("bootstrap", "device", baseline);
+  try {
+    f.fence(); const drain = f.open(), next = f.store.nextStopRestoreCut(drain);
+    if (next.kind !== "bootstrap") throw Error(next.kind);
+    f.store.acknowledgeStopRestoreBootstrap(drain, bootstrapAck(next.baseline));
+    f.store.completeStopRestoreCut(drain);
+    const receipt = {operation: f.store.pendingStopRestoreFence(f.lookup).operation, localHeadSequence: 0, recordedAtMs: 100};
+    f.store.acknowledgeStopRestoreFence(f.lookup, receipt);
+    const point = resolveLiveRestorePoint(f.store.captureStopRestorePoint({...f.lookup, maxBytes: 1_000_000, maxEvents: 10}), policy);
+    expect(point.markdownDigest).toBe(hash(Buffer.from(source)));
+    expect(point.projectionDigest).toBe(hash(Buffer.from(projection)));
+    expect(point.markdownDigest).not.toBe(point.projectionDigest);
+  } finally {f.close();}
+});
+
+it("does not select a checkpoint after the chosen point", () => {
+  const f = ownerOriginProofFixture();
+  try {
+    f.store.acknowledgeStopRestoreFence(f.lookup, f.nativeReceipt);
+    const expected = resolveLiveRestorePoint(f.store.captureStopRestorePoint(f.input), policy);
+    const future = Y.encodeStateAsUpdate(f.doc);
+    f.raw.prepare("UPDATE sync_relay_live_update_journal SET validation_checkpoint_bytes=?,validation_checkpoint_sha256=? WHERE journal_cursor=(SELECT MAX(journal_cursor) FROM sync_relay_live_update_journal)").run(future, hash(future));
+    const capture = f.store.captureStopRestorePoint(f.input);
+    expect(capture.checkpoint.cursor).toBe(0);
+    expect(resolveLiveRestorePoint(capture, policy)).toEqual(expected);
+  } finally {f.close();}
+});
+
+it.each(["bytes", "authority", "receipt", "bound"])("refuses selected restore point %s drift", damage => {
+  const f = ownerOriginProofFixture();
+  try {
+    f.store.acknowledgeStopRestoreFence(f.lookup, f.nativeReceipt);
+    if (damage === "bound") {
+      expect(() => f.store.captureStopRestorePoint({...f.input, maxBytes: 1})).toThrow(/bounds/);
+      return;
+    }
+    const capture = f.store.captureStopRestorePoint(f.input);
+    if (damage === "bytes") capture.events[0]!.updateBytes[0] ^= 1;
+    if (damage === "authority") f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='open'");
+    if (damage === "receipt") capture.nativeReceipt.localHeadSequence++;
+    expect(() => resolveLiveRestorePoint(capture, policy)).toThrow();
+  } finally {f.close();}
+});
 
 it.each(["service", "device"] as const)("recovers the original owner prefix after %s fencing and relay restart", mode => {
   const f = ownerOriginProofFixture(mode);

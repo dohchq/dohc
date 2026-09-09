@@ -86,6 +86,14 @@ export interface RestoreOwnerOriginCapture extends OwnerCutCapture {
   readonly nativeReceipt: NativeRestoreFenceReceipt;
   readonly point: { journalCursor: number; receiptDigest: string };
 }
+export interface RestorePointCapture {
+  readonly binding: LiveObjectBinding;
+  readonly checkpoint: {cursor: number; bytes: Uint8Array; digest: string};
+  readonly events: readonly AdmittedLiveUpdate[];
+  readonly point: {journalCursor: number; receiptDigest: string};
+  readonly nativeReceipt: NativeRestoreFenceReceipt;
+  assertCurrent(): void;
+}
 export interface OwnerDeliveryCapture {
   binding: LiveObjectBinding;
   assertCurrent(): void;
@@ -928,6 +936,65 @@ export class LiveCommittedDeliveryStore {
     capture.assertCurrent();
     // This proof is not registered in #ownerCuts and grants no adoption or delivery authority.
     return capture;
+  }
+  captureStopRestorePoint(input: StopRestoreLookup & {
+    host: LiveHostConnectionCoordinate; maxBytes: number; maxEvents: number;
+  }): RestorePointCapture {
+    const lookup = {operationId: parseLiveUpdateIdentifier(input.operationId), workspaceId: parseLiveUpdateIdentifier(input.workspaceId),
+      ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)};
+    const host = snapshotHostCoordinate(input.host), maxBytes = authorityInteger(input.maxBytes, 1), maxEvents = authorityInteger(input.maxEvents, 1);
+    const saved = this.#storage.readTx(() => {
+      const {operation, authority} = this.#restore(lookup, host);
+      integrity(operation.phase === "native-fenced" && operation.nativeReceipt);
+      const document = operation.intent.document, through = operation.intent.restorePointCursor;
+      const checkpointHeader = this.#storage.db.prepare(`SELECT journal_cursor, length(validation_checkpoint_bytes) AS bytes, length(update_bytes) AS update_bytes FROM ${LIVE_JOURNAL_TABLE}
+        WHERE ${WHERE_DOCUMENT} AND journal_cursor<=? AND validation_checkpoint_bytes IS NOT NULL ORDER BY journal_cursor DESC LIMIT 1`)
+        .get(...documentParams(document), through);
+      const floor = checkpointHeader ? authorityInteger(checkpointHeader.journal_cursor, 1) : 0;
+      const counts = this.#storage.db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(length(update_bytes)),0) AS bytes FROM ${LIVE_JOURNAL_TABLE}
+        WHERE ${WHERE_DOCUMENT} AND journal_cursor>? AND journal_cursor<=?`).get(...documentParams(document), floor, through)!;
+      const count = authorityInteger(counts.count);
+      let bytes = authority.baselineBytes.byteLength + Buffer.byteLength(JSON.stringify(operation.nativeReceipt));
+      if (checkpointHeader) bytes += authorityInteger(checkpointHeader.bytes, 1) + authorityInteger(checkpointHeader.update_bytes, 1);
+      if (count > maxEvents || count > 4094 || bytes > maxBytes || authorityInteger(counts.bytes) > maxBytes - bytes) throw new Error("Restore point exceeds configured bounds.");
+      let checkpoint: RestorePointCapture["checkpoint"];
+      let terminalDigest = authority.baselineDigest;
+      if (checkpointHeader) {
+        const raw = this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor=?`).get(...documentParams(document), floor)!;
+        const row = decodeJournalRow(this.#storage.db, raw);
+        assertJournalCheckpointPosition(this.#storage.db, row); verifyJournalRow(row); integrity(row.checkpoint);
+        integrity(row.admitted.metadata.accepted.binding.currentPath === operation.basis.binding.currentPath && row.admitted.metadata.accepted.binding.restoreFenceGeneration === operation.intent.expectedFence);
+        bytes += Buffer.byteLength(JSON.stringify(row.admitted.metadata)) + 8;
+        if (bytes > maxBytes) throw new Error("Restore point exceeds configured bounds.");
+        checkpoint = {cursor: floor, bytes: row.checkpoint.bytes, digest: row.checkpoint.digest};
+        terminalDigest = row.admitted.metadata.accepted.receipt.updateDigest;
+      } else checkpoint = {cursor: 0, bytes: new Uint8Array(authority.baselineBytes), digest: authority.baselineDigest};
+      const events: AdmittedLiveUpdate[] = [];
+      let terminal = floor;
+      for (const raw of this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor>? AND journal_cursor<=? ORDER BY journal_cursor`)
+        .iterate(...documentParams(document), floor, through)) {
+        const row = decodeJournalRow(this.#storage.db, raw); verifyJournalRow(row);
+        const {binding, receipt} = row.admitted.metadata.accepted;
+        integrity(!row.checkpoint && binding.currentPath === operation.basis.binding.currentPath && binding.restoreFenceGeneration === operation.intent.expectedFence && receipt.journalCursor > terminal);
+        bytes += row.admitted.updateBytes.byteLength + Buffer.byteLength(JSON.stringify(row.admitted.metadata)) + 8;
+        if (bytes > maxBytes || events.length === maxEvents) throw new Error("Restore point exceeds configured bounds.");
+        terminal = receipt.journalCursor; terminalDigest = receipt.updateDigest; events.push(row.admitted);
+        if (terminal === through) assertJournalCheckpointPosition(this.#storage.db, row);
+      }
+      integrity(events.length === count && terminal === through && terminalDigest === operation.intent.restorePointReceiptDigest);
+      return {operation, baselineBytes: authority.baselineBytes, checkpoint, events};
+    });
+    let fingerprint: string;
+    const capture: RestorePointCapture = Object.freeze({binding: structuredClone(saved.operation.basis.ownerBinding), checkpoint: saved.checkpoint,
+      events: saved.events, point: {journalCursor: saved.operation.intent.restorePointCursor, receiptDigest: saved.operation.intent.restorePointReceiptDigest},
+      nativeReceipt: structuredClone(saved.operation.nativeReceipt!), assertCurrent: () => {
+        integrity(fingerprint === digest());
+        this.#storage.readTx(() => integrity(isDeepStrictEqual(this.#restore(lookup, host, undefined, saved.baselineBytes).operation, saved.operation)));
+      }});
+    const digest = () => createHash("sha256").update(JSON.stringify({binding: capture.binding, checkpoint: {...capture.checkpoint, bytes: undefined,
+      actualDigest: createHash("sha256").update(capture.checkpoint.bytes).digest("hex")}, point: capture.point, nativeReceipt: capture.nativeReceipt,
+      events: capture.events.map(event => ({metadata: event.metadata, digest: createHash("sha256").update(event.updateBytes).digest("hex")}))})).digest("hex");
+    fingerprint = digest(); capture.assertCurrent(); return capture;
   }
   stopRestoreDocument(input: StopRestoreLookup & {host: LiveHostConnectionCoordinate}): LiveDocumentKey {
     return this.#storage.readTx(() => structuredClone(this.#restore(input, input.host).operation.intent.document));
