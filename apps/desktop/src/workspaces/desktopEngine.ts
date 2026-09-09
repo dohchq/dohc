@@ -70,14 +70,13 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   let ownerHostModule: typeof import("./desktopOwnerHost") | undefined;
   let ownerHostGeneration = 0;
   let ownerWorkspaceCloses = 0;
-  let ownerHostShutdown = false;
   const stopOwnerHost = () => {
     ownerHostGeneration += 1;
     ownerHost?.stop(); ownerHost = undefined;
   };
   const startOwnerHost = () => {
     stopOwnerHost();
-    if (ownerHostShutdown || ownerWorkspaceCloses || !ownerHostModule || !ownerHostConfig || !rustEngineDaemon || !rustEngineWorkspaceSessions || !rustEngineSessionSource || !dependencies.existingOwnerFor) return;
+    if (isQuitting() || ownerWorkspaceCloses || !ownerHostModule || !ownerHostConfig || !rustEngineDaemon || !rustEngineWorkspaceSessions || !rustEngineSessionSource || !dependencies.existingOwnerFor) return;
     const daemon = rustEngineDaemon, sessions = rustEngineWorkspaceSessions, source = rustEngineSessionSource, config = ownerHostConfig;
     const generation = ownerHostGeneration;
     ownerHost = ownerHostModule.startDesktopOwnerHost({config,ownerFor: dependencies.existingOwnerFor,
@@ -146,15 +145,20 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   }
 
   async function closeAllRelayTransportWorkspaces(): Promise<void> {
-    ownerHostShutdown = true;
+    ownerWorkspaceCloses += 1;
     stopOwnerHost();
-    if (rustEngineRelayClient) {
-      await rustEngineRelayClient.closeAll();
-      return;
-    }
-    await rustEngineWorkspaceSessions?.closeAll();
-    for (const workspaceId of relayTransportRoutes.workspaceIds()) {
-      relayTransportRoutes.releaseWorkspace(workspaceId);
+    try {
+      if (rustEngineRelayClient) {
+        await rustEngineRelayClient.closeAll();
+        return;
+      }
+      await rustEngineWorkspaceSessions?.closeAll();
+      for (const workspaceId of relayTransportRoutes.workspaceIds()) {
+        relayTransportRoutes.releaseWorkspace(workspaceId);
+      }
+    } finally {
+      ownerWorkspaceCloses -= 1;
+      if (!ownerWorkspaceCloses) startOwnerHost();
     }
   }
 

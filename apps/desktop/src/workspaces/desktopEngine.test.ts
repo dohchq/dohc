@@ -147,6 +147,7 @@ function fixture() {
       return workspace;
     },
     async close(expectedRuntimeError?: Error) {
+      quitting = true;
       const stopped = await Promise.allSettled([...states].map(([id, state]) => state.pluginRuntimes.stop(id)));
       try { await engine.closeAllRelayTransportWorkspaces(); }
       finally {
@@ -163,7 +164,7 @@ function fixture() {
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("desktop engine construction", () => {
-  it.each([false, true])("retires owner discovery before workspace close; shutdown=%s", async shutdown => {
+  it.each(["workspace", "cloud", "overlapping-cloud", "shutdown"])("retires owner discovery during %s close and resumes only while running", async mode => {
     const f = fixture();
     Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
     const rootPath = await createTestScratch("dohc-owner-host-rotation-");
@@ -183,23 +184,37 @@ describe("desktop engine construction", () => {
     };
     try {
       expect(await f.engine.start()).toBe(true);
-      const first = await ownerHostMock.start.mock.calls.at(-1)![0].bindings();
-      expect(first.workspaces).toEqual([{ workspaceId: "owner", workspaceHandle: "owner-1" }]);
       const lease = f.authorities.acquire("owner");
       const workspace = { workspaceId: "owner", rootPath, attachmentId: lease.binding.attachmentId };
       lease.release();
-      const close = f.engine.closeRelayTransportWorkspace(workspace);
+      f.engine.relayClient!.bind({...workspace, relay: {baseUrl: "https://relay.test", token: "first-token"}});
+      const first = await ownerHostMock.start.mock.calls.at(-1)![0].bindings();
+      expect(first.workspaces).toEqual([{ workspaceId: "owner", workspaceHandle: "owner-1" }]);
+      const close = mode === "cloud" ? f.engine.closeAllRelayTransportWorkspaces() : f.engine.closeRelayTransportWorkspace(workspace);
       await closeEntered.promise;
       expect(stopped[0]).toHaveBeenCalledOnce();
       expect(() => first.assertCurrent()).toThrow("Owner host daemon retired.");
-      const shutdownDone = shutdown ? f.engine.closeAllRelayTransportWorkspaces() : Promise.resolve();
+      if (mode === "shutdown") f.setQuitting(true);
+      const shutdownDone = mode === "shutdown" || mode === "overlapping-cloud" ? f.engine.closeAllRelayTransportWorkspaces() : Promise.resolve();
+      f.options().onLaunch?.();
+      expect(ownerHostMock.start).toHaveBeenCalledTimes(1);
       closing.resolve(); await close; await shutdownDone;
-      expect(ownerHostMock.start).toHaveBeenCalledTimes(shutdown ? 1 : 2);
-      if (shutdown) return;
+      expect(ownerHostMock.start).toHaveBeenCalledTimes(mode === "shutdown" ? 1 : 2);
+      if (mode === "shutdown") {
+        f.options().onLaunch?.();
+        expect(ownerHostMock.start).toHaveBeenCalledTimes(1);
+        return;
+      }
+      f.engine.relayClient!.bind({...workspace, relay: {baseUrl: "https://relay.test", token: "second-token"}});
       const next = await ownerHostMock.start.mock.calls.at(-1)![0].bindings();
       expect(next.workspaces).toEqual([{ workspaceId: "owner", workspaceHandle: "owner-2" }]);
       expect(() => next.assertCurrent()).not.toThrow();
       expect(next.client).toBe(first.client);
+      await f.engine.closeAllRelayTransportWorkspaces();
+      expect(() => next.assertCurrent()).toThrow("Owner host daemon retired.");
+      const reopened = await ownerHostMock.start.mock.calls.at(-1)![0].bindings();
+      expect(reopened.workspaces).toEqual([{ workspaceId: "owner", workspaceHandle: "owner-3" }]);
+      expect(() => reopened.assertCurrent()).not.toThrow();
     } finally {
       closing.resolve(); await f.close(); ownerHostMock.read.mockReset(); ownerHostMock.start.mockReset();
     }
