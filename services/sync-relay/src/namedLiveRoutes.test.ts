@@ -20,6 +20,7 @@ import { createLiveHostReports } from "./namedLiveHostReports.js";
 import { createNamedFrameChanges, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
 import { fixture as ticketFixture, audience, binding, host, key, scope } from "./liveTickets.test-helper.js";
 import { parseNamedLiveConfig } from "./namedLiveConfig.js";
+import type { StorageContext } from "./storage/context.js";
 
 const exchangeKey = "test-exchange-key-".repeat(3), relayHost = "relay.example.test";
 const frames = { receive: { maxFrameBytes: 1024, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096 },
@@ -39,7 +40,7 @@ function deferred<T>() {
 async function fixture(routeLimits = limits, link = false, membershipPolicy: LiveMembershipPolicy = {maxSessions: 16, maxMembers: 8, maxSnapshotBytes: 153}) {
   const state = await ticketFixture();
   const routeKind = link ? "link" : "named";
-  const memberships = createLiveMembershipRegistry(membershipPolicy);
+  const memberships = createLiveMembershipRegistry(membershipPolicy, state.storage.readLiveAuthority.bind(state.storage));
   const bearer = Buffer.alloc(32, 1).toString("base64url"), profile = Buffer.alloc(32, 2).toString("base64url");
   const currentScope = link ? { kind: "link" as const, workspaceId: scope.workspaceId, shareId: scope.shareId, grantId: scope.grantId,
     sessionId: "link-session", capabilityHash: hashLinkBearer(bearer, key), profileTokenHash: hashLinkProfileSecret(profile, key) } : scope;
@@ -322,7 +323,10 @@ it.each(["expiry", "blocked", "paused"])("prunes an idle link member after %s wh
   if (change === "expiry") vi.spyOn(Date, "now").mockReturnValue(61_000);
   if (change === "blocked") f.raw.exec("UPDATE sync_relay_link_principals SET blocked_at_ms=1000");
   if (change === "paused") f.raw.exec("UPDATE sync_relay_shares SET link_writes_paused_at_ms=1000");
+  const exec = vi.spyOn((f.storage as StorageContext).db, "exec");
   expect(named.snapshot(1024).members).toHaveLength(1);
+  expect(exec.mock.calls.filter(([sql]) => sql === "BEGIN IMMEDIATE")).toHaveLength(0);
+  expect(exec.mock.calls.filter(([sql]) => sql === "BEGIN")).toHaveLength(1);
   await closed;
   expect(f.invalidated.signal.aborted).toBe(false);
 });

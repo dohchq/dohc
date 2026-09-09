@@ -292,7 +292,7 @@ export function canonicalLiveSelector(share: SyncRelayShareRow, selector: ShareS
 
 export function resolveCurrentLiveDocumentBinding(storage: StorageContext, input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
     const request = snapshotCurrentBindingRequest(input);
-    return storage.tx(() => currentLiveDocumentBinding(storage, request));
+    return storage.readLiveAuthority(() => currentLiveDocumentBinding(storage, request));
   }
 
 export type LiveObjectHostBindingResult =
@@ -301,7 +301,7 @@ export type LiveObjectHostBindingResult =
 
 export function resolveLiveObjectHostBinding(storage: StorageContext, value: LiveBrowserContext, requestedObjectId: string): LiveObjectHostBindingResult {
   const scope = snapshotLiveTicketScope(value), objectId = parseLiveUpdateIdentifier(requestedObjectId, "object ID");
-  return storage.tx(() => {
+  return storage.readLiveAuthority(() => {
     if (!ticketScopeIsCurrent(storage, scope)) return { kind: "refused", reason: "not-authorized" };
     const row = storage.db.prepare(`SELECT lineage_claim_id FROM sync_relay_live_documents
       WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current' LIMIT 1`).get(scope.workspaceId, objectId);

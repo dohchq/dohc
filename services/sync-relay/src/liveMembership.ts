@@ -22,7 +22,8 @@ interface Member {
 interface Group { revision: number; readonly members: Set<Member> }
 
 /** One relay deployment owns this registry. Join only after successful ticket redemption. */
-export function createLiveMembershipRegistry(input: LiveMembershipPolicy) {
+export function createLiveMembershipRegistry(input: LiveMembershipPolicy, readAuthority: <T>(run: () => T) => T) {
+  if (typeof readAuthority !== "function") throw new TypeError("Live membership requires an authority reader.");
   const policy = { maxSessions: input.maxSessions, maxMembers: input.maxMembers, maxSnapshotBytes: input.maxSnapshotBytes };
   for (const value of Object.values(policy)) if (!Number.isSafeInteger(value) || value < 1) throw new TypeError("Invalid live membership policy.");
   if (policy.maxSnapshotBytes < LIVE_MEMBERSHIP_BASE_BYTES) throw new TypeError("Membership cannot encode its overflow indicator.");
@@ -73,20 +74,22 @@ export function createLiveMembershipRegistry(input: LiveMembershipPolicy) {
       return {
         invalidated: lifetime.signal,
         snapshot(maxFrameBytes) {
-          check();
-          if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes < LIVE_MEMBERSHIP_BASE_BYTES) throw new TypeError("Invalid membership frame bound.");
-          // Idle peers can lose authority without sending another frame.
-          for (const peer of group.members) {
-            try { peer.assertCurrent(); } catch { peer.close(); }
-          }
-          check();
-          const max = Math.min(policy.maxMembers, Math.floor((Math.min(maxFrameBytes, policy.maxSnapshotBytes) - LIVE_MEMBERSHIP_BASE_BYTES) / LIVE_MEMBERSHIP_MEMBER_BYTES));
-          const members: string[] = [];
-          for (const peer of group.members) {
-            if (members.length === max) break;
-            members.push(peer.pseudonym);
-          }
-          return { kind: "membership", revision: group.revision, members, overflow: members.length < group.members.size };
+          return readAuthority(() => {
+            check();
+            if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes < LIVE_MEMBERSHIP_BASE_BYTES) throw new TypeError("Invalid membership frame bound.");
+            // Idle peers can lose authority without sending another frame.
+            for (const peer of group.members) {
+              try { peer.assertCurrent(); } catch { peer.close(); }
+            }
+            check();
+            const max = Math.min(policy.maxMembers, Math.floor((Math.min(maxFrameBytes, policy.maxSnapshotBytes) - LIVE_MEMBERSHIP_BASE_BYTES) / LIVE_MEMBERSHIP_MEMBER_BYTES));
+            const members: string[] = [];
+            for (const peer of group.members) {
+              if (members.length === max) break;
+              members.push(peer.pseudonym);
+            }
+            return { kind: "membership" as const, revision: group.revision, members, overflow: members.length < group.members.size };
+          });
         },
         subscribe(onChange) {
           check();

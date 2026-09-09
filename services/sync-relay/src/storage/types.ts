@@ -573,6 +573,8 @@ export interface SyncRelayStorage {
 
   close(): void;
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult;
+  /** Groups synchronous authority checks in one current read snapshot. */
+  readLiveAuthority<T>(run: () => T): T;
   resolveLiveObjectHostBinding(scope: LiveBrowserContext, objectId: string): import("./liveDocumentAuthority").LiveObjectHostBindingResult;
   registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult;
   mintLiveTicket(input: LiveTicketMint): { expiresAtMs: number } | null;

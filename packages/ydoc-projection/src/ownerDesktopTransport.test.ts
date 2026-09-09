@@ -264,7 +264,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     const namedPeer = captureNamedLiveFrameHost({ticket,actor: remoteActor,storage: deployment.storage,native: nativePeer,
       bounds: {maxClientVectorBytes: 100_000,maxSyncOutputBytes: 2_000_000,maxAppliedUpdateBytes: 2_000_000,maxSubmissionBytes: 2_000_000,maxAdmissionBytes: 8_000_000},
       validate: createLiveMarkdownJournalValidator(policy)});
-    const membership = createLiveMembershipRegistry({maxSessions: 8,maxMembers: 8,maxSnapshotBytes: 153})
+    const membership = createLiveMembershipRegistry({maxSessions: 8,maxMembers: 8,maxSnapshotBytes: 153},deployment.storage.readLiveAuthority.bind(deployment.storage))
       .join({ticket,invalidated: namedPeer.invalidated,assertCurrent: namedPeer.assertCurrent});
     expect(membership.snapshot(1024).members).toHaveLength(1);
     expect(ticket.authority.principalKind).toBe(link ? "link" : "named");

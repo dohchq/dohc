@@ -18,7 +18,7 @@ function ticket(id: string) {
   hostEpoch: 1, mintedAtMs: 0, expiresAtMs: 30000, redeemedAtMs: 1 });
 }
 function harness() {
-  const registry = createLiveMembershipRegistry({ maxSessions: 8, maxMembers: 8, maxSnapshotBytes: 153 });
+  const registry = createLiveMembershipRegistry({ maxSessions: 8, maxMembers: 8, maxSnapshotBytes: 153 }, read => read());
   const invalidated = new AbortController(), doc = new Y.Doc();
   let authorized = true;
   const host: NamedFrameHostSession = {

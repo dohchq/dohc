@@ -10,6 +10,8 @@ import { captureNamedLiveFrameHost, createNamedFrameChanges } from "./namedLiveF
 import type { LiveUpdateJournalCut, LiveUpdateJournalCommitInput } from "./storage/types.js";
 import { observeRelayWrites } from "./relayWriteChanges.js";
 import { queueLiveHostRequests } from "./liveHostRequests.js";
+import { createLiveMembershipRegistry } from "./liveMembership.js";
+import type { StorageContext } from "./storage/context.js";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 function deferred<T>() {
@@ -100,6 +102,34 @@ it("uses the native atomic cut, excluding the diagnostic local head, and leaves 
   expect(f.peer.requests[0]).toMatchObject({ method: "liveApplication.syncOpen", workspace: "trusted-native-handle", params: { registrationId: 7 } });
   f.capture.close(); sync.close();
   expect(f.changes.listenerCount()).toBe(0); expect(f.peer.closed).toBe(false);
+});
+it("reads every member's current authority in one read transaction without taking a writer lock", async () => {
+  const f = await setup(16);
+  const tickets = createLiveTickets({storage: f.storage, audience, key, hostReports: {currentBinding: async () => report}});
+  const minted = await tickets.mint({objectId: binding.objectId}, scope), ticket = await tickets.redeem(minted!.token, scope);
+  const other = captureNamedLiveFrameHost({ticket: ticket!, actor: liveBrowserActor(scope), storage: f.storage,
+    native: f.native, bounds: f.bounds, validate: f.validate});
+  const registry = createLiveMembershipRegistry({maxSessions: 4, maxMembers: 4, maxSnapshotBytes: 89}, f.storage.readLiveAuthority.bind(f.storage));
+  const members = [f.capture, other].map(host => registry.join({ticket: host.ticket, invalidated: host.invalidated, assertCurrent: host.assertCurrent}));
+  cleanup.push(async () => {members.forEach(member => member.close()); other.close();});
+  const exec = vi.spyOn((f.storage as StorageContext).db, "exec");
+  expect(members[0].snapshot(1024).members).toHaveLength(2);
+  expect(exec.mock.calls.filter(([sql]) => sql === "BEGIN IMMEDIATE")).toHaveLength(0);
+  expect(exec.mock.calls.filter(([sql]) => sql === "BEGIN")).toHaveLength(1);
+});
+it("closes failed authority read scopes and refuses asynchronous callbacks and results", async () => {
+  const f = await setup(), exec = vi.spyOn((f.storage as StorageContext).db, "exec");
+  let asyncRan = false;
+  expect(() => f.storage.readLiveAuthority(async () => {asyncRan = true;})).toThrow("must be synchronous");
+  expect(asyncRan).toBe(false);
+  expect(exec).not.toHaveBeenCalled();
+  expect(() => f.storage.readLiveAuthority(() => Promise.resolve(null))).toThrow("must be synchronous");
+  expect(() => f.storage.readLiveAuthority(() => ({then() {}}))).toThrow("must be synchronous");
+  expect(() => f.storage.readLiveAuthority(() => f.storage.readLiveAuthority(() => {throw new Error("failed check");}))).toThrow("failed check");
+  expect(exec.mock.calls.filter(([sql]) => sql === "ROLLBACK")).toHaveLength(3);
+  exec.mockClear();
+  f.capture.assertCurrent();
+  expect(exec.mock.calls.map(([sql]) => sql)).toEqual(["BEGIN", "COMMIT"]);
 });
 it("keeps three readers alive when a relay write wakes them during a native upload", async () => {
   const f = await setup(16), caller = new AbortController();

@@ -16,7 +16,7 @@ const join = (registry: ReturnType<typeof createLiveMembershipRegistry>, id: str
 
 describe("live membership", () => {
   it("joins different grants to the same document without exposing credentials or identities", () => {
-    const registry = createLiveMembershipRegistry(policy), first = join(registry, "private-ticket-one");
+    const registry = createLiveMembershipRegistry(policy, read => read()), first = join(registry, "private-ticket-one");
     const linkTicket = ticket("private-ticket-two", "grant-b");
     const second = registry.join({ ticket: { ...linkTicket, authority: { ...linkTicket.authority, principalKind: "link" } },
       invalidated: new AbortController().signal, assertCurrent() {} });
@@ -33,7 +33,7 @@ describe("live membership", () => {
     first.close(); second.close(); other.close();
   });
   it("gives each redeemed ticket and reconnect a fresh server pseudonym", () => {
-    const registry = createLiveMembershipRegistry(policy), first = join(registry, "one"), second = join(registry, "two");
+    const registry = createLiveMembershipRegistry(policy, read => read()), first = join(registry, "one"), second = join(registry, "two");
     const initial = first.snapshot(586).members;
     expect(new Set(initial).size).toBe(2);
     first.close(); second.close();
@@ -42,7 +42,7 @@ describe("live membership", () => {
     reconnected.close();
   });
   it("keeps host epochs and restore generations in separate membership groups", () => {
-    const registry = createLiveMembershipRegistry(policy), current = join(registry, "current");
+    const registry = createLiveMembershipRegistry(policy, read => read()), current = join(registry, "current");
     const restored = ticket("restored"), nextHost = ticket("next-host");
     const generations = [registry.join({ ticket: { ...restored, binding: { ...restored.binding, restoreFenceGeneration: 2 } },
       invalidated: new AbortController().signal, assertCurrent() {} }),
@@ -52,7 +52,7 @@ describe("live membership", () => {
     current.close(); generations.forEach(member => member.close());
   });
   it("enforces both member and encoded-byte bounds with explicit overflow", () => {
-    const registry = createLiveMembershipRegistry({ ...policy, maxMembers: 2, maxSnapshotBytes: 57 });
+    const registry = createLiveMembershipRegistry({ ...policy, maxMembers: 2, maxSnapshotBytes: 57 }, read => read());
     const sessions = [join(registry, "one"), join(registry, "two"), join(registry, "three")];
     expect(sessions[0].snapshot(586)).toMatchObject({ overflow: true, members: expect.any(Array) });
     expect(encodeLiveFrame(sessions[0].snapshot(586), 586)).toHaveLength(57);
@@ -63,7 +63,7 @@ describe("live membership", () => {
     sessions.forEach(session => session.close());
   });
   it("prunes idle peers against current authority and invalidates the removed session", () => {
-    const registry = createLiveMembershipRegistry(policy), observer = join(registry, "observer");
+    const registry = createLiveMembershipRegistry(policy, read => read()), observer = join(registry, "observer");
     let authorized = true;
     const peer = registry.join({ ticket: ticket("peer", "grant-b"), invalidated: new AbortController().signal,
       assertCurrent() { if (!authorized) throw new Error("expired or blocked"); } });
@@ -75,7 +75,7 @@ describe("live membership", () => {
     observer.close();
   });
   it("rechecks the recipient after waiting and removes aborted memberships", () => {
-    const registry = createLiveMembershipRegistry(policy), abort = new AbortController();
+    const registry = createLiveMembershipRegistry(policy, read => read()), abort = new AbortController();
     let authorized = true;
     const recipient = registry.join({ ticket: ticket("recipient"), invalidated: abort.signal,
       assertCurrent() { if (!authorized) throw new Error("recipient revoked"); } });
@@ -91,7 +91,7 @@ describe("live membership", () => {
     expect(next.invalidated.aborted).toBe(true);
   });
   it("refuses duplicate and over-capacity joins without leaking membership", () => {
-    const registry = createLiveMembershipRegistry({ ...policy, maxSessions: 1 }), session = join(registry, "one");
+    const registry = createLiveMembershipRegistry({ ...policy, maxSessions: 1 }, read => read()), session = join(registry, "one");
     expect(() => join(registry, "one")).toThrow();
     expect(() => join(registry, "two")).toThrow();
     expect(session.snapshot(586).members).toHaveLength(1);

@@ -2,6 +2,7 @@ import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
 import * as ownerRestoreOptionsStorage from "./storage/ownerRestoreOptions";
 import { RelayWriteOwner } from "./storage/writeOwner";
+import { isAsyncFunction } from "node:util/types";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveJournalStoredUpdate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveJournalValidation, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult } from "./storage/types";
@@ -310,6 +311,7 @@ export function openSyncRelayStorage(
 
 class SqliteSyncRelayStorage implements SyncRelayStorage {
   readonly newDiscussionId: () => string;
+  private readingLiveAuthority = false;
 
   constructor(
     readonly db: SqliteDb,
@@ -899,6 +901,22 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       } catch {}
       throw error;
     }
+  }
+
+  readLiveAuthority<T>(run: () => T): T {
+    if (isAsyncFunction(run)) throw new TypeError("Live authority reads must be synchronous.");
+    const read = () => {
+      const value = run();
+      if (value !== null && (typeof value === "object" || typeof value === "function") &&
+        typeof (value as {then?: unknown}).then === "function") throw new TypeError("Live authority reads must be synchronous.");
+      return value;
+    };
+    if (this.readingLiveAuthority) { this.captureStanding(); return read(); }
+    return this.readTx(() => {
+      this.readingLiveAuthority = true;
+      try { return read(); }
+      finally { this.readingLiveAuthority = false; }
+    });
   }
 
   settleShareProposalInTransaction(
