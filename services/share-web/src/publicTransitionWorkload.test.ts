@@ -129,7 +129,11 @@ it("continues on fresh copied body IDs without resurrecting the discarded branch
     let restoreClient = 1; while (used.has(restoreClient)) restoreClient++;
     restored.clientID = restoreClient;
     const body = restored.getXmlFragment("body");
-    body.delete(0, body.length); body.push(point.getXmlFragment("body").toArray().map(node => node.clone()));
+    const copied = point.getXmlFragment("body").toArray().map(node => {
+      if (!(node instanceof Y.XmlElement || node instanceof Y.XmlText)) throw new Error("Restore fixture contains an unsupported XML node.");
+      return node.clone();
+    });
+    body.delete(0, body.length); body.push(copied);
     const checkpoint = Y.encodeStateAsUpdate(restored), before = Y.decodeStateVector(Y.encodeStateVector(restored));
     const retired = [...selected.updates.map(update => update.bytes), selected.interrupted!.bytes];
     const result = deriveRestoreContinuation(checkpoint, continuation.recipe, selected.baseline.markdown, continuation.expected.markdown, retired);

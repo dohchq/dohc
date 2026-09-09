@@ -31,7 +31,7 @@ export interface PublicTransitionHarness {
   openLink(url: string, index: number): Promise<PublicProofPage>;
   wire: ReturnType<typeof createPublicLinkWireProof>;
 }
-type Step = LoadedPublicTransitions["cases"]["view"]["updates"][number];
+type Step = Omit<LoadedPublicTransitions["cases"]["view"]["updates"][number], "bytes"> & {bytes: Uint8Array};
 
 export async function assertPublicApplication(h: PublicTransitionHarness, fixture: PublicTransitionFixture, step: Step) {
   const current = h.storage.resolveCurrentLiveDocumentBinding({document: fixture.document,
