@@ -242,7 +242,13 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     await second.close();
     const recovered = await startOwner("owner-b");
     expect(await recovered.client.ownerYDocPrepareEnrollment(recovered.request(), target)).toEqual(captured);
-    expect(await first.pass()).toBe("empty");
+    results.stage = "enroll owner A and observe provider refresh";
+    let enrollmentObserved!: () => void;
+    const enrollmentRefresh = new Promise<void>(resolve => {enrollmentObserved = resolve;});
+    updateObserved = enrollmentObserved;
+    try {expect(await first.pass()).toBe("empty"); await enrollmentRefresh;}
+    finally {updateObserved = undefined;}
+    results.stage = "read enrolled owner A descriptor";
     const firstDraft = await first.client.ownerYDocPrepareEnrollment(first.request(), target);
     expect(firstDraft.status).toBe("observed");
     const wrongAccount = await auth.api.signInEmail({body: {email: users[0]!.email, password}});
@@ -384,6 +390,10 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     writeFileSync(join(root, "result.json"), JSON.stringify({verdict: "PASS", executable, sha256: expectedHash,
       scope: "Real BetterAuth/Postgres owner bearer, configured native service, two ordinary native replicas, production owner WS delivery, divergent enrollment, held publication, exact origin release, durable restart, receipt held before accepted feed, native ACK, open provider convergence, delete-only update, old echo and original base after real pruning.",
       omitted: ["Electron renderer UI (production provider and renderer update callback are exercised)", "ordinary publication carrier matrix beyond pending ydoc update"], results}, null, 2));
+  } catch (error) {
+    writeFileSync(join(root, "result.json"), JSON.stringify({verdict: "FAIL", executable, sha256: expectedHash,
+      error: error instanceof Error ? {...error, name: error.name, message: error.message, stack: error.stack} : String(error), results}, null, 2));
+    throw error;
   } finally {
     const cleanupErrors: unknown[] = [];
     for (const client of ownerClients) {try {client.close(); await client.waitForExit();} catch (error) {cleanupErrors.push(error);}}
