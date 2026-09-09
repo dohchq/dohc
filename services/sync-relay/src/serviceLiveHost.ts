@@ -207,11 +207,24 @@ export async function startServiceLiveHost(options: {
           registrationId: registration.id, binding: registration.binding, coordinate, invalidated: AbortSignal.any([signal, registration.invalidated]),
           changes, nextRequestId, deadlineMs: config.client.requestDeadlineMs, drain});
       },
+      get restoreConfigured() { return restore !== undefined; },
       async prepareRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {
         check();
         const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
         if (!consumer) throw new Error("Workspace is not configured on this service host.");
         return runDocument(consumer.documentForRestore(lookup), callerSignal, joined => consumer.prepareRestore(lookup, joined));
+      },
+      async reviewRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {
+        check();
+        const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
+        if (!consumer) throw new Error("Workspace is not configured on this service host.");
+        return runDocument(consumer.documentForRestore(lookup), callerSignal, joined => consumer.reviewRestore(lookup, joined));
+      },
+      async confirmRestore(value: StopRestoreLookup, proposalDigest: string, callerSignal?: AbortSignal) {
+        check();
+        const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
+        if (!consumer) throw new Error("Workspace is not configured on this service host.");
+        return runDocument(consumer.documentForRestore(lookup), callerSignal, joined => consumer.confirmRestore(lookup, proposalDigest, joined));
       },
       async completeRestore(value: StopRestoreLookup, proposalDigest: string, callerSignal?: AbortSignal) {
         check();

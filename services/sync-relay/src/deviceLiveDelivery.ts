@@ -174,11 +174,24 @@ export function createDeviceLiveDelivery(options: {
         coordinate: host, invalidated: AbortSignal.any([invalidated.signal, registration.invalidated]),
         changes, nextRequestId, deadlineMs: config.client.requestDeadlineMs, drain});
     },
+    get restoreConfigured() { return config.restore !== undefined; },
     async prepareRestore(value: StopRestoreLookup, signal?: AbortSignal) {
       requireReady();
       const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
       if (!consumer) throw new Error("Workspace is not configured on this device host.");
       return runDocument(consumer.documentForRestore(lookup), signal, joined => consumer.prepareRestore(lookup, joined));
+    },
+    async reviewRestore(value: StopRestoreLookup, signal?: AbortSignal) {
+      requireReady();
+      const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
+      if (!consumer) throw new Error("Workspace is not configured on this device host.");
+      return runDocument(consumer.documentForRestore(lookup), signal, joined => consumer.reviewRestore(lookup, joined));
+    },
+    async confirmRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
+      requireReady();
+      const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
+      if (!consumer) throw new Error("Workspace is not configured on this device host.");
+      return runDocument(consumer.documentForRestore(lookup), signal, joined => consumer.confirmRestore(lookup, proposalDigest, joined));
     },
     async completeRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
       requireReady();

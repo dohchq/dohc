@@ -15,6 +15,7 @@ import { errorBody } from "./errors";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
+import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
 import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 import { createDeviceControl } from "./deviceControl";
@@ -253,7 +254,9 @@ if (testAuthSeam) {
 // (by design — presence is not durable).
 const presence = new PresenceHub();
 
+let ownerRestoreHost: (() => OwnerRestoreHost | undefined) | undefined;
 const relayApplication = createSyncRelayHandler({
+  ownerRestoreHost: () => ownerRestoreHost?.(),
   storage,
   resolveActor,
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
@@ -400,6 +403,10 @@ if (serviceHostConfig && !deployment) fatal("FATAL: A service host requires an i
 const serviceHost = serviceHostConfig && deployment
   ? await startServiceLiveHost({ configPath: serviceHostConfig, storage, history: deployment.history, frameChanges })
   : undefined;
+ownerRestoreHost = () => {
+  const mode = storage.getLiveHostControl()?.configuredMode;
+  return mode === "service" ? serviceHost : mode === "device" ? deviceControl : undefined;
+};
 if (namedLiveConfig) {
   if (!serviceHost && !deviceControl) fatal("FATAL: Named live routes require an authenticated service or device host.");
   const captureNative = async (binding: LiveObjectBinding, signal: AbortSignal): Promise<NamedFrameNativeHost> => {

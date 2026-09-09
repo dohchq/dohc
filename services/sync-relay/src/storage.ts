@@ -1,4 +1,5 @@
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
+import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
 import { RelayWriteOwner } from "./storage/writeOwner";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
@@ -324,6 +325,16 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   get unavailable(): AbortSignal { return this.owner.unavailable; }
   captureStanding(): () => void { return this.owner.captureStanding(); }
+
+  readStopRestorePlan(input: Parameters<typeof liveRestoreOperationStorage.readStopRestorePlan>[1]) {
+    return liveRestoreOperationStorage.readStopRestorePlan(this, input);
+  }
+  beginStopRestore(input: Parameters<typeof liveRestoreOperationStorage.beginStopRestore>[1], now: number) {
+    return liveRestoreOperationStorage.beginStopRestore(this, input, now);
+  }
+  readStopRestore(input: Parameters<typeof liveRestoreOperationStorage.readStopRestore>[1]) {
+    return liveRestoreOperationStorage.readStopRestore(this, input);
+  }
 
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
     return liveDocumentAuthorityStorage.resolveCurrentLiveDocumentBinding(this, input);

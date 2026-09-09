@@ -1,4 +1,5 @@
 import { TokenBucketLimiter } from "@dohc/service-http";
+import { createOwnerRestoreRoutes, type OwnerRestoreHost, type OwnerRestoreRoute } from "./ownerRestoreRoutes";
 import { randomUUID } from "node:crypto";
 import { createNamedLiveBrowserHttp, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
@@ -62,6 +63,7 @@ export { LINK_FRESHNESS_PAGE_BUDGET, MAX_RAW_ROWS_PER_LINK_PAGE } from "./shareR
 export type SyncRelayHandler = (request: Request) => Promise<Response>;
 
 export interface CreateSyncRelayHandlerOptions {
+  ownerRestoreHost?: () => OwnerRestoreHost | undefined;
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
   nowMs?: () => number;
@@ -111,6 +113,7 @@ export interface CreateSyncRelayHandlerOptions {
 }
 
 type SyncRelayRoute =
+  | OwnerRestoreRoute
   | { route: "link-exchange" }
   | { route: "link-refresh" }
   | { route: "link-handoff" }
@@ -137,6 +140,7 @@ type SyncRelayRoute =
 const MAX_LINK_CURRENT_FILES = 5_000;
 
 export function createSyncRelayHandler({
+  ownerRestoreHost = () => undefined,
   storage,
   resolveActor,
   nowMs = () => Date.now(),
@@ -498,6 +502,7 @@ export function createSyncRelayHandler({
     respondWithLinkBytes,
   );
 
+  const respondToOwnerRestore = createOwnerRestoreRoutes({storage, host: ownerRestoreHost, nowMs, newId});
   const handle: SyncRelayHandler = async (request) => {
     try {
       const pathname = new URL(request.url).pathname;
@@ -590,6 +595,8 @@ export function createSyncRelayHandler({
       }
 
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
+
+      if (route.route === "owner-restore") return await respondToOwnerRestore(request, route, actor.userId);
 
       // The granter's half. Everything below this line is
       // owner-scoped by the one check above, which is why accept and decline
@@ -762,6 +769,17 @@ function parseRoute(request: Request): SyncRelayRoute {
     throw notFound();
   }
   const workspaceId = parseWorkspaceId(parts[1]);
+  if (parts[2] === "live-restores") {
+    if (parts.length === 3) return {route: "owner-restore", workspaceId, action: "begin"};
+    if (parts.length === 4 && parts[3] === "plan") return {route: "owner-restore", workspaceId, action: "plan"};
+    const operationId = parseString(parts[3], "operationId", 512);
+    if (parts.length === 4) return {route: "owner-restore", workspaceId, operationId, action: "status"};
+    const action = parts[4];
+    if (parts.length === 5 && (action === "prepare" || action === "review" || action === "confirm")) {
+      return {route: "owner-restore", workspaceId, operationId, action};
+    }
+    throw notFound();
+  }
   if (parts.length === 4 && parts[2] === "blobs" && parts[3] === "have") {
     return { route: "blob-have", workspaceId };
   }

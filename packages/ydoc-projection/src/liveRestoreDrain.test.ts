@@ -1417,10 +1417,12 @@ it.each(["complete", "missing-event", "missing-proposal", "wrong-proposal", "bud
     const options = {store: f.store, lookup: f.lookup, deliveryKind: "owner" as const,
       connection: {client: {sendLiveRestore} as never, workspace: "native-workspace", host: f.lookup.host, deadlineMs: 1000, nextRequestId: () => 1}};
     if (state !== "budget") {
-      const before = lifecycleRows(f), review = await driver.review(options);
-      expect(review!.acceptedEvents).toHaveLength(3);
-      expect(review!.nativeSources).toHaveLength(2);
-      expect(lifecycleRows(f)).toEqual(before);
+      const before = lifecycleRows(f), lease = await driver.review(options);
+      try {
+        expect(lease.review!.acceptedEvents).toHaveLength(3);
+        expect(lease.review!.nativeSources).toHaveLength(2);
+        expect(lifecycleRows(f)).toEqual(before);
+      } finally {lease.close();}
     }
     if (state === "missing-event") f.raw.exec("DELETE FROM sync_relay_live_update_journal WHERE journal_cursor=1");
     if (state === "missing-proposal") f.raw.exec("DELETE FROM sync_relay_live_restore_proposals WHERE operation_id='review-second'");

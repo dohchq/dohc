@@ -58,6 +58,16 @@ export type StopRestoreApplied = {
   terminal: LiveUpdateReceipt | null;
 };
 export type StopRestoreLookup = { operationId: string; workspaceId: string; ownerUserId: string };
+export type StopRestorePlanInput = {
+  operationId: string; ownerUserId: string; document: LiveDocumentKey;
+  shareId: string; grantId: string; restorePointCursor: number; maxOutputBytes: number;
+};
+export type StopRestoreRecipient = {
+  grantId: string; principalKind: "user" | "email" | "link"; userId: string | null; email: string | null;
+};
+export type StopRestorePlan = {
+  intent: StopRestoreIntent; path: string; recipients: StopRestoreRecipient[];
+};
 export type StopRestoreOperation = {
   intent: StopRestoreIntent;
   basis: StopRestoreBasis;
@@ -188,7 +198,53 @@ export function nativeRestoreFence(applied: StopRestoreApplied, newFence: number
     terminal: applied.terminal ? {...applied.terminal} : null, appliedSequence: applied.localYDocSequence};
 }
 
-// Internal storage operation. No network or desktop route initiates restoration.
+/** Read the exact access to stop. Initiation rechecks these coordinates in its write. */
+export function readStopRestorePlan(storage: StorageContext, input: StopRestorePlanInput): StopRestorePlan {
+  const document = parseLiveDocumentKey(input.document), limit = integer(input.maxOutputBytes, 1);
+  return storage.readTx(() => {
+    owner(storage, document.workspaceId, input.ownerUserId);
+    requireLiveJournalHistory(storage);
+    const share = storage.getShare(input.shareId), grant = storage.getShareGrant(input.grantId);
+    if (!share || share.workspaceId !== document.workspaceId || share.granterUserId !== input.ownerUserId ||
+      !grant || grant.shareId !== share.shareId || grant.status !== "active") refuse();
+    const row = storage.db.prepare(`SELECT restore_fence_generation,baseline_digest,current_path FROM sync_relay_live_documents
+      WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current' AND admission_state='open'`).get(...key(document));
+    if (!row) refuse();
+    const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
+    const selector = storedSelector && effectiveShareSelector(storedSelector, grant.access);
+    if (!selector || !isLiveEditShareSelector(selector) || !canonicalLiveSelector(share, selector) ||
+      visibleSharePath(selector, String(row.current_path)) !== row.current_path) refuse();
+    const cursor = integer(input.restorePointCursor);
+    const digest = cursor === 0 ? row.baseline_digest : storage.db.prepare(`SELECT update_digest FROM sync_relay_live_update_journal
+      WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND journal_cursor=?`).get(...key(document), cursor)?.update_digest;
+    const recipients: StopRestoreRecipient[] = [{grantId: grant.grantId, principalKind: grant.principalKind,
+      userId: grant.principalUserId, email: grant.principalEmail}];
+    const dependentIds: string[] = [];
+    let bytes = Buffer.byteLength(JSON.stringify(recipients));
+    if (grant.principalKind === "link") {
+      for (const dependent of storage.db.prepare(`SELECT grant_id,principal_kind,principal_user_id,principal_email FROM sync_relay_share_grants
+        WHERE parent_grant_id=? AND status='active' ORDER BY grant_id`).iterate(grant.grantId)) {
+        if (dependent.principal_kind !== "user" || typeof dependent.principal_user_id !== "string" ||
+          (dependent.principal_email !== null && typeof dependent.principal_email !== "string")) refuse();
+        const recipient: StopRestoreRecipient = {grantId: parseLiveUpdateIdentifier(dependent.grant_id), principalKind: "user",
+          userId: dependent.principal_user_id, email: dependent.principal_email};
+        bytes += Buffer.byteLength(JSON.stringify(recipient)) + Buffer.byteLength(JSON.stringify(recipient.grantId)) + 2;
+        if (bytes > limit) throw new Error("The complete affected access list exceeds its output budget.");
+        recipients.push(recipient); dependentIds.push(recipient.grantId);
+      }
+    }
+    let intent = snapshot({operationId: input.operationId, ownerUserId: input.ownerUserId, document, shareId: share.shareId,
+      grantId: grant.grantId, deliveryKind: "bootstrap", expectedGrantGeneration: grant.generation,
+      expectedDependentGrantIds: dependentIds, expectedFence: Number(row.restore_fence_generation),
+      restorePointCursor: cursor, restorePointReceiptDigest: parseLiveUpdateDigest(digest)});
+    const savedBasis = basis(storage, intent, authority(storage, intent));
+    if (savedBasis.ownerOrigin !== null) { requireStopRestoreOwnerOrigin(storage, savedBasis); intent = {...intent, deliveryKind: "owner"}; }
+    const plan = {intent, path: String(row.current_path), recipients};
+    if (Buffer.byteLength(JSON.stringify(plan)) > limit) throw new Error("The complete affected access list exceeds its output budget.");
+    return plan;
+  });
+}
+
 export function beginStopRestore(storage: StorageContext, input: StopRestoreIntent, now: number): StopRestoreOperation {
   const intent = snapshot(input), at = integer(now);
   return storage.tx(() => {

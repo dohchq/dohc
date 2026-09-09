@@ -153,9 +153,18 @@ export function createDeviceControl(options: {
       if (!currentDelivery) throw new Error("Device delivery is unavailable.");
       return currentDelivery.captureNative(binding, signal);
     },
+    get restoreConfigured() { return options.delivery?.config.restore !== undefined; },
     async prepareRestore(lookup: StopRestoreLookup, signal?: AbortSignal) {
       if (!currentDelivery) throw new Error("Device delivery is unavailable.");
       return currentDelivery.prepareRestore(lookup, signal);
+    },
+    async reviewRestore(lookup: StopRestoreLookup, signal?: AbortSignal) {
+      if (!currentDelivery) throw new Error("Device delivery is unavailable.");
+      return currentDelivery.reviewRestore(lookup, signal);
+    },
+    async confirmRestore(lookup: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
+      if (!currentDelivery) throw new Error("Device delivery is unavailable.");
+      return currentDelivery.confirmRestore(lookup, proposalDigest, signal);
     },
     async completeRestore(lookup: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
       if (!currentDelivery) throw new Error("Device delivery is unavailable.");

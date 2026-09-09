@@ -205,6 +205,28 @@ export class LiveCommittedDelivery {
     finally {this.#active.delete(key);}
   }
 
+  async reviewRestore(value: StopRestoreLookup, signal?: AbortSignal) {
+    const restore = this.#connection.restore;
+    if (!restore) throw new Error("Restore preparation is not configured on this host.");
+    const lookup = snapshotStopRestoreLookup(value), document = this.documentForRestore(lookup);
+    const key = JSON.stringify([document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId]);
+    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
+    this.#active.add(key);
+    try {return await restore.review({store: this.#store, lookup, connection: this.#connection, deliveryKind: "bootstrap", signal});}
+    finally {this.#active.delete(key);}
+  }
+
+  async confirmRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
+    const restore = this.#connection.restore;
+    if (!restore) throw new Error("Restore preparation is not configured on this host.");
+    const lookup = snapshotStopRestoreLookup(value), document = this.documentForRestore(lookup);
+    const key = JSON.stringify([document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId]);
+    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
+    this.#active.add(key);
+    try {return await restore.confirm({store: this.#store, lookup, connection: this.#connection, deliveryKind: "bootstrap", signal}, proposalDigest);}
+    finally {this.#active.delete(key);}
+  }
+
   async completeRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
     const restore = this.#connection.restore;
     if (!restore) throw new Error("Restore preparation is not configured on this host.");
