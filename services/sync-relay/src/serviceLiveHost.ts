@@ -175,7 +175,9 @@ export async function startServiceLiveHost(options: {
       env: { DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig }, signal,
       onExit: abort, onStderr: text => console.error("[service-live-host]", text.trimEnd()),
     });
+    // Caller input retention and native upload buffers each have their own cap.
     if (changes) client = queueLiveHostRequests(client, {maxPendingReads: changes.maxListeners, maxPendingWrites: changes.maxListeners,
+      maxRetainedInputBytes: config.client.aggregateBytes,
       deadlineMs: config.client.requestDeadlineMs, signal, retire: abort});
     if (signal.aborted) throw new Error("Service host startup cancelled.");
     const discovery = await client.sendRequest({ id: nextRequestId(), method: "liveApplication.hosts", params: {}, deadlineMs: config.client.requestDeadlineMs });

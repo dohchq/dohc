@@ -8,16 +8,18 @@ function deferred<T>() {
 }
 const request = (id: number) => ({id, method: "liveApplication.settle", params: {}, workspace: "workspace", registrationId: 7, deadlineMs: 1000});
 const position = {eventCount: 0, journalCursor: 0, evidenceDigest: "a".repeat(64)};
-function fixture(maxPending = 4) {
+function fixture(maxPending = 4, maxRetainedInputBytes = 1_000_000) {
   const lifetime = new AbortController(), seen: number[] = [];
   const invoke = vi.fn(async (input: {id: number}, _signal?: AbortSignal): Promise<unknown> => {seen.push(input.id); return {result: {}};});
   const native = {
     sendRequest: invoke,
+    sendLiveOwnerAdoption: (input: {id: number}, _cut: unknown, _bounds: unknown, signal?: AbortSignal) => invoke(input, signal),
     readNextLiveApplied: (input: {id: number}, _position: unknown, _limit: number, signal?: AbortSignal) => invoke(input, signal),
     readLiveApplicationAck(input: {id: number}, _identity: unknown, signal?: AbortSignal) {return this.sendRequest(input, signal);},
   };
   const retire = vi.fn(() => lifetime.abort(new Error("retired")));
   const client = queueLiveHostRequests(native as unknown as EngineClient, {maxPendingReads: maxPending, maxPendingWrites: maxPending,
+    maxRetainedInputBytes,
     deadlineMs: 1000, signal: lifetime.signal, retire});
   return {client, invoke, seen, lifetime, retire};
 }
@@ -92,4 +94,40 @@ it("does not enqueue the internal RPC of an already queued client method", async
   const f = fixture(1);
   await f.client.readLiveApplicationAck(request(1), {deliveryId: "delivery", updateDigest: "b".repeat(64)});
   expect(f.invoke).toHaveBeenCalledTimes(1); f.lifetime.abort();
+});
+
+const adoptionCut = (baselineBytes: Uint8Array) => ({
+  relayDatabaseNamespace: "namespace", adoptionId: "adoption", sourceMomentId: "source", sourceDigest: "a".repeat(64), sourceByteLength: 0,
+  baselineMomentRelaySequence: 1, baselineRegisteredAtMs: 0, expectedLocalSequence: 0, terminalReceipt: null, baselineBytes, events: [],
+});
+it("bounds retained borrowed cuts and releases cancelled queued input without borrowing the native budget", async () => {
+  const f = fixture(4, 32_000), release = deferred<unknown>(), caller = new AbortController();
+  f.invoke.mockImplementationOnce(() => release.promise);
+  const active = f.client.sendRequest(request(1));
+  const cut = adoptionCut(new Uint8Array(20_000)), bounds = {maxBytes: 30_000, maxEvents: 1};
+  const queued = f.client.sendLiveOwnerAdoption({...request(2), sessionId: "owner"}, cut, bounds, caller.signal);
+  await expect(f.client.sendLiveOwnerAdoption({...request(3), sessionId: "owner"}, cut, bounds)).rejects.toThrow("retained input capacity");
+  expect(f.invoke).toHaveBeenCalledTimes(1);
+  const cancelled = expect(queued).rejects.toThrow("cancelled"); caller.abort(new Error("cancelled")); await cancelled;
+  const replacement = f.client.sendLiveOwnerAdoption({...request(4), sessionId: "owner"}, cut, bounds);
+  release.resolve({result: {}}); await Promise.all([active, replacement]);
+  expect(f.invoke.mock.calls.map(([input]) => input.id)).toEqual([1, 4]); f.lifetime.abort();
+});
+
+it("holds an active envelope's input charge until native completes after cancellation", async () => {
+  const f = fixture(4, 16_000), release = deferred<unknown>(), caller = new AbortController();
+  f.invoke.mockImplementationOnce(() => release.promise);
+  const envelope = {...request(1), params: {value: "x".repeat(1800)}};
+  const active = f.client.sendRequest(envelope, caller.signal), cancelled = expect(active).rejects.toThrow("cancelled");
+  caller.abort(new Error("cancelled"));
+  await expect(f.client.sendRequest({...envelope, id: 2})).rejects.toThrow("retained input capacity");
+  expect(f.invoke).toHaveBeenCalledTimes(1); release.resolve({result: {}}); await cancelled;
+  await f.client.sendRequest({...envelope, id: 3}); expect(f.invoke).toHaveBeenCalledTimes(2); f.lifetime.abort();
+});
+
+it("refuses an oversized backing allocation before native and leaves no partial reservation", async () => {
+  const f = fixture(4, 10_000), cut = adoptionCut(new Uint8Array(20_000).subarray(0, 1));
+  await expect(f.client.sendLiveOwnerAdoption({...request(1), sessionId: "owner"}, cut, {maxBytes: 1000, maxEvents: 1})).rejects.toThrow("retained input capacity");
+  expect(f.invoke).not.toHaveBeenCalled();
+  await f.client.sendRequest(request(2)); expect(f.invoke).toHaveBeenCalledOnce(); f.lifetime.abort();
 });

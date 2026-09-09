@@ -71,6 +71,7 @@ async function setup(maxListeners = 4) {
   await client.ready(); cleanup.push(async () => { client.close(); });
   const changes = createNamedFrameChanges(maxListeners), invalidated = new AbortController();
   client = queueLiveHostRequests(client, {maxPendingReads: maxListeners, maxPendingWrites: maxListeners, deadlineMs: 5000,
+    maxRetainedInputBytes: 128 * 1024 * 1024,
     signal: invalidated.signal, retire: () => invalidated.abort()});
   let requestId = 0;
   const drain = vi.fn(async () => {});

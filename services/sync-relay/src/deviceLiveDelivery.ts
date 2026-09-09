@@ -66,7 +66,9 @@ export function createDeviceLiveDelivery(options: {
     connection = new DeviceEngineConnection(ws, limits, peer, config.maxQueuedBytes, options.stop);
     client = new EngineClient(connection, { authToken, protocolVersion: 2, capabilities: ["blobs"],
       maxFrameBytes: config.client.maxFrameBytes, connectTimeoutMs: config.client.connectTimeoutMs, privateLiveApplication: config.client });
+    // Caller input retention and native upload buffers each have their own cap.
     if (changes) client = queueLiveHostRequests(client, {maxPendingReads: changes.maxListeners, maxPendingWrites: changes.maxListeners,
+      maxRetainedInputBytes: config.client.aggregateBytes,
       deadlineMs: config.client.requestDeadlineMs, signal: invalidated.signal,
       retire() {invalidated.abort(new Error("Native request completion is unknown.")); options.stop();}});
     stopOwnerEvents = client.onEvent(event => {

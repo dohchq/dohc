@@ -47,6 +47,7 @@ async function fixture({sync = true, adopted = true, aggregateBytes = 200_000_00
           peer = new EngineClient(connection, {authToken: start.authToken, protocolVersion: 2, capabilities: ["blobs"], maxFrameBytes: 1_048_576,
             privateLiveApplication: {aggregateBytes: 200_000_000, maxUploads: 2}});
           if (queued) peer = queueLiveHostRequests(peer, {maxPendingReads: 8, maxPendingWrites: 8, deadlineMs: 30_000,
+            maxRetainedInputBytes: 200_000_000,
             signal: lifetime.signal, retire: () => lifetime.abort()});
           peer.onEvent(event => {if (event.name === "liveApplication.ownerOutboxChanged") events.push(event);});
           started.resolve();
