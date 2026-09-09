@@ -11,8 +11,8 @@ type Cut = {checkpoint: Uint8Array; suffix: readonly Uint8Array[]};
 type RestoreContentInput = {
   document: LiveDocumentKey;
   currentPath: string;
-  accepted: Cut;
-  point: Cut;
+  accepted: Cut & {target: "accepted"};
+  point: Cut & {target: "selected"};
   nativeSources: readonly Uint8Array[];
   frozenState: Uint8Array;
   candidate: Uint8Array;
@@ -46,11 +46,20 @@ export function compareLiveRestoreContent(input: RestoreContentInput, policy: Or
   input = {...input, accepted: {...input.accepted}, point: {...input.point}};
   refuse(Number.isSafeInteger(budget.maxBytes) && budget.maxBytes > 0 &&
     Number.isSafeInteger(budget.maxEvents) && budget.maxEvents > 0, "invalid budget");
+  refuse(input.accepted.target === "accepted" && input.point.target === "selected", "history target differs");
+  const copyUpdates = (updates: readonly Uint8Array[]) => {
+    const length = updates.length;
+    refuse(Array.isArray(updates) && Number.isSafeInteger(length) && length >= 0 &&
+      length <= MAX_OLD_SUFFIX_ENTRIES && length <= budget.maxEvents, "event budget");
+    const copy: Uint8Array[] = [];
+    for (let index = 0; index < length; index++) copy.push(updates[index]!);
+    return copy;
+  };
+  input = {...input, accepted: {...input.accepted, suffix: copyUpdates(input.accepted.suffix)},
+    point: {...input.point, suffix: copyUpdates(input.point.suffix)}, nativeSources: copyUpdates(input.nativeSources)};
   const contextCount = input.accepted.suffix.length + input.nativeSources.length;
-  refuse(contextCount <= MAX_OLD_SUFFIX_ENTRIES && input.point.suffix.length <= MAX_OLD_SUFFIX_ENTRIES &&
+  refuse(contextCount <= MAX_OLD_SUFFIX_ENTRIES &&
     contextCount + input.point.suffix.length <= budget.maxEvents, "event budget");
-  input = {...input, accepted: {...input.accepted, suffix: [...input.accepted.suffix]},
-    point: {...input.point, suffix: [...input.point.suffix]}, nativeSources: [...input.nativeSources]};
   const contextSuffix = [...input.accepted.suffix, ...input.nativeSources];
   // Charge every independent proof input, including repeated checkpoint bytes, before validation or scratch allocation.
   let bytes = 0;

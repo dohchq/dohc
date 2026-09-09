@@ -5,6 +5,7 @@ import {createLiveMarkdownRegistrationValidator, createLiveMarkdownJournalValida
 import type {OrderedLiveUpdateCutPolicy} from "./orderedLiveUpdateCut.js";
 
 type RestorePointInput = {
+  target: "selected";
   binding: {workspaceId: string; mainVersionId: string; objectId: string; lineageClaimId: string; currentPath: string};
   checkpoint: {bytes: Uint8Array};
   events: readonly {updateBytes: Uint8Array}[];
@@ -19,6 +20,7 @@ type RestorePointInput = {
  */
 export function resolveLiveRestorePoint(capture: RestorePointInput, policy: OrderedLiveUpdateCutPolicy) {
   capture.assertCurrent();
+  if (capture.target !== "selected") throw new Error("Restore point requires the selected history capture.");
   const {workspaceId, mainVersionId, objectId, lineageClaimId, currentPath} = capture.binding;
   const document = {workspaceId, mainVersionId, objectId, lineageClaimId};
   const last = capture.events.at(-1);

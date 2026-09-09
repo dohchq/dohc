@@ -10,8 +10,141 @@ import type { StorageContext } from "../../../services/sync-relay/src/storage/co
 import type { StopRestoreCutCapture, CommittedBootstrap } from "../../../services/sync-relay/src/storage/liveCommittedDelivery.js";
 import type {NativeRestoreFenceReceipt} from "../../../services/sync-relay/src/liveRestoreFence.js";
 import { openSyncRelayStorage } from "../../../services/sync-relay/src/storage.js";
+import {decodeJournalRow} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
+import {parseNativeRestoreProposalReceipt} from "../../../services/sync-relay/src/liveRestoreProposal.js";
+import {validateLiveRestoreProposal} from "./liveRestoreProof.js";
+import {createLiveMarkdownJournalValidator} from "./liveDocumentValidation.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
+const jsonHash = (value: unknown) => hash(Buffer.from(JSON.stringify(value)));
+function proposalSourcesFixture(kind: "bootstrap" | "owner", mode: "service" | "device") {
+  const f = readyNativeFence(kind, mode, true);
+  f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt);
+  const input = {...f.lookup, maxBytes: 1_000_000, maxEvents: 10};
+  const acceptedSources = f.raw.prepare("SELECT * FROM sync_relay_live_update_journal ORDER BY journal_cursor").all()
+    .map(row => decodeJournalRow(f.context.db, row).admitted.metadata);
+  let origin: unknown;
+  if (kind === "owner") {
+    const {binding, cut: c} = f.store.captureStopRestoreOwnerOrigin(input);
+    origin = [binding, c.relayDatabaseNamespace, c.sourceMomentId, c.sourceDigest, c.sourceByteLength,
+      c.baselineMomentRelaySequence, c.baselineRegisteredAtMs, c.expectedLocalSequence, c.events.map(event => event.metadata)];
+  } else {
+    const b = f.raw.prepare("SELECT * FROM sync_relay_live_delivery_bootstraps").get()!;
+    origin = {bootstrapId: b.bootstrap_id, bootstrapMomentId: b.bootstrap_moment_id,
+      baselineMomentRelaySequence: b.baseline_moment_relay_seq, baselineRegisteredAtMs: b.baseline_registered_at_ms,
+      baselineDigest: b.baseline_digest, baselineByteLength: b.baseline_byte_length,
+      projectedMarkdownDigest: b.projected_markdown_digest, projectedMarkdownByteLength: b.projected_markdown_byte_length};
+  }
+  // These tests authenticate source receipts only. They do not claim a content-valid native candidate.
+  const receipt = {fence: f.receipt, point: resolveLiveRestorePoint(f.store.captureStopRestorePoint(input), policy),
+    candidateDigest: "a".repeat(64), frozenStateDigest: "b".repeat(64), pointStateDigest: "c".repeat(64),
+    finalContentDigest: "d".repeat(64), beforeStateVector: [0], afterStateVector: [0],
+    replacementRanges: [{clientId: 999, startClock: 0, endClock: 1}], originEvidenceDigest: jsonHash(origin),
+    acceptedSources, nativeSources: [], nativeSourceManifestDigest: jsonHash([f.receipt, []])};
+  return {...f, input, proposal: receipt};
+}
+
+it.each([["bootstrap", "service"], ["bootstrap", "device"], ["owner", "service"], ["owner", "device"]] as const)(
+  "authenticates restore proposal sources for %s on %s without opening admission", (kind, mode) => {
+    const f = proposalSourcesFixture(kind, mode);
+    try {
+      const before = f.journalRows(), captured = f.store.captureStopRestoreProposal(f.input, JSON.stringify(f.proposal));
+      expect(captured.receipt.acceptedSources).toEqual(f.proposal.acceptedSources);
+      expect(captured.selected.target).toBe("selected"); expect(captured.accepted.target).toBe("accepted");
+      expect(() => captured.assertCurrent()).not.toThrow();
+      expect(f.journalRows()).toEqual(before);
+      expect(f.raw.prepare("SELECT admission_state FROM sync_relay_live_documents").get()!.admission_state).toBe("closed");
+      expect(f.storage.getShareGrant("grant")?.status).toBe("revoked");
+      Object.assign(captured.receipt.acceptedSources[0]!.accepted.receipt, {updateDigest: "f".repeat(64)});
+      expect(() => captured.assertCurrent()).toThrow();
+    } finally {f.close();}
+  });
+
+it("refuses restore proposal source substitution, omission, order and operation drift", () => {
+  const f = proposalSourcesFixture("owner", "device");
+  try {
+    const mutations = [
+      (r: typeof f.proposal) => {r.acceptedSources.pop();},
+      (r: typeof f.proposal) => {r.acceptedSources.reverse();},
+      (r: typeof f.proposal) => {Object.assign(r.acceptedSources[0]!.accepted.authority, {principalId: "other"});},
+      (r: typeof f.proposal) => {r.originEvidenceDigest = "f".repeat(64);},
+      (r: typeof f.proposal) => {Object.assign(r.point, {journalCursor: 1});},
+      (r: typeof f.proposal) => {r.fence.operation.hostId = "other";r.nativeSourceManifestDigest = jsonHash([r.fence, []]);},
+    ];
+    for (const mutate of mutations) {
+      const r = structuredClone(f.proposal);mutate(r);
+      expect(() => f.store.captureStopRestoreProposal(f.input, JSON.stringify(r))).toThrow();
+    }
+    const capture = f.store.captureStopRestoreProposal(f.input, JSON.stringify(f.proposal));
+    f.raw.prepare("UPDATE sync_relay_live_update_journal SET received_at_ms=received_at_ms+1 WHERE journal_cursor=1").run();
+    expect(() => capture.assertCurrent()).toThrow();
+  } finally {f.close();}
+});
+
+it("bounds restore proposal metadata and refuses corrupt native source manifests", () => {
+  const f = proposalSourcesFixture("bootstrap", "service");
+  try {
+    const json = JSON.stringify(f.proposal);
+    expect(() => f.store.captureStopRestoreProposal({...f.input, maxBytes: 1}, json)).toThrow(/bound/);
+    expect(() => f.store.captureStopRestoreProposal({...f.input, maxEvents: 1}, json)).toThrow(/bound/);
+    expect(() => parseNativeRestoreProposalReceipt(JSON.stringify({...f.proposal, surprise: true}), f.input)).toThrow();
+    expect(() => parseNativeRestoreProposalReceipt(JSON.stringify({...f.proposal, nativeSourceManifestDigest: "f".repeat(64)}), f.input)).toThrow();
+    expect(() => parseNativeRestoreProposalReceipt(JSON.stringify({...f.proposal, beforeStateVector: [256]}), f.input)).toThrow();
+  } finally {f.close();}
+});
+
+it("carries authenticated store targets into real proposal content validation", () => {
+  const f = proposalSourcesFixture("owner", "device"), point = new Y.Doc({gc: false}), head = new Y.Doc({gc: false});
+  try {
+    const selected = f.store.captureStopRestorePoint(f.input), accepted = f.store.captureStopRestoreAcceptedCut(f.input);
+    Y.applyUpdate(point, selected.checkpoint.bytes);for (const e of selected.events) Y.applyUpdate(point, e.updateBytes);
+    Y.applyUpdate(head, accepted.checkpoint.bytes);for (const e of accepted.events) Y.applyUpdate(head, e.updateBytes);
+    const frozen = Y.encodeStateAsUpdate(head), pointBytes = Y.encodeStateAsUpdate(point), vector = Y.encodeStateVector(head);
+    const used = Y.decodeStateVector(vector);let client = 1;while (used.has(client)) client++;head.clientID = client;
+    head.transact(() => {
+      const body = head.getXmlFragment("body");body.delete(0, body.length);
+      body.insert(0, point.getXmlFragment("body").toArray().map(node => {
+        if (!(node instanceof Y.XmlElement || node instanceof Y.XmlText)) throw Error("unexpected fixture body");
+        return node.clone();
+      }));
+      const fields = head.getMap("frontmatter");for (const key of fields.keys()) fields.delete(key);
+      for (const [key, value] of point.getMap("frontmatter").entries()) fields.set(key, structuredClone(value));
+    });
+    const candidate = Y.encodeStateAsUpdate(head, vector);
+    const validated = createLiveMarkdownJournalValidator(policy)({document: f.document, currentPath: selected.binding.currentPath,
+      checkpoint: frozen, suffix: [], candidate});
+    if (validated.kind !== "accepted") throw Error(validated.reason);
+    const receipt = {...f.proposal, candidateDigest: hash(candidate), frozenStateDigest: hash(frozen), pointStateDigest: hash(pointBytes),
+      beforeStateVector: [...vector], afterStateVector: [...Y.encodeStateVector(head)], replacementRanges: [...validated.evidence.candidate.ranges]};
+    const capture = f.store.captureStopRestoreProposal(f.input, JSON.stringify(receipt));
+    const bytes = {candidateBytes: candidate, frozenStateBytes: frozen, pointStateBytes: pointBytes, nativeSourceBytes: []};
+    expect(validateLiveRestoreProposal(capture, bytes, policy, f.input).content.candidateDigest).toBe(hash(candidate));
+    expect(() => validateLiveRestoreProposal({...capture, selected: capture.accepted, accepted: capture.selected} as never, bytes, policy, f.input)).toThrow();
+    expect(f.raw.prepare("SELECT admission_state FROM sync_relay_live_documents").get()!.admission_state).toBe("closed");
+  } finally {point.destroy();head.destroy();f.close();}
+});
+
+it("authenticates bounded native pending identities and refuses a different adoption or local head", () => {
+  const f = proposalSourcesFixture("owner", "device");
+  try {
+    const binding = f.proposal.fence.operation.oldBinding, updateDigest = "e".repeat(64);
+    const outboxId = `owner-outbox-${hash(Buffer.from(`${binding.workspaceId}\0${JSON.stringify(binding)}\0${binding.lineageClaimId}`))}`;
+    const source = {binding, adoptionId: "adoption", nativeSequence: 9, updateDigest,
+      origin: {kind: "nativeUpdate", actorOriginId: null, actorKind: null, onBehalfOf: null, chainDepth: null, recordedAtMs: 100}};
+    const native = {outboxId, outboxSequence: 1, binding, appendKey: `adopted-local:${jsonHash(source)}`,
+      deliveryId: `owner-delivery-${hash(Buffer.from(`${outboxId}\0${1}\0${updateDigest}`))}`, updateDigest,
+      byteLength: 2, createdAtMs: 100, source, acceptedReceipt: null};
+    const receipt = {...f.proposal, nativeSources: [native], nativeSourceManifestDigest: jsonHash([f.proposal.fence, [native]])};
+    expect(parseNativeRestoreProposalReceipt(JSON.stringify(receipt), f.input).nativeSources).toHaveLength(1);
+    for (const edit of [(s: typeof source) => {s.adoptionId = "other";}, (s: typeof source) => {s.nativeSequence = 12;}]) {
+      const changed = structuredClone(receipt);edit(changed.nativeSources[0]!.source);
+      changed.nativeSources[0]!.appendKey = `adopted-local:${jsonHash(changed.nativeSources[0]!.source)}`;
+      changed.nativeSourceManifestDigest = jsonHash([changed.fence, changed.nativeSources]);
+      expect(() => parseNativeRestoreProposalReceipt(JSON.stringify(changed), f.input)).toThrow();
+    }
+  } finally {f.close();}
+});
+
 function fixture(kind: "bootstrap" | "owner" = "bootstrap",mode: "service" | "device" = "device", baselineBytes?: Uint8Array) {
   const coordinate = {...host,mode}, f = registered({host: coordinate, baselineBytes}), context = f.storage as StorageContext;
   const history = createLiveJournalHistoryAuthority({namespace: "restore-test",reconciled: true});
@@ -412,7 +545,15 @@ it.each(["service", "device"] as const)("captures the frozen accepted %s cut sep
     expect(accepted.events).toHaveLength(3);
     expect(accepted.point).toEqual({journalCursor: f.nativeReceipt.operation.terminal!.journalCursor,
       receiptDigest: f.nativeReceipt.operation.terminal!.updateDigest});
-    expect(resolveLiveRestorePoint(accepted, policy).markdownDigest).toBe(hash(Buffer.from(yDocToMarkdown(f.doc))));
+    expect(accepted.target).toBe("accepted");
+    expect(selected.target).toBe("selected");
+    expect(() => resolveLiveRestorePoint(accepted as never, policy)).toThrow("selected history");
+    const scratch = new Y.Doc({gc: false});
+    try {
+      Y.applyUpdate(scratch, accepted.checkpoint.bytes);
+      for (const event of accepted.events) Y.applyUpdate(scratch, event.updateBytes);
+      expect(yDocToMarkdown(scratch)).toBe(yDocToMarkdown(f.doc));
+    } finally {scratch.destroy();}
     expect(f.journalRows()).toEqual(before);
     expect(() => f.store.captureStopRestoreAcceptedCut({...f.input, maxEvents: 2})).toThrow(/bounds/);
     accepted.events[0]!.updateBytes[0] ^= 1;
