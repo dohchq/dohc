@@ -100,6 +100,7 @@ export type ValidatedLiveUpdateCut =
   | (AcceptedCutCommon & {
       readonly mode: 'journal-candidate'
       readonly checkpointDigest: string
+      readonly checkpointRanges: readonly LiveUpdateStructRange[]
       readonly suffixDigests: readonly string[]
       readonly candidate: ValidatedCutInputEvidence
     })
@@ -3625,6 +3626,7 @@ function validateCut(
         usage: acceptedUsage,
         finishAfterProjection,
         checkpointDigest: (inputEvidence[0] as ValidatedCutInputEvidence).updateDigest,
+        checkpointRanges: frozenInputEvidence((inputEvidence[0] as ValidatedCutInputEvidence).updateDigest, (inputEvidence[0] as ValidatedCutInputEvidence).ranges).ranges,
         suffixDigests: Object.freeze(
           inputEvidence.slice(1, 1 + snapshot.suffixCount).map(entry => entry.updateDigest),
         ),

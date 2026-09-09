@@ -1,6 +1,6 @@
 import { HOST_CONTROL_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/host-control";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
-import { LIVE_OBJECT_BINDING_PATH_MAX_BYTES } from "@dohc/live-session-contract/live-object-binding";
+import { LIVE_OBJECT_BINDING_PATH_MAX_BYTES,LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT } from "@dohc/live-session-contract/live-object-binding";
 import type { StorageContext } from "./context";
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_DELIVERY_BOOTSTRAPS, LIVE_DELIVERY_EDGES, LIVE_DELIVERY_HOSTS, LIVE_DELIVERY_RESERVATIONS, LIVE_DELIVERY_DOCUMENTS, LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
@@ -52,7 +52,7 @@ function reserveLiveDeliveryBaseline(storage: StorageContext, document: LiveDocu
   const terminalReceipt = {deliveryId: identifier,updateDigest: "a".repeat(64),journalCursor: maximum,acceptingHostEpoch: maximum};
   const origin = {relayDatabaseNamespace: identifier,adoptionId: identifier,sourceMomentId: identifier,sourceDigest: "a".repeat(64),sourceByteLength: maximum,
     baselineMomentRelaySequence: maximum,baselineRegisteredAtMs: maximum,expectedLocalSequence: maximum,terminalReceipt,bindingDigest: "a".repeat(64),
-    originEvidenceDigest: "a".repeat(64),originEventCount: maximum,originHistoryEvidenceDigest: "a".repeat(64)};
+    originEvidenceDigest: "a".repeat(64),originEventCount: maximum,originHistoryEvidenceDigest: "a".repeat(64),originalBinding:{...binding,selectorPaths:Array.from({length:LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT},()=>path)}};
   const owner = bytes([identifier,...parameters(document),hostId,JSON.stringify(origin),JSON.stringify(terminalReceipt),maximum,maximum,maximum]);
   const amount = Math.max(bootstrap,owner);
   reserve(storage, document, hostId, 0, amount);

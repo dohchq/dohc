@@ -48,7 +48,8 @@ it("transfers owner metadata quota for all100 maximum-length selectors and detec
     store.acknowledgeOwnerAdoption(capture,{adoptionId: "origin",localYDocSequence: 0,terminalCursor: 0,adoptionReplayed: false});
     expect(Number(f.journalRows().usage)-liveDeliveryBookkeepingBytes(f.raw)).toBe(before);
     const row = f.raw.prepare("SELECT origin_json FROM sync_relay_live_delivery_owners").get()!;
-    expect(Buffer.byteLength(String(row.origin_json))).toBeLessThan(4096);
+    expect(JSON.parse(String(row.origin_json)).originalBinding).toEqual(capture.binding);
+    expect(Buffer.byteLength(String(row.origin_json))).toBeLessThan(Buffer.byteLength(JSON.stringify(capture.binding))+4096);
     f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'").run(JSON.stringify({paths: ["docs/a.md"],versionId: null}));
     expect(() => capture.assertCurrent()).toThrow();
   } finally {f.close();}
@@ -79,14 +80,14 @@ it("records owner origin and ACK progress with exact quota transfer and restart 
     const before = Number(f.journalRows().usage)-liveDeliveryBookkeepingBytes(f.raw);
     const updateAck = {...receipt,localYDocSequence: 2,applicationReplayed: false};
     store.acknowledgeOwnerDeliveryApplication(latest,updateAck);
-    expect(store.ownerDeliveryProgress(latest)).toEqual({terminal: receipt,sequence: 2});
+    expect(store.ownerDeliveryProgress(latest)).toEqual({adoptionId:"origin",terminal: receipt,sequence: 2});
     expect(Number(f.journalRows().usage)-liveDeliveryBookkeepingBytes(f.raw)).toBe(before);
     expect(() => store.acknowledgeOwnerDeliveryApplication(latest,{...updateAck,applicationReplayed: true})).toThrow();
     expect(f.storage.commitLiveUpdateJournal(f.capture(f.update("three","third"),"third")).result.kind).toBe("accepted");
     const historical = store.openOwnerDelivery({host,document: input.document,actor}), third = store.nextOwnerApplication(historical)!.metadata.accepted.receipt;
     expect(() => store.acknowledgeOwnerDeliveryApplication(historical,{...updateAck,journalCursor: third.journalCursor})).toThrow();
     store.acknowledgeOwnerDeliveryApplication(historical,{...third,localYDocSequence: 1,applicationReplayed: false});
-    expect(store.ownerDeliveryProgress(historical)).toEqual({terminal: third,sequence: 2});
+    expect(store.ownerDeliveryProgress(historical)).toEqual({adoptionId:"origin",terminal: third,sequence: 2});
     expect(f.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_delivery_reservations").get()!.count).toBe(0);
   } finally { f.close(); }
 });

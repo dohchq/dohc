@@ -68,7 +68,7 @@ it("funds the stored document binding independently of a large share selector", 
   } finally { f.close(); }
 });
 it("reserves delivery before admission and completes acknowledgements at quota", () => {
-  const quota = 200_000;
+  const quota = 1_000_000;
   const f = registered({ workspaceQuotaBytes: quota });
   try {
     const event = f.capture(f.update(), "reserved-event");
@@ -98,7 +98,7 @@ it("reserves delivery before admission and completes acknowledgements at quota",
 });
 
 it("refuses an event atomically when its delivery reservation does not fit", () => {
-  const quota = 200_000;
+  const quota = 1_000_000;
   const f = registered({ workspaceQuotaBytes: quota });
   try {
     const event = f.capture(f.update(), "no-reservation-space");
@@ -179,7 +179,7 @@ it("funds new documents and events when a previously used host returns", () => {
 });
 
 it("keeps the previous host coordinate when destination funding exceeds quota", () => {
-  const quota = 200_000;
+  const quota = 1_000_000;
   const f = registered({ workspaceQuotaBytes: quota });
   try {
     const begin = f.storage.beginLiveHostTransition({ from: host, toMode: "service", toHostId: "new-host", transitionId: "quota-transition", startedAtMs: 40, guard() {} });
@@ -210,7 +210,7 @@ it("stores delivery acknowledgements at the configured host identifier limit", (
 });
 
 it("refuses baseline registration atomically when its delivery budget does not fit", () => {
-  const quota = 200_000;
+  const quota = 1_000_000;
   const f = registered({ workspaceQuotaBytes: quota });
   try {
     const input = { ...f.input, evidence: { ...f.input.evidence, currentPath: "docs/b.md", document: { ...f.input.evidence.document, objectId: "second-object" } } };

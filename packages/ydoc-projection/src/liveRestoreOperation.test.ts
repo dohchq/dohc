@@ -247,8 +247,9 @@ it.each(["before-insert", "after-insert", "after-fence"])("rolls back every effe
 });
 
 it("funds final metadata before revocation and never charges replay or fence advancement", () => {
-  const f = fixture(false, 100_000);
+  const f = fixture();
   try {
+    f.context.options.workspaceQuotaBytes=100_000;
     f.write(db => { db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=99999").run(); });
     const before = f.rows();
     expect(() => beginStopRestore(f.context, f.intent, 40)).toThrow(/quota/);

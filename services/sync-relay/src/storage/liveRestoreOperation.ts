@@ -1,3 +1,4 @@
+import {requireResumedBinding,retainedRestoreLifecycle} from "./liveRestoreLifecycleStorage";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
@@ -63,7 +64,8 @@ export type StopRestoreOperation = {
   terminal: LiveUpdateReceipt | null;
   applied: StopRestoreApplied | null;
   nativeReceipt: NativeRestoreFenceReceipt | null;
-  phase: "authority-invalidated" | "fenced" | "old-cut-applied" | "native-fenced";
+  phase: "authority-invalidated" | "fenced" | "old-cut-applied" | "native-fenced" | "relay-admitted" | "native-applied" | "settled" | "resumed";
+  previousOperationId: string | null;
   oldFence: number;
   newFence: number | null;
   cutoverCursor: number | null;
@@ -126,12 +128,14 @@ export function requireStopRestoreOwnerOrigin(storage: StorageContext, basis: St
   parseLiveUpdateDigest(origin?.originEvidenceDigest);
   parseLiveUpdateDigest(origin?.originHistoryEvidenceDigest);
   integer(origin?.originEventCount);
+  const originalBinding=parseLiveObjectBinding(origin.originalBinding);
+  requireResumedBinding(storage.db,basis.namespace,originalBinding,basis.ownerBinding);
   const source = storage.db.prepare("SELECT moment_id FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND relay_seq=?")
     .get(basis.binding.workspaceId,basis.binding.objectId,basis.baselineSequence);
   if (!origin || origin.relayDatabaseNamespace !== basis.namespace || origin.sourceMomentId !== source?.moment_id ||
     origin.sourceDigest !== basis.projectedDigest || origin.sourceByteLength !== basis.projectedLength ||
     origin.baselineMomentRelaySequence !== basis.baselineSequence || origin.baselineRegisteredAtMs !== basis.registeredAtMs ||
-    origin.bindingDigest !== createHash("sha256").update(JSON.stringify(basis.ownerBinding)).digest("hex")) refuse();
+    origin.bindingDigest !== createHash("sha256").update(JSON.stringify(originalBinding)).digest("hex")) refuse();
 }
 function authority(storage: StorageContext, intent: StopRestoreIntent, checkedBaseline?: Uint8Array): StoredLiveDocumentAuthority {
   const columns = checkedBaseline ? "workspace_id,main_version_id,object_id,lineage_claim_id,current_path,restore_fence_generation,replaces_lineage_claim_id,registered_at_ms,lineage_state,admission_state,retired_at_ms,baseline_digest,baseline_projected_sha256,baseline_projected_byte_length,baseline_moment_relay_seq,baseline_bytes=? AS baseline_matches" : "*";
@@ -150,12 +154,14 @@ function requireAvailableJournalCursor(storage: StorageContext): void {
   if (rows.length > 1 || sequence < integer(Number(maximum)) || sequence === Number.MAX_SAFE_INTEGER) refuse();
 }
 function read(storage: StorageContext, operationId: string, workspaceId: string): StopRestoreOperation | null {
-  const row = storage.db.prepare(`SELECT * FROM ${table} WHERE operation_id=? AND workspace_id=?`).get(operationId, workspaceId);
+  const namespace=liveJournalHistoryNamespace(storage);
+  const row = storage.db.prepare(`SELECT * FROM ${table} WHERE relay_database_namespace=? AND operation_id=? AND workspace_id=?`).get(namespace,operationId, workspaceId);
   if (!row) return null;
   const intent = snapshot(JSON.parse(String(row.intent_json)) as StopRestoreIntent);
   if (intent.operationId !== operationId || !isDeepStrictEqual(key(intent.document),
     [row.workspace_id, row.main_version_id, row.object_id, row.lineage_claim_id]) || intent.expectedFence !== row.old_fence) refuse();
   const savedBasis = parseBasis(JSON.parse(String(row.basis_json)));
+  if (savedBasis.namespace!==namespace) refuse();
   if (!isDeepStrictEqual(key(savedBasis.binding),key(intent.document)) || savedBasis.binding.restoreFenceGeneration !== intent.expectedFence) refuse();
   const terminal = row.terminal_json === null ? null : JSON.parse(String(row.terminal_json));
   const applied = row.applied_json === null ? null : JSON.parse(String(row.applied_json)) as StopRestoreApplied;
@@ -166,9 +172,10 @@ function read(storage: StorageContext, operationId: string, workspaceId: string)
     parseLiveUpdateIdentifier(applied.sourceId); integer(applied.localYDocSequence);
   }
   const nativeReceipt = row.native_receipt_json === null ? null : parseNativeRestoreFenceReceipt(JSON.parse(String(row.native_receipt_json)));
-  if ((row.phase === "native-fenced") !== (nativeReceipt !== null)) refuse();
+  if (!["authority-invalidated","fenced","old-cut-applied"].includes(String(row.phase)) !== (nativeReceipt !== null)) refuse();
   if (nativeReceipt && (!applied || !isDeepStrictEqual(nativeReceipt.operation, nativeRestoreFence(applied, Number(row.new_fence))))) refuse();
   return { intent, basis: savedBasis, terminal: terminal === null ? null : parseLiveUpdateReceipt(terminal), applied, nativeReceipt,
+    previousOperationId:row.previous_operation_id===null?null:parseLiveUpdateIdentifier(row.previous_operation_id),
     phase: row.phase as StopRestoreOperation["phase"], oldFence: Number(row.old_fence),
     newFence: row.new_fence === null ? null : Number(row.new_fence), cutoverCursor: row.cutover_cursor === null ? null : Number(row.cutover_cursor),
     revokedGeneration: Number(row.revoked_generation), invalidatedAtMs: Number(row.invalidated_at_ms),
@@ -189,15 +196,25 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
     requireLiveJournalHistory(storage);
     const saved = read(storage, intent.operationId, intent.document.workspaceId);
     if (saved) { if (!isDeepStrictEqual(saved.intent, intent)) refuse(); return saved; }
-    if (storage.db.prepare(`SELECT 1 FROM ${table} WHERE operation_id=?`).get(intent.operationId)) refuse();
+    const namespace=liveJournalHistoryNamespace(storage);
+    if (storage.db.prepare(`SELECT 1 FROM ${table} WHERE relay_database_namespace=? AND operation_id=?`).get(namespace,intent.operationId)) refuse();
     requireAvailableJournalCursor(storage);
     const document = storage.db.prepare(`SELECT restore_fence_generation,baseline_digest,baseline_moment_relay_seq,current_path FROM sync_relay_live_documents
       WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current' AND admission_state='open'`).get(...key(intent.document));
     if (!document || document.restore_fence_generation !== intent.expectedFence ||
       Number(document.baseline_moment_relay_seq) <= storage.getEpochLogFloor(intent.document.workspaceId) ||
       !currentLiveDocumentMoment(storage, intent.document, String(document.current_path))) refuse();
-    const existing = storage.db.prepare(`SELECT 1 FROM ${table} WHERE workspace_id=? AND main_version_id=? AND object_id=?`).get(...key(intent.document).slice(0, 3));
+    const existing = storage.db.prepare(`SELECT 1 FROM ${table} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND phase<>'resumed'`).get(...key(intent.document).slice(0, 3));
     if (existing) refuse();
+    const previous=storage.db.prepare(`SELECT operation_id,new_fence,lineage_claim_id,phase FROM ${table} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? ORDER BY new_fence DESC LIMIT 1`)
+      .get(namespace,...key(intent.document).slice(0,3));
+    if (previous && (previous.phase!=="resumed" || previous.new_fence!==intent.expectedFence || previous.lineage_claim_id!==intent.document.lineageClaimId)) refuse();
+    const previousOperationId=previous?parseLiveUpdateIdentifier(previous.operation_id):null;
+    if (previousOperationId) {
+      const completed=retainedRestoreLifecycle(storage.db,namespace,previousOperationId);
+      if (!completed?.lifecycle.resume || completed.lifecycle.resume.binding.restoreFenceGeneration!==intent.expectedFence ||
+        !isDeepStrictEqual(key(completed.lifecycle.resume.binding),key(intent.document))) refuse();
+    }
     const share = storage.getShare(intent.shareId), grant = storage.getShareGrant(intent.grantId);
     if (!share || share.workspaceId !== intent.document.workspaceId || share.granterUserId !== intent.ownerUserId ||
       !grant || grant.shareId !== intent.shareId || grant.generation !== intent.expectedGrantGeneration || grant.status !== "active") refuse();
@@ -222,24 +239,27 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
       hostId: initialBasis.hostId,sourceId: "\\".repeat(512),localYDocSequence: Number.MAX_SAFE_INTEGER,terminal: maximumReceipt};
     const maximumNativeReceipt = {operation: nativeRestoreFence(maximumApplied as StopRestoreApplied, Number.MAX_SAFE_INTEGER),
       localHeadSequence: Number.MAX_SAFE_INTEGER, recordedAtMs: Number.MAX_SAFE_INTEGER};
-    const charge = Buffer.byteLength(JSON.stringify([intent.operationId, ...key(intent.document), intentJson, basisJson, JSON.stringify(maximumReceipt),JSON.stringify(maximumApplied),JSON.stringify(maximumNativeReceipt), "authority-invalidated",
+    const charge = Buffer.byteLength(JSON.stringify([intent.operationId, namespace, previousOperationId, ...key(intent.document), intentJson, basisJson, JSON.stringify(maximumReceipt),JSON.stringify(maximumApplied),JSON.stringify(maximumNativeReceipt), "authority-invalidated",
       intent.expectedFence, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, intent.expectedGrantGeneration + 1, at, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]));
     assertWorkspaceQuota(storage, intent.document.workspaceId, charge);
     const revoked = revokeShareGrantInTransaction(storage, { shareId: intent.shareId, grantId: intent.grantId,
       revokedAtMs: at, expectedDependentGrantIds: intent.expectedDependentGrantIds });
     if (!revoked.ok) refuse();
-    storage.db.prepare(`INSERT INTO ${table}(operation_id,workspace_id,main_version_id,object_id,lineage_claim_id,intent_json,basis_json,phase,
+    storage.db.prepare(`INSERT INTO ${table}(operation_id,relay_database_namespace,previous_operation_id,workspace_id,main_version_id,object_id,lineage_claim_id,intent_json,basis_json,phase,
       old_fence,new_fence,cutover_cursor,revoked_generation,invalidated_at_ms,fenced_at_ms,accounted_bytes)
-      VALUES (?,?,?,?,?,?,?,'authority-invalidated',?,NULL,NULL,?,?,NULL,?)`)
-      .run(intent.operationId, ...key(intent.document), intentJson, basisJson, intent.expectedFence, revoked.grant.generation, at, charge);
+      VALUES (?,?,?,?,?,?,?,?,?,'authority-invalidated',?,NULL,NULL,?,?,NULL,?)`)
+      .run(intent.operationId, namespace,previousOperationId,...key(intent.document), intentJson, basisJson, intent.expectedFence, revoked.grant.generation, at, charge);
     storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, intent.document.workspaceId);
     return read(storage, intent.operationId, intent.document.workspaceId)!;
   });
 }
 
-export function readStopRestore(storage: StorageContext, input: { operationId: string; workspaceId: string; ownerUserId: string }): StopRestoreOperation | null {
+export function readStopRestore(storage: StorageContext, input: StopRestoreLookup): StopRestoreOperation | null {
+  return storage.readTx(()=>readStopRestoreInTransaction(storage,input));
+}
+export function readStopRestoreInTransaction(storage: StorageContext, input: StopRestoreLookup): StopRestoreOperation | null {
   const operationId = parseLiveUpdateIdentifier(input.operationId), workspaceId = parseLiveUpdateIdentifier(input.workspaceId), userId = parseLiveUpdateIdentifier(input.ownerUserId);
-  return storage.readTx(() => { owner(storage, workspaceId, userId); return read(storage, operationId, workspaceId); });
+  owner(storage,workspaceId,userId);return read(storage,operationId,workspaceId);
 }
 
 export function advanceStopRestoreFence(storage: StorageContext, input: { operationId: string; workspaceId: string; ownerUserId: string }, now: number): StopRestoreOperation {
@@ -265,8 +285,8 @@ export function advanceStopRestoreFence(storage: StorageContext, input: { operat
     const last = raw ? decodeJournalRow(storage.db,raw) : null;
     if (last) verifyJournalRow(last);
     const terminal = last?.admitted.metadata.accepted.receipt ?? null;
-    const advanced = storage.db.prepare(`UPDATE ${table} SET phase='fenced',new_fence=?,cutover_cursor=?,fenced_at_ms=?,terminal_json=? WHERE operation_id=?`)
-      .run(saved.oldFence + 1, cutover, at, JSON.stringify(terminal), operationId);
+    const advanced = storage.db.prepare(`UPDATE ${table} SET phase='fenced',new_fence=?,cutover_cursor=?,fenced_at_ms=?,terminal_json=? WHERE relay_database_namespace=? AND operation_id=?`)
+      .run(saved.oldFence + 1, cutover, at, JSON.stringify(terminal),saved.basis.namespace, operationId);
     if (Number(advanced.changes) !== 1) refuse();
     return read(storage, operationId, workspaceId)!;
   });

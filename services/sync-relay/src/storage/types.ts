@@ -524,6 +524,7 @@ export type LiveJournalValidation =
       readonly document: LiveDocumentKey;
       readonly currentPath: string;
       readonly checkpointDigest: string;
+      readonly checkpointRanges: readonly LiveUpdateStructRange[];
       readonly suffixDigests: readonly string[];
       readonly candidate: { readonly updateDigest: string; readonly ranges: readonly LiveUpdateStructRange[] };
       readonly stateUpdate?: Uint8Array;

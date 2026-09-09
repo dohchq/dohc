@@ -62,7 +62,21 @@ export function validateLiveRestoreProposal(capture: ProposalCapture, input: Liv
     require(isDeepStrictEqual(Y.decodeStateVector(Y.encodeStateVector(frozenDoc)), Y.decodeStateVector(Uint8Array.from(receipt.beforeStateVector))));
     require(isDeepStrictEqual(Y.decodeStateVector(Y.encodeStateVector(restoredDoc)), Y.decodeStateVector(Uint8Array.from(receipt.afterStateVector))));
     capture.assertCurrent();
-    return Object.freeze({content: result, get candidateBytes() {return new Uint8Array(candidate);}});
+    // These owned bytes have passed the bounded decoder and authenticated content proof above.
+    const nativeSourceRanges=native.map(bytes => {
+      const ranges=Y.decodeUpdate(bytes).structs.filter(struct => !(struct instanceof Y.Skip))
+        .map(struct => ({clientId:struct.id.client,startClock:struct.id.clock,endClock:struct.id.clock+struct.length}))
+        .sort((a,b)=>a.clientId-b.clientId || a.startClock-b.startClock);
+      const merged:LiveUpdateStructRange[]=[];
+      for (const range of ranges) {
+        const previous=merged.at(-1);
+        if (previous && previous.clientId===range.clientId && previous.endClock===range.startClock) {
+          merged[merged.length-1]={...previous,endClock:range.endClock};
+        } else merged.push(range);
+      }
+      return Object.freeze(merged.map(range=>Object.freeze(range)));
+    });
+    return Object.freeze({content: result,nativeSourceRanges:Object.freeze(nativeSourceRanges),get candidateBytes() {return new Uint8Array(candidate);}});
   } finally {frozenDoc.destroy();restoredDoc.destroy();}
 }
 

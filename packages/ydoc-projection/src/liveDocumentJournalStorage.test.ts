@@ -110,7 +110,7 @@ function registered(options: { workspaceQuotaBytes?: number; deployment?: boolea
       return { stateUpdate: validation.evidence.stateUpdate }
     })() : {}
     const owned = validation.kind === 'accepted' ? { kind: validation.kind, evidence: { version: validation.evidence.version,
-      document: validation.evidence.document, currentPath: validation.evidence.currentPath, checkpointDigest: validation.evidence.checkpointDigest,
+      document: validation.evidence.document, currentPath: validation.evidence.currentPath, checkpointDigest: validation.evidence.checkpointDigest, checkpointRanges: validation.evidence.checkpointRanges,
       suffixDigests: validation.evidence.suffixDigests, candidate: validation.evidence.candidate,
       ...state,
       stateUpdateSha256: validation.evidence.stateUpdateSha256, stateUpdateByteLength: validation.evidence.stateUpdateByteLength } } : validation

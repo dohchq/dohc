@@ -1,3 +1,4 @@
+import {readRestoreAdmission,verifyRestoreCheckpoint} from "./liveRestoreCheckpoint";
 import { liveJournalHistoryNamespace, requireLiveJournalHistory } from "./liveJournalHistory";
 import {canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextAcceptedHistoryDigest} from "../liveAcceptedHistory";
 import { createHash } from "node:crypto";
@@ -8,6 +9,7 @@ import type { HostControlSnapshot } from "@dohc/live-session-contract/host-contr
 import type { StorageContext } from "./context";
 import type { SqliteDb, CurrentLiveBindingRequest, LiveHostConnectionCoordinate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult, LiveJournalValidation, StoredLiveDocumentAuthority } from "./types";
 import { LiveJournalAdmittedCapacityError } from "./errors";
+import {LIVE_RESTORE_SOURCE_RANGES} from "./liveRestoreOperationSchema";
 import { LIVE_JOURNAL_TABLE, LIVE_JOURNAL_PROVENANCE } from "./schema";
 import { snapshotHostCoordinate } from "../liveTicketInputs";
 import { readLiveHostControl } from "./hostControl";
@@ -73,6 +75,7 @@ const JOURNAL_DOCUMENT_WHERE = "workspace_id=? AND main_version_id=? AND object_
 interface DecodedJournalRow {
   admitted: AdmittedLiveUpdate;
   checkpoint: { digest: string; bytes: Uint8Array } | null;
+  restoreOperationId: string | null;
   history: {namespace: string; eventCount: number; evidenceDigest: string; metadataBytes: number};
 }
 export function decodeJournalRow(db: SqliteDb, raw: Record<string, unknown>, provenance?: Record<string, unknown>[]): DecodedJournalRow {
@@ -104,7 +107,9 @@ export function decodeJournalRow(db: SqliteDb, raw: Record<string, unknown>, pro
   };
   const history = {namespace: parseLiveUpdateIdentifier(raw.relay_database_namespace), eventCount: authorityInteger(raw.accepted_event_count, 1),
     evidenceDigest: parseLiveUpdateDigest(raw.accepted_evidence_digest), metadataBytes: authorityInteger(raw.accepted_metadata_bytes, 1)};
-  return { admitted: { metadata, updateBytes: journalBytes(raw.update_bytes) }, checkpoint, history };
+  const restoreOperationId = raw.restore_operation_id === null ? null : parseLiveUpdateIdentifier(raw.restore_operation_id);
+  journalIntegrity(restoreOperationId === null || checkpoint !== null);
+  return { admitted: { metadata, updateBytes: journalBytes(raw.update_bytes) }, checkpoint, history, restoreOperationId };
 }
 export function verifyJournalHistoryRow(db: SqliteDb, row: DecodedJournalRow): void {
   verifyJournalHistoryMetadata(db, row.admitted.metadata, row.history);
@@ -120,8 +125,13 @@ function verifyJournalHistoryMetadata(db: SqliteDb, metadata: AdmittedLiveUpdate
   journalIntegrity(previousCount < Number.MAX_SAFE_INTEGER && history.eventCount === previousCount + 1 &&
     history.evidenceDigest === nextAcceptedHistoryDigest(previousDigest, history.eventCount, metadata));
 }
-export function assertJournalCheckpointPosition(db: SqliteDb, row: DecodedJournalRow): { count: number; bytes: number } {
+export function assertJournalCheckpointPosition(db: SqliteDb, row: DecodedJournalRow, budget?:{bytes:number;chargeBytes(value:number):void}): { count: number; bytes: number } {
+  const restored = verifyRestoreCheckpoint(db, row,budget?.bytes,budget?value=>budget.chargeBytes(value):undefined);
   const { binding, receipt } = row.admitted.metadata.accepted;
+  const predecessor=db.prepare(`SELECT current_path,restore_fence_generation FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE} AND journal_cursor<? ORDER BY journal_cursor DESC LIMIT 1`).get(...documentParams(binding),receipt.journalCursor);
+  if (predecessor) journalIntegrity(predecessor.current_path===binding.currentPath && (restored
+    ? predecessor.restore_fence_generation===restored.preparation.fence.operation.oldBinding.restoreFenceGeneration
+    : predecessor.restore_fence_generation===binding.restoreFenceGeneration));
   const previous = db.prepare(`SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE}
     AND journal_cursor<? AND validation_checkpoint_bytes IS NOT NULL ORDER BY journal_cursor DESC LIMIT 1`)
     .get(...documentParams(binding), receipt.journalCursor);
@@ -141,7 +151,7 @@ export function assertJournalCheckpointPosition(db: SqliteDb, row: DecodedJourna
     const due = index + 1 === 4095 || bytes >= 20_971_520;
     const hasCheckpoint = raw.has_checkpoint_bytes === 1;
     journalIntegrity(hasCheckpoint === (raw.has_checkpoint_digest === 1));
-    journalIntegrity(due === hasCheckpoint);
+    journalIntegrity((due || (restored !== null && index === segment.length - 1)) === hasCheckpoint);
     if (index < segment.length - 1) journalIntegrity(!due);
   }
   return { count: segment.length, bytes };
@@ -194,7 +204,7 @@ function snapshotJournalValidation(value: unknown, checkpointDue: boolean): Live
   }
   if (outer.kind !== "accepted") throw new TypeError("Invalid journal validation.");
   const accepted = baselineRecord(value, ["kind", "evidence"]);
-  const evidence = baselineRecord(accepted.evidence, ["version", "document", "currentPath", "checkpointDigest", "suffixDigests",
+  const evidence = baselineRecord(accepted.evidence, ["version", "document", "currentPath", "checkpointDigest", "checkpointRanges", "suffixDigests",
     "candidate", "stateUpdateSha256", "stateUpdateByteLength", ...(checkpointDue ? ["stateUpdate"] : [])], true);
   if (evidence.version !== 1 || typeof evidence.currentPath !== "string") throw new TypeError("Unknown journal evidence.");
   const candidate = baselineRecord(evidence.candidate, ["updateDigest", "ranges"]);
@@ -207,7 +217,7 @@ function snapshotJournalValidation(value: unknown, checkpointDue: boolean): Live
     journalDigest(stateUpdate, stateUpdateSha256);
   }
   return { kind: "accepted", evidence: { version: 1, document: journalDocument(evidence.document), currentPath: evidence.currentPath,
-    checkpointDigest: parseLiveUpdateDigest(evidence.checkpointDigest), suffixDigests: journalArray(evidence.suffixDigests, 4094, parseLiveUpdateDigest),
+    checkpointDigest: parseLiveUpdateDigest(evidence.checkpointDigest), checkpointRanges: journalRanges(evidence.checkpointRanges), suffixDigests: journalArray(evidence.suffixDigests, 4094, parseLiveUpdateDigest),
     candidate: { updateDigest: parseLiveUpdateDigest(candidate.updateDigest), ranges: journalRanges(candidate.ranges) },
     ...(stateUpdate ? { stateUpdate } : {}), stateUpdateSha256, stateUpdateByteLength } };
 }
@@ -221,7 +231,7 @@ function journalValidationRefusal(validation: Extract<LiveJournalValidation, { k
   }
   return { kind: "refused", reason: reason === "capacity-refused" ? "capacity-refused" : "invalid-update" };
 }
-function subtractJournalRanges(candidate: readonly LiveUpdateStructRange[], coverage: readonly LiveUpdateStructRange[]): LiveUpdateStructRange[] {
+export function subtractJournalRanges(candidate: readonly LiveUpdateStructRange[], coverage: readonly LiveUpdateStructRange[]): LiveUpdateStructRange[] {
   const result: LiveUpdateStructRange[] = [];
   let index = 0;
   for (const range of candidate) {
@@ -250,6 +260,74 @@ export function readLiveUpdateJournalCut(storage: StorageContext, input: { docum
     }
     return result;
   }
+
+/** Internal insertion only. Each caller must revalidate its admission capture in this transaction. */
+export function appendValidatedLiveJournal(storage: StorageContext, input: {
+  document: LiveDocumentKey; namespace: string; host: LiveHostConnectionCoordinate;
+  current: {binding: LiveObjectBinding; authority: AdmittedLiveUpdate["metadata"]["accepted"]["authority"]};
+  metadata: {deliveryId: string; updateDigest: string}; updateBytes: Uint8Array; receivedAtMs: number;
+  restoreOperationId?: string;
+  firstSeen: AdmittedLiveUpdate["metadata"]["firstSeen"]; checkpointBytes: Uint8Array | null; checkpointDigest: string | null;
+  priorMetadata: AdmittedLiveUpdate["metadata"] | null | undefined; onFirstWrite?: () => void;
+}): AdmittedLiveUpdate {
+  const {document,namespace,host,current,metadata,updateBytes,receivedAtMs,firstSeen,checkpointBytes,checkpointDigest,priorMetadata,onFirstWrite}=input;
+  const restoreOperationId=input.restoreOperationId??null;
+  journalIntegrity(restoreOperationId===null || checkpointBytes!==null);
+  requireLiveJournalHistory(storage);
+  journalIntegrity(liveJournalHistoryNamespace(storage) === namespace);
+  const sequenceRows = storage.db.prepare("SELECT seq FROM sqlite_sequence WHERE name=?").all(LIVE_JOURNAL_TABLE);
+  const maximum = storage.db.prepare(`SELECT MAX(journal_cursor) AS maximum FROM ${LIVE_JOURNAL_TABLE}`).get()!.maximum;
+  const maximumCursor = maximum === null ? 0 : authorityInteger(maximum, 1);
+  journalIntegrity(sequenceRows.length <= 1);
+  const sequence = sequenceRows.length ? authorityInteger(sequenceRows[0]!.seq) : 0;
+  journalIntegrity((sequenceRows.length !== 0 || maximumCursor === 0) && sequence >= maximumCursor && sequence < Number.MAX_SAFE_INTEGER);
+  const nextCursor = sequence + 1;
+  const predecessor = storage.db.prepare(`SELECT relay_database_namespace,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes FROM ${LIVE_JOURNAL_TABLE}
+    WHERE ${JOURNAL_DOCUMENT_WHERE} ORDER BY journal_cursor DESC LIMIT 1`).get(...documentParams(document));
+  if (predecessor) journalIntegrity(predecessor.relay_database_namespace === namespace);
+  const previousCount = predecessor ? authorityInteger(predecessor.accepted_event_count, 1) : 0;
+  journalIntegrity(previousCount < Number.MAX_SAFE_INTEGER);
+  const eventCount = previousCount + 1;
+  const previousDigest = predecessor ? parseLiveUpdateDigest(predecessor.accepted_evidence_digest) : initialAcceptedHistoryDigest(namespace, document);
+  if (predecessor) {
+    journalIntegrity(priorMetadata);
+    verifyJournalHistoryMetadata(storage.db, priorMetadata, {namespace, eventCount: previousCount, evidenceDigest: previousDigest,
+      metadataBytes: authorityInteger(predecessor.accepted_metadata_bytes, 1)});
+  }
+  const intended = {accepted: {receipt: {deliveryId: metadata.deliveryId, updateDigest: metadata.updateDigest, journalCursor: nextCursor,
+    acceptingHostEpoch: host.hostEpoch}, binding: current.binding, authority: current.authority, receivedAtMs}, firstSeen};
+  const evidenceDigest = nextAcceptedHistoryDigest(previousDigest, eventCount, intended);
+  const acceptedMetadataBytes = Buffer.byteLength(JSON.stringify(canonicalAcceptedMetadata(intended)));
+  const values = [metadata.deliveryId, metadata.updateDigest, ...documentParams(document),
+    current.binding.currentPath, JSON.stringify(current.binding.selectorPaths), current.binding.restoreFenceGeneration,
+    current.authority.principalKind, current.authority.principalId, current.authority.grantId, current.authority.grantGeneration,
+    host.hostEpoch, receivedAtMs];
+  // Logical stored values, as with delivery reservations; excludes SQLite pages and indexes.
+  const metadataBytes = Buffer.byteLength(JSON.stringify([nextCursor, ...values, checkpointDigest, namespace, eventCount, evidenceDigest, acceptedMetadataBytes,restoreOperationId]));
+  const provenanceBytes = firstSeen.reduce((total, range) => total + Buffer.byteLength(JSON.stringify([
+    ...documentParams(document), range.clientId, range.startClock, range.endClock, nextCursor,
+  ])), 0);
+  const charge = updateBytes.byteLength + (checkpointBytes?.byteLength ?? 0) + metadataBytes + provenanceBytes;
+  assertWorkspaceQuota(storage, document.workspaceId, charge);
+  onFirstWrite?.();
+  const insert = storage.db.prepare(`INSERT INTO ${LIVE_JOURNAL_TABLE}(delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,
+    current_path,selector_paths_json,restore_fence_generation,principal_kind,principal_id,grant_id,grant_generation,
+    accepting_host_epoch,received_at_ms,update_bytes,validation_checkpoint_sha256,validation_checkpoint_bytes,
+    relay_database_namespace,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes,restore_operation_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...values, updateBytes, checkpointDigest, checkpointBytes, namespace, eventCount, evidenceDigest, acceptedMetadataBytes,restoreOperationId);
+  const cursor = authorityInteger(typeof insert.lastInsertRowid === "bigint" ? Number(insert.lastInsertRowid) : insert.lastInsertRowid, 1);
+  journalIntegrity(cursor === nextCursor);
+  const insertRange = storage.db.prepare(`INSERT INTO ${LIVE_JOURNAL_PROVENANCE}(workspace_id,main_version_id,object_id,lineage_claim_id,client_id,start_clock,end_clock,journal_cursor) VALUES (?,?,?,?,?,?,?,?)`);
+  for (const range of firstSeen) insertRange.run(...documentParams(document), range.clientId, range.startClock, range.endClock, cursor);
+  const raw = storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE journal_cursor=?`).get(cursor);
+  journalIntegrity(raw);
+  const row = decodeJournalRow(storage.db, raw);
+  journalIntegrity(isDeepStrictEqual(row.admitted.metadata, intended) && Buffer.compare(row.admitted.updateBytes, updateBytes) === 0 &&
+    (checkpointBytes ? row.checkpoint && row.checkpoint.digest === checkpointDigest && Buffer.compare(row.checkpoint.bytes, checkpointBytes!) === 0 : row.checkpoint === null));
+  storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, document.workspaceId);
+  registerLiveDeliveryEvent(storage, document, host.hostId, raw);
+  return row.admitted;
+}
 
 export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpdateJournalCommitInput): RelayLiveUpdateJournalResult {
     requireLiveJournalHistory(storage);
@@ -313,64 +391,16 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         }
         journalIntegrity(isDeepStrictEqual(read.cut, token));
         if (validation.kind === "refused") return refused(journalValidationRefusal(validation));
-        const sequenceRows = storage.db.prepare("SELECT seq FROM sqlite_sequence WHERE name=?").all(LIVE_JOURNAL_TABLE);
-        const maximum = storage.db.prepare(`SELECT MAX(journal_cursor) AS maximum FROM ${LIVE_JOURNAL_TABLE}`).get()!.maximum;
-        const maximumCursor = maximum === null ? 0 : authorityInteger(maximum, 1);
-        journalIntegrity(sequenceRows.length <= 1);
-        const sequence = sequenceRows.length ? authorityInteger(sequenceRows[0]!.seq) : 0;
-        journalIntegrity((sequenceRows.length !== 0 || maximumCursor === 0) && sequence >= maximumCursor && sequence < Number.MAX_SAFE_INTEGER);
-        const firstSeen = subtractJournalRanges(validation.evidence.candidate.ranges, read.coverage);
+        requireRestoreSourceCoverage(storage, document, namespace, validation.evidence.candidate.ranges, validation.evidence.checkpointRanges, read.coverage);
+        const firstSeen = subtractJournalRanges(subtractJournalRanges(validation.evidence.candidate.ranges, validation.evidence.checkpointRanges), read.coverage);
         const due = read.cut.suffixCount + 1 === 4095 || read.cut.suffixBytes + updateBytes.byteLength >= 20_971_520;
         journalIntegrity(due === anticipatedCheckpoint);
         const checkpointBytes = due ? validation.evidence.stateUpdate! : null;
         const checkpointDigest = due ? validation.evidence.stateUpdateSha256 : null;
-        const nextCursor = sequence + 1;
-        const predecessor = storage.db.prepare(`SELECT relay_database_namespace,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes FROM ${LIVE_JOURNAL_TABLE}
-          WHERE ${JOURNAL_DOCUMENT_WHERE} ORDER BY journal_cursor DESC LIMIT 1`).get(...documentParams(document));
-        if (predecessor) journalIntegrity(predecessor.relay_database_namespace === namespace);
-        const previousCount = predecessor ? authorityInteger(predecessor.accepted_event_count, 1) : 0;
-        journalIntegrity(previousCount < Number.MAX_SAFE_INTEGER);
-        const eventCount = previousCount + 1;
-        const previousDigest = predecessor ? parseLiveUpdateDigest(predecessor.accepted_evidence_digest) : initialAcceptedHistoryDigest(namespace, document);
-        if (predecessor) {
-          const priorMetadata = read.cut.suffix.at(-1)?.metadata ?? read.cut.checkpoint.metadata;
-          journalIntegrity(priorMetadata);
-          verifyJournalHistoryMetadata(storage.db, priorMetadata, {namespace, eventCount: previousCount, evidenceDigest: previousDigest,
-            metadataBytes: authorityInteger(predecessor.accepted_metadata_bytes, 1)});
-        }
-        const intended = {accepted: {receipt: {deliveryId: metadata.deliveryId, updateDigest: metadata.updateDigest, journalCursor: nextCursor,
-          acceptingHostEpoch: host.hostEpoch}, binding: current.binding, authority: current.authority, receivedAtMs}, firstSeen};
-        const evidenceDigest = nextAcceptedHistoryDigest(previousDigest, eventCount, intended);
-        const acceptedMetadataBytes = Buffer.byteLength(JSON.stringify(canonicalAcceptedMetadata(intended)));
-        const values = [metadata.deliveryId, metadata.updateDigest, ...documentParams(document),
-          current.binding.currentPath, JSON.stringify(current.binding.selectorPaths), current.binding.restoreFenceGeneration,
-          current.authority.principalKind, current.authority.principalId, current.authority.grantId, current.authority.grantGeneration,
-          host.hostEpoch, receivedAtMs];
-        // Logical stored values, as with delivery reservations; excludes SQLite pages and indexes.
-        const metadataBytes = Buffer.byteLength(JSON.stringify([nextCursor, ...values, checkpointDigest, namespace, eventCount, evidenceDigest, acceptedMetadataBytes]));
-        const provenanceBytes = firstSeen.reduce((total, range) => total + Buffer.byteLength(JSON.stringify([
-          ...documentParams(document), range.clientId, range.startClock, range.endClock, nextCursor,
-        ])), 0);
-        const charge = updateBytes.byteLength + (checkpointBytes?.byteLength ?? 0) + metadataBytes + provenanceBytes;
-        assertWorkspaceQuota(storage, document.workspaceId, charge);
-        firstWriteAttempted = true;
-        const insert = storage.db.prepare(`INSERT INTO ${LIVE_JOURNAL_TABLE}(delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,
-          current_path,selector_paths_json,restore_fence_generation,principal_kind,principal_id,grant_id,grant_generation,
-          accepting_host_epoch,received_at_ms,update_bytes,validation_checkpoint_sha256,validation_checkpoint_bytes,
-          relay_database_namespace,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...values, updateBytes, checkpointDigest, checkpointBytes, namespace, eventCount, evidenceDigest, acceptedMetadataBytes);
-        const cursor = authorityInteger(typeof insert.lastInsertRowid === "bigint" ? Number(insert.lastInsertRowid) : insert.lastInsertRowid, 1);
-        journalIntegrity(cursor === nextCursor);
-        const insertRange = storage.db.prepare(`INSERT INTO ${LIVE_JOURNAL_PROVENANCE}(workspace_id,main_version_id,object_id,lineage_claim_id,client_id,start_clock,end_clock,journal_cursor) VALUES (?,?,?,?,?,?,?,?)`);
-        for (const range of firstSeen) insertRange.run(...documentParams(document), range.clientId, range.startClock, range.endClock, cursor);
-        const raw = storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE journal_cursor=?`).get(cursor);
-        journalIntegrity(raw);
-        const row = decodeJournalRow(storage.db, raw);
-        journalIntegrity(isDeepStrictEqual(row.admitted.metadata, intended) && Buffer.compare(row.admitted.updateBytes, updateBytes) === 0 &&
-          (due ? row.checkpoint && row.checkpoint.digest === checkpointDigest && Buffer.compare(row.checkpoint.bytes, checkpointBytes!) === 0 : row.checkpoint === null));
-        storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, document.workspaceId);
-        registerLiveDeliveryEvent(storage, document, currentHost.configuredHostId, raw);
-        return { reply: { result: { kind: "accepted" as const, receipt: { ...row.admitted.metadata.accepted.receipt }, replayed: false }, admitted: row.admitted } };
+        const admitted = appendValidatedLiveJournal(storage, {document,namespace,host,current,metadata,updateBytes,receivedAtMs,
+          firstSeen,checkpointBytes,checkpointDigest,priorMetadata: read.cut.suffix.at(-1)?.metadata ?? read.cut.checkpoint.metadata,
+          onFirstWrite() {firstWriteAttempted = true;}});
+        return {reply: {result: {kind: "accepted" as const, receipt: {...admitted.metadata.accepted.receipt}, replayed: false}, admitted}};
       });
     } catch (error) {
       const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
@@ -439,7 +469,7 @@ export function liveJournalCut(storage: StorageContext, document: LiveDocumentKe
     return { kind: "cut", cut, coverage };
   }
 
-function liveJournalCoverage(storage: StorageContext, document: LiveDocumentKey, baseline: readonly LiveUpdateStructRange[]): LiveUpdateStructRange[] {
+export function liveJournalCoverage(storage: StorageContext, document: LiveDocumentKey, baseline: readonly LiveUpdateStructRange[]): LiveUpdateStructRange[] {
     const rows = storage.db.prepare(`SELECT p.*, j.workspace_id AS parent_workspace, j.main_version_id AS parent_version,
       j.object_id AS parent_object, j.lineage_claim_id AS parent_lineage FROM ${LIVE_JOURNAL_PROVENANCE} p
       LEFT JOIN ${LIVE_JOURNAL_TABLE} j ON j.journal_cursor=p.journal_cursor
@@ -477,3 +507,35 @@ export function readCommittedLiveUpdate(storage: StorageContext, input: { host: 
     if (result.kind === "committed") { verifyJournalRow(result.row); return { kind: "committed", admitted: result.row.admitted }; }
     return result;
   }
+
+function requireRestoreSourceCoverage(storage: StorageContext, document: LiveDocumentKey, namespace: string,
+  candidate: readonly LiveUpdateStructRange[], checkpoint: readonly LiveUpdateStructRange[], accepted: readonly LiveUpdateStructRange[]): void {
+  const checkpointOnly = subtractJournalRanges(checkpoint, accepted);
+  const lookup = storage.db.prepare(`SELECT * FROM ${LIVE_RESTORE_SOURCE_RANGES} WHERE relay_database_namespace=?
+    AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND client_id=?
+    AND start_clock<=? AND end_clock>? ORDER BY end_clock DESC LIMIT 1`);
+  let retained: {operationId: string; admission: ReturnType<typeof readRestoreAdmission>} | undefined;
+  let checkpointIndex=0;
+  for (const next of candidate) {
+    while (checkpointIndex<checkpointOnly.length && (checkpointOnly[checkpointIndex]!.clientId<next.clientId ||
+      (checkpointOnly[checkpointIndex]!.clientId===next.clientId && checkpointOnly[checkpointIndex]!.endClock<=next.startClock))) checkpointIndex++;
+    for (let index=checkpointIndex;index<checkpointOnly.length;index++) {
+      const range=checkpointOnly[index]!;
+      if (range.clientId>next.clientId || range.startClock>=next.endClock) break;
+      if (range.clientId!==next.clientId) continue;
+      let start = Math.max(next.startClock, range.startClock), end = Math.min(next.endClock, range.endClock);
+      while (start < end) {
+        const row = lookup.get(namespace, ...documentParams(document), range.clientId, start, start);
+        journalIntegrity(row);
+        const operationId = parseLiveUpdateIdentifier(row.operation_id);
+        if (retained?.operationId !== operationId) retained = {operationId, admission: readRestoreAdmission(storage.db, namespace, operationId)};
+        const admission = retained.admission;
+        journalIntegrity(isDeepStrictEqual(documentParams(admission.admitted.accepted.binding), documentParams(document)) &&
+          row.proposal_sha256 === admission.proposalDigest && admission.sourceRanges.some(source =>
+            source.sourceOrdinal === row.source_ordinal && source.clientId === row.client_id && source.startClock === row.start_clock &&
+            source.endClock === row.end_clock && source.sourceDigest === row.source_sha256));
+        start = Math.min(end, authorityInteger(row.end_clock, 1));
+      }
+    }
+  }
+}

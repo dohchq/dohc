@@ -79,6 +79,21 @@ it.each(["small", "long"])("authenticates the native %s history through retained
       expect(adopted.proof.checkpoint.binding).toEqual(originBinding);
       expect(adopted.proof.evidenceDigest).toBe(selected.proof.evidenceDigest);
     }
+    if (size === "small") {
+      expect(() => readAcceptedHistory(f.storage as StorageContext,{document:binding,namespace,through:receipt.fence.operation.terminal!.journalCursor,
+        baseline,baselineDigest:hash(baseline),originBinding:binding},new RestoreHistoryBudget(1,10))).toThrow(/bounds/);
+      const foreignBudget=new RestoreHistoryBudget(0,0);
+      expect(readAcceptedHistoryDelivery(f.storage as StorageContext,{document:{...binding,objectId:"foreign"},namespace,through:11,eventCount:2,
+        deliveryId:first.accepted.receipt.deliveryId},foreignBudget)).toBeNull();expect(foreignBudget.bytes).toBe(0);
+      const endpoint=receipt.fence.operation.terminal!.journalCursor;
+      const original=f.raw.prepare("SELECT accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(endpoint)!;
+      for (const column of ["accepted_event_count","accepted_metadata_bytes","accepted_evidence_digest"] as const) {
+        f.raw.prepare(`UPDATE sync_relay_live_update_journal SET ${column}=? WHERE journal_cursor=?`).run(column==="accepted_evidence_digest"?"f".repeat(64):Number(original[column])+1,endpoint);
+        expect(() => readAcceptedHistory(f.storage as StorageContext,{document:binding,namespace,through:endpoint,baseline,baselineDigest:hash(baseline),originBinding:binding},new RestoreHistoryBudget(64_000_000,10))).toThrow(/damaged/);
+        f.raw.prepare(`UPDATE sync_relay_live_update_journal SET ${column}=? WHERE journal_cursor=?`).run(original[column],endpoint);
+      }
+      expect(() => readAcceptedHistory(f.storage as StorageContext,{document:binding,namespace,through:endpoint+1,baseline,baselineDigest:hash(baseline),originBinding:binding},new RestoreHistoryBudget(64_000_000,10))).toThrow(/damaged/);
+    }
     const altered = structuredClone(receipt.acceptedHistory);altered.evidenceDigest = "f".repeat(64);
     expect(() => requireAcceptedHistoryProof(accepted.proof, altered)).toThrow(/damaged/);
     const endpoint = receipt.fence.operation.terminal!.journalCursor;

@@ -242,6 +242,7 @@ export interface LiveMarkdownJournalEvidence {
   readonly document: LiveDocumentKey
   readonly currentPath: string
   readonly checkpointDigest: string
+  readonly checkpointRanges: readonly LiveUpdateStructRange[]
   readonly suffixDigests: readonly string[]
   readonly candidate: {
     readonly updateDigest: string
@@ -309,6 +310,7 @@ export function createLiveMarkdownJournalValidator(
           document: input.document,
           currentPath: input.currentPath,
           checkpointDigest: cut.checkpointDigest,
+          checkpointRanges: cut.checkpointRanges,
           suffixDigests: cut.suffixDigests,
           candidate: Object.freeze({
             updateDigest: cut.candidate.updateDigest,

@@ -687,6 +687,8 @@ CREATE TABLE sync_relay_live_update_journal (
   accepted_evidence_digest TEXT NOT NULL
     CHECK (length(accepted_evidence_digest) = 64 AND accepted_evidence_digest NOT GLOB '*[^0-9a-f]*'),
   accepted_metadata_bytes INTEGER NOT NULL CHECK (accepted_metadata_bytes > 0),
+  restore_operation_id TEXT CHECK (length(CAST(restore_operation_id AS BLOB)) BETWEEN 1 AND 512),
+  CHECK (restore_operation_id IS NULL OR validation_checkpoint_bytes IS NOT NULL),
   UNIQUE (
     journal_cursor,
     workspace_id, main_version_id, object_id, lineage_claim_id
@@ -702,8 +704,15 @@ CREATE TABLE sync_relay_live_update_journal (
     (validation_checkpoint_sha256 IS NOT NULL AND validation_checkpoint_bytes IS NOT NULL)
   ),
   FOREIGN KEY (workspace_id)
-    REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
+    REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY (relay_database_namespace,restore_operation_id)
+    REFERENCES sync_relay_live_restore_operations(relay_database_namespace,operation_id) ON DELETE NO ACTION
 ) STRICT;
+`,
+  idx_sync_relay_live_update_journal_restore: `
+CREATE UNIQUE INDEX idx_sync_relay_live_update_journal_restore
+  ON sync_relay_live_update_journal(relay_database_namespace,restore_operation_id)
+  WHERE restore_operation_id IS NOT NULL;
 `,
   idx_sync_relay_live_update_journal_document: `
 CREATE INDEX idx_sync_relay_live_update_journal_document
@@ -784,19 +793,24 @@ const LIVE_JOURNAL_SHAPE = {
       [20,"accepted_event_count","INTEGER",1,null,0],
       [21,"accepted_evidence_digest","TEXT",1,null,0],
       [22,"accepted_metadata_bytes","INTEGER",1,null,0],
+      [23,"restore_operation_id","TEXT",0,null,0],
     ],
     foreignKeys: [
-      [0,0,"sync_relay_workspaces","workspace_id","workspace_id","NO ACTION","CASCADE","NONE"],
+      [0,0,"sync_relay_live_restore_operations","relay_database_namespace","relay_database_namespace","NO ACTION","NO ACTION","NONE"],
+      [0,1,"sync_relay_live_restore_operations","restore_operation_id","operation_id","NO ACTION","NO ACTION","NONE"],
+      [1,0,"sync_relay_workspaces","workspace_id","workspace_id","NO ACTION","CASCADE","NONE"],
     ],
     indexes: [
       ["idx_sync_relay_live_update_journal_checkpoint",0,"c",1],
       ["idx_sync_relay_live_update_journal_document",0,"c",0],
+      ["idx_sync_relay_live_update_journal_restore",1,"c",1],
       ["sqlite_autoindex_sync_relay_live_update_journal_1",1,"u",0],
       ["sqlite_autoindex_sync_relay_live_update_journal_2",1,"u",0],
     ],
     indexColumns: {
       idx_sync_relay_live_update_journal_checkpoint: [[0,3,"workspace_id"],[1,4,"main_version_id"],[2,5,"object_id"],[3,6,"lineage_claim_id"],[4,0,"journal_cursor"]],
       idx_sync_relay_live_update_journal_document: [[0,3,"workspace_id"],[1,4,"main_version_id"],[2,5,"object_id"],[3,6,"lineage_claim_id"],[4,0,"journal_cursor"]],
+      idx_sync_relay_live_update_journal_restore: [[0,19,"relay_database_namespace"],[1,23,"restore_operation_id"]],
       sqlite_autoindex_sync_relay_live_update_journal_1: [[0,1,"delivery_id"]],
       sqlite_autoindex_sync_relay_live_update_journal_2: [[0,0,"journal_cursor"],[1,3,"workspace_id"],[2,4,"main_version_id"],[3,5,"object_id"],[4,6,"lineage_claim_id"]],
     },
@@ -851,7 +865,7 @@ function assertLiveJournalSchema(db: SqliteDb): void {
 function initializeLiveJournalSchema(db: SqliteDb): void {
   const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(LIVE_JOURNAL_MARKER);
   if (marked) { assertLiveJournalSchema(db); return; }
-  const existing = db.prepare("SELECT name FROM sqlite_schema WHERE name IN (?,?,?,?,?,?)").all(...Object.keys(LIVE_JOURNAL_SCHEMA));
+  const existing = db.prepare(`SELECT name FROM sqlite_schema WHERE name IN (${Object.keys(LIVE_JOURNAL_SCHEMA).map(()=>"?").join(",")})`).all(...Object.keys(LIVE_JOURNAL_SCHEMA));
   if (existing.length) throw new Error("unmarked live update journal schema already exists");
   for (const sql of Object.values(LIVE_JOURNAL_SCHEMA)) db.exec(sql);
   assertLiveJournalSchema(db);
@@ -1155,9 +1169,9 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeSessionHostControlSchema(db);
     initializeDeviceHostCredentialSchema(db);
     initializeLiveDocumentAuthoritySchema(db);
+    initializeLiveRestoreOperationSchema(db);
     initializeLiveJournalSchema(db);
     initializeLiveCommittedDeliverySchema(db);
-    initializeLiveRestoreOperationSchema(db);
     initializeLiveTicketSchema(db);
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant

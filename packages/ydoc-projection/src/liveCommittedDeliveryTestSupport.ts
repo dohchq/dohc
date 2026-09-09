@@ -249,7 +249,7 @@ export function registered(
               version: validation.evidence.version,
               document: validation.evidence.document,
               currentPath: validation.evidence.currentPath,
-              checkpointDigest: validation.evidence.checkpointDigest,
+              checkpointDigest: validation.evidence.checkpointDigest, checkpointRanges: validation.evidence.checkpointRanges,
               suffixDigests: validation.evidence.suffixDigests,
               candidate: validation.evidence.candidate,
               ...state,

@@ -1,3 +1,4 @@
+import {createHash} from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
@@ -298,7 +299,7 @@ it("carries authenticated store targets into real proposal content validation", 
 });
 
 const proposalTable = "sync_relay_live_restore_proposals";
-const proposalRows = (f: ReturnType<typeof contentProposalFixture>) => ({...f.journalRows(),
+const proposalRows = (f: Pick<ReturnType<typeof contentProposalFixture>,"raw"|"journalRows">) => ({...f.journalRows(),
   proposals: f.raw.prepare(`SELECT * FROM ${proposalTable}`).all(),
   operations: f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(),
   documents: f.raw.prepare("SELECT * FROM sync_relay_live_documents").all()});
@@ -394,7 +395,7 @@ it("charges the full framed proposal exactly once and refuses one byte beyond wo
   const f = contentProposalFixture();
   try {
     const digest = hash(f.encoded), candidate = hash(f.bytes.candidateBytes), at = 200;
-    const charge = f.encoded.byteLength + Buffer.byteLength(JSON.stringify(["restore", "workspace", digest, candidate, at, Number.MAX_SAFE_INTEGER, "f".repeat(64)]));
+    const charge = f.encoded.byteLength + Buffer.byteLength(JSON.stringify(["restore-test", "restore", "workspace", digest, candidate, at, Number.MAX_SAFE_INTEGER, "f".repeat(64)]));
     const before = proposalRows(f);
     f.context.options.workspaceQuotaBytes = Number(before.usage) + charge - 1;
     expect(() => f.store.recordStopRestoreProposal(f.input, f.encoded, policy, at)).toThrow(/quota/);
@@ -586,7 +587,7 @@ function fixture(kind: "bootstrap" | "owner" = "bootstrap",mode: "service" | "de
     const cut=store.captureOwnerCut({host: coordinate,document,actor: f.actor,adoptionId: "adoption",expectedLocalSequence: 0,maxBytes: 1_000_000,maxEvents: 10});
     store.acknowledgeOwnerAdoption(cut,{adoptionId: "adoption",localYDocSequence: 0,terminalCursor: cut.cut.terminalReceipt?.journalCursor ?? 0,adoptionReplayed: false});
   };
-  return {...f,coordinate,context,history,store,document,intent,lookup,add,fence,open,adopt};
+  return {...f,journalCapture:f.capture,coordinate,context,history,store,document,intent,lookup,add,fence,open,adopt};
 }
 const bootstrapAck=(b: CommittedBootstrap)=>({bootstrapId:b.bootstrapId,bootstrapMomentId:b.bootstrapMomentId,
   baselineDigest:b.baselineDigest,baselineMomentRelaySequence:b.baselineMomentRelaySequence,localYDocSequence:0,bootstrapReplayed:false});
@@ -1189,7 +1190,7 @@ it.each(["binding", "receipt", "point", "authority"])("invalidates a captured ow
   try {
     f.store.acknowledgeStopRestoreFence(f.lookup, f.nativeReceipt);
     const capture = f.store.captureStopRestoreOwnerOrigin(f.input);
-    if (damage === "binding") capture.binding.selectorPaths.push("other");
+    if (damage === "binding") (capture.binding.selectorPaths as string[]).push("other");
     if (damage === "receipt") capture.nativeReceipt.localHeadSequence++;
     if (damage === "point") capture.point.journalCursor++;
     if (damage === "authority") f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='open'");
@@ -1283,3 +1284,202 @@ for (const saved of [false,true]) {
     }finally{f.close();}
   });
 }
+
+it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as const)("admits and resumes one durable restore replacement for %s on %s",(kind,mode)=>{
+  const f=contentProposalFixture(kind,mode,kind==="owner");
+  try {
+    const proposed=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200),before=f.journalRows();
+    const prepare=vi.spyOn(f.context.db,"prepare");
+    const admitted=f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,policy,201);
+    const provenanceReads=prepare.mock.calls.map(([sql])=>sql).filter(sql=>sql.includes("sync_relay_live_update_struct_provenance") && /^\s*SELECT/i.test(sql));
+    expect(provenanceReads.length).toBeGreaterThan(0);
+    expect(provenanceReads.every(sql=>/WHERE[\s\S]*journal_cursor\s*(?:[<>=]|IN\b)/i.test(sql))).toBe(true);
+    prepare.mockRestore();
+    expect(admitted.phase).toBe("relay-admitted");
+    expect(f.raw.prepare("SELECT admission_state FROM sync_relay_live_documents").get()!.admission_state).toBe("closed");
+    const row=f.raw.prepare("SELECT * FROM sync_relay_live_update_journal ORDER BY journal_cursor DESC LIMIT 1").get()!;
+    expect(row.restore_operation_id).toBe(f.input.operationId);
+    expect(row.validation_checkpoint_bytes).toBeInstanceOf(Uint8Array);
+    expect(admitted.admitted.firstSeen).toEqual(f.receipt.replacementRanges);
+    expect(f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,policy,205)).toEqual(admitted);
+    const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,
+      admitted:admitted.admitted,localHeadSequence:admitted.preparation.fence.localHeadSequence+1,
+      hostCoordinate:{hostId:f.input.host.hostId,hostEpoch:f.input.host.hostEpoch,instanceId:f.input.host.instanceId,connectionId:f.input.host.connectionId},recordedAtMs:202};
+    const applied=f.store.acknowledgeStopRestoreReplacement(f.input,application);expect(applied.phase).toBe("native-applied");
+    const settlement={settlementId:"restore-settlement",previousCursor:0,terminalCursor:admitted.admitted.accepted.receipt.journalCursor,
+      applicationCount:3,localYDocSequence:application.localHeadSequence,momentId:"restore-moment",markdownDigest:admitted.preparation.point.markdownDigest,materialized:false,collectionReconcileRequired:false};
+    expect(f.store.acknowledgeStopRestoreSettlement(f.input,settlement).phase).toBe("native-applied");
+    expect(f.raw.prepare("SELECT admission_state FROM sync_relay_live_documents").get()!.admission_state).toBe("closed");
+    const settled=f.store.acknowledgeStopRestoreSettlement(f.input,{...settlement,materialized:true});expect(settled.phase).toBe("settled");
+    const resume={relayDatabaseNamespace:admitted.preparation.fence.operation.relayDatabaseNamespace,operationId:f.input.operationId,
+      binding:admitted.admitted.accepted.binding,applicationReceipt:admitted.admitted.accepted.receipt,settlementId:settlement.settlementId,
+      momentId:settlement.momentId,markdownDigest:settlement.markdownDigest,localHeadSequence:application.localHeadSequence,recordedAtMs:204};
+    const resumed=f.store.acknowledgeStopRestoreResume(f.input,resume);expect(resumed.phase).toBe("resumed");
+    expect(f.raw.prepare("SELECT admission_state FROM sync_relay_live_documents").get()!.admission_state).toBe("open");
+    const after=f.journalRows();
+    expect(f.store.acknowledgeStopRestoreResume(f.input,resume)).toEqual(resumed);
+    expect(f.store.acknowledgeStopRestoreReplacement(f.input,application)).toEqual(resumed);
+    expect(f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,policy,210)).toEqual(resumed);
+    expect(f.journalRows()).toEqual(after);
+    const read=f.storage.readLiveUpdateJournalCut({document:f.document});expect(read.kind).toBe("cut");
+    if (kind==="owner") {
+      const owner=f.store.openOwnerDelivery({host:f.input.host,document:f.document,actor:{kind:"owner",userId:"owner",shareId:"share"}});
+      expect(f.store.ownerDeliveryProgress(owner).terminal).toEqual(resume.applicationReceipt);
+    } else {
+      const drain=f.store.open({host:f.input.host,document:f.document});
+      expect(drain.baseline.binding).toEqual(resume.binding);f.store.close(drain);
+    }
+    expect(before).not.toEqual(after);
+  }finally{f.close();}
+});
+
+function admittedRestoreFixture(kind:"owner"|"bootstrap"="owner",pending=true) {
+  const f=contentProposalFixture(kind,"device",pending),proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200);
+  const admitted=f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201);
+  const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,
+    admitted:admitted.admitted,localHeadSequence:admitted.preparation.fence.localHeadSequence+1,
+    hostCoordinate:{hostId:f.input.host.hostId,hostEpoch:f.input.host.hostEpoch,instanceId:f.input.host.instanceId,connectionId:f.input.host.connectionId},recordedAtMs:202};
+  const settlement={settlementId:"restore-settlement",previousCursor:0,terminalCursor:admitted.admitted.accepted.receipt.journalCursor,
+    applicationCount:3,localYDocSequence:application.localHeadSequence,momentId:"restore-moment",markdownDigest:admitted.preparation.point.markdownDigest,materialized:true,collectionReconcileRequired:false};
+  const resume={relayDatabaseNamespace:admitted.preparation.fence.operation.relayDatabaseNamespace,operationId:f.input.operationId,binding:admitted.admitted.accepted.binding,
+    applicationReceipt:admitted.admitted.accepted.receipt,settlementId:settlement.settlementId,momentId:settlement.momentId,markdownDigest:settlement.markdownDigest,
+    localHeadSequence:application.localHeadSequence,recordedAtMs:204};
+  const complete=(store=f.store)=>{store.acknowledgeStopRestoreReplacement(f.input,application);store.acknowledgeStopRestoreSettlement(f.input,settlement);return store.acknowledgeStopRestoreResume(f.input,resume);};
+  return {...f,proposal,admitted,application,settlement,resume,complete};
+}
+const lifecycleRows=(f:Pick<ReturnType<typeof contentProposalFixture>,"raw"|"journalRows">)=>({...proposalRows(f),
+  lifecycle:f.raw.prepare("SELECT * FROM sync_relay_live_restore_lifecycles").all(),sources:f.raw.prepare("SELECT * FROM sync_relay_live_restore_source_ranges").all(),
+  operations:f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(),owners:f.raw.prepare("SELECT * FROM sync_relay_live_delivery_owners").all(),
+  edges:f.raw.prepare("SELECT * FROM sync_relay_live_delivery_edges").all()});
+
+it.each(["none","all deleted","one deleted","manifest changed"])("keeps pending source attribution complete after restore: %s",damage=>{
+  const f=admittedRestoreFixture(),doc=new Y.Doc({gc:false});
+  try{
+    f.complete();
+    const checkpoint=f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE restore_operation_id=?").get(f.input.operationId)!;
+    Y.applyUpdate(doc,checkpoint.validation_checkpoint_bytes as Uint8Array);doc.getMap("frontmatter").set("later","ordinary work");
+    const candidate=Y.encodeStateAsUpdate(doc),capture=f.journalCapture(candidate,"after-restore");
+    expect(f.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_restore_source_ranges").get()!.count).toBe(2);
+    if(damage==="all deleted")f.raw.exec("DELETE FROM sync_relay_live_restore_source_ranges");
+    if(damage==="one deleted")f.raw.exec("DELETE FROM sync_relay_live_restore_source_ranges WHERE source_ordinal=0");
+    if(damage==="manifest changed")f.raw.exec("UPDATE sync_relay_live_restore_source_ranges SET source_sha256='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'");
+    const before=lifecycleRows(f);
+    if(damage!=="none"){
+      expect(()=>f.storage.commitLiveUpdateJournal(capture)).toThrow();expect(lifecycleRows(f)).toEqual(before);
+    }else{
+      const result=f.storage.commitLiveUpdateJournal(capture);expect(result.result.kind).toBe("accepted");
+      const firstSeen=result.admitted!.metadata.firstSeen;
+      expect(firstSeen.length).toBe(1);expect(firstSeen[0]!.clientId).toBe(doc.clientID);
+      expect(firstSeen[0]!.endClock-firstSeen[0]!.startClock).toBe(1);
+    }
+  }finally{doc.destroy();f.close();}
+});
+it("allows ordinary admission from a restored checkpoint with no pending source rows",()=>{
+  const f=admittedRestoreFixture("bootstrap",false),doc=new Y.Doc({gc:false});
+  try{
+    f.complete();Y.applyUpdate(doc,f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE restore_operation_id=?").get(f.input.operationId)!.validation_checkpoint_bytes as Uint8Array);
+    doc.getMap("frontmatter").set("after","restored");expect(f.storage.commitLiveUpdateJournal(f.journalCapture(Y.encodeStateAsUpdate(doc),"ordinary")).result.kind).toBe("accepted");
+  }finally{doc.destroy();f.close();}
+});
+it.each(["application","settlement","resume"])("refuses changed %s evidence without advancing the restore or quota",stage=>{
+  const f=admittedRestoreFixture();
+  try{
+    if(stage!=="application")f.store.acknowledgeStopRestoreReplacement(f.input,f.application);
+    if(stage==="resume")f.store.acknowledgeStopRestoreSettlement(f.input,f.settlement);
+    const before=lifecycleRows(f);
+    const call=()=>stage==="application"?f.store.acknowledgeStopRestoreReplacement(f.input,{...f.application,localHeadSequence:f.application.localHeadSequence+1}):
+      stage==="settlement"?f.store.acknowledgeStopRestoreSettlement(f.input,{...f.settlement,terminalCursor:f.settlement.terminalCursor+1}):
+      f.store.acknowledgeStopRestoreResume(f.input,{...f.resume,momentId:"foreign"});
+    expect(call).toThrow();expect(lifecycleRows(f)).toEqual(before);
+  }finally{f.close();}
+});
+it("funds all restore receipts before admission and keeps the journal unchanged on quota refusal",()=>{
+  const f=contentProposalFixture();
+  try{
+    const proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200),before=lifecycleRows(f),original=f.context.options.workspaceQuotaBytes;
+    f.context.options.workspaceQuotaBytes=Number(before.usage)+1;
+    expect(()=>f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201)).toThrow(/quota/);expect(lifecycleRows(f)).toEqual(before);
+    f.context.options.workspaceQuotaBytes=original;
+    const admitted=f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201);
+    expect(admitted.phase).toBe("relay-admitted");
+    expect(Number(f.raw.prepare("SELECT receipt_reservation_bytes FROM sync_relay_live_restore_lifecycles").get()!.receipt_reservation_bytes)).toBeGreaterThan(0);
+  }finally{f.close();}
+});
+it.each(["admission","source","usage"])("rolls back the replacement journal and all metadata after ignored %s write",boundary=>{
+  const f=contentProposalFixture("owner","device",true);
+  try{
+    const proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200),table=boundary==="admission"?"sync_relay_live_restore_lifecycles":boundary==="source"?"sync_relay_live_restore_source_ranges":"sync_relay_workspace_usage";
+    f.raw.exec(`CREATE TRIGGER ignore_restore BEFORE ${boundary==="usage"?"UPDATE":"INSERT"} ON ${table} BEGIN SELECT RAISE(IGNORE); END`);
+    const before=lifecycleRows(f);
+    expect(()=>f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201)).toThrow();expect(lifecycleRows(f)).toEqual(before);
+  }finally{f.close();}
+});
+it.each(["application","settlement","resume"])("recovers the exact restore after relay restart before %s acknowledgement",stage=>{
+  const f=admittedRestoreFixture();let reopened:ReturnType<typeof openSyncRelayStorage>|undefined,closed=false;
+  try{
+    if(stage!=="application")f.store.acknowledgeStopRestoreReplacement(f.input,f.application);
+    if(stage==="resume")f.store.acknowledgeStopRestoreSettlement(f.input,f.settlement);
+    f.close();closed=true;reopened=openSyncRelayStorage(f.path);
+    const store=reopened.createLiveCommittedDeliveryStore(createLiveJournalHistoryAuthority({namespace:"restore-test",reconciled:true}));
+    expect(f.complete(store).phase).toBe("resumed");expect(store.readStopRestoreLifecycle(f.input)!.resume).toEqual(f.resume);
+  }finally{if(!closed)f.close();reopened?.close();}
+});
+it("retains original owner binding and operation history across a second stop",()=>{
+  const f=admittedRestoreFixture();
+  try{
+    f.complete();f.raw.exec("UPDATE sync_relay_share_grants SET status='active',generation=6,revoked_at_ms=NULL WHERE grant_id='grant'");
+    const second={...f.intent,operationId:"second-restore",expectedFence:2,expectedGrantGeneration:6};
+    const begun=beginStopRestore(f.context,second,300);expect(begun.previousOperationId).toBe(f.input.operationId);
+    const lookup={...f.lookup,operationId:second.operationId};advanceStopRestoreFence(f.context,lookup,301);
+    const before=lifecycleRows(f);
+    expect(f.store.admitStopRestoreProposal(f.input,f.proposal.proposalDigest,policy,302).resume).toEqual(f.resume);
+    expect(f.store.acknowledgeStopRestoreResume(f.input,f.resume).resume).toEqual(f.resume);expect(lifecycleRows(f)).toEqual(before);
+    expect(f.raw.prepare("SELECT admission_state,restore_fence_generation FROM sync_relay_live_documents").get()).toMatchObject({admission_state:"closed",restore_fence_generation:3});
+  }finally{f.close();}
+});
+it("workspace deletion cascades through admitted restore history",()=>{
+  const f=admittedRestoreFixture();
+  try{
+    f.complete();f.raw.exec("DELETE FROM sync_relay_workspaces WHERE workspace_id='workspace'");
+    for(const table of ["sync_relay_live_restore_lifecycles","sync_relay_live_restore_source_ranges","sync_relay_live_restore_operations","sync_relay_live_update_journal"])
+      expect(f.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()!.n).toBe(0);
+  }finally{f.close();}
+});
+
+it("hashes copied restore state before entering the SQLite writer",()=>{
+  const f=contentProposalFixture("owner","device",true),prototype=Object.getPrototypeOf(createHash("sha256"));
+  const update=prototype.update,tx=f.context.tx.bind(f.context);let writing=false;
+  const hashSpy=vi.spyOn(prototype,"update").mockImplementation(function(this:unknown,...args:unknown[]){
+    if(writing && typeof args[0]!=="string")throw Error("copied state hash inside writer");
+    return Reflect.apply(update,this,args);
+  });
+  const txSpy=vi.spyOn(f.context,"tx").mockImplementation(run=>tx(()=>{writing=true;try{return run();}finally{writing=false;}}));
+  try{
+    const proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200);
+    expect(f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201).phase).toBe("relay-admitted");
+  }finally{hashSpy.mockRestore();txSpy.mockRestore();f.close();}
+});
+it("finds existing owner delivery only after authorization and refuses damaged origin",()=>{
+  const f=fixture("owner");
+  try{
+    const input={host:f.coordinate,document:f.document,actor:f.actor};
+    expect(f.store.existingOwnerDelivery(input)).toBeNull();
+    expect(()=>f.store.existingOwnerDelivery({...input,actor:{...f.actor,userId:"foreign"}})).toThrow();
+    f.adopt();const capture=f.store.existingOwnerDelivery(input);expect(capture).not.toBeNull();
+    expect(f.store.ownerDeliveryProgress(capture!).adoptionId).toBe("adoption");
+    f.raw.exec("UPDATE sync_relay_live_delivery_owners SET origin_json=json_set(origin_json,'$.bindingDigest','ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')");
+    expect(()=>f.store.existingOwnerDelivery(input)).toThrow();
+  }finally{f.close();}
+});
+
+it("precharges retained restore evidence before materializing an oversized admission",()=>{
+  const f=admittedRestoreFixture();
+  try{
+    f.raw.prepare("UPDATE sync_relay_live_restore_lifecycles SET admission_json=?").run(JSON.stringify({payload:"x".repeat(f.input.maxBytes)}));
+    const before=lifecycleRows(f),spy=vi.spyOn(f.context.db,"prepare");
+    expect(()=>f.store.readStopRestoreLifecycle(f.input)).toThrow();
+    const queries=spy.mock.calls.map(([sql])=>sql);spy.mockRestore();
+    expect(queries.some(sql=>sql.includes("SELECT l.admission_json,l.admission_sha256"))).toBe(false);
+    expect(lifecycleRows(f)).toEqual(before);
+  }finally{f.close();}
+});
