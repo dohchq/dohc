@@ -35,7 +35,7 @@ pub(crate) struct PendingCursor {
     pub(super) cursor: IssuedCursor,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RelayOpenParams {
     base_url: String,

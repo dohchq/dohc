@@ -63,6 +63,7 @@ struct WorkspaceConfig {
     root: PathBuf,
     workspace_id: String,
     max_registrations: usize,
+    relay: Option<super::relay::RelayOpenParams>,
 }
 
 #[derive(Deserialize)]
@@ -175,6 +176,7 @@ impl ConfiguredLiveHostConfig {
 
 pub(crate) struct Discovery {
     connection: ConnectionHandle,
+    ordinary_workspaces: HashSet<WorkspaceHandle>,
     sync: Option<(
         dohc_engine_collab::live_update_application::AppliedSyncPolicy,
         SettlementAdmission,
@@ -215,13 +217,18 @@ impl EngineService {
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(owner.handle());
         let mut workspaces = Vec::new();
+        let mut ordinary_workspaces = HashSet::new();
         let result = async {
             for workspace in &config.workspaces {
                 let opened = service.workspace_open(&ctx, json!({
-                    "rootDir": workspace.root, "workspaceId": workspace.workspace_id, "captureMode": "none"
+                    "rootDir": workspace.root, "workspaceId": workspace.workspace_id, "captureMode": "none",
+                    "relay": workspace.relay
                 })).await?;
                 let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone())
                     .map_err(|_| WireError::new(ErrorCode::Internal, "workspace open returned no handle"))?;
+                if workspace.relay.is_some() {
+                    ordinary_workspaces.insert(handle.clone());
+                }
                 service.provision_live_application(owner.handle(), LiveApplicationHostConfig {
                     workspace: handle.clone(), namespace: config.relay_namespace.clone(),
                     coordinate: config.host.coordinate(), max_registrations: workspace.max_registrations,
@@ -237,6 +244,7 @@ impl EngineService {
             Ok(result) => {
                 let _ = service.configured_live_host.set(Discovery {
                     connection: owner.handle(),
+                    ordinary_workspaces,
                     result,
                     settlement,
                     sync,
@@ -253,6 +261,25 @@ impl EngineService {
                 Err(error)
             }
         }
+    }
+
+    pub(super) fn configured_ordinary_request(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+    ) -> bool {
+        self.configured_live_host.get().is_some_and(|host| {
+            host.connection.is_current()
+                && lock(&self.live_applications).hosts_current(&host.connection)
+                && ctx
+                    .connection
+                    .as_ref()
+                    .is_some_and(|connection| host.connection.same_connection(connection))
+                && request
+                    .workspace
+                    .as_ref()
+                    .is_some_and(|handle| host.ordinary_workspaces.contains(handle))
+        })
     }
 
     pub(super) fn configured_live_hosts(

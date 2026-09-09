@@ -60,7 +60,23 @@ fn engine_ping() -> Value {
 }
 
 impl EngineService {
-    fn ensure_configured_host_method(&self, method: &str) -> Result<(), WireError> {
+    fn ensure_configured_host_method(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+    ) -> Result<(), WireError> {
+        let method = request.method.as_str();
+        if matches!(
+            method,
+            "sync.claim"
+                | "sync.adoptJoinIdentity"
+                | "sync.pull"
+                | "sync.commitCursor"
+                | "sync.push"
+        ) && self.configured_ordinary_request(ctx, request)
+        {
+            return Ok(());
+        }
         if self.configured_live_host.get().is_some()
             && !matches!(
                 method,
@@ -93,7 +109,7 @@ impl EngineService {
         request: Request,
         input: crate::LiveApplicationInput,
     ) -> Result<ServiceResponse, WireError> {
-        self.ensure_configured_host_method(&request.method)?;
+        self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
         match input {
@@ -112,7 +128,7 @@ impl EngineService {
         request: Request,
     ) -> Result<ServiceResponse, WireError> {
         let id = request.id;
-        self.ensure_configured_host_method(&request.method)?;
+        self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
         if request.method == "liveApplication.settle" {
@@ -854,6 +870,111 @@ impl EngineService {
 mod tests {
     use super::*;
     use dohc_engine_protocol::transport::EngineService as _;
+
+    #[tokio::test]
+    async fn configured_ordinary_methods_require_attached_handle_and_current_connection() {
+        use dohc_engine_protocol::transport::ConnectionOwner;
+        let attached = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let private = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let config = serde_json::from_value(json!({
+            "version": 1, "relayNamespace": "relay",
+            "host": {"hostId": "host", "hostEpoch": 1, "instanceId": "instance", "connectionId": "connection"},
+            "workspaces": [
+                {"root": attached.path(), "workspaceId": "attached", "maxRegistrations": 4,
+                    "relay": {"baseUrl": "https://relay.example", "bearerToken": "actual-owner-credential"}},
+                {"root": private.path(), "workspaceId": "private", "maxRegistrations": 4}
+            ],
+            "ingress": {"aggregateBytes": 400_000_000, "applicationWorkingReserveBytes": 1_000_000,
+                "maxUploads": 2, "uploadDeadlineMs": 30_000}
+        })).unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(config).await.unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let mut request = Request {
+            id: 1,
+            method: "liveApplication.hosts".into(),
+            workspace: None,
+            deadline_ms: None,
+            idempotency_key: None,
+            params: json!({}),
+        };
+        let discovery = service.configured_live_hosts(&ctx, &request).unwrap();
+        let attached_handle: WorkspaceHandle =
+            serde_json::from_value(discovery["workspaces"][0]["workspaceHandle"].clone()).unwrap();
+        let private_handle: WorkspaceHandle =
+            serde_json::from_value(discovery["workspaces"][1]["workspaceHandle"].clone()).unwrap();
+        for method in [
+            "sync.claim",
+            "sync.adoptJoinIdentity",
+            "sync.pull",
+            "sync.commitCursor",
+            "sync.push",
+        ] {
+            request.method = method.into();
+            request.workspace = Some(attached_handle.clone());
+            assert!(
+                service
+                    .ensure_configured_host_method(&ctx, &request)
+                    .is_ok(),
+                "{method}"
+            );
+            for handle in [
+                Some(private_handle.clone()),
+                Some(WorkspaceHandle("foreign".into())),
+                None,
+            ] {
+                request.workspace = handle;
+                assert_eq!(
+                    service
+                        .ensure_configured_host_method(&ctx, &request)
+                        .unwrap_err()
+                        .code,
+                    ErrorCode::Forbidden
+                );
+            }
+        }
+        request.workspace = Some(attached_handle.clone());
+        for method in [
+            "workspace.open",
+            "ydoc.open",
+            "sync.recoverOrigin",
+            "sync.probe",
+            "versionedText.write",
+        ] {
+            request.method = method.into();
+            assert_eq!(
+                service
+                    .ensure_configured_host_method(&ctx, &request)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Forbidden
+            );
+        }
+        request.method = "sync.pull".into();
+        let other = ConnectionOwner::authenticated();
+        ctx.connection = Some(other.handle());
+        assert_eq!(
+            service
+                .ensure_configured_host_method(&ctx, &request)
+                .unwrap_err()
+                .code,
+            ErrorCode::Forbidden
+        );
+        ctx.connection = Some(owner.handle());
+        owner.retire();
+        assert_eq!(
+            service
+                .ensure_configured_host_method(&ctx, &request)
+                .unwrap_err()
+                .code,
+            ErrorCode::Forbidden
+        );
+        service
+            .workspace_close(Some(attached_handle))
+            .await
+            .unwrap();
+        service.workspace_close(Some(private_handle)).await.unwrap();
+    }
 
     #[test]
     fn only_idempotent_version_bootstrap_bypasses_the_initial_capture_fence() {
