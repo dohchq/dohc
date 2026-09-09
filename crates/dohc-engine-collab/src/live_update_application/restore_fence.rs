@@ -42,7 +42,7 @@ pub fn require_open(conn: &Connection, key: &DocKey) -> Result<(), CollabError> 
 }
 
 impl NativeRestoreFence {
-    fn validate(&self) -> Result<(), ApplicationError> {
+    pub(super) fn validate(&self) -> Result<(), ApplicationError> {
         identifier(&self.operation_id, 512)?;
         identifier(&self.relay_database_namespace, 512)?;
         identifier(&self.host_id, 1024)?;
@@ -63,7 +63,7 @@ impl NativeRestoreFence {
     }
 }
 
-fn marker(
+pub(super) fn marker(
     conn: &Connection,
     binding: &LiveObjectBinding,
 ) -> Result<durable::Marker, ApplicationError> {
@@ -84,7 +84,7 @@ fn marker(
     Ok(marker)
 }
 
-fn applied_tip(
+pub(super) fn applied_tip(
     conn: &Connection,
     held: &Registration,
     input: &NativeRestoreFence,
@@ -238,7 +238,7 @@ impl ApplicationOwner {
                 recorded_at_ms: now_ms,
             };
             tx.execute(
-                "INSERT INTO live_restore_fences VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES(?1,?2,?3,?4,?5,?6,?7)",
                 params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,input.operation_id,input_json,serde_json::to_string(&receipt).map_err(|_| ApplicationError::Corrupt)?],
             ).map_err(write_sql)?;
             let changed = tx.execute(

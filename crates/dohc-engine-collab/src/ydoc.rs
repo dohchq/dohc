@@ -1006,6 +1006,8 @@ impl Ydoc {
                 let normalized_body = uses_crlf.then(|| body.replace("\r\n", "\n"));
                 let blocks = parse_markdown_blocks(normalized_body.as_deref().unwrap_or(body));
                 self.with_delta(|txn| {
+                    meta.remove(txn, TAGGED_FRONTMATTER_PREFIX_META_KEY);
+                    meta.remove(txn, TAGGED_FRONTMATTER_BASELINE_META_KEY);
                     if uses_crlf {
                         meta.insert(txn, MARKDOWN_CRLF_META_KEY, true);
                     } else {
@@ -1070,6 +1072,17 @@ impl Ydoc {
         }
         self.stage_source_preserving_edit(markdown, |staged| {
             let _ = staged.rewrite_content_to_markdown(content_kind, markdown)?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn rewrite_richdoc_preserving_source_bounded(
+        &self,
+        markdown: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, CollabError> {
+        self.stage_source_preserving_edit_bounded(markdown, Some(max_bytes), |staged| {
+            let _ = staged.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)?;
             Ok(())
         })
     }
@@ -1183,6 +1196,15 @@ impl Ydoc {
         markdown: &str,
         edit: impl FnOnce(&Ydoc) -> Result<(), CollabError>,
     ) -> Result<Vec<u8>, CollabError> {
+        self.stage_source_preserving_edit_bounded(markdown, None, edit)
+    }
+
+    fn stage_source_preserving_edit_bounded(
+        &self,
+        markdown: &str,
+        budget: Option<usize>,
+        edit: impl FnOnce(&Ydoc) -> Result<(), CollabError>,
+    ) -> Result<Vec<u8>, CollabError> {
         if markdown.len() > dohc_engine_domain::MAX_TEXT_BYTES {
             return Err(CollabError::ProjectionTooLarge {
                 actual: markdown.len(),
@@ -1192,20 +1214,56 @@ impl Ydoc {
 
         let before = self.doc.transact().state_vector();
         let staged = Ydoc::wire();
-        staged.apply(&self.encode_full_state())?;
+        let capacity_error = || CollabError::MalformedUpdate {
+            reason: "source-preserving rewrite exceeds configured byte budget".into(),
+        };
+        let bounded = budget.is_some();
+        let mut max_bytes = budget.unwrap_or(usize::MAX);
+        let full = if bounded {
+            self.encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
+                .ok_or_else(capacity_error)?
+        } else {
+            self.encode_full_state()
+        };
+        max_bytes = max_bytes
+            .checked_sub(full.len())
+            .ok_or_else(capacity_error)?;
+        staged.apply(&full)?;
+        drop(full);
         edit(&staged)?;
         staged.record_validated_markdown_source_reference(markdown)?;
-        let update = staged.doc.transact().encode_state_as_update_v1(&before);
+        let update = if bounded {
+            let mut encoder = bounded_encoder::BoundedEncoder::new(
+                max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES),
+            )
+            .ok_or_else(capacity_error)?;
+            staged
+                .doc
+                .transact()
+                .encode_state_as_update(&before, &mut encoder);
+            encoder.finish().ok_or_else(capacity_error)?
+        } else {
+            staged.doc.transact().encode_state_as_update_v1(&before)
+        };
         if update.len() > crate::limits::MAX_YDOC_UPDATE_BYTES {
             return Err(CollabError::UpdateTooLarge {
                 actual: update.len(),
                 max: crate::limits::MAX_YDOC_UPDATE_BYTES,
             });
         }
-        let full_state_len = staged.encode_full_state().len();
-        if full_state_len > crate::limits::MAX_YDOC_UPDATE_BYTES {
+        max_bytes = max_bytes
+            .checked_sub(update.len())
+            .ok_or_else(capacity_error)?;
+        let final_bytes = if bounded {
+            staged
+                .encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
+                .ok_or_else(capacity_error)?
+        } else {
+            staged.encode_full_state()
+        };
+        if final_bytes.len() > crate::limits::MAX_YDOC_UPDATE_BYTES {
             return Err(CollabError::UpdateTooLarge {
-                actual: full_state_len,
+                actual: final_bytes.len(),
                 max: crate::limits::MAX_YDOC_UPDATE_BYTES,
             });
         }
@@ -5636,6 +5694,40 @@ fn main() {}
             loaded.frontmatter_json()["debt"],
             json!(-9_007_199_254_740_993_i64)
         );
+    }
+
+    #[test]
+    fn source_preserving_rewrite_clears_previous_tagged_frontmatter_projection() {
+        let doc = Ydoc::wire();
+        let selected = "---\npriority: high\n---\n\nRestored body";
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, selected)
+            .unwrap();
+        let meta = doc.doc.get_or_insert_map(ROOT_META);
+        {
+            let mut txn = doc.doc.transact_mut();
+            meta.insert(
+                &mut txn,
+                TAGGED_FRONTMATTER_PREFIX_META_KEY,
+                "---\npriority: !custom high\n---\n\n",
+            );
+            meta.insert(
+                &mut txn,
+                TAGGED_FRONTMATTER_BASELINE_META_KEY,
+                "priority: high\n",
+            );
+        }
+        assert!(doc.project_richdoc().unwrap().contains("!custom"));
+        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, selected)
+            .unwrap();
+        let projection = doc.project_richdoc().unwrap();
+        assert_eq!(projection, selected);
+        assert_eq!(
+            doc.preserved_markdown_source(&projection).as_deref(),
+            Some(selected)
+        );
+        let txn = doc.doc.transact();
+        assert!(!meta.contains_key(&txn, TAGGED_FRONTMATTER_PREFIX_META_KEY));
+        assert!(!meta.contains_key(&txn, TAGGED_FRONTMATTER_BASELINE_META_KEY));
     }
 
     #[test]

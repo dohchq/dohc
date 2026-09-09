@@ -26,10 +26,15 @@ const SAFE: i64 = 9_007_199_254_740_991;
 mod adoption;
 mod bootstrap;
 pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
+mod restore_content;
 mod restore_fence;
 mod settlement;
 pub use bootstrap::{
     bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
+};
+pub use restore_content::{
+    NativeRestorePoint, NativeRestorePreparation, NativeRestoreProposal,
+    NativeRestoreProposalReceipt,
 };
 pub use restore_fence::require_open as require_restore_open;
 pub use restore_fence::{NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin};
@@ -887,6 +892,9 @@ fn read_ranges(
         .map_err(read_sql)?;
     let mut ranges = Vec::new();
     while let Some(row) = rows.next().map_err(read_sql)? {
+        if ranges.len() as u64 >= count as u64 {
+            return Err(ApplicationError::Corrupt);
+        }
         let ordinal: i64 = row.get(0).map_err(read_sql)?;
         if row.get::<_, String>(4).map_err(read_sql)? != workspace
             || usize::try_from(ordinal).ok() != Some(ranges.len())

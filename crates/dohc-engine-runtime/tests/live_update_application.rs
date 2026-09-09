@@ -669,6 +669,102 @@ async fn owner_drop_suppresses_a_committed_ack_and_a_queued_request() {
 struct PanicCommit;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_preparation_reservation_survives_cancellation_and_owner_retirement() {
+    use dohc_engine_collab::live_update_application::{
+        NativeRestoreFence, NativeRestoreFenceReceipt, NativeRestorePoint,
+        NativeRestorePreparation, RestoreDeliveryOrigin,
+    };
+    struct Reservation(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Reservation {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let (_scratch, db, supervisor, actor) = fixture();
+    let (owner, handle) = registered(&actor).await;
+    let (entered, at_commit) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let held = Arc::new(HoldCommit {
+        entered: Mutex::new(Some(entered)),
+        release: Mutex::new(wait),
+    });
+    let in_flight = tokio::spawn(async move {
+        handle
+            .apply(event("held", 1, "one", vec![0, 0]), held)
+            .await
+    });
+    at_commit.await.unwrap();
+    // The writer must reject this queued operation after retirement before reading its fence.
+    let input = NativeRestorePreparation {
+        fence: NativeRestoreFenceReceipt {
+            operation: NativeRestoreFence {
+                operation_id: "restore".into(),
+                relay_database_namespace: "relay-A".into(),
+                old_binding: binding("one"),
+                host_id: "host".into(),
+                new_fence: 8,
+                origin: RestoreDeliveryOrigin::Bootstrap {
+                    id: "bootstrap".into(),
+                },
+                terminal: None,
+                applied_sequence: 0,
+            },
+            local_head_sequence: 0,
+            recorded_at_ms: 1,
+        },
+        point: NativeRestorePoint {
+            journal_cursor: 0,
+            receipt_digest: binding("one").lineage_claim_id,
+            markdown_digest: hex_sha256(b""),
+            projection_digest: hex_sha256(b""),
+        },
+        owner_origin: None,
+    };
+    let disposed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut queued = Box::pin(owner.prepare_restore(
+        input.clone(),
+        coordinate("connection"),
+        1_000_000,
+        100,
+        Arc::new(NoFaults),
+        Arc::new(Reservation(disposed.clone())),
+    ));
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(queued.as_mut().poll(cx).is_pending()))
+            .await
+    );
+    drop(queued);
+    assert!(!disposed.load(std::sync::atomic::Ordering::SeqCst));
+    owner.retire();
+    release.send(()).unwrap();
+    assert!(matches!(
+        in_flight.await.unwrap(),
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    let _replacement = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    assert!(disposed.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(matches!(
+        owner
+            .prepare_restore(
+                input,
+                coordinate("connection"),
+                1_000_000,
+                100,
+                Arc::new(NoFaults),
+                Arc::new(())
+            )
+            .await,
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    supervisor.close(&db).unwrap();
+    let store = EngineStore::open(&db, 5).unwrap();
+    assert_eq!(store.table_row_count("live_restore_fences").unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cancelled_caller_keeps_queued_input_memory_reserved_until_writer_disposal() {
     struct Reservation(Arc<std::sync::atomic::AtomicBool>);
     impl Drop for Reservation {

@@ -485,7 +485,7 @@ mod tests {
         store.write_with(&NoFaults, |tx| {
             let sha = crate::put_binary_blob(tx, &[0, 0]).unwrap();
             tx.execute("INSERT INTO versioned_workspaces VALUES ('workspace','main')",[]).unwrap();
-            tx.execute("INSERT INTO live_restore_fences VALUES ('workspace','main','object','relay','restore','{}','{}')",[]).unwrap();
+            tx.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('workspace','main','object','relay','restore','{}','{}')",[]).unwrap();
             tx.execute("INSERT INTO live_device_bootstraps VALUES ('relay','workspace','main','object',?1,'bootstrap','bootstrap-moment','{}',?1,2,0,0,?1,0,0,'{}')",[&sha]).unwrap();
             tx.execute("INSERT INTO live_device_application_bindings VALUES ('relay','workspace','main','object','lineage','a.md','[\"a.md\"]',0,'host',1,'instance','connection',1)", []).unwrap();
             tx.execute("INSERT INTO live_device_update_applications VALUES ('relay','workspace','delivery','main','object','lineage','a.md','[\"a.md\"]',0,?1,2,1,1,'owner','person',NULL,NULL,0,1,1,'host',1,'instance','connection')", [&sha]).unwrap();

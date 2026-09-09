@@ -1553,6 +1553,12 @@ CREATE TABLE live_restore_fences (
     operation_id TEXT NOT NULL,
     input_json TEXT NOT NULL CHECK (json_valid(input_json)),
     receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
+    proposal_json TEXT CHECK (proposal_json IS NULL OR json_valid(proposal_json)),
+    proposal_candidate_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    proposal_frozen_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    proposal_point_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    CHECK ((proposal_json IS NULL AND proposal_candidate_sha256 IS NULL AND proposal_frozen_sha256 IS NULL AND proposal_point_sha256 IS NULL)
+        OR (proposal_json IS NOT NULL AND proposal_candidate_sha256 IS NOT NULL AND proposal_frozen_sha256 IS NOT NULL AND proposal_point_sha256 IS NOT NULL)),
     PRIMARY KEY (workspace_id, main_version_id, object_id),
     UNIQUE (relay_database_namespace, operation_id),
     FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE

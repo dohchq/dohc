@@ -264,6 +264,133 @@ mod tests {
     }
 
     #[test]
+    fn restore_preparation_authenticates_original_owner_prefix_before_adoption_terminal() {
+        let mut f = Fixture::new();
+        f.edit(true);
+        f.adopt().unwrap();
+        let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+        let operation = NativeRestoreFence {
+            operation_id: "restore-owner".into(),
+            relay_database_namespace: "namespace".into(),
+            old_binding: f.binding.clone(),
+            host_id: "host".into(),
+            new_fence: 1,
+            origin: RestoreDeliveryOrigin::Owner {
+                id: f.cut.adoption_id.clone(),
+            },
+            terminal: f.cut.terminal_receipt.clone(),
+            applied_sequence: f.cut.expected_local_sequence,
+        };
+        let fence = f
+            ._owner
+            .fence_restore(&mut f.store, operation, coordinate.clone(), 20, &NoFaults)
+            .unwrap();
+        let point = Ydoc::wire();
+        point.apply(&f.cut.baseline_bytes).unwrap();
+        let projection = point.project(ContentKind::Richdoc).unwrap().content;
+        let source = point
+            .preserved_markdown_source(&projection)
+            .unwrap_or_else(|| projection.clone());
+        let input = NativeRestorePreparation {
+            fence,
+            point: NativeRestorePoint {
+                journal_cursor: 0,
+                receipt_digest: f.binding.lineage_claim_id.clone(),
+                markdown_digest: hex_sha256(source.as_bytes()),
+                projection_digest: hex_sha256(projection.as_bytes()),
+            },
+            owner_origin: Some(f.cut.clone()),
+        };
+        for damage in [
+            "absent",
+            "id",
+            "namespace",
+            "moment",
+            "source",
+            "sequence",
+            "terminal",
+            "omitted",
+            "metadata",
+            "bytes",
+        ] {
+            let mut changed = input.clone();
+            if damage == "absent" {
+                changed.owner_origin = None;
+            } else {
+                let cut = changed.owner_origin.as_mut().unwrap();
+                match damage {
+                    "id" => cut.adoption_id = "other".into(),
+                    "namespace" => cut.relay_database_namespace = "other".into(),
+                    "moment" => cut.source_moment_id = "other".into(),
+                    "source" => cut.source_digest = "f".repeat(64),
+                    "sequence" => cut.expected_local_sequence += 1,
+                    "terminal" => cut.terminal_receipt = None,
+                    "omitted" => {
+                        cut.events.clear();
+                        cut.terminal_receipt = None;
+                    }
+                    "metadata" => cut.events[0].metadata.accepted.received_at_ms += 1,
+                    "bytes" => cut.events[0].update_bytes = vec![0, 0],
+                    _ => unreachable!(),
+                }
+            }
+            assert!(
+                f._owner
+                    .prepare_restore(
+                        &mut f.store,
+                        changed,
+                        coordinate.clone(),
+                        1_000_000,
+                        100,
+                        &NoFaults
+                    )
+                    .is_err(),
+                "{damage}"
+            );
+        }
+        let prepared = f
+            ._owner
+            .prepare_restore(
+                &mut f.store,
+                input.clone(),
+                coordinate.clone(),
+                1_000_000,
+                100,
+                &NoFaults,
+            )
+            .unwrap();
+        assert_eq!(prepared.receipt().accepted_sources.len(), 1);
+        assert_eq!(prepared.receipt().point.journal_cursor, 0);
+        assert_eq!(
+            f.store
+                .table_row_count("live_device_update_applications")
+                .unwrap(),
+            0
+        );
+        let replay = f
+            ._owner
+            .prepare_restore(
+                &mut f.store,
+                input.clone(),
+                coordinate.clone(),
+                1_000_000,
+                100,
+                &NoFaults,
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&prepared).unwrap(),
+            serde_json::to_vec(&replay).unwrap()
+        );
+        let mut changed = input;
+        changed.owner_origin.as_mut().unwrap().source_moment_id = "changed-on-replay".into();
+        assert!(f
+            ._owner
+            .prepare_restore(&mut f.store, changed, coordinate, 1_000_000, 100, &NoFaults)
+            .is_err());
+    }
+
+    #[test]
     fn restore_fence_refuses_late_creation_of_an_empty_owner_outbox() {
         for reopen in [false, true] {
             let mut f = Fixture::new();
@@ -867,7 +994,7 @@ pub struct OwnerAdoptionAck {
     pub adoption_replayed: bool,
 }
 
-fn validate_cut(
+pub(super) fn validate_cut(
     cut: &OwnerAdoptionCut,
     binding: &LiveObjectBinding,
     max_bytes: usize,
@@ -911,9 +1038,13 @@ fn validate_cut(
         {
             return Err(invalid("owner adoption journal order"));
         }
-        let metadata_length = serde_json::to_vec(&event.metadata)
-            .map_err(|_| ApplicationError::Corrupt)?
-            .len();
+        let metadata_length = bounded_evidence(
+            &event.metadata,
+            max_bytes
+                .saturating_sub(size)
+                .saturating_sub(event.update_bytes.len()),
+        )?
+        .0;
         size = size
             .checked_add(event.update_bytes.len())
             .and_then(|size| size.checked_add(metadata_length))
@@ -929,8 +1060,8 @@ fn validate_cut(
     {
         return Err(invalid("owner adoption terminal or capacity"));
     }
-    Ok(hex_sha256(
-        &serde_json::to_vec(&(
+    Ok(bounded_evidence(
+        &(
             binding,
             &cut.relay_database_namespace,
             &cut.source_moment_id,
@@ -940,8 +1071,54 @@ fn validate_cut(
             cut.baseline_registered_at_ms,
             cut.expected_local_sequence,
             identities,
-        ))
-        .map_err(|_| ApplicationError::Corrupt)?,
+        ),
+        max_bytes,
+    )?
+    .1)
+}
+
+fn bounded_evidence(
+    value: &impl Serialize,
+    max_bytes: usize,
+) -> Result<(usize, String), ApplicationError> {
+    use sha2::{Digest, Sha256};
+    struct Evidence {
+        size: usize,
+        limit: usize,
+        digest: Sha256,
+    }
+    impl std::io::Write for Evidence {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let size = self
+                .size
+                .checked_add(bytes.len())
+                .filter(|size| *size <= self.limit)
+                .ok_or_else(|| {
+                    std::io::Error::other("owner adoption evidence exceeds configured budget")
+                })?;
+            self.digest.update(bytes);
+            self.size = size;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = Evidence {
+        size: 0,
+        limit: max_bytes,
+        digest: Sha256::new(),
+    };
+    serde_json::to_writer(&mut writer, value)
+        .map_err(|_| invalid("owner adoption evidence exceeds configured budget"))?;
+    Ok((
+        writer.size,
+        writer
+            .digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
     ))
 }
 
@@ -1072,11 +1249,11 @@ pub fn adopt_owner_committed(
     }
 }
 
-fn require_local_replay_budget(
+pub(super) fn require_local_replay_budget(
     conn: &Connection,
     key: &DocKey,
     max_bytes: usize,
-) -> Result<(), ApplicationError> {
+) -> Result<usize, ApplicationError> {
     let (sequence, digest) =
         durable::latest_snapshot(conn, key)?.ok_or(ApplicationError::Corrupt)?;
     let mut total: i64 = conn
@@ -1108,7 +1285,7 @@ fn require_local_replay_budget(
             "owner adoption local replay exceeds configured budget",
         ));
     }
-    Ok(())
+    usize::try_from(total).map_err(|_| ApplicationError::Corrupt)
 }
 
 fn outbox_coverage(

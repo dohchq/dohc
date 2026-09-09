@@ -516,7 +516,7 @@ fn stopped_binary_moment() -> (
         recorded_at_ms: 1_001,
     };
     store.read_with(|conn| conn.execute(
-        "INSERT INTO live_restore_fences VALUES ('ws','main','object','relay','restore',?1,?2)",
+        "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','object','relay','restore',?1,?2)",
         params![serde_json::to_string(&operation).unwrap(), serde_json::to_string(&receipt).unwrap()],
     )).expect("seed the durable stopped-lineage guard");
     let mut payload = present_text_payload(
