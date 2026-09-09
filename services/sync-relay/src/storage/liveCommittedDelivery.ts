@@ -1,5 +1,6 @@
 import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt,parseNativeRestoreResumeReceipt,type RestoreLifecycle,type NativeRestoreApplicationReceipt,type NativeRestoreSettlementReceipt,type NativeRestoreResumeReceipt} from "../liveRestoreLifecycle";
 import type { ServiceActivationAccess } from "./serviceActivationAccess";
+import {readServiceActivationOrigin} from "./serviceActivationOrigin";
 import {readRestoreAdmission,verifyRestoreCheckpoint,restoreDigest,type RestoreAdmission,type RestoreSourceRange} from "./liveRestoreCheckpoint";
 import {retainedRestoreLifecycle,validateRestoreLifecycle,requireResumedBinding} from "./liveRestoreLifecycleStorage";
 import { randomUUID, createHash } from "node:crypto";
@@ -262,6 +263,23 @@ export class LiveCommittedDeliveryStore {
         objectId: row.object_id, lineageClaimId: row.lineage_claim_id }) : undefined;
     });
   }
+  #ownerSource(document: LiveDocumentKey, adoptionId: string, authority: Pick<StoredLiveDocumentAuthority,
+    "binding" | "baselineSequence" | "projectedDigest" | "projectedLength" | "registeredAtMs">) {
+    const activation = readServiceActivationOrigin(this.#storage,this.#history.namespace,document,adoptionId);
+    if (activation) {
+      integrity(activation.source.currentPath === authority.binding.currentPath &&
+        activation.baseline.relaySequence === authority.baselineSequence && activation.baseline.projectedDigest === authority.projectedDigest &&
+        activation.baseline.projectedLength === authority.projectedLength && activation.baseline.registeredAtMs === authority.registeredAtMs);
+      return {sourceMomentId: activation.source.sourceMomentId, sourceDigest: activation.source.sourceDigest,
+        sourceByteLength: activation.source.sourceByteLength, activation};
+    }
+    const source = this.#storage.db.prepare("SELECT moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND relay_seq=?")
+      .get(document.workspaceId,document.objectId,authority.baselineSequence);
+    integrity(source && source.version_id === document.mainVersionId && source.path === authority.binding.currentPath &&
+      source.content_kind === "text" && source.blob_sha256 === authority.projectedDigest && source.byte_length === authority.projectedLength);
+    return {sourceMomentId: parseLiveUpdateIdentifier(source.moment_id,"source moment ID"), sourceDigest: authority.projectedDigest,
+      sourceByteLength: authority.projectedLength, activation: null};
+  }
   openOwnerDelivery(input: {host: LiveHostConnectionCoordinate;document: LiveDocumentKey;actor: import("./types").CurrentLiveBindingRequest["actor"]}): OwnerDeliveryCapture {
     const host = snapshotHostCoordinate(input.host), document = journalDocument(input.document);
     const read = () => {
@@ -270,20 +288,20 @@ export class LiveCommittedDeliveryStore {
       const origin = JSON.parse(String(owner.origin_json));
       const row = this.#storage.db.prepare(`SELECT workspace_id,main_version_id,object_id,lineage_claim_id,current_path,restore_fence_generation,lineage_state,admission_state,baseline_digest,baseline_projected_sha256,baseline_projected_byte_length,baseline_moment_relay_seq,registered_at_ms FROM sync_relay_live_documents WHERE ${WHERE_DOCUMENT}`).get(...documentParams(document));
       integrity(row && row.lineage_state === "current" && row.admission_state === "open" && row.baseline_digest === document.lineageClaimId &&
-        row.baseline_projected_sha256 === origin.sourceDigest && row.baseline_projected_byte_length === origin.sourceByteLength &&
         row.baseline_moment_relay_seq === origin.baselineMomentRelaySequence && row.registered_at_ms === origin.baselineRegisteredAtMs);
       const binding = parseLiveObjectBinding({...document,currentPath: row.current_path,selectorPaths: [row.current_path],restoreFenceGeneration: row.restore_fence_generation});
-      const source = this.#storage.db.prepare("SELECT moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND relay_seq=?")
-        .get(document.workspaceId,document.objectId,row.baseline_moment_relay_seq);
-      integrity(source && source.moment_id === origin.sourceMomentId && source.version_id === document.mainVersionId && source.path === binding.currentPath &&
-        source.content_kind === "text" && source.blob_sha256 === origin.sourceDigest && source.byte_length === origin.sourceByteLength);
+      const source = this.#ownerSource(document,origin.adoptionId,{binding,baselineSequence: authorityInteger(row.baseline_moment_relay_seq,1),
+        projectedDigest: parseLiveUpdateDigest(row.baseline_projected_sha256),projectedLength: authorityInteger(row.baseline_projected_byte_length),
+        registeredAtMs: authorityInteger(row.registered_at_ms)});
+      integrity(source.sourceMomentId === origin.sourceMomentId && source.sourceDigest === origin.sourceDigest && source.sourceByteLength === origin.sourceByteLength &&
+        (!source.activation || source.activation.source.nativeHeadSequence === origin.expectedLocalSequence));
       const hostState = this.#storage.getLiveHostControl(); integrity(hostState);
       const current = authorizeLiveDocument(this.#storage,{document,actor: input.actor},hostState,{binding,current: true,open: true,baselineSequence: authorityInteger(row.baseline_moment_relay_seq,1)},this.activation);
       integrity(current.kind === "current" && isDeepStrictEqual(current.host,host));
       const originalBinding=parseLiveObjectBinding(origin.originalBinding);
       integrity(createHash("sha256").update(JSON.stringify(originalBinding)).digest("hex")===origin.bindingDigest);
       requireResumedBinding(this.#storage.db,this.#history.namespace,originalBinding,current.binding);
-      return {row,origin: String(owner.origin_json),binding: current.binding};
+      return {row,origin: String(owner.origin_json),binding: current.binding,source};
     };
     const initial = this.#storage.readTx(read);
     const assertCurrent = () => {const current = read(); integrity(isDeepStrictEqual(current,initial));};
@@ -359,6 +377,20 @@ export class LiveCommittedDeliveryStore {
       integrity(changed.changes === 1);
     });
   }
+  captureOwnerBinding(input: {host: LiveHostConnectionCoordinate; document: LiveDocumentKey;
+    actor: import("./types").CurrentLiveBindingRequest["actor"]}) {
+    const host = snapshotHostCoordinate(input.host), document = journalDocument(input.document), actor = structuredClone(input.actor);
+    const read = () => {
+      this.#standing(host);
+      const current = currentLiveDocumentBinding(this.#storage,{document,actor},this.activation);
+      integrity(current.kind === "current" && isDeepStrictEqual(current.host,host));
+      return current;
+    };
+    const initial = this.#storage.readTx(read);
+    return {binding: structuredClone(initial.binding), assertCurrent: () => {
+      integrity(isDeepStrictEqual(this.#storage.readTx(read),initial));
+    }};
+  }
   captureOwnerCut(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; adoptionId: string;
     expectedLocalSequence: number; maxBytes: number; maxEvents: number; throughCursor?: number;
     actor?: import("./types").CurrentLiveBindingRequest["actor"] }): OwnerCutCapture {
@@ -376,10 +408,8 @@ export class LiveCommittedDeliveryStore {
       const authorized = input.actor ? currentLiveDocumentBinding(this.#storage,{document,actor: input.actor},this.activation) : undefined;
       if (authorized && (authorized.kind !== "current" || !isDeepStrictEqual(authorized.host,host))) throw new Error("Owner standing changed.");
       const binding = authorized?.kind === "current" ? authorized.binding : authority.binding;
-      const source = this.#storage.db.prepare(`SELECT moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND relay_seq=?`)
-        .get(document.workspaceId, document.objectId, authority.baselineSequence);
-      integrity(source && source.version_id === document.mainVersionId && source.path === authority.binding.currentPath && source.content_kind === "text" &&
-        source.blob_sha256 === authority.projectedDigest && source.byte_length === authority.projectedLength);
+      const source = this.#ownerSource(document,adoptionId,authority);
+      integrity(!source.activation || source.activation.source.nativeHeadSequence === sequence);
       const events: AdmittedLiveUpdate[] = [];
       let bytes = authority.baselineBytes.byteLength;
       for (const raw of this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=? ORDER BY journal_cursor`).iterate(...documentParams(document),requestedCursor ?? Number.MAX_SAFE_INTEGER)) {
@@ -393,8 +423,8 @@ export class LiveCommittedDeliveryStore {
       const terminal = events.at(-1)?.metadata.accepted.receipt ?? null;
       integrity((terminal?.journalCursor ?? 0) === (requestedCursor ?? result.cut.highWater ?? 0) && events.length === count.count);
       const cut: LiveOwnerAdoptionCut = { relayDatabaseNamespace: this.#history.namespace, adoptionId,
-        sourceMomentId: parseLiveUpdateIdentifier(source.moment_id, "source moment ID"), sourceDigest: authority.projectedDigest,
-        sourceByteLength: authority.projectedLength, baselineMomentRelaySequence: authority.baselineSequence,
+        sourceMomentId: source.sourceMomentId, sourceDigest: source.sourceDigest,
+        sourceByteLength: source.sourceByteLength, baselineMomentRelaySequence: authority.baselineSequence,
         baselineRegisteredAtMs: authority.registeredAtMs, expectedLocalSequence: sequence,
         terminalReceipt: terminal, baselineBytes: new Uint8Array(authority.baselineBytes), events };
       const { events: _events, baselineBytes: _baseline, ...header } = cut;
@@ -406,9 +436,8 @@ export class LiveCommittedDeliveryStore {
       this.#standing(host);
       const raw = this.#storage.db.prepare(`SELECT * FROM sync_relay_live_documents WHERE ${WHERE_DOCUMENT}`).get(...documentParams(document));
       integrity(raw && isDeepStrictEqual(decodeLiveDocumentAuthorityStructure(this.#storage.db, document, raw), captured.authority));
-      const source = this.#storage.db.prepare(`SELECT moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND relay_seq=?`)
-        .get(document.workspaceId, document.objectId, captured.authority.baselineSequence);
-      integrity(source && isDeepStrictEqual({ ...source }, captured.source));
+      const source = this.#ownerSource(document,adoptionId,captured.authority);
+      integrity(isDeepStrictEqual(source, captured.source));
       if (input.actor) {
         const authorized = currentLiveDocumentBinding(this.#storage,{document,actor: input.actor},this.activation);
         integrity(authorized.kind === "current" && isDeepStrictEqual(authorized.binding,captured.binding) && isDeepStrictEqual(authorized.host,host));

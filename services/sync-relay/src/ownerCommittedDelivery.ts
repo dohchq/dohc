@@ -72,7 +72,7 @@ export class OwnerCommittedDelivery {
       }
       if (!saved) {
         this.#registrations.invalidate(document.objectId);
-        const current = this.#store.captureOwnerCut({ host: c.host,document,actor,adoptionId: "owner-state-capture",expectedLocalSequence: 0,throughCursor: 0,...c.bounds });
+        const current = this.#store.captureOwnerBinding({host: c.host,document,actor});
         const registered = await c.client.sendRequest({ ...request(),method: "liveApplication.register",params: { binding: { ...current.binding,selectorPaths: [...current.binding.selectorPaths] } } },signal);
         check(); current.assertCurrent();
         const registrationId = authorityInteger(configRecord(registered.result,["registrationId"]).registrationId,1);

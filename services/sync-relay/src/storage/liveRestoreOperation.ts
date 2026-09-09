@@ -1,4 +1,5 @@
 import {requireResumedBinding,retainedRestoreLifecycle} from "./liveRestoreLifecycleStorage";
+import {readServiceActivationOrigin} from "./serviceActivationOrigin";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
@@ -140,10 +141,14 @@ export function requireStopRestoreOwnerOrigin(storage: StorageContext, basis: St
   integer(origin?.originEventCount);
   const originalBinding=parseLiveObjectBinding(origin.originalBinding);
   requireResumedBinding(storage.db,basis.namespace,originalBinding,basis.ownerBinding);
-  const source = storage.db.prepare("SELECT moment_id FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND relay_seq=?")
+  const activation = readServiceActivationOrigin(storage,basis.namespace,basis.binding,origin.adoptionId);
+  const source = activation ? activation.source : storage.db.prepare("SELECT moment_id AS sourceMomentId FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND relay_seq=?")
     .get(basis.binding.workspaceId,basis.binding.objectId,basis.baselineSequence);
-  if (!origin || origin.relayDatabaseNamespace !== basis.namespace || origin.sourceMomentId !== source?.moment_id ||
-    origin.sourceDigest !== basis.projectedDigest || origin.sourceByteLength !== basis.projectedLength ||
+  if (activation && (activation.baseline.relaySequence !== basis.baselineSequence || activation.baseline.projectedDigest !== basis.projectedDigest ||
+    activation.baseline.projectedLength !== basis.projectedLength || activation.baseline.registeredAtMs !== basis.registeredAtMs ||
+    activation.source.currentPath !== originalBinding.currentPath || activation.source.nativeHeadSequence !== origin.expectedLocalSequence)) refuse();
+  if (!origin || origin.relayDatabaseNamespace !== basis.namespace || origin.sourceMomentId !== source?.sourceMomentId ||
+    origin.sourceDigest !== (activation?.source.sourceDigest ?? basis.projectedDigest) || origin.sourceByteLength !== (activation?.source.sourceByteLength ?? basis.projectedLength) ||
     origin.baselineMomentRelaySequence !== basis.baselineSequence || origin.baselineRegisteredAtMs !== basis.registeredAtMs ||
     origin.bindingDigest !== createHash("sha256").update(JSON.stringify(originalBinding)).digest("hex")) refuse();
 }
