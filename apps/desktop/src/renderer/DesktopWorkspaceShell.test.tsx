@@ -522,6 +522,7 @@ function makeBaseBridge(
     })),
     createRelayShare: vi.fn(async () => ({
       shareId: "relay-share-1",
+      grantId: "relay-grant-1",
       shareCode: "dohc-share:relay-share-1:http://relay.test",
       recipientEmail: "friend@dohc.test",
     })),

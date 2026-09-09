@@ -70,6 +70,7 @@ export function createShareGrantRoutes(
   linkGrantBody: ReturnType<typeof createShareSummaries>["linkGrantBody"],
   namedGrantTransitionBody: ReturnType<typeof createShareSummaries>["namedGrantTransitionBody"],
   dependentGrantSummary: ReturnType<typeof createShareSummaries>["dependentGrantSummary"],
+  namedBrowserInvitation: ReturnType<typeof createShareSummaries>["namedBrowserInvitation"],
 ) {
   // The share and an active grant of `kind` on it, when the actor owns both
   // the share and its workspace right now. Anything else is a generic 404.
@@ -593,6 +594,7 @@ export function createShareGrantRoutes(
           selector,
           access,
           grantId,
+          ...namedBrowserInvitation(grantId, selector, access),
           generation: 1,
           createdAtMs,
         });
@@ -647,6 +649,7 @@ export function createShareGrantRoutes(
         selector,
         access,
         grantId,
+        ...namedBrowserInvitation(grantId, selector, access),
         generation: 1,
         createdAtMs,
       });

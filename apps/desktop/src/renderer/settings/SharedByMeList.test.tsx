@@ -119,10 +119,22 @@ describe("SharedByMeList", () => {
     const user = userEvent.setup();
     render(<SharedByMeList workspaceId="ws-1" />);
     await screen.findByTestId("shared-by-me-row");
+    expect(screen.queryByTestId("shared-by-me-copy-invitation")).toBeNull();
     await user.click(screen.getByTestId("shared-by-me-copy"));
     expect(bridgeMock.writeClipboardText).toHaveBeenCalledWith({
       text: "dohc-share:share-1:http://relay.test",
     });
+  });
+
+  it("copies the exact named invitation for a remote workspace row", async () => {
+    const invitation = "https://share.example.test/s/edit/grant-1";
+    bridgeMock.listRelayShares.mockResolvedValue({granted: [{...ACTIVE_SHARE, access: "edit", browserInvitationUrl: invitation}]});
+    const user = userEvent.setup(); render(<SharedByMeList workspaceId="ws-1"/>);
+    await screen.findByTestId("shared-by-me-row");
+    await user.click(screen.getByTestId("shared-by-me-copy-invitation"));
+    expect(bridgeMock.writeClipboardText).toHaveBeenLastCalledWith({text: invitation});
+    expect(screen.getByTestId("shared-by-me-row").getAttribute("data-grant-id")).toBe("grant-1");
+    expect(screen.getByTestId("shared-by-me-copy")).toBeTruthy();
   });
 
   // The row states what is waiting and opens the review that decides it.

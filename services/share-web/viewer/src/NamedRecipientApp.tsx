@@ -70,8 +70,10 @@ export default function NamedRecipientApp({grantId}: {grantId: string | null}) {
     event.preventDefault(); const form = event.currentTarget, values = new FormData(form), controller = start();
     const email = String(values.get("email") ?? ""), password = String(values.get("password") ?? "");
     form.reset();
-    void namedRequest("/api/account/sign-in", controller.signal, {email, password}).then(() => load(controller))
-      .catch(() => {if (!controller.signal.aborted) setError("dohc could not sign you in. Check your email and password, then retry.");})
+    void namedRequest("/api/account/sign-in", controller.signal, {email, password}).then(
+      () => load(controller).catch(() => {if (!controller.signal.aborted) setError("dohc could not open this invitation. Retry or sign in with the invited account.");}),
+      () => {if (!controller.signal.aborted) setError("dohc could not sign you in. Check your email and password, then retry.");},
+    )
       .finally(() => {if (!controller.signal.aborted) setBusy(false);});
   };
   const signOut = () => leave(() => {

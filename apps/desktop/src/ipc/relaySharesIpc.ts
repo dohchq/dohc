@@ -229,7 +229,7 @@ export function registerRelaySharesIpcHandlers<
       async (operation, credentials, session) => {
         const workspace = operation.workspace;
         const created = await session.run(() =>
-          relayShareJsonWithCredentials<{ shareId: string }>(
+          relayShareJsonWithCredentials<{ shareId: string; grantId: string; browserInvitationUrl?: string }>(
             credentials,
             `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`,
             {
@@ -249,6 +249,8 @@ export function registerRelaySharesIpcHandlers<
         });
         return CreateRelayShareResult.parse({
           shareId: created.shareId,
+          grantId: created.grantId,
+          browserInvitationUrl: created.browserInvitationUrl,
           shareCode,
           recipientEmail: input.recipientEmail,
         });

@@ -107,6 +107,25 @@ function harness() {
   };
 }
 
+describe("named browser invitations", () => {
+  it.each([undefined, "https://share.example.test/s/edit/exact-grant"])("preserves the grant and optional server URL %s", async browserInvitationUrl => {
+    const h = harness();
+    h.request.mockResolvedValue({shareId: "share", grantId: "exact-grant", ...(browserInvitationUrl ? {browserInvitationUrl} : {})});
+    const result = await h.invoke(CHANNELS.createRelayShare, {workspaceId, paths: ["docs"], recipientEmail: "friend@dohc.test", access: "edit"});
+    expect(result).toEqual({shareId: "share", grantId: "exact-grant", browserInvitationUrl,
+      shareCode: buildShareCode({shareId: "share", relayUrl: h.credentials.relayUrl!}), recipientEmail: "friend@dohc.test"});
+    expect(h.request.mock.lastCall?.[2]?.body).toBe(JSON.stringify({recipientEmail: "friend@dohc.test", access: "edit", paths: ["docs"]}));
+  });
+  it("retains the listed grant URL without deriving it from desktop credentials", async () => {
+    const h = harness(), browserInvitationUrl = "https://share.example.test/s/edit/exact-grant";
+    h.accountRequest.mockResolvedValue({granted: [{shareId: "share", workspaceId: "remote-workspace", grantId: "exact-grant", generation: 1,
+      recipientUserId: "friend", recipientEmail: "friend@dohc.test", selector: {paths: ["docs"], versionId: null}, access: "edit",
+      createdAtMs: 1, revokedAtMs: null, browserInvitationUrl}]});
+    expect(await h.invoke(CHANNELS.listRelayShares)).toMatchObject({granted: [{grantId: "exact-grant", browserInvitationUrl,
+      shareCode: buildShareCode({shareId: "share", relayUrl: h.credentials.relayUrl!})}]});
+  });
+});
+
 describe("registered owner restore handler", () => {
   const document = {workspaceId, mainVersionId: "main", objectId: "object", lineageClaimId: "lineage"};
   const intent = {deliveryKind: "owner", operationId: "restore", document, shareId: "share", grantId: "grant",

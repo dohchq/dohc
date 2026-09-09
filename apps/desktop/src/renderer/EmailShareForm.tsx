@@ -1,10 +1,11 @@
 import { Check, Copy } from "lucide-react";
-import { useMemo, useState } from "react";
-import type { CreateRelaySharePayload, ShareAccess } from "../ipc/bridgeContract";
+import { useEffect, useMemo, useState } from "react";
+import type { CreateRelaySharePayload, CreateRelayShareResult, ShareAccess } from "../ipc/bridgeContract";
 import type { RelayShareTarget } from "./RelayShareDialog";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
+import { useRequestSequence } from "./useRequestSequence";
 
 const ACCESS_OPTIONS: ReadonlyArray<{
   value: ShareAccess;
@@ -33,16 +34,21 @@ export function EmailShareForm(props: {
   const [access, setAccess] = useState<ShareAccess>("view");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [created, setCreated] = useState<{
-    shareCode: string;
-    recipientEmail: string;
-  } | null>(null);
+  const [created, setCreated] = useState<CreateRelayShareResult | null>(null);
   const [copied, setCopied] = useState(false);
+  const [invitationCopied, setInvitationCopied] = useState(false);
+  // RelayShareDialog keys this form by the canonical target. Switching panes
+  // keeps pending work; changing the target unmounts and invalidates it.
+  const requests = useRequestSequence([props.workspaceId]);
+  useEffect(() => {
+    setCreated(null); setBusy(false); setError(null); setCopied(false); setInvitationCopied(false);
+  }, [props.workspaceId]);
 
   const canSubmit = useMemo(() => email.trim().length > 2 && !busy, [busy, email]);
 
   async function createShare() {
     if (!canSubmit) return;
+    const token = requests.next();
     setBusy(true);
     setError(null);
     try {
@@ -55,21 +61,33 @@ export function EmailShareForm(props: {
           : { paths: props.target.paths }),
       };
       const result = await bridge().createRelayShare(payload);
-      setCreated({ shareCode: result.shareCode, recipientEmail: result.recipientEmail });
+      if (requests.isCurrent(token)) setCreated(result);
     } catch (cause) {
-      setError(ipcErrorMessage(cause));
+      if (requests.isCurrent(token)) setError(ipcErrorMessage(cause));
     } finally {
-      setBusy(false);
+      if (requests.isCurrent(token)) setBusy(false);
     }
   }
 
   async function copyCode() {
     if (!created) return;
+    const token = requests.current();
     try {
       await bridge().writeClipboardText({ text: created.shareCode });
-      setCopied(true);
+      if (requests.isCurrent(token)) setCopied(true);
     } catch {
       // The code stays visible for manual selection.
+    }
+  }
+
+  async function copyInvitation() {
+    if (!created?.browserInvitationUrl) return;
+    const token = requests.current();
+    try {
+      await bridge().writeClipboardText({ text: created.browserInvitationUrl });
+      if (requests.isCurrent(token)) setInvitationCopied(true);
+    } catch {
+      // The invitation stays visible for manual selection.
     }
   }
 
@@ -109,9 +127,13 @@ export function EmailShareForm(props: {
           </div>
 
           <p className="m-0 text-xs leading-relaxed text-muted">
-            They see what you selected — nothing else — and your later edits arrive
-            when they refresh.
+            They can read only what you selected.
           </p>
+          {access === "edit" && props.target.kind === "paths" && (
+            <p className="m-0 text-xs leading-relaxed text-muted">
+              When configured, browser editing lets them change shared Markdown files live. Other files use changes you accept.
+            </p>
+          )}
 
           <label className="block text-[11px] font-medium text-subtle">
             Share with (email)
@@ -139,6 +161,23 @@ export function EmailShareForm(props: {
         </>
       ) : (
         <>
+          {created.browserInvitationUrl && (
+            <>
+              <p className="m-0 text-xs leading-relaxed text-muted">
+                Send this browser invitation to {created.recipientEmail}. The recipient must sign in with the invited account.
+              </p>
+              <code data-testid="share-browser-invitation" data-grant-id={created.grantId}
+                className="min-w-0 break-all rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[11px] text-ink">
+                {created.browserInvitationUrl}
+              </code>
+              <SecondaryButton type="button" data-testid="share-browser-invitation-copy" onClick={() => void copyInvitation()}>
+                {invitationCopied ? "Browser invitation copied" : "Copy browser invitation"}
+              </SecondaryButton>
+              <p className="m-0 text-xs leading-relaxed text-muted">
+                Browser editing supports shared Markdown files when available. Other files use changes you accept.
+              </p>
+            </>
+          )}
           <p className="m-0 text-xs leading-relaxed text-muted">
             Send this code to{" "}
             <span className="font-medium text-ink">{created.recipientEmail}</span> —

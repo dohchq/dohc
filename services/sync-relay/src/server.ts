@@ -335,7 +335,8 @@ export function createSyncRelayHandler({
     dependentGrantSummary,
     independentGrantSummary,
     linkInventorySummary,
-  } = createShareSummaries(lookupUserEmail);
+    namedBrowserInvitation,
+  } = createShareSummaries(lookupUserEmail, namedBrowser ? shareWebOrigin : undefined);
 
   const { respondToShareInventory, respondToWorkspaceLinkInventory } = createShareInventoryRoutes(
     storage,
@@ -366,6 +367,7 @@ export function createSyncRelayHandler({
     linkGrantBody,
     namedGrantTransitionBody,
     dependentGrantSummary,
+    namedBrowserInvitation,
   );
 
   const requireLinkRead = (

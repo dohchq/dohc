@@ -76,6 +76,30 @@ it("keeps a quarantined draft until explicit discard, then opens a fresh session
   expect(sessions[0]!.close).toHaveBeenCalledTimes(1); expect(sessions).toHaveLength(2);
   expect(container.querySelector('[role="textbox"]')?.textContent).toContain("Draft b");
 });
+it.each([200, 401])("distinguishes sign-in status %s from an unavailable invitation", async status => {
+  let signedIn = false;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input) === "/api/account/session") return jsonResponse({user: signedIn ? {id: "alice", name: "Alice"} : null});
+    if (String(input) === "/api/account/sign-in") {signedIn = status === 200; return jsonResponse({ok: signedIn}, status);}
+    if (String(input) === "/api/live/named-documents") return jsonResponse({}, 404);
+    throw Error(String(input));
+  }));
+  await render();
+  await act(async () => {
+    setControlValue(container.querySelector('input[name="email"]')!, "alice@example.test");
+    setControlValue(container.querySelector('input[name="password"]')!, "secret");
+  });
+  await click("Sign in");
+  const error = container.querySelector('[role="alert"]')?.textContent;
+  if (status === 200) {
+    expect(container.textContent).toContain("Alice");
+    expect(error).toContain("could not open this invitation");
+    expect(error).not.toContain("Check your email and password");
+  } else {
+    expect(container.textContent).not.toContain("Alice");
+    expect(error).toContain("Check your email and password");
+  }
+});
 it("ignores a late invitation response after navigation changes the grant", async () => {
   let resolve!: (value: Response) => void;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

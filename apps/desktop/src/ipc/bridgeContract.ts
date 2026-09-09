@@ -3823,6 +3823,7 @@ const RelayShareGrantedRowBase = z.object({
   createdAtMs: z.number().int().nonnegative(),
   revokedAtMs: z.number().int().nonnegative().nullable(),
   shareCode: z.string().min(1).max(4096),
+  browserInvitationUrl: z.string().url().max(4096).optional(),
 });
 
 export const RelayShareGrantedRow = z.union([
@@ -3895,6 +3896,8 @@ export type CreateRelaySharePayload = z.infer<typeof CreateRelaySharePayload>;
 
 export const CreateRelayShareResult = z.object({
   shareId: OPAQUE_ID,
+  grantId: OPAQUE_ID,
+  browserInvitationUrl: z.string().url().max(4096).optional(),
   shareCode: z.string().min(1).max(4096),
   recipientEmail: EMAIL_STRING,
 });
