@@ -93,6 +93,28 @@ it("rejects an ineffective selected candidate without substituting a recipe", ()
   f.selection.corpus = f.json("ineffective.json", {cases: [{id: "tiny-registration", mode: "journal-candidate", checkpoint: f.blob.path, suffix: [], candidate: f.blob.path}], blobs: [f.blob]});
   expect(() => preparePublicWorkload(f.seal(), join(f.root, "ineffective"), renderPublicFixture)).toThrow(/no state|not admissible/);
 }));
+it("rejects source updates supplied through wire JSON", () => fixture(f => {
+  const step = f.selection.wire.rounds[0]!.updates[0]!;
+  Reflect.deleteProperty(step, "recipe");
+  Object.assign(step, {source: {caseId: "tiny-registration", part: "candidate"}});
+  expect(() => preparePublicWorkload(f.seal(), join(f.root, "wire-source"), renderPublicFixture)).toThrow("Wire updates require recipes");
+}));
+it("preserves a selected source candidate mapped to a transition", () => fixture(f => {
+  const doc = new Y.Doc({gc: false});
+  let candidate: WorkloadPin;
+  try {
+    Y.applyUpdate(doc, f.checkpoint);
+    const vector = Y.encodeStateVector(doc), paragraph = new Y.XmlElement("paragraph"), text = new Y.XmlText();
+    text.insert(0, "Selected candidate"); paragraph.insert(0, [text]); doc.getXmlFragment("body").push([paragraph]);
+    candidate = f.save("selected-candidate.bin", Y.encodeStateAsUpdate(doc, vector));
+  } finally {doc.destroy();}
+  f.selection.corpus = f.json("selected-candidate.json", {cases: [{id: "tiny-registration", mode: "journal-candidate", checkpoint: f.blob.path, suffix: [], candidate: candidate.path}], blobs: [f.blob, candidate]});
+  f.selection.transitions.view.updates = [{deliveryId: "selected-view-candidate", source: {caseId: "tiny-registration", part: "candidate"}}];
+  const result = preparePublicWorkload(f.seal(), join(f.root, "source-mapping"), renderPublicFixture);
+  const workload = readPublicTransitionWorkload(result.transitionPin, 2);
+  expect(workload.cases.view.updates[0]!.bytes).toEqual(readFileSync(candidate.path));
+  expect(workload.cases.view.updates[0]!.expected.viewText.toString()).toContain("Selected candidate");
+}));
 it("rejects a product-refused checkpoint without shrinking it", () => fixture(f => {
   const doc = new Y.Doc({gc: false}); doc.getMap("private-extra-root").set("data", "x");
   const blob = f.save("invalid.bin", Y.encodeStateAsUpdate(doc)); doc.destroy();
@@ -106,5 +128,15 @@ it("uses distinct production Markdown, editor and View rendering with explicit i
     const rendered = renderPublicFixture(checkpoint, context);
     expect(rendered.markdown).toContain("![Cat]"); expect(rendered.editorText).toContain("[Image: Cat]"); expect(rendered.viewText).not.toContain("Cat");
     expect(renderPublicFixture(checkpoint, {...context, images: {"cat.png": null}}).viewText).toContain("Cat");
+  } finally {doc.destroy();}
+});
+it.each([
+  ["image", "![Cat](cat.png)", "cat.png"],
+  ["link", "[Other](other.md)", "other.md"],
+])("rejects a missing %s resolver entry outside React rendering", (_kind, markdown, href) => {
+  const doc = markdownToYDoc(markdown);
+  try {
+    expect(() => renderPublicFixture(Y.encodeStateAsUpdate(doc), {version: 1, environment: "jsdom-production-components", images: {}, links: {}}))
+      .toThrow(`Rendering context has no resolution for ${href}`);
   } finally {doc.destroy();}
 });

@@ -71,11 +71,10 @@ export function preparePublicWorkload(selectionPin: WorkloadPin, output: string,
   requireValue(selected.selectionEvidence?.length && selected.caseIds?.length && new Set(selected.caseIds).size === selected.caseIds.length, "Selection evidence and distinct case IDs required.");
   requireValue(Number.isSafeInteger(selected.concurrency) && selected.concurrency > 0 && selected.wire?.rounds?.length, "Explicit concurrency and rounds required.");
   selected.selectionEvidence.forEach(pin => read(pin, base));
+  const implementationPaths = new Set(selected.implementationPins.map(pin => {read(pin, base); return resolve(base, pin.path);}));
   for (const path of adapterImplementationPaths) {
-    const pin = selected.implementationPins?.find(pin => resolve(base, pin.path) === resolve(repo, path));
-    requireValue(pin, `Missing implementation pin: ${path}`); read(pin, base);
+    requireValue(implementationPaths.has(resolve(repo, path)), `Missing implementation pin: ${path}`);
   }
-  selected.implementationPins.forEach(pin => read(pin, base));
   const context = JSON.parse(read(selected.renderingContext, base).toString()) as FixtureRenderingContext;
   requireValue(context.version === 1 && context.environment === "jsdom-production-components" && context.images && context.links, "Explicit rendering context required.");
   for (const table of [context.images, context.links]) requireValue(!Array.isArray(table) && typeof table === "object" && Object.values(table).every(value => value === null || typeof value === "string"), "Invalid resolver table.");
@@ -143,7 +142,7 @@ export function preparePublicWorkload(selectionPin: WorkloadPin, output: string,
       draft.clientID = clientId; const vector = Y.encodeStateVector(draft); append(draft, step.recipe);
       const update = Y.encodeStateAsUpdate(draft, vector), decoded = Y.decodeUpdate(update);
       requireValue(decoded.structs.length && decoded.structs.every(item => item.id.client === clientId), "Recipe reused source writer structs.");
-      derivations.push({deliveryId: step.deliveryId, recipe: step.recipe, clientId, roundStartStateVectorSha256: hash(vector), updateSha256: hash(update)});
+      derivations.push({deliveryId: step.deliveryId, recipe: step.recipe, clientId, startStateVectorSha256: hash(vector), updateSha256: hash(update)});
       return update;
     } finally {draft.destroy();}
   }
@@ -152,7 +151,11 @@ export function preparePublicWorkload(selectionPin: WorkloadPin, output: string,
   try {
     for (const round of selected.wire.rounds) {
       requireValue(round.updates.length === selected.concurrency && new Set(round.updates.map(item => item.client)).size === selected.concurrency, "Round needs every independent writer.");
-      const updates = round.updates.map(step => {requireValue(Number.isSafeInteger(step.client) && step.client >= 0 && step.client < clients.length, "Invalid writer index."); return {step, bytes: generate(wireDoc, step, clients[step.client]!)};});
+      const updates = round.updates.map(step => {
+        requireValue("recipe" in step && !("source" in step), "Wire updates require recipes, not source updates.");
+        requireValue(Number.isSafeInteger(step.client) && step.client >= 0 && step.client < clients.length, "Invalid writer index.");
+        return {step, bytes: generate(wireDoc, step, clients[step.client]!)};
+      });
       for (const update of updates) {
         // Check both first delivery and delivery after every other concurrent writer.
         admit(wireCheckpoint, wireSuffix, update.bytes);
