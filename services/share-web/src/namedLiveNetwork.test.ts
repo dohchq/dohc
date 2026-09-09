@@ -11,8 +11,8 @@ import { serveFetchHandler } from "@dohc/service-http";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { createSyncRelayHandler } from "../../sync-relay/src/server.js";
 import { createNamedLiveRoutes } from "../../sync-relay/src/namedLiveRoutes.js";
-import { createNamedLiveTickets } from "../../sync-relay/src/liveTickets.js";
-import { createNamedLiveHostReports } from "../../sync-relay/src/namedLiveHostReports.js";
+import { createLiveTickets } from "../../sync-relay/src/liveTickets.js";
+import { createLiveHostReports } from "../../sync-relay/src/namedLiveHostReports.js";
 import { createNamedFrameChanges, type NamedFrameNativeHost } from "../../sync-relay/src/namedLiveFrameHost.js";
 import { fixture as ticketFixture, audience, binding, host, key, scope } from "../../sync-relay/src/liveTickets.test-helper.js";
 import { createShareWebApplication } from "./server.js";
@@ -99,8 +99,8 @@ async function fixture() {
   relayHttp.listen(0, "127.0.0.1"); await once(relayHttp, "listening");
   const relayUrl = `http://127.0.0.1:${(relayHttp.address() as { port: number }).port}`;
   const captureNative = vi.fn(async () => native);
-  const tickets = createNamedLiveTickets({ storage: stored.storage, audience, key, hostReports: createNamedLiveHostReports({ storage: stored.storage, captureNative }) });
-  routes = createNamedLiveRoutes({ storage: stored.storage, hosts: new Set([new URL(relayUrl).host]), publicOrigin: audience, exchangeKey, frames, limits: transport,
+  const tickets = createLiveTickets({ storage: stored.storage, audience, key, hostReports: createLiveHostReports({ storage: stored.storage, captureNative }) });
+  routes = createNamedLiveRoutes({ kind: "named", storage: stored.storage, hosts: new Set([new URL(relayUrl).host]), publicOrigin: audience, exchangeKey, frames, limits: transport,
     bounds: { maxClientVectorBytes: 1024, maxSyncOutputBytes: 8192, maxAppliedUpdateBytes: 4096, maxSubmissionBytes: 4096, maxAdmissionBytes: 16384 },
     validate: createLiveMarkdownJournalValidator(policy), sessions: { resolve: relayApp.resolveNamedBrowserSession }, tickets, captureNative });
   const upgrades: Promise<void>[] = [];
@@ -112,7 +112,7 @@ async function fixture() {
     limits: { maxConnections: 4, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4,
       maxFrameBytes: 1024, maxPendingBytes: 8192, maxPendingFrames: 32, maxFragments: 8, maxBufferedChunks: 16,
       upgradeTimeoutMs: 2000, idleTimeoutMs: 10000, drainTimeoutMs: 100 },
-    resolveNamedSession: async (request, discriminator, signal) => {
+    resolveSession: async (request, discriminator, signal) => {
       const authenticated = namedLiveGatewayRequest(request, audience, signal);
       return authenticated ? application.resolveNamedBrowserSession(authenticated, discriminator) : null;
     },

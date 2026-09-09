@@ -120,6 +120,27 @@ async function live(value = provider(), doc = document("base")) {
 }
 
 describe("named live browser provider", () => {
+  it("retains the membership overflow marker without inventing departures", async () => {
+    const { value, host } = await live();
+    const first = "ab".repeat(16), second = "cd".repeat(16);
+    await host.send({ kind: "membership", revision: 1, members: [first, second], overflow: false });
+    expect(value.state().membership).toEqual({ kind: "membership", revision: 1, members: [first, second], overflow: false });
+    await host.send({ kind: "membership", revision: 2, members: [first], overflow: true });
+    expect(value.state().membership).toEqual({ kind: "membership", revision: 2, members: [first], overflow: true });
+    (value.state().membership!.members as string[]).push("ef".repeat(16));
+    expect(value.state().membership!.members).toEqual([first]);
+    host.route.disconnect();
+    expect(value.state().membership).toBeNull();
+  });
+  it("ignores membership arriving from a replaced route", async () => {
+    const { value, host, doc } = await live();
+    await host.send({ kind: "membership", revision: 1, members: ["ab".repeat(16)], overflow: false });
+    host.route.disconnect(); await host.route.settled();
+    const next = peer(value, 2); await next.greet(); await next.initial(doc);
+    await next.send({ kind: "membership", revision: 1, members: ["cd".repeat(16)], overflow: false });
+    await host.route.receive(encodeLiveFrame({ kind: "membership", revision: 2, members: ["ef".repeat(16)], overflow: false }, 586));
+    expect(value.state().membership!.members).toEqual(["cd".repeat(16)]);
+  });
   it("waits for the initial sync, uses the canonical body, and ignores remote echoes", async () => {
     const value = provider(), doc = document("initial"), host = peer(value);
     expect(value.state().status).toBe("connecting");

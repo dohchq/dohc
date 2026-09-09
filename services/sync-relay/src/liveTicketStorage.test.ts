@@ -17,16 +17,16 @@ it("creates and validates the complete private named-ticket schema", async () =>
   const state = await fixture();
   try {
     expect(state.raw.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id=?").get(marker)).toEqual({ migration_id: marker });
-    expect(state.raw.prepare(`PRAGMA table_info(${table})`).all()).toHaveLength(18);
+    expect(state.raw.prepare(`PRAGMA table_info(${table})`).all()).toHaveLength(19);
   } finally { await state.close(); }
 });
 it("commits a ticket and consumes the hashed credential once in real storage", async () => {
   const state = await fixture();
   try {
-    expect(state.storage.mintNamedLiveTicket(mint)).toEqual({ expiresAtMs: 31000 });
-    expect(state.storage.readNamedLiveTicketTarget({ tokenHash, scope, audience })).toEqual({ workspaceId: scope.workspaceId, objectId: binding.objectId });
-    expect(state.storage.redeemNamedLiveTicket(redeem)).toMatchObject({ ticketId: mint.ticketId, redeemedAtMs: 1000 });
-    expect(state.storage.redeemNamedLiveTicket(redeem)).toBeNull();
+    expect(state.storage.mintLiveTicket(mint)).toEqual({ expiresAtMs: 31000 });
+    expect(state.storage.readLiveTicketTarget({ tokenHash, scope, audience })).toEqual({ workspaceId: scope.workspaceId, objectId: binding.objectId });
+    expect(state.storage.redeemLiveTicket(redeem)).toMatchObject({ ticketId: mint.ticketId, redeemedAtMs: 1000 });
+    expect(state.storage.redeemLiveTicket(redeem)).toBeNull();
   } finally { await state.close(); }
 });
 
@@ -42,20 +42,20 @@ it.each([
 ])("refuses %s without consuming or disclosing the rightful ticket", async (_name, changed) => {
   const state = await fixture();
   try {
-    expect(state.storage.mintNamedLiveTicket(mint)).not.toBeNull();
-    expect(state.storage.readNamedLiveTicketTarget({ tokenHash, scope, audience, ...changed })).toBeNull();
-    expect(state.storage.redeemNamedLiveTicket({ ...redeem, ...changed })).toBeNull();
-    expect(state.storage.redeemNamedLiveTicket(redeem)).not.toBeNull();
+    expect(state.storage.mintLiveTicket(mint)).not.toBeNull();
+    expect(state.storage.readLiveTicketTarget({ tokenHash, scope, audience, ...changed })).toBeNull();
+    expect(state.storage.redeemLiveTicket({ ...redeem, ...changed })).toBeNull();
+    expect(state.storage.redeemLiveTicket(redeem)).not.toBeNull();
   } finally { await state.close(); }
 });
 
 it.each([999, 1000, 30999, 31000, 31001])("uses the exact issue/expiry interval at %i", async time => {
   const state = await fixture();
   try {
-    state.storage.mintNamedLiveTicket(mint);
+    state.storage.mintLiveTicket(mint);
     state.setTime(time);
     const accepted = time >= 1000 && time < 31000;
-    expect(state.storage.redeemNamedLiveTicket(redeem) !== null).toBe(accepted);
+    expect(state.storage.redeemLiveTicket(redeem) !== null).toBe(accepted);
     if (!accepted) {
       expect(rows(state)).toEqual([{ ticket_id: "ticket-1", redeemed_at_ms: null }]);
     }
@@ -66,10 +66,10 @@ it("rejects overflow and invalid clocks without creating rows", async () => {
   const state = await fixture();
   try {
     state.setTime(Number.MAX_SAFE_INTEGER - 29999);
-    expect(state.storage.mintNamedLiveTicket(mint)).toBeNull();
+    expect(state.storage.mintLiveTicket(mint)).toBeNull();
     for (const time of [-1, NaN, Infinity, 1.5]) {
       state.setTime(time);
-      expect(() => state.storage.mintNamedLiveTicket(mint)).toThrow("Invalid live-ticket clock");
+      expect(() => state.storage.mintLiveTicket(mint)).toThrow("Invalid live-ticket clock");
     }
     expect(rows(state)).toEqual([]);
   } finally { await state.close(); }
@@ -78,7 +78,7 @@ it("rejects overflow and invalid clocks without creating rows", async () => {
 it("requires explicit captured positive policies with no default", async () => {
   const state = await fixture({});
   try {
-    expect(() => state.storage.mintNamedLiveTicket(mint)).toThrow("not configured");
+    expect(() => state.storage.mintLiveTicket(mint)).toThrow("not configured");
     for (const value of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
       for (const field of ["retainedTicketsPerPrincipalGrant", "expiredTicketCleanupBatchSize"] as const) {
         expect(() => openSyncRelayStorage(state.path, { liveTickets: {
@@ -91,8 +91,8 @@ it("requires explicit captured positive policies with no default", async () => {
     try {
       policy.retainedTicketsPerPrincipalGrant = 99;
       policy.now = () => 999999;
-      expect(configured.mintNamedLiveTicket(mint)).toEqual({ expiresAtMs: 31000 });
-      expect(configured.mintNamedLiveTicket(another(2))).toBeNull();
+      expect(configured.mintLiveTicket(mint)).toEqual({ expiresAtMs: 31000 });
+      expect(configured.mintLiveTicket(another(2))).toBeNull();
     } finally { configured.close(); }
   } finally { await state.close(); }
 });
@@ -106,12 +106,12 @@ it("captures time once with the writer lock held for every ticket operation", as
   });
   const second = openSyncRelayStorage(state.path, { liveTickets: { retainedTicketsPerPrincipalGrant: 2, expiredTicketCleanupBatchSize: 1, now } });
   try {
-    state.storage.mintNamedLiveTicket(mint);
-    expect(second.redeemNamedLiveTicket(redeem)).toBeNull();
+    state.storage.mintLiveTicket(mint);
+    expect(second.redeemLiveTicket(redeem)).toBeNull();
     expect(now).toHaveBeenCalledTimes(1);
-    expect(second.readNamedLiveTicketTarget({ tokenHash, scope, audience })).toBeNull();
+    expect(second.readLiveTicketTarget({ tokenHash, scope, audience })).toBeNull();
     expect(now).toHaveBeenCalledTimes(2);
-    expect(second.mintNamedLiveTicket(another(2))).toEqual({ expiresAtMs: 61000 });
+    expect(second.mintLiveTicket(another(2))).toEqual({ expiresAtMs: 61000 });
     expect(now).toHaveBeenCalledTimes(3);
   } finally { second.close(); await state.close(); }
 });
@@ -126,8 +126,8 @@ it("excludes a second writer during decisive grant and host authority checks", a
     return original(id);
   });
   try {
-    expect(state.storage.mintNamedLiveTicket(mint)).not.toBeNull();
-    expect(state.storage.redeemNamedLiveTicket(redeem)).not.toBeNull();
+    expect(state.storage.mintLiveTicket(mint)).not.toBeNull();
+    expect(state.storage.redeemLiveTicket(redeem)).not.toBeNull();
     expect(guard).toHaveBeenCalled();
   } finally { guard.mockRestore(); await state.close(); }
 });
@@ -135,13 +135,13 @@ it("excludes a second writer during decisive grant and host authority checks", a
 it("retains redeemed capacity until expiry and never evicts unexpired tickets", async () => {
   const state = await fixture();
   try {
-    state.storage.mintNamedLiveTicket(mint);
-    state.storage.redeemNamedLiveTicket(redeem);
-    state.storage.mintNamedLiveTicket(another(2));
-    expect(state.storage.mintNamedLiveTicket(another(3))).toBeNull();
+    state.storage.mintLiveTicket(mint);
+    state.storage.redeemLiveTicket(redeem);
+    state.storage.mintLiveTicket(another(2));
+    expect(state.storage.mintLiveTicket(another(3))).toBeNull();
     expect(rows(state)).toHaveLength(2);
     state.setTime(31000);
-    expect(state.storage.mintNamedLiveTicket(another(3))).toEqual({ expiresAtMs: 61000 });
+    expect(state.storage.mintLiveTicket(another(3))).toEqual({ expiresAtMs: 61000 });
     expect(rows(state).map(row => row.ticket_id)).toEqual(["ticket-2", "ticket-3"]);
   } finally { await state.close(); }
 });
@@ -149,16 +149,16 @@ it("retains redeemed capacity until expiry and never evicts unexpired tickets", 
 it("rolls bounded expiry cleanup back when retained capacity refuses", async () => {
   const state = await fixture();
   try {
-    state.storage.mintNamedLiveTicket(mint);
-    state.storage.mintNamedLiveTicket(another(2));
+    state.storage.mintLiveTicket(mint);
+    state.storage.mintLiveTicket(another(2));
     state.raw.prepare(`UPDATE ${table} SET minted_at_ms=10000, expires_at_ms=40000`).run();
     const stale = another(9);
     state.raw.prepare(`INSERT INTO ${table} SELECT ?, ?, audience, workspace_id, main_version_id, object_id, lineage_claim_id,
       current_path, selector_paths_json, restore_fence_generation, principal_kind, principal_id, grant_id, grant_generation,
-      host_epoch, 0, 30000, NULL FROM ${table} LIMIT 1`).run(stale.ticketId, stale.tokenHash);
+      host_epoch, 0, 30000, NULL, NULL FROM ${table} LIMIT 1`).run(stale.ticketId, stale.tokenHash);
     state.setTime(31000);
     const before = rows(state);
-    expect(state.storage.mintNamedLiveTicket(another(3))).toBeNull();
+    expect(state.storage.mintLiveTicket(another(3))).toBeNull();
     expect(rows(state)).toEqual(before);
   } finally { await state.close(); }
 });
@@ -166,9 +166,9 @@ it("rolls bounded expiry cleanup back when retained capacity refuses", async () 
 it.each(["ticketId", "tokenHash"] as const)("refuses %s collisions before expiry cleanup", async field => {
   const state = await fixture();
   try {
-    state.storage.mintNamedLiveTicket(mint);
+    state.storage.mintLiveTicket(mint);
     state.setTime(31000);
-    expect(state.storage.mintNamedLiveTicket({ ...another(2), [field]: mint[field] })).toBeNull();
+    expect(state.storage.mintLiveTicket({ ...another(2), [field]: mint[field] })).toBeNull();
     expect(rows(state)).toEqual([{ ticket_id: "ticket-1", redeemed_at_ms: null }]);
   } finally { await state.close(); }
 });
@@ -176,23 +176,23 @@ it.each(["ticketId", "tokenHash"] as const)("refuses %s collisions before expiry
 it("does not reset retained capacity when generation or audience changes", async () => {
   const state = await fixture();
   try {
-    state.storage.mintNamedLiveTicket(mint);
+    state.storage.mintLiveTicket(mint);
     state.raw.exec("UPDATE sync_relay_share_grants SET generation=5");
-    expect(state.storage.mintNamedLiveTicket({ ...another(2), audience: "https://other.example.test" })).not.toBeNull();
-    expect(state.storage.mintNamedLiveTicket(another(3))).toBeNull();
+    expect(state.storage.mintLiveTicket({ ...another(2), audience: "https://other.example.test" })).not.toBeNull();
+    expect(state.storage.mintLiveTicket(another(3))).toBeNull();
   } finally { await state.close(); }
 });
 
 it("keeps capacity independent across grants and named principals", async () => {
   const state = await fixture();
   try {
-    state.storage.mintNamedLiveTicket(mint);
-    state.storage.mintNamedLiveTicket(another(2));
+    state.storage.mintLiveTicket(mint);
+    state.storage.mintLiveTicket(another(2));
     for (const [grantId, userId, id] of [["edit-2", scope.userId, 3], ["edit-3", "reader-2", 4]] as const) {
       state.raw.prepare(`INSERT INTO sync_relay_share_grants SELECT ?, share_id, principal_kind, ?, principal_email, access,
         generation, status, created_at_ms, revoked_at_ms, parent_grant_id FROM sync_relay_share_grants WHERE grant_id=?`)
         .run(grantId, userId, scope.grantId);
-      expect(state.storage.mintNamedLiveTicket({ ...another(id), scope: { ...scope, grantId, userId } })).not.toBeNull();
+      expect(state.storage.mintLiveTicket({ ...another(id), scope: { ...scope, grantId, userId } })).not.toBeNull();
     }
   } finally { await state.close(); }
 });
@@ -215,17 +215,17 @@ it.each([
 ])("rechecks %s when redeeming and leaves the row unconsumed", async (_name, sql) => {
   const state = await fixture();
   try {
-    state.storage.mintNamedLiveTicket(mint);
+    state.storage.mintLiveTicket(mint);
     state.raw.exec(sql);
     const next = another(2);
     if (_name === "grant generation") {
-      expect(state.storage.mintNamedLiveTicket(next)).toEqual({ expiresAtMs: 31000 });
+      expect(state.storage.mintLiveTicket(next)).toEqual({ expiresAtMs: 31000 });
     } else {
-      expect(state.storage.mintNamedLiveTicket(next)).toBeNull();
+      expect(state.storage.mintLiveTicket(next)).toBeNull();
     }
-    expect(state.storage.redeemNamedLiveTicket(redeem)).toBeNull();
+    expect(state.storage.redeemLiveTicket(redeem)).toBeNull();
     if (_name === "grant generation") {
-      expect(state.storage.redeemNamedLiveTicket({ ...redeem, tokenHash: next.tokenHash })).toMatchObject({
+      expect(state.storage.redeemLiveTicket({ ...redeem, tokenHash: next.tokenHash })).toMatchObject({
         authority: { principalKind: "named", grantGeneration: 5 },
       });
       expect(rows(state)).toEqual([{ ticket_id: "ticket-1", redeemed_at_ms: null }, { ticket_id: "ticket-2", redeemed_at_ms: 1000 }]);
@@ -242,31 +242,31 @@ it("requires a nonzero fence only at the ticket boundary", async () => {
     const zero = { ...binding, restoreFenceGeneration: 0 };
     expect(state.storage.resolveCurrentLiveDocumentBinding({ document: { workspaceId: scope.workspaceId, mainVersionId: "main",
       objectId: binding.objectId, lineageClaimId: binding.lineageClaimId }, actor: { kind: "named", userId: scope.userId, grantId: scope.grantId } }).kind).toBe("current");
-    expect(state.storage.mintNamedLiveTicket({ ...mint, report: { ...report, binding: zero } })).toBeNull();
+    expect(state.storage.mintLiveTicket({ ...mint, report: { ...report, binding: zero } })).toBeNull();
   } finally { await state.close(); }
 });
 
 it("accepts a valid newer main settlement without requiring the registration moment", async () => {
   const state = await fixture();
   try {
-    state.storage.mintNamedLiveTicket(mint);
+    state.storage.mintLiveTicket(mint);
     state.raw.prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms) SELECT workspace_id, object_id, 2, 'moment-2', version_id, path,
       ?, content_kind, 9, 2 FROM sync_relay_object_moments`).run("c".repeat(64));
-    expect(state.storage.redeemNamedLiveTicket(redeem)).not.toBeNull();
+    expect(state.storage.redeemLiveTicket(redeem)).not.toBeNull();
   } finally { await state.close(); }
 });
 
 it("allows same-epoch reconnect only with the fresh authenticated report", async () => {
   const state = await fixture();
   try {
-    state.storage.mintNamedLiveTicket(mint);
+    state.storage.mintLiveTicket(mint);
     state.storage.disconnectLiveHost({ ...host, updatedAtMs: 3, guard: () => undefined });
-    expect(state.storage.redeemNamedLiveTicket(redeem)).toBeNull();
+    expect(state.storage.redeemLiveTicket(redeem)).toBeNull();
     const connection = { ...host, connectionId: "connection-2" };
     state.storage.registerLiveHost({ ...connection, updatedAtMs: 4, guard: () => undefined });
-    expect(state.storage.mintNamedLiveTicket(another(2))).toBeNull();
-    expect(state.storage.redeemNamedLiveTicket(redeem)).toBeNull();
-    expect(state.storage.redeemNamedLiveTicket({ ...redeem, report: { ...report, connection } })).not.toBeNull();
+    expect(state.storage.mintLiveTicket(another(2))).toBeNull();
+    expect(state.storage.redeemLiveTicket(redeem)).toBeNull();
+    expect(state.storage.redeemLiveTicket({ ...redeem, report: { ...report, connection } })).not.toBeNull();
   } finally { await state.close(); }
 });
 
@@ -274,10 +274,10 @@ it.each(["mode", "hostId", "hostEpoch", "instanceId", "connectionId"] as const)(
   const state = await fixture();
   try {
     const changed = { ...report, connection: { ...host, [field]: field === "mode" ? "service" : field === "hostEpoch" ? 2 : "other" } };
-    expect(state.storage.mintNamedLiveTicket({ ...mint, report: changed })).toBeNull();
-    state.storage.mintNamedLiveTicket(mint);
-    expect(state.storage.redeemNamedLiveTicket({ ...redeem, report: changed })).toBeNull();
-    expect(state.storage.redeemNamedLiveTicket(redeem)).not.toBeNull();
+    expect(state.storage.mintLiveTicket({ ...mint, report: changed })).toBeNull();
+    state.storage.mintLiveTicket(mint);
+    expect(state.storage.redeemLiveTicket({ ...redeem, report: changed })).toBeNull();
+    expect(state.storage.redeemLiveTicket(redeem)).not.toBeNull();
   } finally { await state.close(); }
 });
 
@@ -286,12 +286,12 @@ it.each(["workspaceId", "mainVersionId", "objectId", "lineageClaimId", "currentP
   try {
     const value = field === "lineageClaimId" ? "a".repeat(64) : field === "selectorPaths" ? ["docs", "other"] : field === "restoreFenceGeneration" ? 8 : "other";
     const changed = { ...report, binding: { ...binding, [field]: value } };
-    if (field === "mainVersionId") expect(() => state.storage.mintNamedLiveTicket({ ...mint, report: changed })).toThrow();
-    else expect(state.storage.mintNamedLiveTicket({ ...mint, report: changed })).toBeNull();
-    state.storage.mintNamedLiveTicket(mint);
-    if (field === "mainVersionId") expect(() => state.storage.redeemNamedLiveTicket({ ...redeem, report: changed })).toThrow();
-    else expect(state.storage.redeemNamedLiveTicket({ ...redeem, report: changed })).toBeNull();
-    expect(state.storage.redeemNamedLiveTicket(redeem)).not.toBeNull();
+    if (field === "mainVersionId") expect(() => state.storage.mintLiveTicket({ ...mint, report: changed })).toThrow();
+    else expect(state.storage.mintLiveTicket({ ...mint, report: changed })).toBeNull();
+    state.storage.mintLiveTicket(mint);
+    if (field === "mainVersionId") expect(() => state.storage.redeemLiveTicket({ ...redeem, report: changed })).toThrow();
+    else expect(state.storage.redeemLiveTicket({ ...redeem, report: changed })).toBeNull();
+    expect(state.storage.redeemLiveTicket(redeem)).not.toBeNull();
   } finally { await state.close(); }
 });
 
@@ -310,11 +310,11 @@ it.each([
 ])("treats stored %s as integrity failure", async (_name, column, value) => {
   const state = await fixture();
   try {
-    state.storage.mintNamedLiveTicket(mint);
+    state.storage.mintLiveTicket(mint);
     state.raw.exec("PRAGMA ignore_check_constraints=ON");
     state.raw.prepare(`UPDATE ${table} SET ${column}=?`).run(value);
-    expect(() => state.storage.readNamedLiveTicketTarget({ tokenHash, scope, audience })).toThrow(/stored live ticket is damaged|too large to be represented/);
-    expect(() => state.storage.redeemNamedLiveTicket(redeem)).toThrow(/stored live ticket is damaged|too large to be represented/);
+    expect(() => state.storage.readLiveTicketTarget({ tokenHash, scope, audience })).toThrow(/stored live ticket is damaged|too large to be represented/);
+    expect(() => state.storage.redeemLiveTicket(redeem)).toThrow(/stored live ticket is damaged|too large to be represented/);
   } finally { await state.close(); }
 });
 
@@ -348,8 +348,8 @@ it("reopens valid tickets and cascades only with workspace deletion", async () =
   const state = await fixture();
   const second = openSyncRelayStorage(state.path, state.config);
   try {
-    state.storage.mintNamedLiveTicket(mint);
-    expect(second.readNamedLiveTicketTarget({ tokenHash, scope, audience })).toEqual({ workspaceId: scope.workspaceId, objectId: binding.objectId });
+    state.storage.mintLiveTicket(mint);
+    expect(second.readLiveTicketTarget({ tokenHash, scope, audience })).toEqual({ workspaceId: scope.workspaceId, objectId: binding.objectId });
     state.raw.exec("DELETE FROM sync_relay_share_grants; DELETE FROM sync_relay_shares; DELETE FROM sync_relay_live_documents");
     expect(rows(state)).toHaveLength(1);
     state.raw.exec("DELETE FROM sync_relay_workspaces");
@@ -360,21 +360,21 @@ it("reopens valid tickets and cascades only with workspace deletion", async () =
 it.each(["mint", "redeem"] as const)("returns no %s result and rolls back on commit failure", async operation => {
   const state = await fixture();
   try {
-    if (operation === "redeem") state.storage.mintNamedLiveTicket(mint);
+    if (operation === "redeem") state.storage.mintLiveTicket(mint);
     const original = DatabaseSync.prototype.exec;
     const spy = vi.spyOn(DatabaseSync.prototype, "exec").mockImplementation(function (this: InstanceType<typeof DatabaseSync>, sql: string) {
       if (sql === "COMMIT") throw new Error("injected commit failure");
       return original.call(this, sql);
     });
     try {
-      expect(() => operation === "mint" ? state.storage.mintNamedLiveTicket(mint) : state.storage.redeemNamedLiveTicket(redeem)).toThrow("injected commit failure");
+      expect(() => operation === "mint" ? state.storage.mintLiveTicket(mint) : state.storage.redeemLiveTicket(redeem)).toThrow("injected commit failure");
     } finally { spy.mockRestore(); }
     expect(rows(state)).toEqual(operation === "mint" ? [] : [{ ticket_id: "ticket-1", redeemed_at_ms: null }]);
     expect(state.storage.unavailable.aborted).toBe(true);
-    expect(() => operation === "mint" ? state.storage.mintNamedLiveTicket(mint) : state.storage.redeemNamedLiveTicket(redeem)).toThrow("Relay storage is unavailable.");
+    expect(() => operation === "mint" ? state.storage.mintLiveTicket(mint) : state.storage.redeemLiveTicket(redeem)).toThrow("Relay storage is unavailable.");
     const reopened = openSyncRelayStorage(state.path, state.config);
     try {
-      expect(operation === "mint" ? reopened.mintNamedLiveTicket(mint) : reopened.redeemNamedLiveTicket(redeem)).not.toBeNull();
+      expect(operation === "mint" ? reopened.mintLiveTicket(mint) : reopened.redeemLiveTicket(redeem)).not.toBeNull();
     } finally { reopened.close(); }
   } finally { await state.close(); }
 });
@@ -382,9 +382,9 @@ it.each(["mint", "redeem"] as const)("returns no %s result and rolls back on com
 it("requires a changed row from the conditional consumption update", async () => {
   const state = await fixture();
   try {
-    state.storage.mintNamedLiveTicket(mint);
+    state.storage.mintLiveTicket(mint);
     state.raw.exec(`CREATE TRIGGER refuse_redemption BEFORE UPDATE ON ${table} BEGIN SELECT RAISE(IGNORE); END`);
-    expect(state.storage.redeemNamedLiveTicket(redeem)).toBeNull();
+    expect(state.storage.redeemLiveTicket(redeem)).toBeNull();
     expect(rows(state)).toEqual([{ ticket_id: "ticket-1", redeemed_at_ms: null }]);
   } finally { await state.close(); }
 });
@@ -395,13 +395,13 @@ it.each(["revoked", "narrowed", "wrong-kind", "missing"] as const)("rechecks dep
     state.raw.prepare(`INSERT INTO sync_relay_share_grants SELECT 'parent-1', share_id, 'link', NULL, NULL, access,
       generation, status, created_at_ms, revoked_at_ms, NULL FROM sync_relay_share_grants WHERE grant_id=?`).run(scope.grantId);
     state.raw.exec("UPDATE sync_relay_share_grants SET parent_grant_id='parent-1' WHERE grant_id='edit-1'");
-    expect(state.storage.mintNamedLiveTicket(mint)).not.toBeNull();
+    expect(state.storage.mintLiveTicket(mint)).not.toBeNull();
     if (change === "revoked") state.raw.exec("UPDATE sync_relay_share_grants SET status='revoked', revoked_at_ms=3 WHERE grant_id='parent-1'");
     if (change === "narrowed") state.raw.exec("UPDATE sync_relay_share_grants SET access='comment' WHERE grant_id='parent-1'");
     if (change === "wrong-kind") state.raw.exec("UPDATE sync_relay_share_grants SET principal_kind='user', principal_user_id='owner-1' WHERE grant_id='parent-1'");
     if (change === "missing") state.raw.exec("PRAGMA foreign_keys=OFF; DELETE FROM sync_relay_share_grants WHERE grant_id='parent-1'");
-    expect(state.storage.redeemNamedLiveTicket(redeem)).toBeNull();
-    expect(state.storage.mintNamedLiveTicket(another(2))).toBeNull();
+    expect(state.storage.redeemLiveTicket(redeem)).toBeNull();
+    expect(state.storage.mintLiveTicket(another(2))).toBeNull();
     expect(rows(state)).toEqual([{ ticket_id: "ticket-1", redeemed_at_ms: null }]);
   } finally { await state.close(); }
 });
@@ -409,32 +409,32 @@ it.each(["revoked", "narrowed", "wrong-kind", "missing"] as const)("rechecks dep
 it("refuses both operations while the host is draining", async () => {
   const state = await fixture();
   try {
-    state.storage.mintNamedLiveTicket(mint);
+    state.storage.mintLiveTicket(mint);
     expect(state.storage.beginLiveHostTransition({ from: host, toMode: "service", toHostId: "service-1", transitionId: "transition-1",
       startedAtMs: 5, guard: () => undefined }).ok).toBe(true);
-    expect(state.storage.mintNamedLiveTicket(another(2))).toBeNull();
-    expect(state.storage.redeemNamedLiveTicket(redeem)).toBeNull();
+    expect(state.storage.mintLiveTicket(another(2))).toBeNull();
+    expect(state.storage.redeemLiveTicket(redeem)).toBeNull();
   } finally { await state.close(); }
 });
 
 it("refuses activation, freezes the ticket epoch, and preserves capacity across host changes", async () => {
   const state = await fixture({ liveTickets: { retainedTicketsPerPrincipalGrant: 3, expiredTicketCleanupBatchSize: 1, now: () => 1000 } });
   try {
-    state.storage.mintNamedLiveTicket(mint);
-    state.storage.mintNamedLiveTicket(another(2));
+    state.storage.mintLiveTicket(mint);
+    state.storage.mintLiveTicket(another(2));
     const transition = state.storage.beginLiveHostTransition({ from: host, toMode: "service", toHostId: "service-1",
       transitionId: "transition-1", startedAtMs: 5, guard: () => undefined });
     if (!transition.ok || !transition.snapshot.transition) throw new Error("fixture transition failed");
     const coordinate = { ...host, mode: "service" as const, hostId: "service-1", hostEpoch: parseHostEpoch(2), instanceId: "service-instance", connectionId: "service-connection" };
     const transitionGeneration = transition.snapshot.transition.transitionGeneration;
     expect(state.storage.commitLiveHostTransitionEpoch({ transitionId: "transition-1", transitionGeneration, updatedAtMs: 6 }).ok).toBe(true);
-    expect(state.storage.mintNamedLiveTicket({ ...another(3), report: { ...report, connection: coordinate } })).toBeNull();
-    expect(state.storage.redeemNamedLiveTicket({ ...redeem, report: { ...report, connection: coordinate } })).toBeNull();
+    expect(state.storage.mintLiveTicket({ ...another(3), report: { ...report, connection: coordinate } })).toBeNull();
+    expect(state.storage.redeemLiveTicket({ ...redeem, report: { ...report, connection: coordinate } })).toBeNull();
     expect(state.storage.activateLiveHostTransition({ ...coordinate, transitionId: "transition-1", transitionGeneration,
       transitionFromEpoch: host.hostEpoch, updatedAtMs: 7, guard: () => undefined }).ok).toBe(true);
-    expect(state.storage.redeemNamedLiveTicket({ ...redeem, report: { ...report, connection: coordinate } })).toBeNull();
-    expect(state.storage.mintNamedLiveTicket({ ...another(3), report: { ...report, connection: coordinate } })).not.toBeNull();
-    expect(state.storage.mintNamedLiveTicket({ ...another(4), report: { ...report, connection: coordinate } })).toBeNull();
+    expect(state.storage.redeemLiveTicket({ ...redeem, report: { ...report, connection: coordinate } })).toBeNull();
+    expect(state.storage.mintLiveTicket({ ...another(3), report: { ...report, connection: coordinate } })).not.toBeNull();
+    expect(state.storage.mintLiveTicket({ ...another(4), report: { ...report, connection: coordinate } })).toBeNull();
     expect(state.raw.prepare(`SELECT ticket_id FROM ${table} ORDER BY ticket_id`).all()).toEqual([
       { ticket_id: "ticket-1" }, { ticket_id: "ticket-2" }, { ticket_id: "ticket-3" },
     ]);
@@ -444,26 +444,26 @@ it("refuses activation, freezes the ticket epoch, and preserves capacity across 
 it("shares retained capacity across objects", async () => {
   const state = await fixture();
   try {
-    state.storage.mintNamedLiveTicket(mint);
-    state.storage.mintNamedLiveTicket(another(2));
+    state.storage.mintLiveTicket(mint);
+    state.storage.mintLiveTicket(another(2));
     state.raw.exec(`INSERT INTO sync_relay_object_moments SELECT workspace_id, 'object-2', relay_seq, 'moment-2', version_id,
       'docs/b.md', blob_sha256, content_kind, byte_length, recorded_at_ms FROM sync_relay_object_moments;
       INSERT INTO sync_relay_live_documents SELECT workspace_id, main_version_id, 'object-2', lineage_claim_id, replaces_lineage_claim_id,
       'docs/b.md', baseline_moment_relay_seq, baseline_projected_sha256, baseline_projected_byte_length, baseline_digest, baseline_bytes,
       lineage_state, admission_state, restore_fence_generation, registered_at_ms, retired_at_ms FROM sync_relay_live_documents`);
     const otherBinding = { ...binding, objectId: "object-2", currentPath: "docs/b.md" };
-    expect(state.storage.mintNamedLiveTicket({ ...another(3), objectId: "object-2", report: { ...report, binding: otherBinding } })).toBeNull();
+    expect(state.storage.mintLiveTicket({ ...another(3), objectId: "object-2", report: { ...report, binding: otherBinding } })).toBeNull();
   } finally { await state.close(); }
 });
 
 it("compares frozen binding with a fresh report after a fence change", async () => {
   const state = await fixture();
   try {
-    state.storage.mintNamedLiveTicket(mint);
+    state.storage.mintLiveTicket(mint);
     state.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=8");
     const fresh = { ...report, binding: { ...binding, restoreFenceGeneration: 8 } };
-    expect(state.storage.redeemNamedLiveTicket({ ...redeem, report: fresh })).toBeNull();
-    expect(state.storage.mintNamedLiveTicket({ ...another(2), report: fresh })).not.toBeNull();
+    expect(state.storage.redeemLiveTicket({ ...redeem, report: fresh })).toBeNull();
+    expect(state.storage.mintLiveTicket({ ...another(2), report: fresh })).not.toBeNull();
   } finally { await state.close(); }
 });
 

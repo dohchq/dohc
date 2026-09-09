@@ -1,5 +1,10 @@
 import {captureNamedLiveFrameHost,createNamedFrameChanges} from "../../../services/sync-relay/src/namedLiveFrameHost.js";
-import {createNamedLiveTickets} from "../../../services/sync-relay/src/liveTickets.js";
+import {createLinkLiveBrowserResolver} from "../../../services/sync-relay/src/linkLiveBrowserAuth.js";
+import {hashLinkBearer} from "../../../services/sync-relay/src/linkSecurity.js";
+import {insertShare,insertShareGrant} from "../../../services/sync-relay/src/storage/shares.js";
+import {liveBrowserActor,type LiveBrowserContext} from "../../../services/sync-relay/src/liveBrowserContext.js";
+import {createLiveMembershipRegistry} from "../../../services/sync-relay/src/liveMembership.js";
+import {createLiveTickets} from "../../../services/sync-relay/src/liveTickets.js";
 import {readRelayDeviceDeliveryConfig} from "../../../services/sync-relay/src/deviceLiveHostConfig.js";
 import {createHash} from "node:crypto";
 import {spawn,spawnSync,type ChildProcess} from "node:child_process";
@@ -41,7 +46,7 @@ function assertIndependentRelayReader(root: string,baseline: Uint8Array,expected
     expect(yDocToMarkdown(reader)).toBe(yDocToMarkdown(expected));
   } finally {reader.destroy(); relay.close();}
 }
-it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keeps the ordinary desktop owner through authenticated adoption, durable outbox delivery, remote apply and settlement (standalone=%s)", async standalone => {
+it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false, link: false}, {standalone: true, link: false}, {standalone: false, link: true}])("keeps the ordinary desktop owner through authenticated adoption, durable outbox delivery, remote apply and settlement (standalone=$standalone, link=$link)", async ({standalone, link}) => {
   const binary = resolve(process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY!);
   const captures = vi.spyOn(LiveCommittedDeliveryStore.prototype,"captureOwnerCut");
   expect(hash(readFileSync(binary))).toBe(process.env.DOHC_OWNER_DESKTOP_PROOF_SHA256?.toLowerCase());
@@ -228,25 +233,47 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     expect(native.prepare("SELECT COUNT(*) AS count FROM moments").get()!.count).toBeGreaterThanOrEqual(Number(initialSession));
     expect(rendererDoc.getMap("frontmatter").get("beforeConnection")).toBe("Owner edit before first connection");
     expect(native.prepare("SELECT covered_outbox_sequence FROM live_owner_adoptions").get()!.covered_outbox_sequence).toBe(0);
-    const namedActor = {kind: "named" as const,userId: "reader",grantId: "named-grant"};
-    const namedBinding = deployment.storage.resolveCurrentLiveDocumentBinding({document,actor: namedActor});
-    if (namedBinding.kind !== "current") throw new Error("Named owner binding unavailable.");
+    let scope: LiveBrowserContext = {kind: "named",workspaceId: "workspace",shareId: "named-share",grantId: "named-grant",userId: "reader"};
+    const ticketKey = Buffer.alloc(32,17);
+    if (link) {
+      // Test-created authority; public link Edit issuance remains closed.
+      const context = deployment.storage as StorageContext;
+      context.tx(() => {
+        insertShare(context,{shareId: "private-link-share",workspaceId: "workspace",granterUserId: "owner",selectorJson: JSON.stringify({paths: ["docs/a.md"],versionId: null}),createdAtMs: 3});
+        insertShareGrant(context,{grantId: "private-link-grant",shareId: "private-link-share",principalKind: "link",principalUserId: null,principalEmail: null,access: "edit",generation: 1,status: "active",createdAtMs: 3,revokedAtMs: null,parentGrantId: null});
+      });
+      const bearer = Buffer.alloc(32,31).toString("base64url"), profile = Buffer.alloc(32,32).toString("base64url"), now = Date.now();
+      expect(deployment.storage.mintLinkSession({session: {sessionId: "private-link-session",capabilityHash: hashLinkBearer(bearer,ticketKey),grantId: "private-link-grant",
+        generation: 1,mintedAtMs: now,expiresAtMs: now + 15 * 60_000}})).toBe(true);
+      const resolver = createLinkLiveBrowserResolver({storage: deployment.storage,linkKey: ticketKey});
+      const resolved = await resolver.resolve(new Request(`https://localhost:${sharePort}/private`,{headers: {authorization: `Bearer ${bearer}`,"x-dohc-link-profile-secret": profile}}),"abcdefghijkl");
+      if (!resolved) throw new Error("Native proof link authentication was refused.");
+      scope = resolved;
+      expect(deployment.storage.getLinkPrincipalForGrantProfile(scope.grantId,scope.profileTokenHash)).toBeNull();
+    }
+    const namedBinding = deployment.storage.resolveLiveObjectHostBinding(scope,document.objectId);
+    if (namedBinding.kind !== "current") throw new Error("Owner peer binding unavailable.");
     const nativePeer = await control.captureNative(namedBinding.binding);
-    const scope = {workspaceId: "workspace",shareId: "named-share",grantId: "named-grant",userId: "reader"};
-    const tickets = createNamedLiveTickets({storage: deployment.storage,audience: `https://localhost:${sharePort}`,key: Buffer.alloc(32,17),
+    const tickets = createLiveTickets({storage: deployment.storage,audience: `https://localhost:${sharePort}`,key: ticketKey,
       hostReports: {currentBinding: async () => ({connection: nativePeer.coordinate,binding: namedBinding.binding})}});
     const minted = await tickets.mint({objectId: document.objectId},scope);
-    if (!minted) throw new Error("Named owner ticket was not minted.");
+    if (!minted) throw new Error("Owner peer ticket was not minted.");
     const ticket = await tickets.redeem(minted.token,scope);
-    if (!ticket) throw new Error("Named owner ticket was not redeemed.");
-    const namedPeer = captureNamedLiveFrameHost({ticket,storage: deployment.storage,native: nativePeer,
+    if (!ticket) throw new Error("Owner peer ticket was not redeemed.");
+    const remoteActor = liveBrowserActor(scope);
+    const namedPeer = captureNamedLiveFrameHost({ticket,actor: remoteActor,storage: deployment.storage,native: nativePeer,
       bounds: {maxClientVectorBytes: 100_000,maxSyncOutputBytes: 2_000_000,maxAppliedUpdateBytes: 2_000_000,maxSubmissionBytes: 2_000_000,maxAdmissionBytes: 8_000_000},
       validate: createLiveMarkdownJournalValidator(policy)});
+    const membership = createLiveMembershipRegistry({maxSessions: 8,maxMembers: 8,maxSnapshotBytes: 153},deployment.storage.readLiveAuthority.bind(deployment.storage))
+      .join({ticket,invalidated: namedPeer.invalidated,assertCurrent: namedPeer.assertCurrent});
+    expect(membership.snapshot(1024).members).toHaveLength(1);
+    expect(ticket.authority.principalKind).toBe(link ? "link" : "named");
+    if (link) expect(deployment.storage.getLinkPrincipal(ticket.authority.principalId)?.displayName).toBeNull();
     namedPeerInvalidated = namedPeer.invalidated;
     const peerSignal = new AbortController();
     const peerSync = await namedPeer.openSync(Uint8Array.of(0),peerSignal.signal), browser = new Y.Doc();
     Y.applyUpdate(browser,peerSync.missingStateUpdate);
-    closeNamedPeer = () => {peerSignal.abort(); peerSync.close(); namedPeer.close(); browser.destroy();};
+    closeNamedPeer = () => {peerSignal.abort(); peerSync.close(); membership.close(); namedPeer.close(); browser.destroy();};
     expect(peerSync.binding.selectorPaths).toEqual(["docs/a.md"]);
     expect(nativePeer.binding.selectorPaths).toEqual(["docs"]);
     expect(yDocToMarkdown(browser)).toBe(yDocToMarkdown(rendererDoc));
@@ -287,11 +314,24 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     expect(native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.count).toBe(0);
     const remote = new Y.Doc(); Y.applyUpdate(remote,Y.encodeStateAsUpdate(rendererDoc)); const before = Y.encodeStateVector(remote);
     remote.getMap("frontmatter").set("remote","Remote edit"); const update = Y.encodeStateAsUpdate(remote,before);
-    const actor = {kind: "named" as const,userId: "reader",grantId: "named-grant"};
+    const actor = remoteActor;
     const current = deployment.storage.resolveCurrentLiveDocumentBinding({document,actor}), cut = deployment.storage.readLiveUpdateJournalCut({document});
     if (current.kind !== "current" || cut.kind !== "cut") throw new Error(`Remote cut unavailable: ${JSON.stringify({current,cut: {kind: cut.kind}})}`);
+    if (link) {
+      const submitted = await namedPeer.submit({deliveryId: "remote-edit",updateDigest: hash(update),updateBytes: update},new AbortController().signal);
+      expect(submitted).toMatchObject({result: "success",ack: {deliveryId: "remote-edit",updateDigest: hash(update)}});
+      expect(native.prepare("SELECT principal_kind,principal_id,grant_id FROM live_device_update_applications WHERE delivery_id='remote-edit'").get())
+        .toEqual({principal_kind: "link",principal_id: ticket.authority.principalId,grant_id: "private-link-grant"});
+      const relayReader = new DatabaseSync(join(root,"relay","relay.sqlite"),{readOnly: true});
+      try {
+        expect(relayReader.prepare("SELECT COUNT(*) AS n FROM sync_relay_share_discussion_messages").get()).toEqual({n: 0});
+        expect(relayReader.prepare("SELECT principal_kind,principal_id,grant_id FROM sync_relay_live_update_journal WHERE delivery_id='remote-edit'").get())
+          .toEqual({principal_kind: "link",principal_id: ticket.authority.principalId,grant_id: "private-link-grant"});
+      } finally {relayReader.close();}
+    } else {
     expect(deployment.storage.commitLiveUpdateJournal({host,actor,expectedAuthority: current.authority,metadata: {deliveryId: "remote-edit",updateDigest: hash(update),binding: current.binding},
       cutToken: cut.cut,validation: createLiveMarkdownJournalValidator(policy)({document,currentPath: "docs/a.md",checkpoint: cut.cut.checkpoint.bytes,suffix: cut.cut.suffix.map(row => row.bytes),candidate: update}),updateBytes: update,receivedAtMs: Date.now()}).result.kind).toBe("accepted");
+    }
     await control.settle(document);
     for (let index=0;index<4;index++) {
       const before = Y.encodeStateVector(remote); remote.getMap("frontmatter").set(`later${index}`,index);
@@ -402,7 +442,10 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     expect(await drain()).toHaveProperty("kind", "done");
     expect(handoffCount).toBe(handoffsAfterRestore);
     expect(await control.completeRestore(lookup, prepared.proposalDigest)).toEqual(resumed);
-    writeFileSync(join(root,"result.json"),JSON.stringify({passed: true,binary,sha256: hash(readFileSync(binary)),document,markdown: yDocToMarkdown(remote)},null,2)); remote.destroy();
+    if (link) expect(native.prepare("SELECT principal_kind,principal_id,grant_id FROM live_device_update_applications WHERE delivery_id='remote-edit'").get())
+      .toEqual({principal_kind: "link",principal_id: ticket.authority.principalId,grant_id: "private-link-grant"});
+    expect(membership.invalidated.aborted).toBe(true);
+    writeFileSync(join(root,"result.json"),JSON.stringify({passed: true,link,binary,sha256: hash(readFileSync(binary)),document,markdown: yDocToMarkdown(remote)},null,2)); remote.destroy();
   } finally {
     releaseTailAdmission?.(); closeNamedPeer?.();
     captures.mockRestore();

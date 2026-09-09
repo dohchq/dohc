@@ -9,7 +9,7 @@ import type { StorageContext } from "./storage/context.js";
 import { prepareLiveDeliveryWorkspace, registerLiveDeliveryBaseline } from "./storage/liveDeliveryReservations.js";
 
 export const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
-export const scope = { workspaceId: "workspace-1", shareId: "share-1", grantId: "edit-1", userId: "reader-1" };
+export const scope = { kind: "named" as const, workspaceId: "workspace-1", shareId: "share-1", grantId: "edit-1", userId: "reader-1" };
 export const host = { mode: "device", hostId: "host-1", hostEpoch: parseHostEpoch(1), instanceId: "instance-1", connectionId: "connection-1" } as const;
 const bytes = new Uint8Array([0, 0]);
 export const binding = { workspaceId: scope.workspaceId, mainVersionId: "main", objectId: "object-1",

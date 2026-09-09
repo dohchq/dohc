@@ -283,7 +283,7 @@ function actionAllowed(authorized: AuthorizedShareAction, action: ShareAction): 
       }
       return false;
     case "live-edit":
-      return authorized.grant.principalKind === "user"
+      return (authorized.grant.principalKind === "user" || authorized.grant.principalKind === "link")
         && isLiveEditShareSelector(authorized.effectiveSelector);
   }
 }

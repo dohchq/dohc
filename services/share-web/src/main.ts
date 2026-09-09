@@ -83,7 +83,7 @@ let namedGateway: ReturnType<typeof createLiveGateway> | undefined;
 if (config.namedLiveGatewayLimits) {
   namedGateway = createLiveGateway({publicHosts: config.publicHosts, publicOrigin: config.accountAuth!.publicOrigin,
     limits: config.namedLiveGatewayLimits,
-    resolveNamedSession(request, discriminator, signal) {
+    resolveSession(request, discriminator, signal) {
       const authenticated = namedLiveGatewayRequest(request, config.accountAuth!.publicOrigin, signal);
       return authenticated ? application.resolveNamedBrowserSession(authenticated, discriminator) : Promise.resolve(null);
     },

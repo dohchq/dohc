@@ -2,7 +2,7 @@ import * as Y from "yjs";
 import { getDohcYDocBodyFragment } from "@dohc/ydoc-projection/body-fragment";
 import {
   createLiveFrameSession, decodeLiveFrameSync, encodeLiveFrame, LiveFrameError,
-  type LiveFrame, type LiveFrameBegin, type LiveFrameSessionPolicy,
+  type LiveFrame, type LiveFrameBegin, type LiveFrameSessionPolicy, type LiveMembershipFrame,
 } from "@dohc/live-session-contract/live-frame";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { LiveUpdateHostApplicationAck } from "@dohc/live-session-contract/live-update-admission";
@@ -30,6 +30,8 @@ export interface NamedLiveProviderState {
   readonly pendingBytes: number;
   /** Host application evidence reported by the authenticated route; this is not settlement. */
   readonly lastApplied: LiveUpdateHostApplicationAck | null;
+  /** A bounded current subset. An overflowed snapshot cannot establish departures by omission. */
+  readonly membership: LiveMembershipFrame | null;
 }
 
 interface PendingUpdate {
@@ -99,10 +101,12 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits,
   let binding: LiveObjectBinding | null = null, hostEpoch: number | null = null;
   let pendingBytes = 0, incomingBytes = 0, incomingFrames = 0, sending = false;
   let lastApplied: LiveUpdateHostApplicationAck | null = null;
+  let membership: LiveMembershipFrame | null = null;
   let highestObservedCursor = 0;
   const state = (): NamedLiveProviderState => ({ status, reason,
     binding: binding && { ...binding, selectorPaths: [...binding.selectorPaths] }, hostEpoch,
-    pendingUpdates: pending.length, pendingBytes, lastApplied: lastApplied && { ...lastApplied } });
+    pendingUpdates: pending.length, pendingBytes, lastApplied: lastApplied && { ...lastApplied },
+    membership: membership && { ...membership, members: [...membership.members] } });
   function notify() {
     for (const listener of listeners) {
       try { listener(state()); } catch { /* A view listener cannot change delivery ownership. */ }
@@ -111,7 +115,7 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits,
   const current = (held: Route) => route === held;
   function retire(next: NamedLiveProviderState["status"], why: string | null) {
     const previous = route;
-    route = undefined; status = next; reason = why;
+    route = undefined; status = next; reason = why; membership = null;
     previous?.protocol.close();
     if (previous) {
       previous.controls.length = 0;
@@ -217,6 +221,8 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits,
           held.epoch = frame.hostEpoch; hostEpoch = frame.hostEpoch;
           held.maxFrameBytes = Math.min(held.maxFrameBytes, frame.receivePolicy.maxFrameBytes);
           status = "syncing"; notify();
+        } else if (frame.kind === "membership") {
+          membership = frame; notify();
         } else if (frame.kind === "result") {
           const update = pending[0];
           if (!update || !held.awaitingAck) { quarantine("unexpected-result"); return; }

@@ -85,7 +85,8 @@ export function createNamedLiveBrowserHttp(options: {
           result = sessions.create(context);
         } else {
           if (typeof value !== "string" || !/^[A-Za-z0-9_-]{12}$/u.test(value)) return refusal();
-          result = await sessions.resolve(authenticated, value);
+          const context = await sessions.resolve(authenticated, value);
+          result = context && { userId: context.userId, workspaceId: context.workspaceId, shareId: context.shareId, grantId: context.grantId };
           controller.signal.throwIfAborted();
         }
         if (result === null) return refusal();

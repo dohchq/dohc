@@ -350,7 +350,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
     const expectedAuthority = parseServerDerivedLiveUpdateAuthority(baselineRecord(outer.expectedAuthority,
       ["principalKind", "principalId", "grantId", "grantGeneration"]));
     const actorKind = baselineRecord(outer.actor, ["kind"], true).kind;
-    if (actorKind !== "owner" && actorKind !== "named") return { result: { kind: "refused", reason: "authority-refused" }, admitted: null };
+    if (actorKind !== "owner" && actorKind !== "named" && actorKind !== "link") return { result: { kind: "refused", reason: "authority-refused" }, admitted: null };
     const request = snapshotCurrentBindingRequest({ document, actor: outer.actor as CurrentLiveBindingRequest["actor"] });
     const token = copyJournalData(outer.cutToken) as LiveUpdateJournalCut;
     verifyJournalCut(token);

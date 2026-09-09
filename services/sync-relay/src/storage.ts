@@ -2,6 +2,7 @@ import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
 import * as ownerRestoreOptionsStorage from "./storage/ownerRestoreOptions";
 import { RelayWriteOwner } from "./storage/writeOwner";
+import { isAsyncFunction } from "node:util/types";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveJournalStoredUpdate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveJournalValidation, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult } from "./storage/types";
@@ -63,9 +64,9 @@ import type {
   ShareProposalState,
   FetchLogPageResult,
   CurrentFileStateSnapshot,
-  NamedLiveTicketLookup,
-  NamedLiveTicketMint,
-  NamedLiveTicketRedemption,
+  LiveTicketLookup,
+  LiveTicketMint,
+  LiveTicketRedemption,
   DeviceHostCredentialResult,
 } from "./storage/types";
 import { createRequire } from "node:module";
@@ -178,9 +179,9 @@ export {
   type CurrentLiveBindingResult,
   type DeviceHostCredentialResult,
   type TicketHostReport,
-  type NamedLiveTicketLookup,
-  type NamedLiveTicketMint,
-  type NamedLiveTicketRedemption,
+  type LiveTicketLookup,
+  type LiveTicketMint,
+  type LiveTicketRedemption,
   type LiveTicketStoragePolicy,
 } from "./storage/types";
 export {
@@ -310,6 +311,7 @@ export function openSyncRelayStorage(
 
 class SqliteSyncRelayStorage implements SyncRelayStorage {
   readonly newDiscussionId: () => string;
+  private readingLiveAuthority = false;
 
   constructor(
     readonly db: SqliteDb,
@@ -350,8 +352,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return liveDocumentAuthorityStorage.resolveCurrentLiveDocumentBinding(this, input);
   }
 
-  resolveNamedLiveObjectBinding(scope: Parameters<typeof liveDocumentAuthorityStorage.resolveNamedLiveObjectBinding>[1], objectId: string): CurrentLiveBindingResult {
-    return liveDocumentAuthorityStorage.resolveNamedLiveObjectBinding(this, scope, objectId);
+  resolveLiveObjectHostBinding(scope: Parameters<typeof liveDocumentAuthorityStorage.resolveLiveObjectHostBinding>[1], objectId: string): liveDocumentAuthorityStorage.LiveObjectHostBindingResult {
+    return liveDocumentAuthorityStorage.resolveLiveObjectHostBinding(this, scope, objectId);
   }
 
   registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult {
@@ -901,6 +903,22 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     }
   }
 
+  readLiveAuthority<T>(run: () => T): T {
+    if (isAsyncFunction(run)) throw new TypeError("Live authority reads must be synchronous.");
+    const read = () => {
+      const value = run();
+      if (value !== null && (typeof value === "object" || typeof value === "function") &&
+        typeof (value as {then?: unknown}).then === "function") throw new TypeError("Live authority reads must be synchronous.");
+      return value;
+    };
+    if (this.readingLiveAuthority) { this.captureStanding(); return read(); }
+    return this.readTx(() => {
+      this.readingLiveAuthority = true;
+      try { return read(); }
+      finally { this.readingLiveAuthority = false; }
+    });
+  }
+
   settleShareProposalInTransaction(
     proposalId: string,
     to: Exclude<ShareProposalState, "open">,
@@ -971,16 +989,16 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     }
   }
 
-  readNamedLiveTicketTarget(input: NamedLiveTicketLookup): { workspaceId: string; objectId: string } | null {
-    return liveDocumentAuthorityStorage.readNamedLiveTicketTarget(this, input);
+  readLiveTicketTarget(input: LiveTicketLookup): { workspaceId: string; objectId: string } | null {
+    return liveDocumentAuthorityStorage.readLiveTicketTarget(this, input);
   }
 
-  mintNamedLiveTicket(input: NamedLiveTicketMint): { expiresAtMs: number } | null {
-    return liveDocumentAuthorityStorage.mintNamedLiveTicket(this, input);
+  mintLiveTicket(input: LiveTicketMint): { expiresAtMs: number } | null {
+    return liveDocumentAuthorityStorage.mintLiveTicket(this, input);
   }
 
-  redeemNamedLiveTicket(input: NamedLiveTicketRedemption): RedeemedLiveTicket | null {
-    return liveDocumentAuthorityStorage.redeemNamedLiveTicket(this, input);
+  redeemLiveTicket(input: LiveTicketRedemption): RedeemedLiveTicket | null {
+    return liveDocumentAuthorityStorage.redeemLiveTicket(this, input);
   }
 
   provisionDeviceHostCredential(input: { credential: DeviceHostCredential; updatedAtMs: number }): DeviceHostCredentialResult {

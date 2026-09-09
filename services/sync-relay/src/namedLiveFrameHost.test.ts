@@ -3,12 +3,15 @@ import { createHash } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import { EngineClient, FrameDecoder, FrameType, encodeFrame, type EngineClientConnection } from "@dohc/workspace-engine-client/daemon";
 import type { Envelope, JsonValue } from "../../../packages/workspace-engine-client/src/protocol";
-import { createNamedLiveTickets } from "./liveTickets.js";
+import { createLiveTickets } from "./liveTickets.js";
 import { audience, binding, fixture, host, key, report, scope } from "./liveTickets.test-helper.js";
+import { liveBrowserActor } from "./liveBrowserContext.js";
 import { captureNamedLiveFrameHost, createNamedFrameChanges } from "./namedLiveFrameHost.js";
 import type { LiveUpdateJournalCut, LiveUpdateJournalCommitInput } from "./storage/types.js";
 import { observeRelayWrites } from "./relayWriteChanges.js";
 import { queueLiveHostRequests } from "./liveHostRequests.js";
+import { createLiveMembershipRegistry } from "./liveMembership.js";
+import type { StorageContext } from "./storage/context.js";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 function deferred<T>() {
@@ -61,7 +64,7 @@ const ack = { deliveryId: "delivery", updateDigest: hash(bytes), journalCursor: 
   localYDocSequence: 3, applicationReplayed: true };
 async function setup(maxListeners = 4) {
   const state = await fixture(); cleanup.push(() => state.close());
-  const tickets = createNamedLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async () => report } });
+  const tickets = createLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async () => report } });
   const minted = await tickets.mint({ objectId: binding.objectId }, scope);
   const ticket = (await tickets.redeem(minted!.token, scope))!;
   const peer = new Peer();
@@ -87,7 +90,7 @@ async function setup(maxListeners = 4) {
   const native = { client, workspace: "trusted-native-handle", registrationId: 7, coordinate: host, binding: nativeBinding,
     invalidated: invalidated.signal, changes, deadlineMs: 5000, nextRequestId: () => ++requestId, drain };
   const bounds = { maxClientVectorBytes: 32, maxSyncOutputBytes: 1024, maxAppliedUpdateBytes: 1024, maxSubmissionBytes: 1024, maxAdmissionBytes: 4096 };
-  const capture = captureNamedLiveFrameHost({ ticket, storage: state.storage, validate, native, bounds });
+  const capture = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(scope), storage: state.storage, validate, native, bounds });
   cleanup.push(async () => { capture.close(); });
   return { ...state, peer, client, changes, invalidated, drain, capture, validate, native, bounds };
 }
@@ -100,10 +103,38 @@ it("uses the native atomic cut, excluding the diagnostic local head, and leaves 
   f.capture.close(); sync.close();
   expect(f.changes.listenerCount()).toBe(0); expect(f.peer.closed).toBe(false);
 });
+it("reads every member's current authority in one read transaction without taking a writer lock", async () => {
+  const f = await setup(16);
+  const tickets = createLiveTickets({storage: f.storage, audience, key, hostReports: {currentBinding: async () => report}});
+  const minted = await tickets.mint({objectId: binding.objectId}, scope), ticket = await tickets.redeem(minted!.token, scope);
+  const other = captureNamedLiveFrameHost({ticket: ticket!, actor: liveBrowserActor(scope), storage: f.storage,
+    native: f.native, bounds: f.bounds, validate: f.validate});
+  const registry = createLiveMembershipRegistry({maxSessions: 4, maxMembers: 4, maxSnapshotBytes: 89}, f.storage.readLiveAuthority.bind(f.storage));
+  const members = [f.capture, other].map(host => registry.join({ticket: host.ticket, invalidated: host.invalidated, assertCurrent: host.assertCurrent}));
+  cleanup.push(async () => {members.forEach(member => member.close()); other.close();});
+  const exec = vi.spyOn((f.storage as StorageContext).db, "exec");
+  expect(members[0].snapshot(1024).members).toHaveLength(2);
+  expect(exec.mock.calls.filter(([sql]) => sql === "BEGIN IMMEDIATE")).toHaveLength(0);
+  expect(exec.mock.calls.filter(([sql]) => sql === "BEGIN")).toHaveLength(1);
+});
+it("closes failed authority read scopes and refuses asynchronous callbacks and results", async () => {
+  const f = await setup(), exec = vi.spyOn((f.storage as StorageContext).db, "exec");
+  let asyncRan = false;
+  expect(() => f.storage.readLiveAuthority(async () => {asyncRan = true;})).toThrow("must be synchronous");
+  expect(asyncRan).toBe(false);
+  expect(exec).not.toHaveBeenCalled();
+  expect(() => f.storage.readLiveAuthority(() => Promise.resolve(null))).toThrow("must be synchronous");
+  expect(() => f.storage.readLiveAuthority(() => ({then() {}}))).toThrow("must be synchronous");
+  expect(() => f.storage.readLiveAuthority(() => f.storage.readLiveAuthority(() => {throw new Error("failed check");}))).toThrow("failed check");
+  expect(exec.mock.calls.filter(([sql]) => sql === "ROLLBACK")).toHaveLength(3);
+  exec.mockClear();
+  f.capture.assertCurrent();
+  expect(exec.mock.calls.map(([sql]) => sql)).toEqual(["BEGIN", "COMMIT"]);
+});
 it("keeps three readers alive when a relay write wakes them during a native upload", async () => {
   const f = await setup(16), caller = new AbortController();
   const captures = [f.capture, ...[1, 2].map(() => captureNamedLiveFrameHost({
-    ticket: f.capture.ticket, storage: f.storage, native: f.native, bounds: f.bounds, validate: f.validate,
+    actor: liveBrowserActor(scope), ticket: f.capture.ticket, storage: f.storage, native: f.native, bounds: f.bounds, validate: f.validate,
   }))];
   cleanup.push(async () => {caller.abort(); for (const capture of captures) capture.close();});
   const syncs = [];
@@ -159,10 +190,10 @@ it("keeps two named selectors distinct while borrowing one native registration",
     .run(secondScope.shareId, scope.workspaceId, JSON.stringify({ paths: secondBinding.selectorPaths, versionId: null }));
   f.raw.prepare(`INSERT INTO sync_relay_share_grants (grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
     VALUES (?,?,'user',?,NULL,'edit',4,'active',0,NULL,NULL)`).run(secondScope.grantId, secondScope.shareId, secondScope.userId);
-  const tickets = createNamedLiveTickets({ storage: f.storage, audience, key, hostReports: { currentBinding: async () => ({ connection: host, binding: secondBinding }) } });
+  const tickets = createLiveTickets({ storage: f.storage, audience, key, hostReports: { currentBinding: async () => ({ connection: host, binding: secondBinding }) } });
   const minted = await tickets.mint({ objectId: binding.objectId }, secondScope);
   const ticket = (await tickets.redeem(minted!.token, secondScope))!;
-  const second = captureNamedLiveFrameHost({ ticket, storage: f.storage, native: f.native, bounds: f.bounds, validate: f.validate });
+  const second = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(secondScope), storage: f.storage, native: f.native, bounds: f.bounds, validate: f.validate });
   cleanup.push(async () => { second.close(); });
   const signal = new AbortController().signal;
   const firstSync = await f.capture.openSync(Uint8Array.of(0), signal);
@@ -176,7 +207,7 @@ it("keeps two named selectors distinct while borrowing one native registration",
 });
 it("rejects a captured native registration for a different document fence", async () => {
   const f = await setup();
-  expect(() => captureNamedLiveFrameHost({ ticket: f.capture.ticket, storage: f.storage, validate: f.validate, bounds: f.bounds,
+  expect(() => captureNamedLiveFrameHost({ actor: liveBrowserActor(scope), ticket: f.capture.ticket, storage: f.storage, validate: f.validate, bounds: f.bounds,
     native: { ...f.native, binding: { ...f.native.binding, restoreFenceGeneration: binding.restoreFenceGeneration + 1 } } }))
     .toThrow(/registration binding changed/);
 });

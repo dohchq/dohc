@@ -76,7 +76,7 @@ describe("named browser HTTP bootstrap and private resolution", () => {
     if (status === 200) {
       const { discriminator } = await response.json() as { discriminator: string };
       expect(f.storage.getShareGrant("pending-grant")).toMatchObject({ principalKind: "user", principalUserId: "alice", principalEmail: null });
-      expect(await f.web.resolveNamedBrowserSession(request(), discriminator)).toEqual({ userId: "alice", workspaceId: "workspace", shareId: "pending-share", grantId: "pending-grant" });
+      expect(await f.web.resolveNamedBrowserSession(request(), discriminator)).toEqual({ kind: "named", userId: "alice", workspaceId: "workspace", shareId: "pending-share", grantId: "pending-grant" });
     } else {
       expect(f.storage.getShareGrant("pending-grant")).toMatchObject({ principalKind: "email", principalUserId: null });
       expect((await f.relay(new Request("http://relay.invalid/sync/shares", { headers: { cookie: cookie(user) } }))).status).toBe(200);
@@ -171,7 +171,7 @@ describe("named browser HTTP bootstrap and private resolution", () => {
     const response = await web.handle(request({ grantId: id }));
     expect(response.status).toBe(200);
     const { discriminator } = await response.json() as { discriminator: string };
-    expect(await web.resolveNamedBrowserSession(request(), discriminator)).toEqual({ userId: id, workspaceId: id, shareId: id, grantId: id });
+    expect(await web.resolveNamedBrowserSession(request(), discriminator)).toEqual({ kind: "named", userId: id, workspaceId: id, shareId: id, grantId: id });
   });
 
   it("derives route scope from SQLite and forwards only the account cookie through the service boundary", async () => {
@@ -194,7 +194,7 @@ describe("named browser HTTP bootstrap and private resolution", () => {
     expect(f.forwarded[0]!.headers.get("x-user-id")).toBeNull();
     expect(f.resolveActor.mock.calls[0]![1]).toBe("workspace");
     expect(await f.web.resolveNamedBrowserSession(request(), issued.discriminator)).toEqual({
-      userId: "alice", workspaceId: "workspace", shareId: "alice-share", grantId: "alice-grant" });
+      kind: "named", userId: "alice", workspaceId: "workspace", shareId: "alice-share", grantId: "alice-grant" });
     expect(await f.web.resolveNamedBrowserSession(request({}, "bob"), issued.discriminator)).toBeNull();
     f.restart();
     expect(await f.web.resolveNamedBrowserSession(request(), issued.discriminator)).toBeNull();

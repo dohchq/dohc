@@ -1417,7 +1417,7 @@ CREATE TABLE sync_relay_live_session_tickets (
   ),
   restore_fence_generation INTEGER NOT NULL
     CHECK (restore_fence_generation BETWEEN 1 AND 9007199254740991),
-  principal_kind TEXT NOT NULL CHECK (principal_kind = 'named'),
+  principal_kind TEXT NOT NULL CHECK (principal_kind IN ('named', 'link')),
   principal_id TEXT NOT NULL
     CHECK (length(CAST(principal_id AS BLOB)) BETWEEN 1 AND 512),
   grant_id TEXT NOT NULL
@@ -1437,6 +1437,10 @@ CREATE TABLE sync_relay_live_session_tickets (
       redeemed_at_ms BETWEEN 0 AND 9007199254740991
       AND minted_at_ms <= redeemed_at_ms AND redeemed_at_ms < expires_at_ms
     )
+  ),
+  link_session_id TEXT CHECK (
+    (principal_kind = 'named' AND link_session_id IS NULL) OR
+    (principal_kind = 'link' AND link_session_id IS NOT NULL AND length(CAST(link_session_id AS BLOB)) BETWEEN 1 AND 512)
   ),
   PRIMARY KEY (ticket_id),
   FOREIGN KEY (workspace_id)
@@ -1463,7 +1467,7 @@ export const LIVE_TICKET_COLUMNS = [
   "ticket_id", "token_hash", "audience", "workspace_id", "main_version_id", "object_id",
   "lineage_claim_id", "current_path", "selector_paths_json", "restore_fence_generation",
   "principal_kind", "principal_id", "grant_id", "grant_generation", "host_epoch",
-  "minted_at_ms", "expires_at_ms", "redeemed_at_ms",
+  "minted_at_ms", "expires_at_ms", "redeemed_at_ms", "link_session_id",
 ] as const;
 
 export const LIVE_TICKET_INTEGER_COLUMNS = new Set<string>([
@@ -1484,7 +1488,7 @@ function assertLiveTicketSchema(db: SqliteDb): void {
   same(db.prepare(`PRAGMA table_info(${LIVE_TICKET_TABLE})`).all().map(row =>
     [row.cid, row.name, row.type, row.notnull, row.dflt_value, row.pk]),
   LIVE_TICKET_COLUMNS.map((name, cid) => [cid, name, LIVE_TICKET_INTEGER_COLUMNS.has(name) ? "INTEGER" : "TEXT",
-    name === "redeemed_at_ms" ? 0 : 1, null, name === "ticket_id" ? 1 : 0]));
+    (name === "redeemed_at_ms" || name === "link_session_id") ? 0 : 1, null, name === "ticket_id" ? 1 : 0]));
   same(db.prepare(`PRAGMA foreign_key_list(${LIVE_TICKET_TABLE})`).all().map(row =>
     [row.id, row.seq, row.table, row.from, row.to, row.on_update, row.on_delete, row.match]),
   [[0, 0, "sync_relay_workspaces", "workspace_id", "workspace_id", "NO ACTION", "CASCADE", "NONE"]]);

@@ -710,11 +710,15 @@ it.each(['principalId','grantId','grantGeneration','principalKind'] as const)('c
   } finally { f.close() }
 })
 
-it('rejects runtime link actors and conflicts on another authorized principal or candidate under the same delivery', () => {
+it('rejects malformed link actors and conflicts on another authorized principal or candidate under the same delivery', () => {
   const f = registered()
   try {
     const input = f.capture(f.update())
-    expect(f.storage.commitLiveUpdateJournal({ ...input, actor: { kind: 'link' } as unknown as typeof input.actor }).result.kind).toBe('refused')
+    const untouched = f.journalRows(), db = (f.storage as StorageContext).db
+    const changes = db.prepare('SELECT total_changes() AS count').get()
+    expect(() => f.storage.commitLiveUpdateJournal({ ...input, actor: { kind: 'link' } as unknown as typeof input.actor })).toThrow(TypeError)
+    expect(f.journalRows()).toEqual(untouched)
+    expect(db.prepare('SELECT total_changes() AS count').get()).toEqual(changes)
     expect(f.storage.commitLiveUpdateJournal(input).result.kind).toBe('accepted')
     const before = f.journalRows()
     const named = f.capture(input.updateBytes, 'delivery', { kind: 'named', userId: 'reader', grantId: 'grant' })

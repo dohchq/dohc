@@ -5,6 +5,7 @@ import {
 } from "@dohc/live-session-contract/live-frame";
 import type { RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
 import type { LiveUpdateHostApplicationAck, LiveUpdateRefusal, LiveUpdateRetry } from "@dohc/live-session-contract/live-update-admission";
+import type { LiveMembershipSession } from "./liveMembership";
 
 export interface NamedFrameAppliedUpdate { readonly journalCursor: number; readonly updateBytes: Uint8Array }
 export interface NamedFrameSync extends LiveFrameSync {
@@ -45,8 +46,9 @@ export function createNamedLiveFrameSession(options: {
   host: NamedFrameHostSession;
   frames: LiveFrameSessionPolicy;
   transport: NamedFrameTransport;
+  membership?: LiveMembershipSession;
 }) {
-  const { host, transport } = options;
+  const { host, transport, membership } = options;
   const frames = { ...options.frames, receive: { ...options.frames.receive } };
   const protocol = createLiveFrameSession("server", frames);
   const lifetime = new AbortController();
@@ -58,6 +60,8 @@ export function createNamedLiveFrameSession(options: {
   let grantedBytes = 0, grantedFrames = 0, nextTransfer = 1;
   let maxFrameBytes = Math.min(frames.receive.maxFrameBytes, frames.maxQueuedBytes);
   let peerSyncBytes = frames.receive.maxSyncBytes;
+  let membershipDirty = membership !== undefined, membershipRevision = 0;
+  let unsubscribeMembership: (() => void) | undefined;
 
   function check() { lifetime.signal.throwIfAborted(); host.assertCurrent(); }
   function close() {
@@ -65,6 +69,10 @@ export function createNamedLiveFrameSession(options: {
     closed = true;
     lifetime.abort(new Error("Named frame session closed."));
     host.invalidated.removeEventListener("abort", close);
+    membership?.invalidated.removeEventListener("abort", close);
+    unsubscribeMembership?.(); unsubscribeMembership = undefined;
+    membershipDirty = false;
+    membership?.close();
     protocol.close();
     credit = undefined; result = undefined;
     transfer?.release(); transfer = undefined;
@@ -131,6 +139,12 @@ export function createNamedLiveFrameSession(options: {
             if (available.promisedFrames < 1 || length < 1) return;
             frame = { kind: "chunk", transferId: held.begin.transferId, offset: held.offset,
               bytes: held.bytes.subarray(held.offset, held.offset + length) };
+          } else if (membership && membershipDirty && protocol.usage().live) {
+            startPull();
+            membershipDirty = false;
+            frame = membership.snapshot(Math.min(maxFrameBytes, frames.maxControlBytes));
+            check();
+            if (frame.revision === membershipRevision) continue;
           } else { startPull(); return; }
           let lease;
           try { lease = protocol.send(frame); }
@@ -138,6 +152,7 @@ export function createNamedLiveFrameSession(options: {
           if (frame.kind === "welcome") greeted = true;
           else if (frame.kind === "credit") credit = undefined;
           else if (frame.kind === "result") result = undefined;
+          else if (frame.kind === "membership") membershipRevision = frame.revision;
           else if (frame.kind === "begin") held!.begun = true;
           else if (frame.kind === "chunk") held!.offset += frame.bytes.length;
           try { await transport.send(lease.value); check(); }
@@ -201,8 +216,11 @@ export function createNamedLiveFrameSession(options: {
     finally { received?.release(); }
   }
   host.invalidated.addEventListener("abort", close, { once: true });
+  membership?.invalidated.addEventListener("abort", close, { once: true });
+  if (membership?.invalidated.aborted) close();
   if (host.invalidated.aborted) close();
+  if (!closed && membership) unsubscribeMembership = membership.subscribe(() => { membershipDirty = true; pump(); });
   if (!closed) { grant(frames.maxQueuedBytes, frames.maxQueuedFrames); pump(); }
-  return { receive, close, usage: () => ({ ...protocol.usage(), pulling, submitting, opening }),
+  return { receive, close, usage: () => ({ ...protocol.usage(), pulling, submitting, opening, membershipDirty }),
     async settled() { while (tasks.size) await Promise.allSettled([...tasks]); } };
 }
