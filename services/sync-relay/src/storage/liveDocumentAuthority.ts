@@ -1,5 +1,6 @@
 import type { StoredLiveDocumentAuthority } from "./types";
-import {ordinaryActivationBaseline,type VerifiedOrdinaryActivationCut} from "./ordinaryActivationSource";
+import {ordinaryActivationBaseline,ordinaryActivationBasisCharge,persistOrdinaryActivationBasis,type VerifiedOrdinaryActivationCut} from "./ordinaryActivationSource";
+import {readOrdinaryActivationBasis} from "./ordinaryActivationBasis";
 import { allowsServiceActivation, type ServiceActivationAccess } from "./serviceActivationAccess";
 import type {
   CurrentLiveBindingRequest,
@@ -258,11 +259,28 @@ export function decodeLiveDocumentAuthorityStructure(db: SqliteDb, document: Liv
   const projectionLength = authorityInteger(row.baseline_projected_byte_length);
   authorityIntegrity(projectionLength <= 2_097_152);
   const baselineSequence = authorityInteger(row.baseline_moment_relay_seq, 1);
-  const sourceMoment = db.prepare(`SELECT version_id, path, content_kind, blob_sha256, byte_length
-    FROM sync_relay_object_moments WHERE workspace_id = ? AND object_id = ? AND relay_seq = ?`)
-    .get(document.workspaceId, document.objectId, baselineSequence);
-  authorityIntegrity(sourceMoment && sourceMoment.version_id === "main" && sourceMoment.path === binding.currentPath &&
-    sourceMoment.content_kind === "text" && sourceMoment.blob_sha256 === projectionDigest && sourceMoment.byte_length === projectionLength);
+  const ordinary=readOrdinaryActivationBasis(db,storedDocument);
+  if(ordinary){
+    authorityIntegrity(ordinary.base_relay_seq===baselineSequence&&ordinary.current_path===binding.currentPath&&
+      ordinary.projected_sha256===projectionDigest&&ordinary.projected_byte_length===projectionLength);
+    const epoch=db.prepare("SELECT replication_epoch,stream_identity FROM sync_relay_workspaces WHERE workspace_id=?").get(document.workspaceId);
+    authorityIntegrity(epoch?.replication_epoch===ordinary.replication_epoch&&epoch.stream_identity===ordinary.stream_identity);
+    const source=db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=? AND origin_id=? AND origin_seq=? AND op_kind='ydoc.update'`)
+      .get(document.workspaceId,baselineSequence,ordinary.base_origin_id,ordinary.base_origin_seq);
+    authorityIntegrity(source&&typeof source.payload_json==="string");
+    const payload=JSON.parse(source.payload_json) as Record<string,unknown>;
+    authorityIntegrity(payload.versionId===storedDocument.mainVersionId&&payload.objectId===storedDocument.objectId&&payload.path===binding.currentPath&&
+      payload.contentKind==="richdoc"&&payload.isBaseState===true&&payload.lineageClaimId===baselineDigest&&payload.updateBlobSha256===baselineDigest);
+    const blob=db.prepare("SELECT byte_length,content=? AS matches FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?")
+      .get(bytes,document.workspaceId,baselineDigest);
+    authorityIntegrity(blob?.byte_length===bytes.length&&blob.matches===1);
+  }else{
+    const sourceMoment = db.prepare(`SELECT version_id, path, content_kind, blob_sha256, byte_length
+      FROM sync_relay_object_moments WHERE workspace_id = ? AND object_id = ? AND relay_seq = ?`)
+      .get(document.workspaceId, document.objectId, baselineSequence);
+    authorityIntegrity(sourceMoment && sourceMoment.version_id === "main" && sourceMoment.path === binding.currentPath &&
+      sourceMoment.content_kind === "text" && sourceMoment.blob_sha256 === projectionDigest && sourceMoment.byte_length === projectionLength);
+  }
   const ranges = db.prepare(`SELECT * FROM sync_relay_live_document_baseline_ranges
     WHERE workspace_id = ? AND main_version_id = ? AND object_id = ? AND lineage_claim_id = ?
     ORDER BY client_id, start_clock`)
@@ -551,7 +569,8 @@ function registerBaseline(storage: StorageContext, input: LiveDocumentBaselineRe
         ...rangePrefix, range.clientId, range.startClock, range.endClock,
       ])), 0);
       // Charge logical stored values, excluding SQLite pages and indexes.
-      const charge = baselineBytes.byteLength + Buffer.byteLength(JSON.stringify(metadata)) + rangeBytes;
+      const charge = baselineBytes.byteLength + Buffer.byteLength(JSON.stringify(metadata)) + rangeBytes+
+        (ordinaryCut?ordinaryActivationBasisCharge(storage,owned,ordinaryCut):0);
       assertWorkspaceQuota(storage, document.workspaceId, charge);
       storage.db.prepare(`INSERT INTO sync_relay_live_documents (
         workspace_id, main_version_id, object_id, lineage_claim_id, replaces_lineage_claim_id, current_path,
@@ -559,6 +578,7 @@ function registerBaseline(storage: StorageContext, input: LiveDocumentBaselineRe
         lineage_state, admission_state, restore_fence_generation, registered_at_ms, retired_at_ms, baseline_bytes
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(...metadata, baselineBytes);
+      if(ordinaryCut)persistOrdinaryActivationBasis(storage,owned,ordinaryCut);
       const insertRange = storage.db.prepare(`INSERT INTO sync_relay_live_document_baseline_ranges
         (workspace_id, main_version_id, object_id, lineage_claim_id, client_id, start_clock, end_clock)
         VALUES (?, ?, ?, ?, ?, ?, ?)`);

@@ -6,6 +6,7 @@ import type {LiveDocumentBaselineRegistrationInput} from "./types";
 import type {StorageContext} from "./context";
 import type {LiveMarkdownRegistrationEvidence,createLiveMarkdownJournalValidator} from "../../../../packages/ydoc-projection/src/liveDocumentValidation";
 import {MAX_OLD_SUFFIX_ENTRIES} from "../../../../packages/ydoc-projection/src/orderedLiveUpdateCut";
+import {ORDINARY_ACTIVATION_BASES} from "./ordinaryActivationBasis";
 
 export class ServiceActivationStaleCut extends Error {
   constructor(){super("Ordinary replication advanced before service activation.");}
@@ -43,6 +44,7 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
   const charge=(bytes:number)=>{requireValue(integer(bytes)&&charged<=bounds.maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
   for(const row of metadata){requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");charge(Number(row.payload_bytes)+Buffer.byteLength(JSON.stringify([row.relay_seq,row.origin_id,row.origin_seq,row.op_kind])));}
   const rows=metadata.map(row=>{
+    requireValue(integer(row.relay_seq)&&integer(row.origin_seq)&&typeof row.origin_id==="string"&&row.origin_id.length>0,"Ordinary activation coordinate is damaged.");
     requireValue(row.op_kind==="ydoc.update","Ordinary activation history replaced the live document.");
     const stored=storage.db.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=?").get(document.workspaceId,row.relay_seq);
     requireValue(stored&&typeof stored.payload_json==="string","Ordinary activation history is unavailable.");
@@ -53,7 +55,7 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     const blob=storage.db.prepare("SELECT byte_length,length(content) AS actual_length FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?").get(document.workspaceId,payload.updateBlobSha256);
     requireValue(blob&&integer(blob.byte_length)&&blob.byte_length===blob.actual_length,"Ordinary activation bytes are unavailable.");
     charge(Number(blob.byte_length));
-    return {...row,payload,byteLength:Number(blob.byte_length)};
+    return {relay_seq:row.relay_seq,origin_id:row.origin_id,origin_seq:row.origin_seq,payload,byteLength:Number(blob.byte_length)};
   });
   const first=rows[0]!;
   requireValue(first.relay_seq===source.baseRelaySeq&&first.origin_id===source.baseOriginId&&first.origin_seq===source.baseOriginSeq&&
@@ -97,4 +99,18 @@ export function ordinaryActivationBaseline(storage:StorageContext,input:LiveDocu
   requireValue(isDeepStrictEqual(input.evidence,held.baseline)&&hash(input.baselineBytes)===held.source.lineageClaimId,
     "Ordinary activation baseline differs from its verified source.");
   return {relay_seq:held.source.baseRelaySeq,blob_sha256:held.baseline.projectedMarkdownSha256,byte_length:held.baseline.projectedMarkdownByteLength};
+}
+function basisValues(storage:StorageContext,input:LiveDocumentBaselineRegistrationInput,cut:VerifiedOrdinaryActivationCut){
+  ordinaryActivationBaseline(storage,input,cut);
+  const {source,baseline}=cuts.get(cut)!;
+  return [source.workspaceId,source.mainVersionId,source.objectId,source.lineageClaimId,source.baseRelaySeq,source.baseOriginId,source.baseOriginSeq,
+    source.replicationEpoch,source.streamIdentity,source.currentPath,baseline.projectedMarkdownSha256,baseline.projectedMarkdownByteLength];
+}
+export function ordinaryActivationBasisCharge(storage:StorageContext,input:LiveDocumentBaselineRegistrationInput,cut:VerifiedOrdinaryActivationCut){
+  return Buffer.byteLength(JSON.stringify(basisValues(storage,input,cut)));
+}
+export function persistOrdinaryActivationBasis(storage:StorageContext,input:LiveDocumentBaselineRegistrationInput,cut:VerifiedOrdinaryActivationCut){
+  const values=basisValues(storage,input,cut),charge=Buffer.byteLength(JSON.stringify(values));
+  storage.db.prepare(`INSERT INTO ${ORDINARY_ACTIVATION_BASES} (workspace_id,main_version_id,object_id,lineage_claim_id,base_relay_seq,base_origin_id,base_origin_seq,
+    replication_epoch,stream_identity,current_path,projected_sha256,projected_byte_length,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...values,charge);
 }

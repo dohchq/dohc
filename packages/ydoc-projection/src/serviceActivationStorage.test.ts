@@ -82,6 +82,16 @@ it('activates a receiver projection derived from the ordinary Ydoc base and suff
     expect(f.raw.prepare('SELECT moment_id FROM sync_relay_object_moments').all()).toEqual([{moment_id:'original-moment'}])
   }finally{f.close()}
 })
+it.each(['projection','coordinate','removed'] as const)('rejects a damaged retained ordinary baseline %s',field=>{
+  const f=fixture();try{
+    f.prepare();const access=f.store.pending(f.document,host)
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access).kind).toBe('current')
+    if(field==='projection')f.raw.prepare('UPDATE sync_relay_live_documents SET baseline_projected_sha256=?').run('b'.repeat(64))
+    else if(field==='coordinate')f.raw.exec('UPDATE sync_relay_live_document_ordinary_bases SET base_origin_seq=99')
+    else f.raw.exec('DELETE FROM sync_relay_live_document_ordinary_bases')
+    expect(()=>f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)).toThrow('damaged')
+  }finally{f.close()}
+})
 it('rejects different CRDT history even when its rendered Markdown matches the ordinary cut',()=>{
   const f=fixture(),changed=new Y.Doc();try{
     Y.applyUpdate(changed,f.capture.fullState)
@@ -281,6 +291,7 @@ it('rolls back the full activation when its retained-state quota charge fails',(
     expect(f.storage.getLiveHostControl()!.registeredConnectionId).toBeNull()
     expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
     expect(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()).toEqual(before)
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_document_ordinary_bases').all()).toEqual([])
   }finally{f.close()}
 })
 

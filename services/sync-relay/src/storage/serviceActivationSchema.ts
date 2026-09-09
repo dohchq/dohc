@@ -1,4 +1,5 @@
 import type { SqliteDb } from "./types";
+import {initializeOrdinaryActivationBasis} from "./ordinaryActivationBasis";
 
 export const SERVICE_ACTIVATIONS = "sync_relay_service_activations";
 const marker = "service-activation-v1";
@@ -24,6 +25,7 @@ const sql = `CREATE TABLE ${SERVICE_ACTIVATIONS} (
 ) STRICT`;
 
 export function initializeServiceActivationSchema(db: SqliteDb): void {
+  initializeOrdinaryActivationBasis(db);
   const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(marker);
   const row = db.prepare("SELECT type,sql FROM sqlite_schema WHERE name=?").get(SERVICE_ACTIVATIONS);
   if (!marked) {
