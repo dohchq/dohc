@@ -160,9 +160,12 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits) {
         if (control) frame = control;
         else if (!transfer!.begun) frame = transfer!.begin;
         else {
+          const available = held.protocol.usage().outgoing;
           const overhead = encodeLiveFrame({ kind: "chunk", transferId: 1, offset: 0, bytes: new Uint8Array(1) }, held.maxFrameBytes).length - 1;
+          const length = Math.min(held.maxFrameBytes, limits.frames.maxQueuedBytes - available.queuedBytes, available.promisedBytes) - overhead;
+          if (available.promisedFrames < 1 || available.queuedFrames >= limits.frames.maxQueuedFrames || length < 1) return;
           frame = { kind: "chunk", transferId: transfer!.begin.transferId, offset: transfer!.offset,
-            bytes: transfer!.bytes.subarray(transfer!.offset, transfer!.offset + held.maxFrameBytes - overhead) };
+            bytes: transfer!.bytes.subarray(transfer!.offset, transfer!.offset + length) };
         }
         let lease;
         try { lease = held.protocol.send(frame); }

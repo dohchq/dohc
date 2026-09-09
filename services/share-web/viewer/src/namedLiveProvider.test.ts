@@ -37,30 +37,42 @@ function edit(value: Provider, text: string) {
   const content = paragraph.get(0) as Y.XmlText;
   content.insert(content.length, text);
 }
-function peer(value: Provider, epoch = 1) {
-  const policy = limits().frames;
+function peer(value: Provider, epoch = 1, options: { policy?: NamedLiveProviderLimits["frames"]; replenish?: boolean } = {}) {
+  const policy = options.policy ?? limits().frames;
   const server = createLiveFrameSession("server", policy);
+  cleanup.push(() => server.close());
   const frames: LiveFrame[] = [], transfers: Received[] = [];
+  const frameBytes: number[] = [];
   const watchers = new Set<() => void>();
   let closed = false, nextTransfer = 1, vector: Uint8Array | undefined;
   let creditBytes = policy.maxQueuedBytes, creditFrames = policy.maxQueuedFrames;
   let stalled: (() => void) | undefined;
-  let stall = false;
+  let stall: false | "all" | "chunks" = false, sendsInFlight = 0;
   const route = value.connect({
     async send(bytes) {
-      const received = server.receive(bytes);
+      sendsInFlight++;
       try {
-        frames.push(received.value.frame);
-        if (received.value.transfer) {
-          const transfer = received.value.transfer.value;
-          transfers.push({ begin: transfer.begin, bytes: transfer.bytes.slice() });
-          if (transfer.begin.purpose === "client-vector") vector = transfer.bytes.slice();
+        const received = server.receive(bytes);
+        try {
+          frames.push(received.value.frame);
+          frameBytes.push(bytes.length);
+          if (received.value.transfer) {
+            const transfer = received.value.transfer.value;
+            transfers.push({ begin: transfer.begin, bytes: transfer.bytes.slice() });
+            if (transfer.begin.purpose === "client-vector") vector = transfer.bytes.slice();
+          }
+        } finally { received.value.transfer?.release(); received.release(); }
+        if (options.replenish && (received.value.frame.kind === "begin" || received.value.frame.kind === "chunk")) {
+          creditBytes += bytes.length; creditFrames++;
+          await send({ kind: "credit", grantedBytes: creditBytes, grantedFrames: creditFrames });
         }
-      } finally { received.value.transfer?.release(); received.release(); }
-      for (const notify of watchers) notify();
-      if (stall) await new Promise<void>(resolve => { stalled = resolve; });
+        for (const notify of watchers) notify();
+        if (stall === "all" || (stall === "chunks" && received.value.frame.kind === "chunk")) {
+          await new Promise<void>(resolve => { stalled = resolve; });
+        }
+      } finally { sendsInFlight--; for (const notify of watchers) notify(); }
     },
-    close() { closed = true; stalled?.(); stalled = undefined; },
+    close() { closed = true; server.close(); stalled?.(); stalled = undefined; },
   });
   function until(check: () => boolean) {
     if (check()) return Promise.resolve();
@@ -91,15 +103,16 @@ function peer(value: Provider, epoch = 1) {
     await send({ kind: "result", result: "success", ack: { deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest,
       journalCursor: cursor, acceptingHostEpoch: parseHostEpoch(acceptingHostEpoch), localYDocSequence: 1, applicationReplayed: false } });
   }
-  return { route, server, frames, transfers, send, initial, transfer, submitted, submissions, ack,
+  return { route, server, frames, frameBytes, transfers, send, initial, transfer, submitted, submissions, ack,
     until,
+    sendsInFlight: () => sendsInFlight,
     isClosed: () => closed,
     async greet(grant = true) {
       await send({ kind: "welcome", hostEpoch: parseHostEpoch(epoch), receivePolicy: policy.receive });
       if (grant) await send({ kind: "credit", grantedBytes: creditBytes, grantedFrames: creditFrames });
     },
     async credit(bytes = 16384, count = 64) { creditBytes += bytes; creditFrames += count; await send({ kind: "credit", grantedBytes: creditBytes, grantedFrames: creditFrames }); },
-    stall() { stall = true; }, release() { stall = false; stalled?.(); stalled = undefined; },
+    stall() { stall = "all"; }, stallChunks() { stall = "chunks"; }, release() { stall = false; stalled?.(); stalled = undefined; },
   };
 }
 async function live(value = provider(), doc = document("base")) {
@@ -124,6 +137,60 @@ describe("named live browser provider", () => {
     await host.ack(item);
     expect(value.state()).toMatchObject({ pendingUpdates: 0, pendingBytes: 0, lastApplied: { journalCursor: 1 } });
   });
+  it.each([[586, 16384], [16384, 586], [586, 586]])("delivers and ACKs an update with local queue %i and peer queue %i below the frame limit", async (localBytes, peerBytes) => {
+    const options = limits();
+    const value = provider({ ...options, frames: { ...options.frames, maxQueuedBytes: localBytes } });
+    const host = peer(value, 1, { policy: { ...options.frames, maxQueuedBytes: peerBytes }, replenish: true });
+    const doc = document("base"); await host.greet(); await host.initial(doc);
+    edit(value, "x".repeat(2048));
+    const item = await host.submitted();
+    expect(item.bytes.length).toBeGreaterThan(1024);
+    expect(host.frames.filter(frame => frame.kind === "chunk").length).toBeGreaterThan(3);
+    expect(Math.max(...host.frameBytes)).toBeLessThanOrEqual(Math.min(1024, localBytes, peerBytes));
+    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 1, pendingBytes: item.bytes.length, lastApplied: null });
+    Y.applyUpdate(doc, item.bytes);
+    expect(value.body.toString()).toBe(getDohcYDocBodyFragment(doc).toString());
+    await host.ack(item);
+    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0, lastApplied: { journalCursor: 1 } });
+  }, 2000);
+  it("uses remaining byte credit and waits for another frame before continuing a submission", async () => {
+    const options = { policy: { ...limits().frames, maxQueuedBytes: 586, maxQueuedFrames: 2 }, replenish: false };
+    const value = provider(), host = peer(value, 1, options);
+    await host.greet(); await host.initial(document("base"));
+    await host.credit(0, 1); edit(value, "x".repeat(2048));
+    await host.until(() => host.frames.some(frame => frame.kind === "begin" && frame.purpose === "submit-update"));
+    expect(host.frames.filter(frame => frame.kind === "chunk" && frame.transferId === 2)).toHaveLength(0);
+    expect(host.server.usage().incoming.promisedFrames).toBe(0);
+    await host.credit(0, 1);
+    await host.until(() => host.frames.some(frame => frame.kind === "chunk" && frame.transferId === 2));
+    const firstChunk = host.frames.findIndex(frame => frame.kind === "chunk" && frame.transferId === 2);
+    expect(host.frameBytes[firstChunk]).toBeLessThan(586);
+    expect(host.server.usage().incoming).toMatchObject({ promisedBytes: 0, promisedFrames: 0 });
+    expect(host.submissions()).toHaveLength(0);
+    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 1, lastApplied: null });
+    options.replenish = true; await host.credit(586, 2);
+    await host.ack(await host.submitted());
+    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0 });
+  }, 2000);
+  it("releases a partially sent small-queue update on cancellation and retries the same draft", async () => {
+    const options = limits(), policy = { ...options.frames, maxQueuedBytes: 586 }, peerPolicy = { ...policy, maxQueuedFrames: 1 };
+    const value = provider({ ...options, frames: policy }), doc = document("base");
+    const host = peer(value, 1, { policy: peerPolicy, replenish: true }); await host.greet(); await host.initial(doc);
+    host.stallChunks(); edit(value, "x".repeat(2048));
+    await host.until(() => host.frames.some(frame => frame.kind === "chunk" && frame.transferId === 2));
+    expect(host.submissions()).toHaveLength(0);
+    const pendingBytes = value.state().pendingBytes;
+    expect(host.server.usage().assemblyBytes).toBe(pendingBytes);
+    host.route.disconnect(); await host.until(() => host.sendsInFlight() === 0); await host.route.settled();
+    expect(host.isClosed()).toBe(true);
+    expect(host.server.usage()).toMatchObject({ closed: true, assemblyBytes: 0, incoming: { queuedBytes: 0, queuedFrames: 0 } });
+    expect(value.state()).toMatchObject({ status: "disconnected", pendingUpdates: 1, pendingBytes });
+    const next = peer(value, 2, { policy: peerPolicy, replenish: true }); await next.greet(); await next.initial(doc);
+    const retry = await next.submitted();
+    expect(retry.begin).toMatchObject(host.frames.find(frame => frame.kind === "begin" && frame.purpose === "submit-update")!);
+    await next.ack(retry);
+    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0 });
+  }, 2000);
   it("retries ambiguous delivery with its original identity and accepts historical host application", async () => {
     const { value, host, doc } = await live(); edit(value, " draft"); const first = await host.submitted();
     // The old host may have applied it before the connection vanished.

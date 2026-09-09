@@ -488,7 +488,7 @@ mod tests {
             let sha = crate::put_binary_blob(tx, &[0, 0]).unwrap();
             tx.execute("INSERT INTO versioned_workspaces VALUES ('workspace','main')",[]).unwrap();
             tx.execute("INSERT INTO live_accepted_updates VALUES ('relay','workspace','main','object',?1,1,1,'delivery','{}',?1,1,2,?1)",[&sha]).unwrap();
-            tx.execute("INSERT INTO live_accepted_checkpoints VALUES ('relay','workspace','main','object',?1,0,0,'null','{}',?1,?1,?1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_accepted_checkpoints VALUES ('relay','workspace','main','object',?1,0,0,'null','{}',?1,?1,?1,NULL,NULL)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('workspace','main','object','relay','restore','{}','{}')",[]).unwrap();
             tx.execute("INSERT INTO live_device_bootstraps VALUES ('relay','workspace','main','object',?1,'bootstrap','bootstrap-moment','{}',?1,2,0,0,?1,0,0,'{}')",[&sha]).unwrap();
             tx.execute("INSERT INTO live_device_application_bindings VALUES ('relay','workspace','main','object','lineage','a.md','[\"a.md\"]',0,'host',1,'instance','connection',1)", []).unwrap();

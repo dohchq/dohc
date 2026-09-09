@@ -926,13 +926,20 @@ export class EngineClient implements EngineTransport {
     const deadlineMs = request.deadlineMs ?? null;
     let writeTask: Promise<void> = Promise.resolve();
     let inputComplete = false;
+    const cancellationError = () => writeInput
+      ? new EngineClientError("closed", "Live application request was cancelled.")
+      : signal?.reason;
+    let cancellationSent = false;
     const abort = (): void => {
+      // Finish reserved input before cancelling so other requests retain valid framing.
+      if ((writeInput && !inputComplete) || cancellationSent) return;
       const pending = this.pending.get(wireId);
-      if (!pending) return;
+      if (!pending && !writeInput) return;
+      cancellationSent = true;
       this.pending.delete(wireId);
       this.abandonedRequestIds.add(wireId);
-      if (pending.deadlineTimer) clearTimeout(pending.deadlineTimer);
-      pending.reject(signal?.reason);
+      if (pending?.deadlineTimer) clearTimeout(pending.deadlineTimer);
+      pending?.reject(cancellationError());
       void this.writeEnvelope({ type: "cancel", id: wireId }).catch(() => undefined);
     };
     const response = new Promise<Response>((resolve, reject) => {
@@ -963,6 +970,7 @@ export class EngineClient implements EngineTransport {
       writeTask = this.writeEnvelope(envelope).then(async () => {
         await writeInput?.(wireId);
         inputComplete = true;
+        if (signal?.aborted) abort();
       });
       void writeTask.catch((cause: unknown) => {
         const pending = this.pending.get(wireId);
@@ -981,9 +989,10 @@ export class EngineClient implements EngineTransport {
     try {
       const result = await response;
       if (writeInput) await writeTask;
+      if (writeInput && signal?.aborted) throw cancellationError();
       return result;
     } catch (error: unknown) {
-      // A cancelled upload cannot leave a half-written stream on this connection.
+      // Failed or expired input cannot leave a half-written stream on this connection.
       if (writeInput) {
         if (!inputComplete) this.close();
         await writeTask.catch(() => undefined);
@@ -1268,32 +1277,13 @@ export class EngineClient implements EngineTransport {
     this.liveUploads += 1;
     let stopped = false;
     let uploaded = false;
-    let uploadWireId: number | undefined;
     const abort = (): void => {
       stopped = true;
       if (!uploaded) this.close();
-      else if (uploadWireId !== undefined) {
-        const pending = this.pending.get(uploadWireId);
-        if (!pending) return;
-        this.pending.delete(uploadWireId);
-        this.abandonedRequestIds.add(uploadWireId);
-        if (pending.deadlineTimer) clearTimeout(pending.deadlineTimer);
-        pending.reject(
-          new EngineClientError(
-            "closed",
-            "Live application request was cancelled.",
-          ),
-        );
-        // A retired daemon may suppress the reply. Settle locally before sending cancel.
-        void this.writeEnvelope({ type: "cancel", id: uploadWireId }).catch(
-          () => undefined,
-        );
-      }
     };
     // The reply timer ends when a response arrives. Keep the upload deadline
     // through the final drain so an early reply cannot strand retained input.
     const uploadDeadline = setTimeout(abort, request.deadlineMs);
-    signal?.addEventListener("abort", abort, { once: true });
 
     try {
       const upload = prepare();
@@ -1304,15 +1294,12 @@ export class EngineClient implements EngineTransport {
       if (upload.streams.length === 0) {
         // No partial input stream exists. Cancelling this read must preserve the shared client.
         clearTimeout(uploadDeadline);
-        signal?.removeEventListener("abort", abort);
         return await this.sendRequestWithInput(outgoing, undefined, signal, restoreOutput);
       }
       const writeInput = async (wireId: number): Promise<void> => {
-        uploadWireId = wireId;
         const current = (): void => {
           if (
             stopped ||
-            signal?.aborted ||
             !this.pending.has(wireId) ||
             this.closed
           ) {
@@ -1359,12 +1346,11 @@ export class EngineClient implements EngineTransport {
       return await this.sendRequestWithInput(
         outgoing,
         writeInput,
-        undefined,
+        signal,
         restoreOutput,
       );
     } finally {
       clearTimeout(uploadDeadline);
-      signal?.removeEventListener("abort", abort);
       if (restoreOutput?.wireId !== undefined) {
         for (const [streamId, stream] of this.blobStreams) {
           if (stream.start.requestId !== restoreOutput.wireId) continue;

@@ -42,6 +42,45 @@ describe("private applied sync transport",()=>{
     peer.sendRaw(blobChunkFrame(id,bytes,true));
     peer.send({type:"response",id,result:{...result,streamId:id,byteLength:bytes.length,digest}});
   }
+  it.each(["queued", "header", "chunk", "final"] as const)("finishes reserved sync input after cancellation at %s without closing another reader", async mode => {
+    const peer = new FakePeerConnection(), transport = client(peer, {privateLiveApplication: {aggregateBytes: 128*1024*1024,maxUploads: 1}});
+    peer.acknowledge(); await transport.ready();
+    const closed = vi.spyOn(peer, "close"), reached = Promise.withResolvers<void>();
+    const vector = Buffer.alloc(2 * LIMITS.maxBlobChunkBytes + 1, 7), expectedVector = vector.slice();
+    const chunks: Buffer[] = [];
+    let blockerId = 0, wireId = 0, held = false;
+    const hold = () => {if (!held) {held = true; peer.backpressured = true; reached.resolve();}};
+    peer.onEnvelope = envelope => {
+      if (envelope.type !== "request") return;
+      if (envelope.method === "blocker") {blockerId = envelope.id; hold();}
+      else if (envelope.method === "liveApplication.syncOpen") {wireId = envelope.id; if (mode === "header") hold();}
+      else if (envelope.method === "liveApplication.appliedRead") peer.send({type: "response",id: envelope.id,result: {status: "empty",after: position}});
+      else if (envelope.method === "liveApplication.ack") peer.send({type: "response",id: envelope.id,result: {status: "missing"}});
+    };
+    peer.onBlobChunk = frame => {
+      chunks.push(Buffer.from(frame.payload));
+      if (mode === "chunk" && !frame.fin || mode === "final" && frame.fin) hold();
+    };
+    const signal = new AbortController();
+    let blocker: Promise<unknown> | undefined;
+    try {
+      if (mode === "queued") {blocker = transport.sendRequest({id: 969,method: "blocker",params: {},deadlineMs: 30_000}); void blocker.catch(() => {}); await reached.promise;}
+      const sync = transport.openLiveAppliedSync(request,vector,{maxInputBytes: vector.length,maxOutputBytes: 32},signal.signal);
+      const cancelled = sync.catch(error => error);
+      if (mode !== "queued") await reached.promise;
+      signal.abort(new Error("browser closed"));
+      expect(closed).not.toHaveBeenCalled();
+      await expect(transport.readNextLiveApplied({...request,id: 971},position,32)).rejects.toThrow("capacity is full");
+      if (blockerId) peer.send({type: "response",id: blockerId,result: {done: true}});
+      peer.drain(); await blocker;
+      expect(await cancelled).toBeInstanceOf(EngineClientError);
+      expect(Buffer.concat(chunks)).toEqual(expectedVector);
+      expect(await transport.readNextLiveApplied({...request,id: 972},position,32)).toBeNull();
+      expect(await transport.readLiveApplicationAck({...request,id: 973},{deliveryId: "delivery",updateDigest: "ab".repeat(32)})).toBeNull();
+      expect(peer.received).toContainEqual({type: "cancel",id: wireId});
+      expect(closed).not.toHaveBeenCalled();
+    } finally {peer.drain(); transport.close();}
+  });
   it.each(["queued", "written"] as const)("cancels a %s applied read without retiring the shared client", async mode => {
     const peer = new FakePeerConnection(), transport = client(peer, {privateLiveApplication: {aggregateBytes: 128*1024*1024,maxUploads: 1}});
     peer.acknowledge(); await transport.ready();
@@ -631,11 +670,13 @@ describe.each(["application", "bootstrap"] as const)(
     );
     it.each([
       "abort",
+      "abort-no-drain",
+      "abort-final-response",
       "early-response",
       "early-response-no-drain",
       "final-response-no-drain",
     ])(
-      "bounds concurrent uploads and closes partial streams after %s",
+      "bounds concurrent uploads and preserves framing after %s",
       async (mode) => {
         const peer = new FakePeerConnection();
         const transport = client(peer, {
@@ -677,7 +718,7 @@ describe.each(["application", "bootstrap"] as const)(
           let chunks = 0;
           peer.onEnvelope = (envelope) => {
             if (
-              mode !== "final-response-no-drain" &&
+              mode !== "final-response-no-drain" && mode !== "abort-final-response" &&
               envelope.type === "blobStart"
             ) {
               peer.backpressured = true;
@@ -686,7 +727,7 @@ describe.each(["application", "bootstrap"] as const)(
           };
           peer.onBlobChunk = () => {
             chunks++;
-            if (mode === "final-response-no-drain" && chunks === streamCount) {
+            if ((mode === "final-response-no-drain" || mode === "abort-final-response") && chunks === streamCount) {
               peer.backpressured = true;
               reached.resolve();
               peer.send({
@@ -725,7 +766,11 @@ describe.each(["application", "bootstrap"] as const)(
               event,
             ),
           ).rejects.toThrow("capacity is full");
-          if (mode === "abort") signal.abort();
+          if (mode.startsWith("abort")) {
+            signal.abort();
+            if (mode !== "abort-no-drain") {peer.onEnvelope = null; peer.drain();}
+            else await vi.advanceTimersByTimeAsync(30_000);
+          }
           else {
             if (mode !== "final-response-no-drain")
               peer.send({
@@ -739,8 +784,17 @@ describe.each(["application", "bootstrap"] as const)(
           expect(await pending).toBeInstanceOf(EngineClientError);
           peer.drain();
           expect(chunks).toBe(
-            mode === "final-response-no-drain" ? streamCount : 0,
+            mode === "final-response-no-drain" || mode === "abort" || mode === "abort-final-response" ? streamCount : 0,
           );
+          if (mode === "abort" || mode === "abort-final-response") {
+            expect(peer.received).toContainEqual({type:"cancel",id:1});
+            peer.onEnvelope = envelope => {
+              if (envelope.type === "request") peer.send({type:"response",id:envelope.id,result:{}});
+            };
+            await expect(transport.sendRequest(request(99,"after.cancel"))).resolves.toMatchObject({result:{}});
+            expect(vi.getTimerCount()).toBe(0);
+            return;
+          }
           await expect(
             transport.sendRequest(request(99, "after.partial")),
           ).rejects.toThrow("is closed");
@@ -1264,8 +1318,8 @@ describe("private baseline upload", () => {
         }),
       ).rejects.toThrow("capacity is full");
       abort.abort();
-      expect(await pending).toBeInstanceOf(EngineClientError);
       peer.drain();
+      expect(await pending).toBeInstanceOf(EngineClientError);
     } finally {
       abort.abort();
       transport.close();
