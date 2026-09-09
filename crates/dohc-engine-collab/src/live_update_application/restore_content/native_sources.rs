@@ -53,15 +53,15 @@ pub(super) fn classify(
     let operation = &input.fence.operation;
     let b = &operation.old_binding;
     let parent_length: Option<i64> = conn.query_row(
-        "SELECT length(CAST(outbox_id AS BLOB))+length(CAST(current_path AS BLOB))+length(CAST(selector_paths_json AS BLOB))+length(CAST(base_update_digest AS BLOB))+length(CAST(base_blob_digest AS BLOB))+length(CAST(state AS BLOB))+coalesce(length(CAST(quarantine_reason AS BLOB)),0)+coalesce(length(CAST(observed_binding_json AS BLOB)),0) FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
-        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|row|row.get(0),
+        "SELECT length(CAST(outbox_id AS BLOB))+length(CAST(current_path AS BLOB))+length(CAST(selector_paths_json AS BLOB))+length(CAST(base_update_digest AS BLOB))+length(CAST(base_blob_digest AS BLOB))+length(CAST(state AS BLOB))+coalesce(length(CAST(quarantine_reason AS BLOB)),0)+coalesce(length(CAST(observed_binding_json AS BLOB)),0) FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5",
+        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.restore_fence_generation],|row|row.get(0),
     ).optional().map_err(read_sql)?;
     if let Some(length) = parent_length {
         budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
     }
     let parent: Option<Parent> = conn.query_row(
-        "SELECT outbox_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
-        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|row|Ok(Parent {outbox:row.get(0)?,path:row.get(1)?,selectors:row.get(2)?,fence:row.get(3)?,base:row.get(4)?,blob:row.get(5)?,base_length:row.get(6)?,state:row.get(7)?,pending:row.get(8)?,oldest:row.get(9)?,next:row.get(10)?,reason:row.get(11)?,observed:row.get(12)?}),
+        "SELECT outbox_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5",
+        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.restore_fence_generation],|row|Ok(Parent {outbox:row.get(0)?,path:row.get(1)?,selectors:row.get(2)?,fence:row.get(3)?,base:row.get(4)?,blob:row.get(5)?,base_length:row.get(6)?,state:row.get(7)?,pending:row.get(8)?,oldest:row.get(9)?,next:row.get(10)?,reason:row.get(11)?,observed:row.get(12)?}),
     ).optional().map_err(read_sql)?;
     let mut sources = Vec::new();
     let mut bytes = Vec::new();
@@ -124,11 +124,18 @@ pub(super) fn classify(
         let mut observed_oldest = None;
         let owner = match &operation.origin {
             RestoreDeliveryOrigin::Owner { id } => {
-                let covered: i64 = conn.query_row(
-                    "SELECT covered_outbox_sequence FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND adoption_id=?2",
-                    params![held.namespace,id], |row|row.get(0),
+                let (covered,origin_generation): (i64,i64) = conn.query_row(
+                    "SELECT covered_outbox_sequence,json_extract(binding_json,'$.restoreFenceGeneration') FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND adoption_id=?2",
+                    params![held.namespace,id], |row|Ok((row.get(0)?,row.get(1)?)),
                 ).map_err(read_sql)?;
-                Some((id, covered))
+                Some((
+                    id,
+                    if b.restore_fence_generation == origin_generation {
+                        covered
+                    } else {
+                        0
+                    },
+                ))
             }
             RestoreDeliveryOrigin::Bootstrap { .. } => None,
         };

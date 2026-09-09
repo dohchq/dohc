@@ -88,6 +88,7 @@ async fn seed_plain_richdoc_lineage(actor: &ActorHandle, path: &str, markdown: &
             wall_now_ms(),
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record rich-document seed");

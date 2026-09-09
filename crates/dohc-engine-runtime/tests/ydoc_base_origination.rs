@@ -484,6 +484,7 @@ async fn capture_authored_edit_keeps_actor_in_receiving_store_history() {
             100,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("originate collection base");
@@ -731,6 +732,7 @@ async fn a_first_edit_on_a_synced_workspace_originates_one_base_then_deltas() {
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("first update");
@@ -762,6 +764,7 @@ async fn a_first_edit_on_a_synced_workspace_originates_one_base_then_deltas() {
             300,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("second update");
@@ -820,6 +823,7 @@ async fn a_journaled_delta_names_the_exact_stored_update_blob() {
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("first update");
@@ -842,6 +846,7 @@ async fn a_journaled_delta_names_the_exact_stored_update_blob() {
             300,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("second update");
@@ -920,6 +925,7 @@ async fn draining_a_delta_without_a_verified_base_keeps_it_parked() {
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record dependent update");
@@ -1078,6 +1084,7 @@ async fn applying_a_delta_without_a_verified_base_stays_retryable() {
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record dependent update");
@@ -1195,6 +1202,7 @@ async fn two_edits_originate_nothing(ws: &str, path: &str, prepare: fn(&Path, &s
                 now,
                 Arc::new(NoFaults),
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect("local-only update");
@@ -1285,6 +1293,7 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("local-only edit");
@@ -1336,6 +1345,7 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
             500,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("promoting edit");
@@ -1366,6 +1376,7 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
             600,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("post-promotion edit");
@@ -1425,6 +1436,7 @@ async fn deleting_a_crash_left_ydoc_before_enrollment_retires_the_lineage() {
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("private Y.Doc edit");
@@ -1547,6 +1559,7 @@ async fn capture_retiring_a_closed_ydoc_head_retires_the_lineage() {
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record private Y.Doc update");
@@ -1609,6 +1622,7 @@ async fn live_lease_blocks_capture_retire_until_retry_and_rolls_back_every_row()
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record first Y.Doc update");
@@ -1649,6 +1663,7 @@ async fn live_lease_blocks_capture_retire_until_retry_and_rolls_back_every_row()
             270,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record a post-snapshot Y.Doc update");
@@ -1822,6 +1837,7 @@ async fn merge_fast_forward_delete_retires_the_target_ydoc_lineage() {
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record target Y.Doc state");
@@ -1959,6 +1975,7 @@ async fn a_peer_base_that_lands_first_leaves_the_local_edit_a_delta() {
             400,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("local edit onto the peer's lineage");
@@ -2010,6 +2027,7 @@ async fn redelivering_an_originated_base_is_idempotent() {
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("originating edit");
@@ -2118,6 +2136,7 @@ async fn closing_a_session_that_originated_mid_flight_keeps_the_base() {
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("originating edit");
@@ -2197,6 +2216,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record later text");
@@ -2213,6 +2233,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             250,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("settle later text")
@@ -2300,6 +2321,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             400,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record edit after rollback");
@@ -2316,6 +2338,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             450,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("settle edit after rollback");
@@ -2548,6 +2571,7 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
                 now,
                 Arc::new(NoFaults),
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect("a local-only append under the per-update cap");
@@ -2573,6 +2597,7 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
             500,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("the promoting edit is accepted, not rolled back");
@@ -2668,6 +2693,7 @@ async fn a_lineage_past_the_old_inherited_cap_originates() {
                 now,
                 Arc::new(NoFaults),
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect("a local-only append");
@@ -2692,6 +2718,7 @@ async fn a_lineage_past_the_old_inherited_cap_originates() {
             500,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("the promoting edit is accepted");

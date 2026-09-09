@@ -222,13 +222,14 @@ pub fn append_in_tx(
         &input.binding.object_id,
     )
     .map_err(|_| OwnerOutboxError::InvalidInput("invalid document identity"))?;
-    crate::live_update_application::require_restore_open(tx, &key).map_err(
-        |error| match error {
-            crate::CollabError::RestoreFenced => OwnerOutboxError::Frozen,
-            crate::CollabError::Storage(error) => OwnerOutboxError::Storage(error),
-            _ => OwnerOutboxError::Corrupt,
-        },
-    )?;
+    let current = crate::live_update_application::restore_fence::resumed_binding(tx, &key)
+        .map_err(map_restore_error)?;
+    if current
+        .as_ref()
+        .is_some_and(|binding| binding != &input.binding)
+    {
+        return Err(OwnerOutboxError::Frozen);
+    };
     append_with_retained_base(tx, workspace_id, input, None)
 }
 
@@ -254,7 +255,17 @@ fn append_with_retained_base(
         if let Some((saved_binding, bytes, age)) = adopted {
             let saved: LiveObjectBinding =
                 serde_json::from_str(&saved_binding).map_err(|_| OwnerOutboxError::Corrupt)?;
-            if saved != binding {
+            let key = crate::DocKey::new(
+                &binding.workspace_id,
+                &binding.main_version_id,
+                &binding.object_id,
+            )
+            .map_err(|_| OwnerOutboxError::Corrupt)?;
+            let authorized =
+                crate::live_update_application::restore_fence::resumed_binding(tx, &key)
+                    .map_err(map_restore_error)?
+                    .unwrap_or(saved);
+            if authorized != binding {
                 return Err(OwnerOutboxError::ParentMismatch);
             }
             if input.limits.max_pending_bytes != bytes || input.limits.max_pending_age_ms != age {
@@ -489,8 +500,10 @@ pub fn append_adopted_local_update_in_tx(
     let Some((binding_json, max_pending_bytes, max_pending_age_ms, adoption_id)) = saved else {
         return Ok(());
     };
-    let binding: LiveObjectBinding =
+    let original: LiveObjectBinding =
         serde_json::from_str(&binding_json).map_err(|_| map(OwnerOutboxError::Corrupt))?;
+    let binding = crate::live_update_application::restore_fence::resumed_binding(tx, key)?
+        .unwrap_or(original);
     if binding.workspace_id != key.workspace_id
         || binding.main_version_id != key.version_id
         || binding.object_id != key.object_id
@@ -836,6 +849,7 @@ pub fn acknowledge(
         if parent.state == OwnerOutboxState::Quarantined {
             return Err(OwnerOutboxError::Frozen);
         }
+        if parent.state==OwnerOutboxState::Quarantined {return Err(OwnerOutboxError::Frozen)};
         let mut statement = tx
             .prepare(
                 "SELECT sequence,delivery_id,update_digest,byte_length \
@@ -961,12 +975,13 @@ fn find_parent_for_binding(
          base_blob_digest,state,pending_bytes,oldest_entry_at_ms,next_sequence,\
          quarantine_reason,observed_binding_json \
          FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 \
-         AND object_id=?3 AND lineage_claim_id=?4",
+         AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5",
         params![
             binding.workspace_id,
             binding.main_version_id,
             binding.object_id,
             binding.lineage_claim_id,
+            binding.restore_fence_generation,
         ],
         parent_from_row,
     )
@@ -1104,6 +1119,14 @@ fn read_sql(error: rusqlite::Error) -> OwnerOutboxError {
 
 fn write_sql(error: rusqlite::Error) -> OwnerOutboxError {
     OwnerOutboxError::Storage(StorageError::persist_public(error))
+}
+
+fn map_restore_error(error: crate::CollabError) -> OwnerOutboxError {
+    match error {
+        crate::CollabError::RestoreFenced => OwnerOutboxError::Frozen,
+        crate::CollabError::Storage(error) => OwnerOutboxError::Storage(error),
+        _ => OwnerOutboxError::Corrupt,
+    }
 }
 
 #[cfg(test)]

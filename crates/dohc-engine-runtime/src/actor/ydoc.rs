@@ -53,6 +53,7 @@ pub struct YdocOpenState {
     pub owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     pub lineage_existing: bool,
     pub lineage_claim_id: Option<String>,
+    pub restore_generation: Option<i64>,
     pub seed_content: Option<String>,
     pub artifact_assets: Vec<ArtifactAssetDescriptor>,
     pub seed_materialization_jobs: Vec<String>,
@@ -360,6 +361,7 @@ impl ActorHandle {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
+        restore_generation: Option<i64>,
     ) -> Result<YdocAppend, RuntimeError> {
         self.run(move |store, cache| {
             ydoc_record_update_on_store(
@@ -380,6 +382,7 @@ impl ActorHandle {
                 now_ms,
                 faults.as_ref(),
                 &token,
+                restore_generation,
             )
         })
         .await
@@ -399,6 +402,7 @@ impl ActorHandle {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
+        restore_generation: Option<i64>,
     ) -> Result<YdocSettleOutcome, RuntimeError> {
         self.run(move |store, cache| {
             ydoc_settle_on_store(
@@ -419,6 +423,7 @@ impl ActorHandle {
                 &token,
                 None,
                 None,
+                restore_generation,
             )
         })
         .await
@@ -429,6 +434,7 @@ impl ActorHandle {
         key: DocKey,
         expected_lineage_claim_id: Option<String>,
         token: CancellationToken,
+        restore_generation: Option<i64>,
     ) -> Result<YdocResyncState, RuntimeError> {
         self.run(move |store, cache| {
             ydoc_resync_on_store(
@@ -437,6 +443,7 @@ impl ActorHandle {
                 &key,
                 expected_lineage_claim_id.as_deref(),
                 &token,
+                restore_generation,
             )
         })
         .await
@@ -1079,6 +1086,9 @@ pub(super) fn ydoc_open_state_on_store(
     };
     let key = DocKey::new(workspace_id, version_id, object_id)?;
     let expected_key_matches = expected_key.is_none_or(|expected| *expected == key);
+    let restore_generation = store.read_with(|conn| {
+        dohc_engine_collab::live_update_application::restore_generation(conn, &key)
+    })?;
     // An open sync conflict on this object freezes the open as well as the
     // settle: the claimed lineage may be a peer's unreviewed base, and
     // serving it would put the editor on the very side the conflict
@@ -1181,7 +1191,7 @@ pub(super) fn ydoc_open_state_on_store(
     // A post-lease open starts a live session on this doc: prefer keeping its
     // cache entry resident (eviction order only; a leaked pin never affects
     // correctness).
-    if drain_deferred && expected_key_matches {
+    if drain_deferred && expected_key_matches && restore_generation.is_none() {
         doc_cache.pin(&key);
     }
     let mut persisted = dohc_engine_collab::load_persisted(store, &key)?;
@@ -1338,6 +1348,7 @@ pub(super) fn ydoc_open_state_on_store(
         initial_update,
         lineage_existing,
         lineage_claim_id,
+        restore_generation,
         seed_content: (content_kind != ContentKind::Scene && !lineage_existing)
             .then(|| head.map(|snapshot| snapshot.text))
             .flatten(),
@@ -1366,6 +1377,7 @@ pub(super) fn ydoc_record_update_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
+    restore_generation: Option<i64>,
 ) -> Result<YdocAppend, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
@@ -1410,6 +1422,7 @@ pub(super) fn ydoc_record_update_on_store(
             // timed-out-commit seed retry dedupes inside the guard instead of
             // refusing seed-onto-existing-lineage.
             ensure_parent_row: true,
+            restore_generation,
             require_empty_lineage,
             seed_source_sha256: seed_source
                 .as_ref()
@@ -1694,9 +1707,19 @@ pub(super) fn ydoc_settle_on_store(
     token: &CancellationToken,
     root_guard: Option<&dyn WorkspaceRootGuard>,
     live_audit: Option<&dohc_engine_collab::live_update_application::LiveSettlementAudit>,
+    restore_generation: Option<i64>,
 ) -> Result<YdocSettleOutcome, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
+    }
+    if live_audit.is_none() {
+        store.read_with(|conn| {
+            dohc_engine_collab::live_update_application::require_restore_generation(
+                conn,
+                key,
+                restore_generation,
+            )
+        })?;
     }
     // Refuse to settle a lineage that has no durable state: projecting a
     // fresh doc would be the empty string, and the projected write below
@@ -1752,7 +1775,8 @@ pub(super) fn ydoc_settle_on_store(
             // rows stay queued for the next pull, open, settle, or close,
             // which all emit; the later drain applies and projects the
             // remote content over whatever the pass settled.
-            if drain_deferred && marker.regime == Regime::Replicated {
+            if drain_deferred && restore_generation.is_none() && marker.regime == Regime::Replicated
+            {
                 let drained = drain_deferred_ydoc_for_live_session_rpc(
                     store,
                     doc_cache,
@@ -2046,6 +2070,16 @@ pub(super) fn ydoc_settle_on_store(
     } = projection;
     let projected_text = settled_content_override.unwrap_or(ydoc_projected_text);
     let outcome = store.write_with(faults, |tx| {
+        if live_audit.is_none() {
+            dohc_engine_collab::live_update_application::require_restore_generation(
+                tx,
+                key,
+                restore_generation,
+            )
+            .map_err(|_| DomainError::InvalidInput {
+                reason: "live-restore-fenced",
+            })?;
+        }
         let current = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, path)?;
         if current.binary_sha256.is_some() {
             return Err(dohc_engine_domain::DomainError::BinaryHeadNotText);
@@ -2311,10 +2345,18 @@ fn ydoc_resync_on_store(
     key: &DocKey,
     expected_lineage_claim_id: Option<&str>,
     token: &CancellationToken,
+    restore_generation: Option<i64>,
 ) -> Result<YdocResyncState, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    store.read_with(|conn| {
+        dohc_engine_collab::live_update_application::require_restore_generation(
+            conn,
+            key,
+            restore_generation,
+        )
+    })?;
     // Resync is the staleness recovery path: an envelope acked-but-deferred
     // because this session held the lease may be the very edit that made the
     // client stale — drain it first or the recovery response still misses it.
@@ -2330,6 +2372,7 @@ fn ydoc_resync_on_store(
         .as_ref()
         .is_some_and(|marker| marker.regime == Regime::Replicated)
         && observed_lineage_claim_id == expected_lineage_claim_id
+        && restore_generation.is_none()
     {
         drain_deferred_ydoc_for_live_session_rpc(
             store,
@@ -2406,6 +2449,13 @@ fn ydoc_close_session_on_store(
     // every outcome, including a mid-close crash, leaves no entry behind.
     doc_cache.remove(key);
     doc_cache.unpin(key);
+    let has_restore:bool=store.read_with(|conn|conn.query_row("SELECT EXISTS(SELECT 1 FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",params![key.workspace_id,key.version_id,key.object_id],|r|r.get(0)).map_err(StorageError::corrupt_public))?;
+    if has_restore {
+        return Ok(YdocCloseSessionOutcome {
+            outcome: None,
+            record_facts: Vec::new(),
+        });
+    };
     let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
         return Ok(YdocCloseSessionOutcome {
             outcome: None,

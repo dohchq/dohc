@@ -115,6 +115,7 @@ fn seed_captured_richdoc_lineage_from_markdown(
                     12,
                     Arc::new(FilesNoFaults),
                     CancellationToken::new(),
+                    None,
                 )
                 .await
                 .expect("record simple rich-document fixture seed");

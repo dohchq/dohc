@@ -41,6 +41,49 @@ pub fn require_open(conn: &Connection, key: &DocKey) -> Result<(), CollabError> 
     }
 }
 
+/// Fresh sessions capture this value; queued work must retain its original value.
+pub fn current_generation(conn: &Connection, key: &DocKey) -> Result<Option<i64>, CollabError> {
+    let row:Option<(i64,bool)>=conn.query_row("SELECT new_generation,resume_receipt_json IS NOT NULL FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 ORDER BY new_generation DESC LIMIT 1",params![key.workspace_id,key.version_id,key.object_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|CollabError::Storage(StorageError::corrupt_public(e)))?;
+    match row {
+        None => Ok(None),
+        Some((generation, true)) if (1..=SAFE).contains(&generation) => Ok(Some(generation)),
+        _ => Err(CollabError::RestoreFenced),
+    }
+}
+
+pub fn require_generation(
+    conn: &Connection,
+    key: &DocKey,
+    expected: Option<i64>,
+) -> Result<(), CollabError> {
+    if current_generation(conn, key)? == expected {
+        Ok(())
+    } else {
+        Err(CollabError::RestoreFenced)
+    }
+}
+
+pub(super) fn require_registration(
+    conn: &Connection,
+    key: &DocKey,
+    namespace: &str,
+    binding: &LiveObjectBinding,
+) -> Result<(), ApplicationError> {
+    let Some(generation) = current_generation(conn, key)? else {
+        return Ok(());
+    };
+    if generation != binding.restore_fence_generation {
+        return Err(ApplicationError::Conflict);
+    };
+    let (saved_namespace,json):(String,String)=conn.query_row("SELECT relay_database_namespace,resume_receipt_json FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND new_generation=?4",params![key.workspace_id,key.version_id,key.object_id,generation],|r|Ok((r.get(0)?,r.get(1)?))).map_err(read_sql)?;
+    let resumed: NativeRestoreResumeReceipt =
+        serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+    if saved_namespace != namespace || resumed.binding != *binding {
+        return Err(ApplicationError::Conflict);
+    };
+    Ok(())
+}
+
 impl NativeRestoreFence {
     pub(super) fn validate(&self) -> Result<(), ApplicationError> {
         identifier(&self.operation_id, 512)?;
@@ -98,7 +141,7 @@ pub(super) fn applied_tip(
             let (bootstrap, binding, coordinate, sequence) =
                 bootstrap::read_bootstrap(conn, held)?.ok_or(ApplicationError::Conflict)?;
             bootstrap.validate()?;
-            settlement::validate_historical_binding(&binding, b)?;
+            restore_resume::validate_origin_binding(conn, held, &binding)?;
             if bootstrap.bootstrap_id != *id || coordinate.host_id != input.host_id {
                 return Err(ApplicationError::Conflict);
             }
@@ -119,6 +162,14 @@ pub(super) fn applied_tip(
             }
             (origin.terminal, origin.sequence)
         }
+    };
+    let origin = if let Some(resumed) = restore_resume::generation(conn, held)? {
+        (
+            Some(resumed.application_receipt),
+            resumed.local_head_sequence,
+        )
+    } else {
+        origin
     };
     let latest: Option<LiveUpdateReceipt> = conn.query_row(
         "SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND restore_fence_generation=?6 ORDER BY journal_cursor DESC LIMIT 1",
@@ -195,8 +246,8 @@ impl ApplicationOwner {
         let outcome = store.write_with(faults, |tx| {
             require_workspace(tx, &held)?;
             let saved: Option<(String, String)> = tx.query_row(
-                "SELECT input_json,receipt_json FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3",
-                params![b.workspace_id,b.main_version_id,b.object_id],
+                "SELECT input_json,receipt_json FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?5 AND resume_receipt_json IS NULL",
+                params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,input.operation_id],
                 |r| Ok((r.get(0)?,r.get(1)?)),
             ).optional().map_err(read_sql)?;
             if let Some((saved_input, receipt)) = saved {
@@ -221,6 +272,8 @@ impl ApplicationOwner {
                 params![held.namespace,input.operation_id], |r| r.get(0),
             ).map_err(read_sql)?;
             if collision { return Err(ApplicationError::Conflict); }
+            require_registration(tx,&DocKey::new(&b.workspace_id,&b.main_version_id,&b.object_id)?,&held.namespace,b)?;
+            let previous=restore_resume::generation(tx,&held)?.map(|receipt|receipt.operation_id);
             if !read_binding(tx, &held)?.is_some_and(|(binding, coordinate, available)| {
                 binding == *b && available && (coordinate == held.coordinate
                     || (after_reconnect && coordinate.host_id == held.coordinate.host_id))
@@ -238,8 +291,8 @@ impl ApplicationOwner {
                 recorded_at_ms: now_ms,
             };
             tx.execute(
-                "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,input.operation_id,input_json,serde_json::to_string(&receipt).map_err(|_| ApplicationError::Corrupt)?],
+                "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json,previous_operation_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,input.operation_id,input_json,serde_json::to_string(&receipt).map_err(|_| ApplicationError::Corrupt)?,previous],
             ).map_err(write_sql)?;
             let changed = tx.execute(
                 "UPDATE live_device_application_bindings SET available=0,restore_fence_generation=?5 WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4",
@@ -249,8 +302,8 @@ impl ApplicationOwner {
             let mut observed = b.clone();
             observed.restore_fence_generation = input.new_fence;
             tx.execute(
-                "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason='restore-fenced',observed_binding_json=?5 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND state!='quarantined'",
-                params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,serde_json::to_string(&observed).map_err(|_| ApplicationError::Corrupt)?],
+                "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason='restore-fenced',observed_binding_json=?5 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?6 AND state!='quarantined'",
+                params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,serde_json::to_string(&observed).map_err(|_| ApplicationError::Corrupt)?,b.restore_fence_generation],
             ).map_err(write_sql)?;
             Ok(receipt)
         })?;
@@ -267,4 +320,26 @@ impl ApplicationOwner {
             TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
         }
     }
+}
+
+/// Used only after a local mutation has checked its captured generation.
+pub(crate) fn resumed_binding(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<Option<LiveObjectBinding>, CollabError> {
+    let Some(generation) = current_generation(conn, key)? else {
+        return Ok(None);
+    };
+    let json:String=conn.query_row("SELECT resume_receipt_json FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND new_generation=?4 AND resume_receipt_json IS NOT NULL",params![key.workspace_id,key.version_id,key.object_id,generation],|r|r.get(0)).map_err(|e|CollabError::Storage(StorageError::corrupt_public(e)))?;
+    let receipt: NativeRestoreResumeReceipt =
+        serde_json::from_str(&json).map_err(|_| CollabError::RestoreFenced)?;
+    let b = receipt.binding;
+    if b.workspace_id != key.workspace_id
+        || b.main_version_id != key.version_id
+        || b.object_id != key.object_id
+        || b.restore_fence_generation != generation
+    {
+        return Err(CollabError::RestoreFenced);
+    };
+    Ok(Some(b))
 }

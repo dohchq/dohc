@@ -1246,14 +1246,22 @@ impl Ydoc {
 
         let before = self.doc.transact().state_vector();
         let staged = Ydoc::wire();
-        let capacity_error = || CollabError::MalformedUpdate {
-            reason: "source-preserving rewrite exceeds configured byte budget".into(),
+        let capacity_error = || CollabError::ConfiguredByteBudgetExceeded;
+        let encoder_error = |remaining: usize| {
+            if remaining < crate::limits::MAX_YDOC_UPDATE_BYTES {
+                CollabError::ConfiguredByteBudgetExceeded
+            } else {
+                CollabError::UpdateTooLarge {
+                    actual: crate::limits::MAX_YDOC_UPDATE_BYTES + 1,
+                    max: crate::limits::MAX_YDOC_UPDATE_BYTES,
+                }
+            }
         };
         let bounded = budget.is_some();
         let mut max_bytes = budget.unwrap_or(usize::MAX);
         let full = if bounded {
             self.encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
-                .ok_or_else(capacity_error)?
+                .ok_or_else(|| encoder_error(max_bytes))?
         } else {
             self.encode_full_state()
         };
@@ -1273,7 +1281,7 @@ impl Ydoc {
                 .doc
                 .transact()
                 .encode_state_as_update(&before, &mut encoder);
-            encoder.finish().ok_or_else(capacity_error)?
+            encoder.finish().ok_or_else(|| encoder_error(max_bytes))?
         } else {
             staged.doc.transact().encode_state_as_update_v1(&before)
         };
@@ -1289,7 +1297,7 @@ impl Ydoc {
         let final_bytes = if bounded {
             staged
                 .encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
-                .ok_or_else(capacity_error)?
+                .ok_or_else(|| encoder_error(max_bytes))?
         } else {
             staged.encode_full_state()
         };

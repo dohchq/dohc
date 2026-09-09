@@ -113,7 +113,7 @@ impl Budget {
         self.blob_length(conn, digest)?;
         get_binary_blob(conn, digest)?.ok_or(ApplicationError::Corrupt)
     }
-    fn json(&mut self, value: &impl Serialize) -> Result<Vec<u8>, ApplicationError> {
+    pub(super) fn json(&mut self, value: &impl Serialize) -> Result<Vec<u8>, ApplicationError> {
         struct Bounded<'a> {
             budget: &'a mut Budget,
             bytes: Vec<u8>,
@@ -247,7 +247,7 @@ fn prepare_in(
     let mut budget = Budget {
         remaining: max_bytes,
     };
-    let applied = application::read_saved(tx, held, &mut budget)?;
+    let applied = application::read_saved(tx, held, &operation.operation_id, &mut budget)?;
     let expected_head = applied
         .as_ref()
         .map_or(input.fence.local_head_sequence, |receipt| {
@@ -488,8 +488,13 @@ pub(super) fn applied_proposal(
         remaining: max_bytes,
     };
     budget.json(&input.admitted)?;
-    let receipt =
-        application::read_saved(tx, held, &mut budget)?.ok_or(ApplicationError::Conflict)?;
+    let receipt = application::read_saved(
+        tx,
+        held,
+        &input.preparation.fence.operation.operation_id,
+        &mut budget,
+    )?
+    .ok_or(ApplicationError::Conflict)?;
     if receipt.admitted != input.admitted
         || receipt.candidate_digest != input.candidate_digest
         || receipt.native_source_manifest_digest != input.native_source_manifest_digest
@@ -513,8 +518,8 @@ fn origin(
             let (bootstrap, binding, coordinate, sequence) =
                 bootstrap::read_bootstrap(conn, held)?.ok_or(ApplicationError::Conflict)?;
             bootstrap.validate()?;
+            restore_resume::validate_origin_binding(conn, held, &binding)?;
             if bootstrap.bootstrap_id != *id
-                || binding != *b
                 || coordinate.host_id != operation.host_id
                 || bootstrap.baseline_digest != b.lineage_claim_id
             {
@@ -531,7 +536,8 @@ fn origin(
                 serde_json::from_str(&saved.1).map_err(|_| ApplicationError::Corrupt)?;
             let host: ApplicationHostCoordinate =
                 serde_json::from_str(&saved.3).map_err(|_| ApplicationError::Corrupt)?;
-            if binding != *b || host.host_id != operation.host_id {
+            restore_resume::validate_origin_binding(conn, held, &binding)?;
+            if host.host_id != operation.host_id {
                 return Err(ApplicationError::Conflict);
             }
             digest(&saved.0)?;

@@ -56,18 +56,19 @@ impl NativeRestoreApplication {
     }
 }
 
-pub(super) fn read_saved(
+pub(in crate::live_update_application) fn read_saved(
     conn: &Connection,
     held: &Registration,
+    operation_id: &str,
     budget: &mut Budget,
 ) -> Result<Option<NativeRestoreApplicationReceipt>, ApplicationError> {
     let b = &held.binding;
-    let length:Option<i64>=conn.query_row("SELECT length(CAST(application_json AS BLOB)) FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4",params![b.workspace_id,b.main_version_id,b.object_id,held.namespace],|row|row.get(0)).map_err(read_sql)?;
+    let length:Option<i64>=conn.query_row("SELECT length(CAST(application_json AS BLOB)) FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?5",params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,operation_id],|row|row.get(0)).map_err(read_sql)?;
     let Some(length) = length else {
         return Ok(None);
     };
     budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
-    let (json,delivery):(String,String)=conn.query_row("SELECT application_json,application_delivery_id FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4",params![b.workspace_id,b.main_version_id,b.object_id,held.namespace],|row|Ok((row.get(0)?,row.get(1)?))).map_err(read_sql)?;
+    let (json,delivery):(String,String)=conn.query_row("SELECT application_json,application_delivery_id FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?5",params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,operation_id],|row|Ok((row.get(0)?,row.get(1)?))).map_err(read_sql)?;
     let receipt: NativeRestoreApplicationReceipt =
         serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
     if receipt.admitted.accepted.receipt.delivery_id != delivery {
@@ -143,13 +144,13 @@ pub(in crate::live_update_application) fn fence_replay_head(
     let mut budget = Budget {
         remaining: crate::limits::MAX_YDOC_UPDATE_BYTES,
     };
-    let Some(receipt) = read_saved(conn, held, &mut budget)? else {
+    let Some(receipt) = read_saved(conn, held, &fence.operation.operation_id, &mut budget)? else {
         return Ok(fence.local_head_sequence);
     };
     let b = &held.binding;
     digest(&receipt.candidate_digest)?;
     digest(&receipt.native_source_manifest_digest)?;
-    let bound:bool=conn.query_row("SELECT proposal_candidate_sha256=?5 AND json_extract(proposal_json,'$.nativeSourceManifestDigest')=?6 AND json_extract(proposal_json,'$.replacementRanges')=?7 FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4",params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,receipt.candidate_digest,receipt.native_source_manifest_digest,serde_json::to_string(&receipt.admitted.first_seen).map_err(|_|ApplicationError::Corrupt)?],|row|row.get(0)).map_err(read_sql)?;
+    let bound:bool=conn.query_row("SELECT proposal_candidate_sha256=?5 AND json_extract(proposal_json,'$.nativeSourceManifestDigest')=?6 AND json_extract(proposal_json,'$.replacementRanges')=?7 FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?8",params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,receipt.candidate_digest,receipt.native_source_manifest_digest,serde_json::to_string(&receipt.admitted.first_seen).map_err(|_|ApplicationError::Corrupt)?,fence.operation.operation_id],|row|row.get(0)).map_err(read_sql)?;
     let mut new_binding = b.clone();
     new_binding.restore_fence_generation = fence.operation.new_fence;
     receipt.admitted.accepted.receipt.validate()?;
@@ -282,14 +283,14 @@ impl ApplicationOwner {
             let mut budget = Budget { remaining: max_bytes };
             budget.json(&input.admitted)?;
             let prepared: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND proposal_candidate_sha256=?5)",
-                params![b.workspace_id, b.main_version_id, b.object_id, held.namespace, input.candidate_digest],
+                "SELECT EXISTS(SELECT 1 FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND proposal_candidate_sha256=?5 AND operation_id=?6 AND resume_receipt_json IS NULL)",
+                params![b.workspace_id, b.main_version_id, b.object_id, held.namespace, input.candidate_digest,operation.operation_id],
                 |row| row.get(0),
             ).map_err(read_sql)?;
             if !prepared {
                 return Err(ApplicationError::Conflict);
             }
-            let saved = read_saved(tx, &held, &mut budget)?;
+            let saved = read_saved(tx, &held, &operation.operation_id, &mut budget)?;
             let proposal = prepare_in(tx, &held, &input.preparation, budget.remaining, max_events)?;
             if proposal.receipt.candidate_digest != input.candidate_digest
                 || proposal.receipt.native_source_manifest_digest != input.native_source_manifest_digest
@@ -343,13 +344,13 @@ impl ApplicationOwner {
             verify_saved(tx, &held, &receipt, &proposal, &projected)?;
             let json = String::from_utf8(budget.json(&receipt)?).map_err(|_| ApplicationError::Corrupt)?;
             let changed = tx.execute(
-                "UPDATE live_restore_fences SET application_json=?5,application_delivery_id=?6 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND application_json IS NULL",
-                params![b.workspace_id, b.main_version_id, b.object_id, held.namespace, json, receipt.admitted.accepted.receipt.delivery_id],
+                "UPDATE live_restore_fences SET application_json=?5,application_delivery_id=?6 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?7 AND application_json IS NULL AND resume_receipt_json IS NULL",
+                params![b.workspace_id, b.main_version_id, b.object_id, held.namespace, json, receipt.admitted.accepted.receipt.delivery_id,operation.operation_id],
             ).map_err(write_sql)?;
             if changed != 1 {
                 return Err(ApplicationError::Conflict);
             }
-            accepted_history::append(tx, &application_held, &event, max_bytes)?;
+            accepted_history::append_restore(tx, &application_held, &event, &projected, &operation.operation_id, &mut budget)?;
             Ok((receipt,record_facts))
         });
         cache.remove(&key);

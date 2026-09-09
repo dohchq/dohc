@@ -42,6 +42,7 @@ pub(crate) struct YdocSession {
     pub(super) content_kind: ContentKind,
     pub(super) regime: Regime,
     pub(super) lineage_claim_id: Option<String>,
+    pub(super) restore_generation: Option<i64>,
     pub(super) lineage_absent: bool,
     pub(super) first_update_pending: bool,
     pub(super) last_settled_sha: Option<String>,
@@ -59,6 +60,7 @@ pub(super) struct YdocSessionView {
     pub(super) content_kind: ContentKind,
     pub(super) regime: Regime,
     pub(super) lineage_claim_id: Option<String>,
+    pub(super) restore_generation: Option<i64>,
     pub(super) lineage_absent: bool,
     pub(super) first_update_pending: bool,
     pub(super) last_settled_sha: Option<String>,
@@ -882,6 +884,7 @@ impl EngineService {
                 content_kind: state.content_kind,
                 regime: state.regime,
                 lineage_claim_id: state.lineage_claim_id,
+                restore_generation: state.restore_generation,
                 lineage_absent: !state.lineage_existing,
                 first_update_pending: !state.lineage_existing,
                 last_settled_sha: None,
@@ -983,6 +986,7 @@ impl EngineService {
                         now,
                         Arc::new(NoFaults),
                         token,
+                        session.restore_generation,
                     )
                     .await;
                 if let Ok(append) = &outcome
@@ -1082,6 +1086,7 @@ impl EngineService {
                 now_ms()?,
                 Arc::new(NoFaults),
                 cancellation.token(),
+                session.restore_generation,
             )
             .await
             .map_err(map_runtime)?;
@@ -1327,7 +1332,12 @@ impl EngineService {
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
         let state = open
             .actor
-            .ydoc_resync(session.key, session.lineage_claim_id, cancellation.token())
+            .ydoc_resync(
+                session.key,
+                session.lineage_claim_id,
+                cancellation.token(),
+                session.restore_generation,
+            )
             .await
             .map_err(map_runtime)?;
         if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
@@ -1395,6 +1405,7 @@ impl EngineService {
                 content_kind: session.content_kind,
                 regime: session.regime,
                 lineage_claim_id: session.lineage_claim_id.clone(),
+                restore_generation: session.restore_generation,
                 lineage_absent: session.lineage_absent,
                 first_update_pending: session.first_update_pending,
                 last_settled_sha: session.last_settled_sha.clone(),

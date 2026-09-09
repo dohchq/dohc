@@ -156,6 +156,7 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
             6,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("settle resolves");
@@ -237,6 +238,7 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
             20,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record");
@@ -253,6 +255,7 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("first settle");
@@ -332,6 +335,7 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
             130,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect_err("settling a rebound path must refuse even when bytes match");
@@ -385,6 +389,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
             20,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record");
@@ -401,6 +406,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("first settle");
@@ -475,6 +481,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
             70,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("reseed record");
@@ -491,6 +498,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
             80,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("post-prune settle must succeed")
@@ -544,6 +552,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
             20,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record");
@@ -560,6 +569,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("settle");
@@ -627,6 +637,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
             60,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("fresh record");
@@ -643,6 +654,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
             70,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("fresh settle succeeds")
@@ -700,6 +712,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             20,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record v1");
@@ -716,6 +729,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("settle v1");
@@ -741,6 +755,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             40,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record v2");
@@ -760,6 +775,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             50,
             faults.clone(),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect_err("the injected crash must fail the settle");
@@ -806,6 +822,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             70,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("retry settles")
@@ -866,6 +883,7 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
             20,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record update");
@@ -884,6 +902,7 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("a freshly blocked settle is durably accepted")
@@ -931,6 +950,7 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
             50,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect_err("replaying through the alias remains retryable");
@@ -957,6 +977,7 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
             60,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("the next settle replays after containment is restored")

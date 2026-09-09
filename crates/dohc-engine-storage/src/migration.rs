@@ -1580,6 +1580,10 @@ CREATE TABLE live_accepted_checkpoints (
     origin_stamp TEXT NOT NULL CHECK (length(origin_stamp)=64 AND origin_stamp NOT GLOB '*[^0-9a-f]*'),
     state_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
     evidence_digest TEXT NOT NULL CHECK (length(evidence_digest)=64 AND evidence_digest NOT GLOB '*[^0-9a-f]*'),
+    restore_operation_id TEXT,
+    restore_stamp TEXT,
+    CHECK ((restore_operation_id IS NULL AND restore_stamp IS NULL) OR (event_count>0 AND restore_operation_id IS NOT NULL AND restore_stamp IS NOT NULL AND length(restore_stamp)=64)),
+    FOREIGN KEY (relay_database_namespace,restore_operation_id) REFERENCES live_restore_fences(relay_database_namespace,operation_id) ON DELETE RESTRICT,
     PRIMARY KEY (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, event_count),
     UNIQUE (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, journal_cursor),
     FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
@@ -1599,16 +1603,33 @@ CREATE TABLE live_restore_fences (
     proposal_point_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
     application_json TEXT CHECK (application_json IS NULL OR json_valid(application_json)),
     application_delivery_id TEXT,
+    lineage_claim_id TEXT GENERATED ALWAYS AS (json_extract(input_json,'$.oldBinding.lineageClaimId')) VIRTUAL,
+    old_generation INTEGER GENERATED ALWAYS AS (json_extract(input_json,'$.oldBinding.restoreFenceGeneration')) VIRTUAL,
+    new_generation INTEGER GENERATED ALWAYS AS (json_extract(input_json,'$.newFence')) VIRTUAL,
+    previous_operation_id TEXT,
+    resume_receipt_json TEXT CHECK (resume_receipt_json IS NULL OR json_valid(resume_receipt_json)),
+    resume_settlement_id TEXT REFERENCES live_device_settlements(settlement_id) ON DELETE RESTRICT,
+    resume_evidence_digest TEXT,
+    CHECK ((resume_receipt_json IS NULL AND resume_settlement_id IS NULL AND resume_evidence_digest IS NULL)
+        OR (resume_receipt_json IS NOT NULL AND resume_settlement_id IS NOT NULL AND application_json IS NOT NULL
+            AND resume_evidence_digest IS NOT NULL AND length(resume_evidence_digest)=64 AND resume_evidence_digest NOT GLOB '*[^0-9a-f]*')),
     CHECK ((application_json IS NULL AND application_delivery_id IS NULL)
         OR (application_json IS NOT NULL AND application_delivery_id IS NOT NULL AND proposal_json IS NOT NULL)),
     CHECK ((proposal_json IS NULL AND proposal_candidate_sha256 IS NULL AND proposal_frozen_sha256 IS NULL AND proposal_point_sha256 IS NULL)
         OR (proposal_json IS NOT NULL AND proposal_candidate_sha256 IS NOT NULL AND proposal_frozen_sha256 IS NOT NULL AND proposal_point_sha256 IS NOT NULL)),
-    PRIMARY KEY (workspace_id, main_version_id, object_id),
-    UNIQUE (relay_database_namespace, operation_id),
+    PRIMARY KEY (relay_database_namespace, operation_id),
+    UNIQUE (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, new_generation),
+    FOREIGN KEY (relay_database_namespace, previous_operation_id)
+        REFERENCES live_restore_fences(relay_database_namespace, operation_id) ON DELETE RESTRICT,
     FOREIGN KEY (relay_database_namespace, workspace_id, application_delivery_id)
         REFERENCES live_device_update_applications(relay_database_namespace, workspace_id, delivery_id) ON DELETE RESTRICT,
     FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
 ) STRICT;
+CREATE UNIQUE INDEX live_restore_active ON live_restore_fences(workspace_id,main_version_id,object_id)
+    WHERE resume_receipt_json IS NULL;
+CREATE INDEX live_restore_document_generation ON live_restore_fences(workspace_id,main_version_id,object_id,new_generation);
+CREATE UNIQUE INDEX live_restore_application_delivery ON live_restore_fences(relay_database_namespace,application_delivery_id)
+    WHERE application_delivery_id IS NOT NULL;
 
 CREATE TABLE live_device_settlements (
     settlement_id TEXT NOT NULL PRIMARY KEY,
@@ -1755,7 +1776,7 @@ CREATE TABLE owner_ydoc_outboxes (
       (pending_bytes = 0 AND oldest_entry_at_ms IS NULL) OR
       (pending_bytes > 0 AND oldest_entry_at_ms IS NOT NULL)
     ),
-    UNIQUE (workspace_id, main_version_id, object_id, lineage_claim_id),
+    UNIQUE (workspace_id, main_version_id, object_id, lineage_claim_id, restore_fence_generation),
     FOREIGN KEY (base_blob_digest)
       REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
 ) STRICT;

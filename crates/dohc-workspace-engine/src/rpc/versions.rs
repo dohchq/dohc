@@ -151,6 +151,7 @@ fn version_fence_session_view(
         content_kind: session.content_kind,
         regime: session.regime,
         lineage_claim_id: session.lineage_claim_id.clone(),
+        restore_generation: session.restore_generation,
         lineage_absent: session.lineage_absent,
         first_update_pending: session.first_update_pending,
         last_settled_sha: session.last_settled_sha.clone(),
@@ -182,6 +183,7 @@ async fn settle_ydoc_session_for_version_fence(
             now_ms()?,
             Arc::new(NoFaults),
             token.clone(),
+            session.restore_generation,
         )
         .await
         .map_err(map_runtime)?;

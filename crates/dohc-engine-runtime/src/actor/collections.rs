@@ -330,6 +330,7 @@ fn ensure_collection_record_id_on_store(
         now_ms,
         faults,
         token,
+        None,
     )?
     .lineage_claim_id;
     Ok(Some((lineage_claim_id, true)))
@@ -487,6 +488,7 @@ fn adopt_collection_record_on_store(
             token,
             root_guard,
             None,
+            None,
         )?
         .into_settlement_for_internal_caller()?
         .path,
@@ -594,6 +596,7 @@ fn cleanup_collection_relation_on_store(
             now_ms,
             faults,
             token,
+            None,
         )?
         .lineage_claim_id;
     }
@@ -637,6 +640,7 @@ fn cleanup_collection_relation_on_store(
         now_ms,
         faults,
         token,
+        None,
     )?;
     validate_workspace_root(root_dir, root_guard)?;
     let settlement = ydoc_settle_on_store(
@@ -659,6 +663,7 @@ fn cleanup_collection_relation_on_store(
         faults,
         token,
         root_guard,
+        None,
         None,
     )?
     .into_settlement_for_internal_caller()?;

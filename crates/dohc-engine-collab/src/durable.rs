@@ -458,6 +458,7 @@ pub struct LocalAppend<'a> {
     pub actor_origin_id: Option<&'a str>,
     pub attribution: Option<&'a ChangeAttribution>,
     pub lineage_guard: LineageGuard<'a>,
+    pub restore_generation: Option<i64>,
     pub ensure_parent_row: bool,
     pub require_empty_lineage: bool,
     /// Captured artifact imported by a client-declared first seed.
@@ -490,6 +491,7 @@ where
         actor_origin_id,
         attribution,
         lineage_guard,
+        restore_generation,
         ensure_parent_row,
         require_empty_lineage,
         seed_source_sha256,
@@ -515,7 +517,7 @@ where
         };
         crate::hex_sha256(
             format!(
-                "ydoc-record-v3{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}{sep}{}",
+                "ydoc-record-v4{sep}{restore_generation:?}{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}{sep}{}",
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
@@ -533,7 +535,7 @@ where
     let mut probe = GateBaseProbe::default();
     let mut pending_after_append = None;
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
-        crate::live_update_application::require_restore_open(tx, key)?;
+        crate::live_update_application::require_restore_generation(tx, key, restore_generation)?;
         if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
             let recorded: Option<(String, i64)> = tx
                 .query_row(
@@ -2080,6 +2082,18 @@ pub fn record_update_in_tx(
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     crate::live_update_application::require_restore_open(tx, key)?;
+    record_authorized_update_in_tx(tx, key, update, actor_origin_id, attribution, now_ms)
+}
+
+/// The receipt application owner has checked its full binding in this transaction.
+pub(crate) fn record_authorized_update_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    now_ms: i64,
+) -> Result<AppendOutcome, CollabError> {
     validate_update_bytes(update)?;
     let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
     let sha = crate::hex_sha256(update);
@@ -2151,6 +2165,7 @@ pub fn settle(
     let sv_bytes = persisted.doc.encode_state_vector();
 
     store.write_with(faults, |tx| {
+        crate::live_update_application::require_restore_open(tx, key)?;
         // Persist the content and its provenance state vector as blobs. The
         // content digest was computed once above; the settle rows below reuse
         // it too.

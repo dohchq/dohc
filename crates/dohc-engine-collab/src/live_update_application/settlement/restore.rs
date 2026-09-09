@@ -1,14 +1,14 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct PriorAnchor {
-    pub(super) id: String,
+pub(in crate::live_update_application) struct PriorAnchor {
+    pub(in crate::live_update_application) id: String,
     pub(super) cursor: i64,
-    pub(super) sequence: i64,
+    pub(in crate::live_update_application) sequence: i64,
     pub(super) previous_cursor: i64,
     previous_sequence: i64,
-    pub(super) moment: String,
-    pub(super) markdown: String,
+    pub(in crate::live_update_application) moment: String,
+    pub(in crate::live_update_application) markdown: String,
     interval: String,
     pub(super) vector: String,
     pub(super) application_count: usize,
@@ -192,7 +192,7 @@ impl ApplicationOwner {
                 let (bootstrap, binding, _, _) = bootstrap::read_bootstrap(tx, &held)?.ok_or(ApplicationError::Corrupt)?;
                 (binding, bootstrap.bootstrap_moment_id, bootstrap.projected_markdown_digest, 0, 0)
             };
-            validate_historical_binding(&origin_binding, &held.binding)?;
+            restore_resume::validate_origin_binding(tx, &held, &origin_binding)?;
             let (previous_cursor, previous_sequence, expected_moment, expected_digest) = prior.as_ref().map_or(
                 (origin_cursor, origin_sequence, origin_moment, origin_digest),
                 |prior| (prior.cursor, prior.sequence, prior.moment.clone(), prior.markdown.clone()),
@@ -254,7 +254,7 @@ fn read_prior(
     read_anchor(conn, held, terminal, max_bytes)
 }
 
-fn read_anchor(
+pub(in crate::live_update_application) fn read_anchor(
     conn: &Connection,
     held: &Registration,
     terminal: i64,
@@ -269,7 +269,7 @@ fn read_anchor(
         return Ok(None);
     };
     if usize::try_from(length).map_err(|_| ApplicationError::Corrupt)? > max_bytes {
-        return Err(invalid("restore anchor exceeds configured byte budget"));
+        return Err(ApplicationError::ConfiguredByteBudgetExceeded);
     }
     let (id,cursor,sequence,moment,markdown,interval,vector,binding,previous_cursor,previous_sequence,count): (String,i64,i64,String,String,String,String,String,i64,i64,i64) = conn.query_row(
         "SELECT settlement_id,terminal_cursor,local_ydoc_sequence,moment_id,markdown_digest,interval_digest,source_state_vector_digest,binding_json,previous_cursor,previous_ydoc_sequence,application_count FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor<=?6 ORDER BY terminal_cursor DESC LIMIT 1",
@@ -315,7 +315,7 @@ fn read_anchor(
 
 // One object fence, then one settlement by its unique operation identity.
 // CROSS JOIN preserves that order when an ordinary object has no restore.
-const RESTORED_ORIGIN: &str = "SELECT s.terminal_cursor,length(CAST(f.application_json AS BLOB)) FROM live_restore_fences f CROSS JOIN live_device_settlements s ON s.relay_database_namespace=f.relay_database_namespace AND s.restore_operation_id=f.operation_id WHERE f.workspace_id=?2 AND f.main_version_id=?3 AND f.object_id=?4 AND f.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.settlement_kind='restore'";
+const RESTORED_ORIGIN: &str = "SELECT s.terminal_cursor,length(CAST(f.application_json AS BLOB)) FROM live_restore_fences f CROSS JOIN live_device_settlements s ON s.relay_database_namespace=f.relay_database_namespace AND s.restore_operation_id=f.operation_id WHERE f.workspace_id=?2 AND f.main_version_id=?3 AND f.object_id=?4 AND f.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.settlement_kind='restore' AND f.new_generation=?6";
 
 pub(super) fn restored_origin(
     conn: &Connection,
@@ -330,7 +330,8 @@ pub(super) fn restored_origin(
                 b.workspace_id,
                 b.main_version_id,
                 b.object_id,
-                b.lineage_claim_id
+                b.lineage_claim_id,
+                b.restore_fence_generation
             ],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -392,7 +393,7 @@ fn coverage(
         remaining: max_bytes,
     };
     serde_json::to_writer(&mut writer, &(prior, proposal, application, receipts))
-        .map_err(|_| invalid("restore coverage exceeds configured byte budget"))?;
+        .map_err(|_| ApplicationError::ConfiguredByteBudgetExceeded)?;
     Ok(writer
         .hash
         .finalize()
@@ -425,7 +426,7 @@ mod tests {
                     let mut statement = conn.prepare(RESTORED_ORIGIN).unwrap();
                     let result: Option<(i64, i64)> = statement
                         .query_row(
-                            params!["relay", "workspace", "main", "object", "lineage"],
+                            params!["relay", "workspace", "main", "object", "lineage", 0],
                             |row| Ok((row.get(0)?, row.get(1)?)),
                         )
                         .optional()

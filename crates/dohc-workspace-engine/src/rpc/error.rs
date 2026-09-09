@@ -339,6 +339,7 @@ fn map_domain(error: DomainError) -> WireError {
 
 fn map_collab_code(error: CollabError) -> ErrorCode {
     match error {
+        CollabError::ConfiguredByteBudgetExceeded => ErrorCode::LimitExceeded,
         CollabError::Corrupt { .. } | CollabError::Storage(_) => ErrorCode::Internal,
         CollabError::MalformedUpdate { .. }
         | CollabError::ReplayParityViolation { .. }

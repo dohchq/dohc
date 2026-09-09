@@ -15,6 +15,8 @@ fn native_tail_edit(f: &mut Fixture, source: &str, now: i64) -> owner_outbox::Ow
         &f.key,
         &update,
         crate::LocalAppend {
+            restore_generation: (f.binding.restore_fence_generation > 0)
+                .then_some(f.binding.restore_fence_generation),
             actor_origin_id: Some("native-agent"),
             attribution: Some(&attribution),
             ..Default::default()
@@ -36,9 +38,11 @@ fn native_tail_edit(f: &mut Fixture, source: &str, now: i64) -> owner_outbox::Ow
     let outbox: String = f
         .store
         .read_with(|conn| {
-            conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes", [], |r| {
-                r.get(0)
-            })
+            conn.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outboxes WHERE restore_fence_generation=?1",
+                [f.binding.restore_fence_generation],
+                |r| r.get(0),
+            )
         })
         .unwrap();
     owner_outbox::read_pending(&f.store, "workspace", &outbox)
@@ -100,11 +104,15 @@ fn native_tail_input(
         .fence_restore(
             &mut f.store,
             NativeRestoreFence {
-                operation_id: "tail-restore".into(),
+                operation_id: if f.binding.restore_fence_generation == 0 {
+                    "tail-restore".into()
+                } else {
+                    format!("tail-restore-{}", f.binding.restore_fence_generation + 1)
+                },
                 relay_database_namespace: "namespace".into(),
                 old_binding: f.binding.clone(),
                 host_id: "host".into(),
-                new_fence: 1,
+                new_fence: f.binding.restore_fence_generation + 1,
                 origin: RestoreDeliveryOrigin::Owner {
                     id: f.cut.adoption_id.clone(),
                 },
@@ -885,4 +893,179 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
     assert_eq!(settled.settlement_id, replay.settlement_id);
     assert_eq!(inventory, native_tail_inventory(&store));
     assert_eq!(store.table_row_count("moments").unwrap(), 2);
+}
+
+#[test]
+fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generation_queue() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let old = native_tail_edit(&mut f, "Unaccepted owner edit", 11);
+    let prep = native_tail_input(&mut f, None, 0);
+    let proposal = native_tail_prepare(&mut f, prep.clone()).unwrap();
+    let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+    let mut binding = f.binding.clone();
+    binding.restore_fence_generation = 1;
+    let input = NativeRestoreApplication {
+        preparation: prep,
+        candidate_digest: proposal.receipt().candidate_digest.clone(),
+        native_source_manifest_digest: proposal.receipt().native_source_manifest_digest.clone(),
+        admitted: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "resume-owner".into(),
+                    update_digest: proposal.receipt().candidate_digest.clone(),
+                    journal_cursor: 71,
+                    accepting_host_epoch: 2,
+                },
+                binding: binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "restoring-owner".into(),
+                },
+                received_at_ms: 80,
+            },
+            first_seen: proposal.receipt().replacement_ranges.clone(),
+        },
+    };
+    f._owner
+        .apply_restore(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            input.clone(),
+            coordinate.clone(),
+            2_000_000,
+            100,
+            90,
+            &NoFaults,
+        )
+        .unwrap();
+    let canonical = f
+        .store
+        .read_with(|conn| durable::load_doc_in(conn, &f.key))
+        .unwrap();
+    let without_native = Ydoc::wire();
+    without_native.apply(&f.cut.baseline_bytes).unwrap();
+    without_native.apply(proposal.candidate_bytes()).unwrap();
+    assert!(!crate::replay_parity::structurally_equal_v2(&without_native, &canonical).unwrap());
+    let held = f.handle.registration.lock().unwrap();
+    f.store
+        .read_with(|conn| -> Result<(), ApplicationError> {
+            let history = accepted_history::read(
+                conn,
+                &held,
+                71,
+                &mut restore_content::Budget {
+                    remaining: 2_000_000,
+                },
+                100,
+            )?;
+            assert_eq!(history.proof.event_count, 1);
+            assert_eq!(
+                history.proof.checkpoint.restore_operation_id.as_deref(),
+                Some("tail-restore")
+            );
+            assert!(crate::replay_parity::structurally_equal_v2(
+                &history.doc,
+                &canonical
+            )?);
+            Ok(())
+        })
+        .unwrap();
+    drop(held);
+    let settlement = f
+        ._owner
+        .with_restore_settlement(
+            &mut f.store,
+            input.clone(),
+            coordinate.clone(),
+            2_000_000,
+            100,
+            |store, audit| {
+                restore_content::tests::record_test_projection(store, audit, "resumed-owner")
+            },
+        )
+        .unwrap();
+    let resume = NativeRestoreResume {
+        application: input,
+        settlement_id: settlement.settlement_id,
+    };
+    f._owner
+        .resume_restore(
+            &mut f.store,
+            resume.clone(),
+            coordinate.clone(),
+            2_000_000,
+            100,
+            100,
+            &NoFaults,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap();
+    f.binding = binding;
+    f.doc = canonical;
+    f.handle = f
+        ._owner
+        .register(
+            &mut f.store,
+            "namespace".into(),
+            coordinate.clone(),
+            f.binding.clone(),
+        )
+        .unwrap();
+    let old_inventory = native_tail_inventory(&f.store);
+    let stale = f.doc.richdoc_append_paragraph("stale writer");
+    assert!(matches!(
+        crate::record_local_update(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.key,
+            &stale,
+            crate::LocalAppend::default(),
+            &NoFaults,
+            110,
+            |_, _, _| Ok(())
+        ),
+        Err(CollabError::RestoreFenced)
+    ));
+    f.doc = f
+        .store
+        .read_with(|conn| durable::load_doc_in(conn, &f.key))
+        .unwrap();
+    let fresh = native_tail_edit(&mut f, "New generation pending", 120);
+    assert_ne!(fresh.delivery_id, old.delivery_id);
+    assert_eq!(fresh.sequence, 1);
+    let ack = native_tail_apply(&mut f, fresh.update.clone(), fresh.delivery_id.clone(), 82);
+    let terminal = LiveUpdateReceipt {
+        delivery_id: ack.delivery_id,
+        update_digest: ack.update_digest,
+        journal_cursor: ack.journal_cursor,
+        accepting_host_epoch: ack.accepting_host_epoch,
+    };
+    let second = native_tail_input(&mut f, Some(terminal), ack.local_ydoc_sequence);
+    let next = native_tail_prepare(&mut f, second).unwrap();
+    assert_eq!(next.receipt().accepted_history.event_count, 2);
+    assert_eq!(next.receipt().native_sources.len(), 1);
+    assert_eq!(
+        next.receipt().native_sources[0]
+            .binding
+            .restore_fence_generation,
+        1
+    );
+    let inventory = native_tail_inventory(&f.store);
+    for entry in old_inventory.as_array().unwrap() {
+        assert!(inventory.as_array().unwrap().contains(entry));
+    }
+    let historic = f
+        ._owner
+        .resume_restore(
+            &mut f.store,
+            resume,
+            coordinate,
+            2_000_000,
+            100,
+            130,
+            &NoFaults,
+            |_, _, _, _| panic!("old retry must not resume new fence"),
+        )
+        .unwrap();
+    assert_eq!(historic.binding.restore_fence_generation, 1);
 }

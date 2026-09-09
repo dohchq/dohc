@@ -15,6 +15,15 @@ fn restore_serialized_byte_refusals_keep_the_configured_budget_error() {
         Budget { remaining: 1 }.state(&doc),
         Err(ApplicationError::ConfiguredByteBudgetExceeded)
     ));
+    let f = Fixture::new("valid rich document");
+    let error = f
+        .doc
+        .rewrite_richdoc_preserving_source_bounded("valid replacement", &f.doc, 1)
+        .unwrap_err();
+    assert!(matches!(
+        ApplicationError::from(error),
+        ApplicationError::ConfiguredByteBudgetExceeded
+    ));
 }
 
 #[test]
@@ -543,11 +552,15 @@ impl Fixture {
     }
     fn freeze(&mut self, point: NativeRestorePoint) -> NativeRestorePreparation {
         let operation = NativeRestoreFence {
-            operation_id: "restore".into(),
+            operation_id: if self.binding.restore_fence_generation == 0 {
+                "restore".into()
+            } else {
+                format!("restore-{}", self.binding.restore_fence_generation + 1)
+            },
             relay_database_namespace: "namespace".into(),
             old_binding: self.binding.clone(),
             host_id: "host".into(),
-            new_fence: 1,
+            new_fence: self.binding.restore_fence_generation + 1,
             origin: RestoreDeliveryOrigin::Bootstrap {
                 id: "bootstrap".into(),
             },
@@ -1342,4 +1355,323 @@ fn ordinary_settlement_starts_at_verified_restore_anchor_under_future_open_bindi
         f.store.table_row_count("live_device_settlements").unwrap(),
         2
     );
+}
+
+#[test]
+fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repeated_restore() {
+    let mut f = Fixture::new("Original");
+    f.edit("Later", 7);
+    let prep = f.freeze(f.baseline_point.clone());
+    let input = admitted_restore(&mut f, prep);
+    apply_restore(&mut f, input.clone(), &NoFaults).unwrap();
+    let missing = NativeRestoreResume {
+        application: input.clone(),
+        settlement_id: "missing".into(),
+    };
+    assert!(f
+        .owner
+        .resume_restore(
+            &mut f.store,
+            missing,
+            f.host.clone(),
+            2_000_000,
+            100,
+            100,
+            &NoFaults,
+            |_, _, _, _| Ok(())
+        )
+        .is_err());
+    let settlement = f
+        .owner
+        .with_restore_settlement(
+            &mut f.store,
+            input.clone(),
+            f.host.clone(),
+            2_000_000,
+            100,
+            |store, audit| record_test_projection(store, audit, "restore-one"),
+        )
+        .unwrap();
+    let resume = NativeRestoreResume {
+        application: input.clone(),
+        settlement_id: settlement.settlement_id,
+    };
+    assert!(f
+        .owner
+        .resume_restore(
+            &mut f.store,
+            resume.clone(),
+            f.host.clone(),
+            2_000_000,
+            100,
+            100,
+            &NoFaults,
+            |_, _, _, _| Err(ApplicationError::Conflict)
+        )
+        .is_err());
+    assert!(f
+        .owner
+        .register(
+            &mut f.store,
+            "namespace".into(),
+            f.host.clone(),
+            input.admitted.accepted.binding.clone()
+        )
+        .is_err());
+    let first = f
+        .owner
+        .resume_restore(
+            &mut f.store,
+            resume.clone(),
+            f.host.clone(),
+            2_000_000,
+            100,
+            100,
+            &NoFaults,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap();
+    f.binding = first.binding.clone();
+    f.doc = f.canonical();
+    f.sequence = first.local_head_sequence;
+    f.terminal = Some(first.application_receipt.clone());
+    f.handle = f
+        .owner
+        .register(
+            &mut f.store,
+            "namespace".into(),
+            f.host.clone(),
+            f.binding.clone(),
+        )
+        .unwrap();
+    let held = f.handle.registration.lock().unwrap();
+    f.store
+        .read_with(|conn| -> Result<(), ApplicationError> {
+            let history = accepted_history::read(
+                conn,
+                &held,
+                71,
+                &mut Budget {
+                    remaining: 2_000_000,
+                },
+                100,
+            )?;
+            assert_eq!(
+                history.proof.checkpoint.restore_operation_id.as_deref(),
+                Some("restore")
+            );
+            assert!(crate::replay_parity::structurally_equal_v2(
+                &history.doc,
+                &f.doc
+            )?);
+            Ok(())
+        })
+        .unwrap();
+    drop(held);
+    f.edit("After resume", 82);
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    f.store
+        .read_with(|conn| -> Result<(), ApplicationError> {
+            assert!(require_restore_open(conn, &key).is_err());
+            assert!(require_restore_generation(conn, &key, None).is_err());
+            require_restore_generation(conn, &key, Some(1))?;
+            Ok(())
+        })
+        .unwrap();
+    let second_prep = f.freeze(f.baseline_point.clone());
+    assert_eq!(
+        first,
+        f.owner
+            .resume_restore(
+                &mut f.store,
+                resume.clone(),
+                f.host.clone(),
+                2_000_000,
+                100,
+                120,
+                &NoFaults,
+                |_, _, _, _| panic!("historical retry must not reopen")
+            )
+            .unwrap()
+    );
+    assert!(f
+        .owner
+        .register(
+            &mut f.store,
+            "namespace".into(),
+            f.host.clone(),
+            f.binding.clone()
+        )
+        .is_err());
+    let mut second = admitted_restore(&mut f, second_prep);
+    second.admitted.accepted.receipt.delivery_id = "restore-two".into();
+    second.admitted.accepted.receipt.journal_cursor = 100;
+    apply_restore(&mut f, second.clone(), &NoFaults).unwrap();
+    let settlement = f
+        .owner
+        .with_restore_settlement(
+            &mut f.store,
+            second.clone(),
+            f.host.clone(),
+            2_000_000,
+            100,
+            |store, audit| record_test_projection(store, audit, "restore-two"),
+        )
+        .unwrap();
+    let second_resume = NativeRestoreResume {
+        application: second,
+        settlement_id: settlement.settlement_id,
+    };
+    let result = f
+        .owner
+        .resume_restore(
+            &mut f.store,
+            second_resume,
+            f.host.clone(),
+            2_000_000,
+            100,
+            150,
+            &NoFaults,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(result.binding.restore_fence_generation, 2);
+    use dohc_engine_storage::backup::{create_verified_backup, BackupOutcome, RealFreeSpace};
+    let BackupOutcome::Verified(backup) = create_verified_backup(
+        &f.store,
+        &f.dir.join("resumed-recovery"),
+        "resume",
+        "test",
+        180,
+        &RealFreeSpace,
+        &NoFaults,
+    )
+    .unwrap() else {
+        panic!("backup interrupted")
+    };
+    let db = backup.backup_path;
+    drop(f.store);
+    f.store = EngineStore::open(&db, 200).unwrap();
+    f.owner = ApplicationOwner::new("workspace".into()).unwrap();
+    assert_eq!(
+        first,
+        f.owner
+            .resume_restore(
+                &mut f.store,
+                resume.clone(),
+                f.host.clone(),
+                2_000_000,
+                100,
+                200,
+                &NoFaults,
+                |_, _, _, _| panic!("historical retry")
+            )
+            .unwrap()
+    );
+    let mut forged = resume;
+    forged.application.preparation.point.markdown_digest = "a".repeat(64);
+    assert!(f
+        .owner
+        .resume_restore(
+            &mut f.store,
+            forged,
+            f.host.clone(),
+            2_000_000,
+            100,
+            200,
+            &NoFaults,
+            |_, _, _, _| Ok(())
+        )
+        .is_err());
+    f.store
+        .read_with(|conn| -> Result<(), ApplicationError> {
+            require_restore_generation(conn, &key, Some(2))?;
+            assert!(require_restore_generation(conn, &key, Some(1)).is_err());
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn resume_commit_boundaries_leave_a_stop_or_one_historical_receipt() {
+    for point in [
+        FaultPoint::StorageBeforePersist,
+        FaultPoint::StorageAfterCommitBeforeAck,
+    ] {
+        let mut f = Fixture::new("Original");
+        let prep = f.freeze(f.baseline_point.clone());
+        let input = admitted_restore(&mut f, prep);
+        apply_restore(&mut f, input.clone(), &NoFaults).unwrap();
+        let settlement = f
+            .owner
+            .with_restore_settlement(
+                &mut f.store,
+                input.clone(),
+                f.host.clone(),
+                2_000_000,
+                100,
+                |store, audit| record_test_projection(store, audit, "resume-crash"),
+            )
+            .unwrap();
+        let resume = NativeRestoreResume {
+            application: input,
+            settlement_id: settlement.settlement_id,
+        };
+        assert!(matches!(
+            f.owner.resume_restore(
+                &mut f.store,
+                resume.clone(),
+                f.host.clone(),
+                2_000_000,
+                100,
+                100,
+                &CrashAt(point),
+                |_, _, _, _| Ok(())
+            ),
+            Err(ApplicationError::Interrupted)
+        ));
+        let committed: bool = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT resume_receipt_json IS NOT NULL FROM live_restore_fences",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(committed, point == FaultPoint::StorageAfterCommitBeforeAck);
+        let receipt = f
+            .owner
+            .resume_restore(
+                &mut f.store,
+                resume.clone(),
+                f.host.clone(),
+                2_000_000,
+                100,
+                110,
+                &NoFaults,
+                |_, _, _, _| {
+                    assert!(!committed);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(receipt.recorded_at_ms, if committed { 100 } else { 110 });
+        assert_eq!(
+            receipt,
+            f.owner
+                .resume_restore(
+                    &mut f.store,
+                    resume,
+                    f.host.clone(),
+                    2_000_000,
+                    100,
+                    120,
+                    &NoFaults,
+                    |_, _, _, _| panic!("saved resume")
+                )
+                .unwrap()
+        );
+    }
 }

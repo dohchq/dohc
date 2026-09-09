@@ -13,6 +13,9 @@ pub enum CollabError {
     #[error("malformed Y.Doc update: {reason}")]
     MalformedUpdate { reason: String },
 
+    #[error("configured Y.Doc byte budget exceeded")]
+    ConfiguredByteBudgetExceeded,
+
     /// The update is valid Yjs v1 data, but one of its structural edit
     /// boundaries lands inside a multi-unit Unicode scalar. Yjs can represent
     /// that UTF-16 boundary while Rust strings cannot, so replay would diverge.
@@ -197,6 +200,7 @@ impl CollabError {
     pub fn code(&self) -> &'static str {
         match self {
             CollabError::MalformedUpdate { .. } => "malformed-update",
+            CollabError::ConfiguredByteBudgetExceeded => "configured-byte-budget-exceeded",
             CollabError::ReplayParityViolation { .. } => "replay-parity-violation",
             CollabError::EmptyUpdate => "empty-update",
             CollabError::UpdateTooLarge { .. } => "update-too-large",

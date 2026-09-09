@@ -824,6 +824,7 @@ async fn restore_fence_serializes_queued_writes_and_preserves_other_documents() 
         4,
         Arc::new(NoFaults),
         tokio_util::sync::CancellationToken::new(),
+        None,
     ));
     let remote = AdmittedLiveUpdate {
         metadata: AdmittedLiveUpdateMetadata {
@@ -887,6 +888,7 @@ async fn restore_fence_serializes_queued_writes_and_preserves_other_documents() 
             5,
             Arc::new(NoFaults),
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();

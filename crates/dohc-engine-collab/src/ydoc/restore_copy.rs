@@ -21,9 +21,7 @@ impl Budget {
         self.bytes = self
             .bytes
             .checked_sub(count)
-            .ok_or_else(|| CollabError::MalformedUpdate {
-                reason: "restore structure exceeds configured byte budget".into(),
-            })?;
+            .ok_or(CollabError::ConfiguredByteBudgetExceeded)?;
         Ok(())
     }
 

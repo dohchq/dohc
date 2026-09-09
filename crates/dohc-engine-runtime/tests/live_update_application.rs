@@ -192,6 +192,7 @@ async fn committed_application_compacts_and_preserves_replay_through_fold_failur
                         DocKey::new("workspace", "main", "one").unwrap(),
                         Some(binding("one").lineage_claim_id),
                         tokio_util::sync::CancellationToken::new(),
+                        None,
                     )
                     .await
                     .unwrap();
@@ -202,6 +203,7 @@ async fn committed_application_compacts_and_preserves_replay_through_fold_failur
                 DocKey::new("workspace", "main", "one").unwrap(),
                 Some(binding("one").lineage_claim_id),
                 tokio_util::sync::CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();

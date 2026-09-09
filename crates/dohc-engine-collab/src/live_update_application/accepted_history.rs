@@ -9,6 +9,8 @@ const DOCUMENT: &str = "relay_database_namespace=?1 AND workspace_id=?2 AND main
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeAcceptedCheckpoint {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restore_operation_id: Option<String>,
     pub event_count: i64,
     pub terminal: Option<LiveUpdateReceipt>,
     pub binding: LiveObjectBinding,
@@ -60,7 +62,10 @@ fn next_digest(
     ))
 }
 
-fn origin_stamp(conn: &Connection, held: &Registration) -> Result<String, ApplicationError> {
+pub(super) fn origin_stamp(
+    conn: &Connection,
+    held: &Registration,
+) -> Result<String, ApplicationError> {
     if let Some(record) = bootstrap::read_bootstrap(conn, held)? {
         return Ok(hex_sha256(
             &serde_json::to_vec(&record).map_err(|_| ApplicationError::Corrupt)?,
@@ -83,23 +88,32 @@ pub(super) fn initialize(
     doc.apply(baseline)?;
     doc.validate_public_baseline(baseline)?;
     let checkpoint = NativeAcceptedCheckpoint {
+        restore_operation_id: None,
         event_count: 0,
         terminal: None,
         binding: held.binding.clone(),
         state_digest: put_binary_blob(tx, baseline)?,
         evidence_digest: initial_digest(held)?,
     };
-    insert_checkpoint(tx, held, &checkpoint)
+    insert_checkpoint(
+        tx,
+        held,
+        &checkpoint,
+        &mut restore_content::Budget {
+            remaining: crate::limits::MAX_YDOC_UPDATE_BYTES,
+        },
+    )
 }
 
 fn insert_checkpoint(
     tx: &Transaction<'_>,
     held: &Registration,
     c: &NativeAcceptedCheckpoint,
+    budget: &mut restore_content::Budget,
 ) -> Result<(), ApplicationError> {
     let p = parameters(held);
     tx.execute(
-        "INSERT INTO live_accepted_checkpoints VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+        "INSERT INTO live_accepted_checkpoints VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
         params![
             p[0],
             p[1],
@@ -112,7 +126,9 @@ fn insert_checkpoint(
             serde_json::to_string(&c.binding).map_err(|_| ApplicationError::Corrupt)?,
             origin_stamp(tx, held)?,
             c.state_digest,
-            c.evidence_digest
+            c.evidence_digest,
+            c.restore_operation_id,
+            c.restore_operation_id.as_deref().map(|id| restore_stamp(tx,held,id,budget)).transpose()?
         ],
     )
     .map_err(write_sql)?;
@@ -127,7 +143,7 @@ fn checkpoint(
     verify_cadence: bool,
 ) -> Result<NativeAcceptedCheckpoint, ApplicationError> {
     let p = parameters(held);
-    let sql = format!("SELECT event_count,journal_cursor,length(CAST(terminal_json AS BLOB))+length(CAST(binding_json AS BLOB)) FROM live_accepted_checkpoints WHERE {DOCUMENT} AND journal_cursor<=?6 ORDER BY journal_cursor DESC LIMIT 1");
+    let sql = format!("SELECT event_count,journal_cursor,length(CAST(terminal_json AS BLOB))+length(CAST(binding_json AS BLOB))+coalesce(length(CAST(restore_operation_id AS BLOB)),0) FROM live_accepted_checkpoints WHERE {DOCUMENT} AND journal_cursor<=?6 ORDER BY journal_cursor DESC LIMIT 1");
     let (count, cursor, length): (i64, i64, i64) = conn
         .query_row(&sql, params![p[0], p[1], p[2], p[3], p[4], through], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -136,16 +152,34 @@ fn checkpoint(
         .map_err(read_sql)?
         .ok_or(ApplicationError::Conflict)?;
     budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
-    let sql = format!("SELECT terminal_json,binding_json,state_sha256,evidence_digest,origin_stamp FROM live_accepted_checkpoints WHERE {DOCUMENT} AND event_count=?6");
-    let (terminal, binding, state_digest, evidence_digest, stamp): (
+    let sql = format!("SELECT terminal_json,binding_json,state_sha256,evidence_digest,origin_stamp,restore_operation_id,restore_stamp FROM live_accepted_checkpoints WHERE {DOCUMENT} AND event_count=?6");
+    let (
+        terminal,
+        binding,
+        state_digest,
+        evidence_digest,
+        stamp,
+        restore_operation_id,
+        saved_restore_stamp,
+    ): (
         String,
         String,
         String,
         String,
         String,
+        Option<String>,
+        Option<String>,
     ) = conn
         .query_row(&sql, params![p[0], p[1], p[2], p[3], p[4], count], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
         })
         .map_err(read_sql)?;
     if stamp != origin_stamp(conn, held)? {
@@ -175,6 +209,23 @@ fn checkpoint(
     {
         return Err(ApplicationError::Corrupt);
     }
+    if count == 0 && restore_operation_id.is_some() {
+        return Err(ApplicationError::Corrupt);
+    };
+    if let Some(id) = &restore_operation_id {
+        if Some(restore_stamp(conn, held, id, budget)?) != saved_restore_stamp {
+            return Err(ApplicationError::Corrupt);
+        };
+        let bound:bool=conn.query_row("SELECT application_delivery_id=?3 AND new_generation=?4 AND json_extract(application_json,'$.admitted.accepted.binding')=?5 FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2",params![held.namespace,id,terminal.as_ref().ok_or(ApplicationError::Corrupt)?.delivery_id,binding.restore_fence_generation,serde_json::to_string(&binding).map_err(|_|ApplicationError::Corrupt)?],|r|r.get(0)).map_err(read_sql)?;
+        if !bound {
+            return Err(ApplicationError::Corrupt);
+        };
+        if verify_cadence {
+            verify_restore_state(conn, held, id, &state_digest, budget)?;
+        }
+    } else if saved_restore_stamp.is_some() {
+        return Err(ApplicationError::Corrupt);
+    };
     if count > 0 {
         let sql=format!("SELECT length(CAST(metadata_json AS BLOB)) FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6 AND journal_cursor=?7");
         let length: i64 = conn
@@ -210,12 +261,16 @@ fn checkpoint(
                 })
                 .map_err(read_sql)?;
             let (events, bytes) = segment_position(conn, held, previous, count)?;
-            if events != CHECKPOINT_EVENTS && bytes < CHECKPOINT_BYTES {
+            if restore_operation_id.is_none()
+                && events != CHECKPOINT_EVENTS
+                && bytes < CHECKPOINT_BYTES
+            {
                 return Err(ApplicationError::Corrupt);
             }
         }
     }
     Ok(NativeAcceptedCheckpoint {
+        restore_operation_id,
         event_count: count,
         terminal,
         binding,
@@ -284,6 +339,35 @@ pub(super) fn append(
     event: &AdmittedLiveUpdate,
     working_reserve_bytes: usize,
 ) -> Result<(), ApplicationError> {
+    append_inner(
+        tx,
+        held,
+        event,
+        &mut restore_content::Budget {
+            remaining: working_reserve_bytes,
+        },
+        None,
+    )
+}
+
+pub(super) fn append_restore(
+    tx: &Transaction<'_>,
+    held: &Registration,
+    event: &AdmittedLiveUpdate,
+    doc: &Ydoc,
+    operation: &str,
+    budget: &mut restore_content::Budget,
+) -> Result<(), ApplicationError> {
+    append_inner(tx, held, event, budget, Some((operation, doc)))
+}
+
+fn append_inner(
+    tx: &Transaction<'_>,
+    held: &Registration,
+    event: &AdmittedLiveUpdate,
+    budget: &mut restore_content::Budget,
+    restored: Option<(&str, &Ydoc)>,
+) -> Result<(), ApplicationError> {
     let p = parameters(held);
     let sql = format!("SELECT EXISTS(SELECT 1 FROM live_accepted_checkpoints WHERE {DOCUMENT})");
     if !tx
@@ -297,10 +381,7 @@ pub(super) fn append(
         }
         return Ok(());
     }
-    let mut budget = restore_content::Budget {
-        remaining: working_reserve_bytes,
-    };
-    let c = checkpoint(tx, held, SAFE, &mut budget, false)?;
+    let c = checkpoint(tx, held, SAFE, budget, false)?;
     let sql=format!("SELECT length(CAST(metadata_json AS BLOB)) FROM live_accepted_updates WHERE {DOCUMENT} ORDER BY event_count DESC LIMIT 1");
     if let Some(length) = tx
         .query_row(&sql, p, |r| r.get::<_, i64>(0))
@@ -379,17 +460,24 @@ pub(super) fn append(
         ],
     )
     .map_err(write_sql)?;
-    if events == CHECKPOINT_EVENTS || bytes >= CHECKPOINT_BYTES {
-        let history = read_inner(
-            tx,
-            held,
-            event.metadata.accepted.receipt.journal_cursor,
-            &mut budget,
-            CHECKPOINT_EVENTS as usize,
-            false,
-        )?;
-        let state = history
-            .doc
+    if restored.is_some() || events == CHECKPOINT_EVENTS || bytes >= CHECKPOINT_BYTES {
+        let history = if restored.is_none() {
+            Some(read_inner(
+                tx,
+                held,
+                event.metadata.accepted.receipt.journal_cursor,
+                budget,
+                CHECKPOINT_EVENTS as usize,
+                false,
+            )?)
+        } else {
+            None
+        };
+        let doc = restored
+            .map(|(_, doc)| doc)
+            .or_else(|| history.as_ref().map(|h| &h.doc))
+            .ok_or(ApplicationError::Corrupt)?;
+        let state = doc
             .encode_full_state_bounded(budget.remaining.min(CHECKPOINT_BYTES as usize))
             .ok_or_else(|| {
                 if budget.remaining < CHECKPOINT_BYTES as usize {
@@ -399,17 +487,19 @@ pub(super) fn append(
                 }
             })?;
         budget.charge(state.len())?;
-        history.doc.validate_public_baseline(&state)?;
+        doc.validate_public_baseline(&state)?;
         insert_checkpoint(
             tx,
             held,
             &NativeAcceptedCheckpoint {
+                restore_operation_id: restored.map(|(id, _)| id.to_owned()),
                 event_count: count,
                 terminal: Some(event.metadata.accepted.receipt.clone()),
                 binding: event.metadata.accepted.binding.clone(),
                 state_digest: put_binary_blob(tx, &state)?,
                 evidence_digest: evidence,
             },
+            budget,
         )?;
     }
     Ok(())
@@ -594,4 +684,67 @@ pub(super) fn accepted_source(
         return Err(ApplicationError::Corrupt);
     }
     Ok(Some(metadata))
+}
+
+fn restore_stamp(
+    conn: &Connection,
+    held: &Registration,
+    id: &str,
+    budget: &mut restore_content::Budget,
+) -> Result<String, ApplicationError> {
+    let sql="SELECT json_array(input_json,receipt_json,proposal_json,proposal_candidate_sha256,proposal_frozen_sha256,proposal_point_sha256,application_json,application_delivery_id) FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5";
+    let p = params![
+        held.namespace,
+        id,
+        held.workspace_id,
+        held.binding.main_version_id,
+        held.binding.object_id
+    ];
+    let length: i64 = conn
+        .query_row(&format!("SELECT length(CAST(({sql}) AS BLOB))"), p, |r| {
+            r.get(0)
+        })
+        .map_err(read_sql)?;
+    budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
+    let json: String = conn.query_row(sql, p, |r| r.get(0)).map_err(read_sql)?;
+    Ok(hex_sha256(json.as_bytes()))
+}
+
+fn verify_restore_state(
+    conn: &Connection,
+    held: &Registration,
+    id: &str,
+    state_digest: &str,
+    budget: &mut restore_content::Budget,
+) -> Result<(), ApplicationError> {
+    let (frozen,candidate,proposal):(String,String,String)=conn.query_row("SELECT proposal_frozen_sha256,proposal_candidate_sha256,proposal_json FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2",params![held.namespace,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(read_sql)?;
+    // restore_stamp charged the complete retained metadata before this read.
+    let proposal: NativeRestoreProposalReceipt =
+        serde_json::from_str(&proposal).map_err(|_| ApplicationError::Corrupt)?;
+    if proposal.fence.operation.operation_id != id
+        || proposal.frozen_state_digest != frozen
+        || proposal.candidate_digest != candidate
+    {
+        return Err(ApplicationError::Corrupt);
+    };
+    let doc = Ydoc::wire();
+    doc.apply(&budget.blob(conn, &frozen)?)?;
+    for source in &proposal.native_sources {
+        let bytes = budget.blob(conn, &source.update_digest)?;
+        if bytes.len() as i64 != source.byte_length {
+            return Err(ApplicationError::Corrupt);
+        };
+    }
+    let candidate = budget.blob(conn, &candidate)?;
+    crate::validate_replay_parity(&doc, &candidate)?;
+    doc.apply(&candidate)?;
+    let state = budget.blob(conn, state_digest)?;
+    let saved = Ydoc::wire();
+    saved.apply(&state)?;
+    if !crate::replay_parity::structurally_equal_v2(&doc, &saved)?
+        || doc.canonical_content_sha256() != proposal.final_content_digest
+    {
+        return Err(ApplicationError::Corrupt);
+    };
+    Ok(())
 }

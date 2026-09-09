@@ -1091,7 +1091,7 @@ fn bounded_evidence(
         digest: Sha256::new(),
     };
     serde_json::to_writer(&mut writer, value)
-        .map_err(|_| invalid("owner adoption evidence exceeds configured budget"))?;
+        .map_err(|_| ApplicationError::ConfiguredByteBudgetExceeded)?;
     Ok((
         writer.size,
         writer
@@ -1207,7 +1207,7 @@ pub fn adopt_owner_committed(
                 return Err(invalid("owner adoption journal does not account for durable state"));
             }
             let seed = local.encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
-                .ok_or(invalid("owner adoption local seed exceeds configured budget"))?;
+                .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
             let append_key = format!("owner-adoption:{}",hex_sha256(&serde_json::to_vec(&(&cut.adoption_id,marker.head_update_seq,hex_sha256(&seed))).map_err(|_|ApplicationError::Corrupt)?));
             let entry = crate::owner_outbox::append_in_tx(tx,&b.workspace_id,crate::OwnerOutboxAppendInput {
                 binding:b.clone(),base_update:cut.baseline_bytes.clone(),append_key,update:seed,
@@ -1261,16 +1261,18 @@ pub(super) fn require_local_replay_budget(
         total = total
             .checked_add(size.map_err(read_sql)?)
             .ok_or(ApplicationError::Corrupt)?;
+        if total < 0 {
+            return Err(ApplicationError::Corrupt);
+        };
         if total as u64 > max_bytes as u64 {
-            return Err(invalid(
-                "owner adoption local replay exceeds configured budget",
-            ));
+            return Err(ApplicationError::ConfiguredByteBudgetExceeded);
         }
     }
-    if total < 0 || total as u64 > max_bytes as u64 {
-        return Err(invalid(
-            "owner adoption local replay exceeds configured budget",
-        ));
+    if total < 0 {
+        return Err(ApplicationError::Corrupt);
+    };
+    if total as u64 > max_bytes as u64 {
+        return Err(ApplicationError::ConfiguredByteBudgetExceeded);
     }
     usize::try_from(total).map_err(|_| ApplicationError::Corrupt)
 }
@@ -1382,7 +1384,7 @@ pub(super) fn read_origin(
         return Ok(None);
     };
     let binding = serde_json::from_str(&binding).map_err(|_| ApplicationError::Corrupt)?;
-    settlement::validate_historical_binding(&binding, b)?;
+    restore_resume::validate_origin_binding(conn, held, &binding)?;
     let terminal: Option<LiveUpdateReceipt> =
         serde_json::from_str(&terminal).map_err(|_| ApplicationError::Corrupt)?;
     if let Some(receipt) = &terminal {

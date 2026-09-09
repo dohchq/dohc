@@ -29,7 +29,8 @@ pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};
 mod bootstrap;
 pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
 mod restore_content;
-mod restore_fence;
+pub(crate) mod restore_fence;
+mod restore_resume;
 mod settlement;
 pub use bootstrap::{
     bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
@@ -40,7 +41,11 @@ pub use restore_content::{
     NativeRestoreSource,
 };
 pub use restore_fence::require_open as require_restore_open;
+pub use restore_fence::{
+    current_generation as restore_generation, require_generation as require_restore_generation,
+};
 pub use restore_fence::{NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin};
+pub use restore_resume::{NativeRestoreResume, NativeRestoreResumeReceipt};
 pub use settlement::{with_settlement, LiveSettlementAudit, LiveSettlementResult};
 
 #[derive(Debug, thiserror::Error)]
@@ -64,7 +69,7 @@ pub enum ApplicationError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
-    Collab(#[from] CollabError),
+    Collab(CollabError),
 }
 
 fn invalid(message: &'static str) -> ApplicationError {
@@ -488,7 +493,9 @@ impl ApplicationOwner {
             &binding.main_version_id,
             &binding.object_id,
         )?;
-        store.read_with(|conn| restore_fence::require_open(conn, &key))?;
+        store.read_with(|conn| {
+            restore_fence::require_registration(conn, &key, &namespace, &binding)
+        })?;
         let connection_changed = self.current.iter().any(|entry| {
             entry.lock().map_or(true, |r| {
                 r.namespace != namespace || r.coordinate != coordinate
@@ -518,6 +525,12 @@ impl ApplicationOwner {
         };
         let outcome = store.write_with(&NoFaults, |tx| {
             require_workspace(tx, &registration)?;
+            restore_fence::require_registration(
+                tx,
+                &key,
+                &registration.namespace,
+                &registration.binding,
+            )?;
             install_binding(tx, &registration)
         })?;
         if !matches!(outcome, TxnOutcome::Committed(())) {
@@ -698,6 +711,7 @@ pub fn apply_committed(
                     ApplicationPending::ApplicabilityUnavailable,
                 ));
             }
+            restore_fence::require_registration(tx, &key, &held.namespace, &held.binding)?;
             let Some(marker) = durable::read_marker_in(tx, &key)? else {
                 return Ok(ApplicationResult::Pending(
                     ApplicationPending::BaselineUnavailable,
@@ -737,7 +751,7 @@ pub fn apply_committed(
                 return Err(ApplicationError::Conflict.into());
             }
             mutation_attempted = true;
-            let append = durable::record_update_in_tx(
+            let append = durable::record_authorized_update_in_tx(
                 tx,
                 &key,
                 &event.update_bytes,
@@ -1013,6 +1027,15 @@ fn insert_application(
         tx.execute("INSERT INTO live_device_application_first_seen (relay_database_namespace,workspace_id,delivery_id,ordinal,client_id,start_clock,end_clock) VALUES (?1,?2,?3,?4,?5,?6,?7)", params![r.namespace,b.workspace_id,a.receipt.delivery_id,ordinal as i64,range.client_id,range.start_clock,range.end_clock]).map_err(write_sql)?;
     }
     Ok(())
+}
+
+impl From<CollabError> for ApplicationError {
+    fn from(error: CollabError) -> Self {
+        match error {
+            CollabError::ConfiguredByteBudgetExceeded => Self::ConfiguredByteBudgetExceeded,
+            error => Self::Collab(error),
+        }
+    }
 }
 
 #[cfg(test)]

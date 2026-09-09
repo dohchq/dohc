@@ -1,7 +1,7 @@
 use super::*;
 use std::collections::HashSet;
 
-mod restore;
+pub(super) mod restore;
 
 /// Immutable projection coverage. Filesystem status belongs to its materialization job.
 #[derive(Debug, Clone, Serialize)]
