@@ -14,6 +14,8 @@ import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidat
 import {openSyncRelayStorage} from '../../../services/sync-relay/src/storage.js'
 import {createLiveJournalHistoryAuthority} from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
 import {ServiceActivationStaleCut} from '../../../services/sync-relay/src/storage/serviceActivation.js'
+import {requireStopRestoreOwnerOrigin,type StopRestoreBasis} from '../../../services/sync-relay/src/storage/liveRestoreOperation.js'
+import type {StorageContext} from '../../../services/sync-relay/src/storage/context.js'
 
 const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')
 const hash=(bytes:Uint8Array)=>createHash('sha256').update(bytes).digest('hex')
@@ -152,6 +154,54 @@ it('does not accept an empty native outbox as an adoption acknowledgement',()=>{
     expect(()=>f.store.complete({document:f.document,host,access:f.store.pending(f.document,host),
       nativeState:{adoptionId:f.capture.activationId,pendingBytes:0},guard(){}})).toThrow('acknowledgement is missing')
     expect(f.store.read('workspace','docs/a.md',1_000_000)!.completed).toBe(false)
+  }finally{f.close()}
+})
+function ownerCapture(f:ReturnType<typeof fixture>){
+  f.prepare()
+  const access=f.store.pending(f.document,host),delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
+  const capture=delivery.captureOwnerCut({host,document:f.document,actor,adoptionId:f.capture.activationId,
+    expectedLocalSequence:f.capture.source.nativeHeadSequence,maxBytes:1_000_000,maxEvents:100,throughCursor:0})
+  const acknowledge=()=>delivery.acknowledgeOwnerAdoption(capture,{adoptionId:f.capture.activationId,
+    localYDocSequence:f.capture.source.nativeHeadSequence,terminalCursor:0,adoptionReplayed:false})
+  return {capture,delivery,acknowledge}
+}
+it('revalidates the frozen activation source before acknowledging a captured owner cut',()=>{
+  const f=fixture();try{
+    const owner=ownerCapture(f)
+    expect(owner.capture.cut.sourceMomentId).toBe(f.capture.source.sourceMomentId)
+    expect(owner.capture.cut.sourceDigest).toBe(f.capture.source.sourceDigest)
+    f.raw.exec("UPDATE sync_relay_service_activations SET source_json=json_set(source_json,'$.sourceMomentId','changed-source')")
+    expect(owner.capture.assertCurrent).toThrow()
+    expect(owner.acknowledge).toThrow()
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_delivery_owners').all()).toEqual([])
+  }finally{f.close()}
+})
+it('rejects changed retained activation provenance when opening or revalidating owner delivery',()=>{
+  const f=fixture();try{
+    const owner=ownerCapture(f);owner.acknowledge()
+    const opened=owner.delivery.openOwnerDelivery({host,document:f.document,actor})
+    expect(()=>opened.assertCurrent()).not.toThrow()
+    f.raw.exec("UPDATE sync_relay_service_activations SET source_json=json_set(source_json,'$.nativeHeadSequence',99)")
+    expect(opened.assertCurrent).toThrow()
+    expect(()=>owner.delivery.openOwnerDelivery({host,document:f.document,actor})).toThrow()
+  }finally{f.close()}
+})
+it('checks the frozen service origin separately from the original baseline when guarding restore',()=>{
+  const f=fixture();try{
+    const owner=ownerCapture(f);owner.acknowledge()
+    const row=f.raw.prepare('SELECT * FROM sync_relay_live_documents').get()!
+    const origin=f.raw.prepare('SELECT origin_json FROM sync_relay_live_delivery_owners').get()!
+    const basis:StopRestoreBasis={binding:owner.capture.binding,ownerBinding:owner.capture.binding,
+      baselineDigest:f.document.lineageClaimId,baselineByteLength:f.capture.baselineBytes.length,
+      projectedDigest:String(row.baseline_projected_sha256),projectedLength:Number(row.baseline_projected_byte_length),
+      baselineSequence:Number(row.baseline_moment_relay_seq),registeredAtMs:Number(row.registered_at_ms),
+      namespace:f.history.namespace,hostMode:'service',hostId:host.hostId,ownerOrigin:String(origin.origin_json)}
+    expect(basis.projectedDigest).not.toBe(f.capture.source.sourceDigest)
+    expect(()=>requireStopRestoreOwnerOrigin(f.storage as StorageContext,basis)).not.toThrow()
+    const tampered=JSON.parse(basis.ownerOrigin!);tampered.sourceMomentId='unrelated-source'
+    expect(()=>requireStopRestoreOwnerOrigin(f.storage as StorageContext,{...basis,ownerOrigin:JSON.stringify(tampered)})).toThrow()
+    f.raw.exec("UPDATE sync_relay_service_activations SET source_json=json_set(source_json,'$.nativeHeadSequence',99)")
+    expect(()=>requireStopRestoreOwnerOrigin(f.storage as StorageContext,basis)).toThrow()
   }finally{f.close()}
 })
 
