@@ -1004,3 +1004,55 @@ fn native_origin_details_survive_import_and_forged_source_is_rejected() {
     assert_eq!(count(&receiver, "live_device_bootstraps"), 0);
     assert_eq!(count(&receiver, "live_owner_adoptions"), 0);
 }
+
+#[test]
+fn historical_event_export_reads_the_base_once_then_reuses_its_published_scope() {
+    let mut f = fixture(false);
+    bootstrap(&mut f, false).unwrap();
+    for cursor in 1..=3 {
+        accept_enrollment_event(&mut f, cursor);
+    }
+    assert_eq!(count(&f.store, "live_audit_base_publications"), 0);
+    contact(&mut f.store);
+    BASE_BLOB_BYTES_READ.with(|read| read.set(0));
+    for event_count in 1..=3 {
+        let result = f
+            .store
+            .write_with(&NoFaults, |tx| {
+                journal_live_event_in_tx(tx, "relay", &f.binding, event_count, 300)
+            })
+            .unwrap();
+        assert!(matches!(
+            result,
+            dohc_engine_storage::TxnOutcome::Committed(Some(_))
+        ));
+        assert_eq!(BASE_BLOB_BYTES_READ.with(|read| read.get()), f.bytes.len());
+    }
+    assert_eq!(count(&f.store, "live_audit_base_publications"), 1);
+    assert_eq!(count(&f.store, "live_audit_event_publications"), 3);
+    let published = operations(&f.store);
+    BASE_BLOB_BYTES_READ.with(|read| read.set(0));
+    f.store
+        .write_with(&NoFaults, |tx| {
+            journal_live_event_in_tx(tx, "relay", &f.binding, 3, 301)
+        })
+        .unwrap();
+    assert_eq!(BASE_BLOB_BYTES_READ.with(|read| read.get()), 0);
+    assert_eq!(operations(&f.store), published);
+    assert!(
+        f.store
+            .write_with(&NoFaults, |tx| {
+                journal_live_event_in_tx(tx, "different-relay", &f.binding, 1, 302)
+            })
+            .is_err()
+    );
+    assert_eq!(operations(&f.store), published);
+    // An explicit base replay still verifies its complete bytes and saved coordinate.
+    f.store
+        .write_with(&NoFaults, |tx| {
+            journal_live_base_in_tx(tx, "relay", &f.binding, 303)
+        })
+        .unwrap();
+    assert_eq!(BASE_BLOB_BYTES_READ.with(|read| read.get()), f.bytes.len());
+    assert_eq!(operations(&f.store), published);
+}

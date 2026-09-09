@@ -183,6 +183,11 @@ fn require_base_coordinate(conn: &Connection, record: &BaseRecord) -> Result<(),
     Ok(())
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static BASE_BLOB_BYTES_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn require_base_blob(conn: &Connection, record: &BaseRecord) -> Result<(), SyncError> {
     let lengths: Option<(i64, i64)> = conn
         .query_row(
@@ -217,6 +222,8 @@ fn require_base_blob(conn: &Connection, record: &BaseRecord) -> Result<(), SyncE
         if bytes.len() != length {
             return Err(SyncError::BlobInvalid);
         }
+        #[cfg(test)]
+        BASE_BLOB_BYTES_READ.with(|read| read.set(read.get() + bytes.len()));
         hash.update(bytes);
     }
     if dohc_engine_storage::hex(&hash.finalize()) != record.checkpoint.state_digest {
@@ -381,7 +388,7 @@ pub fn journal_live_base_in_tx(
     } else {
         // A retained predecessor may have no active marker after replacement.
         // Its publication must not stamp or mutate the current lineage.
-        let existing:Option<BaseCoordinate>=tx.query_row("SELECT origin_id,origin_seq FROM replication_log WHERE workspace_id=?1 AND op_kind='ydoc.update' AND json_extract(payload_json,'$.versionId')=?2 AND json_extract(payload_json,'$.objectId')=?3 AND json_extract(payload_json,'$.lineageClaimId')=?4 AND json_extract(payload_json,'$.updateBlobSha256')=?4 AND json_extract(payload_json,'$.contentKind')='richdoc' AND json_extract(payload_json,'$.isBaseState')=1 ORDER BY origin_id,origin_seq LIMIT 1",params![key.workspace_id,key.version_id,key.object_id,binding.lineage_claim_id],|r|Ok(BaseCoordinate{origin_id:r.get(0)?,origin_seq:r.get(1)?})).optional().map_err(SyncError::corrupt)?;
+        let existing:Option<BaseCoordinate>=tx.query_row("SELECT origin_id,origin_seq FROM replication_log WHERE workspace_id=?1 AND op_kind='ydoc.update' AND json_extract(payload_json,'$.versionId')=?2 AND json_extract(payload_json,'$.objectId')=?3 AND json_extract(payload_json,'$.lineageClaimId')=?4 AND json_extract(payload_json,'$.updateBlobSha256')=?5 AND json_extract(payload_json,'$.contentKind')='richdoc' AND json_extract(payload_json,'$.isBaseState')=1 ORDER BY origin_id,origin_seq LIMIT 1",params![key.workspace_id,key.version_id,key.object_id,binding.lineage_claim_id,checkpoint.1],|r|Ok(BaseCoordinate{origin_id:r.get(0)?,origin_seq:r.get(1)?})).optional().map_err(SyncError::corrupt)?;
         if let Some(existing) = existing {
             existing
         } else {

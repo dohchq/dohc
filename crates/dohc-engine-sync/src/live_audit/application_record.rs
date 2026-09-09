@@ -527,8 +527,18 @@ pub fn journal_live_event_in_tx(
     if !crate::workspace_replicates_with_relay_in_tx(tx, &binding.workspace_id)? {
         return Ok(None);
     }
-    journal_live_base_in_tx(tx, namespace, binding, now_ms)?;
     let p = scope(namespace, binding);
+    // A local publication row records the base validation committed for this exact scope.
+    let base_published: bool = tx
+        .query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM live_audit_base_publications WHERE {SCOPE})"),
+            p,
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if !base_published {
+        journal_live_base_in_tx(tx, namespace, binding, now_ms)?;
+    }
     previous_evidence(tx, scope(namespace, binding), count)?;
     let published:Option<i64>=tx.query_row(&format!("SELECT origin_seq FROM live_audit_event_publications WHERE {SCOPE} AND event_count=?6"),params![p[0],p[1],p[2],p[3],p[4],count],|r|r.get(0)).optional().map_err(SyncError::corrupt)?;
     let (delivery,update,evidence,metadata_length):(String,String,String,i64)=tx.query_row(&format!("SELECT delivery_id,update_sha256,evidence_digest,length(CAST(metadata_json AS BLOB)) FROM live_accepted_updates WHERE {SCOPE} AND event_count=?6"),params![p[0],p[1],p[2],p[3],p[4],count],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(SyncError::corrupt)?;
