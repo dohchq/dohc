@@ -156,3 +156,24 @@ it("does not recover or acknowledge after owner standing changes during applicat
   expect(f.client.readLiveApplicationAck).not.toHaveBeenCalled();
   expect(f.outboxAcks).toEqual([]);
 });
+
+it("preserves the application error when reading its recovery ACK also fails", async () => {
+  const f = fixture(), applicationError = new Error("application response lost");
+  f.client.sendLiveApplication.mockRejectedValueOnce(applicationError);
+  f.client.readLiveApplicationAck.mockRejectedValueOnce(new Error("recovery ACK unavailable"));
+  await expect(f.consumer.drain(document)).rejects.toBe(applicationError);
+  expect(f.client.readLiveApplicationAck).toHaveBeenCalledTimes(1);
+  expect(f.outboxAcks).toEqual([]);
+  expect(f.retained).toEqual(f.ownerEntries);
+});
+
+it("checks owner standing before returning an earlier application error", async () => {
+  const f = fixture();
+  f.client.sendLiveApplication.mockRejectedValueOnce(new Error("application response lost"));
+  f.client.readLiveApplicationAck.mockImplementationOnce(async () => {
+    f.invalidate(); throw new Error("recovery ACK unavailable");
+  });
+  await expect(f.consumer.drain(document)).rejects.toThrow("Owner standing changed");
+  expect(f.outboxAcks).toEqual([]);
+  expect(f.retained).toEqual(f.ownerEntries);
+});

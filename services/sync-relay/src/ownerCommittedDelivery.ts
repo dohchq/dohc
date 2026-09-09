@@ -111,7 +111,10 @@ export class OwnerCommittedDelivery {
             applied = await c.client.sendLiveApplication({ ...request(),registrationId },event,signal);
           } catch (error) {
             check(); latest.assertCurrent();
-            const ack = await c.client.readLiveApplicationAck({...request(),registrationId},event.metadata.accepted.receipt,signal);
+            const ack = await c.client.readLiveApplicationAck({...request(),registrationId},event.metadata.accepted.receipt,signal).catch(() => {
+              check(); latest.assertCurrent();
+              throw error;
+            });
             check(); latest.assertCurrent();
             if (!ack) throw error;
             applied = {result: {status: "applied",ack}};
