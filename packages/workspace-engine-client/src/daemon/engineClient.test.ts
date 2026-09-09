@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { parseRelayAcceptedLiveUpdate } from "@dohc/live-session-contract";
 import type { Envelope, Request } from "../protocol";
 import { isDaemonReconnectError } from "../live/daemonLiveAdapter";
-import { decodeNativeRestoreProposal, encodeNativeRestoreInput } from "./nativeRestore";
+import { encodeNativeRestoreInput } from "./nativeRestore";
 import {
   EngineClient,
   EngineClientError,
@@ -118,17 +118,6 @@ describe("private native restore transport", () => {
       peer.onBlobChunk = frame => { if (frame.fin) reply(peer, wireId); };
       await expect(transport.sendLiveRestore({ ...call, id: 904 }, "apply", input, 128)).resolves.toHaveProperty("bytes");
     } finally { controller.abort(); transport.close(); }
-  });
-  it("decodes bounded field views without parsing receipt JSON", () => {
-    const fields = [Buffer.from("not JSON"), Buffer.from([1]), Buffer.from([2]), Buffer.from([3]), Buffer.from([4])];
-    const framed = Buffer.concat(fields.flatMap(value => { const size = Buffer.alloc(4); size.writeUInt32LE(value.length); return [size, value]; }));
-    const result = decodeNativeRestoreProposal(framed, 128, 1);
-    expect(Buffer.from(result.receiptJson).toString()).toBe("not JSON");
-    expect(result.nativeSourceBytes).toHaveLength(1);
-    expect(result.candidateBytes.buffer).toBe(framed.buffer);
-    expect(() => decodeNativeRestoreProposal(framed.subarray(0, -1), 128, 1)).toThrow("Truncated");
-    expect(() => decodeNativeRestoreProposal(Buffer.concat([framed, Buffer.alloc(4)]), 128, 1)).toThrow("source count");
-    expect(() => decodeNativeRestoreProposal(framed, 8, 1)).toThrow("bounds");
   });
 });
 

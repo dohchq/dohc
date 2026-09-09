@@ -28,7 +28,7 @@ function read(value: string): unknown {
   return JSON.parse(readFileSync(file, "utf8"));
 }
 export function readDeviceLiveHostConfig(file: string, limits: DeviceControlLimits) {
-  const row = configRecord(read(file), ["version", "engineExecutable", "hostId", "hostEpoch", "instanceId", "workspaces", "ingress", "maxQueuedBytes", "shutdownGraceMs"], ["settlement"]);
+  const row = configRecord(read(file), ["version", "engineExecutable", "hostId", "hostEpoch", "instanceId", "workspaces", "ingress", "maxQueuedBytes", "shutdownGraceMs"], ["settlement", "restore"]);
   if (row.version !== 1 || !Array.isArray(row.workspaces) || row.workspaces.length < 1 || row.workspaces.length > 64) throw new TypeError("Invalid device delivery configuration.");
   const workspaces = row.workspaces.map(item => {
     const entry = configRecord(item, ["root", "workspaceId", "maxRegistrations"]);
@@ -38,10 +38,13 @@ export function readDeviceLiveHostConfig(file: string, limits: DeviceControlLimi
     new Set(workspaces.map(item => process.platform === "win32" ? item.root.toLowerCase() : item.root)).size !== workspaces.length) throw new TypeError("Duplicate device workspace.");
   const ingress = configRecord(row.ingress, ["aggregateBytes", "applicationWorkingReserveBytes", "maxUploads", "uploadDeadlineMs"]);
   const settlement = parseLiveSettlementConfig(row.settlement);
+  const restoreRow = row.restore === undefined ? undefined : configRecord(row.restore, ["maxBytes", "maxEvents"]);
+  const restore = restoreRow ? Object.freeze({maxBytes: integer(restoreRow.maxBytes, 5), maxEvents: integer(restoreRow.maxEvents)}) : undefined;
   const applicationWorkingReserveBytes = integer(ingress.applicationWorkingReserveBytes, 0);
   if (settlement && applicationWorkingReserveBytes === 0) throw new TypeError("Settlement requires a positive applicationWorkingReserveBytes limit.");
+  if (restore && applicationWorkingReserveBytes === 0) throw new TypeError("Restore requires a positive applicationWorkingReserveBytes limit.");
   return Object.freeze({ version: 1 as const, engineExecutable: path(row.engineExecutable, false),
-    settlement,
+    settlement, restore,
     shutdownGraceMs: integer(row.shutdownGraceMs),
     hostId: parseHostControlIdentifier(row.hostId), hostEpoch: parseHostEpoch(row.hostEpoch), instanceId: parseHostControlIdentifier(row.instanceId),
     workspaces: Object.freeze(workspaces), maxQueuedBytes: integer(row.maxQueuedBytes, Math.max(limits.maxPayloadBytes + 16, 65_536 + 16)),

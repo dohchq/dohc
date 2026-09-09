@@ -66,6 +66,16 @@ it("requires a positive application reserve only when settlement is configured",
   expect(readDeviceLiveHostConfig(run.write({ ...run.value, settlement }), limits).settlement).toEqual(settlement);
 });
 
+it("requires bounded native restore configuration and a working reserve", () => {
+  const run = fixture(), restore = {maxBytes: 1_000_000, maxEvents: 10};
+  expect(readDeviceLiveHostConfig(run.write({...run.value, restore}), limits).restore).toEqual(restore);
+  for (const bad of [{...restore, maxBytes: 4}, {...restore, maxEvents: 0}, {...restore, unexpected: true}]) {
+    expect(() => readDeviceLiveHostConfig(run.write({...run.value, restore: bad}), limits)).toThrow();
+  }
+  expect(() => readDeviceLiveHostConfig(run.write({...run.value, restore,
+    ingress: {...run.value.ingress, applicationWorkingReserveBytes: 0}}), limits)).toThrow("Restore requires a positive applicationWorkingReserveBytes limit.");
+});
+
 it("rejects relay queues smaller than an advertised payload before connecting", () => {
   const run = fixture();
   const wide = { ...limits, maxPayloadBytes: 4_194_304, maxPendingBytes: 4_194_320 };
