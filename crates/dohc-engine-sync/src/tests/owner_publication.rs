@@ -388,6 +388,52 @@ fn accepted_page_budget_exhaustion_is_resumable_without_pending_share() {
 }
 
 #[test]
+fn workspace_push_reports_and_resumes_an_accepted_prefix_limited_by_proof_budget() {
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    for sequence in 0..2 {
+        let op = candidate(&mut store, &observed, &checkpoint, sequence);
+        journal_local_replication_op(
+            &mut store,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "ydoc.update",
+            &op.payload,
+            10 + sequence,
+            &NoFaults,
+        )
+        .unwrap();
+    }
+    let client = RelaySyncClient::new(FakeRelay::default());
+    for (pass, expected_more) in [(0, true), (1, false)] {
+        let outcome = client
+            .push_workspace(&mut store, "ws", &NoFaults, 12 + pass, checkpoint.len() * 2)
+            .unwrap();
+        let SyncPassOutcome::Complete {
+            pushed,
+            has_more,
+            owner_admission_pending,
+            ..
+        } = outcome
+        else {
+            panic!("push did not complete");
+        };
+        assert_eq!(pushed, if expected_more { 2 } else { 1 });
+        assert_eq!(has_more, expected_more);
+        assert!(owner_admission_pending.is_empty());
+        assert_eq!(read_pushed_seq(&store, "ws", "local").unwrap(), pass + 1);
+    }
+    let pushes = client.transport().pushes.lock().unwrap();
+    let sent: Vec<_> = pushes
+        .iter()
+        .flat_map(|push| &push.ops)
+        .map(|op| op.origin_seq)
+        .collect();
+    assert_eq!(sent, [0, 1, 2]);
+}
+
+#[test]
 fn first_accepted_operation_over_budget_returns_configuration_error() {
     let (_dir, mut store, observed, checkpoint) = fixture();
     let op = candidate(&mut store, &observed, &checkpoint, 0);

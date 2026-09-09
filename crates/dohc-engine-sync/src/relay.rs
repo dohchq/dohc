@@ -983,6 +983,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         let mut pushed = 0_usize;
         let mut owner_admission_pending = Vec::new();
+        let mut resume_needed = false;
 
         let has_position = store
             .read_with(|conn| has_relay_position(conn, workspace_id))
@@ -1121,6 +1122,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 }
                 if !conflict {
                     if blocked {
+                        resume_needed |= prefix.budget_exhausted;
                         break;
                     }
                     continue;
@@ -1161,9 +1163,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             owner_admission_pending,
             pushed,
             fetched: 0,
-            has_more: store
-                .read_with(|conn| crate::live_audit::enrollment::pending_in_tx(conn, workspace_id))
-                .map_err(local)?,
+            has_more: resume_needed
+                || store
+                    .read_with(|conn| {
+                        crate::live_audit::enrollment::pending_in_tx(conn, workspace_id)
+                    })
+                    .map_err(local)?,
             applied: 0,
             refused: 0,
             skipped: 0,
