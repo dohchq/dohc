@@ -148,6 +148,7 @@ export class ServiceOrdinaryReplication {
     return this.#run(callerSignal, async signal => {
       const result = await this.#request("sync.push", {}, signal);
       if (result.status !== "complete" || typeof result.hasMore !== "boolean") throw new Error("Ordinary push did not complete.");
+      if (array(result.ownerAdmissionPending).length > 0) throw new Error("Ordinary publication is waiting for owner admission.");
       return {pushed: integer(result.pushed), hasMore: result.hasMore, sharingDeclined: declines(result.sharingDeclined)};
     });
   }
