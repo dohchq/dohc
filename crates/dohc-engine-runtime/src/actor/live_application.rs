@@ -1138,7 +1138,7 @@ impl Request {
                                 .map_err(|error| dohc_engine_collab::live_update_application::ApplicationError::Storage(
                                     dohc_engine_storage::StorageError::persist_public(error)))?;
                             for event_count in 1..=count {
-                                dohc_engine_sync::journal_live_event_in_tx(tx, namespace, binding, event_count, now_ms)
+                                dohc_engine_sync::journal_live_event_or_defer_in_tx(tx, namespace, binding, event_count, now_ms)
                                     .map_err(|error| dohc_engine_collab::live_update_application::ApplicationError::Storage(
                                         dohc_engine_storage::StorageError::persist_public(error)))?;
                             }
