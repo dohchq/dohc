@@ -255,6 +255,11 @@ impl EngineService {
                 let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone())
                     .map_err(|_| WireError::new(ErrorCode::Internal, "workspace open returned no handle"))?;
                 if workspace.relay.is_some() {
+                    service.versions_ensure_main(
+                        &ctx,
+                        Some(handle.clone()),
+                        json!({"workspaceId": workspace.workspace_id}),
+                    ).await?;
                     ordinary_workspaces.insert(handle.clone());
                 }
                 if let Some(adoption) = &config.adoption {
@@ -616,6 +621,42 @@ mod tests {
         assert!(service.sync_admission(&owner.handle()).is_err());
         close(&service).await;
         assert!(EngineService::new().relay_sync_admission().is_none());
+    }
+
+    #[tokio::test]
+    async fn cold_ordinary_workspace_has_main_before_discovery_and_preserves_it_on_restart() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        assert!(!scratch.path().join(".dohc/engine/engine.db").exists());
+        let mut first_main = None;
+        for _ in 0..2 {
+            let mut config = config(&[(scratch.path(), "workspace")]);
+            config.workspaces[0].relay = Some(
+                serde_json::from_value(
+                    json!({"baseUrl":"https://relay.invalid","bearerToken":"owner"}),
+                )
+                .unwrap(),
+            );
+            let (service, owner, _ingress) =
+                EngineService::configured_live_host(config).await.unwrap();
+            let discovery = service.configured_live_host.get().unwrap();
+            let handle: WorkspaceHandle = serde_json::from_value(
+                discovery.result["workspaces"][0]["workspaceHandle"].clone(),
+            )
+            .unwrap();
+            let mut ctx = RequestContext::unbounded();
+            ctx.connection = Some(owner.handle());
+            let main = service
+                .versions_active(&ctx, Some(handle), json!({"workspaceId":"workspace"}))
+                .await
+                .unwrap();
+            assert_eq!(main["id"], "main");
+            if let Some(first) = &first_main {
+                assert_eq!(&main, first);
+            } else {
+                first_main = Some(main);
+            }
+            close(&service).await;
+        }
     }
 
     #[tokio::test]
