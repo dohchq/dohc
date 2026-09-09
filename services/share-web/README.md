@@ -1,7 +1,7 @@
 # share-web
 
-This service is the public browser boundary for share links. It exchanges a
-fragment secret with the sync relay, stores the returned relay capability in a
+This service is the public browser boundary for share links. For public links,
+it exchanges a fragment secret with the sync relay, stores the returned relay capability in a
 bounded in-memory session, and sends only an HttpOnly session cookie to the
 browser.
 
@@ -45,6 +45,25 @@ If the relay is unavailable or sends an invalid response to an authenticated
 viewer request, `share-web` returns a generic 503 without relay details or
 stale shared content. Restore the relay; the viewer can retry while its
 in-memory session remains valid.
+
+## Named browser invitations
+
+The owner can copy a browser invitation for direct named Edit access to live paths.
+The relay builds `/s/edit/<encoded-grantId>` from `DOHC_RELAY_SHARE_WEB_ORIGIN` when named browser sessions are configured.
+This URL identifies the invitation. The recipient must sign in with the invited account; knowing the URL grants no access.
+Issuing the invitation does not check whether the editor or document host is available.
+
+Browser editing requires configuration on both services:
+
+- On the relay, set `DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS`, `DOHC_RELAY_SHARE_WEB_ORIGIN`, and `DOHC_RELAY_EXCHANGE_KEY`.
+  Enable `DOHC_RELAY_NAMED_LIVE_CONFIG` and `DOHC_RELAY_NAMED_LIVE_HOSTS` with the existing link key and a configured native document host.
+- On share-web, set `DOHC_SHARE_WEB_AUTH_URL` and `DOHC_SHARE_WEB_PUBLIC_ORIGIN` with the matching public Host and relay exchange key.
+  Set `DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS`, `DOHC_SHARE_WEB_NAMED_LIVE_LIMITS`, and `DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS`.
+
+The named session, live transport, and editor settings have no default budgets.
+Share-web refuses editor requests when its named editor is unconfigured.
+Live browser editing covers shared Markdown files. Other files retain their existing sharing permissions and change-submission flow.
+Desktop share codes remain available when browser invitations are unconfigured.
 
 ## Storage and recovery
 
