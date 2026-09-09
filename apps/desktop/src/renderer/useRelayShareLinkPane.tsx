@@ -22,6 +22,13 @@ import { PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
 
 type LinkAccess = "view" | "comment";
 
+export function linkRetuneLabels(widens: boolean, access: LinkAccess | undefined) {
+  if (widens) return {action: "Turn on comments", pending: "Turning on comments…"};
+  return access === "comment"
+    ? {action: "Use Comment access", pending: "Changing access…"}
+    : {action: "Turn off comments", pending: "Turning off comments…"};
+}
+
 type LinkConfirmation =
   | {
       kind: "reset";
@@ -499,22 +506,19 @@ export function useRelayShareLinkPane(props: {
   const confirmationWidens =
     confirmation?.kind === "retune" && confirmationRow !== null &&
     shareAccessRank(confirmation.access) > shareAccessRank(confirmationRow.access);
+  const retuneLabels = linkRetuneLabels(confirmationWidens, confirmation?.kind === "retune" ? confirmation.access : undefined);
   const confirmationActionLabel =
     confirmation?.kind === "reset"
       ? "Reset link"
       : confirmation?.kind === "end"
         ? "End link"
-        : confirmation?.access === "comment"
-          ? "Turn on comments"
-          : "Turn off comments";
+        : retuneLabels.action;
   const confirmationPendingLabel =
     confirmation?.kind === "reset"
       ? "Resetting…"
       : confirmation?.kind === "end"
         ? "Ending…"
-        : confirmation?.access === "comment"
-          ? "Turning on comments…"
-          : "Turning off comments…";
+        : retuneLabels.pending;
 
   useLayoutEffect(() => {
     stopAllOwnerActivity();
@@ -2263,7 +2267,7 @@ export function useRelayShareLinkPane(props: {
                         : "Use Comment access for this link? The same link keeps working. Holders can view and comment."}
                       {narrowerDependents.length > 0 ? (
                         <>
-                          {" "}These people drop to {confirmation.access} too:{" "}
+                          {" "}These people drop to {confirmation.access === "comment" ? "Comment" : "view"} too:{" "}
                           <DependentNames dependents={narrowerDependents} />.
                         </>
                       ) : null}
