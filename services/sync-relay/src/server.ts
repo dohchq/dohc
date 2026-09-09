@@ -1,3 +1,4 @@
+import {createNamedRecipientDocuments} from "./namedRecipientDocuments";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { createOwnerRestoreRoutes, type OwnerRestoreHost, type OwnerRestoreRoute } from "./ownerRestoreRoutes";
 import { randomUUID } from "node:crypto";
@@ -186,17 +187,22 @@ export function createSyncRelayHandler({
   if (namedBrowserSessionLimits && (!shareWebOrigin || !relayExchangeKey)) {
     throw new TypeError("Named browser sessions require configured viewer origin and relay exchange.");
   }
+  const resolveNamedActor: ResolveActor = async (request, workspaceId) => {
+    request.signal.throwIfAborted();
+    const actor = await resolveActor(request, workspaceId);
+    request.signal.throwIfAborted();
+    if (actor.workspaceId !== workspaceId) return actor;
+    await claimPendingShares(actor.userId, request.signal);
+    request.signal.throwIfAborted();
+    return actor;
+  };
   const namedBrowser = namedBrowserSessionLimits ? createNamedLiveBrowserHttp({
     storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, now: nowMs,
-    resolveActor: async (request, workspaceId) => {
-      request.signal.throwIfAborted();
-      const actor = await resolveActor(request, workspaceId);
-      request.signal.throwIfAborted();
-      if (actor.workspaceId !== workspaceId) return actor;
-      await claimPendingShares(actor.userId, request.signal);
-      request.signal.throwIfAborted();
-      return actor;
-    },
+    resolveActor: resolveNamedActor,
+  }) : undefined;
+  const namedDocuments = namedBrowserSessionLimits ? createNamedRecipientDocuments({
+    storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits,
+    resolveActor: resolveNamedActor, maxFiles: linkCurrentFileLimit,
   }) : undefined;
   const relayExchangeKeyHash =
     relayExchangeKey === undefined ? undefined : hashRelayExchangeKey(relayExchangeKey);
@@ -508,6 +514,9 @@ export function createSyncRelayHandler({
       const pathname = new URL(request.url).pathname;
       if (pathname === "/sync/live/named-sessions" || pathname === "/sync/live/named-sessions/resolve") {
         return namedBrowser ? await namedBrowser(request) : errorResponse(notFound());
+      }
+      if (pathname === "/sync/live/named-documents") {
+        return namedDocuments ? await namedDocuments(request) : errorResponse(notFound());
       }
       const route = parseRoute(request);
       if (route.route === "link-exchange") {

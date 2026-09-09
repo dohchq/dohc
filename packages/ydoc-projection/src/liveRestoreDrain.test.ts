@@ -20,6 +20,7 @@ import {LiveRestorePreparation, parseLiveRestoreConfig} from "../../../services/
 import {canonicalAcceptedMetadata} from "../../../services/sync-relay/src/liveAcceptedHistory.js";
 import {LiveCommittedDelivery} from "../../../services/sync-relay/src/liveCommittedDelivery.js";
 import {OwnerCommittedDelivery} from "../../../services/sync-relay/src/ownerCommittedDelivery.js";
+import {OwnerRestoreReview} from "../../../apps/desktop/src/ipc/ownerRestoreContract.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
 const jsonHash = (value: unknown) => hash(Buffer.from(JSON.stringify(value)));
@@ -1408,6 +1409,32 @@ function repeatedReviewFixture(rounds = 1) {
     }
   } catch (error) {f.close(); throw error;}
 }
+
+it("parses the complete leased storage review through the desktop owner restore contract", async () => {
+  const f = repeatedReviewFixture(2);
+  try {
+    const before = lifecycleRows(f), driver = new LiveRestorePreparation({...preparationConfig(), maxEvents: 40});
+    const sendLiveRestore = vi.fn(async () => {throw Error("review must not write to the host");});
+    const lease = await driver.review({store: f.store, lookup: f.lookup, deliveryKind: "owner",
+      connection: {client: {sendLiveRestore} as never, workspace: "native-workspace", host: f.lookup.host, deadlineMs: 1000, nextRequestId: () => 1}});
+    try {
+      const parsed = OwnerRestoreReview.parse(JSON.parse(JSON.stringify(lease.review)));
+      expect(parsed.operationId).toBe(f.input.operationId);
+      expect(parsed.acceptedEvents).toEqual(lease.review!.acceptedEvents);
+      expect(parsed.priorRestoreCuts).toEqual(lease.review!.priorRestoreCuts);
+      expect(parsed.priorRestoreCuts).toHaveLength(2);
+      expect(parsed.nativeSources).toEqual(lease.review!.nativeSources);
+      expect(parsed.nativeSources).toHaveLength(2);
+      const {candidateDigest, ...content} = lease.review!.content;
+      expect(parsed.candidateDigest).toBe(candidateDigest);
+      expect(parsed.content).toEqual(content);
+      expect(parsed.content.restoredMarkdownDigest).toBe(f.receipt.point.markdownDigest);
+      expect(lifecycleRows(f)).toEqual(before);
+      expect(sendLiveRestore).not.toHaveBeenCalled();
+    } finally {lease.close();}
+    expect(lease.invalidated.aborted).toBe(true);
+  } finally {f.close();}
+});
 
 it.each(["complete", "missing-event", "missing-proposal", "wrong-proposal", "budget", "changed-after-review", "cancelled-after-review"])("confirms only an authenticated complete host restore review: %s", async state => {
   const f = repeatedReviewFixture();

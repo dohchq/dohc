@@ -46,11 +46,12 @@ const application = createShareWebApplication({
   accountAuth: config.accountAuth,
   namedBrowserSessionLimits: config.namedBrowserSessionLimits,
   namedLiveTickets: config.namedLiveGatewayLimits !== undefined,
+  namedRecipientBrowserLimits: config.namedRecipientBrowserLimits,
 });
 
 const server = serveFetchHandler({
   handler: application.handle,
-  maxBodyBytes: url => ["/api/live/named-session", "/api/live/named-ticket"].includes(url.pathname) && config.namedBrowserSessionLimits
+  maxBodyBytes: url => ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents"].includes(url.pathname) && config.namedBrowserSessionLimits
     ? config.namedBrowserSessionLimits.maxRequestBytes : MAX_REQUEST_BODY_BYTES,
   oversized: refusal,
   failure: refusal,

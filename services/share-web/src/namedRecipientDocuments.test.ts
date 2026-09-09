@@ -12,6 +12,7 @@ const browserLimits = {provider: {frames: {receive: {maxFrameBytes: 1024, maxSta
   maxQueuedBytes: 16384, maxQueuedFrames: 64, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 16384},
   maxPendingUpdateBytes: 16384, maxPendingUpdates: 8, maxDeliveryAttempts: 4},
   maxHttpResponseBytes: 16384, maxSocketBufferedBytes: 16384, connectTimeoutMs: 2000, sendTimeoutMs: 500, drainPollMs: 10};
+function deferred<T>() {let resolve!: (value: T) => void; const promise = new Promise<T>(done => {resolve = done;}); return {promise, resolve};}
 function request(user = "alice", body: unknown = {grantId: "grant"}) {
   return new Request(`${origin}/api/live/named-documents`, {method: "POST", body: JSON.stringify(body),
     headers: {host: "share.example.test", origin, "content-type": "application/json", cookie: `${cookieName}=${user}`}});
@@ -76,7 +77,7 @@ it("rechecks the grant after reading current files", async () => {
 });
 it("keeps cancelled navigation in capacity until account resolution finishes", async () => {
   const f = await fixture();
-  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const entered = deferred<void>(), release = deferred<void>();
   let count = 0;
   f.actor.mockImplementation(async (_incoming, workspaceId) => {
     if (++count === 2) entered.resolve();

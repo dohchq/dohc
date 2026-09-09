@@ -17,7 +17,13 @@ export const OwnerRestoreIntent = z.object({
 }).strict();
 export const OwnerRestoreRecipient = z.object({grantId: id, principalKind: z.enum(["user", "email", "link"]), userId: id.nullable(), email: z.string().nullable()});
 export const OwnerRestoreStatus = z.object({operationId: id, document, path: z.string(), phase: OwnerRestorePhase,
-  intent: OwnerRestoreIntent, proposalDigest: digest.nullable()});
+  intent: OwnerRestoreIntent, proposalDigest: digest.nullable()}).superRefine((status, context) => {
+  const sameDocument = (Object.keys(status.document) as (keyof typeof status.document)[])
+    .every(key => status.document[key] === status.intent.document[key]);
+  if (status.operationId !== status.intent.operationId || !sameDocument) {
+    context.addIssue({code: "custom", message: "The restore status belongs to another operation or file."});
+  }
+});
 export const OwnerRestoreOptions = z.object({document, path: z.string(),
   grants: z.array(OwnerRestoreRecipient.extend({shareId: id, generation: integer.min(1)})),
   points: z.array(z.object({cursor: integer, receivedAtMs: integer.nullable(), kind: z.enum(["baseline", "accepted"]), receiptDigest: digest})),

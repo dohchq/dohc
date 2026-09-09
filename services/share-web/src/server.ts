@@ -1,3 +1,5 @@
+import {createNamedRecipientDocumentsClient} from "./namedRecipientDocuments";
+import type {NamedLiveBrowserLimits} from "../viewer/src/namedLiveBrowserTransport";
 import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
@@ -77,6 +79,7 @@ export interface CreateShareWebApplicationOptions {
   fetchAuth?: RelayFetch;
   namedBrowserSessionLimits?: NamedLiveBrowserClientLimits;
   namedLiveTickets?: boolean;
+  namedRecipientBrowserLimits?: NamedLiveBrowserLimits;
 }
 
 export type LinkBrowserMaterial =
@@ -765,6 +768,7 @@ export function createShareWebApplication({
   fetchAuth,
   namedBrowserSessionLimits,
   namedLiveTickets,
+  namedRecipientBrowserLimits,
 }: CreateShareWebApplicationOptions): ShareWebApplication {
   if (namedBrowserSessionLimits && (!accountAuth || !relayExchangeKey || !publicHosts.has(new URL(accountAuth.publicOrigin).host))) {
     throw new TypeError("Named browser sessions require configured account auth and relay exchange.");
@@ -775,6 +779,11 @@ export function createShareWebApplication({
   if (namedLiveTickets && !namedBrowser) throw new TypeError("Named live tickets require named browser sessions.");
   const namedTickets = namedLiveTickets ? createNamedLiveTicketClient({
     relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits!, fetchRelay,
+  }) : undefined;
+  if (namedRecipientBrowserLimits && !namedTickets) throw new TypeError("Named recipient editing requires named live tickets.");
+  const namedDocuments = namedRecipientBrowserLimits ? createNamedRecipientDocumentsClient({
+    relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits!,
+    browserLimits: namedRecipientBrowserLimits, fetchRelay,
   }) : undefined;
   const accountHandler = accountAuth ? createAccountAuthHandler({
     ...accountAuth,
@@ -980,6 +989,12 @@ export function createShareWebApplication({
     if (pathname === "/api/live/named-ticket") {
       if (!namedTickets) return refused();
       const result = await namedTickets(request);
+      return response(result.body, {status: result.status, headers: result.headers});
+    }
+
+    if (pathname === "/api/live/named-documents") {
+      if (!namedDocuments) return refused();
+      const result = await namedDocuments(request);
       return response(result.body, {status: result.status, headers: result.headers});
     }
 
