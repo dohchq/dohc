@@ -66,7 +66,7 @@ describe("EmailShareForm", () => {
     const user = userEvent.setup();
     render(<EmailShareForm workspaceId="ws-1" target={{kind: "paths", paths: ["docs"]}} visible onDone={() => {}}/>);
     await user.click(screen.getByTestId("share-access-edit"));
-    expect(screen.getByText(/When configured, browser editing/).textContent).toContain("shared Markdown files live");
+    expect(screen.getByText(/Browser editing lets them/).textContent).toContain("shared Markdown files live when available");
     await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
     await user.click(screen.getByTestId("share-create"));
     expect((await screen.findByTestId("share-browser-invitation")).getAttribute("data-grant-id")).toBe("exact-grant");

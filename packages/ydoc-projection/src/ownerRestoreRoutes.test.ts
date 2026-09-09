@@ -115,13 +115,17 @@ it("closes admission before host preparation and preserves the same cut on retry
       expect(operation.phase).toBe("fenced");
       expect(operation.newFence).toBe(operation.oldFence + 1);
       if (cut) expect(operation).toEqual(cut);
-      else cut = operation;
+      else {
+        cut = operation;
+        throw Error("Host disconnected after admission closed");
+      }
       return {kind: "pending", reason: "Host unavailable"};
     });
     for (let attempt = 0; attempt < 2; attempt++) {
       const response = await f.request("/restore/prepare", {});
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(attempt === 0 ? 409 : 200);
       expect(await response.json()).toMatchObject({status: {phase: "fenced"}, result: {kind: "pending"}});
+      expect(f.storage.readStopRestore(lookup)).toEqual(cut);
     }
     expect(f.host.prepareRestore).toHaveBeenCalledTimes(2);
   } finally {f.close();}

@@ -182,6 +182,8 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
       await recipient.page.getByRole("button", {name: "docs/a.md", exact: true}).click();
       await browserExpect(recipient.editor).toHaveAttribute("contenteditable", "true");
       await browserExpect(recipient.editor).toHaveText("Hello");
+      await browserExpect(recipient.page.getByRole("status")).toContainText("Ready to edit");
+      await browserExpect(recipient.page.getByRole("status")).not.toContainText("Changes saved");
     }
     for (const user of users) for (const path of ["/api/account/session", "/api/account/sign-in", "/api/live/named-documents", "/api/live/named-session", "/api/live/named-ticket"]) {
       expect(requests).toContainEqual({accountId: user.id, path, status: 200});

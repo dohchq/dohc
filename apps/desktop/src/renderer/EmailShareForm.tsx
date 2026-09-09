@@ -131,7 +131,7 @@ export function EmailShareForm(props: {
           </p>
           {access === "edit" && props.target.kind === "paths" && (
             <p className="m-0 text-xs leading-relaxed text-muted">
-              When configured, browser editing lets them change shared Markdown files live. Other files use changes you accept.
+              Browser editing lets them change shared Markdown files live when available. Other files use changes you accept.
             </p>
           )}
 
@@ -174,7 +174,7 @@ export function EmailShareForm(props: {
                 {invitationCopied ? "Browser invitation copied" : "Copy browser invitation"}
               </SecondaryButton>
               <p className="m-0 text-xs leading-relaxed text-muted">
-                Browser editing supports shared Markdown files when available. Other files use changes you accept.
+                Browser editing lets them change shared Markdown files live when available. Other files use changes you accept.
               </p>
             </>
           )}
