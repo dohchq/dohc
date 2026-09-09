@@ -131,8 +131,15 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
   cleanups.push(async () => { routes.close(); sockets.forEach(ws => ws.terminate()); await Promise.all(upgrades); await new Promise<void>(done => http.close(() => done())); await state.close(); });
   const bootstrap = desktop ? await post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath}) : link || owner ? Response.json({ discriminator: "abcdefghijkl" }) : await post("/sync/live/named-sessions", { grantId: scope.grantId });
   expect(bootstrap.status).toBe(200);
-  const { discriminator } = await bootstrap.json() as { discriminator: string };
+  let { discriminator } = await bootstrap.json() as { discriminator: string };
   async function mint() {
+    if (desktop) {
+      const response = await post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath});
+      expect(response.status).toBe(200);
+      const admitted = await response.json() as {discriminator: string; ticket: {token: string; expiresAtMs: number}};
+      discriminator = admitted.discriminator;
+      return admitted.ticket;
+    }
     if (!link && !desktop) expect(await application.resolveNamedBrowserSession(new Request("https://relay.example.test", { headers: { cookie: "account=reader" } }), discriminator)).toEqual(scope);
     expect(state.storage.resolveLiveObjectHostBinding(currentScope, binding.objectId)).toMatchObject({ kind: "current", binding });
     const response = await post(`/sync/live/${routeKind}-tickets`, { discriminator, objectId: binding.objectId });

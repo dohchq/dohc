@@ -43,6 +43,7 @@ function fixture() {
     credentials: {relayUrl: "https://relay.test", token: "real-account-token", userId: "reader", signal: new AbortController().signal},
     assertCurrent() {if (!current) throw new Error("switched");}, fetch: request, preserveDraft});
   return {capture, request, closed, preserveDraft, session, switchWorkspace() {current = false;},
+    quarantineEdit(change: () => void) {doc.transact(change); status = "quarantined"; notify(); return false;},
     ack() {pendingUpdates = 0; notify();}};
 }
 
@@ -83,6 +84,23 @@ it("rejects a workspace switch and pinned-selector escape before editing", async
   expect(() => provider.applyLocalUpdate(new Uint8Array([0, 0]))).toThrow("switched");
   expect(f.session.state().pendingUpdates).toBe(0);
   await provider.close();
+});
+
+it("retains an edit quarantined before queue admission across failed recovery and retry", async () => {
+  const f = fixture();
+  const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()});
+  f.session.edit = f.quarantineEdit;
+  const edit = new Y.Doc(); edit.getText("body").insert(0, "larger than the pending budget");
+  provider.applyLocalUpdate(Y.encodeStateAsUpdate(edit)); edit.destroy();
+  expect(f.session.state().pendingUpdates).toBe(0);
+  const exact = Y.encodeStateAsUpdate(provider.doc);
+  f.preserveDraft.mockRejectedValueOnce(new Error("disk full"));
+  await expect(provider.close()).rejects.toThrow("disk full");
+  expect(f.closed).not.toHaveBeenCalled();
+  expect(Y.encodeStateAsUpdate(provider.doc)).toEqual(exact);
+  await provider.close();
+  expect(f.preserveDraft).toHaveBeenLastCalledWith({path: "docs/a.md", objectId: "object", remoteWorkspaceId: "remote-workspace", update: exact});
+  expect(f.closed).toHaveBeenCalledOnce();
 });
 
 it("writes exact recovery under its original local workspace without admitting secret paths", async () => {

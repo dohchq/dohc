@@ -2148,7 +2148,7 @@ export function MarkdownView(props: {
           that same render and the capture above sets a draft typed before the
           timeout aside — where the user can copy it — instead of letting it
           reach disk over the artifact the engine is binding. */}
-      {engine.engineMayHoldDocument || engine.liveHostUnavailable || engine.readOnlyWhileEditing ? (
+      {engine.engineMayHoldDocument || engine.liveHostUnavailable ? (
         <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown />
       ) : null}
       {engine.removalInProgress ? (

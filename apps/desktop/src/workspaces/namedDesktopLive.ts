@@ -106,7 +106,7 @@ export function createNamedDesktopLiveCapture(options: {
         },
         async readArtifactAsset() { throw new Error("Shared Markdown has no live artifact assets."); },
         async close() {
-          if (session.state().pendingUpdates > 0) {
+          if (session.state().pendingUpdates > 0 || pendingTokens.length > 0) {
             session.disconnect();
             await options.preserveDraft({ path: input.path, objectId: first.selection.objectId,
               remoteWorkspaceId: first.selection.workspaceId, update: Y.encodeStateAsUpdate(session.doc) });

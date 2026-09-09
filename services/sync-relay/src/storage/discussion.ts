@@ -165,7 +165,7 @@ export function appendLinkDiscussionMessage(storage: StorageContext, input: {
           };
         }
       }
-      if (authority.access !== "comment") {
+      if (authority.access !== "comment" && authority.access !== "edit") {
         return { ok: false, reason: "not-authorized" };
       }
       const writeRefusal = linkWriteRefusal(enrollment);

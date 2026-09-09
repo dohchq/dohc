@@ -103,7 +103,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
 
   async function handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    if (options.kind === "owner" || closed || storage.unavailable.aborted || url.pathname !== `/sync/live/${routeKind}-tickets` || url.search || request.method !== "POST" || !trusted(request.headers) ||
+    if (options.kind === "owner" || desktop || closed || storage.unavailable.aborted || url.pathname !== `/sync/live/${kind}-tickets` || url.search || request.method !== "POST" || !trusted(request.headers) ||
       request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json" || pendingRequests >= limits.maxPendingRequests || request.signal.aborted) return refusal();
     pendingRequests++;
     const controller = new AbortController(), signal = AbortSignal.any([request.signal, storage.unavailable, shutdown.signal, controller.signal]);
@@ -167,7 +167,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         parseLiveTicketToken(token);
       }
     } catch { refuseDeviceControl(socket, limits.drainTimeoutMs); return; }
-    if (closed || storage.unavailable.aborted || connections.size >= limits.maxConnections || head.length > limits.maxPendingBytes) {
+    if (closed || storage.unavailable.aborted || head.length > limits.maxPendingBytes) {
       refuseDeviceControl(socket, limits.drainTimeoutMs); return;
     }
     const releaseConnection = admission.reserve([["connections", limits.maxConnections]]);

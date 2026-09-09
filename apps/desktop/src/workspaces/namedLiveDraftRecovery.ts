@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 
@@ -17,7 +17,11 @@ export async function preserveNamedLiveDraft(directory: string, workspaceId: str
     remoteWorkspaceId: draft.remoteWorkspaceId, updateBase64: Buffer.from(draft.update).toString("base64") });
   const digest = createHash("sha256").update(content).digest("hex");
   await mkdir(directory, { recursive: true });
-  // Each complete snapshot has its own name. A failed write is retried; it
-  // never replaces a different recovery or permits the provider to close.
-  await writeFile(join(directory, `${digest}.json`), content, { encoding: "utf8", flush: true });
+  const temporary = join(directory, `${digest}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, content, { encoding: "utf8", flag: "wx", flush: true });
+    await rename(temporary, join(directory, `${digest}.json`));
+  } finally {
+    await rm(temporary, { force: true }).catch(() => {});
+  }
 }

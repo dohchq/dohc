@@ -551,6 +551,19 @@ function seedCrossShareHandles(storage: SyncRelayStorage): {
 }
 
 describe("share discussion HTTP boundary", () => {
+  it("allows prepared Edit grant comments while View grants remain read-only", async () => {
+    const test = await fixture();
+    const append = (link: LinkFixture) => test.storage.appendLinkDiscussionMessage({
+      capabilityHash: hashLinkBearer(link.capabilityToken, LINK_KEY),
+      profileTokenHash: "edit-comment-profile-hash",
+      body: "A comment from an editor",
+      idempotencyKey: "edit-comment",
+      createdAtMs: 20_000,
+    });
+    expect(append(test.view)).toMatchObject({ok: false, reason: "not-authorized"});
+    expect(append(test.edit)).toMatchObject({ok: true, message: {body: "A comment from an editor"}});
+  });
+
   it("rejects missing and same-account wrong-workspace owner discussion operations before work starts", async () => {
     const lookupUserDisplayName = vi.fn(() => "Owner Name");
     const test = await fixture({ lookupUserDisplayName });
