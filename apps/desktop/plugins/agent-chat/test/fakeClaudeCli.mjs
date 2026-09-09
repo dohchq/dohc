@@ -7,7 +7,6 @@
 //
 // Usage: node fakeClaudeCli.mjs <mode> [--version | auth status | -p ...]
 
-import { writeFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
