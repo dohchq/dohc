@@ -37,7 +37,7 @@ async function fixture(maxRestoreBytes: number | null = 1_000_000) {
   const stop = vi.fn(()=>connection?.close());
   transport = startExistingOwnerDeviceTransport({config:{client:native as unknown as EngineClient,
     workspaces:[{workspaceId:"workspace",workspaceHandle:"handle"}],ownerFor,maxQueuedBytes:2_000_000,maxFrameBytes:1_048_576,
-    maxUploads:2,maxRegistrations:2,aggregateBytes:6_048_576,maxAdoptionBytes:1_000_000,maxAdoptionEvents:10,maxRestoreBytes:maxRestoreBytes ?? undefined,
+    maxUploads:2,maxRegistrations:2,aggregateBytes:1_000_000 * 5 + 1_048_576 * 4,maxAdoptionBytes:1_000_000,maxAdoptionEvents:10,maxRestoreBytes:maxRestoreBytes ?? undefined,
     requestDeadlineMs:30_000},start,ws:deviceSocket,limits,stop});
   const peer = await started;await peer.ready();
   const fence = {operation:{operationId:"restore",relayDatabaseNamespace:"namespace",hostId:"host",newFence:2,
