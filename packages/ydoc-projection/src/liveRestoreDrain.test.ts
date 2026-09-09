@@ -557,7 +557,7 @@ it.each(["service", "device"] as const)("recovers the original owner prefix afte
   } finally {if (!closed) f.close(); reopened?.close();}
 });
 
-it.each(["bytes", "events", "owner", "workspace", "host", "origin", "reopened"])("refuses an owner restore origin with %s drift without writes", damage => {
+it.each(["bytes", "events", "owner", "workspace", "host", "origin", "checkpoint", "reopened"])("refuses an owner restore origin with %s drift without writes", damage => {
   const f = ownerOriginProofFixture();
   try {
     f.store.acknowledgeStopRestoreFence(f.lookup, f.nativeReceipt);
@@ -568,6 +568,10 @@ it.each(["bytes", "events", "owner", "workspace", "host", "origin", "reopened"])
     if (damage === "workspace") input.workspaceId = "foreign";
     if (damage === "host") input.host = {...input.host, connectionId: "foreign"};
     if (damage === "origin") f.raw.exec("UPDATE sync_relay_live_delivery_owners SET origin_json=json_set(origin_json,'$.expectedLocalSequence',8)");
+    if (damage === "checkpoint") {
+      const checkpoint = Y.encodeStateAsUpdate(f.doc);
+      f.raw.prepare("UPDATE sync_relay_live_update_journal SET validation_checkpoint_bytes=?,validation_checkpoint_sha256=? WHERE journal_cursor=1").run(checkpoint, hash(checkpoint));
+    }
     if (damage === "reopened") f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='open'");
     const before = f.journalRows();
     expect(() => f.store.captureStopRestoreOwnerOrigin(input)).toThrow();
