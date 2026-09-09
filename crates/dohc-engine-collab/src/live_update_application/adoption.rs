@@ -704,18 +704,21 @@ mod tests {
         assert_eq!(f.store.table_row_count("moments").unwrap(), 1);
     }
     #[test]
-    fn owner_adoption_accepts_drained_sealed_outbox_and_rejects_identity_collision() {
+    fn owner_adoption_accepts_reopened_drained_outbox_and_rejects_identity_collision() {
         let mut f = Fixture::new();
         f.edit_with_limit(true, 1);
-        let state: String = f
+        let (state, pending_bytes): (String, i64) = f
             .store
             .read_with(|conn| {
-                conn.query_row("SELECT state FROM owner_ydoc_outboxes", [], |row| {
-                    row.get(0)
-                })
+                conn.query_row(
+                    "SELECT state,pending_bytes FROM owner_ydoc_outboxes",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
             })
             .unwrap();
-        assert_eq!(state, "sealed");
+        assert_eq!(state, "active");
+        assert_eq!(pending_bytes, 0);
         let before = f.counts();
         assert!(!f.adopt().unwrap().adoption_replayed);
         assert!(f.adopt().unwrap().adoption_replayed);
