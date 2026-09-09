@@ -47,6 +47,7 @@ use crate::limits::{MAX_PROJECTION_BYTES, MAX_PROJECTION_DEPTH, MAX_PROJECTION_N
 
 mod bounded_encoder;
 mod frontmatter_yaml;
+mod restore_copy;
 
 /// The declared dohc root schema. The Yjs v1 wire format does not carry
 /// root-type kinds — a root's kind is defined by typed API access — so both
@@ -483,8 +484,8 @@ impl Ydoc {
 
     /// Resolve exact Markdown source only when it is equivalent to
     /// `canonical_projection`: the projection witness must be fresh, the
-    /// source digest must match, and parsing the source must reproject to
-    /// exactly the canonical projection. The digests alone prove freshness
+    /// source digest must match, and differing source bytes must parse and
+    /// reproject to the canonical projection. The digests alone prove freshness
     /// and self-consistency, never equivalence — the metadata rides the
     /// replicated doc, so a crafted update can pair the current projection's
     /// digest with foreign source bytes, and settlement would write bytes the
@@ -497,6 +498,9 @@ impl Ydoc {
             return None;
         }
         let source = self.markdown_source(&reference)?;
+        if source == canonical_projection {
+            return Some(source);
+        }
         let staged = Ydoc::wire();
         self.copy_tagged_frontmatter_to(&staged);
         staged
@@ -1091,8 +1095,7 @@ impl Ydoc {
     ) -> Result<Vec<u8>, CollabError> {
         self.stage_source_preserving_edit_bounded(markdown, Some(max_bytes), |staged| {
             point.copy_tagged_frontmatter_to(staged);
-            let _ = staged.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)?;
-            Ok(())
+            restore_copy::copy(point, staged, max_bytes)
         })
     }
 

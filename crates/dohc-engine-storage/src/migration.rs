@@ -1557,10 +1557,16 @@ CREATE TABLE live_restore_fences (
     proposal_candidate_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
     proposal_frozen_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
     proposal_point_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    application_json TEXT CHECK (application_json IS NULL OR json_valid(application_json)),
+    application_delivery_id TEXT,
+    CHECK ((application_json IS NULL AND application_delivery_id IS NULL)
+        OR (application_json IS NOT NULL AND application_delivery_id IS NOT NULL AND proposal_json IS NOT NULL)),
     CHECK ((proposal_json IS NULL AND proposal_candidate_sha256 IS NULL AND proposal_frozen_sha256 IS NULL AND proposal_point_sha256 IS NULL)
         OR (proposal_json IS NOT NULL AND proposal_candidate_sha256 IS NOT NULL AND proposal_frozen_sha256 IS NOT NULL AND proposal_point_sha256 IS NOT NULL)),
     PRIMARY KEY (workspace_id, main_version_id, object_id),
     UNIQUE (relay_database_namespace, operation_id),
+    FOREIGN KEY (relay_database_namespace, workspace_id, application_delivery_id)
+        REFERENCES live_device_update_applications(relay_database_namespace, workspace_id, delivery_id) ON DELETE RESTRICT,
     FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
 ) STRICT;
 

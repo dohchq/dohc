@@ -121,8 +121,8 @@ pub(super) fn applied_tip(
         }
     };
     let latest: Option<LiveUpdateReceipt> = conn.query_row(
-        "SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY journal_cursor DESC LIMIT 1",
-        params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
+        "SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND restore_fence_generation=?6 ORDER BY journal_cursor DESC LIMIT 1",
+        params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.restore_fence_generation],
         |r| Ok(LiveUpdateReceipt {delivery_id:r.get(0)?,update_digest:r.get(1)?,journal_cursor:r.get(2)?,accepting_host_epoch:r.get(3)?}),
     ).optional().map_err(read_sql)?;
     let Some(terminal) =
@@ -211,7 +211,7 @@ impl ApplicationOwner {
                 stopped.restore_fence_generation = input.new_fence;
                 if !read_binding(tx, &held)?.is_some_and(|(binding, coordinate, available)| {
                     binding == stopped && coordinate.host_id == input.host_id && !available
-                }) || marker(tx, b)?.head_update_seq != receipt.local_head_sequence {
+                }) || marker(tx, b)?.head_update_seq != restore_content::application::fence_replay_head(tx,&held,&receipt)? {
                     return Err(ApplicationError::Corrupt);
                 }
                 return Ok(receipt);

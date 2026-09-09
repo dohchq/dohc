@@ -1042,3 +1042,190 @@ async fn configured_settlement_retains_pending_projection_when_parent_is_unusabl
     assert_eq!(f.counts(), counts);
     f.assert_projection();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_application_keeps_queued_memory_and_replays_after_cancelled_or_retired_owner() {
+    struct Hold {
+        entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl FaultInjector for Hold {
+        fn poll(&self, point: FaultPoint) -> FaultAction {
+            if point == FaultPoint::StorageBeforePersist {
+                if let Some(entered) = self.entered.lock().unwrap().take() {
+                    let _ = entered.send(());
+                    self.release.lock().unwrap().recv().unwrap();
+                }
+            }
+            FaultAction::Continue
+        }
+    }
+    struct Reservation(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Reservation {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    for retire in [false, true] {
+        let mut f = Fixture::new().await;
+        let coordinate = ApplicationHostCoordinate {
+            host_id: "host".into(),
+            host_epoch: 1,
+            instance_id: "instance".into(),
+            connection_id: "connection".into(),
+        };
+        let projection = f.doc.project(ContentKind::Richdoc).unwrap().content;
+        let source = f
+            .doc
+            .preserved_markdown_source(&projection)
+            .unwrap_or_else(|| projection.clone());
+        let fence = f
+            .owner
+            .fence_restore(
+                NativeRestoreFence {
+                    operation_id: "restore".into(),
+                    relay_database_namespace: "relay".into(),
+                    old_binding: f.binding.clone(),
+                    host_id: "host".into(),
+                    new_fence: 1,
+                    origin: RestoreDeliveryOrigin::Bootstrap {
+                        id: "bootstrap".into(),
+                    },
+                    terminal: None,
+                    applied_sequence: 0,
+                },
+                coordinate.clone(),
+                20,
+                Arc::new(NoFaults),
+            )
+            .await
+            .unwrap();
+        let preparation = NativeRestorePreparation {
+            fence,
+            point: NativeRestorePoint {
+                journal_cursor: 0,
+                receipt_digest: f.binding.lineage_claim_id.clone(),
+                markdown_digest: hex_sha256(source.as_bytes()),
+                projection_digest: hex_sha256(projection.as_bytes()),
+            },
+            owner_origin: None,
+        };
+        let proposal = f
+            .owner
+            .prepare_restore(
+                preparation.clone(),
+                coordinate.clone(),
+                2_000_000,
+                100,
+                Arc::new(NoFaults),
+                Arc::new(()),
+            )
+            .await
+            .unwrap();
+        let mut binding = f.binding.clone();
+        binding.restore_fence_generation = 1;
+        let input = NativeRestoreApplication {
+            preparation,
+            candidate_digest: proposal.receipt().candidate_digest.clone(),
+            native_source_manifest_digest: proposal.receipt().native_source_manifest_digest.clone(),
+            admitted: AdmittedLiveUpdateMetadata {
+                accepted: RelayAcceptedLiveUpdate {
+                    receipt: LiveUpdateReceipt {
+                        delivery_id: "restore-delivery".into(),
+                        update_digest: proposal.receipt().candidate_digest.clone(),
+                        journal_cursor: 17,
+                        accepting_host_epoch: 2,
+                    },
+                    binding,
+                    authority: ServerDerivedLiveUpdateAuthority::Owner {
+                        principal_id: "restoring-owner".into(),
+                    },
+                    received_at_ms: 25,
+                },
+                first_seen: proposal.receipt().replacement_ranges.clone(),
+            },
+        };
+        let (entered, at_commit) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let disposed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut call = Box::pin(f.owner.apply_restore(
+            input.clone(),
+            coordinate.clone(),
+            2_000_000,
+            100,
+            30,
+            Arc::new(Hold {
+                entered: std::sync::Mutex::new(Some(entered)),
+                release: std::sync::Mutex::new(wait),
+            }),
+            Arc::new(Reservation(disposed.clone())),
+        ));
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(call.as_mut().poll(cx).is_pending()))
+                .await
+        );
+        at_commit.await.unwrap();
+        assert!(!disposed.load(std::sync::atomic::Ordering::SeqCst));
+        if retire {
+            f.owner.retire();
+            release.send(()).unwrap();
+            assert!(matches!(call.await, Err(RuntimeError::ActorUnavailable)));
+        } else {
+            drop(call);
+            assert!(!disposed.load(std::sync::atomic::Ordering::SeqCst));
+            release.send(()).unwrap();
+        }
+        if retire {
+            f.owner = f
+                .supervisor
+                .open(&f.db, 35)
+                .unwrap()
+                .actor
+                .live_application_owner("workspace".into())
+                .await
+                .unwrap();
+        }
+        let receipt = f
+            .owner
+            .apply_restore(
+                input.clone(),
+                coordinate.clone(),
+                2_000_000,
+                100,
+                40,
+                Arc::new(NoFaults),
+                Arc::new(()),
+            )
+            .await
+            .unwrap();
+        assert!(disposed.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(receipt.local_head_sequence, 1);
+        assert_eq!(receipt.recorded_at_ms, 30);
+        assert_eq!(
+            receipt,
+            f.owner
+                .apply_restore(
+                    input,
+                    coordinate,
+                    2_000_000,
+                    100,
+                    50,
+                    Arc::new(NoFaults),
+                    Arc::new(())
+                )
+                .await
+                .unwrap()
+        );
+        assert!(f.settle(None, 100, Arc::new(NoFaults)).await.is_err());
+        f.supervisor.close(&f.db).unwrap();
+        let store = EngineStore::open(&f.db, 60).unwrap();
+        assert_eq!(store.table_row_count("moments").unwrap(), 1);
+        assert_eq!(
+            store
+                .table_row_count("live_device_update_applications")
+                .unwrap(),
+            1
+        );
+        assert_eq!(store.table_row_count("live_device_settlements").unwrap(), 0);
+    }
+}

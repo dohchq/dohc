@@ -558,3 +558,132 @@ fn native_restore_tail_accepts_trusted_deduped_pre_adoption_source_as_overlappin
     assert!(proposal.receipt().accepted_sources.is_empty());
     assert_eq!(inventory, native_tail_inventory(&f.store));
 }
+
+#[test]
+fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_backup() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    native_tail_edit(&mut f, "Pending before", 11);
+    native_tail_edit(&mut f, "Pending after", 12);
+    let prep = native_tail_input(&mut f, None, 0);
+    let proposal = native_tail_prepare(&mut f, prep.clone()).unwrap();
+    let mut binding = f.binding.clone();
+    binding.restore_fence_generation = 1;
+    let input = NativeRestoreApplication {
+        preparation: prep.clone(),
+        candidate_digest: proposal.receipt().candidate_digest.clone(),
+        native_source_manifest_digest: proposal.receipt().native_source_manifest_digest.clone(),
+        admitted: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "restore-tail".into(),
+                    update_digest: proposal.receipt().candidate_digest.clone(),
+                    journal_cursor: 71,
+                    accepting_host_epoch: 2,
+                },
+                binding,
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "restoring-owner".into(),
+                },
+                received_at_ms: 80,
+            },
+            first_seen: proposal.receipt().replacement_ranges.clone(),
+        },
+    };
+    let inventory = native_tail_inventory(&f.store);
+    let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+    let receipt = f
+        ._owner
+        .apply_restore(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            input.clone(),
+            coordinate.clone(),
+            2_000_000,
+            100,
+            90,
+            &NoFaults,
+        )
+        .unwrap();
+    assert_eq!(receipt.local_head_sequence, 3);
+    assert_eq!(inventory, native_tail_inventory(&f.store));
+    assert_eq!(
+        f.store
+            .table_row_count("live_device_update_applications")
+            .unwrap(),
+        1
+    );
+    assert!(matches!(
+        f.store
+            .write_with(&NoFaults, |tx| durable::record_update_in_tx(
+                tx,
+                &f.key,
+                proposal.candidate_bytes(),
+                None,
+                None,
+                100
+            )),
+        Err(CollabError::RestoreFenced)
+    ));
+    durable::maybe_compact(&mut f.store, &f.key, 0, &NoFaults, 100).unwrap();
+    assert_eq!(f.store.table_row_count("ydoc_updates").unwrap(), 0);
+    assert_eq!(
+        receipt,
+        f._owner
+            .apply_restore(
+                &mut f.store,
+                &mut WriterDocCache::new(),
+                input.clone(),
+                coordinate.clone(),
+                2_000_000,
+                100,
+                110,
+                &NoFaults
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        f._owner
+            .fence_restore(
+                &mut f.store,
+                prep.fence.operation.clone(),
+                coordinate.clone(),
+                110,
+                &NoFaults
+            )
+            .unwrap(),
+        prep.fence
+    );
+    use dohc_engine_storage::backup::{create_verified_backup, BackupOutcome, RealFreeSpace};
+    let BackupOutcome::Verified(backup) = create_verified_backup(
+        &f.store,
+        &f._scratch.join("applied-recovery"),
+        "apply",
+        "test",
+        120,
+        &RealFreeSpace,
+        &NoFaults,
+    )
+    .unwrap() else {
+        panic!("backup interrupted")
+    };
+    let mut store = EngineStore::open(&backup.backup_path, 130).unwrap();
+    let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
+    assert_eq!(
+        receipt,
+        owner
+            .apply_restore(
+                &mut store,
+                &mut WriterDocCache::new(),
+                input,
+                coordinate,
+                2_000_000,
+                100,
+                140,
+                &NoFaults
+            )
+            .unwrap()
+    );
+    assert_eq!(inventory, native_tail_inventory(&store));
+    assert_eq!(store.table_row_count("moments").unwrap(), 1);
+}

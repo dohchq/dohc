@@ -33,8 +33,9 @@ pub use bootstrap::{
     bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
 };
 pub use restore_content::{
-    NativeRestorePoint, NativeRestorePreparation, NativeRestoreProposal,
-    NativeRestoreProposalReceipt, NativeRestoreSource,
+    NativeRestoreApplication, NativeRestoreApplicationReceipt, NativeRestorePoint,
+    NativeRestorePreparation, NativeRestoreProposal, NativeRestoreProposalReceipt,
+    NativeRestoreSource,
 };
 pub use restore_fence::require_open as require_restore_open;
 pub use restore_fence::{NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin};

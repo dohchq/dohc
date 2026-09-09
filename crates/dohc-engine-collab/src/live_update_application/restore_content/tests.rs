@@ -1,6 +1,7 @@
 use super::*;
 use dohc_engine_storage::{FaultAction, FaultPoint};
 use dohc_test_scratch::ScratchDir;
+use serde_json::json;
 
 struct Fixture {
     store: EngineStore,
@@ -510,5 +511,290 @@ fn tagged_restore_preserves_the_selected_projection_after_later_tags_are_cleared
                 serde_json::to_vec(&f.prepare(input).unwrap()).unwrap()
             );
         }
+    }
+}
+
+fn admitted_restore(
+    f: &mut Fixture,
+    preparation: NativeRestorePreparation,
+) -> NativeRestoreApplication {
+    let proposal = f.prepare(preparation.clone()).unwrap();
+    let mut binding = f.binding.clone();
+    binding.restore_fence_generation = preparation.fence.operation.new_fence;
+    NativeRestoreApplication {
+        preparation,
+        candidate_digest: proposal.receipt().candidate_digest.clone(),
+        native_source_manifest_digest: proposal.receipt().native_source_manifest_digest.clone(),
+        admitted: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "restore-delivery".into(),
+                    update_digest: proposal.receipt().candidate_digest.clone(),
+                    journal_cursor: 71,
+                    accepting_host_epoch: 3,
+                },
+                binding,
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "restoring-owner".into(),
+                },
+                received_at_ms: 80,
+            },
+            first_seen: proposal.receipt().replacement_ranges.clone(),
+        },
+    }
+}
+
+fn apply_restore(
+    f: &mut Fixture,
+    input: NativeRestoreApplication,
+    faults: &dyn FaultInjector,
+) -> Result<NativeRestoreApplicationReceipt, ApplicationError> {
+    f.owner.apply_restore(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        input,
+        f.host.clone(),
+        2_000_000,
+        100,
+        90,
+        faults,
+    )
+}
+
+#[test]
+fn native_restore_apply_commits_once_and_replays_the_original_operation_after_restart() {
+    let mut f = Fixture::new("# Original\n");
+    let selected = f.edit("# Chosen\n", 7);
+    f.edit("# Later\n", 11);
+    let prep = f.freeze(selected);
+    let input = admitted_restore(&mut f, prep.clone());
+    let receipt = apply_restore(&mut f, input.clone(), &NoFaults).unwrap();
+    assert_eq!(receipt.local_head_sequence, 3);
+    assert_eq!(receipt.admitted, input.admitted);
+    let projected = f.canonical().project(ContentKind::Richdoc).unwrap().content;
+    assert_eq!(
+        f.canonical()
+            .preserved_markdown_source(&projected)
+            .as_deref(),
+        Some("# Chosen\n")
+    );
+    assert_eq!(
+        receipt,
+        apply_restore(&mut f, input.clone(), &NoFaults).unwrap()
+    );
+    assert_eq!(
+        f.store
+            .table_row_count("live_device_update_applications")
+            .unwrap(),
+        3
+    );
+    assert_eq!(f.store.table_row_count("moments").unwrap(), 1);
+    assert_eq!(
+        f.owner
+            .fence_restore(
+                &mut f.store,
+                prep.fence.operation.clone(),
+                f.host.clone(),
+                100,
+                &NoFaults
+            )
+            .unwrap(),
+        prep.fence
+    );
+    let proposal = f.prepare(prep.clone()).unwrap();
+    assert_eq!(proposal.receipt().candidate_digest, input.candidate_digest);
+    drop(f.store);
+    f.store = EngineStore::open(&f.dir.join("engine.db"), 110).unwrap();
+    f.owner = ApplicationOwner::new("workspace".into()).unwrap();
+    f.host.connection_id = "new-connection".into();
+    f.host.host_epoch = 2;
+    assert_eq!(receipt, apply_restore(&mut f, input, &NoFaults).unwrap());
+    assert_eq!(f.store.table_row_count("moments").unwrap(), 1);
+}
+
+#[test]
+fn native_restore_apply_refuses_changed_admission_before_and_after_commit() {
+    for replay in [false, true] {
+        for change in 0..8 {
+            let mut f = Fixture::new("# Original\n");
+            f.edit("# Later\n", 7);
+            let prep = f.freeze(f.baseline_point.clone());
+            let mut input = admitted_restore(&mut f, prep);
+            if replay {
+                apply_restore(&mut f, input.clone(), &NoFaults).unwrap();
+            }
+            let before = f.canonical();
+            let count = f
+                .store
+                .table_row_count("live_device_update_applications")
+                .unwrap();
+            match change {
+                0 => input.candidate_digest = "a".repeat(64),
+                1 => input.native_source_manifest_digest = "a".repeat(64),
+                2 => input.admitted.accepted.binding.object_id = "foreign".into(),
+                3 => input.admitted.accepted.binding.restore_fence_generation = 0,
+                4 => input.admitted.accepted.receipt.journal_cursor = 7,
+                5 => input.admitted.first_seen.clear(),
+                6 => input.preparation.fence.operation.operation_id = "foreign".into(),
+                _ => {
+                    input.admitted.accepted.authority = ServerDerivedLiveUpdateAuthority::Named {
+                        principal_id: "named".into(),
+                        grant_id: "grant".into(),
+                        grant_generation: 1,
+                    }
+                }
+            }
+            assert!(
+                apply_restore(&mut f, input, &NoFaults).is_err(),
+                "change {change}, replay={replay}"
+            );
+            assert!(crate::replay_parity::structurally_equal_v2(&before, &f.canonical()).unwrap());
+            assert_eq!(
+                f.store
+                    .table_row_count("live_device_update_applications")
+                    .unwrap(),
+                count
+            );
+        }
+    }
+}
+
+#[test]
+fn native_restore_apply_commit_crashes_preserve_one_candidate_and_one_application() {
+    for fault in [
+        FaultPoint::StorageBeforePersist,
+        FaultPoint::StorageAfterCommitBeforeAck,
+    ] {
+        let mut f = Fixture::new("# Original\n");
+        f.edit("# Later\n", 7);
+        let prep = f.freeze(f.baseline_point.clone());
+        let input = admitted_restore(&mut f, prep);
+        assert!(apply_restore(&mut f, input.clone(), &CrashAt(fault)).is_err());
+        let receipt = apply_restore(&mut f, input.clone(), &NoFaults).unwrap();
+        assert_eq!(receipt.local_head_sequence, 2);
+        assert_eq!(receipt, apply_restore(&mut f, input, &NoFaults).unwrap());
+        assert_eq!(
+            f.store
+                .table_row_count("live_device_update_applications")
+                .unwrap(),
+            2
+        );
+        assert_eq!(f.store.table_row_count("ydoc_updates").unwrap(), 2);
+        assert_eq!(f.store.table_row_count("moments").unwrap(), 1);
+    }
+}
+
+#[test]
+fn restore_copy_preserves_public_point_actual_rich_marks() {
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../../../tests/live-bootstrap-fixtures/live-bootstrap.json"
+    ))
+    .unwrap();
+    let row = fixtures
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "rich-unicode")
+        .unwrap();
+    let doc = Ydoc::wire();
+    doc.apply(&serde_json::from_value::<Vec<u8>>(row["bytes"].clone()).unwrap())
+        .unwrap();
+    let projection = doc.project(ContentKind::Richdoc).unwrap().content;
+    let before = doc.canonical_content();
+    let point = Ydoc::wire();
+    point.apply(&doc.encode_full_state()).unwrap();
+    let before_vector = doc.state_vector();
+    doc.rewrite_richdoc_preserving_source_bounded(&projection, &point, 8 * 1024 * 1024)
+        .unwrap();
+    assert!(doc
+        .state_vector()
+        .iter()
+        .any(|(client, _)| before_vector.get(client) == 0));
+    assert_eq!(
+        doc.project(ContentKind::Richdoc).unwrap().content,
+        projection
+    );
+    assert_eq!(doc.canonical_content()["body"], before["body"]);
+}
+
+#[test]
+fn native_restore_apply_replay_refuses_damaged_saved_admission_and_application() {
+    for damage in 0..9 {
+        let mut f = Fixture::new("# Original\n");
+        f.edit("# Later\n", 7);
+        let prep = f.freeze(f.baseline_point.clone());
+        let input = admitted_restore(&mut f, prep.clone());
+        let receipt = apply_restore(&mut f, input.clone(), &NoFaults).unwrap();
+        let before = f.canonical();
+        f.store.write_with(&NoFaults, |tx| {
+            let mut json = serde_json::to_value(&receipt).unwrap();
+            match damage {
+                0 => json["admitted"]["accepted"]["receivedAtMs"] = json!(987),
+                1 => json["admitted"]["accepted"]["authority"]["principalId"] = json!("foreign-owner"),
+                2 => json["localHeadSequence"] = json!(99),
+                3 => json["candidateDigest"] = json!("a".repeat(64)),
+                4 => json["admitted"]["firstSeen"] = json!([]),
+                5 => { return tx.execute("UPDATE live_device_update_applications SET first_seen_count=999999 WHERE delivery_id='restore-delivery'", []).map_err(write_sql); }
+                6 => { return tx.execute("UPDATE live_device_update_applications SET selector_paths_json=?1 WHERE delivery_id='restore-delivery'", [serde_json::to_string(&vec!["a.md"; 10_000]).unwrap()]).map_err(write_sql); }
+                7 => { return tx.execute("UPDATE live_restore_fences SET application_json=NULL,application_delivery_id=NULL", []).map_err(write_sql); }
+                _ => { return tx.execute("UPDATE live_restore_fences SET application_json='{}'", []).map_err(write_sql); }
+            }
+            tx.execute("UPDATE live_restore_fences SET application_json=?1", [json.to_string()]).map_err(write_sql)
+        }).unwrap();
+        assert!(
+            apply_restore(&mut f, input, &NoFaults).is_err(),
+            "damage {damage}"
+        );
+        assert!(f.prepare(prep.clone()).is_err(), "prepare damage {damage}");
+        assert!(
+            f.owner
+                .fence_restore(
+                    &mut f.store,
+                    prep.fence.operation,
+                    f.host.clone(),
+                    100,
+                    &NoFaults
+                )
+                .is_err(),
+            "fence damage {damage}"
+        );
+        assert!(crate::replay_parity::structurally_equal_v2(&before, &f.canonical()).unwrap());
+        assert_eq!(
+            f.store
+                .table_row_count("live_device_update_applications")
+                .unwrap(),
+            2
+        );
+    }
+}
+
+#[test]
+fn native_restore_apply_enforces_budget_on_first_apply_and_replay() {
+    for replay in [false, true] {
+        let mut f = Fixture::new("# Original\n");
+        f.edit("# Later\n", 7);
+        let prep = f.freeze(f.baseline_point.clone());
+        let input = admitted_restore(&mut f, prep);
+        if replay {
+            apply_restore(&mut f, input.clone(), &NoFaults).unwrap();
+        }
+        let before = f.canonical();
+        for (bytes, events) in [(1, 100), (2_000_000, 0)] {
+            assert!(f
+                .owner
+                .apply_restore(
+                    &mut f.store,
+                    &mut WriterDocCache::new(),
+                    input.clone(),
+                    f.host.clone(),
+                    bytes,
+                    events,
+                    90,
+                    &NoFaults
+                )
+                .is_err());
+            assert!(crate::replay_parity::structurally_equal_v2(&before, &f.canonical()).unwrap());
+        }
+        apply_restore(&mut f, input, &NoFaults).unwrap();
     }
 }

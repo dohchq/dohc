@@ -3,7 +3,9 @@ use crate::{ContentKind, Ydoc};
 use dohc_engine_storage::put_binary_blob;
 use std::io::Write;
 
+pub(super) mod application;
 mod native_sources;
+pub use application::{NativeRestoreApplication, NativeRestoreApplicationReceipt};
 #[cfg(test)]
 mod tests;
 pub use native_sources::NativeRestoreSource;
@@ -227,11 +229,20 @@ fn prepare_in(
     if saved_input != *operation || saved_fence != input.fence {
         return Err(ApplicationError::Conflict);
     }
+    let mut budget = Budget {
+        remaining: max_bytes,
+    };
+    let applied = application::read_saved(tx, held, &mut budget)?;
+    let expected_head = applied
+        .as_ref()
+        .map_or(input.fence.local_head_sequence, |receipt| {
+            receipt.local_head_sequence
+        });
     let mut stopped = b.clone();
     stopped.restore_fence_generation = operation.new_fence;
     if !read_binding(tx, held)?.is_some_and(|(binding, host, available)| {
         binding == stopped && host.host_id == operation.host_id && !available
-    }) || restore_fence::marker(tx, b)?.head_update_seq != input.fence.local_head_sequence
+    }) || restore_fence::marker(tx, b)?.head_update_seq != expected_head
     {
         return Err(ApplicationError::Conflict);
     }
@@ -240,21 +251,27 @@ fn prepare_in(
         return Err(ApplicationError::Conflict);
     }
     let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
-    let local_bytes = adoption::require_local_replay_budget(tx, &key, max_bytes)?;
-    let frozen = durable::load_doc_in(tx, &key)?;
+    let local_bytes = adoption::require_local_replay_budget(tx, &key, budget.remaining)?;
+    budget.charge(local_bytes)?;
+    let current = durable::load_doc_in(tx, &key)?;
+    let (frozen, applied_current) = if applied.is_some() {
+        let bytes = budget.blob(tx, saved.4.as_deref().ok_or(ApplicationError::Corrupt)?)?;
+        let frozen = Ydoc::wire();
+        frozen.apply(&bytes)?;
+        (frozen, Some(current))
+    } else {
+        (current, None)
+    };
     if frozen.has_missing_updates() {
         return Err(invalid("restore frozen head has missing dependencies"));
     }
-    let mut budget = Budget {
-        remaining: max_bytes,
-    };
-    budget.charge(local_bytes)?;
+
     let (origin_digest, mut events, baseline) =
         origin(tx, held, input, &mut budget, max_bytes, max_events)?;
     let origin_cursor = events
         .last()
         .map_or(0, |event| event.metadata.accepted.receipt.journal_cursor);
-    let mut query = tx.prepare("SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch,update_byte_length,first_seen_count FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND journal_cursor>?6 ORDER BY journal_cursor LIMIT ?7").map_err(read_sql)?;
+    let mut query = tx.prepare("SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch,update_byte_length,first_seen_count FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND journal_cursor>?6 AND restore_fence_generation=?8 ORDER BY journal_cursor LIMIT ?7").map_err(read_sql)?;
     let mut rows = query
         .query(params![
             held.namespace,
@@ -263,7 +280,8 @@ fn prepare_in(
             b.object_id,
             b.lineage_claim_id,
             origin_cursor,
-            max_events as i64 + 1
+            max_events as i64 + 1,
+            operation.old_binding.restore_fence_generation
         ])
         .map_err(read_sql)?;
     while let Some(row) = rows.next().map_err(read_sql)? {
@@ -398,13 +416,23 @@ fn prepare_in(
             &receipt,
             &mut budget,
         )?;
-        return Ok(NativeRestoreProposal {
+        let proposal = NativeRestoreProposal {
             receipt,
             candidate_bytes,
             frozen_state_bytes,
             point_state_bytes,
             native_source_bytes,
-        });
+        };
+        if let Some(applied) = &applied {
+            application::verify_saved(
+                tx,
+                held,
+                applied,
+                &proposal,
+                applied_current.as_ref().ok_or(ApplicationError::Corrupt)?,
+            )?;
+        }
+        return Ok(proposal);
     }
     let frozen_state_bytes = budget.state(&frozen)?;
     let point_state_bytes = budget.state(&point)?;

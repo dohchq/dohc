@@ -5,7 +5,8 @@ use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, ApplicationError, ApplicationHandle, ApplicationHostCoordinate,
     ApplicationOwner, ApplicationResult, BootstrapResult, LiveApplicationBootstrap,
-    LiveSettlementResult, LiveUpdateReceipt, NativeRestoreFence, NativeRestoreFenceReceipt,
+    LiveSettlementResult, LiveUpdateReceipt, NativeRestoreApplication,
+    NativeRestoreApplicationReceipt, NativeRestoreFence, NativeRestoreFenceReceipt,
     NativeRestorePreparation, NativeRestoreProposal, OwnerAdoptionAck, OwnerAdoptionCut,
     adopt_owner_committed, apply_committed, bootstrap_committed, validate_application_binding,
     with_settlement,
@@ -85,6 +86,44 @@ impl ActorHandle {
 }
 
 impl ActorLiveApplicationOwner {
+    /// Apply one saved proposal through the current actor owner.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn apply_restore(
+        &self,
+        input: NativeRestoreApplication,
+        coordinate: ApplicationHostCoordinate,
+        max_bytes: usize,
+        max_events: usize,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<NativeRestoreApplicationReceipt, RuntimeError> {
+        current(&self.actor, &self.token)?;
+        input.validate_budget(max_bytes, max_events)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(Request::ApplyRestore {
+                workspace_id: self.workspace_id.clone(),
+                token: self.token.clone(),
+                input: Box::new(input),
+                coordinate,
+                max_bytes,
+                max_events,
+                now_ms,
+                faults,
+                reservation,
+                reply,
+            })))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        let receipt = receive
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        current(&self.actor, &self.token)?;
+        Ok(receipt)
+    }
+
     /// The authenticated caller keeps proof memory reserved through queued preparation.
     pub async fn prepare_restore(
         &self,
@@ -438,6 +477,18 @@ impl Registry {
 }
 
 pub(super) enum Request {
+    ApplyRestore {
+        workspace_id: String,
+        token: Token,
+        input: Box<NativeRestoreApplication>,
+        coordinate: ApplicationHostCoordinate,
+        max_bytes: usize,
+        max_events: usize,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        reservation: Arc<dyn Send + Sync>,
+        reply: Reply<NativeRestoreApplicationReceipt>,
+    },
     PrepareRestore {
         workspace_id: String,
         token: Token,
@@ -531,6 +582,34 @@ impl Request {
         cache: &mut WriterDocCache,
     ) {
         match self {
+            Self::ApplyRestore {
+                workspace_id,
+                token,
+                input,
+                coordinate,
+                max_bytes,
+                max_events,
+                now_ms,
+                faults,
+                reservation: _reservation,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|owner| {
+                    owner
+                        .apply_restore(
+                            store,
+                            cache,
+                            *input,
+                            coordinate,
+                            max_bytes,
+                            max_events,
+                            now_ms,
+                            faults.as_ref(),
+                        )
+                        .map_err(Into::into)
+                });
+                let _ = reply.send(result);
+            }
             Self::PrepareRestore {
                 workspace_id,
                 token,
