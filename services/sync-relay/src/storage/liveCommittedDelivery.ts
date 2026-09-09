@@ -919,21 +919,18 @@ export class LiveCommittedDeliveryStore {
       integrity(events.length === count && sameReceipt(events.at(-1)?.metadata.accepted.receipt ?? null, terminal));
       return {operation, baselineBytes: authority.baselineBytes, cut: {...header, baselineBytes: new Uint8Array(authority.baselineBytes), events}};
     });
-    let fingerprint: string;
     const capture: RestoreOwnerOriginCapture = Object.freeze({binding: structuredClone(saved.operation.basis.ownerBinding), cut: saved.cut,
       nativeReceipt: structuredClone(saved.operation.nativeReceipt!),
       point: {journalCursor: saved.operation.intent.restorePointCursor, receiptDigest: saved.operation.intent.restorePointReceiptDigest},
       assertCurrent: () => {
         integrity(fingerprint === digest());
-        this.#storage.readTx(() => {
-          const current = this.#restore(lookup, host, undefined, saved.baselineBytes);
-          integrity(isDeepStrictEqual(current.operation, saved.operation));
-          integrity(this.#ownerRow(host, saved.operation.intent.document)?.origin_json === saved.operation.basis.ownerOrigin);
-        });
+        const current = this.#restore(lookup, host, undefined, saved.baselineBytes);
+        integrity(isDeepStrictEqual(current.operation, saved.operation));
+        integrity(this.#ownerRow(host, saved.operation.intent.document)?.origin_json === saved.operation.basis.ownerOrigin);
       }});
     const digest = () => createHash("sha256").update(JSON.stringify({origin: ownerCutDigest(capture), nativeReceipt: capture.nativeReceipt, point: capture.point})).digest("hex");
-    fingerprint = digest();
-    capture.assertCurrent();
+    const fingerprint = digest();
+    this.#storage.readTx(() => capture.assertCurrent());
     // This proof is not registered in #ownerCuts and grants no adoption or delivery authority.
     return capture;
   }
@@ -984,17 +981,19 @@ export class LiveCommittedDeliveryStore {
       integrity(events.length === count && terminal === through && terminalDigest === operation.intent.restorePointReceiptDigest);
       return {operation, baselineBytes: authority.baselineBytes, checkpoint, events};
     });
-    let fingerprint: string;
-    const capture: RestorePointCapture = Object.freeze({binding: structuredClone(saved.operation.basis.ownerBinding), checkpoint: saved.checkpoint,
+    const binding = saved.operation.intent.deliveryKind === "owner" ? saved.operation.basis.ownerBinding : saved.operation.basis.binding;
+    const capture: RestorePointCapture = Object.freeze({binding: structuredClone(binding), checkpoint: saved.checkpoint,
       events: saved.events, point: {journalCursor: saved.operation.intent.restorePointCursor, receiptDigest: saved.operation.intent.restorePointReceiptDigest},
       nativeReceipt: structuredClone(saved.operation.nativeReceipt!), assertCurrent: () => {
         integrity(fingerprint === digest());
-        this.#storage.readTx(() => integrity(isDeepStrictEqual(this.#restore(lookup, host, undefined, saved.baselineBytes).operation, saved.operation)));
+        integrity(isDeepStrictEqual(this.#restore(lookup, host, undefined, saved.baselineBytes).operation, saved.operation));
       }});
     const digest = () => createHash("sha256").update(JSON.stringify({binding: capture.binding, checkpoint: {...capture.checkpoint, bytes: undefined,
       actualDigest: createHash("sha256").update(capture.checkpoint.bytes).digest("hex")}, point: capture.point, nativeReceipt: capture.nativeReceipt,
       events: capture.events.map(event => ({metadata: event.metadata, digest: createHash("sha256").update(event.updateBytes).digest("hex")}))})).digest("hex");
-    fingerprint = digest(); capture.assertCurrent(); return capture;
+    const fingerprint = digest();
+    this.#storage.readTx(() => capture.assertCurrent());
+    return capture;
   }
   stopRestoreDocument(input: StopRestoreLookup & {host: LiveHostConnectionCoordinate}): LiveDocumentKey {
     return this.#storage.readTx(() => structuredClone(this.#restore(input, input.host).operation.intent.document));

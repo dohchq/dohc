@@ -3,10 +3,21 @@ import * as Y from "yjs";
 import {yDocToMarkdown} from "./import-export.js";
 import {createLiveMarkdownRegistrationValidator, createLiveMarkdownJournalValidator} from "./liveDocumentValidation.js";
 import type {OrderedLiveUpdateCutPolicy} from "./orderedLiveUpdateCut.js";
-import type {RestorePointCapture} from "../../../services/sync-relay/src/storage/liveCommittedDelivery.js";
 
-/** Resolves a retained point without using a checkpoint from its future. */
-export function resolveLiveRestorePoint(capture: RestorePointCapture, policy: OrderedLiveUpdateCutPolicy) {
+type RestorePointInput = {
+  binding: {workspaceId: string; mainVersionId: string; objectId: string; lineageClaimId: string; currentPath: string};
+  checkpoint: {bytes: Uint8Array};
+  events: readonly {updateBytes: Uint8Array}[];
+  point: {journalCursor: number; receiptDigest: string};
+  assertCurrent(): void;
+};
+
+/**
+ * Resolves a store-captured point without using a checkpoint from its future.
+ * markdownDigest identifies the resolved artifact: validated retained source or canonical projection.
+ * It grants no exact-source ancestry claim.
+ */
+export function resolveLiveRestorePoint(capture: RestorePointInput, policy: OrderedLiveUpdateCutPolicy) {
   capture.assertCurrent();
   const {workspaceId, mainVersionId, objectId, lineageClaimId, currentPath} = capture.binding;
   const document = {workspaceId, mainVersionId, objectId, lineageClaimId};

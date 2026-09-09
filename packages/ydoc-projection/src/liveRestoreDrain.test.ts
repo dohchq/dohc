@@ -376,6 +376,7 @@ it.each(["service", "device"] as const)("resolves the selected owner restore poi
     f.store.acknowledgeStopRestoreFence(f.lookup, f.nativeReceipt);
     const before = f.journalRows();
     const capture = f.store.captureStopRestorePoint(f.input);
+    expect(capture.binding.selectorPaths).toEqual(["docs"]);
     expect(capture.checkpoint.cursor).toBe(0);
     expect(capture.events).toHaveLength(1);
     const point = resolveLiveRestorePoint(capture, policy);
@@ -392,6 +393,7 @@ it("resolves a baseline restore point after native bootstrap fencing", () => {
   try {
     f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt);
     const capture = f.store.captureStopRestorePoint({...f.lookup, maxBytes: 1_000_000, maxEvents: 10});
+    expect(capture.binding.selectorPaths).toEqual(["docs/a.md"]);
     expect(capture.events).toHaveLength(0);
     expect(resolveLiveRestorePoint(capture, policy)).toEqual({journalCursor: 0, receiptDigest: f.intent.restorePointReceiptDigest,
       markdownDigest: hash(Buffer.from("Hello")), projectionDigest: hash(Buffer.from("Hello"))});
@@ -430,6 +432,74 @@ it("does not select a checkpoint after the chosen point", () => {
     const capture = f.store.captureStopRestorePoint(f.input);
     expect(capture.checkpoint.cursor).toBe(0);
     expect(resolveLiveRestorePoint(capture, policy)).toEqual(expected);
+  } finally {f.close();}
+});
+
+it("resolves from a real 4095-cadence checkpoint and refuses its stale path or fence", () => {
+  const f = fixture("bootstrap", "service");
+  try {
+    const receipts = [f.add("checkpoint")];
+    const noop = Y.encodeStateAsUpdate(f.doc, Y.encodeStateVector(f.doc));
+    expect([...noop]).toEqual([0, 0]);
+    for (let index = 1; index < 4095; index++) {
+      const committed = f.storage.commitLiveUpdateJournal(f.capture(noop, `checkpoint-noop-${index}`));
+      if (committed.result.kind !== "accepted") throw Error(committed.result.kind);
+      receipts.push(committed.result.receipt);
+    }
+    const cut = f.storage.readLiveUpdateJournalCut({document: f.document});
+    expect(cut).toMatchObject({kind: "cut", cut: {highWater: 4095, checkpoint: {cursor: 4095}, suffixCount: 0}});
+    if (cut.kind !== "cut") throw Error(cut.kind);
+    const checkpoint = Uint8Array.from(cut.cut.checkpoint.bytes);
+    const point = f.add("point"), expected = hash(Buffer.from(yDocToMarkdown(f.doc)));
+    receipts.push(point, f.add("future"));
+    f.intent.restorePointCursor = point.journalCursor;
+    f.intent.restorePointReceiptDigest = point.updateDigest;
+    f.fence();
+    const drain = f.open(), first = f.store.nextStopRestoreCut(drain);
+    if (first.kind !== "bootstrap") throw Error(first.kind);
+    f.store.acknowledgeStopRestoreBootstrap(drain, bootstrapAck(first.baseline));
+    for (const [index, receipt] of receipts.entries()) {
+      f.store.acknowledgeStopRestoreApplication(drain, receipts[index - 1] ?? null, applicationAck(receipt, index + 1));
+    }
+    f.store.completeStopRestoreCut(drain);
+    const nativeReceipt = {operation: f.store.pendingStopRestoreFence(f.lookup).operation, localHeadSequence: receipts.length, recordedAtMs: 100};
+    f.store.acknowledgeStopRestoreFence(f.lookup, nativeReceipt);
+    const input = {...f.lookup, maxBytes: 1_000_000, maxEvents: 10};
+    const capture = f.store.captureStopRestorePoint(input);
+    expect(capture.checkpoint).toEqual({cursor: 4095, bytes: checkpoint, digest: hash(checkpoint)});
+    expect(capture.events.map(event => event.metadata.accepted.receipt)).toEqual([point]);
+    expect(resolveLiveRestorePoint(capture, policy)).toEqual({journalCursor: point.journalCursor, receiptDigest: point.updateDigest,
+      markdownDigest: expected, projectionDigest: expected});
+    expect(expected).not.toBe(hash(Buffer.from(yDocToMarkdown(f.doc))));
+    const original = f.raw.prepare("SELECT current_path,restore_fence_generation FROM sync_relay_live_update_journal WHERE journal_cursor=4095").get()!;
+    const before = f.journalRows();
+    for (const [column, value] of [["current_path", "docs/stale.md"], ["restore_fence_generation", 2]] as const) {
+      try {
+        f.raw.prepare(`UPDATE sync_relay_live_update_journal SET ${column}=? WHERE journal_cursor=4095`).run(value);
+        expect(() => f.store.captureStopRestorePoint(input)).toThrow();
+      } finally {
+        f.raw.prepare(`UPDATE sync_relay_live_update_journal SET ${column}=? WHERE journal_cursor=4095`).run(original[column]!);
+      }
+    }
+    expect(f.journalRows()).toEqual(before);
+    expect(resolveLiveRestorePoint(f.store.captureStopRestorePoint(input), policy)).toEqual(resolveLiveRestorePoint(capture, policy));
+  } finally {f.close();}
+}, 1_800_000);
+
+it("revalidates both restore proofs inside a write transaction and observes its uncommitted authority", () => {
+  const f = ownerOriginProofFixture();
+  try {
+    f.store.acknowledgeStopRestoreFence(f.lookup, f.nativeReceipt);
+    const proofs = [f.store.captureStopRestoreOwnerOrigin(f.input), f.store.captureStopRestorePoint(f.input)];
+    const before = f.journalRows();
+    expect(() => f.context.tx(() => {for (const proof of proofs) proof.assertCurrent();})).not.toThrow();
+    expect(() => f.context.tx(() => {
+      f.context.db.exec("UPDATE sync_relay_workspaces SET owner_user_id='other'");
+      for (const proof of proofs) expect(() => proof.assertCurrent()).toThrow(/authority/);
+      throw Error("rollback proof test");
+    })).toThrow("rollback proof test");
+    for (const proof of proofs) proof.assertCurrent();
+    expect(f.journalRows()).toEqual(before);
   } finally {f.close();}
 });
 
