@@ -17,6 +17,7 @@ import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import { snapshotHostCoordinate } from "./liveTicketInputs";
 import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
+import type {LiveRestorePreparation} from "./liveRestorePreparation";
 export { createLiveJournalHistoryAuthority, type LiveJournalHistoryAuthority };
 
 export type CommittedDeliveryOutcome =
@@ -57,6 +58,7 @@ export class LiveCommittedDelivery {
     readonly host: LiveHostConnectionCoordinate;
     readonly deadlineMs: number;
     readonly nextRequestId: () => number;
+    readonly restore?: LiveRestorePreparation;
   };
   constructor(
     storage: SyncRelayStorage,
@@ -67,6 +69,7 @@ export class LiveCommittedDelivery {
       host: LiveHostConnectionCoordinate;
       deadlineMs: number;
       nextRequestId(): number;
+      restore?: LiveRestorePreparation;
     },
   ) {
     if (
@@ -84,6 +87,7 @@ export class LiveCommittedDelivery {
       host: Object.freeze(snapshotHostCoordinate(connection.host)),
       deadlineMs: connection.deadlineMs,
       nextRequestId: connection.nextRequestId.bind(connection),
+      restore: connection.restore,
     });
     this.#store = storage.createLiveCommittedDeliveryStore(history);
   }
@@ -194,6 +198,17 @@ export class LiveCommittedDelivery {
     if (this.#active.has(key)) throw new Error("A committed delivery operation already owns this document.");
     this.#active.add(key);
     try {return await deliverStopRestore({store: this.#store, lookup, connection: this.#connection, deliveryKind: "bootstrap", signal});}
+    finally {this.#active.delete(key);}
+  }
+
+  async prepareRestore(value: StopRestoreLookup, signal?: AbortSignal) {
+    const restore = this.#connection.restore;
+    if (!restore) throw new Error("Restore preparation is not configured on this host.");
+    const lookup = snapshotStopRestoreLookup(value), document = this.#store.stopRestoreDocument({...lookup, host: this.#connection.host});
+    const key = JSON.stringify([document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId]);
+    if (this.#active.has(key)) throw new Error("A committed delivery operation already owns this document.");
+    this.#active.add(key);
+    try {return await restore.prepare({store: this.#store, lookup, connection: this.#connection, deliveryKind: "bootstrap", signal});}
     finally {this.#active.delete(key);}
   }
 

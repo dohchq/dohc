@@ -147,6 +147,10 @@ export function createDeviceControl(options: {
   options.storage.unavailable.addEventListener("abort", close, { once: true });
   if (options.storage.unavailable.aborted) close();
   return { handleUpgrade, close,
+    async prepareRestore(lookup: StopRestoreLookup, signal?: AbortSignal) {
+      if (!currentDelivery) throw new Error("Device delivery is unavailable.");
+      return currentDelivery.prepareRestore(lookup, signal);
+    },
     async stopRestore(lookup: StopRestoreLookup, signal?: AbortSignal) {
       if (!currentDelivery) throw new Error("Device delivery is unavailable.");
       return currentDelivery.stopRestore(lookup, signal);

@@ -14,6 +14,7 @@ import { OwnerCommittedDelivery } from "./ownerCommittedDelivery.js";
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 import {snapshotStopRestoreLookup} from "./liveRestoreDelivery.js";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
+import {LiveRestorePreparation} from "./liveRestorePreparation.js";
 
 export function createDeviceLiveDelivery(options: {
   ws: WebSocket; limits: DeviceControlLimits; config: RelayDeviceDeliveryConfig;
@@ -24,6 +25,7 @@ export function createDeviceLiveDelivery(options: {
   const { ws, limits, config, storage, history, host } = options;
   const invalidated = new AbortController();
   const consumers = new Map<string, LiveCommittedDelivery | OwnerCommittedDelivery>();
+  const restore = config.restore ? new LiveRestorePreparation(config.restore) : undefined;
   const authToken = randomBytes(32).toString("base64url");
   let connection: DeviceEngineConnection | undefined, client: EngineClient | undefined;
   let ready = false, closed = false, requestId = 0, active = 0;
@@ -71,7 +73,7 @@ export function createDeviceLiveDelivery(options: {
       if (typeof row.workspaceId !== "string" || !config.workspaceIds.includes(row.workspaceId) || consumers.has(row.workspaceId) ||
         typeof row.workspaceHandle !== "string" || !row.workspaceHandle || handles.has(row.workspaceHandle)) throw new Error("Device workspace discovery mismatch.");
       handles.add(row.workspaceHandle);
-      const ownerConnection = { client,workspace: row.workspaceHandle,host,deadlineMs: config.client.requestDeadlineMs,nextRequestId };
+      const ownerConnection = { client,workspace: row.workspaceHandle,host,deadlineMs: config.client.requestDeadlineMs,nextRequestId,restore };
       if (ownerBounds && !options.ownerAdmission) throw new Error("Owner admission is not configured.");
       consumers.set(row.workspaceId, ownerBounds ? new OwnerCommittedDelivery(storage,history,{ ...ownerConnection,bounds: ownerBounds,ownerAdmission: options.ownerAdmission! }) : new LiveCommittedDelivery(storage,history,ownerConnection));
     }
@@ -107,6 +109,18 @@ export function createDeviceLiveDelivery(options: {
         check();
         return outcome;
       } finally { active--; }
+    },
+    async prepareRestore(value: StopRestoreLookup, signal?: AbortSignal) {
+      check();
+      if (!ready || active >= config.maxActiveDrains) throw new Error("Device delivery is not ready or is full.");
+      const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
+      if (!consumer) throw new Error("Workspace is not configured on this device host.");
+      active++;
+      try {
+        const outcome = await consumer.prepareRestore(lookup, AbortSignal.any([invalidated.signal, ...(signal ? [signal] : [])]));
+        check();
+        return outcome;
+      } finally {active--;}
     },
     async stopRestore(value: StopRestoreLookup, signal?: AbortSignal) {
       check();

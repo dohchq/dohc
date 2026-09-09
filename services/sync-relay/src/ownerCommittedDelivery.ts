@@ -10,6 +10,7 @@ import {isDeepStrictEqual} from "node:util";
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
+import type {LiveRestorePreparation} from "./liveRestorePreparation";
 
 /** Relay-side delivery to an ordinary desktop owner through its curated bridge. */
 export class OwnerCommittedDelivery {
@@ -20,6 +21,7 @@ export class OwnerCommittedDelivery {
     client: EngineClient; workspace: string; host: LiveHostConnectionCoordinate; deadlineMs: number; nextRequestId(): number;
     bounds: { maxBytes: number; maxEvents: number };
     ownerAdmission: OwnerOutboxAdmission;
+    restore?: LiveRestorePreparation;
   }) {
     authorityInteger(connection.bounds.maxBytes,1); authorityInteger(connection.bounds.maxEvents,1); authorityInteger(connection.deadlineMs,1);
     this.#store = storage.createLiveCommittedDeliveryStore(history);
@@ -96,4 +98,14 @@ export class OwnerCommittedDelivery {
     finally {this.#active.delete(key);}
   }
   settle(document: LiveDocumentKey,signal?: AbortSignal) { return this.#run(document,true,signal); }
+  async prepareRestore(value: StopRestoreLookup, signal?: AbortSignal) {
+    const restore = this.connection.restore;
+    if (!restore) throw new Error("Restore preparation is not configured on this host.");
+    const lookup = snapshotStopRestoreLookup(value), document = parseLiveDocumentKey(this.#store.stopRestoreDocument({...lookup, host: this.connection.host}));
+    const key = JSON.stringify(document);
+    if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
+    this.#active.add(key);
+    try {return await restore.prepare({store: this.#store, lookup, connection: this.connection, deliveryKind: "owner", signal});}
+    finally {this.#active.delete(key);}
+  }
 }

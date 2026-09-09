@@ -12,6 +12,7 @@ import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.j
 import { parseLiveSettlementConfig, type LiveSettlementConfig } from "./liveSettlementConfig.js";
 import {snapshotStopRestoreLookup} from "./liveRestoreDelivery.js";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
+import {parseLiveRestoreConfig, LiveRestorePreparation, type LiveRestoreConfig} from "./liveRestorePreparation.js";
 
 interface ServiceLiveHostConfig {
   readonly version: 1;
@@ -22,6 +23,7 @@ interface ServiceLiveHostConfig {
   readonly ingress: { readonly aggregateBytes: number; readonly applicationWorkingReserveBytes: number; readonly maxUploads: number; readonly uploadDeadlineMs: number };
   readonly client: { readonly aggregateBytes: number; readonly maxUploads: number; readonly connectTimeoutMs: number; readonly requestDeadlineMs: number };
   readonly settlement?: LiveSettlementConfig;
+  readonly restore?: LiveRestoreConfig;
 }
 
 function record(value: unknown, keys: string[], optional: string[] = []): Record<string, unknown> {
@@ -44,7 +46,7 @@ function path(value: unknown, directory: boolean): string {
 /** Operator configuration only. Incoming document fields never supply these paths. */
 function readServiceLiveHostConfig(configPath: string): ServiceLiveHostConfig {
   const value = record(JSON.parse(readFileSync(path(configPath, false), "utf8")),
-    ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"], ["settlement"]);
+    ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"], ["settlement", "restore"]);
   if (value.version !== 1 || !Array.isArray(value.workspaces) || !value.workspaces.length) throw new TypeError("Invalid service host configuration.");
   const workspaces = value.workspaces.map(item => {
     const row = record(item, ["root", "workspaceId", "maxRegistrations"]);
@@ -55,12 +57,14 @@ function readServiceLiveHostConfig(configPath: string): ServiceLiveHostConfig {
   const ingress = record(value.ingress, ["aggregateBytes", "applicationWorkingReserveBytes", "maxUploads", "uploadDeadlineMs"]);
   const client = record(value.client, ["aggregateBytes", "maxUploads", "connectTimeoutMs", "requestDeadlineMs"]);
   const settlement = parseLiveSettlementConfig(value.settlement);
+  const restore = parseLiveRestoreConfig(value.restore);
   const applicationWorkingReserveBytes = integer(ingress.applicationWorkingReserveBytes, 0);
   if (settlement && applicationWorkingReserveBytes === 0) throw new TypeError("Settlement requires a positive applicationWorkingReserveBytes limit.");
+  if (restore && applicationWorkingReserveBytes === 0) throw new TypeError("Restore requires a positive applicationWorkingReserveBytes limit.");
   return Object.freeze({ version: 1, engineExecutable: path(value.engineExecutable, false),
     hostId: parseLiveUpdateIdentifier(value.hostId, "host ID"), instanceId: parseLiveUpdateIdentifier(value.instanceId, "instance ID"),
     workspaces: Object.freeze(workspaces),
-    settlement,
+    settlement, restore,
     ingress: Object.freeze({ aggregateBytes: integer(ingress.aggregateBytes), applicationWorkingReserveBytes,
       maxUploads: integer(ingress.maxUploads), uploadDeadlineMs: integer(ingress.uploadDeadlineMs, 1, 2_147_483_647) }),
     client: Object.freeze({ aggregateBytes: integer(client.aggregateBytes), maxUploads: integer(client.maxUploads),
@@ -90,6 +94,7 @@ export async function startServiceLiveHost(options: {
   const invalidated = new AbortController();
   const signal = AbortSignal.any([storage.unavailable, invalidated.signal, ...(options.signal ? [options.signal] : [])]);
   const consumers = new Map<string, LiveCommittedDelivery>();
+  const restore = config.restore ? new LiveRestorePreparation(config.restore) : undefined;
   let client: EngineClient | undefined, temporary: string | undefined, registered = false, closing: Promise<void> | undefined;
   let clientClosed = false;
   const stopClient = () => { if (client && !clientClosed) { clientClosed = true; client.close(); } };
@@ -133,7 +138,8 @@ export async function startServiceLiveHost(options: {
     temporary = await mkdtemp(join(tmpdir(), "dohc-service-live-host-"));
     const nativeConfig = join(temporary, "host.json");
     await writeFile(nativeConfig, JSON.stringify({ version: 1, relayNamespace: history.namespace, host,
-      workspaces: config.workspaces, ingress: config.ingress, settlement: config.settlement }), { flag: "wx", mode: 0o600 });
+      workspaces: config.workspaces, ingress: config.ingress, settlement: config.settlement,
+      restore: config.restore ? {maxBytes: config.restore.maxBytes, maxEvents: config.restore.maxEvents} : undefined }), { flag: "wx", mode: 0o600 });
     client = await createEngineClient({ command: config.engineExecutable, authToken: randomBytes(32).toString("base64url"),
       protocolVersion: 2, capabilities: ["blobs"], privateLiveApplication: config.client, connectTimeoutMs: config.client.connectTimeoutMs,
       env: { DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig }, signal,
@@ -150,7 +156,7 @@ export async function startServiceLiveHost(options: {
       if (row.workspaceId !== config.workspaces[index]!.workspaceId || typeof row.workspaceHandle !== "string" || !row.workspaceHandle || handles.has(row.workspaceHandle)) throw new Error("Configured workspace identity mismatch.");
       handles.add(row.workspaceHandle);
       consumers.set(row.workspaceId as string, new LiveCommittedDelivery(storage, history, { client, workspace: row.workspaceHandle,
-        host: coordinate, deadlineMs: config.client.requestDeadlineMs, nextRequestId }));
+        host: coordinate, deadlineMs: config.client.requestDeadlineMs, nextRequestId, restore }));
     }
     standing();
     if (signal.aborted || !history.reconciled) throw new Error("Service host startup cancelled.");
@@ -160,6 +166,14 @@ export async function startServiceLiveHost(options: {
     check();
     finishStartup();
     return Object.freeze({ coordinate, invalidated: signal,
+      async prepareRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {
+        check();
+        const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
+        if (!consumer) throw new Error("Workspace is not configured on this service host.");
+        const result = await consumer.prepareRestore(lookup, AbortSignal.any([signal, ...(callerSignal ? [callerSignal] : [])]));
+        check();
+        return result;
+      },
       async stopRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {
         check();
         const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);

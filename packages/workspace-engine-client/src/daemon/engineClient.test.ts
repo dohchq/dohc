@@ -32,7 +32,15 @@ const LIMITS = {
 };
 
 describe("private native restore transport", () => {
-  const input = encodeNativeRestoreInput(Buffer.from('{"fence":{}}'), new Uint8Array(), 128);
+  const input = encodeNativeRestoreInput(Buffer.from('{"fence":{}}'), 128);
+  it("frames one bounded restore header without a caller-supplied owner cut", () => {
+    const header = Buffer.from('{"fence":{}}'), encoded = encodeNativeRestoreInput(header, header.length + 4);
+    expect(new DataView(encoded.buffer).getUint32(0, true)).toBe(header.length);
+    expect(encoded.subarray(4)).toEqual(new Uint8Array(header));
+    expect(encoded.length).toBe(header.length + 4);
+    expect(() => encodeNativeRestoreInput(header, header.length + 3)).toThrow();
+    expect(() => encodeNativeRestoreInput(new Uint8Array(), 128)).toThrow();
+  });
   const call = { id: 903, workspace: "ws-0000000000000001", deadlineMs: 30_000 };
   async function connected() {
     const peer = new FakePeerConnection();

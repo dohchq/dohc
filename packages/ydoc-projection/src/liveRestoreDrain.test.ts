@@ -15,6 +15,7 @@ import {parseNativeRestoreProposalReceipt, encodeNativeRestoreProposal, decodeNa
 import {initializeLiveRestoreOperationSchema} from "../../../services/sync-relay/src/storage/liveRestoreOperationSchema.js";
 import {validateLiveRestoreProposal} from "./liveRestoreProof.js";
 import {createLiveMarkdownJournalValidator} from "./liveDocumentValidation.js";
+import {LiveRestorePreparation, parseLiveRestoreConfig} from "../../../services/sync-relay/src/liveRestorePreparation.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
 const jsonHash = (value: unknown) => hash(Buffer.from(JSON.stringify(value)));
@@ -142,6 +143,69 @@ function contentProposalFixture(kind: "bootstrap" | "owner" = "owner", mode: "se
   } catch (error) {f.close();throw error;}
   finally {point.destroy();head.destroy();}
 }
+
+const preparationConfig = () => parseLiveRestoreConfig({maxBytes: 1_000_000, maxEvents: 10, aggregateBytes: 17_000_000,
+  workingReserveBytes: 1_000_000, maxOperations: 1, validation: policy})!;
+
+it.each([["bootstrap", "service"], ["bootstrap", "device"], ["owner", "device"]] as const)(
+  "prepares and durably replays a verified %s restore proposal on %s", async (kind, mode) => {
+    const f = contentProposalFixture(kind, mode, kind === "owner");
+    try {
+      const sendLiveRestore = vi.fn(async (_request: unknown, operation: string, bytes: Uint8Array) => {
+        expect(operation).toBe("prepare");
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        expect(view.getUint32(0, true)).toBe(bytes.byteLength - 4);
+        expect(JSON.parse(Buffer.from(bytes.subarray(4)).toString())).toEqual({fence: f.receipt.fence, point: f.receipt.point});
+        return {response: {result: {status: "prepared"}}, bytes: Buffer.from(f.encoded)};
+      });
+      const prepare = new LiveRestorePreparation(preparationConfig());
+      const options = {store: f.store, lookup: f.lookup, deliveryKind: kind,
+        connection: {client: {sendLiveRestore} as never, workspace: "native-workspace", host: f.lookup.host, deadlineMs: 1000, nextRequestId: () => 1}};
+      const outcome = await prepare.prepare(options);
+      expect(outcome).toMatchObject({kind: "prepared", candidateDigest: f.receipt.candidateDigest, replayed: false});
+      expect(await prepare.prepare(options)).toEqual({...outcome, replayed: true});
+      expect(sendLiveRestore).toHaveBeenCalledTimes(1);
+      expect(f.raw.prepare("SELECT admission_state FROM sync_relay_live_documents").get()!.admission_state).toBe("closed");
+      expect(f.storage.getShareGrant("grant")?.status).toBe("revoked");
+    } finally {f.close();}
+  });
+
+it("holds restore preparation capacity across transport and releases it after cancellation or proof refusal", async () => {
+  const f = contentProposalFixture();
+  try {
+    const prepare = new LiveRestorePreparation(preparationConfig()), abort = new AbortController();
+    let release!: (value: {response: {result: {status: string}}; bytes: Buffer}) => void;
+    const pending = new Promise<{response: {result: {status: string}}; bytes: Buffer}>(resolve => {release = resolve;});
+    let started!: () => void;
+    const reached = new Promise<void>(resolve => {started = resolve;});
+    const sendLiveRestore = vi.fn(async () => {started(); return pending;});
+    const options = {store: f.store, lookup: f.lookup, deliveryKind: "owner" as const,
+      connection: {client: {sendLiveRestore} as never, workspace: "native-workspace", host: f.lookup.host, deadlineMs: 1000, nextRequestId: () => 1}};
+    const first = prepare.prepare({...options, signal: abort.signal});
+    await reached;
+    await expect(prepare.prepare(options)).rejects.toThrow("capacity is full");
+    abort.abort(new Error("caller retired"));
+    release({response: {result: {status: "prepared"}}, bytes: Buffer.from(f.encoded)});
+    await expect(first).rejects.toThrow("caller retired");
+    expect(f.store.readStopRestoreProposal(f.input, policy)).toBeNull();
+    sendLiveRestore.mockResolvedValueOnce({response: {result: {status: "prepared"}}, bytes: Buffer.from([0])});
+    await expect(prepare.prepare(options)).rejects.toThrow();
+    expect(f.store.readStopRestoreProposal(f.input, policy)).toBeNull();
+    await expect(prepare.prepare(options)).resolves.toMatchObject({kind: "prepared", replayed: false});
+  } finally {f.close();}
+});
+
+it("requires explicit restore preparation limits and snapshots the configured validation policy", () => {
+  expect(parseLiveRestoreConfig(undefined)).toBeUndefined();
+  const config = preparationConfig();
+  expect(() => parseLiveRestoreConfig({...config, aggregateBytes: 1})).toThrow();
+  expect(() => parseLiveRestoreConfig({...config, maxBytes: Number.MAX_SAFE_INTEGER})).toThrow();
+  expect(() => parseLiveRestoreConfig({...config, workingReserveBytes: 0})).toThrow();
+  const mutable = {...config, validation: {...config.validation}};
+  const prepare = new LiveRestorePreparation(mutable);
+  mutable.validation.maxStructVisits = 1;
+  expect(prepare.config.validation.maxStructVisits).toBe(config.validation.maxStructVisits);
+});
 
 it("carries authenticated store targets into real proposal content validation", () => {
   const f = contentProposalFixture();

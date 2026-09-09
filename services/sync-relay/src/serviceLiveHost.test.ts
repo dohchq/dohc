@@ -128,3 +128,24 @@ it("rejects settlement without an application reserve before spawning", async ()
   const withSettlement = await startServiceLiveHost(f);
   await withSettlement.close();
 });
+
+it("requires a restore working reserve and passes only native restore bounds to the engine", async () => {
+  const f = await fixture();
+  const validation = {maxStructVisits: 1000, maxValueNodeVisits: 1000, maxDecodedPayloadByteVisits: 1000,
+    maxStructClientGroupVisits: 1000, maxDeleteClientGroupVisits: 1000, maxDeleteIntervalVisits: 1000, maxIndexOperations: 1000};
+  const restore = {maxBytes: 1_000_000, maxEvents: 10, aggregateBytes: 17_000_000, workingReserveBytes: 1_000_000,
+    maxOperations: 1, validation};
+  f.config.ingress.applicationWorkingReserveBytes = 0;
+  await writeFile(f.configPath, JSON.stringify({...f.config, restore}));
+  await expect(startServiceLiveHost(f)).rejects.toThrow("Restore requires a positive applicationWorkingReserveBytes limit.");
+  expect(spawn).not.toHaveBeenCalled();
+  f.config.ingress.applicationWorkingReserveBytes = 50_000_000;
+  await writeFile(f.configPath, JSON.stringify({...f.config, restore}));
+  let captured!: ReturnType<typeof clientFrom>;
+  spawn.mockImplementation(async options => {captured = clientFrom(options); return captured.client;});
+  const host = await startServiceLiveHost(f);
+  try {
+    expect(captured.config.restore).toEqual({maxBytes: restore.maxBytes, maxEvents: restore.maxEvents});
+    await expect(host.prepareRestore({operationId: "restore", workspaceId: "other", ownerUserId: "owner"})).rejects.toThrow("not configured");
+  } finally {await host.close();}
+});

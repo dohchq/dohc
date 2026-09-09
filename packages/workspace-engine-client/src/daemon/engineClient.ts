@@ -1139,8 +1139,8 @@ export class EngineClient implements EngineTransport {
     signal?: AbortSignal,
   ): Promise<{ response: Response; bytes: Buffer }> {
     const status = ({ prepare: "prepared", apply: "applied", settle: "settled" } as const)[operation];
-    if (!status || !Number.isSafeInteger(maxBytes) || maxBytes < 8 || maxBytes > MAX_U32 ||
-      bytes.byteLength < 8 || bytes.byteLength > maxBytes) throw new TypeError("Invalid native restore bounds.");
+    if (!status || !Number.isSafeInteger(maxBytes) || maxBytes < 5 || maxBytes > MAX_U32 ||
+      bytes.byteLength < 5 || bytes.byteLength > maxBytes) throw new TypeError("Invalid native restore bounds.");
     const output: RestoreOutput = { maxBytes, status, started: false };
     const response = await this.sendLiveUpload(request, `liveApplication.${operation}Restore`,
       bytes.byteLength + maxBytes + 3 * 1024 * 1024, () => {

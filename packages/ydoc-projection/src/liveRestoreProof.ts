@@ -67,3 +67,4 @@ export function validateLiveRestoreProposal(capture: ProposalCapture, input: Liv
 }
 
 export type {OrderedLiveUpdateCutPolicy};
+export {resolveLiveRestorePoint};

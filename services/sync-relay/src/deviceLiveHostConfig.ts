@@ -4,6 +4,7 @@ import { parseHostControlIdentifier, parseHostEpoch } from "@dohc/live-session-c
 import type { DeviceControlLimits } from "@dohc/live-session-contract/device-control";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveSettlementConfig } from "./liveSettlementConfig.js";
+import {parseLiveRestoreConfig} from "./liveRestorePreparation.js";
 
 export function configRecord(value: unknown, keys: string[], optional: string[] = []): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
@@ -53,13 +54,14 @@ export function readRelayDeviceDeliveryConfig(file: string, limits: DeviceContro
   return parseRelayDeviceDeliveryConfig(read(file),limits);
 }
 export function parseRelayDeviceDeliveryConfig(value: unknown, limits: DeviceControlLimits) {
-  const row = configRecord(value, ["version", "workspaceIds", "client", "maxQueuedBytes", "maxActiveDrains"]);
+  const row = configRecord(value, ["version", "workspaceIds", "client", "maxQueuedBytes", "maxActiveDrains"], ["restore"]);
   if (row.version !== 1 || !Array.isArray(row.workspaceIds) || row.workspaceIds.length < 1 || row.workspaceIds.length > 64) throw new TypeError("Invalid relay delivery configuration.");
   const workspaceIds = row.workspaceIds.map(value => parseLiveUpdateIdentifier(value));
   if (new Set(workspaceIds).size !== workspaceIds.length) throw new TypeError("Duplicate relay workspace.");
   const client = configRecord(row.client, ["aggregateBytes", "maxUploads", "connectTimeoutMs", "requestDeadlineMs", "maxFrameBytes"]);
   const maxFrameBytes = integer(client.maxFrameBytes, 1024 * 1024);
   return Object.freeze({ version: 1 as const,workspaceIds: Object.freeze(workspaceIds), maxActiveDrains: integer(row.maxActiveDrains),
+    restore: parseLiveRestoreConfig(row.restore),
     maxQueuedBytes: integer(row.maxQueuedBytes, Math.max(limits.maxPayloadBytes + 16, maxFrameBytes + 20 + 16)),
     client: Object.freeze({ aggregateBytes: integer(client.aggregateBytes, 20 * 1024 * 1024 + Math.floor((20 * 1024 * 1024 - 2) / 5) * 16 + 3 * 1024 * 1024),
       maxUploads: integer(client.maxUploads), connectTimeoutMs: integer(client.connectTimeoutMs), requestDeadlineMs: integer(client.requestDeadlineMs), maxFrameBytes }) });
