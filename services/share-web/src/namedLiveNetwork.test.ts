@@ -52,8 +52,8 @@ async function post(port: number, path: string, body: unknown, account = cookie)
 async function fixture() {
   const stored = await ticketFixture(), sharedChanges = createNamedFrameChanges(8), invalidated = new AbortController();
   const noListeners = deferred<void>();
-  const changes = { ...sharedChanges, subscribe(changed: () => void) {
-    const remove = sharedChanges.subscribe(changed);
+  const changes = { ...sharedChanges, subscribe(...args: Parameters<typeof sharedChanges.subscribe>) {
+    const remove = sharedChanges.subscribe(...args);
     return () => { remove(); if (sharedChanges.listenerCount() === 0) noListeners.resolve(); };
   } };
   const doc = new Y.Doc(), text = new Y.XmlText(), paragraph = new Y.XmlElement("paragraph");
@@ -157,7 +157,7 @@ async function fixture() {
   return { ...stored, native, changes, invalidated, doc, mint, connect, opened, waitingRead, abortedSync, noListeners,
     blockSync() { blockSync = true; },
     publish(textToAppend: string) { const vector = Y.encodeStateVector(doc); text.insert(text.length, textToAppend);
-      queued = { cursor: ++acceptedCursor, bytes: Y.encodeStateAsUpdate(doc, vector) }; changes.notify(); },
+      queued = { cursor: ++acceptedCursor, bytes: Y.encodeStateAsUpdate(doc, vector) }; changes.notify(binding); },
   };
 }
 function untilLive(provider: ReturnType<typeof createNamedLiveProvider>) {

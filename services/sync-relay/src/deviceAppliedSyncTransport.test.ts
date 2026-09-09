@@ -1,11 +1,12 @@
 import {createHash} from "node:crypto";
 import {expect, it, vi} from "vitest";
 import type {WebSocket} from "ws";
-import {EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {EngineClient, FrameDecoder} from "@dohc/workspace-engine-client/daemon";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import type {DeviceControlLimits} from "@dohc/live-session-contract/device-control";
 import {DeviceEngineConnection} from "./deviceEngineConnection.js";
 import {startExistingOwnerDeviceTransport} from "./deviceExistingOwnerTransport.js";
+import {queueLiveHostRequests} from "./liveHostRequests.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -22,7 +23,9 @@ const ack = {deliveryId: "delivery", updateDigest: createHash("sha256").update(u
 const cut = () => ({binding, position: origin, observedLocalYDocHeadSequence: 7,
   hostVector: Buffer.from([0]), missingStateUpdate: Buffer.from([0, 0])});
 
-async function fixture({sync = true, adopted = true, aggregateBytes = 200_000_000} = {}) {
+async function fixture({sync = true, adopted = true, aggregateBytes = 200_000_000, maxUploads = 2, queued = false} = {}) {
+  const lifetime = new AbortController();
+  const replies: {type: string; result?: {status?: string}}[] = [], replyDecoder = new FrameDecoder(1_048_576);
   let transport!: ReturnType<typeof startExistingOwnerDeviceTransport>, connection: DeviceEngineConnection | undefined, peer: EngineClient | undefined;
   const started = deferred<void>();
   const events: Array<{name: string; payload: unknown; seq: number}> = [];
@@ -33,13 +36,18 @@ async function fixture({sync = true, adopted = true, aggregateBytes = 200_000_00
   const device = {readyState: 1, bufferedAmount: 0, send(bytes: Buffer, options: {binary: boolean}, done: () => void) {
     setImmediate(async () => {
       if (options.binary && outputGate) {outputEntered!.resolve(); await outputGate.promise;}
-      if (options.binary) connection!.receive(bytes);
+      if (options.binary) {
+        for (const frame of replyDecoder.push(bytes)) if (frame.kind !== "blobChunk") replies.push(JSON.parse(frame.payload.toString()));
+        connection!.receive(bytes);
+      }
       else {
         const value = JSON.parse(bytes.toString());
         if (value.type === "liveHost.transport") {
           connection = new DeviceEngineConnection(relay, limits, value.receive, 2_000_000, () => undefined);
           peer = new EngineClient(connection, {authToken: start.authToken, protocolVersion: 2, capabilities: ["blobs"], maxFrameBytes: 1_048_576,
             privateLiveApplication: {aggregateBytes: 200_000_000, maxUploads: 2}});
+          if (queued) peer = queueLiveHostRequests(peer, {maxPendingReads: 8, maxPendingWrites: 8, deadlineMs: 30_000,
+            signal: lifetime.signal, retire: () => lifetime.abort()});
           peer.onEvent(event => {if (event.name === "liveApplication.ownerOutboxChanged") events.push(event);});
           started.resolve();
         } else connection!.credit(value.receivedBytes);
@@ -61,24 +69,55 @@ async function fixture({sync = true, adopted = true, aggregateBytes = 200_000_00
     openLiveAppliedSync: vi.fn<EngineClient["openLiveAppliedSync"]>(async () => cut()),
     readNextLiveApplied: vi.fn<EngineClient["readNextLiveApplied"]>(async () => ({position: {eventCount: 1, journalCursor: 30, evidenceDigest: "c".repeat(64)}, ack, updateBytes})),
     readLiveApplicationAck: vi.fn<EngineClient["readLiveApplicationAck"]>(async () => ack),
+    forwardLiveOwnerAdoption: vi.fn(async () => ({result: {status: "adopted", adoption: {adoptionId: "adoption", localYDocSequence: 0,
+      terminalCursor: 0, adoptionReplayed: false}}})),
   };
   transport = startExistingOwnerDeviceTransport({config: {client: singleton as unknown as EngineClient,
     workspaces: [{workspaceId: "workspace", workspaceHandle: "handle"}], ownerFor: () => owner,
-    maxQueuedBytes: 2_000_000, maxFrameBytes: 1_048_576, maxUploads: 2, maxRegistrations: 1, aggregateBytes,
+    maxQueuedBytes: 2_000_000, maxFrameBytes: 1_048_576, maxUploads, maxRegistrations: 1, aggregateBytes,
     maxAdoptionBytes: 1_000_000, maxAdoptionEvents: 10, requestDeadlineMs: 30_000,
     ...(sync ? {sync: {maxClientVectorBytes: 1024, maxOutputBytes: 1_000_000}} : {})}, start, ws: device, limits, stop: () => connection?.close()});
   await started.promise; await peer!.ready();
   await peer!.sendRequest({id: 1, method: "liveApplication.register", workspace: "handle", params: {binding,
     ...(adopted ? {resumeAdoptionId: "adoption"} : {})}});
   let id = 1;
-  return {peer: peer!, singleton, owner, disposed, events, change: () => {for (const listener of listeners) listener();},
+  return {peer: peer!, singleton, owner, disposed, events, replies, change: () => {for (const listener of listeners) listener();},
     holdOutput() {
       const gate = deferred<void>(); outputGate = gate; outputEntered = deferred<void>();
       return {entered: outputEntered.promise, release() {outputGate = undefined; gate.resolve();}};
     },
     next: () => ({id: ++id, workspace: "handle", registrationId: 9, deadlineMs: 30_000}),
-    async close() {await transport.close(); peer!.close();}};
+    async close() {lifetime.abort(); await transport.close(); peer!.close();}};
 }
+
+it("queues three reader requests through a one-operation desktop peer", async () => {
+  const f = await fixture({maxUploads: 1, queued: true});
+  try {
+    const reads = [0, 1, 2].map(() => f.peer.readNextLiveApplied(f.next(), origin, 1_000_000));
+    expect(await Promise.all(reads)).toHaveLength(3);
+    expect(f.singleton.readNextLiveApplied).toHaveBeenCalledTimes(3);
+    expect(f.singleton.close).not.toHaveBeenCalled();
+  } finally {await f.close();}
+});
+
+it("finishes owner handoff before a response can release the next queued native request", async () => {
+  const f = await fixture({adopted: false, maxUploads: 1, queued: true}), entered = deferred<void>(), release = deferred<void>();
+  try {
+    await f.peer.sendRequest({...f.next(), method: "liveApplication.ownerState", params: {registrationId: 9}});
+    f.owner.finishHandoff.mockImplementationOnce(async () => {entered.resolve(); await release.promise;});
+    const adoption = f.peer.sendLiveOwnerAdoption({...f.next(), sessionId: "9"}, {
+      relayDatabaseNamespace: "namespace", adoptionId: "adoption", sourceMomentId: "source", sourceDigest: "b".repeat(64), sourceByteLength: 0,
+      baselineMomentRelaySequence: 1, baselineRegisteredAtMs: 0, expectedLocalSequence: 0, terminalReceipt: null,
+      baselineBytes: Uint8Array.of(0, 0), events: [],
+    }, {maxBytes: 1_000_000, maxEvents: 10});
+    const read = f.peer.readNextLiveApplied(f.next(), origin, 1_000_000);
+    await entered.promise;
+    expect(f.replies.some(reply => reply.result?.status === "adopted")).toBe(false);
+    expect(f.singleton.readNextLiveApplied).not.toHaveBeenCalled();
+    release.resolve(); await Promise.all([adoption, read]);
+    expect(f.singleton.readNextLiveApplied).toHaveBeenCalledOnce();
+  } finally {release.resolve(); await f.close();}
+});
 
 it("forwards atomic sync, chunked applied bytes, empty reads and durable ACKs through the existing owner", async () => {
   const f = await fixture();

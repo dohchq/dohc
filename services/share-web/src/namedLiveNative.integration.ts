@@ -112,8 +112,8 @@ it("preserves native ACKs, accepted feed, and registration lifetime through the 
   const ownerDoc = markdownToYDoc("Hello"), sharedChanges = createNamedFrameChanges(16), validate = createLiveMarkdownJournalValidator(validationPolicy);
   let released!: () => void;
   const noListeners = new Promise<void>(resolve => { released = resolve; });
-  const frameChanges = { ...sharedChanges, subscribe(changed: () => void) {
-    const remove = sharedChanges.subscribe(changed);
+  const frameChanges = { ...sharedChanges, subscribe(...args: Parameters<typeof sharedChanges.subscribe>) {
+    const remove = sharedChanges.subscribe(...args);
     return () => { remove(); if (sharedChanges.listenerCount() === 0) released(); };
   } };
   let active: Awaited<ReturnType<typeof startServiceLiveHost>> | undefined;

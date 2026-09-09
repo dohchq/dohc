@@ -20,6 +20,7 @@ import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
 import {LiveRestorePreparation} from "./liveRestorePreparation.js";
 import {LiveDocumentWork} from "./liveDocumentWork.js";
 import {OwnerOutboxWake} from "./ownerOutboxWake.js";
+import {queueLiveHostRequests} from "./liveHostRequests.js";
 
 export function createDeviceLiveDelivery(options: {
   ws: WebSocket; limits: DeviceControlLimits; config: RelayDeviceDeliveryConfig;
@@ -65,6 +66,9 @@ export function createDeviceLiveDelivery(options: {
     connection = new DeviceEngineConnection(ws, limits, peer, config.maxQueuedBytes, options.stop);
     client = new EngineClient(connection, { authToken, protocolVersion: 2, capabilities: ["blobs"],
       maxFrameBytes: config.client.maxFrameBytes, connectTimeoutMs: config.client.connectTimeoutMs, privateLiveApplication: config.client });
+    if (changes) client = queueLiveHostRequests(client, {maxPendingReads: changes.maxListeners, maxPendingWrites: changes.maxListeners,
+      deadlineMs: config.client.requestDeadlineMs, signal: invalidated.signal,
+      retire() {invalidated.abort(new Error("Native request completion is unknown.")); options.stop();}});
     stopOwnerEvents = client.onEvent(event => {
       if (event.name !== "liveApplication.ownerOutboxChanged") return;
       try {
@@ -118,7 +122,7 @@ export function createDeviceLiveDelivery(options: {
       if (!ready || active >= config.maxActiveDrains) throw new Error("Device delivery is not ready or is full.");
       active++;
       try {const outcome = await run(joined); check(); return outcome;}
-      finally {active--; changes?.notify(); queueMicrotask(() => ownerWake.pump());}
+      finally {active--; changes?.notify(document); queueMicrotask(() => ownerWake.pump());}
     }));
   };
   const drain = async (value: LiveDocumentKey, signal?: AbortSignal) => {

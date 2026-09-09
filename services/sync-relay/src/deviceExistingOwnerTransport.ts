@@ -323,13 +323,15 @@ export function startExistingOwnerDeviceTransport(options: {
         owner!.assertCurrent();
         if (registrations.get(registration.nativeId) !== registration) throw new Error("Owner registration is unavailable.");
       }
-      await send({ type: "response",id: operation.id,result },signal);
-      check(); signal.throwIfAborted();
       if (operation.method === "liveApplication.adoptOwner") {
         await owner!.finishHandoff(true);
+        check(); signal.throwIfAborted(); owner!.assertCurrent();
         clearTimeout(registration!.handoffTimer); registration!.handoffTimer = undefined; registration!.adopting = false;
         registration!.dirty = true;
+        armedHandoff = false;
       }
+      await send({ type: "response",id: operation.id,result },signal);
+      check(); signal.throwIfAborted();
       if (registration?.adopted) notifyChanges();
     } catch {
       if (owner) {try {owner.assertCurrent();} catch {stop();}}

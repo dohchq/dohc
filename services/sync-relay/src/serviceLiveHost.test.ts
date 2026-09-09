@@ -118,7 +118,7 @@ it("preserves a replacement connection when an older host closes", async () => {
 it("wakes captures after stored authority changes and releases its observer on close", async () => {
   const f = await fixture(), notify = vi.fn();
   spawn.mockImplementation(async options => clientFrom(options).client);
-  const host = await startServiceLiveHost({...f, frameChanges: {notify, subscribe: () => () => {}}});
+  const host = await startServiceLiveHost({...f, frameChanges: {maxListeners: 16, notify, subscribe: () => () => {}}});
   await new Promise<void>(queueMicrotask);
   notify.mockClear();
   const stopReading = observeRelayWrites(f.storage, () => {

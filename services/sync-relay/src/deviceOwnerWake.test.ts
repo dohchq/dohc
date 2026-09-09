@@ -53,7 +53,7 @@ async function fixture() {
       client: {maxFrameBytes: 1_048_576, aggregateBytes: 200_000_000, maxUploads: 2, connectTimeoutMs: 30_000, requestDeadlineMs: 30_000}} as never,
     storage: {} as never, history: {namespace: "namespace", reconciled: true} as never,
     host: {hostId: "host", hostEpoch: parseHostEpoch(1), instanceId: "instance", connectionId: "connection", mode: "device"},
-    ownerAdmission: {} as never, frameChanges: {notify, subscribe: () => () => {}}, isCurrent: () => true, stop,
+    ownerAdmission: {} as never, frameChanges: {maxListeners: 16, notify, subscribe: () => () => {}}, isCurrent: () => true, stop,
   });
   delivery.receive(Buffer.from(JSON.stringify({type: "liveHost.transport", version: 1, receive: limits})), false);
   await expect.poll(() => state.madeOwner).toBe(true);

@@ -7,8 +7,14 @@ import { createNamedLiveTickets } from "./liveTickets.js";
 import { audience, binding, fixture, host, key, report, scope } from "./liveTickets.test-helper.js";
 import { captureNamedLiveFrameHost, createNamedFrameChanges } from "./namedLiveFrameHost.js";
 import type { LiveUpdateJournalCut, LiveUpdateJournalCommitInput } from "./storage/types.js";
+import { observeRelayWrites } from "./relayWriteChanges.js";
+import { queueLiveHostRequests } from "./liveHostRequests.js";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  return {promise: new Promise<T>(done => {resolve = done;}), resolve: (value: T) => resolve(value)};
+}
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
 const wireLimits = { maxFrameBytes: 1024 * 1024, maxBlobChunkBytes: 65536, maxStringBytes: 65536,
@@ -22,7 +28,7 @@ class Peer implements EngineClientConnection {
   closed = false;
   write(bytes: Buffer) {
     for (const frame of this.decoder.push(bytes)) {
-      if (frame.kind === "blobChunk") { if (frame.fin && this.pendingSync) this.response?.(this.pendingSync); continue; }
+      if (frame.kind === "blobChunk") { this.events.emit("chunk", frame); if (frame.fin && this.pendingSync) this.response?.(this.pendingSync); continue; }
       const value = JSON.parse(frame.payload.toString()) as Envelope;
       if (value.type === "request") {
         this.requests.push(value);
@@ -53,17 +59,19 @@ const position = { eventCount: 0, journalCursor: 0, evidenceDigest: "ab".repeat(
 const bytes = Uint8Array.of(0, 0);
 const ack = { deliveryId: "delivery", updateDigest: hash(bytes), journalCursor: 11, acceptingHostEpoch: host.hostEpoch,
   localYDocSequence: 3, applicationReplayed: true };
-async function setup() {
+async function setup(maxListeners = 4) {
   const state = await fixture(); cleanup.push(() => state.close());
   const tickets = createNamedLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async () => report } });
   const minted = await tickets.mint({ objectId: binding.objectId }, scope);
   const ticket = (await tickets.redeem(minted!.token, scope))!;
   const peer = new Peer();
-  const client = new EngineClient(peer, { authToken: "test-parent-secret", protocolVersion: 2, capabilities: ["core", "blobs"],
+  let client = new EngineClient(peer, { authToken: "test-parent-secret", protocolVersion: 2, capabilities: ["core", "blobs"],
     connectTimeoutMs: 5000, privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 2 } });
   peer.send({ type: "helloAck", protocolVersion: 2, sessionGeneration: 7, capabilities: ["core", "blobs"], limits: wireLimits });
   await client.ready(); cleanup.push(async () => { client.close(); });
-  const changes = createNamedFrameChanges(4), invalidated = new AbortController();
+  const changes = createNamedFrameChanges(maxListeners), invalidated = new AbortController();
+  client = queueLiveHostRequests(client, {maxPendingReads: maxListeners, maxPendingWrites: maxListeners, deadlineMs: 5000,
+    signal: invalidated.signal, retire: () => invalidated.abort()});
   let requestId = 0;
   const drain = vi.fn(async () => {});
   const nativeBinding = { ...binding, selectorPaths: [binding.currentPath] };
@@ -90,6 +98,57 @@ it("uses the native atomic cut, excluding the diagnostic local head, and leaves 
   expect(f.peer.requests[0]).toMatchObject({ method: "liveApplication.syncOpen", workspace: "trusted-native-handle", params: { registrationId: 7 } });
   f.capture.close(); sync.close();
   expect(f.changes.listenerCount()).toBe(0); expect(f.peer.closed).toBe(false);
+});
+it("keeps three readers alive when a relay write wakes them during a native upload", async () => {
+  const f = await setup(16), caller = new AbortController();
+  const captures = [f.capture, ...[1, 2].map(() => captureNamedLiveFrameHost({
+    ticket: f.capture.ticket, storage: f.storage, native: f.native, bounds: f.bounds, validate: f.validate,
+  }))];
+  cleanup.push(async () => {caller.abort(); for (const capture of captures) capture.close();});
+  const syncs = [];
+  for (const capture of captures) syncs.push(await capture.openSync(Uint8Array.of(0), caller.signal));
+  const read = f.peer.response!;
+  let firstRead = deferred<void>();
+  f.peer.response = request => {read(request); firstRead.resolve();};
+  const pending = [];
+  for (const sync of syncs) {
+    firstRead = deferred<void>();
+    pending.push(sync.nextApplied(caller.signal));
+    await firstRead.promise;
+  }
+  const outcomes = Promise.allSettled(pending);
+  const uploading = deferred<number>();
+  const uploaded = deferred<void>();
+  let rangeStreamId = 0;
+  f.peer.events.on("chunk", (frame: {streamId: number; fin: boolean}) => {if (frame.fin && frame.streamId === rangeStreamId) uploaded.resolve();});
+  f.peer.response = request => {
+    if (request.method === "liveApplication.apply") {rangeStreamId = (request.params as {rangeStreamId: number}).rangeStreamId; uploading.resolve(request.id);}
+    else if (request.method === "liveApplication.appliedRead") f.peer.blob(request.id,
+      {status: "update", position: {eventCount: 1, journalCursor: 11, evidenceDigest: "cd".repeat(32)}, ack});
+  };
+  const upload = f.client.sendLiveApplication({id: f.native.nextRequestId(), workspace: f.native.workspace,
+    registrationId: f.native.registrationId, deadlineMs: 5000}, {
+    metadata: {accepted: {binding: f.native.binding, authority: {principalKind: "owner", principalId: "owner-1", grantId: null, grantGeneration: null},
+      receipt: {deliveryId: ack.deliveryId, updateDigest: ack.updateDigest, journalCursor: 11, acceptingHostEpoch: host.hostEpoch}, receivedAtMs: 1}, firstSeen: []}, updateBytes: bytes,
+  });
+  const wireId = await uploading.promise;
+  await uploaded.promise;
+  const remove = observeRelayWrites(f.storage, () => f.changes.notify());
+  const authorityWake = deferred<void>(), removeAuthority = f.changes.subscribe(() => authorityWake.resolve());
+  try {
+    f.storage.claimWorkspace({workspaceId: "unrelated-workspace", ownerUserId: "unrelated-owner", createdAtMs: 1});
+    await authorityWake.promise;
+    expect(f.peer.requests.filter(row => row.method === "liveApplication.appliedRead")).toHaveLength(3);
+    f.peer.send({type: "response", id: wireId, result: {status: "applied", ack}}); await upload;
+    f.changes.notify(binding);
+    const result = await outcomes;
+    expect(result.map(row => row.status)).toEqual(["fulfilled", "fulfilled", "fulfilled"]);
+    for (const row of result) if (row.status === "fulfilled") row.value.release();
+    expect(captures.every(capture => !capture.invalidated.aborted)).toBe(true);
+    expect(f.peer.closed).toBe(false);
+  } finally {
+    remove(); removeAuthority();
+  }
 });
 it("keeps two named selectors distinct while borrowing one native registration", async () => {
   const f = await setup();
@@ -128,7 +187,7 @@ it("arms a coalesced wake before an empty native read and retains one output lea
     expect(request.method).toBe("liveApplication.appliedRead");
     if (++reads === 1) {
       expect(f.changes.listenerCount()).toBe(2);
-      f.changes.notify(); f.changes.notify();
+      f.changes.notify(binding); f.changes.notify(binding);
       f.peer.send({ type: "response", id: request.id, result: { status: "empty", after: position } });
     } else f.peer.blob(request.id, { status: "update", position: { eventCount: 1, journalCursor: 11, evidenceDigest: "cd".repeat(32) }, ack });
   };
@@ -217,4 +276,15 @@ it("coalesces shared wakes and preserves listener bounds and independent deliver
   await Promise.resolve(); expect(called).toHaveBeenCalledTimes(1);
   changes.notify(); remove(); await Promise.resolve(); expect(called).toHaveBeenCalledTimes(2);
   expect(changes.listenerCount()).toBe(1);
+});
+
+it("checks authority globally while waking native readers only for their document", async () => {
+  const changes = createNamedFrameChanges(3), authority = vi.fn(), first = vi.fn(), second = vi.fn();
+  changes.subscribe(authority); changes.subscribe(first, binding); changes.subscribe(second, {...binding, workspaceId: "other-workspace"});
+  changes.notify(); await new Promise<void>(queueMicrotask);
+  expect(authority).toHaveBeenCalledOnce(); expect(first).not.toHaveBeenCalled(); expect(second).not.toHaveBeenCalled();
+  changes.notify(binding); changes.notify(binding); await new Promise<void>(queueMicrotask);
+  expect(authority).toHaveBeenCalledTimes(2); expect(first).toHaveBeenCalledOnce(); expect(second).not.toHaveBeenCalled();
+  changes.notify({...binding, workspaceId: "other-workspace"}); await new Promise<void>(queueMicrotask);
+  expect(authority).toHaveBeenCalledTimes(3); expect(first).toHaveBeenCalledOnce(); expect(second).toHaveBeenCalledOnce();
 });

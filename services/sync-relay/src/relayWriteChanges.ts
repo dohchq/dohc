@@ -1,6 +1,8 @@
+import type {LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 export interface LiveHostChanges {
-  subscribe(changed: () => void): () => void;
-  notify(): void;
+  readonly maxListeners: number;
+  subscribe(changed: () => void, document?: LiveDocumentKey): () => void;
+  notify(document?: LiveDocumentKey): void;
 }
 
 const observers = new WeakMap<object, Set<() => void>>();

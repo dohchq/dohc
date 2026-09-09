@@ -94,7 +94,7 @@ export function captureNamedLiveFrameHost(options: {
   function pendingChange(signal: AbortSignal) {
     let resolve!: () => void;
     const promise = new Promise<void>(done => { resolve = done; });
-    const remove = native.changes.subscribe(resolve);
+    const remove = native.changes.subscribe(resolve, document);
     signal.addEventListener("abort", resolve, { once: true });
     if (signal.aborted) resolve();
     return { promise, dispose() { remove(); signal.removeEventListener("abort", resolve); } };

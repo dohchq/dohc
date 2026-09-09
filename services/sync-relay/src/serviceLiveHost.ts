@@ -2,6 +2,7 @@ import {liveHostSignal, withLiveHostSignal} from "./liveHostSignal.js";
 import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges.js";
 import {parseNativeLiveSyncConfig} from "./liveSyncConfig.js";
 import {LiveDocumentWork} from "./liveDocumentWork.js";
+import {queueLiveHostRequests} from "./liveHostRequests.js";
 import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -153,7 +154,7 @@ export async function startServiceLiveHost(options: {
         check();
         return result;
       }));
-    } finally {changes?.notify();}
+    } finally {changes?.notify(document);}
   };
   const drain = async (value: LiveDocumentKey, callerSignal?: AbortSignal): Promise<CommittedDeliveryOutcome> => {
     check();
@@ -174,6 +175,8 @@ export async function startServiceLiveHost(options: {
       env: { DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig }, signal,
       onExit: abort, onStderr: text => console.error("[service-live-host]", text.trimEnd()),
     });
+    if (changes) client = queueLiveHostRequests(client, {maxPendingReads: changes.maxListeners, maxPendingWrites: changes.maxListeners,
+      deadlineMs: config.client.requestDeadlineMs, signal, retire: abort});
     if (signal.aborted) throw new Error("Service host startup cancelled.");
     const discovery = await client.sendRequest({ id: nextRequestId(), method: "liveApplication.hosts", params: {}, deadlineMs: config.client.requestDeadlineMs });
     const reply = record(discovery.result, ["relayNamespace", "host", "workspaces"]);
