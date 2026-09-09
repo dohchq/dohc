@@ -2,6 +2,7 @@ import { canonicalRelayUrl } from "@dohc/workspace-contracts/relay-values";
 import type { AccountAuthConfig } from "./accountAuth";
 import { parseNamedLiveBrowserClientLimits, type NamedLiveBrowserClientLimits } from "./namedLiveBrowserClient";
 import {parseLiveGatewayLimits, type LiveGatewayLimits} from "./liveGateway";
+import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "../viewer/src/namedLiveBrowserTransport";
 
 export interface ShareWebConfig {
   relayUrl: string;
@@ -15,6 +16,7 @@ export interface ShareWebConfig {
   accountAuth?: AccountAuthConfig;
   namedBrowserSessionLimits?: NamedLiveBrowserClientLimits;
   namedLiveGatewayLimits?: LiveGatewayLimits;
+  namedRecipientBrowserLimits?: NamedLiveBrowserLimits;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -130,6 +132,14 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     if (!namedBrowserSessionLimits || !accountAuth || !relayExchangeKey) throw new Error("Named live transport requires named browser sessions and relay exchange configuration.");
     namedLiveGatewayLimits = parseLiveGatewayLimits(JSON.parse(env.DOHC_SHARE_WEB_NAMED_LIVE_LIMITS));
   }
+  let namedRecipientBrowserLimits: NamedLiveBrowserLimits | undefined;
+  if (env.DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS !== undefined) {
+    if (!namedLiveGatewayLimits) throw new Error("Named browser editing requires the named live gateway.");
+    namedRecipientBrowserLimits = parseNamedLiveBrowserLimits(JSON.parse(env.DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS));
+    if (namedRecipientBrowserLimits.provider.frames.receive.maxFrameBytes > namedLiveGatewayLimits.maxFrameBytes) {
+      throw new Error("Named browser frames exceed gateway capacity.");
+    }
+  }
 
   return {
     relayUrl: relayUrl.href,
@@ -143,5 +153,6 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     ...(accountAuth ? { accountAuth } : {}),
     ...(namedBrowserSessionLimits ? { namedBrowserSessionLimits } : {}),
     ...(namedLiveGatewayLimits ? {namedLiveGatewayLimits} : {}),
+    ...(namedRecipientBrowserLimits ? {namedRecipientBrowserLimits} : {}),
   };
 }

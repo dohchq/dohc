@@ -602,6 +602,7 @@ it('keeps policy constructors outside root exports and pins explicit subpaths', 
   expect(manifest.exports).toEqual({
     '.': './src/index.ts',
     './body-fragment': './src/body-fragment.ts',
+    './browser-editor': './src/browser-editor.ts',
     './live-journal-validation': './src/live-journal-validation.ts',
     './image-src': './src/image-src.ts',
     './restore-proof': './src/liveRestoreProof.ts',

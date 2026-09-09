@@ -41,6 +41,16 @@ describe("share-web configuration", () => {
     expect(loadShareWebConfig(env).namedLiveGatewayLimits).toBeUndefined();
     const enabled = {...env, DOHC_SHARE_WEB_NAMED_LIVE_LIMITS: JSON.stringify(limits)};
     expect(loadShareWebConfig(enabled).namedLiveGatewayLimits).toEqual(limits);
+    expect(loadShareWebConfig(enabled).namedRecipientBrowserLimits).toBeUndefined();
+    const browser = {provider: {frames: {receive: {maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384},
+      maxQueuedBytes: 16384, maxQueuedFrames: 64, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 16384},
+      maxPendingUpdateBytes: 16384, maxPendingUpdates: 8, maxDeliveryAttempts: 4},
+      maxHttpResponseBytes: 16384, maxSocketBufferedBytes: 16384, connectTimeoutMs: 2000, sendTimeoutMs: 500, drainPollMs: 10};
+    const editor = {...enabled, DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS: JSON.stringify(browser)};
+    expect(loadShareWebConfig(editor).namedRecipientBrowserLimits).toEqual(browser);
+    expect(() => loadShareWebConfig({...editor, DOHC_SHARE_WEB_NAMED_LIVE_LIMITS: undefined})).toThrow("requires");
+    expect(() => loadShareWebConfig({...editor, DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS: "{}"})).toThrow();
+    expect(() => loadShareWebConfig({...editor, DOHC_SHARE_WEB_NAMED_LIVE_LIMITS: JSON.stringify({...limits, maxFrameBytes: 512})})).toThrow("exceed");
     expect(() => loadShareWebConfig({...enabled, DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS: undefined})).toThrow("requires");
     expect(() => loadShareWebConfig({...enabled, DOHC_SHARE_WEB_NAMED_LIVE_LIMITS: "{}"})).toThrow();
   });

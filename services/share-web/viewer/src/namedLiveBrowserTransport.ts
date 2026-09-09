@@ -1,5 +1,6 @@
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
+import {createLiveFrameSession} from "@dohc/live-session-contract/live-frame";
 import { createNamedLiveProvider, type NamedLiveProviderLimits, type NamedLiveProviderState } from "./namedLiveProvider";
 
 /** Account ID is a stale-selection guard, never an authentication credential. */
@@ -36,16 +37,25 @@ const exact = (value: unknown, keys: string): value is Record<string, unknown> =
 class Refused extends Error {}
 class Unavailable extends Error {}
 
+export function parseNamedLiveBrowserLimits(value: unknown): NamedLiveBrowserLimits {
+  if (!exact(value, "connectTimeoutMs,drainPollMs,maxHttpResponseBytes,maxSocketBufferedBytes,provider,sendTimeoutMs") ||
+    !exact(value.provider, "frames,maxDeliveryAttempts,maxPendingUpdateBytes,maxPendingUpdates")) throw new TypeError("Invalid browser transport limits.");
+  const limits = structuredClone(value) as unknown as NamedLiveBrowserLimits;
+  for (const number of [limits.maxHttpResponseBytes, limits.maxSocketBufferedBytes, limits.connectTimeoutMs, limits.sendTimeoutMs, limits.drainPollMs]) {
+    if (!Number.isSafeInteger(number) || number < 1 || number > 2_147_483_647) throw new TypeError("Invalid browser transport limits.");
+  }
+  for (const number of [limits.provider.maxPendingUpdateBytes, limits.provider.maxPendingUpdates, limits.provider.maxDeliveryAttempts]) {
+    if (!Number.isSafeInteger(number) || number < 1) throw new TypeError("Invalid browser transport limits.");
+  }
+  createLiveFrameSession("client", limits.provider.frames).close();
+  if (limits.maxSocketBufferedBytes < limits.provider.frames.receive.maxFrameBytes) throw new TypeError("Socket capacity cannot hold a frame.");
+  return limits;
+}
+
 /** One current selection. Retired handles retain only their in-memory draft for caller-owned recovery. */
 export function createNamedLiveBrowserTransport(options: Options) {
-  const origin = new URL(options.publicOrigin), limits = structuredClone(options.limits);
+  const origin = new URL(options.publicOrigin), limits = parseNamedLiveBrowserLimits(options.limits);
   if (origin.protocol !== "https:" || origin.origin !== options.publicOrigin) throw new TypeError("Named editing requires an HTTPS origin.");
-  for (const value of [limits.maxHttpResponseBytes, limits.maxSocketBufferedBytes, limits.connectTimeoutMs, limits.sendTimeoutMs, limits.drainPollMs]) {
-    if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) {
-      throw new TypeError("Invalid browser transport limits.");
-    }
-  }
-  if (limits.maxSocketBufferedBytes < limits.provider.frames.receive.maxFrameBytes) throw new TypeError("Socket capacity cannot hold a frame.");
   const request = options.fetch ?? globalThis.fetch.bind(globalThis);
   const openSocket = options.openSocket ?? ((url, protocols) => new WebSocket(url, protocols));
   let selected: ReturnType<typeof session> | undefined;
