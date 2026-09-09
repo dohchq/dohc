@@ -1483,3 +1483,114 @@ it("precharges retained restore evidence before materializing an oversized admis
     expect(lifecycleRows(f)).toEqual(before);
   }finally{f.close();}
 });
+
+function retainedLifecyclePayloadBytes(db:StorageContext["db"],operationId:string):number {
+  const op=db.prepare("SELECT * FROM sync_relay_live_restore_operations WHERE operation_id=?").get(operationId)!;
+  const lifecycle=db.prepare("SELECT * FROM sync_relay_live_restore_lifecycles WHERE operation_id=?").get(operationId)!;
+  const journal=db.prepare("SELECT * FROM sync_relay_live_update_journal WHERE restore_operation_id=?").get(operationId)!;
+  return [op.intent_json,op.basis_json,op.terminal_json,op.applied_json,op.native_receipt_json,lifecycle.admission_json,
+    lifecycle.application_json,lifecycle.pending_settlement_json,lifecycle.settlement_json,lifecycle.resume_json]
+    .reduce<number>((sum,value)=>sum+(value===null?0:Buffer.byteLength(String(value))),0)+
+    (journal.update_bytes as Uint8Array).byteLength+(journal.validation_checkpoint_bytes as Uint8Array).byteLength+
+    Number(journal.accepted_metadata_bytes)+Number(lifecycle.receipt_reservation_bytes);
+}
+it("rolls back admission one byte below its funded read budget and can retry to completion",()=>{
+  const f=contentProposalFixture("owner","device",true),tx=f.context.tx.bind(f.context);
+  try {
+    const proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200),before=lifecycleRows(f);
+    let required=0;
+    const dryRun=vi.spyOn(f.context,"tx").mockImplementation(run=>tx(()=>{
+      run();required=retainedLifecyclePayloadBytes(f.context.db,f.input.operationId);throw Error("measured rollback");
+    }));
+    try{expect(()=>f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201)).toThrow("measured rollback");}finally{dryRun.mockRestore();}
+    expect(lifecycleRows(f)).toEqual(before);expect(required).toBeGreaterThan(f.encoded.length);
+    let reachedAdmission=false;
+    const observe=vi.spyOn(f.context,"tx").mockImplementation(run=>tx(()=>{try{return run();}catch(error){
+      reachedAdmission=f.context.db.prepare("SELECT 1 FROM sync_relay_live_restore_lifecycles WHERE operation_id=?").get(f.input.operationId)!==undefined;throw error;
+    }}));
+    try{expect(()=>f.store.admitStopRestoreProposal({...f.input,maxBytes:required-1},proposal.proposalDigest,policy,201)).toThrow();}finally{observe.mockRestore();}
+    expect(reachedAdmission).toBe(true);expect(lifecycleRows(f)).toEqual(before);
+    const admitted=f.store.admitStopRestoreProposal({...f.input,maxBytes:required},proposal.proposalDigest,policy,201);
+    expect(admitted.phase).toBe("relay-admitted");
+    const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,
+      admitted:admitted.admitted,localHeadSequence:admitted.preparation.fence.localHeadSequence+1,
+      hostCoordinate:{hostId:f.input.host.hostId,hostEpoch:f.input.host.hostEpoch,instanceId:f.input.host.instanceId,connectionId:f.input.host.connectionId},recordedAtMs:202};
+    const settlement={settlementId:"budget-settlement",previousCursor:0,terminalCursor:admitted.admitted.accepted.receipt.journalCursor,applicationCount:3,
+      localYDocSequence:application.localHeadSequence,momentId:"budget-moment",markdownDigest:admitted.preparation.point.markdownDigest,materialized:true,collectionReconcileRequired:false};
+    const resume={relayDatabaseNamespace:admitted.preparation.fence.operation.relayDatabaseNamespace,operationId:f.input.operationId,binding:admitted.admitted.accepted.binding,
+      applicationReceipt:admitted.admitted.accepted.receipt,settlementId:settlement.settlementId,momentId:settlement.momentId,markdownDigest:settlement.markdownDigest,
+      localHeadSequence:application.localHeadSequence,recordedAtMs:204};
+    const budget={...f.input,maxBytes:required};
+    f.store.acknowledgeStopRestoreReplacement(budget,application);f.store.acknowledgeStopRestoreSettlement(budget,settlement);
+    expect(f.store.acknowledgeStopRestoreResume(budget,resume).phase).toBe("resumed");
+  }finally{f.close();}
+});
+it("charges operation payloads once when reading a resumed lifecycle at its exact byte budget",()=>{
+  const f=admittedRestoreFixture();try{
+    f.complete();const required=retainedLifecyclePayloadBytes(f.context.db,f.input.operationId);
+    expect(f.store.readStopRestoreLifecycle({...f.input,maxBytes:required})!.phase).toBe("resumed");
+    expect(()=>f.store.readStopRestoreLifecycle({...f.input,maxBytes:required-1})).toThrow();
+  }finally{f.close();}
+});
+it.each(["application","settlement","resume"])("keeps %s recoverable when configured evidence capacity is reduced",stage=>{
+  const f=admittedRestoreFixture();try{
+    if(stage!=="application")f.store.acknowledgeStopRestoreReplacement(f.input,f.application);
+    if(stage==="resume")f.store.acknowledgeStopRestoreSettlement(f.input,f.settlement);
+    const before=lifecycleRows(f),input={...f.input,maxBytes:retainedLifecyclePayloadBytes(f.context.db,f.input.operationId)-1};
+    const call=(input:typeof f.input)=>stage==="application"?f.store.acknowledgeStopRestoreReplacement(input,f.application):
+      stage==="settlement"?f.store.acknowledgeStopRestoreSettlement(input,f.settlement):f.store.acknowledgeStopRestoreResume(input,f.resume);
+    expect(()=>call(input)).toThrow();expect(lifecycleRows(f)).toEqual(before);expect(()=>call(f.input)).not.toThrow();
+    expect(f.complete().phase).toBe("resumed");
+  }finally{f.close();}
+});
+it.each(["application","settlement","resume"])("rolls back %s if its retained budget becomes unreadable before commit",stage=>{
+  const f=admittedRestoreFixture();try{
+    if(stage!=="application")f.store.acknowledgeStopRestoreReplacement(f.input,f.application);
+    if(stage==="resume")f.store.acknowledgeStopRestoreSettlement(f.input,f.settlement);
+    const column=stage==="application"?"application_json":stage==="settlement"?"settlement_json":"resume_json";
+    f.raw.exec(`CREATE TRIGGER shrink_restore_budget AFTER UPDATE OF ${column} ON sync_relay_live_restore_lifecycles BEGIN UPDATE sync_relay_live_restore_lifecycles SET max_evidence_bytes=1; END`);
+    const before=lifecycleRows(f);
+    expect(()=>stage==="application"?f.store.acknowledgeStopRestoreReplacement(f.input,f.application):
+      stage==="settlement"?f.store.acknowledgeStopRestoreSettlement(f.input,f.settlement):f.store.acknowledgeStopRestoreResume(f.input,f.resume)).toThrow();
+    expect(lifecycleRows(f)).toEqual(before);f.raw.exec("DROP TRIGGER shrink_restore_budget");expect(f.complete().phase).toBe("resumed");
+  }finally{f.close();}
+});
+it.each(["proposal","admission"])("rejects a same-length source rewrite by another connection before %s writer entry",stage=>{
+  const f=contentProposalFixture("owner","device",true),tx=f.context.tx.bind(f.context);let changed:ReturnType<typeof lifecycleRows>|undefined;
+  try {
+    const proposal=stage==="admission"?f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200):null;
+    const spy=vi.spyOn(f.context,"tx").mockImplementation(run=>{
+      const row=f.raw.prepare("SELECT journal_cursor,update_bytes FROM sync_relay_live_update_journal ORDER BY journal_cursor LIMIT 1").get()!;
+      const bytes=new Uint8Array(row.update_bytes as Uint8Array);bytes[bytes.length-1]^=1;
+      f.raw.prepare("UPDATE sync_relay_live_update_journal SET update_bytes=? WHERE journal_cursor=?").run(bytes,row.journal_cursor);changed=lifecycleRows(f);
+      return tx(run);
+    });
+    try{expect(()=>stage==="proposal"?f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200):f.store.admitStopRestoreProposal(f.input,proposal!.proposalDigest,policy,201)).toThrow(/changed during validation/);}finally{spy.mockRestore();}
+    expect(changed).toBeDefined();expect(lifecycleRows(f)).toEqual(changed);
+  }finally{f.close();}
+});
+it("keeps admission and all lifecycle ACKs free of journal blob reads, byte comparisons and byte hashes in the writer",()=>{
+  const f=contentProposalFixture("owner","device",true),tx=f.context.tx.bind(f.context),prepare=f.context.db.prepare.bind(f.context.db),compare=Buffer.compare;
+  const prototype=Object.getPrototypeOf(createHash("sha256")),update=prototype.update;let writing=false;
+  const txSpy=vi.spyOn(f.context,"tx").mockImplementation(run=>tx(()=>{writing=true;try{return run();}finally{writing=false;}}));
+  const sqlSpy=vi.spyOn(f.context.db,"prepare").mockImplementation(sql=>{
+    if(writing && /SELECT\s+\*\s+FROM sync_relay_live_update_journal\b/i.test(sql))throw Error("journal blobs in writer");
+    if(writing && /SELECT\s+proposal_bytes\b/i.test(sql))throw Error("proposal bytes in writer");
+    return prepare(sql);
+  });
+  const compareSpy=vi.spyOn(Buffer,"compare").mockImplementation((a,b)=>{if(writing)throw Error("byte comparison in writer");return compare(a,b);});
+  const hashSpy=vi.spyOn(prototype,"update").mockImplementation(function(this:unknown,...args:unknown[]){if(writing&&typeof args[0]!=="string")throw Error("byte hash in writer");return Reflect.apply(update,this,args);});
+  try {
+    const proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200);
+    expect(f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200).replayed).toBe(true);
+    const admitted=f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201);
+    const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,admitted:admitted.admitted,
+      localHeadSequence:admitted.preparation.fence.localHeadSequence+1,hostCoordinate:{hostId:f.input.host.hostId,hostEpoch:f.input.host.hostEpoch,instanceId:"\\".repeat(1024),connectionId:"\\".repeat(1024)},recordedAtMs:202};
+    const settlement={settlementId:"\\".repeat(512),previousCursor:0,terminalCursor:admitted.admitted.accepted.receipt.journalCursor,applicationCount:3,localYDocSequence:application.localHeadSequence,
+      momentId:"\\".repeat(512),markdownDigest:admitted.preparation.point.markdownDigest,materialized:true,collectionReconcileRequired:false};
+    const resume={relayDatabaseNamespace:admitted.preparation.fence.operation.relayDatabaseNamespace,operationId:f.input.operationId,binding:admitted.admitted.accepted.binding,
+      applicationReceipt:admitted.admitted.accepted.receipt,settlementId:settlement.settlementId,momentId:settlement.momentId,markdownDigest:settlement.markdownDigest,localHeadSequence:application.localHeadSequence,recordedAtMs:204};
+    f.store.acknowledgeStopRestoreReplacement(f.input,application);f.store.acknowledgeStopRestoreSettlement(f.input,{...settlement,materialized:false});
+    f.store.acknowledgeStopRestoreSettlement(f.input,settlement);expect(f.store.acknowledgeStopRestoreResume(f.input,resume).phase).toBe("resumed");
+  }finally{hashSpy.mockRestore();compareSpy.mockRestore();sqlSpy.mockRestore();txSpy.mockRestore();f.close();}
+});

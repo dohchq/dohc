@@ -28,6 +28,7 @@ pub struct ConfiguredLiveHostConfig {
     ingress: IngressConfig,
     settlement: Option<SettlementConfig>,
     restore: Option<crate::live_application_ingress::RestoreConfig>,
+    sync: Option<super::live_application::sync::SyncConfig>,
 }
 
 #[derive(Deserialize)]
@@ -174,6 +175,10 @@ impl ConfiguredLiveHostConfig {
 
 pub(crate) struct Discovery {
     connection: ConnectionHandle,
+    sync: Option<(
+        dohc_engine_collab::live_update_application::AppliedSyncPolicy,
+        SettlementAdmission,
+    )>,
     result: Value,
     settlement: Option<(usize, SettlementAdmission)>,
     restore: Option<crate::live_application_ingress::RestoreConfig>,
@@ -190,6 +195,14 @@ impl EngineService {
         if let Some(config) = &config.restore {
             ingress.validate_restore_budget(config)?;
         }
+        let sync = config
+            .sync
+            .map(|c| {
+                ingress
+                    .sync_admission(c)
+                    .map(|admission| (c.policy, admission))
+            })
+            .transpose()?;
         let settlement = config
             .settlement
             .map(|config| {
@@ -226,6 +239,7 @@ impl EngineService {
                     connection: owner.handle(),
                     result,
                     settlement,
+                    sync,
                     restore: config.restore,
                 });
                 Ok((service, owner, ingress))
@@ -314,6 +328,30 @@ impl EngineService {
             WireError::new(ErrorCode::Forbidden, "live settlement is not configured")
         })?;
         Ok((*max, admission.reserve()?))
+    }
+
+    pub(crate) fn sync_admission(
+        &self,
+        connection: &ConnectionHandle,
+    ) -> Result<
+        (
+            dohc_engine_collab::live_update_application::AppliedSyncPolicy,
+            SettlementAdmission,
+        ),
+        WireError,
+    > {
+        let (owner, sync) = if let Some(host) = self.ordinary_live_host.get() {
+            (&host.connection, &host.sync)
+        } else if let Some(host) = self.configured_live_host.get() {
+            (&host.connection, &host.sync)
+        } else {
+            return Err(invalid("applied sync is not provisioned"));
+        };
+        if !owner.same_connection(connection) || !owner.is_current() {
+            return Err(invalid("applied sync connection retired"));
+        }
+        sync.clone()
+            .ok_or_else(|| invalid("applied sync is not provisioned"))
     }
 
     pub(crate) fn restore_config(

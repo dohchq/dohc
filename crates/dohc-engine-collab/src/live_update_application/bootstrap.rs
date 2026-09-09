@@ -422,6 +422,332 @@ mod tests {
         assert_eq!(store.table_row_count("live_restore_fences").unwrap(), 1);
     }
 
+    fn sync_policy() -> AppliedSyncPolicy {
+        AppliedSyncPolicy {
+            max_client_vector_bytes: 1024,
+            max_host_vector_bytes: 4096,
+            max_output_bytes: 1_000_000,
+            max_read_bytes: 10_000_000,
+        }
+    }
+
+    fn sync_event(handle: &ApplicationHandle, cursor: i64, bytes: Vec<u8>) -> AdmittedLiveUpdate {
+        AdmittedLiveUpdate {
+            metadata: AdmittedLiveUpdateMetadata {
+                accepted: RelayAcceptedLiveUpdate {
+                    receipt: LiveUpdateReceipt {
+                        delivery_id: format!("sync-{cursor}"),
+                        update_digest: hex_sha256(&bytes),
+                        journal_cursor: cursor,
+                        accepting_host_epoch: 1,
+                    },
+                    binding: handle.registration.lock().unwrap().binding.clone(),
+                    authority: ServerDerivedLiveUpdateAuthority::Owner {
+                        principal_id: "owner".into(),
+                    },
+                    received_at_ms: 120,
+                },
+                first_seen: vec![],
+            },
+            update_bytes: bytes,
+        }
+    }
+
+    #[test]
+    fn applied_sync_replays_past_the_old_configured_event_window() {
+        let vector = vectors()
+            .into_iter()
+            .find(|v| v.registration_accepted)
+            .unwrap();
+        let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+        run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap();
+        let doc = Ydoc::wire();
+        doc.apply(&vector.bytes).unwrap();
+        let update = doc.richdoc_append_paragraph("past one hundred applications");
+        for cursor in 1..=101 {
+            apply_committed(
+                &mut store,
+                &mut cache,
+                &handle,
+                sync_event(&handle, cursor, update.clone()),
+                &NoFaults,
+                10_000_000,
+            )
+            .unwrap();
+        }
+        let checkpoint_count: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT max(event_count) FROM live_accepted_checkpoints",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(checkpoint_count, 0);
+        let cut = read_applied_sync(&store, &handle, &[0], sync_policy(), || true).unwrap();
+        assert_eq!(cut.position.event_count, 101);
+        assert_eq!(cut.position.journal_cursor, 101);
+        let peer = Ydoc::wire();
+        peer.apply(&cut.missing_state_update).unwrap();
+        assert_eq!(peer.canonical_content(), doc.canonical_content());
+    }
+
+    #[test]
+    fn applied_sync_requires_accepted_history_for_a_native_claimed_document() {
+        let vector = vectors()
+            .into_iter()
+            .find(|v| v.registration_accepted)
+            .unwrap();
+        let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+        let doc = Ydoc::wire();
+        doc.apply(&vector.bytes).unwrap();
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                write_text_in_tx(
+                    tx,
+                    &WriteText {
+                        workspace_id: "workspace".into(),
+                        version_id: "main".into(),
+                        object_id: "object".into(),
+                        path: "notes/example.md".into(),
+                        text: vector.markdown.clone(),
+                        moment_id: "native-baseline".into(),
+                        metadata_origin: "sync".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 100,
+                        request_id: None,
+                    },
+                )?;
+                durable::claim_base_in_tx(
+                    tx,
+                    &key,
+                    ContentKind::Richdoc,
+                    &vector.bytes,
+                    &doc.encode_state_vector(),
+                    100,
+                )
+                .map_err(ApplicationError::from)?;
+                tx.execute("UPDATE ydoc_docs SET path='notes/example.md'", [])
+                    .map_err(write_sql)?;
+                Ok::<_, Error>(())
+            })
+            .unwrap();
+        let zero = AppliedPosition {
+            event_count: 0,
+            journal_cursor: 0,
+            evidence_digest: accepted_history::initial_digest(&handle.registration.lock().unwrap())
+                .unwrap(),
+        };
+        for cursor in 0..=1 {
+            if cursor == 1 {
+                let update = doc.richdoc_append_paragraph("applied without accepted history");
+                assert!(matches!(
+                    apply_committed(
+                        &mut store,
+                        &mut cache,
+                        &handle,
+                        sync_event(&handle, cursor, update),
+                        &NoFaults,
+                        10_000_000
+                    )
+                    .unwrap(),
+                    ApplicationResult::Applied(_)
+                ));
+            }
+            assert!(matches!(
+                read_applied_sync(&store, &handle, &[0], sync_policy(), || true),
+                Err(ApplicationError::Conflict)
+            ));
+            assert!(matches!(
+                read_next_applied(&store, &handle, &zero, sync_policy(), || true),
+                Err(ApplicationError::Conflict)
+            ));
+        }
+    }
+
+    #[test]
+    fn applied_sync_cut_feed_survives_compaction_and_detects_missing_ordinals() {
+        let vector = vectors()
+            .into_iter()
+            .find(|v| v.registration_accepted)
+            .unwrap();
+        let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+        run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap();
+        let policy = sync_policy();
+        let cut = read_applied_sync(&store, &handle, &[0], policy, || true).unwrap();
+        assert_eq!(cut.position.event_count, 0);
+        assert!(
+            read_next_applied(&store, &handle, &cut.position, policy, || true)
+                .unwrap()
+                .is_none()
+        );
+        let doc = Ydoc::wire();
+        doc.apply(&cut.missing_state_update).unwrap();
+        let update = doc.richdoc_append_paragraph("after atomic cut");
+        let binding = handle.registration.lock().unwrap().binding.clone();
+        let event = AdmittedLiveUpdate {
+            metadata: AdmittedLiveUpdateMetadata {
+                accepted: RelayAcceptedLiveUpdate {
+                    receipt: LiveUpdateReceipt {
+                        delivery_id: "sync-first".into(),
+                        update_digest: hex_sha256(&update),
+                        journal_cursor: 11,
+                        accepting_host_epoch: 1,
+                    },
+                    binding,
+                    authority: ServerDerivedLiveUpdateAuthority::Owner {
+                        principal_id: "owner".into(),
+                    },
+                    received_at_ms: 120,
+                },
+                first_seen: vec![],
+            },
+            update_bytes: update,
+        };
+        apply_committed(
+            &mut store,
+            &mut cache,
+            &handle,
+            event.clone(),
+            &NoFaults,
+            10_000_000,
+        )
+        .unwrap();
+        let first = read_next_applied(&store, &handle, &cut.position, policy, || true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.position.journal_cursor, 11);
+        assert_eq!(first.position.event_count, 1);
+        let peer = Ydoc::wire();
+        peer.apply(&cut.missing_state_update).unwrap();
+        peer.apply(&first.update_bytes).unwrap();
+        assert_eq!(peer.canonical_content(), doc.canonical_content());
+        let mut duplicate = event;
+        duplicate.metadata.accepted.receipt.delivery_id = "sync-repeat-bytes".into();
+        duplicate.metadata.accepted.receipt.journal_cursor = 30;
+        apply_committed(
+            &mut store, &mut cache, &handle, duplicate, &NoFaults, 10_000_000,
+        )
+        .unwrap();
+        let second = read_next_applied(&store, &handle, &first.position, policy, || true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            second.ack.local_ydoc_sequence,
+            first.ack.local_ydoc_sequence
+        );
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        durable::maybe_compact(&mut store, &key, 0, &NoFaults, 150).unwrap();
+        assert_eq!(
+            read_next_applied(&store, &handle, &first.position, policy, || true)
+                .unwrap()
+                .unwrap()
+                .update_bytes,
+            second.update_bytes
+        );
+        let now = read_applied_sync(&store, &handle, &peer.encode_state_vector(), policy, || {
+            true
+        })
+        .unwrap();
+        assert_eq!(now.position, second.position);
+        assert!(
+            read_next_applied(&store, &handle, &now.position, policy, || true)
+                .unwrap()
+                .is_none()
+        );
+        let before = counts(&store);
+        assert!(read_applied_sync(
+            &store,
+            &handle,
+            &[0],
+            AppliedSyncPolicy {
+                max_read_bytes: 1024,
+                ..policy
+            },
+            || true
+        )
+        .is_err());
+        assert!(read_next_applied(
+            &store,
+            &handle,
+            &cut.position,
+            AppliedSyncPolicy {
+                max_output_bytes: 4096,
+                max_host_vector_bytes: 4096,
+                max_read_bytes: 1,
+                ..policy
+            },
+            || true
+        )
+        .is_err());
+        assert!(read_applied_sync(&store, &handle, &[0], policy, || false).is_err());
+        assert_eq!(counts(&store), before);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("DELETE FROM live_accepted_updates WHERE event_count=1", [])
+                    .map_err(write_sql)?;
+                Ok::<_, ApplicationError>(())
+            })
+            .unwrap();
+        assert!(read_next_applied(&store, &handle, &cut.position, policy, || true).is_err());
+    }
+
+    #[test]
+    fn applied_sync_refuses_stopped_or_retired_registration() {
+        let vector = vectors()
+            .into_iter()
+            .find(|v| v.registration_accepted)
+            .unwrap();
+        let (_dir, mut store, mut cache, mut owner, handle) = fixture(&vector);
+        run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap();
+        let cut = read_applied_sync(&store, &handle, &[0], sync_policy(), || true).unwrap();
+        let (fence, coordinate) = fence_input(&handle);
+        owner
+            .fence_restore(&mut store, fence, coordinate, 200, &NoFaults)
+            .unwrap();
+        assert!(read_applied_sync(&store, &handle, &[0], sync_policy(), || true).is_err());
+        assert!(read_next_applied(&store, &handle, &cut.position, sync_policy(), || true).is_err());
+        owner.invalidate(&mut store).unwrap();
+        assert!(read_applied_sync(&store, &handle, &[0], sync_policy(), || true).is_err());
+    }
+
+    #[test]
+    fn applied_sync_excludes_unadmitted_native_head() {
+        let vector = vectors()
+            .into_iter()
+            .find(|v| v.registration_accepted)
+            .unwrap();
+        let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+        run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap();
+        let native = Ydoc::wire();
+        native.apply(&vector.bytes).unwrap();
+        let update = native.richdoc_append_paragraph("not yet admitted");
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                durable::record_update_in_tx(tx, &key, &update, None, None, 150)
+            })
+            .unwrap();
+        let cut = read_applied_sync(&store, &handle, &[0], sync_policy(), || true).unwrap();
+        assert_eq!(cut.observed_local_ydoc_head_sequence, 1);
+        assert_eq!(cut.position.event_count, 0);
+        let applied = Ydoc::wire();
+        applied.apply(&cut.missing_state_update).unwrap();
+        let baseline = Ydoc::wire();
+        baseline.apply(&vector.bytes).unwrap();
+        assert_eq!(applied.canonical_content(), baseline.canonical_content());
+        assert_ne!(applied.canonical_content(), native.canonical_content());
+        assert!(
+            read_next_applied(&store, &handle, &cut.position, sync_policy(), || true)
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[test]
     fn restore_fence_replay_refuses_changed_durable_state() {
         for sql in [

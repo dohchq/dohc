@@ -784,6 +784,9 @@ importers:
       '@dohc/workspace-core':
         specifier: workspace:*
         version: link:../../packages/workspace-core
+      '@dohc/ydoc-projection':
+        specifier: workspace:*
+        version: link:../../packages/ydoc-projection
       '@excalidraw/excalidraw':
         specifier: 0.18.1
         version: 0.18.1(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -805,6 +808,9 @@ importers:
       ws:
         specifier: 8.21.3
         version: 8.21.3
+      yjs:
+        specifier: 13.6.30
+        version: 13.6.30
     devDependencies:
       '@dohc/sync-relay':
         specifier: workspace:*

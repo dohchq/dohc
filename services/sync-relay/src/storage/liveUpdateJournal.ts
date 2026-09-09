@@ -78,7 +78,7 @@ interface DecodedJournalRow {
   restoreOperationId: string | null;
   history: {namespace: string; eventCount: number; evidenceDigest: string; metadataBytes: number};
 }
-export function decodeJournalRow(db: SqliteDb, raw: Record<string, unknown>, provenance?: Record<string, unknown>[]): DecodedJournalRow {
+function decodeJournalMetadata(db: SqliteDb, raw: Record<string, unknown>, provenance?: Record<string, unknown>[]): AdmittedLiveUpdate["metadata"] {
   const binding = parseLiveObjectBinding({ workspaceId: raw.workspace_id, mainVersionId: raw.main_version_id,
     objectId: raw.object_id, lineageClaimId: raw.lineage_claim_id, currentPath: raw.current_path,
     selectorPaths: typeof raw.selector_paths_json === "string" ? JSON.parse(raw.selector_paths_json) : null,
@@ -96,11 +96,14 @@ export function decodeJournalRow(db: SqliteDb, raw: Record<string, unknown>, pro
     const a = firstSeen[index - 1]!, b = firstSeen[index]!;
     journalIntegrity(a.clientId < b.clientId || (a.clientId === b.clientId && a.endClock < b.startClock));
   }
-  const metadata = parseAdmittedLiveUpdateMetadata({ accepted: {
+  return parseAdmittedLiveUpdateMetadata({ accepted: {
     receipt: { deliveryId: raw.delivery_id, updateDigest: raw.update_digest, journalCursor: cursor, acceptingHostEpoch: raw.accepting_host_epoch },
     binding, authority: { principalKind: raw.principal_kind, principalId: raw.principal_id, grantId: raw.grant_id, grantGeneration: raw.grant_generation },
     receivedAtMs: raw.received_at_ms,
   }, firstSeen });
+}
+export function decodeJournalRow(db: SqliteDb, raw: Record<string, unknown>, provenance?: Record<string, unknown>[]): DecodedJournalRow {
+  const metadata=decodeJournalMetadata(db,raw,provenance);
   journalIntegrity((raw.validation_checkpoint_sha256 === null) === (raw.validation_checkpoint_bytes === null));
   const checkpoint = raw.validation_checkpoint_sha256 === null ? null : {
     digest: parseLiveUpdateDigest(raw.validation_checkpoint_sha256), bytes: journalBytes(raw.validation_checkpoint_bytes),
@@ -271,6 +274,9 @@ export function appendValidatedLiveJournal(storage: StorageContext, input: {
   priorMetadata: AdmittedLiveUpdate["metadata"] | null | undefined; onFirstWrite?: () => void;
 }): AdmittedLiveUpdate {
   const {document,namespace,host,current,metadata,updateBytes,receivedAtMs,firstSeen,checkpointBytes,checkpointDigest,priorMetadata,onFirstWrite}=input;
+  // Preserve the journal decoder's bounds without copying the owned insert bytes.
+  for (const bytes of [updateBytes,checkpointBytes]) if (bytes!==null && (bytes.byteLength<1 || bytes.byteLength>20_971_520))
+    throw new TypeError("Invalid journal bytes.");
   const restoreOperationId=input.restoreOperationId??null;
   journalIntegrity(restoreOperationId===null || checkpointBytes!==null);
   requireLiveJournalHistory(storage);
@@ -319,14 +325,17 @@ export function appendValidatedLiveJournal(storage: StorageContext, input: {
   journalIntegrity(cursor === nextCursor);
   const insertRange = storage.db.prepare(`INSERT INTO ${LIVE_JOURNAL_PROVENANCE}(workspace_id,main_version_id,object_id,lineage_claim_id,client_id,start_clock,end_clock,journal_cursor) VALUES (?,?,?,?,?,?,?,?)`);
   for (const range of firstSeen) insertRange.run(...documentParams(document), range.clientId, range.startClock, range.endClock, cursor);
-  const raw = storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE journal_cursor=?`).get(cursor);
+  const raw = storage.db.prepare(`SELECT journal_cursor,delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,
+    current_path,selector_paths_json,restore_fence_generation,principal_kind,principal_id,grant_id,grant_generation,accepting_host_epoch,received_at_ms,
+    validation_checkpoint_sha256,length(update_bytes) AS update_length,length(validation_checkpoint_bytes) AS checkpoint_length
+    FROM ${LIVE_JOURNAL_TABLE} WHERE journal_cursor=?`).get(cursor);
   journalIntegrity(raw);
-  const row = decodeJournalRow(storage.db, raw);
-  journalIntegrity(isDeepStrictEqual(row.admitted.metadata, intended) && Buffer.compare(row.admitted.updateBytes, updateBytes) === 0 &&
-    (checkpointBytes ? row.checkpoint && row.checkpoint.digest === checkpointDigest && Buffer.compare(row.checkpoint.bytes, checkpointBytes!) === 0 : row.checkpoint === null));
+  const storedMetadata=decodeJournalMetadata(storage.db,raw);
+  journalIntegrity(isDeepStrictEqual(storedMetadata,intended) && raw.update_length===updateBytes.byteLength &&
+    raw.validation_checkpoint_sha256===checkpointDigest && raw.checkpoint_length===(checkpointBytes?.byteLength??null));
   storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, document.workspaceId);
   registerLiveDeliveryEvent(storage, document, host.hostId, raw);
-  return row.admitted;
+  return {metadata:storedMetadata,updateBytes};
 }
 
 export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpdateJournalCommitInput): RelayLiveUpdateJournalResult {
@@ -516,13 +525,13 @@ function requireRestoreSourceCoverage(storage: StorageContext, document: LiveDoc
     AND start_clock<=? AND end_clock>? ORDER BY end_clock DESC LIMIT 1`);
   let retained: {operationId: string; admission: ReturnType<typeof readRestoreAdmission>} | undefined;
   let checkpointIndex=0;
+  // Both range lists are ordered by client and start clock.
   for (const next of candidate) {
     while (checkpointIndex<checkpointOnly.length && (checkpointOnly[checkpointIndex]!.clientId<next.clientId ||
       (checkpointOnly[checkpointIndex]!.clientId===next.clientId && checkpointOnly[checkpointIndex]!.endClock<=next.startClock))) checkpointIndex++;
     for (let index=checkpointIndex;index<checkpointOnly.length;index++) {
       const range=checkpointOnly[index]!;
       if (range.clientId>next.clientId || range.startClock>=next.endClock) break;
-      if (range.clientId!==next.clientId) continue;
       let start = Math.max(next.startClock, range.startClock), end = Math.min(next.endClock, range.endClock);
       while (start < end) {
         const row = lookup.get(namespace, ...documentParams(document), range.clientId, start, start);

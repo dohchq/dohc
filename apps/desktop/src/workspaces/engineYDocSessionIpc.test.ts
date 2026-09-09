@@ -180,7 +180,7 @@ const openPayload = {
 describe("engine Y.Doc IPC adapter", () => {
   it("hands the existing session to main only after its journal flush and keeps the renderer held until completion", async () => {
     const flush = deferred<void>();
-    const nativeOwner = {sessionId: "native-existing",flush: vi.fn(() => flush.promise),refresh: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async (_update: Uint8Array) => undefined)};
+    const nativeOwner = {onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(() => flush.promise),refresh: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async (_update: Uint8Array) => undefined)};
     const h = harness(providerSession({nativeOwner,objectId: "object",versionId: "main",lineageClaimId: "a".repeat(64)}));
     const sender = new FakeSender(7);
     await h.ipc.open(sender,openPayload);
@@ -209,7 +209,7 @@ describe("engine Y.Doc IPC adapter", () => {
   });
 
   it("releases a prepared renderer when relay acquisition is cancelled", async () => {
-    const nativeOwner = {sessionId: "native-existing",flush: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async () => undefined)};
+    const nativeOwner = {onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async () => undefined)};
     const h = harness(providerSession({nativeOwner,objectId: "object",versionId: "main",lineageClaimId: "a".repeat(64)}));
     const sender = new FakeSender(7); await h.ipc.open(sender,openPayload);
     const owner = h.ipc.existingOwner({workspaceId: "workspace-1",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "notes/a.md",selectorPaths: ["notes/a.md"],restoreFenceGeneration: 1});

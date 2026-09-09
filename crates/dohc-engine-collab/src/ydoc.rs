@@ -337,6 +337,8 @@ impl Ydoc {
     fn with_offset_kind(offset_kind: yrs::OffsetKind) -> Self {
         let doc = Doc::with_options(Options {
             offset_kind,
+            // Durable snapshots and restore proofs retain deleted CRDT payload.
+            skip_gc: true,
             ..Options::default()
         });
         Self::from_doc(doc)
@@ -346,6 +348,7 @@ impl Ydoc {
         let doc = Doc::with_options(Options {
             client_id: yrs::ClientID::new(client_id),
             offset_kind: yrs::OffsetKind::Utf16,
+            skip_gc: true,
             ..Options::default()
         });
         Self::from_doc(doc)
@@ -673,6 +676,45 @@ impl Ydoc {
         })?;
         let txn = self.doc.transact();
         Ok(txn.encode_state_as_update_v1(&sv))
+    }
+
+    /// Bounded output allocation. Yrs traversal itself is not preemptible.
+    pub(crate) fn diff_bounded(
+        &self,
+        remote_sv: &[u8],
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, CollabError> {
+        crate::replay_parity::prevalidate_state_vector_bytes(remote_sv)?;
+        let sv = StateVector::decode_v1(remote_sv).map_err(|e| CollabError::MalformedUpdate {
+            reason: format!("state vector decode: {e}"),
+        })?;
+        let Some(mut encoder) = bounded_encoder::BoundedEncoder::new(max_bytes) else {
+            return Ok(None);
+        };
+        self.doc
+            .transact()
+            .encode_state_as_update(&sv, &mut encoder);
+        Ok(encoder.finish())
+    }
+
+    pub(crate) fn encode_state_vector_bounded(&self, max_bytes: usize) -> Option<Vec<u8>> {
+        let txn = self.doc.transact();
+        let vector = txn.state_vector();
+        // Each client needs at least two encoded bytes. Bound sorting scratch before allocation.
+        if vector.iter().count() > max_bytes.saturating_sub(1) / 2 {
+            return None;
+        }
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(vector.iter().count()).ok()?;
+        entries.extend(vector.iter().map(|(client, clock)| (client.get(), *clock)));
+        entries.sort_unstable_by_key(|(client, _)| *client);
+        let mut encoder = bounded_encoder::BoundedEncoder::new(max_bytes)?;
+        encoder.write_var(entries.len());
+        for (client, clock) in entries {
+            encoder.write_var(client);
+            encoder.write_var(clock);
+        }
+        encoder.finish()
     }
 
     /// The canonical semantic content — the convergence surface the JS driver
@@ -4355,6 +4397,21 @@ mod projection_tests {
     use crate::limits::MAX_PROJECTION_BYTES;
     use yrs::types::xml::XmlIn;
     use yrs::types::Attrs;
+
+    #[test]
+    fn fixed_client_retains_deleted_yjs_payload() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/lossless-fixtures/deleted-history.json"
+        ))
+        .unwrap();
+        let updates: Vec<Vec<u8>> = serde_json::from_value(fixture["updates"].clone()).unwrap();
+        let expected: Vec<u8> = serde_json::from_value(fixture["retainedState"].clone()).unwrap();
+        let doc = Ydoc::with_client_id(17);
+        for update in updates {
+            doc.apply(&update).unwrap();
+        }
+        assert_eq!(doc.encode_full_state(), expected);
+    }
 
     fn scene_map_set(doc: &Ydoc, root: &str, key: &str, value: &str) -> Vec<u8> {
         let map = doc.doc.get_or_insert_map(root);

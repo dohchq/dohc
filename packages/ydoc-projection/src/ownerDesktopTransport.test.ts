@@ -1,3 +1,5 @@
+import {captureNamedLiveFrameHost,createNamedFrameChanges} from "../../../services/sync-relay/src/namedLiveFrameHost.js";
+import {createNamedLiveTickets} from "../../../services/sync-relay/src/liveTickets.js";
 import {readRelayDeviceDeliveryConfig} from "../../../services/sync-relay/src/deviceLiveHostConfig.js";
 import {createHash} from "node:crypto";
 import {spawn,spawnSync,type ChildProcess} from "node:child_process";
@@ -49,8 +51,11 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
   const seed = JSON.parse(readFileSync(new URL("../../../crates/dohc-engine-collab/tests/owner-source/owner-source-seed.json",import.meta.url),"utf8"));
   writeFileSync(join(workspaceRoot,"docs/a.md"),seed.markdown);
   const nativeConfig = join(root,"ordinary.json");
-  writeFileSync(nativeConfig,JSON.stringify({ingress: {aggregateBytes: 400_000_000,applicationWorkingReserveBytes: 1_000_000,maxUploads: 2,uploadDeadlineMs: 30_000},
-    maxRegistrations: 8,maxAdoptionBytes: 1_000_000,maxAdoptionEvents: 100,maxApplicationsPerSettlement: 100,ownerOutbox: {maxPendingBytes: 1_000_000,maxPendingAgeMs: 600_000}}));
+  const restoreMaxBytes = 16_000_000;
+  writeFileSync(nativeConfig,JSON.stringify({ingress: {aggregateBytes: 600_000_000,applicationWorkingReserveBytes: 1_000_000,maxUploads: 2,uploadDeadlineMs: 30_000},
+    maxRegistrations: 8,maxAdoptionBytes: 1_000_000,maxAdoptionEvents: 100,maxApplicationsPerSettlement: 100,
+    sync: {policy: {maxClientVectorBytes: 100_000,maxHostVectorBytes: 100_000,maxOutputBytes: 2_000_000,maxReadBytes: 8_000_000},workingReserveBytes: 4_000_000},
+    restore: {maxBytes: restoreMaxBytes, maxEvents: 100}, ownerOutbox: {maxPendingBytes: 1_000_000,maxPendingAgeMs: 600_000}}));
   const conflicting = spawnSync(binary,[],{windowsHide: true,timeout: 10_000,encoding: "utf8",env: {...process.env,DOHC_ENGINE_AUTH_TOKEN: "test-auth",
     DOHC_ENGINE_OWNER_HOST_CONFIG: nativeConfig,DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig}});
   expect(conflicting.status).not.toBe(0);
@@ -68,6 +73,9 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
   let child: ChildProcess | undefined;
   let handoffEditInjected = false;
   let handoffCount = 0;
+  let closeNamedPeer: (() => void) | undefined;
+  let namedPeerInvalidated: AbortSignal | undefined;
+  let releaseTailAdmission: (() => void) | undefined;
   try {
     capture.captureBatch([{path: "docs/a.md",operation: "update"}]); await capture.flush();
     await capture.stop(); await sessions.closeWorkspace(workspace);
@@ -80,8 +88,9 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     ipc = createEngineYDocSessionIpc({sessionFor: () => ({workspaceId: "workspace",generation: 1,isCurrent: () => true}),
       acquireWorkspace: () => ({workspace,assertCurrent() {},release() {}}),captureFor: () => capture,ensureCaptureFor: async () => undefined,
       isSharedView: () => false,resolveDocumentPath: async (_workspace,path) => path,onError: (message,error) => {console.error(message,error);}});
-    const sessionId = "renderer-existing"; let seq = 0;
-    renderer = await bindEngineYDoc({
+    const openRenderer = async (sessionId: string) => {
+      let seq = 0;
+      return bindEngineYDoc({
       open: () => ipc!.open(sender,{workspaceId: "workspace",sessionId,path: "docs/a.md"}),stageLocalUpdate: () => ++seq,
       async applyLocalUpdate(update,seq,lineageGeneration) {const result = ipc!.applyUpdate(sender,{sessionId,update,seq,lineageGeneration}); if (!result.accepted) throw new Error(result.reason);},
       onRemoteUpdate(listener) {listeners.set(CHANNELS.engineYDocRemoteUpdate,event => listener(event.update,event.lineageGeneration)); return () => listeners.delete(CHANNELS.engineYDocRemoteUpdate);},
@@ -94,7 +103,9 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
         if (!handoffEditInjected) {handoffEditInjected = true; renderer?.doc?.getMap("frontmatter").set("duringHandoff","Queued owner edit");}
       }); return () => listeners.delete(CHANNELS.engineYDocOwnerHandoff);},
       close: () => ipc!.close(sender,{sessionId}),
-    });
+      });
+    };
+    renderer = await openRenderer("renderer-existing");
     expect(renderer.available).toBe(true);
     const rendererDoc = renderer.doc!;
     const engineBinding = await sessions.run(workspace,async binding => binding);
@@ -107,17 +118,20 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     await expect.poll(() => native.prepare("SELECT head_update_seq FROM ydoc_docs WHERE object_id=?").get(document.objectId)!.head_update_seq).toBeGreaterThan(0);
     expect(native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries").get()!.count).toBe(0);
     const configPath = join(root,"deployment.json");
-    initializeRelayDeployment({configPath,relayPath: join(root,"relay","relay.sqlite"),continuityDirectory: join(root,"continuity")}); deployment = openRelayDeployment(configPath);
+    initializeRelayDeployment({configPath,relayPath: join(root,"relay","relay.sqlite"),continuityDirectory: join(root,"continuity")}); deployment = openRelayDeployment(configPath,{liveTickets: {retainedTicketsPerPrincipalGrant: 8,expiredTicketCleanupBatchSize: 4,now: Date.now}});
     const credential = createDeviceHostCredential("host",parseHostEpoch(1));
     expect(deployment.storage.provisionDeviceHostCredential({credential,updatedAtMs: 1}).ok).toBe(true);
     const limits = {maxConnections: 4,maxHeaderBytes: 8192,maxCredentialBytes: 4096,maxPayloadBytes: 4096,maxPendingBytes: 4_000_000,maxFragments: 8,maxBufferedChunks: 16,
       handshakeTimeoutMs: 10_000,heartbeatIntervalMs: 500,heartbeatTimeoutMs: 10_000,closeTimeoutMs: 1000};
     const relayConfig = join(root,"relay-device.json");
-    writeFileSync(relayConfig,JSON.stringify({version: 1,workspaceIds: ["workspace"],maxQueuedBytes: 4_000_000,maxActiveDrains: 2,client: {aggregateBytes: 200_000_000,maxUploads: 2,connectTimeoutMs: 30_000,requestDeadlineMs: 30_000,maxFrameBytes: 1_048_576}}));
+    writeFileSync(relayConfig,JSON.stringify({version: 1,workspaceIds: ["workspace"],maxQueuedBytes: 4_000_000,maxActiveDrains: 2,
+      restore: {maxBytes: restoreMaxBytes, maxEvents: 100, aggregateBytes: restoreMaxBytes * 16 + 1_000_000, workingReserveBytes: 1_000_000, maxOperations: 1, validation: policy},
+      client: {aggregateBytes: 200_000_000,maxUploads: 2,connectTimeoutMs: 30_000,requestDeadlineMs: 30_000,maxFrameBytes: 1_048_576}}));
     const relay = createServer(); relay.listen(0,"127.0.0.1"); await once(relay,"listening");
     const relayPort = (relay.address() as {port: number}).port, exchangeKey = "owner-desktop-exchange-key-32-bytes";
+    const frameChanges = createNamedFrameChanges(16);
     const control = createDeviceControl({storage: deployment.storage,hosts: new Set([`127.0.0.1:${relayPort}`]),relayExchangeKey: exchangeKey,limits,
-      delivery: {config: readRelayDeviceDeliveryConfig(relayConfig,limits),history: deployment.history,ownerAdmission: {shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 10_000_000,validate: createLiveMarkdownJournalValidator(policy)}}});
+      delivery: {config: readRelayDeviceDeliveryConfig(relayConfig,limits),history: deployment.history,frameChanges,ownerAdmission: {shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000_000,validate: createLiveMarkdownJournalValidator(policy)}}});
     relay.on("upgrade",control.handleUpgrade);
     const certificate = fileURLToPath(new URL("../../../services/share-web/src/testing/device-control/localhost-cert.pem",import.meta.url));
     const key = fileURLToPath(new URL("../../../services/share-web/src/testing/device-control/localhost-key.pem",import.meta.url));
@@ -128,7 +142,9 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     let ownerAvailable = true;
     const connect = () => connectDeviceHost({url: `wss://localhost:${sharePort}/api/device-control`,credential,limits,onRegistered() {},existingOwner: {
       client: singleton,workspaces: [{workspaceId: "workspace",workspaceHandle: engineBinding.workspace}],ownerFor: binding => {if (!ownerAvailable) throw new Error("Renderer owner is unavailable."); return ipc!.existingOwner(binding);},
-      maxQueuedBytes: 4_000_000,maxFrameBytes: 1_048_576,maxUploads: 2,maxRegistrations: 8,aggregateBytes: 200_000_000,maxAdoptionBytes: 1_000_000,maxAdoptionEvents: 2,requestDeadlineMs: 30_000}});
+      maxQueuedBytes: 4_000_000,maxFrameBytes: 1_048_576,maxUploads: 2,maxRegistrations: 8,aggregateBytes: 200_000_000,
+      sync: {maxClientVectorBytes: 100_000,maxOutputBytes: 2_000_000},
+      maxRestoreBytes: restoreMaxBytes,maxAdoptionBytes: 1_000_000,maxAdoptionEvents: 2,requestDeadlineMs: 30_000}});
     let connection = connect();
     closeNetwork = async () => {connection.stop(); control.close(); bridge.close(); await connection.closed;
       await Promise.all([new Promise<void>(resolve => share.close(() => resolve())),new Promise<void>(resolve => relay.close(() => resolve()))]); native.close();};
@@ -136,6 +152,10 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     const hostRow = deployment.storage.getLiveHostControl()!, host = {mode: "device" as const,hostId: credential.hostId,hostEpoch: credential.hostEpoch,instanceId: credential.instanceId,connectionId: hostRow.registeredConnectionId!};
     const baseline = new Uint8Array(origin.bytes as Uint8Array), registration = createLiveMarkdownRegistrationValidator(policy)({document,currentPath: "docs/a.md",checkpoint: baseline});
     if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
+    const baselineDoc = new Y.Doc({gc: false});
+    Y.applyUpdate(baselineDoc, baseline);
+    const baselineProjection = yDocToMarkdown(baselineDoc);
+    baselineDoc.destroy();
     deployment.storage.claimWorkspace({workspaceId: "workspace",ownerUserId: "owner",createdAtMs: 2});
     deployment.storage.putBlob({workspaceId: "workspace",sha256: hash(seed.markdown),content: Buffer.from(seed.markdown),createdAtMs: 2});
     deployment.storage.appendLogBatch({workspaceId: "workspace",originId: "owner",ops: [{originSeq: 0,opKind: "moment.append",recordedAtMs: 2,payloadJson: JSON.stringify({objectId: document.objectId,
@@ -200,22 +220,76 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
       return;
     }
     const drain = async () => {let result: unknown,failure: unknown; await expect.poll(async () => {try {result = await control.drain(document); return true;} catch (error) {if ((error as Error).message.includes("not ready")) return false; failure = error; return true;}},{timeout: 30_000}).toBe(true); if (failure) throw failure; return result;};
-    expect(await drain()).toMatchObject({kind: "done"});
+    const adoptionPass = await drain();
+    expect(adoptionPass).toEqual(expect.objectContaining({kind: expect.stringMatching(/^(done|pending)$/)}));
+    if ((adoptionPass as {kind: string}).kind === "pending") expect(adoptionPass).toHaveProperty("continueDrain",true);
+    await expect.poll(() => native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.count,{timeout: 30_000}).toBe(0);
     expect(native.prepare("SELECT COUNT(*) AS count FROM live_device_bootstraps").get()!.count).toBe(0);
     expect(native.prepare("SELECT COUNT(*) AS count FROM moments").get()!.count).toBeGreaterThanOrEqual(Number(initialSession));
     expect(rendererDoc.getMap("frontmatter").get("beforeConnection")).toBe("Owner edit before first connection");
     expect(native.prepare("SELECT covered_outbox_sequence FROM live_owner_adoptions").get()!.covered_outbox_sequence).toBe(0);
-    rendererDoc.getMap("frontmatter").set("title","Owner edit"); await renderer.flushPendingLocalUpdates();
-    const binding = deployment.storage.resolveCurrentLiveDocumentBinding({document,actor: {kind: "owner",userId: "owner",shareId: "share"}});
-    if (binding.kind !== "current") throw new Error("Owner binding unavailable.");
-    await ipc.existingOwner(binding.binding).prepareHandoff(new AbortController().signal).then(() => ipc!.existingOwner(binding.binding).finishHandoff(true));
-    expect(native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.count).toBeGreaterThan(0);
-    await drain();
+    const namedActor = {kind: "named" as const,userId: "reader",grantId: "named-grant"};
+    const namedBinding = deployment.storage.resolveCurrentLiveDocumentBinding({document,actor: namedActor});
+    if (namedBinding.kind !== "current") throw new Error("Named owner binding unavailable.");
+    const nativePeer = await control.captureNative(namedBinding.binding);
+    const scope = {workspaceId: "workspace",shareId: "named-share",grantId: "named-grant",userId: "reader"};
+    const tickets = createNamedLiveTickets({storage: deployment.storage,audience: `https://localhost:${sharePort}`,key: Buffer.alloc(32,17),
+      hostReports: {currentBinding: async () => ({connection: nativePeer.coordinate,binding: namedBinding.binding})}});
+    const minted = await tickets.mint({objectId: document.objectId},scope);
+    if (!minted) throw new Error("Named owner ticket was not minted.");
+    const ticket = await tickets.redeem(minted.token,scope);
+    if (!ticket) throw new Error("Named owner ticket was not redeemed.");
+    const namedPeer = captureNamedLiveFrameHost({ticket,storage: deployment.storage,native: nativePeer,
+      bounds: {maxClientVectorBytes: 100_000,maxSyncOutputBytes: 2_000_000,maxAppliedUpdateBytes: 2_000_000,maxSubmissionBytes: 2_000_000,maxAdmissionBytes: 8_000_000},
+      validate: createLiveMarkdownJournalValidator(policy)});
+    namedPeerInvalidated = namedPeer.invalidated;
+    const peerSignal = new AbortController();
+    const peerSync = await namedPeer.openSync(Uint8Array.of(0),peerSignal.signal), browser = new Y.Doc();
+    Y.applyUpdate(browser,peerSync.missingStateUpdate);
+    closeNamedPeer = () => {peerSignal.abort(); peerSync.close(); namedPeer.close(); browser.destroy();};
+    expect(peerSync.binding.selectorPaths).toEqual(["docs/a.md"]);
+    expect(nativePeer.binding.selectorPaths).toEqual(["docs"]);
+    expect(yDocToMarkdown(browser)).toBe(yDocToMarkdown(rendererDoc));
+    const firstApplied = peerSync.nextApplied(peerSignal.signal);
+    // The production nextApplied waiter must be armed before the owner changes.
+    await expect.poll(() => frameChanges.listenerCount()).toBe(2);
+    rendererDoc.getMap("frontmatter").set("title","Owner edit");
+    await renderer.flushPendingLocalUpdates();
+    const firstLease = await firstApplied;
+    try {Y.applyUpdate(browser,firstLease.value.updateBytes);} finally {firstLease.release();}
+    expect(browser.getMap("frontmatter").get("title")).toBe("Owner edit");
+    let lastCursor = firstLease.value.journalCursor;
+    for (let round = 0; round < 2; round++) {
+      const pending = peerSync.nextApplied(peerSignal.signal);
+      await expect.poll(() => frameChanges.listenerCount()).toBe(2);
+      for (let index = 0; index < 4; index++) {
+        rendererDoc.getMap("frontmatter").set(`ownerBurst${round}-${index}`,index);
+        await renderer.flushPendingLocalUpdates();
+      }
+      let lease = await pending;
+      for (;;) {
+        try {
+          expect(lease.value.journalCursor).toBeGreaterThan(lastCursor); lastCursor = lease.value.journalCursor;
+          Y.applyUpdate(browser,lease.value.updateBytes);
+        } finally {lease.release();}
+        if (browser.getMap("frontmatter").get(`ownerBurst${round}-3`) === 3) break;
+        lease = await peerSync.nextApplied(peerSignal.signal);
+      }
+      expect(yDocToMarkdown(browser)).toBe(yDocToMarkdown(rendererDoc));
+    }
+    // Settlement shares the document slot with wake delivery while a peer waits.
+    const waitingAfterEdits = peerSync.nextApplied(peerSignal.signal);
+    const cancelWaiting = expect(waitingAfterEdits).rejects.toThrow();
+    await expect.poll(() => frameChanges.listenerCount()).toBe(2);
+    expect((await control.settle(document)).materialized).toBe(true);
+    expect(namedPeer.invalidated.aborted).toBe(false);
+    peerSignal.abort(); await cancelWaiting; peerSync.close();
+    expect(native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.count).toBe(0);
     const remote = new Y.Doc(); Y.applyUpdate(remote,Y.encodeStateAsUpdate(rendererDoc)); const before = Y.encodeStateVector(remote);
     remote.getMap("frontmatter").set("remote","Remote edit"); const update = Y.encodeStateAsUpdate(remote,before);
     const actor = {kind: "named" as const,userId: "reader",grantId: "named-grant"};
     const current = deployment.storage.resolveCurrentLiveDocumentBinding({document,actor}), cut = deployment.storage.readLiveUpdateJournalCut({document});
-    if (current.kind !== "current" || cut.kind !== "cut") throw new Error("Remote cut unavailable.");
+    if (current.kind !== "current" || cut.kind !== "cut") throw new Error(`Remote cut unavailable: ${JSON.stringify({current,cut: {kind: cut.kind}})}`);
     expect(deployment.storage.commitLiveUpdateJournal({host,actor,expectedAuthority: current.authority,metadata: {deliveryId: "remote-edit",updateDigest: hash(update),binding: current.binding},
       cutToken: cut.cut,validation: createLiveMarkdownJournalValidator(policy)({document,currentPath: "docs/a.md",checkpoint: cut.cut.checkpoint.bytes,suffix: cut.cut.suffix.map(row => row.bytes),candidate: update}),updateBytes: update,receivedAtMs: Date.now()}).result.kind).toBe("accepted");
     await control.settle(document);
@@ -255,6 +329,12 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
       .mockImplementationOnce(()=>{throw new Error("Lost owner application ACK before stop");});
     try {await expect(drain()).rejects.toThrow("Lost owner application ACK before stop");}finally{lostApplication.mockRestore();}
     const appliedSequence=Number(native.prepare("SELECT local_ydoc_sequence FROM live_device_update_applications WHERE delivery_id='owner-stop-cut'").get()!.local_ydoc_sequence);
+    const originalAdmission = deployment.storage.commitLiveUpdateJournal.bind(deployment.storage);
+    const tailAdmission = vi.spyOn(deployment.storage,"commitLiveUpdateJournal").mockImplementation(input => {
+      if (input.actor.kind === "owner") throw new Error("Injected unavailable owner admission before restore");
+      return originalAdmission(input);
+    });
+    releaseTailAdmission = () => tailAdmission.mockRestore();
     rendererDoc.getMap("frontmatter").set("localRestoreTail","Unadmitted owner work");
     await renderer.flushPendingLocalUpdates();
     await expect.poll(() => native.prepare("SELECT COUNT(*) AS n FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.n).toBeGreaterThan(0);
@@ -263,11 +343,17 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     beginStopRestore(deployment.storage as StorageContext,{deliveryKind: "owner",...lookup,document,shareId: "share",grantId: "grant",expectedGrantGeneration: 1,
       expectedDependentGrantIds: [],expectedFence: stopAuthority.binding.restoreFenceGeneration,restorePointCursor: 0,restorePointReceiptDigest: hash(baseline)},Date.now());
     advanceStopRestoreFence(deployment.storage as StorageContext,lookup,Date.now());
+    releaseTailAdmission(); releaseTailAdmission = undefined;
     const stop = async () => {let result: Awaited<ReturnType<typeof control.stopRestore>> | undefined, failure: unknown; await expect.poll(async () => {
       try {result = await control.stopRestore(lookup); return true;} catch(error) {if ((error as Error).message.includes("not ready")) return false; failure=error; return true;}
     },{timeout: 30_000}).toBe(true); if(failure) throw failure; return result!;};
     const oldConnection = deployment.storage.getLiveHostControl()!.registeredConnectionId;
-    connection.stop(); await connection.closed; connection = connect();
+    expect(namedPeerInvalidated!.aborted).toBe(false);
+    connection.stop(); await connection.closed;
+    expect(namedPeerInvalidated!.aborted).toBe(true);
+    closeNamedPeer!(); closeNamedPeer = undefined;
+    expect(frameChanges.listenerCount()).toBe(0);
+    connection = connect();
     await expect.poll(() => {const current=deployment!.storage.getLiveHostControl();return current?.admissionState==="open" && current.registeredConnectionId!==oldConnection;},{timeout: 30_000}).toBe(true);
     const handoffsBeforeStop = handoffCount;
     const stoppedRequests = vi.spyOn(singleton,"sendRequest");
@@ -293,8 +379,32 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     expect(replayRequests.mock.calls.map(call=>call[0].method)).not.toContain("liveApplication.register");
     expect(replayRequests.mock.calls.map(call=>call[0].method)).not.toContain("liveApplication.ownerState");
     replayRequests.mockRestore();
+    const prepared = await control.prepareRestore(lookup);
+    if (prepared.kind !== "prepared") throw new Error("Owner restore proposal is pending.");
+    const resumed = await control.completeRestore(lookup, prepared.proposalDigest);
+    if (resumed.kind !== "resumed") throw new Error("Owner restore is pending.");
+    expect(readFileSync(join(workspaceRoot, "docs/a.md"), "utf8")).toBe(seed.markdown);
+    expect(native.prepare("SELECT sequence,update_digest,pending FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence").all()).toEqual(pendingTail);
+    renderer = await openRenderer("renderer-restored"); ownerAvailable = true;
+    expect(renderer.available).toBe(true);
+    expect(yDocToMarkdown(renderer.doc!)).toBe(baselineProjection);
+    const handoffsAfterRestore = handoffCount;
+    renderer.doc!.getMap("frontmatter").set("afterRestore", "Fresh owner generation");
+    await renderer.flushPendingLocalUpdates();
+    expect(await drain()).toHaveProperty("kind", "done");
+    expect(handoffCount).toBe(handoffsAfterRestore);
+    expect(native.prepare("SELECT sequence,update_digest,pending FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence").all()).toEqual(pendingTail);
+    expect((await control.settle(document)).materialized).toBe(true);
+    expect(readFileSync(join(workspaceRoot, "docs/a.md"), "utf8")).toBe(yDocToMarkdown(renderer.doc!));
+    const restoredConnection = deployment.storage.getLiveHostControl()!.registeredConnectionId;
+    connection.stop(); await connection.closed; connection = connect();
+    await expect.poll(() => deployment!.storage.getLiveHostControl()?.registeredConnectionId !== restoredConnection, {timeout: 30_000}).toBe(true);
+    expect(await drain()).toHaveProperty("kind", "done");
+    expect(handoffCount).toBe(handoffsAfterRestore);
+    expect(await control.completeRestore(lookup, prepared.proposalDigest)).toEqual(resumed);
     writeFileSync(join(root,"result.json"),JSON.stringify({passed: true,binary,sha256: hash(readFileSync(binary)),document,markdown: yDocToMarkdown(remote)},null,2)); remote.destroy();
   } finally {
+    releaseTailAdmission?.(); closeNamedPeer?.();
     captures.mockRestore();
     if (child && child.exitCode === null) {child.kill(); await once(child,"exit");}
     await closeNetwork?.();

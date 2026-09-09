@@ -24,6 +24,13 @@ use std::sync::{Arc, Mutex};
 const SAFE: i64 = 9_007_199_254_740_991;
 
 mod accepted_history;
+mod ack_read;
+mod sync;
+pub use ack_read::{read_application_ack, LiveApplicationAckIdentity};
+pub use sync::{
+    read_applied_sync, read_next_applied, AppliedPosition, AppliedSyncCut, AppliedSyncPolicy,
+    NextAppliedUpdate,
+};
 mod adoption;
 pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};
 mod bootstrap;
@@ -1271,6 +1278,291 @@ mod tests {
             .read_with(|conn| durable::load_doc_in(conn, &key()))
             .unwrap()
     }
+
+    #[test]
+    fn ack_read_preserves_historical_identity_after_restart_without_mutation() {
+        let (dir, mut store, mut cache, owner, handle) = fixture();
+        let source = Ydoc::wire();
+        let first = event("ack-first", 1, source.plaintext_insert(0, "first"));
+        let identity = LiveApplicationAckIdentity {
+            delivery_id: first.metadata.accepted.receipt.delivery_id.clone(),
+            update_digest: first.metadata.accepted.receipt.update_digest.clone(),
+        };
+        assert!(read_application_ack(&store, &handle, &identity)
+            .unwrap()
+            .is_none());
+        let mut expected = ack(apply(&mut store, &mut cache, &handle, first));
+        expected.application_replayed = true;
+        apply(
+            &mut store,
+            &mut cache,
+            &handle,
+            event("ack-next", 2, source.plaintext_insert(5, " next")),
+        );
+        assert_eq!(
+            read_application_ack(&store, &handle, &identity).unwrap(),
+            Some(expected.clone())
+        );
+        drop(handle);
+        drop(owner);
+        drop(store);
+        let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+        let mut owner = ApplicationOwner::new("workspace-1".into()).unwrap();
+        let mut next = coordinate("new-connection");
+        next.host_epoch = 3;
+        let handle = owner
+            .register(&mut store, "relay-A".into(), next, binding())
+            .unwrap();
+        let before = document(&store).encode_full_state();
+        let count_before = count(&store, "live_device_update_applications");
+        assert_eq!(
+            read_application_ack(&store, &handle, &identity).unwrap(),
+            Some(expected.clone())
+        );
+        assert_eq!(expected.accepting_host_epoch, 1);
+        assert_eq!(expected.local_ydoc_sequence, 1);
+        assert_eq!(document(&store).encode_full_state(), before);
+        assert_eq!(
+            count(&store, "live_device_update_applications"),
+            count_before
+        );
+        let absent = LiveApplicationAckIdentity {
+            delivery_id: "absent".into(),
+            update_digest: identity.update_digest.clone(),
+        };
+        assert!(read_application_ack(&store, &handle, &absent)
+            .unwrap()
+            .is_none());
+        let wrong_digest = LiveApplicationAckIdentity {
+            update_digest: "00".repeat(32),
+            ..identity.clone()
+        };
+        assert!(matches!(
+            read_application_ack(&store, &handle, &wrong_digest),
+            Err(ApplicationError::Conflict)
+        ));
+        owner.invalidate(&mut store).unwrap();
+        assert!(read_application_ack(&store, &handle, &identity).is_err());
+    }
+
+    #[test]
+    fn ack_read_refuses_foreign_binding_generation_namespace_and_corrupt_sequence() {
+        let (_dir, mut store, mut cache, mut owner, handle) = fixture();
+        let update = event("ack-bound", 1, Ydoc::wire().plaintext_insert(0, "bound"));
+        let identity = LiveApplicationAckIdentity {
+            delivery_id: update.metadata.accepted.receipt.delivery_id.clone(),
+            update_digest: update.metadata.accepted.receipt.update_digest.clone(),
+        };
+        apply(&mut store, &mut cache, &handle, update);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE live_device_update_applications SET local_ydoc_sequence=2",
+                    [],
+                )
+                .unwrap();
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        assert!(matches!(
+            read_application_ack(&store, &handle, &identity),
+            Err(ApplicationError::Corrupt)
+        ));
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE live_device_update_applications SET local_ydoc_sequence=1",
+                    [],
+                )
+                .unwrap();
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        let mut generation = binding();
+        generation.restore_fence_generation = 8;
+        let replacement = owner
+            .register(
+                &mut store,
+                "relay-A".into(),
+                coordinate("connection-1"),
+                generation,
+            )
+            .unwrap();
+        assert!(matches!(
+            read_application_ack(&store, &replacement, &identity),
+            Err(ApplicationError::Conflict)
+        ));
+        let other_namespace = owner
+            .register(
+                &mut store,
+                "relay-B".into(),
+                coordinate("connection-2"),
+                binding(),
+            )
+            .unwrap();
+        assert!(read_application_ack(&store, &other_namespace, &identity)
+            .unwrap()
+            .is_none());
+        let current = owner
+            .register(
+                &mut store,
+                "relay-A".into(),
+                coordinate("connection-3"),
+                binding(),
+            )
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE live_device_update_applications SET object_id='another-object'",
+                    [],
+                )
+                .unwrap();
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        assert!(matches!(
+            read_application_ack(&store, &current, &identity),
+            Err(ApplicationError::Conflict)
+        ));
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE live_device_application_bindings SET available=0",
+                    [],
+                )
+                .unwrap();
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        assert!(matches!(
+            read_application_ack(&store, &current, &identity),
+            Err(ApplicationError::Interrupted)
+        ));
+    }
+
+    #[test]
+    fn ack_read_accepts_different_covering_selectors_and_refuses_damaged_history() {
+        let (dir, mut store, mut cache, mut owner, handle) = fixture();
+        let update = event(
+            "selector-ack",
+            1,
+            Ydoc::wire().plaintext_insert(0, "retained"),
+        );
+        let identity = LiveApplicationAckIdentity {
+            delivery_id: update.metadata.accepted.receipt.delivery_id.clone(),
+            update_digest: update.metadata.accepted.receipt.update_digest.clone(),
+        };
+        let mut expected = ack(apply(&mut store, &mut cache, &handle, update));
+        expected.application_replayed = true;
+        let mut unrelated = binding();
+        unrelated.selector_paths = vec!["elsewhere".into()];
+        let outside = owner
+            .register(
+                &mut store,
+                "relay-A".into(),
+                coordinate("outside-selector"),
+                unrelated,
+            )
+            .unwrap();
+        assert!(read_application_ack(&store, &outside, &identity).is_err());
+        let mut broader = binding();
+        broader.selector_paths = vec!["notes".into()];
+        let current = owner
+            .register(
+                &mut store,
+                "relay-A".into(),
+                coordinate("named-reader"),
+                broader,
+            )
+            .unwrap();
+        assert_eq!(
+            read_application_ack(&store, &current, &identity).unwrap(),
+            Some(expected.clone())
+        );
+        drop(handle);
+        drop(current);
+        drop(owner);
+        drop(store);
+        let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+        let mut owner = ApplicationOwner::new("workspace-1".into()).unwrap();
+        let current = owner
+            .register(
+                &mut store,
+                "relay-A".into(),
+                coordinate("after-restart"),
+                binding(),
+            )
+            .unwrap();
+        let before = document(&store).encode_full_state();
+        for saved in ["[\"notes\"]", "[\"notes\",\"notes/a.md\"]"] {
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE live_device_update_applications SET selector_paths_json=?1",
+                        [saved],
+                    )
+                    .unwrap();
+                    Ok::<_, StorageError>(())
+                })
+                .unwrap();
+            assert_eq!(
+                read_application_ack(&store, &current, &identity).unwrap(),
+                Some(expected.clone())
+            );
+        }
+        let oversized = format!("[\"{}\"]", "a".repeat(ack_read::MAX_SELECTOR_JSON_BYTES));
+        for (saved, expected_error) in [
+            ("[]", ApplicationError::Corrupt),
+            ("[1]", ApplicationError::Corrupt),
+            ("[\"elsewhere\"]", ApplicationError::Conflict),
+            ("[\"notes/a.md\",\"notes\"]", ApplicationError::Corrupt),
+            ("[\"notes\",\"notes\"]", ApplicationError::Corrupt),
+            ("[\"notes/../elsewhere\"]", ApplicationError::Corrupt),
+            (oversized.as_str(), ApplicationError::Corrupt),
+        ] {
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE live_device_update_applications SET selector_paths_json=?1",
+                        [saved],
+                    )
+                    .unwrap();
+                    Ok::<_, StorageError>(())
+                })
+                .unwrap();
+            assert_eq!(
+                std::mem::discriminant(
+                    &read_application_ack(&store, &current, &identity).unwrap_err()
+                ),
+                std::mem::discriminant(&expected_error),
+                "{saved:.80}"
+            );
+        }
+        assert_eq!(document(&store).encode_full_state(), before);
+        assert_eq!(count(&store, "live_device_update_applications"), 1);
+    }
+
+    #[test]
+    fn ack_read_refuses_an_active_restore_fence_even_with_a_retained_application() {
+        let (_dir, mut store, mut cache, _owner, handle) = fixture();
+        let update = event("fenced-ack", 1, Ydoc::wire().plaintext_insert(0, "draft"));
+        let identity = LiveApplicationAckIdentity {
+            delivery_id: "fenced-ack".into(),
+            update_digest: update.metadata.accepted.receipt.update_digest.clone(),
+        };
+        apply(&mut store, &mut cache, &handle, update);
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('workspace-1','main','object-1','relay-A','stopped',?1,'{}')",
+                [serde_json::json!({"oldBinding":binding(),"newFence":8}).to_string()]).unwrap();
+            Ok::<_,StorageError>(())
+        }).unwrap();
+        assert!(matches!(
+            read_application_ack(&store, &handle, &identity),
+            Err(ApplicationError::Collab(CollabError::RestoreFenced))
+        ));
+        assert_eq!(count(&store, "live_device_update_applications"), 1);
+    }
     fn reopen(store: EngineStore, dir: &ScratchDir) -> EngineStore {
         drop(store);
         EngineStore::open(&dir.join("engine.db"), 20).unwrap()
@@ -1895,7 +2187,14 @@ mod tests {
                 end_clock: 1,
             }];
             assert!(matches!(
-                apply_committed(&mut store, &mut cache, &handle, conflict, &NoFaults, 100_000_000),
+                apply_committed(
+                    &mut store,
+                    &mut cache,
+                    &handle,
+                    conflict,
+                    &NoFaults,
+                    100_000_000
+                ),
                 Err(ApplicationError::Conflict)
             ));
             store
@@ -1913,7 +2212,8 @@ mod tests {
                         &mut cache,
                         &handle,
                         event("noop", 3, vec![0, 0]),
-                        &NoFaults, 100_000_000
+                        &NoFaults,
+                        100_000_000
                     ),
                     Err(ApplicationError::Corrupt)
                 ),
@@ -1922,7 +2222,14 @@ mod tests {
             assert_eq!(count(&store, "ydoc_updates"), before);
             if damage.contains("workspace_id='damaged'") {
                 assert!(matches!(
-                    apply_committed(&mut store, &mut cache, &handle, first, &NoFaults, 100_000_000),
+                    apply_committed(
+                        &mut store,
+                        &mut cache,
+                        &handle,
+                        first,
+                        &NoFaults,
+                        100_000_000
+                    ),
                     Err(ApplicationError::Corrupt)
                 ));
             }
@@ -2058,7 +2365,14 @@ mod tests {
                 .unwrap();
             assert!(
                 !matches!(
-                    apply_committed(&mut store, &mut cache, &handle, update, &NoFaults, 100_000_000),
+                    apply_committed(
+                        &mut store,
+                        &mut cache,
+                        &handle,
+                        update,
+                        &NoFaults,
+                        100_000_000
+                    ),
                     Ok(ApplicationResult::Applied(_))
                 ),
                 "{damage}"
@@ -2117,7 +2431,15 @@ mod tests {
                 })
                 .unwrap();
             assert!(
-                apply_committed(&mut store, &mut cache, &handle, update, &NoFaults, 100_000_000).is_err(),
+                apply_committed(
+                    &mut store,
+                    &mut cache,
+                    &handle,
+                    update,
+                    &NoFaults,
+                    100_000_000
+                )
+                .is_err(),
                 "{damage}"
             );
         }

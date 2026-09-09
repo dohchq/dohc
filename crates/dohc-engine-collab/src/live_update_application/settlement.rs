@@ -347,7 +347,7 @@ pub(super) fn validate_historical_binding(
     Ok(())
 }
 
-fn latest_receipt(
+pub(super) fn latest_receipt(
     conn: &Connection,
     registration: &Registration,
 ) -> Result<Option<LiveUpdateReceipt>, ApplicationError> {

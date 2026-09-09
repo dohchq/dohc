@@ -5,7 +5,7 @@ import * as Y from "yjs";
 import { Duplex, PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { parseRelayAcceptedLiveUpdate } from "@dohc/live-session-contract";
-import type { Envelope, Request } from "../protocol";
+import type { Envelope, Request, JsonValue } from "../protocol";
 import { isDaemonReconnectError } from "../live/daemonLiveAdapter";
 import { encodeNativeRestoreInput } from "./nativeRestore";
 import {
@@ -30,6 +30,109 @@ const LIMITS = {
   maxBatchLen: 64,
   maxJsonDepth: 32,
 };
+
+describe("private applied sync transport",()=>{
+  const request={id:970,workspace:"workspace",registrationId:7,deadlineMs:30_000};
+  const position={eventCount:0,journalCursor:0,evidenceDigest:"ab".repeat(32)};
+  const binding={workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"cd".repeat(32),currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:0};
+  const outputBytes=Buffer.from([0,0,0]);
+  function output(peer:FakePeerConnection,id:number,result:Record<string,JsonValue>,bytes=outputBytes) {
+    const digest=createHash("sha256").update(bytes).digest("hex");
+    peer.send({type:"blobStart",requestId:id,streamId:id,totalBytes:bytes.length,sha256:digest});
+    peer.sendRaw(blobChunkFrame(id,bytes,true));
+    peer.send({type:"response",id,result:{...result,streamId:id,byteLength:bytes.length,digest}});
+  }
+  it.each(["queued", "written"] as const)("cancels a %s applied read without retiring the shared client", async mode => {
+    const peer = new FakePeerConnection(), transport = client(peer, {privateLiveApplication: {aggregateBytes: 128*1024*1024,maxUploads: 1}});
+    peer.acknowledge(); await transport.ready();
+    const blocked = Promise.withResolvers<void>();
+    let firstRead = true, blockerId = 0;
+    peer.onEnvelope = envelope => {
+      if (envelope.type !== "request") return;
+      if (envelope.method === "blocker") {blockerId = envelope.id; peer.backpressured = true; blocked.resolve();}
+      else if (envelope.method === "liveApplication.appliedRead") {
+        if (mode === "written" && firstRead) {firstRead = false; peer.backpressured = true; blocked.resolve(); return;}
+        peer.send({type: "response",id: envelope.id,result: {status: "empty",after: position}});
+      } else if (envelope.method === "liveApplication.ack") peer.send({type: "response",id: envelope.id,result: {status: "missing"}});
+    };
+    const signal = new AbortController();
+    let blocker: Promise<unknown> | undefined;
+    try {
+      if (mode === "queued") {
+        blocker = transport.sendRequest({id: 969,method: "blocker",params: {},deadlineMs: 30_000});
+        void blocker.catch(() => {}); await blocked.promise;
+      }
+      const read = transport.readNextLiveApplied(request,position,32,signal.signal);
+      const cancelled = expect(read).rejects.toThrow("reader cancelled");
+      if (mode === "written") await blocked.promise;
+      signal.abort(new Error("reader cancelled")); await cancelled;
+      if (blockerId) peer.send({type: "response",id: blockerId,result: {done: true}});
+      peer.drain(); await blocker;
+      expect(await transport.readNextLiveApplied({...request,id: 971},position,32)).toBeNull();
+      expect(await transport.readLiveApplicationAck({...request,id: 972},{deliveryId: "delivery",updateDigest: "ab".repeat(32)})).toBeNull();
+    } finally {peer.drain(); transport.close();}
+  });
+  it.each(["valid","vector-length","extra","position"])("checks %s sync output",async mode=>{
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge();await transport.ready();let id=0;
+    peer.onEnvelope=e=>{if(e.type!=="request")return;id=e.id;expect(e.method).toBe("liveApplication.syncOpen");expect(e.params).toHaveProperty("registrationId",7);};
+    peer.onBlobChunk=frame=>{if(frame.fin)output(peer,id,{status:"sync",binding,position:mode==="position"?{...position,eventCount:2}:position,
+      observedLocalYDocHeadSequence:5,hostVectorByteLength:mode==="vector-length"?2:1,...(mode==="extra"?{extra:true}:{})});};
+    try {
+      const call=transport.openLiveAppliedSync(request,Uint8Array.of(0),{maxInputBytes:8,maxOutputBytes:32});
+      if(mode==="valid") {const cut=await call;expect(cut.hostVector).toEqual(Buffer.from([0]));expect(cut.missingStateUpdate).toEqual(Buffer.from([0,0]));expect(cut.observedLocalYDocHeadSequence).toBe(5);}
+      else await expect(call).rejects.toThrow();
+    }finally{transport.close();}
+  });
+  it.each(["update","empty","gap","wrong-digest","empty-with-blob"])("checks %s applied feed output",async mode=>{
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge();await transport.ready();
+    peer.onEnvelope=e=>{
+      if(e.type!=="request")return;expect(e.method).toBe("liveApplication.appliedRead");
+      if(mode==="empty") {peer.send({type:"response",id:e.id,result:{status:"empty",after:position}});return;}
+      if(mode==="empty-with-blob") {output(peer,e.id,{status:"empty",after:position});return;}
+      const digest=createHash("sha256").update(outputBytes).digest("hex");
+      output(peer,e.id,{status:"update",position:{eventCount:mode==="gap"?2:1,journalCursor:11,evidenceDigest:"ef".repeat(32)},
+        ack:{deliveryId:"delivery",updateDigest:mode==="wrong-digest"?"aa".repeat(32):digest,journalCursor:11,acceptingHostEpoch:1,localYDocSequence:1,applicationReplayed:true}});
+    };
+    try {
+      const call=transport.readNextLiveApplied(request,position,32);
+      if(mode==="update")expect((await call)?.position.journalCursor).toBe(11);
+      else if(mode==="empty")expect(await call).toBeNull();
+      else await expect(call).rejects.toThrow();
+    }finally{transport.close();}
+  });
+});
+
+describe("private application ACK read", () => {
+  const call = { id: 920, workspace: "workspace", registrationId: 7, deadlineMs: 30_000 };
+  const identity = { deliveryId: "delivery", updateDigest: "ab".repeat(32) };
+  it.each(["historical", "missing", "wrong-id", "wrong-digest", "relay-receipt", "not-replayed", "extra"])("handles %s evidence", async mode => {
+    const peer = new FakePeerConnection(), transport = client(peer);
+    peer.acknowledge(); await transport.ready();
+    const ack = { ...identity, journalCursor: 4, acceptingHostEpoch: 1, localYDocSequence: 2, applicationReplayed: true };
+    peer.onEnvelope = envelope => {
+      if (envelope.type !== "request") return;
+      expect(envelope.method).toBe("liveApplication.ack");
+      expect(envelope.params).toEqual({ registrationId: 7, ...identity });
+      let result: Extract<Envelope, { type: "response" }>["result"] = { status: "applied", ack: { ...ack,
+        ...(mode === "wrong-id" ? { deliveryId: "other" } : {}),
+        ...(mode === "wrong-digest" ? { updateDigest: "cd".repeat(32) } : {}),
+        ...(mode === "not-replayed" ? { applicationReplayed: false } : {}),
+      } };
+      if (mode === "missing") result = { status: "missing" };
+      if (mode === "relay-receipt") result = { status: "applied", ack: { ...identity, journalCursor: 4, acceptingHostEpoch: 1 } };
+      if (mode === "extra") result = { status: "missing", ack };
+      peer.send({ type: "response", id: envelope.id, result });
+    };
+    try {
+      const pending = transport.readLiveApplicationAck(call, identity);
+      if (mode === "historical") expect(await pending).toEqual(ack);
+      else if (mode === "missing") expect(await pending).toBeNull();
+      else await expect(pending).rejects.toThrow();
+    } finally { transport.close(); }
+  });
+});
 
 describe("private native restore transport", () => {
   const input = encodeNativeRestoreInput(Buffer.from('{"fence":{}}'), 128);

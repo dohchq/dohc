@@ -24,7 +24,7 @@ function fixture() {
   expect(store.next(drain).kind).toBe("done");
   store.close(drain);
   const settlement = { settlementId: "settlement", previousCursor: 0, terminalCursor: 1, applicationCount: 1,
-    localYDocSequence: 1, momentId: "settled-moment", markdownDigest: "a".repeat(64), materialized: true };
+    localYDocSequence: 1, momentId: "settled-moment", markdownDigest: "a".repeat(64), materialized: true, collectionReconcileRequired: false };
   let reply: unknown = { status: "settled", settlement };
   let beforeReply = async () => {};
   const sendRequest = vi.fn(async (request: { method: string }) => {
@@ -54,10 +54,26 @@ it.each([true, false])("returns validated settlement coverage with materialized=
   } finally { f.close(); }
 });
 
+it("keeps a borrowed native registration through repeated drains and settlement", async () => {
+  const f = fixture();
+  try {
+    await f.consumer.drain(f.document);
+    const current = f.storage.resolveCurrentLiveDocumentBinding({document: f.document, actor: f.actor});
+    if (current.kind !== "current") throw new Error("Expected current binding.");
+    const borrowed = f.consumer.captureRegistration(current.binding);
+    await f.consumer.drain(f.document);
+    await f.consumer.settle(f.document);
+    expect(f.consumer.captureRegistration(current.binding).id).toBe(borrowed.id);
+    expect(borrowed.invalidated.aborted).toBe(false);
+    expect(f.sendRequest.mock.calls.filter(([request]) => request.method === "liveApplication.register")).toHaveLength(1);
+  } finally { f.close(); }
+});
+
 const invalidRows: [string, Record<string, unknown>][] = [
   ["extra field", { unexpected: true }], ["missing field", { momentId: undefined }],
   ["wrong terminal", { terminalCursor: 0 }], ["previous after terminal", { previousCursor: 2 }],
   ["application overrun", { applicationCount: 2 }], ["nonboolean materialized", { materialized: 1 }],
+  ["missing reconciliation", { collectionReconcileRequired: undefined }], ["nonboolean reconciliation", { collectionReconcileRequired: 1 }],
   ["negative cursor", { previousCursor: -1 }], ["fractional cursor", { terminalCursor: 1.5 }],
   ["string count", { applicationCount: "1" }], ["unsafe sequence", { localYDocSequence: Number.MAX_SAFE_INTEGER + 1 }],
   ["nonfinite sequence", { localYDocSequence: Infinity }], ["empty settlement ID", { settlementId: "" }],

@@ -89,7 +89,17 @@ struct AdoptionParams {
     digest: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SyncParams {
+    registration_id: u64,
+    stream_id: u64,
+    byte_length: usize,
+    digest: String,
+}
+
 enum Metadata {
+    Sync(dohc_engine_collab::live_update_application::AppliedSyncPolicy),
     Apply(RelayAcceptedLiveUpdate),
     Bootstrap(LiveApplicationBootstrap),
     Adoption {
@@ -230,6 +240,22 @@ pub struct LiveApplicationIngress {
 }
 
 impl LiveApplicationIngress {
+    pub(crate) fn sync_admission(
+        &self,
+        config: crate::rpc::live_application::sync::SyncConfig,
+    ) -> Result<SettlementAdmission, WireError> {
+        let bytes = config
+            .reservation_bytes()
+            .filter(|n| *n <= self.config.aggregate_bytes)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| invalid("invalid applied sync budget"))?;
+        Ok(SettlementAdmission {
+            budget: self.budget.clone(),
+            slots: self.upload_slots.clone(),
+            bytes,
+        })
+    }
+
     pub(crate) fn validate_adoption_budget(
         &self,
         bytes: usize,
@@ -314,7 +340,10 @@ impl LiveApplicationIngress {
         }
         if !matches!(
             request.method.as_str(),
-            "liveApplication.apply" | "liveApplication.bootstrap" | "liveApplication.adoptOwner"
+            "liveApplication.apply"
+                | "liveApplication.bootstrap"
+                | "liveApplication.adoptOwner"
+                | "liveApplication.syncOpen"
         ) || request.idempotency_key.is_some()
         {
             return Err(invalid("invalid-live-application-request"));
@@ -359,6 +388,20 @@ impl LiveApplicationIngress {
                 },
                 params.registration_id,
                 stream,
+                None,
+                0,
+            )
+        } else if request.method == "liveApplication.syncOpen" {
+            let (policy, _admission) = self.service.sync_admission(connection)?;
+            let params: SyncParams = serde_json::from_value(std::mem::take(&mut request.params))
+                .map_err(|_| invalid("invalid sync vector upload"))?;
+            if params.byte_length == 0 || params.byte_length > policy.max_client_vector_bytes {
+                return Err(invalid("sync vector limit"));
+            }
+            (
+                Metadata::Sync(policy),
+                params.registration_id,
+                Stream::new(params.stream_id, params.byte_length, params.digest)?,
                 None,
                 0,
             )
@@ -426,7 +469,9 @@ impl LiveApplicationIngress {
             request.workspace.as_ref(),
             registration_id,
         )?;
-        let reserved = if let Metadata::Adoption { max_bytes, .. } = &metadata {
+        let reserved = if let Metadata::Sync(_) = &metadata {
+            Some(self.service.sync_admission(connection)?.1.bytes as usize)
+        } else if let Metadata::Adoption { max_bytes, .. } = &metadata {
             // First adoption can seed a native head larger than the relay baseline.
             self.adoption_reservation(*max_bytes)
         } else {
@@ -578,6 +623,7 @@ impl LiveApplicationIngress {
         }
         let mut upload = self.uploads.remove(&id).expect("completed upload");
         let operation = match upload.metadata {
+            Metadata::Sync(policy) => LiveApplicationOperation::SyncOpen(upload.bytes, policy),
             Metadata::Apply(accepted) => LiveApplicationOperation::Apply(AdmittedLiveUpdate {
                 metadata: AdmittedLiveUpdateMetadata {
                     accepted,

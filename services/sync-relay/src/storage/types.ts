@@ -563,6 +563,7 @@ export interface SyncRelayStorage {
 
   close(): void;
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult;
+  resolveNamedLiveObjectBinding(scope: NamedLiveBrowserContext, objectId: string): CurrentLiveBindingResult;
   registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult;
   mintNamedLiveTicket(input: NamedLiveTicketMint): { expiresAtMs: number } | null;
   readNamedLiveTicketTarget(input: NamedLiveTicketLookup): { workspaceId: string; objectId: string } | null;

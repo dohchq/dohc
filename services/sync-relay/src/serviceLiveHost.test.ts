@@ -5,9 +5,12 @@ import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { startServiceLiveHost } from "./serviceLiveHost.js";
+import {observeRelayWrites} from "./relayWriteChanges.js";
 
 const spawn = vi.hoisted(() => vi.fn());
-vi.mock("@dohc/workspace-engine-client/daemon", () => ({ createEngineClient: spawn }));
+vi.mock("@dohc/workspace-engine-client/daemon", async importOriginal => ({
+  ...await importOriginal<typeof import("@dohc/workspace-engine-client/daemon")>(), createEngineClient: spawn,
+}));
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); spawn.mockReset(); });
 
@@ -110,6 +113,46 @@ it("preserves a replacement connection when an older host closes", async () => {
   await expect(host.drain({ workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64) })).rejects.toThrow("retired");
   await host.close();
   expect(f.storage.getLiveHostControl()).toMatchObject({ registeredConnectionId: "replacement", admissionState: "open" });
+});
+
+it("wakes captures after stored authority changes and releases its observer on close", async () => {
+  const f = await fixture(), notify = vi.fn();
+  spawn.mockImplementation(async options => clientFrom(options).client);
+  const host = await startServiceLiveHost({...f, frameChanges: {notify, subscribe: () => () => {}}});
+  await new Promise<void>(queueMicrotask);
+  notify.mockClear();
+  const stopReading = observeRelayWrites(f.storage, () => {
+    f.storage.resolveCurrentLiveDocumentBinding({document: {workspaceId: "workspace", mainVersionId: "main", objectId: "missing", lineageClaimId: "a".repeat(64)}, actor: {kind: "named", userId: "alice", grantId: "missing"}});
+  });
+  const stop = observeRelayWrites(f.storage, () => {});
+  f.storage.registerLiveHost({...host.coordinate, connectionId: "replacement", updatedAtMs: Date.now(), guard: f.storage.captureStanding()});
+  expect(notify).not.toHaveBeenCalled();
+  await new Promise<void>(queueMicrotask);
+  expect(notify).toHaveBeenCalledTimes(1);
+  await new Promise<void>(queueMicrotask);
+  expect(notify).toHaveBeenCalledTimes(1);
+  stopReading();
+  await host.close();
+  await new Promise<void>(queueMicrotask);
+  notify.mockClear();
+  f.storage.registerLiveHost({...host.coordinate, connectionId: "another", updatedAtMs: Date.now(), guard: f.storage.captureStanding()});
+  await new Promise<void>(queueMicrotask);
+  expect(notify).not.toHaveBeenCalled();
+  stop();
+});
+
+it("forwards explicitly provisioned native sync bounds without enabling frame capture implicitly", async () => {
+  const f = await fixture(); let captured!: ReturnType<typeof clientFrom>;
+  spawn.mockImplementation(async options => {captured = clientFrom(options); return captured.client;});
+  const sync = {policy: {maxClientVectorBytes: 1000, maxHostVectorBytes: 1000, maxOutputBytes: 10000,
+    maxReadBytes: 10000}, workingReserveBytes: 10000};
+  await writeFile(f.configPath, JSON.stringify({...f.config, sync}));
+  const host = await startServiceLiveHost(f);
+  try {
+    expect(captured.config.sync).toEqual(sync);
+    await expect(host.captureNative({workspaceId: "workspace", mainVersionId: "main", objectId: "object",
+      lineageClaimId: "a".repeat(64), currentPath: "docs/note.md", selectorPaths: ["docs"], restoreFenceGeneration: 0})).rejects.toThrow("not configured");
+  } finally {await host.close();}
 });
 
 it("rejects zero application reserve before spawning with or without settlement", async () => {

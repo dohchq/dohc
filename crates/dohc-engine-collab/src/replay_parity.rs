@@ -477,7 +477,7 @@ struct WireStructure {
     insertion_boundaries: Vec<ID>,
     deletion_boundaries: Vec<ID>,
     claimed_clocks: BTreeMap<ClientID, u32>,
-    /// The structural identity every live content block in this wire claims, by
+    /// The structural identity every payload-bearing block in this wire claims, by
     /// `(client, clock)`. Covers all live content kinds (string, JSON, binary,
     /// embed, format, type, doc, any) — the content-parity check compares these
     /// across wires at overlapping clocks so a candidate cannot redefine an
@@ -506,6 +506,8 @@ struct WireStructure {
     /// delete-set boundary endpoints consumed elsewhere are recorded separately
     /// (and unnormalized) in `deletion_boundaries`.
     deleted_ranges: BTreeMap<ClientID, Vec<(u32, u32)>>,
+    /// Explicit GC and ContentDeleted blocks, distinct from retained deleted items.
+    collected_ranges: BTreeMap<ClientID, Vec<(u32, u32)>>,
     /// The v2 differential oracle's complete client-local block topology. The
     /// gate's v1 scan leaves this empty, preserving its verdict fingerprint.
     blocks: BTreeMap<ClientID, Vec<BlockDescriptor>>,
@@ -587,6 +589,9 @@ pub(crate) struct IntegratedFrontier {
     identities: ClockIdentityIndex,
     unsafe_boundaries: BTreeSet<ID>,
     delete_coverage: IdSet,
+    /// Collected input may overlap retained identities on a full-state resend.
+    /// Only covered clocks without an identity have irrecoverably lost payload.
+    collected_claims: IdSet,
     /// A valid admitted lineage cannot have this intersection. Retaining the
     /// derived bit keeps the hot check exact without re-walking every historic
     /// delete range on each append.
@@ -603,6 +608,7 @@ pub(crate) struct IntegratedFrontierDelta {
     identities: ClockIdentityIndex,
     unsafe_boundaries: BTreeSet<ID>,
     delete_coverage: IdSet,
+    collected_claims: IdSet,
 }
 
 impl IntegratedFrontier {
@@ -616,6 +622,7 @@ impl IntegratedFrontier {
             identities: structure.identities,
             unsafe_boundaries: structure.unsafe_boundaries,
             delete_coverage,
+            collected_claims: id_set_from_ranges(&structure.collected_ranges),
             has_unsafe_deletion_endpoint,
             approx_bytes: 0,
         };
@@ -628,13 +635,13 @@ impl IntegratedFrontier {
     }
 
     /// Advance from one accepted candidate in work proportional to the
-    /// candidate facts (plus the identities/interiors the candidate retires).
+    /// candidate facts. Deleted items retain their identities and scalar interiors.
     pub(crate) fn fold(&mut self, delta: IntegratedFrontierDelta) -> (usize, usize) {
         let previous_approx_bytes = self.approx_bytes;
         let identities_before = self.identities.approx_bytes();
 
-        // An older dangling delete may already cover newly delivered content.
-        // Never resurrect those facts while the dependency integrates.
+        // A delete set does not discard payload. Explicit collected input cannot
+        // later regain payload that the native store never retained.
         for (client, spans) in delta.identities.clients {
             for (start, span) in spans {
                 match span {
@@ -645,7 +652,9 @@ impl IntegratedFrontier {
                             let clock = start
                                 .checked_add(u32::try_from(offset).expect("run offset fits u32"))
                                 .expect("validated run clock cannot overflow");
-                            if self.delete_coverage.contains(&ID::new(client, clock)) {
+                            if self.collected_claims.contains(&ID::new(client, clock))
+                                && !self.identities.contains_clock(client, clock)
+                            {
                                 if let Some(segment_start) = uncovered_start.take() {
                                     self.identities.insert_string_run(
                                         client,
@@ -665,7 +674,9 @@ impl IntegratedFrontier {
                     }
                     IdentitySpan::Typed { kind, payload } => {
                         let id = ID::new(client, start);
-                        if !self.delete_coverage.contains(&id) {
+                        if !self.collected_claims.contains(&id)
+                            || self.identities.contains_clock(client, start)
+                        {
                             self.identities.insert_identity(
                                 client,
                                 start,
@@ -680,14 +691,16 @@ impl IntegratedFrontier {
         self.adjust_approx_bytes(identities_before, identities_after_insert);
 
         for boundary in delta.unsafe_boundaries {
-            if !self.delete_coverage.contains(&boundary) && self.unsafe_boundaries.insert(boundary)
+            if self
+                .identities
+                .contains_clock(boundary.client, boundary.clock)
+                && self.unsafe_boundaries.insert(boundary)
             {
                 self.approx_bytes = self.approx_bytes.saturating_add(std::mem::size_of::<ID>());
             }
         }
 
-        // A newly accepted delete retires established facts by clock range.
-        // Range queries avoid a document-wide `retain` for a small deletion.
+        // Keep retained payload and its UTF-16 interiors when deletion coverage grows.
         let delete_clients: Vec<ClientID> = delta
             .delete_coverage
             .iter()
@@ -697,35 +710,31 @@ impl IntegratedFrontier {
             .iter()
             .map(|client| Self::delete_coverage_client_bytes(&self.delete_coverage, client))
             .sum();
-        let identities_before_retirement = self.identities.approx_bytes();
-        for (client, ranges) in delta.delete_coverage.iter() {
-            for range in ranges.iter() {
-                self.identities.remove_range(*client, range.clone());
-                let retired: Vec<ID> = self
-                    .unsafe_boundaries
-                    .range(ID::new(*client, range.start)..ID::new(*client, range.end))
-                    .copied()
-                    .collect();
-                for boundary in retired {
-                    if self.unsafe_boundaries.remove(&boundary) {
-                        self.approx_bytes =
-                            self.approx_bytes.saturating_sub(std::mem::size_of::<ID>());
-                    }
-                }
-            }
-        }
-        let identities_after_retirement = self.identities.approx_bytes();
-        self.adjust_approx_bytes(identities_before_retirement, identities_after_retirement);
         self.delete_coverage.merge_with(delta.delete_coverage);
         let delete_coverage_after: usize = delete_clients
             .iter()
             .map(|client| Self::delete_coverage_client_bytes(&self.delete_coverage, client))
             .sum();
         self.adjust_approx_bytes(delete_coverage_before, delete_coverage_after);
+        let collected_clients: Vec<ClientID> = delta
+            .collected_claims
+            .iter()
+            .map(|(client, _)| *client)
+            .collect();
+        let collected_before: usize = collected_clients
+            .iter()
+            .map(|client| Self::delete_coverage_client_bytes(&self.collected_claims, client))
+            .sum();
+        self.collected_claims.merge_with(delta.collected_claims);
+        let collected_after: usize = collected_clients
+            .iter()
+            .map(|client| Self::delete_coverage_client_bytes(&self.collected_claims, client))
+            .sum();
+        self.adjust_approx_bytes(collected_before, collected_after);
 
         // The gate admitted the pre-delete union against every raw endpoint.
         // Canonical union endpoints are a subset of those outer endpoints, and
-        // covered unsafe points have just been retired.
+        // retained unsafe interiors cannot intersect the accepted endpoints.
         self.has_unsafe_deletion_endpoint = false;
         #[cfg(any(test, debug_assertions))]
         {
@@ -806,6 +815,7 @@ impl IntegratedFrontier {
         let delete_ranges = self
             .delete_coverage
             .iter()
+            .chain(self.collected_claims.iter())
             .map(|(_, ranges)| {
                 std::mem::size_of::<ClientID>()
                     + ranges.len() * std::mem::size_of::<std::ops::Range<u32>>()
@@ -905,6 +915,7 @@ impl IntegratedFrontierDelta {
             identities: structure.identities,
             unsafe_boundaries: structure.unsafe_boundaries,
             delete_coverage,
+            collected_claims: id_set_from_ranges(&structure.collected_ranges),
         }
     }
 }
@@ -1886,6 +1897,16 @@ fn scan(bytes: &[u8], version: ScanVersion) -> Result<WireStructure, CollabError
                     reason: "the update contains a zero-length structural block".to_owned(),
                 });
             }
+            if scanned.kind == BlockKind::Gc || info & 0x0f == BLOCK_ITEM_DELETED_REF_NUMBER {
+                let end = clock
+                    .checked_add(scanned.len)
+                    .ok_or_else(parity_clock_overflow)?;
+                structure
+                    .collected_ranges
+                    .entry(client)
+                    .or_default()
+                    .push((clock, end));
+            }
             if version == ScanVersion::V2 {
                 structure
                     .blocks
@@ -1948,10 +1969,13 @@ fn scan(bytes: &[u8], version: ScanVersion) -> Result<WireStructure, CollabError
             reason: "the update contains unconsumed structural bytes".to_owned(),
         });
     }
-    // Normalize both covers-query range sets once, so every later membership
+    // Normalize the covers-query range sets once, so every later membership
     // query is a binary search instead of a linear scan over an
     // attacker-controlled range count (see `normalize_ranges`).
     for ranges in structure.tombstone_ranges.values_mut() {
+        normalize_ranges(ranges);
+    }
+    for ranges in structure.collected_ranges.values_mut() {
         normalize_ranges(ranges);
     }
     for ranges in structure.deleted_ranges.values_mut() {
@@ -2311,7 +2335,7 @@ mod tests {
     }
 
     #[test]
-    fn run_frontier_mid_run_delete_splits_and_matches_fresh_facts() {
+    fn run_frontier_mid_run_delete_retains_and_matches_fresh_facts() {
         let producer = Ydoc::wire();
         let insert = producer.plaintext_insert(0, "abcde");
         let doc = doc_from_update(&insert);
@@ -2332,10 +2356,54 @@ mod tests {
             .iter()
             .next()
             .expect("remaining string facts");
-        assert_eq!(spans.keys().copied().collect::<Vec<_>>(), vec![0, 3]);
-        assert_eq!(frontier.identities.string_run_count(), 2);
-        assert!(!frontier.identities.contains_clock(client, 2));
+        assert_eq!(spans.keys().copied().collect::<Vec<_>>(), vec![0]);
+        assert_eq!(frontier.identities.string_run_count(), 1);
+        assert!(frontier.identities.contains_clock(client, 2));
         assert_frontier_facts_match_fresh(&frontier, &doc);
+    }
+
+    #[test]
+    fn frontier_distinguishes_retained_deletions_from_collected_resends() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/lossless-fixtures/deleted-history.json"
+        ))
+        .unwrap();
+        let retained: Vec<u8> = serde_json::from_value(fixture["retainedState"].clone()).unwrap();
+        let collected: Vec<u8> = serde_json::from_value(fixture["collectedState"].clone()).unwrap();
+        for updates in [
+            [&retained, &collected, &retained],
+            [&collected, &retained, &collected],
+        ] {
+            let doc = Ydoc::wire();
+            let mut frontier =
+                IntegratedFrontier::from_full_state_bytes(&doc.encode_full_state()).unwrap();
+            for update in updates {
+                doc.apply(update).unwrap();
+                frontier.fold(IntegratedFrontierDelta::from_structure(
+                    scan_v1(update).unwrap(),
+                ));
+                assert_frontier_facts_match_fresh(&frontier, &doc);
+            }
+        }
+    }
+
+    #[test]
+    fn frontier_retains_payload_delivered_after_a_dangling_delete() {
+        let producer = Ydoc::wire();
+        let insert = producer.plaintext_insert(0, "😀");
+        let delete = producer.plaintext_delete(0, 2);
+        let doc = Ydoc::wire();
+        let mut frontier =
+            IntegratedFrontier::from_full_state_bytes(&doc.encode_full_state()).unwrap();
+        for update in [&delete, &insert] {
+            doc.apply(update).unwrap();
+            frontier.fold(IntegratedFrontierDelta::from_structure(
+                scan_v1(update).unwrap(),
+            ));
+            assert_frontier_facts_match_fresh(&frontier, &doc);
+        }
+        assert_eq!(frontier.fact_counts(), (2, 1, 2));
+        assert!(doc.plaintext_string().is_empty());
     }
 
     #[test]
@@ -2587,7 +2655,8 @@ mod tests {
             0x01, // raw length = 1
             0x00,
         ];
-        assert_v1_blind_to_wire_v2_difference(&gc, &skip);
+        assert!(!structurally_equal_v1(&gc, &skip).unwrap());
+        assert_ne!(scan_v2(&gc).unwrap(), scan_v2(&skip).unwrap());
     }
 
     /// An internal unwind during replay validation (which can originate inside

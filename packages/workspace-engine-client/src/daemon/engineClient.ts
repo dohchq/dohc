@@ -4,7 +4,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, type Hash } from "node:crypto";
 import { Duplex } from "node:stream";
 import { TextDecoder } from "node:util";
-import { parseRelayAcceptedLiveUpdate, parseLiveUpdateIdentifier, parseLiveUpdateDigest, type AdmittedLiveUpdate } from "@dohc/live-session-contract";
+import { parseRelayAcceptedLiveUpdate, parseLiveUpdateIdentifier, parseLiveUpdateDigest, parseLiveUpdateHostApplicationAck, type LiveUpdateHostApplicationAck, type AdmittedLiveUpdate, parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract";
 import type { BlobStart, Envelope, Event, Request, Response, WireError } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 
@@ -63,9 +63,18 @@ interface LiveApplicationRequest {
   deadlineMs: number;
 }
 
-interface RestoreOutput {
+export interface NativeAppliedPosition { readonly eventCount:number; readonly journalCursor:number; readonly evidenceDigest:string }
+function appliedPosition(value: unknown): NativeAppliedPosition {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join() !== "eventCount,evidenceDigest,journalCursor") throw new TypeError("Invalid applied position.");
+  const row=value as NativeAppliedPosition;
+  if (!Number.isSafeInteger(row.eventCount) || row.eventCount<0 || !Number.isSafeInteger(row.journalCursor) || row.journalCursor<0 || (row.eventCount===0)!==(row.journalCursor===0)) throw new TypeError("Invalid applied position.");
+  return Object.freeze({eventCount:row.eventCount,journalCursor:row.journalCursor,evidenceDigest:parseLiveUpdateDigest(row.evidenceDigest)});
+}
+
+interface PrivateLiveOutput {
   readonly maxBytes: number;
-  readonly status: "prepared" | "applied" | "settled" | "resumed";
+  readonly status: "prepared" | "applied" | "settled" | "resumed" | "sync" | "update";
+  readonly allowEmpty?: boolean;
   wireId?: number;
   started: boolean;
   blob?: CompletedBlob;
@@ -646,7 +655,7 @@ interface PendingRequest {
   readonly resolve: (response: Response) => void;
   readonly reject: (error: EngineClientError) => void;
   readonly deadlineTimer?: ReturnType<typeof setTimeout>;
-  readonly restoreOutput?: RestoreOutput;
+  readonly restoreOutput?: PrivateLiveOutput;
 }
 
 interface PendingBlob {
@@ -667,6 +676,72 @@ interface PendingBlob {
 type HelloAckEnvelope = Extract<Envelope, { type: "helloAck" }>;
 
 export class EngineClient implements EngineTransport {
+  async openLiveAppliedSync(request:LiveApplicationRequest, clientVector:Uint8Array, bounds:{maxInputBytes:number;maxOutputBytes:number}, signal?:AbortSignal):Promise<{
+    binding:LiveObjectBinding;position:NativeAppliedPosition;observedLocalYDocHeadSequence:number;hostVector:Buffer;missingStateUpdate:Buffer;
+  }> {
+    const {maxInputBytes,maxOutputBytes}=bounds;
+    this.validateAppliedReadBounds(request,maxOutputBytes);
+    if (!Number.isSafeInteger(maxInputBytes) || maxInputBytes<1 || maxInputBytes>this.maxBlobBytes || clientVector.byteLength<1 || clientVector.byteLength>maxInputBytes) throw new TypeError("Invalid sync vector bounds.");
+    const output:PrivateLiveOutput={status:"sync",maxBytes:maxOutputBytes,started:false};
+    const response=await this.sendLiveUpload(request,"liveApplication.syncOpen",clientVector.byteLength+maxOutputBytes+3*1024*1024,()=>{
+      const bytes=Buffer.from(clientVector),digest=createHash("sha256").update(bytes).digest("hex"),streamId=this.nextLiveStreamId++;
+      if (!Number.isSafeInteger(streamId)) throw new TypeError("Live stream identifiers exhausted.");
+      return {params:{registrationId:request.registrationId,streamId,byteLength:bytes.length,digest},streams:[{streamId,bytes,digest}]};
+    },signal,output);
+    const row=response.result as Record<string,unknown>,bytes=output.blob!.bytes;
+    if (Object.keys(row).sort().join()!=="binding,byteLength,digest,hostVectorByteLength,observedLocalYDocHeadSequence,position,status,streamId" ||
+      !Number.isSafeInteger(row.hostVectorByteLength) || (row.hostVectorByteLength as number)<1 || (row.hostVectorByteLength as number)>bytes.length-2 ||
+      !Number.isSafeInteger(row.observedLocalYDocHeadSequence) || (row.observedLocalYDocHeadSequence as number)<0) throw new TypeError("Invalid applied sync response.");
+    return {binding:parseLiveObjectBinding(row.binding),position:appliedPosition(row.position),observedLocalYDocHeadSequence:row.observedLocalYDocHeadSequence as number,
+      hostVector:bytes.subarray(0,row.hostVectorByteLength as number),missingStateUpdate:bytes.subarray(row.hostVectorByteLength as number)};
+  }
+  async readNextLiveApplied(request:LiveApplicationRequest, after:NativeAppliedPosition, maxOutputBytes:number, signal?:AbortSignal):Promise<{
+    position:NativeAppliedPosition;ack:LiveUpdateHostApplicationAck;updateBytes:Buffer;
+  }|null> {
+    this.validateAppliedReadBounds(request,maxOutputBytes);after=appliedPosition(after);
+    const output:PrivateLiveOutput={status:"update",allowEmpty:true,maxBytes:maxOutputBytes,started:false};
+    const response=await this.sendLiveUpload(request,"liveApplication.appliedRead",maxOutputBytes+3*1024*1024,
+      ()=>({params:{registrationId:request.registrationId,after:{...after}},streams:[]}),signal,output);
+    const row=response.result as Record<string,unknown>;
+    if (row.status==="empty") {
+      if (Object.keys(row).sort().join()!=="after,status" || JSON.stringify(appliedPosition(row.after))!==JSON.stringify(after)) throw new TypeError("Invalid empty applied read.");
+      return null;
+    }
+    if (Object.keys(row).sort().join()!=="ack,byteLength,digest,position,status,streamId") throw new TypeError("Invalid applied update response.");
+    const position=appliedPosition(row.position),ack=parseLiveUpdateHostApplicationAck(row.ack);
+    if (position.eventCount!==after.eventCount+1 || position.journalCursor<=after.journalCursor || ack.journalCursor!==position.journalCursor ||
+      !ack.applicationReplayed || ack.updateDigest!==output.blob!.sha256) throw new TypeError("Applied update differs from its requested position.");
+    return {position,ack,updateBytes:output.blob!.bytes};
+  }
+  private validateAppliedReadBounds(request:LiveApplicationRequest,maxOutputBytes:number):void {
+    if (!Number.isSafeInteger(request.registrationId) || request.registrationId<1 || !Number.isSafeInteger(maxOutputBytes) || maxOutputBytes<2 || maxOutputBytes>this.maxBlobBytes) throw new TypeError("Invalid applied read bounds.");
+  }
+  /** Reads retained host application evidence from an authenticated registration. */
+  async readLiveApplicationAck(
+    request: LiveApplicationRequest,
+    identity: { readonly deliveryId: string; readonly updateDigest: string },
+    signal?: AbortSignal,
+  ): Promise<LiveUpdateHostApplicationAck | null> {
+    const { id, workspace, registrationId, deadlineMs } = request;
+    const deliveryId = parseLiveUpdateIdentifier(identity.deliveryId, "delivery ID");
+    const updateDigest = parseLiveUpdateDigest(identity.updateDigest);
+    if (!Number.isSafeInteger(registrationId) || registrationId < 1 || !Number.isSafeInteger(deadlineMs) || deadlineMs < 1) {
+      throw new TypeError("Invalid application ACK request.");
+    }
+    const response = await this.sendRequest({ id, workspace, method: "liveApplication.ack",
+      params: { registrationId, deliveryId, updateDigest }, deadlineMs }, signal);
+    const result = response.result;
+    if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Invalid application ACK response.");
+    const row = result as Record<string, unknown>;
+    if (row.status === "missing" && Object.keys(row).join() === "status") return null;
+    if (row.status !== "applied" || Object.keys(row).sort().join() !== "ack,status") throw new Error("Invalid application ACK response.");
+    const ack = parseLiveUpdateHostApplicationAck(row.ack);
+    if (ack.deliveryId !== deliveryId || ack.updateDigest !== updateDigest || !ack.applicationReplayed) {
+      throw new Error("Application ACK does not match the requested delivery.");
+    }
+    return ack;
+  }
+
   private readonly decoder: FrameDecoder;
   private readonly eventHandlers = new Set<(event: Event) => void>();
   private readonly blobHandlers = new Set<(blob: CompletedBlob) => void>();
@@ -809,7 +884,7 @@ export class EngineClient implements EngineTransport {
     request: Request,
     writeInput?: (wireId: number) => Promise<void>,
     signal?: AbortSignal,
-    restoreOutput?: RestoreOutput,
+    restoreOutput?: PrivateLiveOutput,
   ): Promise<Response> {
     if (signal?.aborted) throw signal.reason;
     if (this.closed) {
@@ -1142,7 +1217,7 @@ export class EngineClient implements EngineTransport {
     const status = NATIVE_RESTORE_STATUS[operation];
     if (!status || !Number.isSafeInteger(maxBytes) || maxBytes < 5 || maxBytes > this.maxBlobBytes ||
       bytes.byteLength < 5 || bytes.byteLength > maxBytes) throw new TypeError("Invalid native restore bounds.");
-    const output: RestoreOutput = { maxBytes, status, started: false };
+    const output: PrivateLiveOutput = { maxBytes, status, started: false };
     const response = await this.sendLiveUpload(request, `liveApplication.${operation}Restore`,
       bytes.byteLength + maxBytes + 3 * 1024 * 1024, () => {
         const captured = Buffer.from(bytes);
@@ -1160,7 +1235,7 @@ export class EngineClient implements EngineTransport {
     charge: number,
     prepare: () => LiveUpload,
     signal?: AbortSignal,
-    restoreOutput?: RestoreOutput,
+    restoreOutput?: PrivateLiveOutput,
   ): Promise<Response> {
     if (
       !this.liveConfig ||
@@ -1222,6 +1297,16 @@ export class EngineClient implements EngineTransport {
 
     try {
       const upload = prepare();
+      const outgoing: Request = {
+        id: request.id, workspace: request.workspace, method, deadlineMs: request.deadlineMs,
+        idempotencyKey: null, params: upload.params,
+      };
+      if (upload.streams.length === 0) {
+        // No partial input stream exists. Cancelling this read must preserve the shared client.
+        clearTimeout(uploadDeadline);
+        signal?.removeEventListener("abort", abort);
+        return await this.sendRequestWithInput(outgoing, undefined, signal, restoreOutput);
+      }
       const writeInput = async (wireId: number): Promise<void> => {
         uploadWireId = wireId;
         const current = (): void => {
@@ -1272,14 +1357,7 @@ export class EngineClient implements EngineTransport {
       };
 
       return await this.sendRequestWithInput(
-        {
-          id: request.id,
-          workspace: request.workspace,
-          method,
-          deadlineMs: request.deadlineMs,
-          idempotencyKey: null,
-          params: upload.params,
-        },
+        outgoing,
         writeInput,
         undefined,
         restoreOutput,
@@ -1834,8 +1912,9 @@ export class EngineClient implements EngineTransport {
     if (pending.restoreOutput) {
       const { blob, status } = pending.restoreOutput;
       const result = response.result as Record<string, unknown> | null;
-      if (!blob || !result || result.status !== status || result.streamId !== blob.streamId ||
-        result.byteLength !== blob.bytes.length || result.digest !== blob.sha256) {
+      const empty = pending.restoreOutput.allowEmpty && result?.status === "empty" && !blob && !pending.restoreOutput.started;
+      if (!empty && (!blob || !result || result.status !== status || result.streamId !== blob.streamId ||
+        result.byteLength !== blob.bytes.length || result.digest !== blob.sha256)) {
         throw new EngineClientError("protocol-error", "Native restore response does not match its completed output.");
       }
     }

@@ -224,7 +224,7 @@ fn local_appends_install_then_hit_and_advance_the_cache() {
 }
 
 #[test]
-fn frontier_fold_retires_a_live_identity_covered_by_delete() {
+fn frontier_fold_retains_an_identity_covered_by_delete() {
     let (mut ts, key) = setup("frontier-retire-identity", Regime::LocalOnly);
     let producer = Ydoc::wire();
     let insert = producer.plaintext_insert(0, "ab");
@@ -262,7 +262,7 @@ fn frontier_fold_retires_a_live_identity_covered_by_delete() {
     );
     assert_eq!(
         ts.cache.frontier_fact_counts_for_test(&key),
-        Some((1, 0, 2))
+        Some((2, 0, 2))
     );
     assert_eq!(
         ts.cache
@@ -273,7 +273,7 @@ fn frontier_fold_retires_a_live_identity_covered_by_delete() {
 }
 
 #[test]
-fn frontier_fold_splits_a_string_run_around_a_mid_run_delete() {
+fn frontier_fold_retains_a_string_run_across_a_mid_run_delete() {
     let (mut ts, key) = setup("frontier-split-mid-run-delete", Regime::LocalOnly);
     let producer = Ydoc::wire();
     let insert = producer.plaintext_insert(0, "abcde");
@@ -307,7 +307,7 @@ fn frontier_fold_splits_a_string_run_around_a_mid_run_delete() {
     );
     assert_eq!(
         ts.cache.frontier_fact_counts_for_test(&key),
-        Some((4, 0, 2))
+        Some((5, 0, 2))
     );
     assert_eq!(
         ts.cache
@@ -318,7 +318,7 @@ fn frontier_fold_splits_a_string_run_around_a_mid_run_delete() {
 }
 
 #[test]
-fn frontier_fold_retires_a_deleted_scalar_interior() {
+fn frontier_fold_retains_a_deleted_scalar_interior() {
     let (mut ts, key) = setup("frontier-retire-interior", Regime::LocalOnly);
     let producer = Ydoc::wire();
     let insert = producer.plaintext_insert(0, "😀");
@@ -356,7 +356,7 @@ fn frontier_fold_retires_a_deleted_scalar_interior() {
     );
     assert_eq!(
         ts.cache.frontier_fact_counts_for_test(&key),
-        Some((0, 0, 2))
+        Some((2, 1, 2))
     );
     assert_eq!(
         ts.cache
@@ -439,7 +439,7 @@ fn frontier_delete_endpoints_canonicalize_across_pending_integration() {
     );
     assert_eq!(
         ts.cache.frontier_fact_counts_for_test(&key),
-        Some((1, 0, 2))
+        Some((3, 0, 2))
     );
     assert_eq!(
         ts.cache

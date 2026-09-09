@@ -49,7 +49,7 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000) {
 
 it("drains small edits when their immutable base exceeds the aggregate drain budget", async () => {
   const run = fixture();
-  await run.run();
+  expect(await run.run()).toEqual({admittedEntries: 3, hasMore: false});
   expect(run.receipts).toHaveLength(3);
   expect(run.requests.filter(row => row.part === "base")).toHaveLength(0);
   expect(run.requests).toHaveLength(9);
@@ -57,9 +57,24 @@ it("drains small edits when their immutable base exceeds the aggregate drain bud
 });
 
 it("retains configured entry and byte limits without acknowledging unread updates", async () => {
-  const one = fixture(1); await one.run(); expect(one.receipts).toHaveLength(1);
+  const one = fixture(1);
+  expect(await one.run()).toEqual({admittedEntries: 1, hasMore: true});
+  expect(one.receipts).toHaveLength(1);
+  expect(await one.run()).toEqual({admittedEntries: 1, hasMore: true});
+  expect(await one.run()).toEqual({admittedEntries: 1, hasMore: false});
+  expect(await one.run()).toEqual({admittedEntries: 0, hasMore: false});
   const bounded = fixture(3, 1);
   await expect(bounded.run()).rejects.toThrow("byte budget exceeded");
   expect(bounded.receipts).toHaveLength(0);
   expect(bounded.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
+});
+
+it("continues a byte-limited pass only after a real admission and native outbox ACK", async () => {
+  const measured = fixture(1); await measured.run();
+  const bytes = measured.requests.reduce((sum, row) => sum + row.bytes, 0);
+  const bounded = fixture(3, bytes);
+  expect(await bounded.run()).toEqual({admittedEntries: 1, hasMore: true});
+  expect(bounded.receipts).toHaveLength(1);
+  expect(await bounded.run()).toEqual({admittedEntries: 1, hasMore: true});
+  expect(await bounded.run()).toEqual({admittedEntries: 1, hasMore: false});
 });

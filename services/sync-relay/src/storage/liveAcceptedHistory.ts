@@ -23,10 +23,6 @@ type HistoryInput = {document: LiveDocumentKey; namespace: string; through: numb
 export function readAcceptedHistory(storage:StorageContext,input:HistoryInput,budget:RestoreHistoryBudget) {
   return captureAcceptedHistory(storage,input,budget,verifyJournalRow);
 }
-export function revalidateAcceptedHistory(storage:StorageContext,input:HistoryInput,budget:RestoreHistoryBudget,held:ReturnType<typeof readAcceptedHistory>):void {
-  const current=captureAcceptedHistory(storage,input,budget,()=>{});
-  require(isDeepStrictEqual(current,held));
-}
 function captureAcceptedHistory(storage: StorageContext, input: {
   document: LiveDocumentKey; namespace: string; through: number; baseline: Uint8Array; baselineDigest: string; originBinding: LiveObjectBinding;
 }, budget: RestoreHistoryBudget, verifyContent:typeof verifyJournalRow) {

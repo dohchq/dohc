@@ -432,6 +432,7 @@ where
                                     | "liveApplication.bootstrap"
                                     | "liveApplication.adoptOwner"
                                     | "liveApplication.prepareRestore"
+                                    | "liveApplication.syncOpen"
                                     | "liveApplication.applyRestore"
                                     | "liveApplication.settleRestore"
                                     | "liveApplication.resumeRestore"

@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 pub(crate) mod restore;
+pub(crate) mod sync;
 
 /// Explicit host provisioning for the private admitted-update path.
 #[doc(hidden)]
@@ -120,6 +121,10 @@ pub struct AdmittedApplicationInput {
 
 #[derive(Clone)]
 pub(crate) enum LiveApplicationOperation {
+    SyncOpen(
+        Vec<u8>,
+        dohc_engine_collab::live_update_application::AppliedSyncPolicy,
+    ),
     Apply(AdmittedLiveUpdate),
     Bootstrap(LiveApplicationBootstrap, Vec<u8>),
     AdoptOwner {
@@ -218,7 +223,99 @@ impl OutputGuard for ApplicationOutputGuard {
     }
 }
 
+fn map_application_read(error: dohc_engine_runtime::RuntimeError) -> WireError {
+    match error {
+        dohc_engine_runtime::RuntimeError::LiveApplication(
+            dohc_engine_collab::live_update_application::ApplicationError::Interrupted,
+        ) => workspace_unavailable(),
+        other => map_runtime(other),
+    }
+}
+
+fn read_owner_outbox(
+    conn: &rusqlite::Connection,
+    binding: &LiveObjectBinding,
+) -> Result<Option<(String, i64, String)>, dohc_engine_storage::StorageError> {
+    use rusqlite::OptionalExtension;
+    conn.query_row(
+        "SELECT outbox_id,pending_bytes,state FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5",
+        rusqlite::params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.restore_fence_generation],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()
+    .map_err(dohc_engine_storage::StorageError::persist_public)
+}
+
 impl EngineService {
+    pub(super) async fn live_application_ack(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+    ) -> Result<ServiceResponse, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            registration_id: u64,
+            delivery_id: String,
+            update_digest: String,
+        }
+        let params: Params = serde_json::from_value(request.params).map_err(|_| {
+            WireError::new(ErrorCode::InvalidParams, "invalid application ACK request")
+        })?;
+        let identity = dohc_engine_collab::live_update_application::LiveApplicationAckIdentity {
+            delivery_id: params.delivery_id,
+            update_digest: params.update_digest,
+        };
+        identity.validate().map_err(|_| {
+            WireError::new(ErrorCode::InvalidParams, "invalid application ACK identity")
+        })?;
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        let registration = self.live_application_registration(
+            connection,
+            request.workspace.as_ref(),
+            params.registration_id,
+        )?;
+        let cancellation = super::request::OperationCancellation::new(&ctx);
+        if ctx.cancel.is_cancelled() {
+            return Err(cancellation.interruption("application ACK read"));
+        }
+        if ctx.deadline.is_some_and(|end| Instant::now() >= end) {
+            return Err(WireError::new(
+                ErrorCode::DeadlineExceeded,
+                "application ACK read deadline elapsed",
+            ));
+        }
+        let guard = Arc::new(ApplicationOutputGuard {
+            registration: registration.clone(),
+            cancel: ctx.cancel.clone(),
+            deadline: ctx.deadline,
+            _reservation: Arc::new(()),
+        });
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        let ack = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => return Err(cancellation.interruption("application ACK read")),
+            () = registration.retired.cancelled() => return Err(workspace_unavailable()),
+            ack = registration.handle.read_ack(identity) => ack.map_err(map_application_read)?,
+        };
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        Ok(ServiceResponse {
+            response: Response {
+                id: request.id,
+                result: match ack {
+                    Some(ack) => json!({"status":"applied", "ack":ack}),
+                    None => json!({"status":"missing"}),
+                },
+            },
+            blob_egress: None,
+            output_guard: Some(guard),
+        })
+    }
+
     pub(super) async fn live_owner_state(
         &self,
         ctx: &RequestContext,
@@ -270,9 +367,7 @@ impl EngineService {
                 use rusqlite::OptionalExtension;
                 let prior: Option<(String,i64,i64)> = conn.query_row("SELECT adoption_id,local_ydoc_sequence,terminal_cursor FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
                     rusqlite::params![registration.host.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(dohc_engine_storage::StorageError::persist_public)?;
-                let outbox_id: Option<String> = conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",rusqlite::params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|r|r.get(0)).optional().map_err(dohc_engine_storage::StorageError::persist_public)?;
-                let backlog: Option<(i64,String)> = conn.query_row("SELECT pending_bytes,state FROM owner_ydoc_outboxes WHERE outbox_id=?1",[outbox_id.as_deref()],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(dohc_engine_storage::StorageError::persist_public)?;
-                let (pending_bytes,outbox_state) = backlog.map_or((0,None),|(bytes,state)|(bytes,Some(state)));
+                let (outbox_id,pending_bytes,outbox_state) = read_owner_outbox(conn,b)?.map_or((None,0,None),|(id,bytes,state)|(Some(id),bytes,Some(state)));
                 if let Some((id,sequence,cursor)) = prior { return Ok(json!({"adoptionId":id,"expectedLocalSequence":sequence,"throughCursor":cursor,"outboxId":outbox_id,"pendingBytes":pending_bytes,"outboxState":outbox_state})); }
                 let sequence: i64 = conn.query_row("SELECT head_update_seq FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",rusqlite::params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|r|r.get(0)).map_err(dohc_engine_storage::StorageError::persist_public)?;
                 let identity = serde_json::to_vec(&(&registration.host.namespace,&b.workspace_id,&b.main_version_id,&b.object_id,&b.lineage_claim_id)).map_err(dohc_engine_storage::StorageError::persist_public)?;
@@ -854,10 +949,27 @@ impl EngineService {
                 )
                 .await;
         }
+        if let LiveApplicationOperation::SyncOpen(vector, policy) = input.operation {
+            if request.method != "liveApplication.syncOpen" {
+                return Err(workspace_unavailable());
+            }
+            return self
+                .live_application_sync(
+                    ctx,
+                    request,
+                    input.registration,
+                    Some(vector),
+                    None,
+                    policy,
+                    input.reservation,
+                )
+                .await;
+        }
         let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
         let method = match &input.operation {
             LiveApplicationOperation::Apply(_) => "liveApplication.apply",
             LiveApplicationOperation::Bootstrap(..) => "liveApplication.bootstrap",
+            LiveApplicationOperation::SyncOpen(..) => unreachable!("sync dispatched above"),
             LiveApplicationOperation::AdoptOwner { .. } => {
                 unreachable!("adoption dispatched above")
             }
@@ -896,6 +1008,7 @@ impl EngineService {
         let operation = tokio::spawn(async move {
             let _serial = serial;
             match input.operation {
+                LiveApplicationOperation::SyncOpen(..) => unreachable!("sync dispatched above"),
                 LiveApplicationOperation::AdoptOwner { .. } => {
                     unreachable!("adoption dispatched above")
                 }
@@ -993,6 +1106,222 @@ mod tests {
             idempotency_key: None,
             params: json!({"operation":{"operationId":"restore-rpc","relayDatabaseNamespace":namespace,"oldBinding":binding,"hostId":"host","newFence":binding.restore_fence_generation+1,"origin":{"kind":"bootstrap","id":"bootstrap"},"terminal":null,"appliedSequence":0}}),
         }
+    }
+
+    #[tokio::test]
+    async fn owner_state_reads_only_the_registered_restore_generation() {
+        use dohc_engine_storage::{EngineStore, StorageError};
+        let (_scratch, service, _owner, workspace, _registration, mut binding) = fixture().await;
+        let open = service.open(Some(&WorkspaceHandle(workspace))).unwrap();
+        let mut store = EngineStore::open(&open.db_path, 0).unwrap();
+        store.write_with(&NoFaults, |tx| {
+            for (id, generation, state, reason, bytes) in [
+                ("old", 0, "quarantined", Some("restore-fenced"), 64),
+                ("current", 1, "active", None, 61),
+            ] {
+                tx.execute(
+                    "INSERT INTO owner_ydoc_outboxes(outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,created_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?5,?5,2,?9,?10,0,2,?11,0)",
+                    rusqlite::params![id,binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.current_path,serde_json::to_string(&binding.selector_paths).unwrap(),generation,state,bytes,reason],
+                ).unwrap();
+            }
+            Ok::<_, StorageError>(())
+        }).unwrap();
+        store
+            .read_with(|conn| {
+                assert_eq!(
+                    read_owner_outbox(conn, &binding)?,
+                    Some(("old".into(), 64, "quarantined".into()))
+                );
+                binding.restore_fence_generation = 1;
+                assert_eq!(
+                    read_owner_outbox(conn, &binding)?,
+                    Some(("current".into(), 61, "active".into()))
+                );
+                binding.restore_fence_generation = 2;
+                assert_eq!(read_owner_outbox(conn, &binding)?, None);
+                let old: (String, i64) = conn
+                    .query_row(
+                        "SELECT state,pending_bytes FROM owner_ydoc_outboxes WHERE outbox_id='old'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(old, ("quarantined".into(), 64));
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ack_read_rpc_requires_owned_registration_and_fences_pending_output() {
+        let (_scratch, service, owner, workspace, registration, binding) = fixture().await;
+        let bytes = Ydoc::wire().plaintext_insert(0, "applied");
+        let mut ingress = LiveApplicationIngress::new(service.clone(), config()).unwrap();
+        ingress
+            .begin(
+                request(&workspace, registration, &binding, &bytes, &[]),
+                &owner.handle(),
+            )
+            .unwrap();
+        for (stream_id, content) in [(1, bytes.as_slice()), (2, &[][..])] {
+            ingress
+                .start(BlobStart {
+                    request_id: 3,
+                    stream_id,
+                    total_bytes: Some(content.len() as u64),
+                    sha256: Some(hex_sha256(content)),
+                })
+                .unwrap();
+        }
+        ingress.chunk(1, true, &bytes).unwrap();
+        let (apply_request, input) = ingress.chunk(2, true, &[]).unwrap().unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let applied = service
+            .call_with_input(ctx, apply_request, Some(input))
+            .await
+            .unwrap();
+        let workspace = WorkspaceHandle(workspace);
+        let request = || Request {
+            id: 92,
+            method: "liveApplication.ack".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            params: json!({"registrationId":registration,"deliveryId":"missing","updateDigest":"00".repeat(32)}),
+        };
+        assert!(
+            service
+                .call(RequestContext::unbounded(), request())
+                .await
+                .is_err()
+        );
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let result = service.call(ctx, request()).await.unwrap();
+        assert_eq!(result.response.result, json!({"status":"missing"}));
+        assert!(result.output_guard.as_ref().unwrap().is_current());
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let mut exact = request();
+        exact.params["deliveryId"] = json!("delivery");
+        exact.params["updateDigest"] = json!(hex_sha256(&bytes));
+        let found = service.call(ctx, exact).await.unwrap();
+        let mut expected = applied.response.result["ack"].clone();
+        expected["applicationReplayed"] = json!(true);
+        assert_eq!(
+            found.response.result,
+            json!({"status":"applied","ack":expected})
+        );
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let mut malformed = request();
+        malformed.params["extra"] = json!(true);
+        assert!(service.call(ctx, malformed).await.is_err());
+        lock(&service.live_applications)
+            .hosts
+            .get(&workspace)
+            .unwrap()
+            .retire();
+        assert!(!result.output_guard.as_ref().unwrap().is_current());
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        assert!(service.call(ctx, request()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn ack_read_cancelled_while_waiting_preserves_the_registration() {
+        let (_scratch, service, owner, workspace, registration, _) = fixture().await;
+        let workspace = WorkspaceHandle(workspace);
+        let open = service.open(Some(&workspace)).unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let actor = open.actor.clone();
+        let blocker = tokio::spawn(async move {
+            actor
+                .ensure_main_version(
+                    "ack-blocker".into(),
+                    0,
+                    Arc::new(BlockWriter {
+                        started: Mutex::new(Some(started_tx)),
+                        release: Mutex::new(release_rx),
+                    }),
+                    dohc_engine_runtime::CancellationToken::new(),
+                )
+                .await
+        });
+        started_rx.await.unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let cancel = ctx.cancel.clone();
+        let mut operation = Box::pin(service.call(ctx, Request { id: 93, method: "liveApplication.ack".into(), workspace: Some(workspace.clone()),
+            deadline_ms: None, idempotency_key: None, params: json!({"registrationId":registration,"deliveryId":"missing","updateDigest":"00".repeat(32)}) }));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(operation.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        cancel.cancel();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(1), operation)
+            .await
+            .unwrap()
+            .unwrap_err();
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), registration)
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn ack_read_expired_deadline_is_not_reported_as_cancellation() {
+        let (_scratch, service, owner, workspace, registration, _) = fixture().await;
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        ctx.deadline = Some(Instant::now() - std::time::Duration::from_secs(1));
+        let result = service.call(ctx, Request { id: 94, method: "liveApplication.ack".into(), workspace: Some(WorkspaceHandle(workspace)),
+            deadline_ms: None, idempotency_key: None, params: json!({"registrationId":registration,"deliveryId":"missing","updateDigest":"00".repeat(32)}) }).await;
+        assert_eq!(result.unwrap_err().code, ErrorCode::DeadlineExceeded);
+    }
+
+    #[tokio::test]
+    async fn ack_read_completes_while_session_operations_are_held() {
+        let (_scratch, service, owner, workspace, registration, _) = fixture().await;
+        let workspace = WorkspaceHandle(workspace);
+        let open = service.open(Some(&workspace)).unwrap();
+        let serial = open.session_ops.lock().await;
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let request = Request {
+            id: 95,
+            method: "liveApplication.ack".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            params: json!({"registrationId":registration,"deliveryId":"missing","updateDigest":"00".repeat(32)}),
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            service.call(ctx, request),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.response.result["status"], "missing");
+        drop(serial);
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    #[test]
+    fn ack_read_maps_interrupted_standing_to_unavailable() {
+        let error = map_application_read(dohc_engine_runtime::RuntimeError::LiveApplication(
+            dohc_engine_collab::live_update_application::ApplicationError::Interrupted,
+        ));
+        assert_eq!(error.code, workspace_unavailable().code);
+        assert_eq!(error.message, workspace_unavailable().message);
     }
 
     async fn fence_queued_interruption(deadline: bool) {
@@ -1213,25 +1542,26 @@ mod tests {
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 
-    async fn actor_interruption(deadline: bool, restore_fence: bool) {
-        use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
-        struct BlockWriter {
-            started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-            release: Mutex<std::sync::mpsc::Receiver<()>>,
-        }
-        impl FaultInjector for BlockWriter {
-            fn poll(&self, point: FaultPoint) -> FaultAction {
-                if point == FaultPoint::StorageBeforePersist
-                    && let Some(started) = lock(&self.started).take()
-                {
-                    let _ = started.send(());
-                    lock(&self.release)
-                        .recv_timeout(std::time::Duration::from_secs(5))
-                        .unwrap();
-                }
-                FaultAction::Continue
+    use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
+    struct BlockWriter {
+        started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl FaultInjector for BlockWriter {
+        fn poll(&self, point: FaultPoint) -> FaultAction {
+            if point == FaultPoint::StorageBeforePersist
+                && let Some(started) = lock(&self.started).take()
+            {
+                let _ = started.send(());
+                lock(&self.release)
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
             }
+            FaultAction::Continue
         }
+    }
+
+    async fn actor_interruption(deadline: bool, restore_fence: bool) {
         let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
         let configuration = serde_json::from_value(json!({
             "version": 1, "relayNamespace": "cancel-test",

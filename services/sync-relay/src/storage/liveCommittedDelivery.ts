@@ -2,7 +2,10 @@ import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt
 import {readRestoreAdmission,verifyRestoreCheckpoint,restoreDigest,type RestoreAdmission,type RestoreSourceRange} from "./liveRestoreCheckpoint";
 import {retainedRestoreLifecycle,validateRestoreLifecycle,requireResumedBinding} from "./liveRestoreLifecycleStorage";
 import { randomUUID, createHash } from "node:crypto";
-import {revalidateAcceptedHistoryDelivery,revalidateAcceptedHistory,readAcceptedHistory, readAcceptedHistoryDelivery, requireAcceptedHistoryProof, RestoreHistoryBudget} from "./liveAcceptedHistory";
+import {revalidateAcceptedHistoryDelivery,readAcceptedHistory, readAcceptedHistoryDelivery, requireAcceptedHistoryProof, RestoreHistoryBudget} from "./liveAcceptedHistory";
+import {captureSqliteReadRevision} from "./readRevision";
+import {requireRestoreLifecycleBudget} from "./liveRestoreLifecycleBudget";
+import {HOST_CONTROL_IDENTIFIER_MAX_BYTES} from "@dohc/live-session-contract/host-control";
 import {canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextAcceptedHistoryDigest} from "../liveAcceptedHistory";
 import type {NativeRestoreHistoryProof} from "../liveRestoreProposal";
 export type {RestoreLifecycle} from "../liveRestoreLifecycle";
@@ -11,6 +14,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   parseLiveUpdateDigest,
   parseLiveUpdateIdentifier,
+  LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
   parseLiveUpdateReceipt,
   parseLiveUpdateHostApplicationAck,
   type LiveDocumentKey,
@@ -241,7 +245,6 @@ export class LiveCommittedDeliveryStore {
   readonly #history: LiveJournalHistoryAuthority;
   readonly #ownerCuts = new WeakMap<OwnerCutCapture,{ host: LiveHostConnectionCoordinate; document: LiveDocumentKey; digest: string }>();
   readonly #ownerDeliveries = new WeakMap<OwnerDeliveryCapture,{host: LiveHostConnectionCoordinate;document: LiveDocumentKey;highWater: number}>();
-  readonly #restoreHistoryRechecks=new WeakMap<object,()=>void>();
   readonly #restores = new WeakMap<StopRestoreCutCapture,RestoreCapture>();
   constructor(storage: StorageContext, history: LiveJournalHistoryAuthority) {
     this.#storage = storage;
@@ -1002,6 +1005,16 @@ export class LiveCommittedDeliveryStore {
     const proposalDigest = createHash("sha256").update(decoded.captured).digest("hex");
     const operationId = capture.receipt.fence.operation.operationId, workspaceId = capture.selected.binding.workspaceId;
     const charge = proposalCharge(decoded.captured.byteLength, operationId, workspaceId, proposalDigest, content.content.candidateDigest, at,this.#history.namespace);
+    const replayMatches=this.#storage.readTx(()=>{
+      const header=this.#storage.db.prepare(`SELECT length(proposal_bytes) AS bytes FROM ${LIVE_RESTORE_PROPOSALS} WHERE relay_database_namespace=? AND operation_id=?`)
+        .get(this.#history.namespace,operationId);
+      if (!header) return false;
+      integrity(authorityInteger(header.bytes,1)<=budget.maxBytes);
+      const row=this.#storage.db.prepare(`SELECT proposal_bytes FROM ${LIVE_RESTORE_PROPOSALS} WHERE relay_database_namespace=? AND operation_id=?`)
+        .get(this.#history.namespace,operationId)!;
+      integrity(row.proposal_bytes instanceof Uint8Array);
+      return Buffer.compare(row.proposal_bytes,decoded.captured)===0;
+    });
     return this.#storage.tx(() => {
       assertCurrentInTransaction();
       const old = this.#storage.db.prepare(`SELECT workspace_id,proposal_sha256,candidate_sha256,recorded_at_ms,accounted_bytes,record_sha256,length(proposal_bytes) AS bytes
@@ -1011,8 +1024,7 @@ export class LiveCommittedDeliveryStore {
         const recordedAtMs = authorityInteger(old.recorded_at_ms);
         integrity(old.accounted_bytes === proposalCharge(decoded.captured.byteLength, operationId, workspaceId, proposalDigest, content.content.candidateDigest, recordedAtMs,this.#history.namespace));
         integrity(old.record_sha256 === proposalRecordDigest(operationId, workspaceId, proposalDigest, content.content.candidateDigest, recordedAtMs, authorityInteger(old.accounted_bytes, 1),this.#history.namespace));
-        const row = this.#storage.db.prepare(`SELECT proposal_bytes FROM ${LIVE_RESTORE_PROPOSALS} WHERE relay_database_namespace=? AND operation_id=?`).get(this.#history.namespace,operationId)!;
-        integrity(row.proposal_bytes instanceof Uint8Array && Buffer.compare(row.proposal_bytes, decoded.captured) === 0);
+        integrity(replayMatches);
         return {proposalDigest, candidateDigest: content.content.candidateDigest, recordedAtMs, replayed: true};
       }
       assertWorkspaceQuota(this.#storage, workspaceId, charge);
@@ -1054,6 +1066,7 @@ export class LiveCommittedDeliveryStore {
     return this.#captureStopRestoreProposal(input, receiptJson).capture;
   }
   #captureStopRestoreProposal(input: RestoreProposalInput, receiptJson: string,ownedSourceBytes?:readonly Uint8Array[]) {
+    const assertDatabaseCurrent=captureSqliteReadRevision(this.#storage.db);
     const lookup = {operationId: parseLiveUpdateIdentifier(input.operationId), workspaceId: parseLiveUpdateIdentifier(input.workspaceId),
       ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)}, host = snapshotHostCoordinate(input.host);
     const budget = {maxBytes: authorityInteger(input.maxBytes, 1), maxEvents: authorityInteger(input.maxEvents, 1)};
@@ -1100,12 +1113,13 @@ export class LiveCommittedDeliveryStore {
       integrity((ownerOrigin?.evidenceDigest ?? createHash("sha256").update(JSON.stringify(origin)).digest("hex")) === receipt.originEvidenceDigest);
     };
     const fingerprint = createHash("sha256").update(JSON.stringify(receipt)).digest("hex");
-    const assertCurrentInTransaction = () => {
-      this.#storage.captureStanding();
-      integrity(createHash("sha256").update(JSON.stringify(receipt)).digest("hex") === fingerprint);
-      this.#restoreHistoryRechecks.get(selected)!(); this.#restoreHistoryRechecks.get(accepted)!(); ownerOrigin?.assertCurrent(); verifySources();
-    };
-    const assertCurrent = () => this.#storage.readTx(assertCurrentInTransaction);
+    this.#storage.readTx(verifySources);
+    const assertCurrentInTransaction = () => {this.#storage.captureStanding();assertDatabaseCurrent();};
+    const assertCurrent = () => this.#storage.readTx(() => {
+      assertCurrentInTransaction();
+      integrity(createHash("sha256").update(JSON.stringify(receipt)).digest("hex")===fingerprint);
+      selected.assertCurrent();accepted.assertCurrent();ownerOrigin?.assertCurrent();
+    });
     assertCurrent();
     return {capture: Object.freeze({receipt, selected, accepted, ownerOrigin, assertCurrent}), assertCurrentInTransaction};
   }
@@ -1154,24 +1168,16 @@ export class LiveCommittedDeliveryStore {
       point: capture.point, nativeReceipt: capture.nativeReceipt,
       events: capture.events.map(event => ({metadata: event.metadata, digest: createHash("sha256").update(event.updateBytes).digest("hex")}))})).digest("hex");
     const fingerprint = digest();
-    this.#restoreHistoryRechecks.set(capture,()=>{
-      this.#storage.captureStanding();
-      integrity(isDeepStrictEqual(this.#restore(lookup,host,undefined,saved.historyInput.baseline).operation,saved.operation));
-      revalidateAcceptedHistory(this.#storage,saved.historyInput,new RestoreHistoryBudget(maxBytes,maxEvents),{checkpoint:saved.checkpoint,events:saved.events,proof:saved.proof});
-    });
     this.#storage.readTx(() => capture.assertCurrent());
     return capture;
   }
   #readLifecycle(input: RestoreProposalInput) {
     const host=snapshotHostCoordinate(input.host);
     this.#standing(host);
-    const header=this.#storage.db.prepare(`SELECT length(CAST(intent_json AS BLOB))+length(CAST(basis_json AS BLOB))+COALESCE(length(CAST(terminal_json AS BLOB)),0)+COALESCE(length(CAST(applied_json AS BLOB)),0)+COALESCE(length(CAST(native_receipt_json AS BLOB)),0) AS bytes FROM ${LIVE_RESTORE_OPERATIONS} WHERE relay_database_namespace=? AND operation_id=? AND workspace_id=?`).get(this.#history.namespace,input.operationId,input.workspaceId);
-    integrity(header && authorityInteger(header.bytes,1)<=input.maxBytes);
-    const journalHeader=this.#storage.db.prepare(`SELECT length(update_bytes)+length(validation_checkpoint_bytes)+accepted_metadata_bytes AS bytes FROM ${LIVE_JOURNAL_TABLE} WHERE relay_database_namespace=? AND restore_operation_id=?`).get(this.#history.namespace,input.operationId);
-    const heldBytes=authorityInteger(header.bytes,1)+(journalHeader?authorityInteger(journalHeader.bytes,1):0);integrity(heldBytes<=input.maxBytes);
+    requireRestoreLifecycleBudget(this.#storage.db,this.#history.namespace,input.operationId,input.workspaceId,input.maxBytes);
     const operation=readStopRestoreInTransaction(this.#storage,input);integrity(operation);
     integrity(operation.basis.namespace===this.#history.namespace && operation.basis.hostId===host.hostId && operation.basis.hostMode===host.mode);
-    const saved=retainedRestoreLifecycle(this.#storage.db,this.#history.namespace,input.operationId,input.maxBytes-heldBytes);
+    const saved=retainedRestoreLifecycle(this.#storage.db,this.#history.namespace,input.operationId,input.maxBytes);
     if (!saved) {integrity(!["relay-admitted","native-applied","settled","resumed"].includes(operation.phase));return null;}
     integrity(saved.lifecycle.phase===operation.phase);
     const raw=this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE relay_database_namespace=? AND restore_operation_id=?`)
@@ -1202,6 +1208,7 @@ export class LiveCommittedDeliveryStore {
     integrity(active?.operation_id===operation.intent.operationId);
   }
   admitStopRestoreProposal(input: RestoreProposalInput, expectedProposalDigest:string, policy: OrderedLiveUpdateCutPolicy, now:number):RestoreLifecycle {
+    const assertProposalCurrent=captureSqliteReadRevision(this.#storage.db);
     input=lifecycleInput(input);
     expectedProposalDigest=parseLiveUpdateDigest(expectedProposalDigest);
     const historical=this.readStopRestoreLifecycle(input);
@@ -1224,32 +1231,30 @@ export class LiveCommittedDeliveryStore {
     const metadata={deliveryId:`restore-${restoreDigest([this.#history.namespace,input.operationId,expectedProposalDigest])}`,
       updateDigest:proposal.candidateDigest,binding};
     const host=snapshotHostCoordinate(input.host);
+    const priorMetadata=this.#storage.readTx(()=>{
+      const raw=this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} ORDER BY journal_cursor DESC LIMIT 1`).get(...documentParams(document));
+      return raw?decodeJournalRow(this.#storage.db,raw).admitted.metadata:null;
+    });
     this.#storage.tx(()=>{
+      assertProposalCurrent();
       assertCurrentInTransaction();
       const operation=readStopRestoreInTransaction(this.#storage,input);integrity(operation);
       integrity(operation.phase==="native-fenced");
-      const exact=this.#storage.db.prepare(`SELECT proposal_bytes=? AS matches FROM ${LIVE_RESTORE_PROPOSALS} WHERE relay_database_namespace=? AND operation_id=?`)
-        .get(proposal.bytes,this.#history.namespace,input.operationId);integrity(exact?.matches===1);
-      const before=this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} ORDER BY journal_cursor DESC LIMIT 1`).get(...documentParams(document));
-      const priorMetadata=before?decodeJournalRow(this.#storage.db,before).admitted.metadata:null;
       const admitted=appendValidatedLiveJournal(this.#storage,{document,namespace:this.#history.namespace,host,
         current:{binding,authority:{principalKind:"owner",principalId:input.ownerUserId,grantId:null,grantGeneration:null}},metadata,
         updateBytes,receivedAtMs:at,firstSeen:validated.content.replacementRanges,checkpointBytes,checkpointDigest,priorMetadata,restoreOperationId:input.operationId});
       const admission:RestoreAdmission={proposalDigest:expectedProposalDigest,candidateDigest:proposal.candidateDigest,preparation:{fence,point},
         nativeSourceManifestDigest,admitted:admitted.metadata,checkpointDigest,sourceRanges,recordedAtMs:at};
       const admissionJson=JSON.stringify(admission);
-      // The maximum future values fund escaped identifiers and safe integer fields before admission commits.
-      const id="\\".repeat(512),integer=Number.MAX_SAFE_INTEGER;
+      // Both identifier contracts refuse controls; quotes and backslashes cost two JSON bytes.
+      const id="\\".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES),hostId="\\".repeat(HOST_CONTROL_IDENTIFIER_MAX_BYTES),integer=Number.MAX_SAFE_INTEGER;
       const application={fence,candidateDigest:proposal.candidateDigest,nativeSourceManifestDigest,admitted:admitted.metadata,
-        localHeadSequence:integer,hostCoordinate:{hostId:host.hostId,hostEpoch:integer,instanceId:id,connectionId:id},recordedAtMs:integer};
+        localHeadSequence:integer,hostCoordinate:{hostId:host.hostId,hostEpoch:integer,instanceId:hostId,connectionId:hostId},recordedAtMs:integer};
       const settlement={settlementId:id,previousCursor:integer,terminalCursor:integer,applicationCount:integer,localYDocSequence:integer,
         momentId:id,markdownDigest:"f".repeat(64),materialized:false,collectionReconcileRequired:false};
       const resume={relayDatabaseNamespace:this.#history.namespace,operationId:input.operationId,binding,applicationReceipt:admitted.metadata.accepted.receipt,
         settlementId:id,momentId:id,markdownDigest:"f".repeat(64),localHeadSequence:integer,recordedAtMs:integer};
       const reservation=Buffer.byteLength(JSON.stringify(application))+2*Buffer.byteLength(JSON.stringify(settlement))+Buffer.byteLength(JSON.stringify(resume));
-      const retainedHeader=this.#storage.db.prepare(`SELECT length(CAST(intent_json AS BLOB))+length(CAST(basis_json AS BLOB))+length(CAST(native_receipt_json AS BLOB)) AS bytes
-        FROM ${LIVE_RESTORE_OPERATIONS} WHERE relay_database_namespace=? AND operation_id=?`).get(this.#history.namespace,input.operationId)!;
-      integrity(Buffer.byteLength(admissionJson)+reservation+authorityInteger(retainedHeader.bytes,1)<=input.maxBytes);
       const values=[this.#history.namespace,input.operationId,document.workspaceId,input.maxBytes,admissionJson,restoreDigest(admission)];
       const charge=Buffer.byteLength(JSON.stringify(values))+reservation;
       const sourceRows=sourceRanges.map(range=>{
@@ -1267,6 +1272,7 @@ export class LiveCommittedDeliveryStore {
       integrity(this.#storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(total,document.workspaceId).changes===1);
       integrity(this.#storage.db.prepare(`UPDATE ${LIVE_RESTORE_OPERATIONS} SET phase='relay-admitted' WHERE relay_database_namespace=? AND operation_id=? AND phase='native-fenced'`)
         .run(this.#history.namespace,input.operationId).changes===1);
+      requireRestoreLifecycleBudget(this.#storage.db,this.#history.namespace,input.operationId,input.workspaceId,input.maxBytes);
     });
     return this.readStopRestoreLifecycle(input)!;
   }
@@ -1281,9 +1287,10 @@ export class LiveCommittedDeliveryStore {
   }
   #acknowledgeLifecycle(input:RestoreProposalInput,stage:"application"|"settlement"|"resume",value:NativeRestoreApplicationReceipt|NativeRestoreSettlementReceipt|NativeRestoreResumeReceipt):RestoreLifecycle {
     input=lifecycleInput(input);
+    const assertDatabaseCurrent=captureSqliteReadRevision(this.#storage.db);
     const before=this.#storage.readTx(()=>this.#readLifecycle(input));integrity(before);verifyJournalRow(before.journal);
     return this.#storage.tx(()=>{
-      const saved=this.#readLifecycle(input);integrity(saved && isDeepStrictEqual(saved,before));
+      assertDatabaseCurrent();const saved=before;
       const existing=saved.lifecycle[stage];
       if (existing) {
         if (stage!=="settlement" || (existing as NativeRestoreSettlementReceipt).materialized) {
@@ -1319,6 +1326,7 @@ export class LiveCommittedDeliveryStore {
         integrity(this.#storage.db.prepare(`UPDATE sync_relay_live_documents SET admission_state='open' WHERE ${WHERE_DOCUMENT} AND restore_fence_generation=? AND admission_state='closed' AND lineage_state='current'`)
           .run(...documentParams(saved.operation.intent.document),saved.operation.newFence).changes===1);
       }
+      requireRestoreLifecycleBudget(this.#storage.db,this.#history.namespace,input.operationId,input.workspaceId,input.maxBytes);
       return structuredClone(lifecycle);
     });
   }

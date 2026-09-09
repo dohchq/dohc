@@ -176,7 +176,9 @@ export function createSyncRelayHandler({
   linkCurrentFileLimit = MAX_LINK_CURRENT_FILES,
   newLinkBearer = () => mintLinkBearer(),
   newLinkHandoffCode = () => mintLinkHandoffCode(),
-}: CreateSyncRelayHandlerOptions): SyncRelayHandler {
+}: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
+  resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
+} {
   if (namedBrowserSessionLimits && (!shareWebOrigin || !relayExchangeKey)) {
     throw new TypeError("Named browser sessions require configured viewer origin and relay exchange.");
   }
@@ -496,7 +498,7 @@ export function createSyncRelayHandler({
     respondWithLinkBytes,
   );
 
-  return async (request) => {
+  const handle: SyncRelayHandler = async (request) => {
     try {
       const pathname = new URL(request.url).pathname;
       if (pathname === "/sync/live/named-sessions" || pathname === "/sync/live/named-sessions/resolve") {
@@ -644,6 +646,9 @@ export function createSyncRelayHandler({
       return errorResponse(error);
     }
   };
+  return Object.assign(handle, {
+    resolveNamedBrowserSession: (request: Request, discriminator: string) => namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null),
+  });
 }
 
 function parseRoute(request: Request): SyncRelayRoute {

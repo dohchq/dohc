@@ -11,7 +11,7 @@ export interface NamedLiveTicketOptions {
   readonly audience: string;
   readonly key: BinaryLike;
   readonly hostReports: {
-    currentBinding(scope: NamedLiveBrowserContext, objectId: string): Promise<TicketHostReport | null>;
+    currentBinding(scope: NamedLiveBrowserContext, objectId: string, signal?: AbortSignal): Promise<TicketHostReport | null>;
   };
   readonly entropy?: (byteLength: number) => Uint8Array;
   readonly newTicketId?: () => string;
@@ -26,15 +26,17 @@ export function createNamedLiveTickets(options: NamedLiveTicketOptions) {
   const newTicketId = options.newTicketId ?? randomUUID;
   const currentBinding = hostReports.currentBinding.bind(hostReports);
 
-  async function readReport(scope: NamedLiveBrowserContext, objectId: string): Promise<TicketHostReport | null> {
-    const candidate = await currentBinding({ ...scope }, objectId);
+  async function readReport(scope: NamedLiveBrowserContext, objectId: string, signal?: AbortSignal): Promise<TicketHostReport | null> {
+    signal?.throwIfAborted();
+    const candidate = await currentBinding({ ...scope }, objectId, signal);
+    signal?.throwIfAborted();
     if (candidate === null) return null;
     try { return snapshotTicketHostReport(candidate); }
     catch { return null; }
   }
 
   return {
-    async mint(input: unknown, context: NamedLiveBrowserContext): Promise<{ token: string; expiresAtMs: number } | null> {
+    async mint(input: unknown, context: NamedLiveBrowserContext, signal?: AbortSignal): Promise<{ token: string; expiresAtMs: number } | null> {
       let scope: NamedLiveBrowserContext;
       let objectId: string;
       try {
@@ -42,7 +44,7 @@ export function createNamedLiveTickets(options: NamedLiveTicketOptions) {
         objectId = parseLiveUpdateIdentifier(ticketRecord(input, ["objectId"]).objectId, "object ID");
       } catch { return null; }
       try {
-        const report = await readReport(scope, objectId);
+        const report = await readReport(scope, objectId, signal);
         if (report === null) return null;
         const token = mintLiveTicketToken(entropy);
         const tokenHash = hashLiveTicketToken(token, key);
@@ -50,7 +52,7 @@ export function createNamedLiveTickets(options: NamedLiveTicketOptions) {
         return minted === null ? null : { token, expiresAtMs: minted.expiresAtMs };
       } catch { throw new Error("Live-ticket operation failed."); }
     },
-    async redeem(token: unknown, context: NamedLiveBrowserContext): Promise<RedeemedLiveTicket | null> {
+    async redeem(token: unknown, context: NamedLiveBrowserContext, signal?: AbortSignal): Promise<RedeemedLiveTicket | null> {
       let scope: NamedLiveBrowserContext;
       try { parseLiveTicketToken(token); scope = snapshotNamedTicketScope(context); }
       catch { return null; }
@@ -58,7 +60,7 @@ export function createNamedLiveTickets(options: NamedLiveTicketOptions) {
         const tokenHash = hashLiveTicketToken(token as string, key);
         const target = storage.readNamedLiveTicketTarget({ tokenHash, scope, audience });
         if (target === null) return null;
-        const report = await readReport(scope, target.objectId);
+        const report = await readReport(scope, target.objectId, signal);
         return report === null ? null : storage.redeemNamedLiveTicket({ tokenHash, scope, audience, report });
       } catch { throw new Error("Live-ticket operation failed."); }
     },

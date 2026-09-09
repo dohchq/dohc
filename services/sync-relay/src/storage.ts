@@ -329,6 +329,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return liveDocumentAuthorityStorage.resolveCurrentLiveDocumentBinding(this, input);
   }
 
+  resolveNamedLiveObjectBinding(scope: Parameters<typeof liveDocumentAuthorityStorage.resolveNamedLiveObjectBinding>[1], objectId: string): CurrentLiveBindingResult {
+    return liveDocumentAuthorityStorage.resolveNamedLiveObjectBinding(this, scope, objectId);
+  }
+
   registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult {
     return liveDocumentAuthorityStorage.registerLiveDocumentBaseline(this, input);
   }
@@ -852,7 +856,13 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   // One write transaction, so a caller states what it writes rather than the
   // BEGIN/COMMIT/ROLLBACK frame around it.
   tx<T>(run: () => T): T {
-    return this.owner.write(run);
+    if (!hasRelayWriteObservers(this)) return this.owner.write(run);
+    const revision = this.db.prepare("SELECT total_changes() AS changes,(SELECT schema_version FROM pragma_schema_version) AS schema_version");
+    const before = JSON.stringify(revision.get());
+    try { return this.owner.write(run); }
+    finally {
+      if (this.unavailable.aborted || JSON.stringify(revision.get()) !== before) notifyRelayWrite(this);
+    }
   }
 
   readTx<T>(run: () => T): T {
@@ -968,3 +978,4 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return hostControlStorage.revokeDeviceHostCredential(this, input);
   }
 }
+import {hasRelayWriteObservers, notifyRelayWrite} from "./relayWriteChanges";

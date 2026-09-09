@@ -669,6 +669,10 @@ class EngineYDocSessionIpc {
       return {
         nativeSessionId: native.sessionId,
         assertCurrent,
+        onDurableLocalChange: (handler: () => void) => {
+          assertCurrent();
+          return native.onDurableLocalChange(() => {assertCurrent(); handler();});
+        },
         prepareHandoff: async (signal: AbortSignal) => {
           assertCurrent(); signal.throwIfAborted();
           if (owned.ownerHandoff) throw new Error("Owner handoff is already active.");

@@ -25,13 +25,15 @@
     "@dohc/service-http": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
+    "@dohc/ydoc-projection": "workspace:*",
     "@excalidraw/excalidraw": "0.18.1",
     "better-auth": "^1.6.26",
     "dompurify": "3.4.13",
     "marked": "17.0.6",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "ws": "8.21.3"
+    "ws": "8.21.3",
+    "yjs": "13.6.30"
   },
   "devDependencies": {
     "@dohc/sync-relay": "workspace:*",

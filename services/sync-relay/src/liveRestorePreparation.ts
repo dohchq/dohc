@@ -3,6 +3,8 @@ import {resolveLiveRestorePoint, type OrderedLiveUpdateCutPolicy} from "@dohc/yd
 import {configRecord} from "./deviceLiveHostConfig";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
 import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
+import {parseLiveUpdateDigest} from "@dohc/live-session-contract/live-update-admission";
+import {snapshotHostCoordinate} from "./liveTicketInputs";
 
 const policyKeys = ["maxStructVisits", "maxValueNodeVisits", "maxDecodedPayloadByteVisits", "maxStructClientGroupVisits",
   "maxDeleteClientGroupVisits", "maxDeleteIntervalVisits", "maxIndexOperations"] as const;
@@ -46,15 +48,22 @@ export class LiveRestorePreparation {
     this.#reservationBytes = reservationBytes(this.config.maxBytes, this.config.workingReserveBytes);
   }
 
-  async prepare(options: Parameters<typeof deliverStopRestore>[0]) {
-    const config = this.config, lookup = snapshotStopRestoreLookup(options.lookup), signal = options.signal;
-    const check = () => {if (signal?.aborted) throw signal.reason;};
-    check();
+  async #reserved<T>(signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T> {
+    const config = this.config;
+    if (signal?.aborted) throw signal.reason;
     if (this.#operations >= config.maxOperations || this.#reservationBytes > config.aggregateBytes - this.#bytes) {
       throw new Error("Restore preparation capacity is full.");
     }
     this.#bytes += this.#reservationBytes; this.#operations++;
     try {
+      return await run();
+    } finally {this.#bytes -= this.#reservationBytes; this.#operations--;}
+  }
+
+  async prepare(options: Parameters<typeof deliverStopRestore>[0]) {
+    const config = this.config, lookup = snapshotStopRestoreLookup(options.lookup), signal = options.signal;
+    const check = () => {if (signal?.aborted) throw signal.reason;};
+    return this.#reserved(signal, async () => {
       const stopped = await deliverStopRestore({...options, lookup});
       check();
       if (stopped.kind === "pending") return stopped;
@@ -72,6 +81,55 @@ export class LiveRestorePreparation {
       check(); selected.assertCurrent();
       const recorded = store.recordStopRestoreProposal(input, output.bytes, config.validation, Date.now());
       return {kind: "prepared" as const, ...recorded};
-    } finally {this.#bytes -= this.#reservationBytes; this.#operations--;}
+    });
+  }
+
+  /** Continue only the durable proposal selected by the private caller. */
+  async complete(options: Parameters<typeof deliverStopRestore>[0], expectedDigest: string) {
+    const config = this.config, signal = options.signal, store = options.store, deliveryKind = options.deliveryKind;
+    const proposalDigest = parseLiveUpdateDigest(expectedDigest);
+    const connection = {...options.connection, host: snapshotHostCoordinate(options.connection.host),
+      nextRequestId: options.connection.nextRequestId.bind(options.connection)};
+    const input = {...snapshotStopRestoreLookup(options.lookup), host: connection.host,
+      maxBytes: config.maxBytes, maxEvents: config.maxEvents};
+    const check = () => {if (signal?.aborted) throw signal.reason;};
+    return this.#reserved(signal, async () => {
+      let current = store.readStopRestoreLifecycle(input)
+        ?? store.admitStopRestoreProposal(input, proposalDigest, config.validation, Date.now());
+      const verify = () => {
+        check();
+        if (current.proposalDigest !== proposalDigest || current.preparation.fence.operation.origin.kind !== deliveryKind) {
+          throw new Error("Restore continuation does not match the retained proposal.");
+        }
+      };
+      const send = async (operation: "apply" | "settle" | "resume", settlementId?: string) => {
+        verify();
+        const header = {...current.preparation, candidateDigest: current.candidateDigest,
+          nativeSourceManifestDigest: current.nativeSourceManifestDigest, admitted: current.admitted,
+          ...(settlementId === undefined ? {} : {settlementId})};
+        const bytes = encodeNativeRestoreInput(Buffer.from(JSON.stringify(header)), config.maxBytes);
+        const output = await connection.client.sendLiveRestore({id: connection.nextRequestId(), workspace: connection.workspace,
+          deadlineMs: connection.deadlineMs}, operation, bytes, config.maxBytes, signal);
+        check();
+        return JSON.parse(new TextDecoder("utf-8", {fatal: true}).decode(output.bytes)) as unknown;
+      };
+      verify();
+      if (current.phase === "relay-admitted") {
+        current = store.acknowledgeStopRestoreReplacement(input, await send("apply"));
+      }
+      if (current.phase === "native-applied") {
+        current = store.acknowledgeStopRestoreSettlement(input, await send("settle"));
+        if (current.phase === "native-applied") {
+          return {kind: "pending" as const, reason: "Restore materialization is pending.", proposalDigest};
+        }
+      }
+      if (current.phase === "settled") {
+        if (!current.settlement?.materialized) throw new Error("Restore settlement is not materialized.");
+        current = store.acknowledgeStopRestoreResume(input, await send("resume", current.settlement.settlementId));
+      }
+      verify();
+      if (current.phase !== "resumed" || !current.resume) throw new Error("Restore continuation did not resume.");
+      return {kind: "resumed" as const, proposalDigest, receipt: current.resume};
+    });
   }
 }

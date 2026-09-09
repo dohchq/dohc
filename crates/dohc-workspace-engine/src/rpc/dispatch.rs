@@ -68,6 +68,9 @@ impl EngineService {
                     | "liveApplication.register"
                     | "liveApplication.bootstrap"
                     | "liveApplication.apply"
+                    | "liveApplication.ack"
+                    | "liveApplication.syncOpen"
+                    | "liveApplication.appliedRead"
                     | "liveApplication.settle"
                     | "liveApplication.fenceRestore"
                     | "liveApplication.prepareRestore"
@@ -114,6 +117,12 @@ impl EngineService {
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
         if request.method == "liveApplication.settle" {
             return self.live_application_settle(ctx, request).await;
+        }
+        if request.method == "liveApplication.appliedRead" {
+            return self.live_application_applied_read(ctx, request).await;
+        }
+        if request.method == "liveApplication.ack" {
+            return self.live_application_ack(ctx, request).await;
         }
         if request.method == "liveApplication.fenceRestore" {
             return self.live_application_fence_restore(ctx, request).await;

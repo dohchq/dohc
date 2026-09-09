@@ -344,7 +344,8 @@ mod tests {
                 "host":{"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
                 "workspaces":[{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4}],
                 "ingress":{"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":32*1024*1024,"maxUploads":2,"uploadDeadlineMs":30_000},
-                "restore":{"maxBytes":1_000_000,"maxEvents":100}
+                "restore":{"maxBytes":1_000_000,"maxEvents":100},
+                "sync":{"policy":{"maxClientVectorBytes":1024,"maxHostVectorBytes":4096,"maxOutputBytes":1_000_000,"maxReadBytes":10_000_000},"workingReserveBytes":16*1024*1024}
             })).unwrap();
             let (service, owner, ingress) =
                 EngineService::configured_live_host(config).await.unwrap();
@@ -600,6 +601,112 @@ mod tests {
         let output = f.restore("liveApplication.prepareRestore", &header).await;
         assert_eq!(output.response.result["status"], "prepared");
         drop(output);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn applied_sync_rpc_expired_deadlines_preserve_the_deadline_error() {
+        let mut f = Fixture::new().await;
+        let capacity = f.ingress.budget.available_permits();
+        let vector = [0u8];
+        let request = f.request("liveApplication.syncOpen", json!({"registrationId":f.registration,"streamId":100,"byteLength":1,"digest":hex_sha256(&vector)}));
+        let opened = f.upload(request, 100, &vector).await;
+        let position = opened.response.result["position"].clone();
+        drop(opened);
+        for sync_open in [false, true] {
+            let mut ctx = f.context();
+            ctx.deadline = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+            let result = if sync_open {
+                let request = f.request("liveApplication.syncOpen", json!({"registrationId":f.registration,"streamId":200,"byteLength":1,"digest":hex_sha256(&vector)}));
+                let id = request.id;
+                f.ingress.begin(request, &f.owner.handle()).unwrap();
+                f.ingress
+                    .start(BlobStart {
+                        request_id: id,
+                        stream_id: 200,
+                        total_bytes: Some(1),
+                        sha256: Some(hex_sha256(&vector)),
+                    })
+                    .unwrap();
+                let (request, input) = f.ingress.chunk(200, true, &vector).unwrap().unwrap();
+                f.service.call_with_input(ctx, request, Some(input)).await
+            } else {
+                let request = f.request(
+                    "liveApplication.appliedRead",
+                    json!({"registrationId":f.registration,"after":position}),
+                );
+                f.service.call(ctx, request).await
+            };
+            assert_eq!(result.unwrap_err().code, ErrorCode::DeadlineExceeded);
+            assert_eq!(f.ingress.budget.available_permits(), capacity);
+        }
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn applied_sync_rpc_streams_one_atomic_cut_and_guarded_next_update() {
+        let mut f = Fixture::new().await;
+        let vector = [0u8];
+        let request=f.request("liveApplication.syncOpen",json!({"registrationId":f.registration,"streamId":100,"byteLength":1,"digest":hex_sha256(&vector)}));
+        let opened = f.upload(request, 100, &vector).await;
+        assert_eq!(opened.response.result["status"], "sync");
+        let bytes = &opened.blob_egress.as_ref().unwrap().bytes;
+        let vector_length = opened.response.result["hostVectorByteLength"]
+            .as_u64()
+            .unwrap() as usize;
+        let peer = Ydoc::wire();
+        peer.apply(&bytes[vector_length..]).unwrap();
+        assert_eq!(peer.canonical_content(), f.doc.canonical_content());
+        assert_eq!(opened.response.result["observedLocalYDocHeadSequence"], 0);
+        let position = opened.response.result["position"].clone();
+        let empty = f
+            .control(
+                "liveApplication.appliedRead",
+                json!({"registrationId":f.registration,"after":position}),
+            )
+            .await;
+        assert_eq!(empty.response.result["status"], "empty");
+        assert!(empty.blob_egress.is_none());
+        drop(empty);
+        f.id = 150;
+        f.edit("applied after sync cut").await;
+        let update = f
+            .control(
+                "liveApplication.appliedRead",
+                json!({"registrationId":f.registration,"after":position}),
+            )
+            .await;
+        assert_eq!(update.response.result["status"], "update");
+        assert_eq!(update.response.result["position"]["eventCount"], 1);
+        assert_eq!(
+            update.response.result["ack"]["journalCursor"],
+            f.terminal["journalCursor"]
+        );
+        peer.apply(&update.blob_egress.as_ref().unwrap().bytes)
+            .unwrap();
+        assert_eq!(peer.canonical_content(), f.doc.canonical_content());
+        let blocked = f.request(
+            "liveApplication.appliedRead",
+            json!({"registrationId":f.registration,"after":position}),
+        );
+        assert!(f.service.call(f.context(), blocked).await.is_err());
+        drop(update);
+        let replay = f
+            .control(
+                "liveApplication.appliedRead",
+                json!({"registrationId":f.registration,"after":position}),
+            )
+            .await;
+        assert_eq!(replay.response.result["position"]["eventCount"], 1);
+        drop(replay);
+        f.fence().await;
+        assert!(!opened.output_guard.as_ref().unwrap().is_current());
+        let blocked = f.request(
+            "liveApplication.appliedRead",
+            json!({"registrationId":f.registration,"after":position}),
+        );
+        assert!(f.service.call(f.context(), blocked).await.is_err());
+        drop(opened);
         f.close().await;
     }
 

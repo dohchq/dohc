@@ -110,6 +110,46 @@ fn ack(
     }
 }
 struct Crash(FaultPoint);
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ack_read_uses_current_actor_registration_and_retains_original_sequence() {
+    use dohc_engine_collab::live_update_application::LiveApplicationAckIdentity;
+    let (_scratch, _db, _supervisor, actor) = fixture();
+    let (owner, handle) = registered(&actor).await;
+    let source = Ydoc::wire();
+    let update = event("ack-one", 1, "one", source.plaintext_insert(0, "one"));
+    let identity = LiveApplicationAckIdentity {
+        delivery_id: "ack-one".into(),
+        update_digest: update.metadata.accepted.receipt.update_digest.clone(),
+    };
+    assert!(handle.read_ack(identity.clone()).await.unwrap().is_none());
+    let mut expected = ack(handle
+        .apply(update, Arc::new(NoFaults), 100_000_000)
+        .await
+        .unwrap());
+    expected.application_replayed = true;
+    handle
+        .apply(
+            event("ack-two", 2, "one", source.plaintext_insert(3, " two")),
+            Arc::new(NoFaults),
+            100_000_000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        handle.read_ack(identity.clone()).await.unwrap(),
+        Some(expected.clone())
+    );
+    let foreign = owner
+        .register("relay-A".into(), coordinate("connection"), binding("two"))
+        .await
+        .unwrap();
+    assert!(foreign.read_ack(identity.clone()).await.is_err());
+    owner.retire();
+    assert!(handle.read_ack(identity.clone()).await.is_err());
+    let (_replacement, fresh) = registered(&actor).await;
+    assert_eq!(fresh.read_ack(identity).await.unwrap(), Some(expected));
+}
 impl FaultInjector for Crash {
     fn poll(&self, point: FaultPoint) -> FaultAction {
         if point == self.0 {

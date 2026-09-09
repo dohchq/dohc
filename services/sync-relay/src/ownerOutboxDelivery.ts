@@ -20,7 +20,7 @@ export async function drainOwnerOutbox(options: {
   workspace: string; host: LiveHostConnectionCoordinate; registrationId: number;
   binding: LiveObjectBinding; nextRequestId(): number; deadlineMs: number; signal?: AbortSignal;
   assertCurrent(): void;
-}): Promise<void> {
+}): Promise<{admittedEntries: number; hasMore: boolean}> {
   const {storage,admission,client,registrationId,binding,host,signal} = options;
   for (const value of [admission.maxEntriesPerDrain,admission.maxBytesPerDrain]) {
     if (!Number.isSafeInteger(value) || value < 1) throw new Error("Invalid owner drain budget.");
@@ -28,16 +28,20 @@ export async function drainOwnerOutbox(options: {
   const check = () => { signal?.throwIfAborted(); options.assertCurrent(); };
   const request = () => ({id: options.nextRequestId(),workspace: options.workspace,deadlineMs: options.deadlineMs});
   check();
-  const available = await client.sendRequest({...request(),method: "liveApplication.ownerOutbox",params: {registrationId}},signal);
-  check();
-  const status = configRecord(available.result,["outboxId","pendingBytes","state"]), outboxId = status.outboxId;
-  if (typeof status.pendingBytes !== "number" || !Number.isSafeInteger(status.pendingBytes) || status.pendingBytes < 0) throw new Error("Invalid owner pending bytes.");
-  if (status.state === "sealed" || status.state === "quarantined") throw new Error(`Owner outbox is ${status.state}; explicit recovery is required.`);
-  if (status.pendingBytes === 0) return;
-  if (status.state !== "active") throw new Error("Invalid owner outbox state.");
-  if (outboxId === null) return;
+  const readStatus = async () => {
+    const available = await client.sendRequest({...request(),method: "liveApplication.ownerOutbox",params: {registrationId}},signal);
+    check();
+    const status = configRecord(available.result,["outboxId","pendingBytes","state"]);
+    if (typeof status.pendingBytes !== "number" || !Number.isSafeInteger(status.pendingBytes) || status.pendingBytes < 0) throw new Error("Invalid owner pending bytes.");
+    if (status.state === "sealed" || status.state === "quarantined") throw new Error(`Owner outbox is ${status.state}; explicit recovery is required.`);
+    if (status.pendingBytes > 0 && (status.state !== "active" || typeof status.outboxId !== "string")) throw new Error("Invalid owner outbox state.");
+    return {outboxId: status.outboxId, pendingBytes: status.pendingBytes};
+  };
+  const status = await readStatus(), outboxId = status.outboxId;
+  if (status.pendingBytes === 0) return {admittedEntries: 0, hasMore: false};
   if (typeof outboxId !== "string") throw new Error("Invalid owner outbox identity.");
-  let receivedBytes = 0;
+  let receivedBytes = 0, admittedEntries = 0;
+  const byteBudget = new Error("Owner drain byte budget exceeded.");
   const outbox = new OwnerYDocOutbox({sendRequest: async original => {
     check();
     const reading = original.method === "ydoc.ownerOutbox.readPending";
@@ -50,7 +54,7 @@ export async function drainOwnerOutbox(options: {
     if (reading) {
       const result = response.result as Record<string,unknown>;
       if (typeof result.bytesBase64 === "string") receivedBytes += result.bytesBase64.length;
-      if (receivedBytes > admission.maxBytesPerDrain) throw new Error("Owner drain byte budget exceeded.");
+      if (receivedBytes > admission.maxBytesPerDrain) throw byteBudget;
     }
     return {...response,id: original.id};
   }},options.workspace);
@@ -59,7 +63,8 @@ export async function drainOwnerOutbox(options: {
       check();
       const pending = await outbox.readDeliveryHead(outboxId,binding); check();
       if (!isDeepStrictEqual(pending.binding,binding) || pending.baseUpdateDigest !== binding.lineageClaimId) throw new Error("Owner outbox binding changed.");
-      if (pending.state !== "active" || !pending.entry) return;
+      if (pending.state !== "active") throw new Error("Owner outbox requires explicit recovery.");
+      if (!pending.entry) return {admittedEntries, hasMore: false};
       const entry = pending.entry;
       const shareId = admission.shares.get(binding.workspaceId);
       const share = shareId ? storage.getShare(shareId) : null;
@@ -77,6 +82,17 @@ export async function drainOwnerOutbox(options: {
         metadata: {deliveryId: entry.deliveryId,updateDigest: entry.updateDigest,binding},cutToken: cut.cut,validation,updateBytes: entry.update,receivedAtMs: Date.now()});
       if (committed.result.kind !== "accepted") throw new Error("Owner update admission refused.");
       await outbox.acknowledge(outboxId,[committed.result.receipt]); check();
+      admittedEntries++;
     }
+    const remaining = await readStatus();
+    if (remaining.outboxId !== outboxId) throw new Error("Owner outbox changed.");
+    return {admittedEntries, hasMore: remaining.pendingBytes > 0};
+  } catch (error) {
+    if (error === byteBudget && admittedEntries > 0) {
+      const remaining = await readStatus();
+      if (remaining.outboxId !== outboxId) throw new Error("Owner outbox changed.");
+      return {admittedEntries, hasMore: remaining.pendingBytes > 0};
+    }
+    throw error;
   } finally { outbox.dispose(); }
 }

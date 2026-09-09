@@ -7,6 +7,7 @@ import { asRecord } from "@dohc/workspace-core";
 import { createAccountAuthHandler, type AccountAuthConfig } from "./accountAuth";
 import { isSessionDiscriminator } from "./sessionDiscriminator";
 import { createNamedLiveBrowserClient, type NamedLiveBrowserClientLimits, type NamedLiveBrowserSessionContext } from "./namedLiveBrowserClient";
+import {createNamedLiveTicketClient} from "./namedLiveTicketClient";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 export const SHARE_WEB_CSP =
@@ -75,6 +76,7 @@ export interface CreateShareWebApplicationOptions {
   accountAuth?: AccountAuthConfig;
   fetchAuth?: RelayFetch;
   namedBrowserSessionLimits?: NamedLiveBrowserClientLimits;
+  namedLiveTickets?: boolean;
 }
 
 export type LinkBrowserMaterial =
@@ -762,12 +764,17 @@ export function createShareWebApplication({
   accountAuth,
   fetchAuth,
   namedBrowserSessionLimits,
+  namedLiveTickets,
 }: CreateShareWebApplicationOptions): ShareWebApplication {
   if (namedBrowserSessionLimits && (!accountAuth || !relayExchangeKey || !publicHosts.has(new URL(accountAuth.publicOrigin).host))) {
     throw new TypeError("Named browser sessions require configured account auth and relay exchange.");
   }
   const namedBrowser = namedBrowserSessionLimits ? createNamedLiveBrowserClient({
     relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, fetchRelay,
+  }) : undefined;
+  if (namedLiveTickets && !namedBrowser) throw new TypeError("Named live tickets require named browser sessions.");
+  const namedTickets = namedLiveTickets ? createNamedLiveTicketClient({
+    relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits!, fetchRelay,
   }) : undefined;
   const accountHandler = accountAuth ? createAccountAuthHandler({
     ...accountAuth,
@@ -968,6 +975,12 @@ export function createShareWebApplication({
       if (!namedBrowser) return refused();
       const result = await namedBrowser.bootstrap(request);
       return response(result.body, { status: result.status, headers: result.headers });
+    }
+
+    if (pathname === "/api/live/named-ticket") {
+      if (!namedTickets) return refused();
+      const result = await namedTickets(request);
+      return response(result.body, {status: result.status, headers: result.headers});
     }
 
     if (pathname.startsWith("/api/account/")) {

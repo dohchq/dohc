@@ -2,7 +2,7 @@ use super::*;
 use crate::Ydoc;
 use dohc_engine_storage::put_binary_blob;
 
-const CHECKPOINT_EVENTS: i64 = 4095;
+pub(super) const CHECKPOINT_EVENTS: i64 = 4095;
 const CHECKPOINT_BYTES: i64 = 20_971_520;
 const DOCUMENT: &str = "relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5";
 
@@ -44,7 +44,7 @@ fn parameters(held: &Registration) -> [&str; 5] {
     ]
 }
 
-fn initial_digest(held: &Registration) -> Result<String, ApplicationError> {
+pub(super) fn initial_digest(held: &Registration) -> Result<String, ApplicationError> {
     Ok(hex_sha256(
         &serde_json::to_vec(&("accepted-history-v1", parameters(held)))
             .map_err(|_| ApplicationError::Corrupt)?,
@@ -143,7 +143,9 @@ fn checkpoint(
     verify_cadence: bool,
 ) -> Result<NativeAcceptedCheckpoint, ApplicationError> {
     let p = parameters(held);
-    let sql = format!("SELECT event_count,journal_cursor,length(CAST(terminal_json AS BLOB))+length(CAST(binding_json AS BLOB))+coalesce(length(CAST(restore_operation_id AS BLOB)),0) FROM live_accepted_checkpoints WHERE {DOCUMENT} AND journal_cursor<=?6 ORDER BY journal_cursor DESC LIMIT 1");
+    let sql = format!(
+        "SELECT event_count,journal_cursor,length(CAST(terminal_json AS BLOB))+length(CAST(binding_json AS BLOB))+coalesce(length(CAST(restore_operation_id AS BLOB)),0) FROM live_accepted_checkpoints WHERE {DOCUMENT} AND journal_cursor<=?6 ORDER BY journal_cursor DESC LIMIT 1"
+    );
     let (count, cursor, length): (i64, i64, i64) = conn
         .query_row(&sql, params![p[0], p[1], p[2], p[3], p[4], through], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -152,7 +154,9 @@ fn checkpoint(
         .map_err(read_sql)?
         .ok_or(ApplicationError::Conflict)?;
     budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
-    let sql = format!("SELECT terminal_json,binding_json,state_sha256,evidence_digest,origin_stamp,restore_operation_id,restore_stamp FROM live_accepted_checkpoints WHERE {DOCUMENT} AND event_count=?6");
+    let sql = format!(
+        "SELECT terminal_json,binding_json,state_sha256,evidence_digest,origin_stamp,restore_operation_id,restore_stamp FROM live_accepted_checkpoints WHERE {DOCUMENT} AND event_count=?6"
+    );
     let (
         terminal,
         binding,
@@ -227,7 +231,9 @@ fn checkpoint(
         return Err(ApplicationError::Corrupt);
     };
     if count > 0 {
-        let sql=format!("SELECT length(CAST(metadata_json AS BLOB)) FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6 AND journal_cursor=?7");
+        let sql = format!(
+            "SELECT length(CAST(metadata_json AS BLOB)) FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6 AND journal_cursor=?7"
+        );
         let length: i64 = conn
             .query_row(
                 &sql,
@@ -236,7 +242,9 @@ fn checkpoint(
             )
             .map_err(read_sql)?;
         budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
-        let sql=format!("SELECT metadata_json,evidence_digest FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6 AND journal_cursor=?7");
+        let sql = format!(
+            "SELECT metadata_json,evidence_digest FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6 AND journal_cursor=?7"
+        );
         let (json, expected): (String, String) = conn
             .query_row(
                 &sql,
@@ -254,7 +262,9 @@ fn checkpoint(
         }
         if verify_cadence {
             // Check cadence from the preceding checkpoint using lengths only.
-            let sql=format!("SELECT event_count FROM live_accepted_checkpoints WHERE {DOCUMENT} AND event_count<?6 ORDER BY event_count DESC LIMIT 1");
+            let sql = format!(
+                "SELECT event_count FROM live_accepted_checkpoints WHERE {DOCUMENT} AND event_count<?6 ORDER BY event_count DESC LIMIT 1"
+            );
             let previous: i64 = conn
                 .query_row(&sql, params![p[0], p[1], p[2], p[3], p[4], count], |r| {
                     r.get(0)
@@ -297,7 +307,7 @@ fn segment_position(
     through: i64,
 ) -> Result<(i64, i64), ApplicationError> {
     let p = parameters(held);
-    let sql="SELECT a.event_count,b.byte_length,length(b.bytes),a.suffix_count,a.suffix_bytes FROM live_accepted_updates a JOIN binary_blobs b ON b.sha256=a.update_sha256 WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5 AND a.event_count>?6 AND a.event_count<=?7 ORDER BY a.event_count LIMIT 4096";
+    let sql = "SELECT a.event_count,b.byte_length,length(b.bytes),a.suffix_count,a.suffix_bytes FROM live_accepted_updates a JOIN binary_blobs b ON b.sha256=a.update_sha256 WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5 AND a.event_count>?6 AND a.event_count<=?7 ORDER BY a.event_count LIMIT 4096";
     let mut query = conn.prepare(sql).map_err(read_sql)?;
     let mut rows = query
         .query(params![p[0], p[1], p[2], p[3], p[4], after, through])
@@ -382,7 +392,9 @@ fn append_inner(
         return Ok(());
     }
     let c = checkpoint(tx, held, SAFE, budget, false)?;
-    let sql=format!("SELECT length(CAST(metadata_json AS BLOB)) FROM live_accepted_updates WHERE {DOCUMENT} ORDER BY event_count DESC LIMIT 1");
+    let sql = format!(
+        "SELECT length(CAST(metadata_json AS BLOB)) FROM live_accepted_updates WHERE {DOCUMENT} ORDER BY event_count DESC LIMIT 1"
+    );
     if let Some(length) = tx
         .query_row(&sql, p, |r| r.get::<_, i64>(0))
         .optional()
@@ -390,7 +402,9 @@ fn append_inner(
     {
         budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
     }
-    let sql=format!("SELECT event_count,journal_cursor,metadata_json,evidence_digest,suffix_count,suffix_bytes FROM live_accepted_updates WHERE {DOCUMENT} ORDER BY event_count DESC LIMIT 1");
+    let sql = format!(
+        "SELECT event_count,journal_cursor,metadata_json,evidence_digest,suffix_count,suffix_bytes FROM live_accepted_updates WHERE {DOCUMENT} ORDER BY event_count DESC LIMIT 1"
+    );
     let prior: Option<(i64, i64, String, String, i64, i64)> = tx
         .query_row(&sql, p, |r| {
             Ok((
@@ -540,7 +554,7 @@ pub(super) fn read(
     read_inner(conn, held, through, budget, max_events, true)
 }
 
-fn read_inner(
+pub(super) fn read_inner(
     conn: &Connection,
     held: &Registration,
     through: i64,
@@ -554,7 +568,9 @@ fn read_inner(
     doc.apply(&baseline)?;
     doc.validate_public_baseline(&baseline)?;
     let p = parameters(held);
-    let sql=format!("SELECT event_count,journal_cursor,length(CAST(metadata_json AS BLOB)),update_sha256,evidence_digest FROM live_accepted_updates WHERE {DOCUMENT} AND event_count>?6 AND journal_cursor<=?7 ORDER BY event_count LIMIT ?8");
+    let sql = format!(
+        "SELECT event_count,journal_cursor,length(CAST(metadata_json AS BLOB)),update_sha256,evidence_digest FROM live_accepted_updates WHERE {DOCUMENT} AND event_count>?6 AND journal_cursor<=?7 ORDER BY event_count LIMIT ?8"
+    );
     let mut query = conn.prepare(&sql).map_err(read_sql)?;
     let mut rows = query
         .query(params![

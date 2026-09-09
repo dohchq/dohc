@@ -59,11 +59,39 @@ it("keeps restore forwarding disabled unless its explicit bound is valid",()=>{
   expect(readDesktopOwnerHostConfig(f.path).transport.maxRestoreBytes).toBe(1_000_000);
 });
 
+it("enables sync forwarding only with bounded vectors, outputs and aggregate copy space", () => {
+  const f = fixture();
+  expect(readDesktopOwnerHostConfig(f.path).transport.sync).toBeUndefined();
+  const sync = {maxClientVectorBytes: 1024, maxOutputBytes: 1_000_000};
+  Object.assign(f.config.transport, {sync}); f.write();
+  expect(readDesktopOwnerHostConfig(f.path).transport.sync).toEqual(sync);
+  const required = 1024 * 3 + 1_000_000 * 3 + f.config.transport.maxFrameBytes * 4;
+  f.config.transport.aggregateBytes = required - 1; f.write();
+  expect(() => readDesktopOwnerHostConfig(f.path)).toThrow("sync aggregate budget");
+  f.config.transport.aggregateBytes = required; f.write();
+  expect(() => readDesktopOwnerHostConfig(f.path)).not.toThrow();
+  for (const bad of [null, {}, {...sync, maxClientVectorBytes: 0}, {...sync, maxOutputBytes: 2},
+    {...sync, maxOutputBytes: 64 * 1024 * 1024 + 1}, {...sync, extra: true}]) {
+    Object.assign(f.config.transport, {sync: bad}); f.write();
+    expect(() => readDesktopOwnerHostConfig(f.path)).toThrow();
+  }
+});
+
 it("refuses impossible aggregate budgets at config read",()=>{
   const f=fixture();
-  Object.assign(f.config.transport,{maxRestoreBytes:1_000_000,aggregateBytes:6_048_575});f.write();
+  Object.assign(f.config.transport,{maxRestoreBytes:1_000_000,aggregateBytes:9_194_303});f.write();
   expect(()=>readDesktopOwnerHostConfig(f.path)).toThrow("transport budget");
   f.config.transport.aggregateBytes++;f.write();expect(()=>readDesktopOwnerHostConfig(f.path)).not.toThrow();
   f.config.transport.maxAdoptionBytes=2_000_000;f.write();
   expect(()=>readDesktopOwnerHostConfig(f.path)).toThrow("transport budget");
+});
+
+it.each([4096, 1_500_000])("requires queue space for the advertised payload and native frame (%i)", maxPayloadBytes => {
+  const f = fixture();
+  f.config.control.maxPayloadBytes = maxPayloadBytes;
+  const minimum = Math.max(maxPayloadBytes + 16, f.config.transport.maxFrameBytes + 36);
+  f.config.transport.maxQueuedBytes = minimum - 1; f.write();
+  expect(() => readDesktopOwnerHostConfig(f.path)).toThrow("transport budget");
+  f.config.transport.maxQueuedBytes = minimum; f.write();
+  expect(() => readDesktopOwnerHostConfig(f.path)).not.toThrow();
 });

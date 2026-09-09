@@ -53,7 +53,7 @@ export function createNamedLiveBrowserHttp(options: {
   const refusal = () => Response.json({ ok: false, error: "not found" }, { status: 404, headers: { "cache-control": "private, no-store" } });
   let pending = 0;
 
-  return async (request: Request): Promise<Response> => {
+  const handle = async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
     const create = url.pathname === "/sync/live/named-sessions";
     if ((!create && url.pathname !== "/sync/live/named-sessions/resolve") || url.search || request.method !== "POST" ||
@@ -102,4 +102,5 @@ export function createNamedLiveBrowserHttp(options: {
     })();
     return Promise.race([work, cancelled]);
   };
+  return Object.assign(handle, { resolve: sessions.resolve.bind(sessions) });
 }

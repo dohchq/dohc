@@ -604,6 +604,7 @@ export class YdocAdapterSession {
   private droppedWhileStale = false;
   private nextLocalUpdateSeq = 1;
   private readonly remoteUpdateListeners = new Set<(update: Uint8Array) => void>();
+  private readonly durableLocalChangeListeners = new Set<() => void>();
   private readonly remoteApplyErrorListeners = new Set<
     (error: RemoteYdocApplyError) => void
   >();
@@ -794,6 +795,9 @@ export class YdocAdapterSession {
     const guarded = operation.then(
       (value) => {
         if (levelsTheEngine) this.engineMissingLocalState = false;
+        if (!this.closed && this.staleError === null && this.quarantinedError === null) {
+          this.notifyListeners(this.durableLocalChangeListeners, undefined);
+        }
         return value;
       },
       (error: unknown) => {
@@ -987,6 +991,11 @@ export class YdocAdapterSession {
     return () => this.remoteUpdateListeners.delete(handler);
   }
 
+  onDurableLocalChange(handler: () => void): () => void {
+    this.durableLocalChangeListeners.add(handler);
+    return () => this.durableLocalChangeListeners.delete(handler);
+  }
+
   onRemoteApplyError(handler: (error: RemoteYdocApplyError) => void): () => void {
     this.remoteApplyErrorListeners.add(handler);
     return () => this.remoteApplyErrorListeners.delete(handler);
@@ -1133,6 +1142,7 @@ export class YdocAdapterSession {
       if (!isYdocSessionNotFoundRefusal(error)) throw error;
     }
     this.closed = true;
+    this.durableLocalChangeListeners.clear();
     this.doc.off("update", this.handleDocUpdate);
     for (const retired of this.retiredDocs) retired.destroy();
     this.retiredDocs.clear();
@@ -1155,6 +1165,7 @@ export class YdocAdapterSession {
       if (!isYdocSessionNotFoundRefusal(error)) throw error;
     }
     this.closed = true;
+    this.durableLocalChangeListeners.clear();
     this.doc.off("update", this.handleDocUpdate);
     for (const retired of this.retiredDocs) retired.destroy();
     this.retiredDocs.clear();

@@ -4,12 +4,16 @@ use dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, ApplicationError, ApplicationHandle, ApplicationHostCoordinate,
-    ApplicationOwner, ApplicationResult, BootstrapResult, LiveApplicationBootstrap,
-    LiveSettlementResult, LiveUpdateReceipt, NativeRestoreApplication,
-    NativeRestoreApplicationReceipt, NativeRestoreFence, NativeRestoreFenceReceipt,
-    NativeRestorePreparation, NativeRestoreProposal, NativeRestoreResume,
-    NativeRestoreResumeReceipt, OwnerAdoptionAck, OwnerAdoptionCut, adopt_owner_committed,
-    apply_committed, bootstrap_committed, validate_application_binding, with_settlement,
+    ApplicationOwner, ApplicationResult, BootstrapResult, LiveApplicationAckIdentity,
+    LiveApplicationBootstrap, LiveSettlementResult, LiveUpdateHostApplicationAck,
+    LiveUpdateReceipt, NativeRestoreApplication, NativeRestoreApplicationReceipt,
+    NativeRestoreFence, NativeRestoreFenceReceipt, NativeRestorePreparation, NativeRestoreProposal,
+    NativeRestoreResume, NativeRestoreResumeReceipt, OwnerAdoptionAck, OwnerAdoptionCut,
+    adopt_owner_committed, apply_committed, bootstrap_committed, read_application_ack,
+    validate_application_binding, with_settlement,
+};
+use dohc_engine_collab::live_update_application::{
+    AppliedPosition, AppliedSyncCut, AppliedSyncPolicy, NextAppliedUpdate,
 };
 use dohc_engine_collab::{CollabError, WriterDocCache};
 use dohc_engine_storage::{EngineStore, FaultInjector};
@@ -435,6 +439,93 @@ impl ActorLiveApplicationOwner {
 }
 
 impl ActorLiveApplicationHandle {
+    pub async fn sync_open(
+        &self,
+        client_vector: Vec<u8>,
+        policy: AppliedSyncPolicy,
+        cancel: tokio_util::sync::CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<AppliedSyncCut, RuntimeError> {
+        policy.validate()?;
+        current(&self.actor, &self.token)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(Request::SyncOpen {
+                workspace_id: self.workspace_id.clone(),
+                token: self.token.clone(),
+                application: self.application.clone(),
+                client_vector,
+                policy,
+                cancel,
+                reservation,
+                reply,
+            })))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        let result = receive
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        current(&self.actor, &self.token)?;
+        Ok(result)
+    }
+    pub async fn read_next_applied(
+        &self,
+        after: AppliedPosition,
+        policy: AppliedSyncPolicy,
+        cancel: tokio_util::sync::CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<Option<NextAppliedUpdate>, RuntimeError> {
+        policy.validate()?;
+        after.validate()?;
+        current(&self.actor, &self.token)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(
+                Request::ReadNextApplied {
+                    workspace_id: self.workspace_id.clone(),
+                    token: self.token.clone(),
+                    application: self.application.clone(),
+                    after,
+                    policy,
+                    cancel,
+                    reservation,
+                    reply,
+                },
+            )))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        let result = receive
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        current(&self.actor, &self.token)?;
+        Ok(result)
+    }
+    pub async fn read_ack(
+        &self,
+        identity: LiveApplicationAckIdentity,
+    ) -> Result<Option<LiveUpdateHostApplicationAck>, RuntimeError> {
+        identity.validate()?;
+        current(&self.actor, &self.token)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(Request::ReadAck {
+                workspace_id: self.workspace_id.clone(),
+                token: self.token.clone(),
+                application: self.application.clone(),
+                identity,
+                reply,
+            })))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        let result = receive
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        current(&self.actor, &self.token)?;
+        Ok(result)
+    }
     /// Adopt on the captured workspace actor. The reservation remains owned by
     /// the queued operation when its caller drops the response future.
     pub async fn adopt_owner(
@@ -624,6 +715,33 @@ impl Registry {
 }
 
 pub(super) enum Request {
+    SyncOpen {
+        workspace_id: String,
+        token: Token,
+        application: ApplicationHandle,
+        client_vector: Vec<u8>,
+        policy: AppliedSyncPolicy,
+        cancel: tokio_util::sync::CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+        reply: Reply<AppliedSyncCut>,
+    },
+    ReadNextApplied {
+        workspace_id: String,
+        token: Token,
+        application: ApplicationHandle,
+        after: AppliedPosition,
+        policy: AppliedSyncPolicy,
+        cancel: tokio_util::sync::CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+        reply: Reply<Option<NextAppliedUpdate>>,
+    },
+    ReadAck {
+        workspace_id: String,
+        token: Token,
+        application: ApplicationHandle,
+        identity: LiveApplicationAckIdentity,
+        reply: Reply<Option<LiveUpdateHostApplicationAck>>,
+    },
     ResumeRestore {
         workspace_id: String,
         token: Token,
@@ -760,6 +878,70 @@ impl Request {
         cache: &mut WriterDocCache,
     ) {
         match self {
+            Self::SyncOpen {
+                workspace_id,
+                token,
+                application,
+                client_vector,
+                policy,
+                cancel,
+                reservation: _reservation,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|_| {
+                    dohc_engine_collab::live_update_application::read_applied_sync(
+                        store,
+                        &application,
+                        &client_vector,
+                        policy,
+                        || {
+                            !cancel.is_cancelled()
+                                && token.load(Ordering::Acquire)
+                                && !reply.is_closed()
+                        },
+                    )
+                    .map_err(Into::into)
+                });
+                let _ = reply.send(result);
+            }
+            Self::ReadNextApplied {
+                workspace_id,
+                token,
+                application,
+                after,
+                policy,
+                cancel,
+                reservation: _reservation,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|_| {
+                    dohc_engine_collab::live_update_application::read_next_applied(
+                        store,
+                        &application,
+                        &after,
+                        policy,
+                        || {
+                            !cancel.is_cancelled()
+                                && token.load(Ordering::Acquire)
+                                && !reply.is_closed()
+                        },
+                    )
+                    .map_err(Into::into)
+                });
+                let _ = reply.send(result);
+            }
+            Self::ReadAck {
+                workspace_id,
+                token,
+                application,
+                identity,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|_| {
+                    read_application_ack(store, &application, &identity).map_err(Into::into)
+                });
+                let _ = reply.send(result);
+            }
             Self::ResumeRestore {
                 workspace_id,
                 token,

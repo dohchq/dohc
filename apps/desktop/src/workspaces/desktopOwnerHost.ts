@@ -1,7 +1,7 @@
 import {openSync,readSync,closeSync} from "node:fs";
 import {isAbsolute} from "node:path";
 import {EngineClient,DEFAULT_MAX_BLOB_BYTES} from "@dohc/workspace-engine-client/daemon";
-import {connectDeviceHost,parseDeviceHostCredential,type ExistingOwnerDeviceConfig} from "@dohc/sync-relay/device-host";
+import {connectDeviceHost,parseDeviceHostCredential,parseOwnerLiveSyncConfig,type ExistingOwnerDeviceConfig} from "@dohc/sync-relay/device-host";
 import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-control";
 
 interface DesktopOwnerHostConfig {
@@ -38,15 +38,18 @@ export function readDesktopOwnerHostConfig(path: string): DesktopOwnerHostConfig
     new Set(input.workspaceIds).size !== input.workspaceIds.length || !Number.isSafeInteger(input.reconnectDelayMs) || input.reconnectDelayMs < 1 || input.reconnectDelayMs > 2_147_483_647) throw new Error("Invalid private owner host configuration.");
   const credentialBytes = readBoundedFile(input.credentialPath,16_384,"Owner host credential is too large.");
   const transport = input.transport;
+  const control = parseDeviceControlLimits(input.control);
   const fields = ["aggregateBytes","maxAdoptionBytes","maxAdoptionEvents","maxFrameBytes","maxQueuedBytes","maxRegistrations","maxUploads","requestDeadlineMs"];
-  if (!transport || Object.keys(transport).filter(field => field !== "maxRestoreBytes").sort().join() !== fields.join() ||
+  if (!transport || Object.keys(transport).filter(field => field !== "maxRestoreBytes" && field !== "sync").sort().join() !== fields.join() ||
     fields.some(field => !Number.isSafeInteger(transport[field]) || transport[field] < 1) || transport.requestDeadlineMs > 2_147_483_647 ||
     transport.maxFrameBytes < 1_048_576 || transport.maxFrameBytes > 16_777_216 ||
-    transport.maxAdoptionBytes * 3 + transport.maxFrameBytes > transport.aggregateBytes ||
+    transport.maxQueuedBytes < Math.max(control.maxPayloadBytes + 16, transport.maxFrameBytes + 36) ||
+    transport.maxAdoptionBytes * 3 + transport.maxFrameBytes * 4 > transport.aggregateBytes ||
     (transport.maxRestoreBytes !== undefined && (!Number.isSafeInteger(transport.maxRestoreBytes) || transport.maxRestoreBytes < 5 || transport.maxRestoreBytes > DEFAULT_MAX_BLOB_BYTES ||
-      transport.maxRestoreBytes * 5 + transport.maxFrameBytes > transport.aggregateBytes))) throw new Error("Invalid private owner host transport budget.");
+      transport.maxRestoreBytes * 5 + transport.maxFrameBytes * 4 > transport.aggregateBytes))) throw new Error("Invalid private owner host transport budget.");
+  const sync = parseOwnerLiveSyncConfig(transport.sync, transport.aggregateBytes - transport.maxFrameBytes * 3, transport.maxFrameBytes);
   return {nativeConfigPath: input.nativeConfigPath,url: input.url,workspaceIds: input.workspaceIds,reconnectDelayMs: input.reconnectDelayMs,
-    transport,credential: parseDeviceHostCredential(JSON.parse(credentialBytes.toString("utf8"))),control: parseDeviceControlLimits(input.control)};
+    transport: {...transport, sync},credential: parseDeviceHostCredential(JSON.parse(credentialBytes.toString("utf8"))),control};
 }
 
 /** Connects only the desktop's current daemon generation and opened workspace handles. */

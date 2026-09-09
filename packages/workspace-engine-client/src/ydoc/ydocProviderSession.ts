@@ -108,6 +108,7 @@ export interface EngineYdocProviderSession {
     readonly sessionId: string;
     flush(): Promise<void>;
     applyRemoteUpdate(update: Uint8Array): Promise<void>;
+    onDurableLocalChange(handler: () => void): () => void;
   };
   readonly doc: Y.Doc;
   readonly initialUpdate: Uint8Array;
@@ -359,6 +360,7 @@ export async function openEngineYdocProviderSession(
   return {
     nativeOwner: {
       get sessionId() { return session.sessionId; },
+      onDurableLocalChange: handler => session.onDurableLocalChange(handler),
       async flush() {
         if (closed) throw new Error("Owner session is closed.");
         await journalChain;

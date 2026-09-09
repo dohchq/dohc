@@ -133,6 +133,8 @@ it("forwards committed owner deltas without resync or journaling, while daemon g
     onRemoteUpdate: remote,onResyncNeeded: gaps,scheduleSettle: () => () => undefined,
   });
   const owner = provider.nativeOwner!;
+  const durableChanges = vi.fn();
+  const stopDurableChanges = owner.onDurableLocalChange(durableChanges);
   const recordedBeforeDelivery = engine.recordedUpdates.length;
   const mirror = new Y.Doc(); Y.applyUpdate(mirror,provider.initialUpdate);
   let deltaBytes = 0;
@@ -147,6 +149,8 @@ it("forwards committed owner deltas without resync or journaling, while daemon g
     }
     expect(provider.doc.getText("plainText").toString()).toBe(original + "!".repeat(100));
     expect(remote).toHaveBeenCalledTimes(100);
+    expect(durableChanges).not.toHaveBeenCalled();
+    stopDurableChanges();
     expect(deltaBytes).toBeLessThan(10_000);
     expect(engine.requests.filter(request => request.method === YDOC_METHOD.resync)).toHaveLength(0);
     expect(engine.recordedUpdates).toHaveLength(recordedBeforeDelivery);
@@ -1652,9 +1656,12 @@ describe("YdocLiveAdapter", () => {
     // engine never received. The resend asks durable state what is missing.
     const { provider, settled, scheduler, journaled } =
       await openAgainstABusyJournal("typed while the store was busy", 2);
+    const durableChanges = vi.fn();
+    const stopDurableChanges = provider.nativeOwner!.onDurableLocalChange(durableChanges);
 
     // The caller still hears the truth about its own update.
     await expect(journaled).rejects.toThrow("engine-store-busy");
+    expect(durableChanges).not.toHaveBeenCalled();
     expect(settled).toEqual([]);
 
     // The ladder's rung: resend, then settle.
@@ -1665,6 +1672,8 @@ describe("YdocLiveAdapter", () => {
     expect(settled).toHaveLength(1);
     // The assertion a call count cannot make.
     expect(settled[0]?.content).toContain("typed while the store was busy");
+    expect(durableChanges).toHaveBeenCalledTimes(1);
+    stopDurableChanges();
 
     await provider.close({ settle: false });
   });
@@ -4638,4 +4647,36 @@ describe("no-edit settle skip", () => {
       content: "prior edit seeded body",
     });
   });
+});
+
+it("notifies durable owner observers only after commit and preserves lost-response recovery", async () => {
+  const engine = seedPlaintextEngine();
+  let release!: () => void, entered!: () => void;
+  const blocked = new Promise<void>(resolve => {release = resolve;});
+  const started = new Promise<void>(resolve => {entered = resolve;});
+  let loseResponse = true;
+  const transport: EngineTransport = {
+    ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+    async sendRequest(request) {
+      if (request.method === YDOC_METHOD.recordUpdate && loseResponse) {
+        entered(); await blocked;
+        await engine.sendRequest(request); loseResponse = false;
+        throw new Error("committed response lost");
+      }
+      return engine.sendRequest(request);
+    },
+  };
+  const adapter = new YdocLiveAdapter(transport);
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  const changed = vi.fn(() => {expect(engine.sessionText(session.sessionId)).toBe("durable");});
+  const stop = session.onDurableLocalChange(changed);
+  try {
+    const recorded = session.applyLocalTextEdit({root: "plainText", index: 0, insert: "durable"});
+    await started; expect(changed).not.toHaveBeenCalled();
+    release(); await recorded;
+    expect(changed).toHaveBeenCalledTimes(1); expect(engine.recordedUpdates).toHaveLength(1);
+    stop(); stop();
+    await session.applyLocalTextEdit({root: "plainText", index: 7, insert: "!"});
+    expect(changed).toHaveBeenCalledTimes(1);
+  } finally {release(); await session.close(); adapter.dispose();}
 });

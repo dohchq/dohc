@@ -21,7 +21,7 @@ it("retries an unmaterialized owner settlement and caches only its completed res
         if (request.method !== "liveApplication.settle") throw new Error(request.method);
         settles++;
         return {result: {status: "settled",settlement: {settlementId: "settlement",previousCursor: 0,terminalCursor: 0,applicationCount: 0,localYDocSequence: 0,
-          momentId: "moment",markdownDigest: "a".repeat(64),materialized: settles > 1}}};
+          momentId: "moment",markdownDigest: "a".repeat(64),materialized: settles > 1,collectionReconcileRequired:false}}};
       }),
       sendLiveOwnerAdoption: vi.fn(async () => ({result: {status: "adopted",adoption: {adoptionId: "owner-origin",localYDocSequence: 0,terminalCursor: 0,adoptionReplayed: false}}})),
     };

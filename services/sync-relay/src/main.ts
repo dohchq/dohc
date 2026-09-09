@@ -24,6 +24,13 @@ import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-contr
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost } from "./serviceLiveHost";
+import { parseNamedLiveConfig } from "./namedLiveConfig";
+import { createNamedFrameChanges } from "./liveHostChanges";
+import { createNamedLiveRoutes } from "./namedLiveRoutes";
+import { createNamedLiveTickets } from "./liveTickets";
+import { createNamedLiveHostReports } from "./namedLiveHostReports";
+import type { NamedFrameNativeHost } from "./namedLiveFrameHost";
+import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
   process.env.NODE_ENV === "test" ? process.env.SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS : undefined,
@@ -150,12 +157,23 @@ if (!testAuthSeam && secret.length < 32) {
 }
 
 const namedBrowserSessionLimits = loadNamedBrowserSessionLimits();
+const namedLiveConfig = (() => {
+  const value = process.env.DOHC_RELAY_NAMED_LIVE_CONFIG;
+  if (value === undefined) return undefined;
+  if (!namedBrowserSessionLimits || !shareWebOrigin || !relayExchangeKey || !linkKey || !process.env.DOHC_RELAY_NAMED_LIVE_HOSTS) {
+    fatal("FATAL: Named live routes require browser sessions, viewer origin, relay exchange and link keys, and explicit relay Host values.");
+  }
+  try { return parseNamedLiveConfig(JSON.parse(value)); }
+  catch { fatal("FATAL: DOHC_RELAY_NAMED_LIVE_CONFIG must provide every named live budget and validation policy."); }
+})();
+const frameChanges = namedLiveConfig ? createNamedFrameChanges(namedLiveConfig.maxListeners) : undefined;
 const dbPath = process.env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay.sqlite");
 const deploymentConfig = process.env.DOHC_RELAY_DEPLOYMENT_CONFIG;
 if (!isDevOrTest && !deploymentConfig) fatal("FATAL: DOHC_RELAY_DEPLOYMENT_CONFIG must name an initialized deployment outside development/test.");
 if (deploymentConfig && process.env.SYNC_RELAY_DB_PATH !== undefined) fatal("FATAL: The deployment config owns the relay database path. Remove SYNC_RELAY_DB_PATH.");
-const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, { workspaceQuotaBytes }) : undefined;
-const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, { workspaceQuotaBytes });
+const storageOptions = { workspaceQuotaBytes, ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}) };
+const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, storageOptions) : undefined;
+const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
 
 // Production auth intentionally reuses workspace-api's Better Auth database
 // and BETTER_AUTH_SECRET. A bearer token minted by workspace-api's desktop
@@ -235,7 +253,7 @@ if (testAuthSeam) {
 // (by design — presence is not durable).
 const presence = new PresenceHub();
 
-const relayHandler = guardRelayResponses(storage, createSyncRelayHandler({
+const relayApplication = createSyncRelayHandler({
   storage,
   resolveActor,
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
@@ -247,7 +265,11 @@ const relayHandler = guardRelayResponses(storage, createSyncRelayHandler({
   shareWebOrigin,
   relayExchangeKey,
   namedBrowserSessionLimits,
-}));
+});
+let namedLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
+const relayHandler = guardRelayResponses(storage, request => new URL(request.url).pathname === "/sync/live/named-tickets"
+  ? namedLive?.handle(request) ?? Promise.resolve(Response.json({ ok: false, error: "not found" }, { status: 404 }))
+  : relayApplication(request));
 const fetchHandler = async (request: Request): Promise<Response> => {
   if (new URL(request.url).pathname === "/health") {
     // The presence hub footprint is exposed only under the dev/test seam so
@@ -313,12 +335,13 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
 const server = serveFetchHandler({
   handler: fetchHandler,
   maxBodyBytes: (url) =>
+    url.pathname === "/sync/live/named-tickets" && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? MAX_LINK_EXCHANGE_BODY_BYTES
       : MAX_BODY_BYTES,
   oversized: (url) =>
-    isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
+    url.pathname === "/sync/live/named-tickets" || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? errorBody("not_found")
       : errorBody("payload_too_large"),
   // Never echo internal error details (or anything derived from the request)
@@ -352,14 +375,17 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
       storage, relayExchangeKey: relayExchangeKey ?? "",
       hosts: new Set((process.env.DOHC_RELAY_DEVICE_CONTROL_HOSTS ?? "").split(",")),
       limits,
-      ...(delivery && deployment ? { delivery: { config: delivery, history: deployment.history,ownerAdmission: ownerAdmission?.admission } } : {}),
+      ...(delivery && deployment ? { delivery: { config: delivery, history: deployment.history,ownerAdmission: ownerAdmission?.admission, frameChanges } } : {}),
     });
   } catch (error) {
     fatal(`FATAL: Invalid device control configuration. ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 if (deviceControl) {
-  server.on("upgrade", deviceControl.handleUpgrade);
+  server.on("upgrade", (request, socket, head) => {
+    if (namedLiveConfig && request.url?.startsWith("/sync/live/named?")) return;
+    deviceControl!.handleUpgrade(request, socket, head);
+  });
   process.once("SIGINT", deviceControl.close);
   process.once("SIGTERM", deviceControl.close);
   server.once("close", deviceControl.close);
@@ -372,8 +398,28 @@ process.once("SIGTERM",() => ownerAdmissionRun?.close());
 const serviceHostConfig = process.env.DOHC_RELAY_SERVICE_HOST_CONFIG;
 if (serviceHostConfig && !deployment) fatal("FATAL: A service host requires an initialized relay deployment.");
 const serviceHost = serviceHostConfig && deployment
-  ? await startServiceLiveHost({ configPath: serviceHostConfig, storage, history: deployment.history })
+  ? await startServiceLiveHost({ configPath: serviceHostConfig, storage, history: deployment.history, frameChanges })
   : undefined;
+if (namedLiveConfig) {
+  if (!serviceHost && !deviceControl) fatal("FATAL: Named live routes require an authenticated service or device host.");
+  const captureNative = async (binding: LiveObjectBinding, signal: AbortSignal): Promise<NamedFrameNativeHost> => {
+    const mode = storage.getLiveHostControl()?.configuredMode;
+    const host = mode === "service" ? serviceHost : mode === "device" ? deviceControl : undefined;
+    if (!host) throw new Error("Named live host is unavailable.");
+    return host.captureNative(binding, signal);
+  };
+  const tickets = createNamedLiveTickets({ storage, audience: shareWebOrigin!, key: linkKey!, hostReports: createNamedLiveHostReports({ storage, captureNative }) });
+  namedLive = createNamedLiveRoutes({ storage, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
+    publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
+    frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
+    sessions: { resolve: relayApplication.resolveNamedBrowserSession }, tickets, captureNative });
+  server.on("upgrade", (request, socket, head) => {
+    if (request.url?.startsWith("/sync/live/named?")) void namedLive!.handleUpgrade(request, socket, head);
+    else if (!deviceControl) socket.destroy();
+  });
+  server.once("close", namedLive.close);
+  process.once("SIGINT", namedLive.close); process.once("SIGTERM", namedLive.close);
+}
 server.listen(requestedPort, host, () => {
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : requestedPort;

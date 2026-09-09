@@ -1,3 +1,6 @@
+import {withLiveHostSignal} from "./liveHostSignal.js";
+import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges.js";
+import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import { randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { WebSocket } from "ws";
@@ -15,15 +18,24 @@ import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 import {snapshotStopRestoreLookup} from "./liveRestoreDelivery.js";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
 import {LiveRestorePreparation} from "./liveRestorePreparation.js";
+import {LiveDocumentWork} from "./liveDocumentWork.js";
+import {OwnerOutboxWake} from "./ownerOutboxWake.js";
 
 export function createDeviceLiveDelivery(options: {
   ws: WebSocket; limits: DeviceControlLimits; config: RelayDeviceDeliveryConfig;
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; host: LiveHostConnectionCoordinate;
   isCurrent: () => boolean; stop: () => void;
   ownerAdmission?: OwnerOutboxAdmission;
+  frameChanges?: LiveHostChanges;
 }) {
   const { ws, limits, config, storage, history, host } = options;
   const invalidated = new AbortController();
+  const changes = options.frameChanges;
+  let stopObserving = () => {};
+  let stopOwnerEvents = () => {};
+  const documentWork = new LiveDocumentWork();
+  const documentFor = (binding: LiveObjectBinding) => parseLiveDocumentKey({workspaceId: binding.workspaceId,
+    mainVersionId: binding.mainVersionId, objectId: binding.objectId, lineageClaimId: binding.lineageClaimId});
   const consumers = new Map<string, LiveCommittedDelivery | OwnerCommittedDelivery>();
   const restore = config.restore ? new LiveRestorePreparation(config.restore) : undefined;
   const authToken = randomBytes(32).toString("base64url");
@@ -53,6 +65,21 @@ export function createDeviceLiveDelivery(options: {
     connection = new DeviceEngineConnection(ws, limits, peer, config.maxQueuedBytes, options.stop);
     client = new EngineClient(connection, { authToken, protocolVersion: 2, capabilities: ["blobs"],
       maxFrameBytes: config.client.maxFrameBytes, connectTimeoutMs: config.client.connectTimeoutMs, privateLiveApplication: config.client });
+    stopOwnerEvents = client.onEvent(event => {
+      if (event.name !== "liveApplication.ownerOutboxChanged") return;
+      try {
+        check();
+        const value = configRecord(event.payload, ["registrationId", "binding"]), binding = parseLiveObjectBinding(value.binding);
+        if (!Number.isSafeInteger(value.registrationId) || (value.registrationId as number) < 1) throw new Error("Invalid owner change registration.");
+        const consumer = consumers.get(binding.workspaceId);
+        if (!(consumer instanceof OwnerCommittedDelivery)) throw new Error("Owner change workspace is unavailable.");
+        let registration;
+        try {registration = consumer.captureRegistration(binding);} catch {return;}
+        // The notice identifies the native registration, never a browser ticket selector.
+        if (registration.id !== value.registrationId || !isDeepStrictEqual(registration.binding, binding)) return;
+        ownerWake.wake(registration);
+      } catch {options.stop();}
+    });
     await client.ready();
     check();
     const response = await client.sendRequest({ id: nextRequestId(), method: "liveApplication.hosts", params: {}, deadlineMs: config.client.requestDeadlineMs });
@@ -80,6 +107,42 @@ export function createDeviceLiveDelivery(options: {
     clearTimeout(timer);
     ready = true;
   }
+  const requireReady = () => {
+    check();
+    if (!ready) throw new Error("Device delivery is not ready.");
+  };
+  const runDocument = async <T>(document: LiveDocumentKey, signal: AbortSignal | undefined, run: (signal: AbortSignal) => Promise<T>): Promise<T> => {
+    requireReady();
+    return withLiveHostSignal(invalidated.signal, signal, joined => documentWork.run(JSON.stringify(document), joined, async () => {
+      check();
+      if (!ready || active >= config.maxActiveDrains) throw new Error("Device delivery is not ready or is full.");
+      active++;
+      try {const outcome = await run(joined); check(); return outcome;}
+      finally {active--; changes?.notify(); queueMicrotask(() => ownerWake.pump());}
+    }));
+  };
+  const drain = async (value: LiveDocumentKey, signal?: AbortSignal) => {
+    requireReady();
+    const document = parseLiveDocumentKey(value), consumer = consumers.get(document.workspaceId);
+    if (!consumer) throw new Error("Workspace is not configured on this device host.");
+    return runDocument(document, signal, async joined => {
+      const outcome = await consumer.drain(document, joined);
+      check();
+      if (consumer instanceof OwnerCommittedDelivery && "continueDrain" in outcome && outcome.continueDrain) {
+        ownerWake.wake(consumer.captureDocumentRegistration(document));
+      }
+      return outcome;
+    });
+  };
+  const ownerWake = new OwnerOutboxWake({
+    canRun: registration => ready && !closed && active < config.maxActiveDrains && !documentWork.busy(JSON.stringify(documentFor(registration.binding))),
+    async run(registration) {
+      const outcome = await drain(documentFor(registration.binding), registration.invalidated);
+      return "continueDrain" in outcome && outcome.continueDrain === true;
+    },
+    onError: error => {if (!closed && !invalidated.signal.aborted) console.error("Owner outbox change delivery failed.", error);},
+  });
+  if (changes) stopObserving = observeRelayWrites(storage, () => changes.notify());
   return {
     receive(bytes: Buffer, binary: boolean): void {
       try {
@@ -98,57 +161,46 @@ export function createDeviceLiveDelivery(options: {
         }
       } catch { options.stop(); }
     },
-    async drain(value: LiveDocumentKey, signal?: AbortSignal) {
+    drain,
+    async captureNative(value: LiveObjectBinding, signal?: AbortSignal) {
+      if (!changes) throw new Error("Named frame sync is not configured on this device host.");
+      const binding = parseLiveObjectBinding(value);
+      const document = parseLiveDocumentKey({workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId, objectId: binding.objectId, lineageClaimId: binding.lineageClaimId});
+      await drain(document, signal);
       check();
-      if (!ready || active >= config.maxActiveDrains) throw new Error("Device delivery is not ready or is full.");
-      const document = parseLiveDocumentKey(value), consumer = consumers.get(document.workspaceId);
-      if (!consumer) throw new Error("Workspace is not configured on this device host.");
-      active++;
-      try {
-        const outcome = await consumer.drain(document, AbortSignal.any([invalidated.signal, ...(signal ? [signal] : [])]));
-        check();
-        return outcome;
-      } finally { active--; }
+      const consumer = consumers.get(document.workspaceId)!;
+      const registration = consumer.captureRegistration(binding);
+      return Object.freeze({client: client!, workspace: consumer.workspace, registrationId: registration.id, binding: registration.binding,
+        coordinate: host, invalidated: AbortSignal.any([invalidated.signal, registration.invalidated]),
+        changes, nextRequestId, deadlineMs: config.client.requestDeadlineMs, drain});
     },
     async prepareRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-      check();
-      if (!ready || active >= config.maxActiveDrains) throw new Error("Device delivery is not ready or is full.");
+      requireReady();
       const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
       if (!consumer) throw new Error("Workspace is not configured on this device host.");
-      active++;
-      try {
-        const outcome = await consumer.prepareRestore(lookup, AbortSignal.any([invalidated.signal, ...(signal ? [signal] : [])]));
-        check();
-        return outcome;
-      } finally {active--;}
+      return runDocument(consumer.documentForRestore(lookup), signal, joined => consumer.prepareRestore(lookup, joined));
+    },
+    async completeRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
+      requireReady();
+      const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
+      if (!consumer) throw new Error("Workspace is not configured on this device host.");
+      return runDocument(consumer.documentForRestore(lookup), signal, joined => consumer.completeRestore(lookup, proposalDigest, joined));
     },
     async stopRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-      check();
-      if (!ready || active >= config.maxActiveDrains) throw new Error("Device delivery is not ready or is full.");
+      requireReady();
       const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
       if (!consumer) throw new Error("Workspace is not configured on this device host.");
-      active++;
-      try {
-        const outcome = await consumer.stopRestore(lookup, AbortSignal.any([invalidated.signal, ...(signal ? [signal] : [])]));
-        check();
-        return outcome;
-      } finally {active--;}
+      return runDocument(consumer.documentForRestore(lookup), signal, joined => consumer.stopRestore(lookup, joined));
     },
     async settle(value: LiveDocumentKey, signal?: AbortSignal) {
-      check();
-      if (!ready || active >= config.maxActiveDrains) throw new Error("Device delivery is not ready or is full.");
+      requireReady();
       const document = parseLiveDocumentKey(value), consumer = consumers.get(document.workspaceId);
       if (!consumer) throw new Error("Workspace is not configured on this device host.");
-      active++;
-      try {
-        const outcome = await consumer.settle(document, AbortSignal.any([invalidated.signal, ...(signal ? [signal] : [])]));
-        check();
-        return outcome;
-      } finally { active--; }
+      return runDocument(document, signal, joined => consumer.settle(document, joined));
     },
     close(): void {
       if (closed) return;
-      closed = true; ready = false; clearTimeout(timer); invalidated.abort(); client?.close(); connection?.close(); consumers.clear();
+      closed = true; ready = false; clearTimeout(timer); invalidated.abort(); stopObserving(); stopOwnerEvents(); ownerWake.close(); changes?.notify(); client?.close(); connection?.close(); consumers.clear();
     },
   };
 }

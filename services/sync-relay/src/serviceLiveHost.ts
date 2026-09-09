@@ -1,3 +1,8 @@
+import {liveHostSignal, withLiveHostSignal} from "./liveHostSignal.js";
+import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges.js";
+import {parseNativeLiveSyncConfig} from "./liveSyncConfig.js";
+import {LiveDocumentWork} from "./liveDocumentWork.js";
+import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { readFileSync, realpathSync, statSync } from "node:fs";
@@ -24,6 +29,7 @@ interface ServiceLiveHostConfig {
   readonly client: { readonly aggregateBytes: number; readonly maxUploads: number; readonly connectTimeoutMs: number; readonly requestDeadlineMs: number };
   readonly settlement?: LiveSettlementConfig;
   readonly restore?: LiveRestoreConfig;
+  readonly sync?: ReturnType<typeof parseNativeLiveSyncConfig>;
 }
 
 function record(value: unknown, keys: string[], optional: string[] = []): Record<string, unknown> {
@@ -46,7 +52,7 @@ function path(value: unknown, directory: boolean): string {
 /** Operator configuration only. Incoming document fields never supply these paths. */
 function readServiceLiveHostConfig(configPath: string): ServiceLiveHostConfig {
   const value = record(JSON.parse(readFileSync(path(configPath, false), "utf8")),
-    ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"], ["settlement", "restore"]);
+    ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"], ["settlement", "restore", "sync"]);
   if (value.version !== 1 || !Array.isArray(value.workspaces) || !value.workspaces.length) throw new TypeError("Invalid service host configuration.");
   const workspaces = value.workspaces.map(item => {
     const row = record(item, ["root", "workspaceId", "maxRegistrations"]);
@@ -63,7 +69,7 @@ function readServiceLiveHostConfig(configPath: string): ServiceLiveHostConfig {
   return Object.freeze({ version: 1, engineExecutable: path(value.engineExecutable, false),
     hostId: parseLiveUpdateIdentifier(value.hostId, "host ID"), instanceId: parseLiveUpdateIdentifier(value.instanceId, "instance ID"),
     workspaces: Object.freeze(workspaces),
-    settlement, restore,
+    settlement, restore, sync: parseNativeLiveSyncConfig(value.sync, integer(ingress.aggregateBytes)),
     ingress: Object.freeze({ aggregateBytes: integer(ingress.aggregateBytes), applicationWorkingReserveBytes,
       maxUploads: integer(ingress.maxUploads), uploadDeadlineMs: integer(ingress.uploadDeadlineMs, 1, 2_147_483_647) }),
     client: Object.freeze({ aggregateBytes: integer(client.aggregateBytes), maxUploads: integer(client.maxUploads),
@@ -79,6 +85,7 @@ export async function startServiceLiveHost(options: {
   storage: SyncRelayStorage;
   history: LiveJournalHistoryAuthority;
   signal?: AbortSignal;
+  frameChanges?: LiveHostChanges;
 }) {
   const { storage, history } = options;
   const config = readServiceLiveHostConfig(options.configPath);
@@ -91,8 +98,12 @@ export async function startServiceLiveHost(options: {
     instanceId: config.instanceId, connectionId: randomUUID() });
   const host = { hostId: coordinate.hostId, hostEpoch: coordinate.hostEpoch, instanceId: coordinate.instanceId, connectionId: coordinate.connectionId };
   const invalidated = new AbortController();
-  const signal = AbortSignal.any([storage.unavailable, invalidated.signal, ...(options.signal ? [options.signal] : [])]);
+  const lifetime = liveHostSignal(storage.unavailable, invalidated.signal, options.signal);
+  const signal = lifetime.signal;
+  const changes = options.frameChanges;
+  const stopObserving = changes ? observeRelayWrites(storage, () => changes.notify()) : () => {};
   const consumers = new Map<string, LiveCommittedDelivery>();
+  const documents = new LiveDocumentWork();
   const restore = config.restore ? new LiveRestorePreparation(config.restore) : undefined;
   let client: EngineClient | undefined, temporary: string | undefined, registered = false, closing: Promise<void> | undefined;
   let clientClosed = false;
@@ -126,18 +137,37 @@ export async function startServiceLiveHost(options: {
       }
     });
     invalidated.abort();
+    stopObserving();
+    changes?.notify();
+    lifetime.dispose();
     stopClient();
     return closing;
   };
   held.add(storage);
   const abort = () => { void close().catch(error => console.error("Service host shutdown failed.", error)); };
+  const runDocument = async <T>(document: LiveDocumentKey, callerSignal: AbortSignal | undefined, operation: (joined: AbortSignal) => Promise<T>): Promise<T> => {
+    try {
+      return await withLiveHostSignal(signal, callerSignal, joined => documents.run(JSON.stringify(parseLiveDocumentKey(document)), joined, async () => {
+        check();
+        const result = await operation(joined);
+        check();
+        return result;
+      }));
+    } finally {changes?.notify();}
+  };
+  const drain = async (value: LiveDocumentKey, callerSignal?: AbortSignal): Promise<CommittedDeliveryOutcome> => {
+    check();
+    const document = parseLiveDocumentKey(value), consumer = consumers.get(document.workspaceId);
+    if (!consumer) throw new Error("Workspace is not configured on this service host.");
+    return runDocument(document, callerSignal, joined => consumer.drain(document, joined));
+  };
   signal.addEventListener("abort", abort, { once: true });
   try {
     if (signal.aborted) throw new Error("Service host startup cancelled.");
     temporary = await mkdtemp(join(tmpdir(), "dohc-service-live-host-"));
     const nativeConfig = join(temporary, "host.json");
     await writeFile(nativeConfig, JSON.stringify({ version: 1, relayNamespace: history.namespace, host,
-      workspaces: config.workspaces, ingress: config.ingress, settlement: config.settlement,
+      workspaces: config.workspaces, ingress: config.ingress, settlement: config.settlement, sync: config.sync,
       restore: config.restore ? {maxBytes: config.restore.maxBytes, maxEvents: config.restore.maxEvents} : undefined }), { flag: "wx", mode: 0o600 });
     client = await createEngineClient({ command: config.engineExecutable, authToken: randomBytes(32).toString("base64url"),
       protocolVersion: 2, capabilities: ["blobs"], privateLiveApplication: config.client, connectTimeoutMs: config.client.connectTimeoutMs,
@@ -165,39 +195,44 @@ export async function startServiceLiveHost(options: {
     check();
     finishStartup();
     return Object.freeze({ coordinate, invalidated: signal,
+      async captureNative(value: LiveObjectBinding, callerSignal?: AbortSignal) {
+        if (!changes || !config.sync) throw new Error("Named frame sync is not configured on this service host.");
+        const binding = parseLiveObjectBinding(value);
+        const document = parseLiveDocumentKey({workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId, objectId: binding.objectId, lineageClaimId: binding.lineageClaimId});
+        await drain(document, callerSignal);
+        check();
+        const consumer = consumers.get(document.workspaceId)!;
+        const registration = consumer.captureRegistration(binding);
+        return Object.freeze({client: client!, workspace: consumer.workspace,
+          registrationId: registration.id, binding: registration.binding, coordinate, invalidated: AbortSignal.any([signal, registration.invalidated]),
+          changes, nextRequestId, deadlineMs: config.client.requestDeadlineMs, drain});
+      },
       async prepareRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {
         check();
         const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
         if (!consumer) throw new Error("Workspace is not configured on this service host.");
-        const result = await consumer.prepareRestore(lookup, AbortSignal.any([signal, ...(callerSignal ? [callerSignal] : [])]));
+        return runDocument(consumer.documentForRestore(lookup), callerSignal, joined => consumer.prepareRestore(lookup, joined));
+      },
+      async completeRestore(value: StopRestoreLookup, proposalDigest: string, callerSignal?: AbortSignal) {
         check();
-        return result;
+        const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
+        if (!consumer) throw new Error("Workspace is not configured on this service host.");
+        return runDocument(consumer.documentForRestore(lookup), callerSignal, joined => consumer.completeRestore(lookup, proposalDigest, joined));
       },
       async stopRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {
         check();
         const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
         if (!consumer) throw new Error("Workspace is not configured on this service host.");
-        const result = await consumer.stopRestore(lookup, AbortSignal.any([signal, ...(callerSignal ? [callerSignal] : [])]));
-        check();
-        return result;
+        return runDocument(consumer.documentForRestore(lookup), callerSignal, joined => consumer.stopRestore(lookup, joined));
       },
       async settle(value: LiveDocumentKey, callerSignal?: AbortSignal) {
         check();
         if (!config.settlement) throw new Error("Settlement is not configured on this service host.");
         const document = parseLiveDocumentKey(value), consumer = consumers.get(document.workspaceId);
         if (!consumer) throw new Error("Workspace is not configured on this service host.");
-        const result = await consumer.settle(document, AbortSignal.any([signal, ...(callerSignal ? [callerSignal] : [])]));
-        check();
-        return result;
+        return runDocument(document, callerSignal, joined => consumer.settle(document, joined));
       },
-      async drain(value: LiveDocumentKey, callerSignal?: AbortSignal): Promise<CommittedDeliveryOutcome> {
-        check();
-        const document = parseLiveDocumentKey(value), consumer = consumers.get(document.workspaceId);
-        if (!consumer) throw new Error("Workspace is not configured on this service host.");
-        const result = await consumer.drain(document, AbortSignal.any([signal, ...(callerSignal ? [callerSignal] : [])]));
-        check();
-        return result;
-      },
+      drain,
       async close() { signal.removeEventListener("abort", abort); await close(); },
     });
   } catch (error) {

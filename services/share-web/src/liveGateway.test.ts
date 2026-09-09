@@ -6,7 +6,6 @@ import { createHash } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
-import { parseRedeemedLiveTicket, type RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
 import { decodeLiveFrame, encodeLiveFrame } from "@dohc/live-session-contract/live-frame";
 import { createLiveGateway, type LiveGatewayHostReceiveOptions, type LiveGatewayHostRoute, type LiveGatewayLimits, type LiveGatewayOptions } from "./liveGateway.js";
 import { createNamedLiveBrowserResolver } from "../../sync-relay/src/namedLiveBrowserAuth.js";
@@ -23,15 +22,6 @@ const limits: LiveGatewayLimits = {
   upgradeTimeoutMs: 2000, idleTimeoutMs: 2000, drainTimeoutMs: 100,
 };
 const session = { userId: "alice", workspaceId: "workspace", shareId: "share", grantId: "edit" };
-function ticket(): RedeemedLiveTicket {
-  return parseRedeemedLiveTicket({
-    ticketId: "ticket", audience: origin,
-    authority: { principalKind: "named", principalId: session.userId, grantId: session.grantId, grantGeneration: 1 },
-    binding: { workspaceId: session.workspaceId, mainVersionId: "main", objectId: "doc", lineageClaimId: "a".repeat(64),
-      currentPath: "docs/a.md", selectorPaths: ["docs"], restoreFenceGeneration: 7 },
-    hostEpoch: 1, mintedAtMs: 1000, expiresAtMs: 31000, redeemedAtMs: 1001,
-  });
-}
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(accept => { resolve = accept; });
@@ -65,7 +55,7 @@ async function fixture(overrides: Partial<LiveGatewayOptions> = {}, onUpgrade?: 
   const receiveOptions: LiveGatewayHostReceiveOptions = Object.freeze({ maxPayload: policy.maxFrameBytes,
     maxFragments: policy.maxFragments, maxBufferedChunks: policy.maxBufferedChunks, closeTimeout: policy.drainTimeoutMs,
     perMessageDeflate: false, autoPong: false });
-  const makeRoute = async (redeemed: RedeemedLiveTicket, receive: LiveGatewayHostReceiveOptions): Promise<LiveGatewayHostRoute> => {
+  const makeRoute = async (receive: LiveGatewayHostReceiveOptions): Promise<LiveGatewayHostRoute> => {
     expect(receive).toEqual(receiveOptions);
     expect(Object.isFrozen(receive)).toBe(true);
     const socket = new WebSocket(`ws://127.0.0.1:${hostPort}`, receive);
@@ -74,13 +64,12 @@ async function fixture(overrides: Partial<LiveGatewayOptions> = {}, onUpgrade?: 
     // application bytes; this does not prove a production adapter's pause timing.
     await once(socket, "open");
     socket.pause();
-    return { ticket: redeemed, socket, invalidated: invalidated.signal };
+    return { socket, invalidated: invalidated.signal };
   };
   const resolve = vi.fn<LiveGatewayOptions["resolveNamedSession"]>(async () => session);
-  const redeem = vi.fn<LiveGatewayOptions["redeem"]>(async () => ticket());
-  const open = vi.fn<LiveGatewayOptions["openHostRoute"]>((redeemed, _signal, receive) => makeRoute(redeemed, receive));
+  const open = vi.fn<LiveGatewayOptions["openHostRoute"]>((_input, _signal, receive) => makeRoute(receive));
   const gateway = createLiveGateway({ publicHosts: new Set(["share.example.test"]), publicOrigin: origin,
-    limits, resolveNamedSession: resolve, redeem, openHostRoute: open, ...overrides });
+    limits, resolveNamedSession: resolve, openHostRoute: open, ...overrides });
   const completions: Promise<void>[] = [];
   http.on("upgrade", (request, socket, head) => {
     onUpgrade?.(socket);
@@ -131,13 +120,13 @@ async function fixture(overrides: Partial<LiveGatewayOptions> = {}, onUpgrade?: 
       ...completions,
     ]);
   });
-  return { gateway, browser, raw, resolve, redeem, open, hosts, makeRoute, receiveOptions, invalidated, completions };
+  return { gateway, browser, raw, resolve, open, hosts, makeRoute, receiveOptions, invalidated, completions };
 }
 
 function stalledRefusal() {
   let flush!: () => void;
   const socket = new Duplex({ read() {}, write(_chunk, _encoding, callback) { flush = () => callback(); } });
-  const ports = { resolveNamedSession: vi.fn(async () => null), redeem: vi.fn(async () => null), openHostRoute: vi.fn(async () => null) };
+  const ports = { resolveNamedSession: vi.fn(async () => null), openHostRoute: vi.fn(async () => null) };
   const gateway = createLiveGateway({ publicHosts: new Set(["share.example.test"]), publicOrigin: origin, limits, ...ports });
   const request = { method: "GET", url: `/api/live?session=${discriminator}`, rawHeaders: ["Host", "share.example.test"] } as IncomingMessage;
   cleanups.push(async () => { gateway.close(); socket.destroy(); });
@@ -187,7 +176,7 @@ describe("private named live gateway", () => {
     const response = await state.raw([...headers, `Sec-WebSocket-Protocol: dohc-live-v1, dohc-live-ticket.${token}`]);
     expect(response).toContain("HTTP/1.1 404");
     expect(state.resolve).not.toHaveBeenCalled();
-    expect(state.redeem).not.toHaveBeenCalled();
+    expect(state.open).not.toHaveBeenCalled();
     expect(state.open).not.toHaveBeenCalled();
   });
 
@@ -196,9 +185,7 @@ describe("private named live gateway", () => {
     const client = state.browser();
     expect(await client.status).toBe(101);
     expect(client.socket.protocol).toBe("dohc-live-v1");
-    expect(state.redeem).toHaveBeenCalledTimes(1);
-    expect(state.redeem.mock.calls[0]!.slice(0, 2)).toEqual([token, session]);
-    expect(state.open).toHaveBeenCalledWith(ticket(), expect.any(AbortSignal), state.receiveOptions);
+    expect(state.open).toHaveBeenCalledWith(expect.objectContaining({discriminator, ticketToken: token, request: expect.anything()}), expect.any(AbortSignal), state.receiveOptions);
     const receivePolicy = { maxFrameBytes: 2048, maxStateVectorBytes: 512, maxUpdateBytes: 1024, maxSyncBytes: 2048 };
     const hello = encodeLiveFrame({ kind: "hello", receivePolicy }, 2048);
     const received = once(state.hosts[0]!, "message");
@@ -227,27 +214,10 @@ describe("private named live gateway", () => {
     expect(decodeLiveFrame((await applied)[0], 2048)).toEqual({ kind: "result", result: "success", ack });
   });
 
-  it.each(["principal", "grant", "workspace", "audience", "anonymous"])("refuses mismatched redeemed %s before routing", async changed => {
-    const wrong = ticket();
-    const mutation = structuredClone(wrong) as any;
-    if (changed === "principal") mutation.authority.principalId = "bob";
-    if (changed === "grant") mutation.authority.grantId = "other";
-    if (changed === "workspace") mutation.binding.workspaceId = "other";
-    if (changed === "audience") mutation.audience = "https://other.example.test";
-    if (changed === "anonymous") mutation.authority.principalKind = "link";
-    const state = await fixture({ redeem: async () => mutation });
-    expect(await state.browser().status).toBe(404);
-    expect(state.open).not.toHaveBeenCalled();
-  });
-
-  it.each(["epoch", "binding", "authority", "fence", "invalidated", "unpaused"])("refuses and closes a %s host route before 101", async changed => {
+  it.each(["invalidated", "unpaused"])("refuses and closes a %s host route before 101", async changed => {
     const state = await fixture();
-    state.open.mockImplementation(async (redeemed, _signal, receive) => {
-      const route = await state.makeRoute(redeemed, receive);
-      if (changed === "epoch") (route.ticket as any).hostEpoch = 2;
-      if (changed === "binding") (route.ticket.binding as any).objectId = "other";
-      if (changed === "authority") (route.ticket.authority as any).grantGeneration = 2;
-      if (changed === "fence") (route.ticket.binding as any).restoreFenceGeneration = 8;
+    state.open.mockImplementation(async (_input, _signal, receive) => {
+      const route = await state.makeRoute(receive);
       if (changed === "invalidated") state.invalidated.abort();
       if (changed === "unpaused") route.socket.resume();
       return route;
@@ -273,7 +243,7 @@ describe("private named live gateway", () => {
     expect(signal.aborted).toBe(true);
     await Promise.all(state.completions);
     vi.useRealTimers();
-    const route = await state.makeRoute(ticket(), receive);
+    const route = await state.makeRoute(receive);
     const closed = once(route.socket, "close");
     late.resolve(route);
     await closed;
@@ -282,7 +252,7 @@ describe("private named live gateway", () => {
 
   it("disposes a fulfilled host route when shutdown wins before delivery", async () => {
     const state = await fixture();
-    const route = await state.makeRoute(ticket(), state.receiveOptions);
+    const route = await state.makeRoute(state.receiveOptions);
     expect(route.socket.listenerCount("error")).toBe(0);
     let terminationErrorHandled = false;
     const originalTerminate = route.socket.terminate.bind(route.socket);
@@ -318,7 +288,6 @@ describe("private named live gateway", () => {
     const response = await state.raw(["Host: share.example.test", `Origin: ${origin}`,
       `Sec-WebSocket-Protocol: dohc-live-v1, dohc-live-ticket.${token}`], handshake);
     await Promise.all(state.completions);
-    expect(state.redeem).toHaveBeenCalledTimes(1);
     expect(state.open).toHaveBeenCalledTimes(1);
     const route = (await state.open.mock.results[0]!.value)!;
     if (route.socket.readyState !== WebSocket.CLOSED) await once(route.socket, "close");
@@ -330,8 +299,8 @@ describe("private named live gateway", () => {
 
   it("normalizes a Blob-mode host socket before forwarding real binary frames", async () => {
     const state = await fixture();
-    state.open.mockImplementation(async (redeemed, _signal, receive) => {
-      const route = await state.makeRoute(redeemed, receive);
+    state.open.mockImplementation(async (_input, _signal, receive) => {
+      const route = await state.makeRoute(receive);
       Reflect.set(route.socket, "binaryType", "blob");
       expect(route.socket.binaryType).toBe("blob");
       return route;
@@ -365,7 +334,7 @@ describe("private named live gateway", () => {
     const state = await fixture({ limits: { ...limits, upgradeTimeoutMs: 20 }, resolveNamedSession: async () => new Promise(() => {}) });
     expect(await state.browser().status).toBe(404);
     await Promise.all(state.completions);
-    expect(state.redeem).not.toHaveBeenCalled();
+    expect(state.open).not.toHaveBeenCalled();
   });
 
   it("pauses the raw socket throughout asynchronous named authentication", async () => {
@@ -375,21 +344,9 @@ describe("private named live gateway", () => {
     const client = state.browser();
     const request = await entered.promise;
     expect(request.socket.isPaused()).toBe(true);
-    expect(state.redeem).not.toHaveBeenCalled();
+    expect(state.open).not.toHaveBeenCalled();
     resolved.resolve(session);
     expect(await client.status).toBe(101);
-  });
-
-  it("closes the acquired transport when a host returns malformed ticket metadata", async () => {
-    const state = await fixture();
-    let acquired!: LiveGatewayHostRoute;
-    state.open.mockImplementation(async (redeemed, _signal, receive) => {
-      acquired = await state.makeRoute(redeemed, receive);
-      (acquired.ticket as any).hostEpoch = 0;
-      return acquired;
-    });
-    expect(await state.browser().status).toBe(404);
-    expect(acquired.socket.readyState).not.toBe(WebSocket.OPEN);
   });
 
   it("closes both directions on host invalidation without acknowledging", async () => {
@@ -485,8 +442,7 @@ describe("private named live gateway", () => {
       const first = state.browser();
       expect(await first.status).toBe(101);
       expect(await state.browser().status).toBe(404);
-      expect(state.redeem).toHaveBeenCalledTimes(1);
-      expect(state.open).toHaveBeenCalledTimes(1);
+        expect(state.open).toHaveBeenCalledTimes(1);
       const closed = once(state.hosts[0]!, "close");
       first.socket.terminate();
       await closed;
@@ -532,7 +488,7 @@ describe("private named live gateway", () => {
 
   it("requires every injected limit to be a positive finite integer", () => {
     const base = { publicHosts: new Set(["share.example.test"]), publicOrigin: origin,
-      resolveNamedSession: async () => null, redeem: async () => null, openHostRoute: async () => null };
+      resolveNamedSession: async () => null, openHostRoute: async () => null };
     for (const name of Object.keys(limits)) for (const bad of [undefined, 0, -1, 1.5, Infinity, NaN]) {
       expect(() => createLiveGateway({ ...base, limits: { ...limits, [name]: bad } as LiveGatewayLimits })).toThrow();
     }
@@ -553,20 +509,23 @@ describe("private named live gateway", () => {
     const resolveNamed = createNamedLiveBrowserResolver({ storage: stored.storage,
       resolveActor: async (request, workspaceId) => ({ workspaceId,
         userId: request.headers.get("cookie") === "account=alice" ? scope.userId : "other-account" }) });
-    const redeem = vi.fn<LiveGatewayOptions["redeem"]>((value, context) => tickets.redeem(value, context));
+    const redeem = vi.fn((value: string) => tickets.redeem(value, scope));
     // Trusted fixture scope is explicit. This does not implement a public
     // discriminator-to-named-scope mapping or real account sign-in service.
     const state = await fixture({
       resolveNamedSession: (request: IncomingMessage) => resolveNamed(new Request(`${origin}/api/live`, {
         headers: { cookie: request.headers.cookie ?? "" },
-      }), scope), redeem,
+      }), scope),
+    });
+    state.open.mockImplementation(async (input, _signal, receive) => {
+      const redeemed = await redeem(input.ticketToken);
+      return redeemed ? state.makeRoute(receive) : null;
     });
     expect(await state.browser({ token: minted!.token, cookie: "account=bob" }).status).toBe(404);
     expect(redeem).not.toHaveBeenCalled();
     const attempts = [state.browser({ token: minted!.token }), state.browser({ token: minted!.token })];
     expect((await Promise.all(attempts.map(attempt => attempt.status))).sort()).toEqual([101, 404]);
-    expect(state.open).toHaveBeenCalledTimes(1);
-    expect(state.open.mock.calls[0]![0].authority).toEqual({ principalKind: "named", principalId: scope.userId,
-      grantId: scope.grantId, grantGeneration: 4 });
+    expect(state.open).toHaveBeenCalledTimes(2);
+    expect(redeem).toHaveBeenCalledTimes(2);
   });
 });

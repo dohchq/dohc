@@ -1,0 +1,220 @@
+import { EventEmitter } from "node:events";
+import { createHash } from "node:crypto";
+import { afterEach, expect, it, vi } from "vitest";
+import { EngineClient, FrameDecoder, FrameType, encodeFrame, type EngineClientConnection } from "@dohc/workspace-engine-client/daemon";
+import type { Envelope, JsonValue } from "../../../packages/workspace-engine-client/src/protocol";
+import { createNamedLiveTickets } from "./liveTickets.js";
+import { audience, binding, fixture, host, key, report, scope } from "./liveTickets.test-helper.js";
+import { captureNamedLiveFrameHost, createNamedFrameChanges } from "./namedLiveFrameHost.js";
+import type { LiveUpdateJournalCut, LiveUpdateJournalCommitInput } from "./storage/types.js";
+
+const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+const cleanup: (() => Promise<void>)[] = [];
+afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
+const wireLimits = { maxFrameBytes: 1024 * 1024, maxBlobChunkBytes: 65536, maxStringBytes: 65536,
+  maxCollectionLen: 1024, maxBatchLen: 64, maxJsonDepth: 32 };
+class Peer implements EngineClientConnection {
+  readonly events = new EventEmitter();
+  readonly decoder = new FrameDecoder(wireLimits.maxFrameBytes);
+  readonly requests: Extract<Envelope, { type: "request" }>[] = [];
+  response?: (request: Extract<Envelope, { type: "request" }>) => void;
+  pendingSync?: Extract<Envelope, { type: "request" }>;
+  closed = false;
+  write(bytes: Buffer) {
+    for (const frame of this.decoder.push(bytes)) {
+      if (frame.kind === "blobChunk") { if (frame.fin && this.pendingSync) this.response?.(this.pendingSync); continue; }
+      const value = JSON.parse(frame.payload.toString()) as Envelope;
+      if (value.type === "request") {
+        this.requests.push(value);
+        if (value.method === "liveApplication.syncOpen") this.pendingSync = value;
+        else this.response?.(value);
+      }
+    }
+    return true;
+  }
+  send(value: Envelope) { this.events.emit("data", encodeFrame(1, 0, Buffer.from(JSON.stringify(value)), wireLimits.maxFrameBytes)); }
+  blob(id: number, result: Record<string, JsonValue>, bytes = Buffer.from([0, 0])) {
+    const digest = hash(bytes);
+    this.send({ type: "blobStart", requestId: id, streamId: id, totalBytes: bytes.length, sha256: digest });
+    this.events.emit("data", encodeFrame(FrameType.BlobChunk, 1, { streamId: id, bytes }, wireLimits.maxBlobChunkBytes));
+    this.send({ type: "response", id, result: { ...result, streamId: id, byteLength: bytes.length, digest } });
+  }
+  onData(fn: (bytes: Buffer | Uint8Array) => void) { this.events.on("data", fn); }
+  offData(fn: (bytes: Buffer | Uint8Array) => void) { this.events.off("data", fn); }
+  onClose(fn: () => void) { this.events.on("close", fn); }
+  offClose(fn: () => void) { this.events.off("close", fn); }
+  onError(fn: (error: unknown) => void) { this.events.on("fault", fn); }
+  offError(fn: (error: unknown) => void) { this.events.off("fault", fn); }
+  onDrain(fn: () => void) { this.events.on("drain", fn); }
+  offDrain(fn: () => void) { this.events.off("drain", fn); }
+  close() { this.closed = true; }
+}
+const position = { eventCount: 0, journalCursor: 0, evidenceDigest: "ab".repeat(32) };
+const bytes = Uint8Array.of(0, 0);
+const ack = { deliveryId: "delivery", updateDigest: hash(bytes), journalCursor: 11, acceptingHostEpoch: host.hostEpoch,
+  localYDocSequence: 3, applicationReplayed: true };
+async function setup() {
+  const state = await fixture(); cleanup.push(() => state.close());
+  const tickets = createNamedLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async () => report } });
+  const minted = await tickets.mint({ objectId: binding.objectId }, scope);
+  const ticket = (await tickets.redeem(minted!.token, scope))!;
+  const peer = new Peer();
+  const client = new EngineClient(peer, { authToken: "test-parent-secret", protocolVersion: 2, capabilities: ["core", "blobs"],
+    connectTimeoutMs: 5000, privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 2 } });
+  peer.send({ type: "helloAck", protocolVersion: 2, sessionGeneration: 7, capabilities: ["core", "blobs"], limits: wireLimits });
+  await client.ready(); cleanup.push(async () => { client.close(); });
+  const changes = createNamedFrameChanges(4), invalidated = new AbortController();
+  let requestId = 0;
+  const drain = vi.fn(async () => {});
+  const nativeBinding = { ...binding, selectorPaths: [binding.currentPath] };
+  peer.response = request => {
+    if (request.method === "liveApplication.syncOpen") peer.blob(request.id, { status: "sync", binding: nativeBinding, position,
+      observedLocalYDocHeadSequence: 99, hostVectorByteLength: 1 }, Buffer.from([0, 0, 0]));
+    else if (request.method === "liveApplication.appliedRead") peer.send({ type: "response", id: request.id,
+      result: { status: "empty", after: (request.params as { after: JsonValue }).after } });
+    else if (request.method === "liveApplication.ack") peer.send({ type: "response", id: request.id, result: { status: "applied", ack } });
+  };
+  const validate = vi.fn(() => ({ kind: "refused" as const, reason: "invalid-update" as const, source: "candidate" as const }));
+  const native = { client, workspace: "trusted-native-handle", registrationId: 7, coordinate: host, binding: nativeBinding,
+    invalidated: invalidated.signal, changes, deadlineMs: 5000, nextRequestId: () => ++requestId, drain };
+  const bounds = { maxClientVectorBytes: 32, maxSyncOutputBytes: 1024, maxAppliedUpdateBytes: 1024, maxSubmissionBytes: 1024, maxAdmissionBytes: 4096 };
+  const capture = captureNamedLiveFrameHost({ ticket, storage: state.storage, validate, native, bounds });
+  cleanup.push(async () => { capture.close(); });
+  return { ...state, peer, client, changes, invalidated, drain, capture, validate, native, bounds };
+}
+it("uses the native atomic cut, excluding the diagnostic local head, and leaves the shared client running", async () => {
+  const f = await setup();
+  const sync = await f.capture.openSync(Uint8Array.of(0), new AbortController().signal);
+  expect(sync.appliedThroughJournalCursor).toBe(0);
+  expect([...sync.missingStateUpdate]).toEqual([0, 0]);
+  expect(f.peer.requests[0]).toMatchObject({ method: "liveApplication.syncOpen", workspace: "trusted-native-handle", params: { registrationId: 7 } });
+  f.capture.close(); sync.close();
+  expect(f.changes.listenerCount()).toBe(0); expect(f.peer.closed).toBe(false);
+});
+it("keeps two named selectors distinct while borrowing one native registration", async () => {
+  const f = await setup();
+  const secondScope = { ...scope, shareId: "share-2", grantId: "edit-2", userId: "reader-2" };
+  const secondBinding = { ...binding, selectorPaths: [binding.currentPath] };
+  f.raw.prepare("INSERT INTO sync_relay_shares (share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner-1',?,0)")
+    .run(secondScope.shareId, scope.workspaceId, JSON.stringify({ paths: secondBinding.selectorPaths, versionId: null }));
+  f.raw.prepare(`INSERT INTO sync_relay_share_grants (grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+    VALUES (?,?,'user',?,NULL,'edit',4,'active',0,NULL,NULL)`).run(secondScope.grantId, secondScope.shareId, secondScope.userId);
+  const tickets = createNamedLiveTickets({ storage: f.storage, audience, key, hostReports: { currentBinding: async () => ({ connection: host, binding: secondBinding }) } });
+  const minted = await tickets.mint({ objectId: binding.objectId }, secondScope);
+  const ticket = (await tickets.redeem(minted!.token, secondScope))!;
+  const second = captureNamedLiveFrameHost({ ticket, storage: f.storage, native: f.native, bounds: f.bounds, validate: f.validate });
+  cleanup.push(async () => { second.close(); });
+  const signal = new AbortController().signal;
+  const firstSync = await f.capture.openSync(Uint8Array.of(0), signal);
+  const secondSync = await second.openSync(Uint8Array.of(0), signal);
+  expect(firstSync.binding.selectorPaths).toEqual(["docs"]);
+  expect(secondSync.binding.selectorPaths).toEqual(["docs/a.md"]);
+  expect(firstSync.missingStateUpdate).toEqual(secondSync.missingStateUpdate);
+  expect(f.peer.requests.map(request => (request.params as { registrationId: number }).registrationId)).toEqual([7, 7]);
+  firstSync.close(); secondSync.close(); f.capture.close();
+  expect(f.peer.closed).toBe(false); second.assertCurrent();
+});
+it("rejects a captured native registration for a different document fence", async () => {
+  const f = await setup();
+  expect(() => captureNamedLiveFrameHost({ ticket: f.capture.ticket, storage: f.storage, validate: f.validate, bounds: f.bounds,
+    native: { ...f.native, binding: { ...f.native.binding, restoreFenceGeneration: binding.restoreFenceGeneration + 1 } } }))
+    .toThrow(/registration binding changed/);
+});
+it("arms a coalesced wake before an empty native read and retains one output lease", async () => {
+  const f = await setup();
+  const sync = await f.capture.openSync(Uint8Array.of(0), new AbortController().signal);
+  let reads = 0;
+  f.peer.response = request => {
+    expect(request.method).toBe("liveApplication.appliedRead");
+    if (++reads === 1) {
+      expect(f.changes.listenerCount()).toBe(2);
+      f.changes.notify(); f.changes.notify();
+      f.peer.send({ type: "response", id: request.id, result: { status: "empty", after: position } });
+    } else f.peer.blob(request.id, { status: "update", position: { eventCount: 1, journalCursor: 11, evidenceDigest: "cd".repeat(32) }, ack });
+  };
+  const lease = await sync.nextApplied(new AbortController().signal);
+  expect(reads).toBe(2); expect(lease.value.journalCursor).toBe(11);
+  await expect(sync.nextApplied(new AbortController().signal)).rejects.toThrow(/already owns/);
+  expect(reads).toBe(2); lease.release(); lease.release();
+});
+it("aborts an empty-feed wait without polling or leaving listeners", async () => {
+  const f = await setup();
+  const sync = await f.capture.openSync(Uint8Array.of(0), new AbortController().signal);
+  let read!: () => void; const reading = new Promise<void>(resolve => { read = resolve; });
+  const response = f.peer.response!;
+  f.peer.response = request => { response(request); read(); };
+  const abort = new AbortController();
+  const next = sync.nextApplied(abort.signal); await reading; abort.abort();
+  await expect(next).rejects.toThrow();
+  expect(f.peer.requests.filter(row => row.method === "liveApplication.appliedRead")).toHaveLength(1);
+  expect(f.changes.listenerCount()).toBe(1);
+});
+it("rejects another pull while the first waits for a shared wake", async () => {
+  const f = await setup(); const signal = new AbortController();
+  const sync = await f.capture.openSync(Uint8Array.of(0), signal.signal);
+  const pending = sync.nextApplied(signal.signal);
+  await expect(sync.nextApplied(signal.signal)).rejects.toThrow(/already owns/);
+  signal.abort(); await expect(pending).rejects.toThrow();
+});
+it("freezes the captured ticket and its binding before exposing them", async () => {
+  const f = await setup();
+  expect(() => { (f.capture.ticket.binding.selectorPaths as string[])[0] = "other.md"; }).toThrow();
+  expect(Object.isFrozen(f.capture.ticket.authority)).toBe(true);
+  expect(Object.isFrozen(f.capture.ticket.binding)).toBe(true);
+  expect(Object.isFrozen(f.capture.ticket)).toBe(true);
+  f.capture.assertCurrent();
+});
+it.each(["grant", "selector", "restore", "host"])("invalidates the capture when %s standing changes", async mode => {
+  const f = await setup();
+  if (mode === "grant") f.raw.prepare("UPDATE sync_relay_share_grants SET generation=generation+1 WHERE grant_id=?").run(scope.grantId);
+  if (mode === "selector") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?").run(JSON.stringify({ paths: ["other"], versionId: null }), scope.shareId);
+  if (mode === "restore") f.raw.prepare("UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1").run();
+  if (mode === "host") f.invalidated.abort(); else f.changes.notify();
+  await Promise.resolve();
+  expect(f.capture.invalidated.aborted).toBe(true);
+  expect(f.peer.closed).toBe(false); expect(f.changes.listenerCount()).toBe(0);
+});
+
+function journal(f: Awaited<ReturnType<typeof setup>>) {
+  const document = { workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId, objectId: binding.objectId, lineageClaimId: binding.lineageClaimId };
+  const cut: LiveUpdateJournalCut = { document, currentPath: binding.currentPath, restoreFenceGeneration: binding.restoreFenceGeneration,
+    authorityHistory: [], baseline: { sequence: 1, digest: binding.lineageClaimId, bytes, ranges: [], projectedDigest: "b".repeat(64),
+      projectedLength: 1, registeredAtMs: 1, replacesLineageClaimId: null },
+    checkpoint: { cursor: null, digest: binding.lineageClaimId, bytes, metadata: null, updateBytes: null }, suffix: [],
+    highWater: null, suffixCount: 0, suffixBytes: 0 };
+  vi.spyOn(f.storage, "readLiveUpdateJournalCut").mockReturnValue({ kind: "cut", cut });
+  return vi.spyOn(f.storage, "commitLiveUpdateJournal").mockImplementation((input: LiveUpdateJournalCommitInput) => {
+    const receipt = { deliveryId: input.metadata.deliveryId, updateDigest: input.metadata.updateDigest, journalCursor: 11, acceptingHostEpoch: host.hostEpoch };
+    return { result: { kind: "accepted", receipt, replayed: false }, admitted: { updateBytes: input.updateBytes,
+      metadata: { accepted: { binding, receipt, authority: input.expectedAuthority, receivedAtMs: input.receivedAtMs }, firstSeen: [] } } };
+  });
+}
+it.each(["applied", "missing", "ambiguous", "receipt-only"])("uses exact durable ACK evidence for %s delivery", async mode => {
+  const f = await setup(); const commit = journal(f);
+  if (mode === "ambiguous") f.drain.mockRejectedValueOnce(new Error("Lost application response."));
+  if (mode === "missing" || mode === "receipt-only") f.peer.response = request => f.peer.send({ type: "response", id: request.id,
+    result: mode === "missing" ? { status: "missing" } : { status: "applied", ack: { deliveryId: ack.deliveryId,
+      updateDigest: ack.updateDigest, journalCursor: ack.journalCursor, acceptingHostEpoch: ack.acceptingHostEpoch } } });
+  const submitted = f.capture.submit({ deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes }, new AbortController().signal);
+  if (mode === "receipt-only") await expect(submitted).rejects.toThrow();
+  else expect(await submitted).toEqual(mode === "missing" ? { result: "retry", reason: "application-pending" } : { result: "success", ack });
+  expect(commit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ actor: { kind: "named", userId: scope.userId, grantId: scope.grantId },
+    metadata: { deliveryId: ack.deliveryId, updateDigest: hash(bytes), binding }, updateBytes: bytes }));
+});
+it("rejects a parsed native ACK for a different accepted journal cursor", async () => {
+  const f = await setup(); journal(f);
+  f.peer.response = request => f.peer.send({ type: "response", id: request.id, result: { status: "applied", ack: { ...ack, journalCursor: 12 } } });
+  await expect(f.capture.submit({ deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes }, new AbortController().signal))
+    .rejects.toThrow(/ACK identity changed/);
+});
+
+it("coalesces shared wakes and preserves listener bounds and independent delivery", async () => {
+  const changes = createNamedFrameChanges(2), called = vi.fn();
+  const remove = changes.subscribe(() => { throw new Error("Subscriber failed."); });
+  changes.subscribe(called);
+  expect(() => changes.subscribe(() => {})).toThrow(/capacity/);
+  changes.notify(); changes.notify(); expect(called).not.toHaveBeenCalled();
+  await Promise.resolve(); expect(called).toHaveBeenCalledTimes(1);
+  changes.notify(); remove(); await Promise.resolve(); expect(called).toHaveBeenCalledTimes(2);
+  expect(changes.listenerCount()).toBe(1);
+});

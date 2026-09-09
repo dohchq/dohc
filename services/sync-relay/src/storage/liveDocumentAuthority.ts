@@ -285,6 +285,18 @@ export function resolveCurrentLiveDocumentBinding(storage: StorageContext, input
     return storage.tx(() => currentLiveDocumentBinding(storage, request));
   }
 
+export function resolveNamedLiveObjectBinding(storage: StorageContext, value: NamedLiveBrowserContext, requestedObjectId: string): CurrentLiveBindingResult {
+  const scope = snapshotNamedTicketScope(value), objectId = parseLiveUpdateIdentifier(requestedObjectId, "object ID");
+  return storage.tx(() => {
+    if (!ticketScopeIsCurrent(storage, scope)) return { kind: "refused", reason: "not-authorized" };
+    const row = storage.db.prepare(`SELECT lineage_claim_id FROM sync_relay_live_documents
+      WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current' LIMIT 1`).get(scope.workspaceId, objectId);
+    if (!row) return { kind: "refused", reason: "stale-document" };
+    return currentLiveDocumentBinding(storage, { document: { workspaceId: scope.workspaceId, mainVersionId: "main", objectId,
+      lineageClaimId: parseLiveUpdateDigest(row.lineage_claim_id) }, actor: { kind: "named", userId: scope.userId, grantId: scope.grantId } });
+  });
+}
+
 function parseStoredLiveTicket(row: Record<string, unknown>): { claims: LiveTicketClaims; redeemedAtMs: number | null } {
   try {
     for (const column of LIVE_TICKET_COLUMNS) {

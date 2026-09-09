@@ -6,12 +6,29 @@ import { readDeviceLiveHostConfig, readRelayDeviceDeliveryConfig } from "./devic
 import { connectDeviceHost } from "./deviceHostConnect.js";
 import { createDeviceHostCredential } from "./deviceHostCredential.js";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
+import {parseNativeLiveSyncConfig} from "./liveSyncConfig.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const limits = { maxConnections: 2, maxHeaderBytes: 8192, maxCredentialBytes: 4096, maxPayloadBytes: 4096,
   maxPendingBytes: 8192, maxFragments: 8, maxBufferedChunks: 8, handshakeTimeoutMs: 1000,
   heartbeatIntervalMs: 1000, heartbeatTimeoutMs: 1000, closeTimeoutMs: 100 };
+
+it("requires explicit native sync bounds and reserves their complete read/output budget", () => {
+  const run = fixture(), sync = {policy: {maxClientVectorBytes: 1024, maxHostVectorBytes: 4096,
+    maxOutputBytes: 1_000_000, maxReadBytes: 10_000_000}, workingReserveBytes: 16_777_216};
+  expect(readDeviceLiveHostConfig(run.write(run.value), limits).sync).toBeUndefined();
+  expect(readDeviceLiveHostConfig(run.write({...run.value, sync}), limits).sync).toEqual(sync);
+  const reservation = 1024 * 9 + 4096 * 10 + 1_000_000 * 2 + 10_000_000 * 2 + 16_777_216 + 643_576 * 2;
+  expect(parseNativeLiveSyncConfig(sync, reservation)).toEqual(sync);
+  expect(() => parseNativeLiveSyncConfig(sync, reservation - 1)).toThrow("aggregate budget");
+  for (const bad of [null, {}, {...sync, workingReserveBytes: 0}, {...sync, extra: true},
+    {...sync, policy: {...sync.policy, maxReplayEvents: 0}}, {...sync, policy: {...sync.policy, maxReadBytes: 1023}},
+    {...sync, policy: {...sync.policy, maxHostVectorBytes: 1_000_001}},
+    {...sync, policy: {...sync.policy, maxOutputBytes: 64 * 1024 * 1024 + 1}}]) {
+    expect(() => readDeviceLiveHostConfig(run.write({...run.value, sync: bad}), limits)).toThrow();
+  }
+});
 
 it.each(["a".repeat(512), "é".repeat(256)])("bounds workspace IDs by UTF-8 bytes while preserving host ID limits", workspaceId => {
   const run = fixture();

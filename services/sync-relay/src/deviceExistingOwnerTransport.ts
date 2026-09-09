@@ -9,6 +9,7 @@ import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-sessi
 import { DeviceEngineConnection } from "./deviceEngineConnection.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
 import {parseNativeRestoreFence, parseNativeRestoreFenceReceipt} from "./liveRestoreFence.js";
+import {parseOwnerLiveSyncConfig} from "./liveSyncConfig.js";
 
 export interface ExistingOwnerSession {
   readonly nativeSessionId: string;
@@ -18,6 +19,7 @@ export interface ExistingOwnerSession {
   prepareHandoff(signal: AbortSignal): Promise<void>;
   finishHandoff(adopted: boolean): Promise<void>;
   remoteApplied(update: Uint8Array): Promise<void>;
+  onDurableLocalChange(handler: () => void): () => void;
 }
 
 export interface ExistingOwnerDeviceConfig {
@@ -33,6 +35,8 @@ export interface ExistingOwnerDeviceConfig {
   maxAdoptionEvents: number;
   /** Explicit private input and output bound. Omission disables restore forwarding. */
   maxRestoreBytes?: number;
+  /** Explicit bridge input/output bounds. Native sync provisioning is separate. */
+  sync?: {maxClientVectorBytes: number; maxOutputBytes: number};
   requestDeadlineMs: number;
 }
 
@@ -43,7 +47,8 @@ interface Operation {
   id: number; method: string; workspace: string; params: Record<string, unknown>; signal: AbortController;
   timer: ReturnType<typeof setTimeout>; streams: Attachment[]; charge: number;
 }
-interface Registration { nativeId: number; binding: LiveObjectBinding; owner: ExistingOwnerSession; adopted: boolean; adopting?: boolean; outboxId?: string; handoffTimer?: ReturnType<typeof setTimeout> }
+interface Registration { nativeId: number; binding: LiveObjectBinding; owner: ExistingOwnerSession; adopted: boolean; adopting?: boolean; outboxId?: string; handoffTimer?: ReturnType<typeof setTimeout>;
+  stopChanges?: () => void; dirty?: boolean; }
 
 function integer(value: unknown, minimum = 0, maximum = Number.MAX_SAFE_INTEGER): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum || value > maximum) throw new Error("Invalid device owner integer.");
@@ -71,21 +76,27 @@ export function startExistingOwnerDeviceTransport(options: {
   integer(config.requestDeadlineMs,1,2_147_483_647);
   integer(config.maxFrameBytes,1_048_576,16_777_216);
   const maxRestoreBytes = config.maxRestoreBytes === undefined ? undefined : integer(config.maxRestoreBytes,5,DEFAULT_MAX_BLOB_BYTES);
-  if (maxRestoreBytes !== undefined && maxRestoreBytes * 5 + config.maxFrameBytes > config.aggregateBytes) throw new Error("Invalid owner restore transport budget.");
-  if (config.maxAdoptionBytes * 3 + config.maxFrameBytes > config.aggregateBytes || config.maxQueuedBytes < Math.max(limits.maxPayloadBytes + 16,config.maxFrameBytes + 36)) throw new Error("Invalid existing owner transport budget.");
+  const noticeCharge = config.maxFrameBytes * 3;
+  const operationBudget = config.aggregateBytes - noticeCharge;
+  if (operationBudget < config.maxFrameBytes) throw new Error("Owner notification cannot fit its transport budget.");
+  const sync = parseOwnerLiveSyncConfig(config.sync, operationBudget, config.maxFrameBytes);
+  if (maxRestoreBytes !== undefined && maxRestoreBytes * 5 + config.maxFrameBytes > operationBudget) throw new Error("Invalid owner restore transport budget.");
+  if (config.maxAdoptionBytes * 3 + config.maxFrameBytes > operationBudget || config.maxQueuedBytes < Math.max(limits.maxPayloadBytes + 16,config.maxFrameBytes + 36)) throw new Error("Invalid existing owner transport budget.");
   const workspaces = new Map(config.workspaces.map(row => [row.workspaceHandle, row.workspaceId]));
   if (!workspaces.size || workspaces.size !== config.workspaces.length || new Set(workspaces.values()).size !== workspaces.size) throw new Error("Invalid existing owner workspaces.");
   const retired = new AbortController(), operations = new Map<number,Operation>(), registrations = new Map<number,Registration>();
   const decoder = new FrameDecoder(config.maxFrameBytes,256*1024);
   const receive = deviceLiveHostReceive(limits,{ maxPayloadBytes: limits.maxPayloadBytes,maxPendingBytes: config.maxQueuedBytes });
   const credit = new DeviceCreditWindow(receive.maxPendingBytes,receive.maxPayloadBytes);
-  let received = 0, charged = 0, lastId = 0, lastStream = 0, ready = false, attached = false, closed = false, requestId = 0;
+  let received = 0, charged = 0, lastId = 0, lastStream = 0, ready = false, attached = false, closed = false, requestId = 0, eventSeq = 0;
+  let notifying = false;
+  let notificationReservation = noticeCharge;
   const next = () => integer(++requestId,1);
   const stop = () => { if (closed) return; closed = true; retired.abort(new Error("Owner device connection retired."));
     for (const operation of operations.values()) { clearTimeout(operation.timer); operation.signal.abort(retired.signal.reason); }
     operations.clear(); connection.close();
-    for (const registration of registrations.values()) { clearTimeout(registration.handoffTimer); void registration.owner.finishHandoff(false).catch(() => undefined); }
-    registrations.clear(); options.stop(); };
+    for (const registration of registrations.values()) { clearTimeout(registration.handoffTimer); registration.stopChanges?.(); registration.stopChanges = undefined; void registration.owner.finishHandoff(false).catch(() => undefined); }
+    registrations.clear(); notificationReservation = 0; options.stop(); };
   const connection = new DeviceEngineConnection(ws,limits,start.receive,config.maxQueuedBytes,stop);
   const check = () => { if (closed || retired.signal.aborted) throw new Error("Owner device connection retired."); };
   const write = (bytes: Buffer,signal?: AbortSignal): Promise<void> => new Promise((resolve,reject) => {
@@ -100,10 +111,51 @@ export function startExistingOwnerDeviceTransport(options: {
     catch (error) { cleanup(); reject(error); }
   });
   const send = (value: unknown,signal?: AbortSignal) => write(encodeFrame(FrameType.Control,0,Buffer.from(JSON.stringify(value)),config.maxFrameBytes),signal);
+  const notifyChanges = () => {
+    if (notifying || closed || !ready) return;
+    notifying = true;
+    queueMicrotask(() => {void (async () => {
+      try {
+        for (;;) {
+          check();
+          const registration = [...registrations.values()].find(entry => entry.adopted && entry.dirty);
+          if (!registration) break;
+          if (operations.size > 0) break;
+          registration.owner.assertCurrent();
+          registration.dirty = false;
+          await send({type: "event", name: "liveApplication.ownerOutboxChanged", seq: integer(++eventSeq, 1), sessionGeneration: 1,
+            payload: {registrationId: registration.nativeId, binding: registration.binding}}, retired.signal);
+          // A change while this notification drains leaves dirty set for the next pass.
+        }
+      } catch {stop();}
+      finally {notifying = false;}
+    })();});
+  };
+  const observeOwner = (registration: Registration) => {
+    if (registration.stopChanges) return;
+    registration.stopChanges = registration.owner.onDurableLocalChange(() => {
+      if (closed || registrations.get(registration.nativeId) !== registration) return;
+      try {registration.owner.assertCurrent(); registration.dirty = true; notifyChanges();}
+      catch {stop();}
+    });
+  };
   const registrationFor = (operation: Operation): Registration => {
     const registration = registrations.get(integer(operation.params.registrationId,1));
     if (!registration || workspaces.get(operation.workspace) !== registration.binding.workspaceId) throw new Error("Owner registration is unavailable.");
     return registration;
+  };
+  const sendBlob = async (operation: Operation, bytes: Buffer, signal: AbortSignal, assertCurrent: () => void) => {
+    const digest = createHash("sha256").update(bytes).digest("hex"), streamId = operation.id;
+    assertCurrent();
+    await send({type: "blobStart", requestId: operation.id, streamId, totalBytes: bytes.length, sha256: digest}, signal);
+    for (let offset = 0; offset < bytes.length || offset === 0; offset += 256 * 1024) {
+      assertCurrent();
+      const end = Math.min(offset + 256 * 1024, bytes.length);
+      await write(encodeFrame(FrameType.BlobChunk, end === bytes.length ? 1 : 0,
+        {streamId, bytes: bytes.subarray(offset, end)}, 256 * 1024), signal);
+    }
+    assertCurrent();
+    return {streamId, byteLength: bytes.length, digest};
   };
   async function execute(operation: Operation): Promise<void> {
     let result: unknown;
@@ -146,7 +198,7 @@ export function startExistingOwnerDeviceTransport(options: {
         const receipt = parseNativeRestoreFenceReceipt(value.receipt);
         if (!isDeepStrictEqual(receipt.operation, fence)) throw new Error("Native restore fence acknowledgement mismatch.");
         for (const [id, entry] of registrations) if (entry.binding.workspaceId === fence.oldBinding.workspaceId && entry.binding.mainVersionId === fence.oldBinding.mainVersionId && entry.binding.objectId === fence.oldBinding.objectId) {
-          clearTimeout(entry.handoffTimer); registrations.delete(id);
+          clearTimeout(entry.handoffTimer); entry.stopChanges?.(); entry.stopChanges = undefined; registrations.delete(id);
         }
         result = {status: "fenced", receipt};
       } else if (operation.method === "liveApplication.register") {
@@ -165,6 +217,7 @@ export function startExistingOwnerDeviceTransport(options: {
         const nativeId = existing?.nativeId ?? integer(configRecord((await config.client.sendRequest({...request,method: operation.method,params: {binding: {...binding,selectorPaths: [...binding.selectorPaths]}}},signal)).result,["registrationId"]).registrationId,1);
         registration = existing ?? {nativeId,binding,owner,adopted: false};
         registrations.set(nativeId,registration);
+        observeOwner(registration);
         owner.assertCurrent();
         if (resumeAdoptionId !== undefined) {
           if (existing?.handoffTimer) throw new Error("Owner handoff is already active.");
@@ -177,12 +230,45 @@ export function startExistingOwnerDeviceTransport(options: {
           integer(state.throughCursor);
           if (state.adoptionId !== resumeAdoptionId) throw new Error("Owner adoption identity mismatch.");
           registration.adopted = true;
+          registration.dirty = true;
         }
         result = {registrationId: nativeId};
       } else {
         registration = registrationFor(operation); owner = registration.owner; owner.assertCurrent();
         const native = { ...request,registrationId: registration.nativeId,sessionId: owner.nativeSessionId };
-        if (operation.method === "liveApplication.ownerState") {
+        if (["liveApplication.syncOpen", "liveApplication.appliedRead", "liveApplication.ack"].includes(operation.method)) {
+          if (!registration.adopted) throw new Error("Owner adoption must finish first.");
+          const current = () => {
+            check(); signal.throwIfAborted(); owner!.assertCurrent();
+            if (registrations.get(registration!.nativeId) !== registration) throw new Error("Owner registration is unavailable.");
+          };
+          if (operation.method === "liveApplication.ack") {
+            const params = configRecord(operation.params, ["registrationId", "deliveryId", "updateDigest"]);
+            const ack = await config.client.readLiveApplicationAck(native,
+              {deliveryId: string(params.deliveryId), updateDigest: string(params.updateDigest)}, signal);
+            current(); result = ack === null ? {status: "missing"} : {status: "applied", ack};
+          } else {
+            if (!sync) throw new Error("Owner sync forwarding is not configured.");
+            if (operation.method === "liveApplication.syncOpen") {
+              const cut = await config.client.openLiveAppliedSync(native, operation.streams[0]!.bytes,
+                {maxInputBytes: sync.maxClientVectorBytes, maxOutputBytes: sync.maxOutputBytes}, signal);
+              current();
+              if (!isDeepStrictEqual(cut.binding, registration.binding) || cut.hostVector.length + cut.missingStateUpdate.length > sync.maxOutputBytes) throw new Error("Owner sync cut differs from its registration.");
+              const bytes = Buffer.concat([cut.hostVector, cut.missingStateUpdate]);
+              const output = await sendBlob(operation, bytes, signal, current);
+              result = {status: "sync", binding: cut.binding, position: cut.position, observedLocalYDocHeadSequence: cut.observedLocalYDocHeadSequence,
+                hostVectorByteLength: cut.hostVector.length, ...output};
+            } else {
+              const params = configRecord(operation.params, ["registrationId", "after"]);
+              const after = params.after as Parameters<EngineClient["readNextLiveApplied"]>[1];
+              const update = await config.client.readNextLiveApplied(native, after, sync.maxOutputBytes, signal);
+              current();
+              result = update === null ? {status: "empty", after} : {status: "update", position: update.position, ack: update.ack,
+                ...await sendBlob(operation, update.updateBytes, signal, current)};
+            }
+          }
+          current();
+        } else if (operation.method === "liveApplication.ownerState") {
           configRecord(operation.params,["registrationId"]);
           if (registration.handoffTimer) throw new Error("Owner handoff is already active.");
           registration.handoffTimer = setTimeout(stop,config.requestDeadlineMs); registration.handoffTimer.unref();
@@ -233,12 +319,18 @@ export function startExistingOwnerDeviceTransport(options: {
         } else throw new Error("Owner device method is unavailable.");
       }
       check(); if (operation.signal.signal.aborted) throw operation.signal.signal.reason;
+      if (registration && ["liveApplication.syncOpen", "liveApplication.appliedRead", "liveApplication.ack"].includes(operation.method)) {
+        owner!.assertCurrent();
+        if (registrations.get(registration.nativeId) !== registration) throw new Error("Owner registration is unavailable.");
+      }
       await send({ type: "response",id: operation.id,result },signal);
       check(); signal.throwIfAborted();
       if (operation.method === "liveApplication.adoptOwner") {
         await owner!.finishHandoff(true);
         clearTimeout(registration!.handoffTimer); registration!.handoffTimer = undefined; registration!.adopting = false;
+        registration!.dirty = true;
       }
+      if (registration?.adopted) notifyChanges();
     } catch {
       if (owner) {try {owner.assertCurrent();} catch {stop();}}
       if (owner && armedHandoff) {
@@ -246,7 +338,7 @@ export function startExistingOwnerDeviceTransport(options: {
         await owner.finishHandoff(false).catch(() => undefined);
       }
       if (!closed && !operation.signal.signal.aborted) await send({ type: "error",id: operation.id,error: { code: "FORBIDDEN",message: "owner-device-operation-refused",retryability: "no" } },operation.signal.signal).catch(() => {if (!operation.signal.signal.aborted) stop();});
-    } finally { operations.delete(operation.id); charged -= operation.charge; clearTimeout(operation.timer); }
+    } finally { operations.delete(operation.id); charged -= operation.charge; clearTimeout(operation.timer); notifyChanges(); }
   }
   function attachment(id: unknown,size: unknown,digest: unknown,maximum: number): Attachment {
     const streamId = integer(id,lastStream+1), length = integer(size,0,maximum), hash = string(digest);
@@ -285,7 +377,7 @@ export function startExistingOwnerDeviceTransport(options: {
     if (value.type !== "request" || operations.size >= config.maxUploads) throw new Error("Owner operation capacity exceeded.");
     const id = integer(value.id,lastId+1), method = string(value.method), workspace = value.workspace == null ? "" : string(value.workspace);
     const restoring = restoreOperation(method);
-    if ((!restoring && !["liveApplication.hosts","liveApplication.register","liveApplication.fenceRestore","liveApplication.ownerState","liveApplication.ownerOutbox","liveApplication.readOwnerOutbox","liveApplication.acknowledgeOwnerOutbox","liveApplication.adoptOwner","liveApplication.apply","liveApplication.settle"].includes(method)) || (restoring && maxRestoreBytes === undefined) || (method !== "liveApplication.hosts" && !workspaces.has(workspace)) || value.idempotencyKey != null) throw new Error("Owner method is unavailable.");
+    if ((!restoring && !["liveApplication.hosts","liveApplication.register","liveApplication.fenceRestore","liveApplication.ownerState","liveApplication.ownerOutbox","liveApplication.readOwnerOutbox","liveApplication.acknowledgeOwnerOutbox","liveApplication.adoptOwner","liveApplication.apply","liveApplication.settle","liveApplication.syncOpen","liveApplication.appliedRead","liveApplication.ack"].includes(method)) || (restoring && maxRestoreBytes === undefined) || (method !== "liveApplication.hosts" && !workspaces.has(workspace)) || value.idempotencyKey != null) throw new Error("Owner method is unavailable.");
     const params = value.params as Record<string,unknown>;
     if (!params || typeof params !== "object" || Array.isArray(params)) throw new Error("Invalid owner params.");
     const updateBytes = method === "liveApplication.apply" ? integer(params.updateByteLength,2,20_971_520) : 0;
@@ -294,14 +386,18 @@ export function startExistingOwnerDeviceTransport(options: {
       configRecord(params,["streamId","byteLength","digest","maxOutputBytes"]);
       integer(params.maxOutputBytes,5,DEFAULT_MAX_BLOB_BYTES);
     }
-    const bytes = restoring ? integer(params.byteLength,5,maxRestoreBytes!) : method === "liveApplication.adoptOwner" ? integer(params.byteLength,1,config.maxAdoptionBytes) : updateBytes + rangeBytes;
-    const charge = bytes * 3 + (restoring ? 2 * maxRestoreBytes! : 0) + config.maxFrameBytes;
-    if (!Number.isSafeInteger(charge) || charged + charge > config.aggregateBytes) throw new Error("Owner operation capacity exceeded.");
+    const syncing = method === "liveApplication.syncOpen", appliedRead = method === "liveApplication.appliedRead";
+    if ((syncing || appliedRead) && !sync) throw new Error("Owner sync forwarding is not configured.");
+    if (syncing) configRecord(params, ["registrationId", "streamId", "byteLength", "digest"]);
+    const bytes = syncing ? integer(params.byteLength,1,sync!.maxClientVectorBytes) : restoring ? integer(params.byteLength,5,maxRestoreBytes!) : method === "liveApplication.adoptOwner" ? integer(params.byteLength,1,config.maxAdoptionBytes) : updateBytes + rangeBytes;
+    const charge = bytes * 3 + (syncing || appliedRead ? 3 * sync!.maxOutputBytes : restoring ? 2 * maxRestoreBytes! : 0) + config.maxFrameBytes;
+    if (!Number.isSafeInteger(charge) || charged + charge + notificationReservation > config.aggregateBytes) throw new Error("Owner operation capacity exceeded.");
     charged += charge; lastId = id;
     const signal = new AbortController(), timer = setTimeout(stop,Math.min(integer(value.deadlineMs ?? config.requestDeadlineMs,1),config.requestDeadlineMs)); timer.unref();
     const operation: Operation = { id,method,workspace,params,signal,timer,streams: [],charge };
     operations.set(id,operation);
-    if (restoring) operation.streams = [attachment(params.streamId,params.byteLength,params.digest,maxRestoreBytes!)];
+    if (syncing) operation.streams = [attachment(params.streamId,params.byteLength,params.digest,sync!.maxClientVectorBytes)];
+    else if (restoring) operation.streams = [attachment(params.streamId,params.byteLength,params.digest,maxRestoreBytes!)];
     else if (method === "liveApplication.adoptOwner") operation.streams = [attachment(params.streamId,params.byteLength,params.digest,config.maxAdoptionBytes)];
     else if (method === "liveApplication.apply") {
       const accepted = configRecord(params.accepted,["receipt","binding","authority","receivedAtMs"]);

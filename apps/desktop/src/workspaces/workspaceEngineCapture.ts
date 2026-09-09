@@ -2184,6 +2184,10 @@ export function createWorkspaceEngineCapture(
         };
         return {
           sessionId: owner.sessionId,
+          onDurableLocalChange: (handler: () => void) => {
+            assertCurrent();
+            return owner.onDurableLocalChange(() => {if (current === captured && !closed) handler();});
+          },
           flush: () => append(async () => { assertCurrent(); await owner.flush(); assertCurrent(); }),
           applyRemoteUpdate: (update: Uint8Array) => append(async () => { assertCurrent(); await owner.applyRemoteUpdate(update); assertCurrent(); }),
         };

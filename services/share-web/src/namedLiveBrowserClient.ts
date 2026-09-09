@@ -1,4 +1,4 @@
-import { getCookies } from "better-auth/cookies";
+import {namedAccountCookie} from "./namedAccountCookie";
 import { readBoundedJson } from "@dohc/service-http";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES, parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 
@@ -51,9 +51,6 @@ export function createNamedLiveBrowserClient(options: {
   if (origin.origin !== options.publicOrigin || origin.protocol !== "https:" || options.exchangeKey.length < 32) {
     throw new TypeError("Named browser sessions require an HTTPS origin and relay exchange key.");
   }
-  const accountCookies = getCookies({ baseURL: options.publicOrigin });
-  const cookieName = accountCookies.sessionToken.name;
-  const cookieNames = new Set([cookieName, accountCookies.dontRememberToken.name]);
   let pending = 0;
   const refusal = () => Response.json({ ok: false, error: "not found" }, { status: 404 });
 
@@ -70,17 +67,8 @@ export function createNamedLiveBrowserClient(options: {
     const work = (async (): Promise<NamedLiveBrowserBootstrap | NamedLiveBrowserSessionContext | null> => {
       let response: Response | undefined;
       try {
-        const cookies = new Map<string, string>();
-        for (const part of (request.headers.get("cookie") ?? "").split(";")) {
-          const pair = part.trim();
-          const separator = pair.indexOf("=");
-          if (separator < 1) continue;
-          const name = pair.slice(0, separator);
-          if (!cookieNames.has(name)) continue;
-          if (cookies.has(name)) return null;
-          cookies.set(name, pair);
-        }
-        if (!cookies.has(cookieName)) return null;
+        const cookie = namedAccountCookie(request.headers.get("cookie"), options.publicOrigin);
+        if (!cookie) return null;
         let input: unknown;
         if (discriminator === undefined) {
           const value = await readBoundedJson(request, limits.maxRequestBytes, controller.signal);
@@ -95,7 +83,7 @@ export function createNamedLiveBrowserClient(options: {
         response = await options.fetchRelay(new Request(new URL(
           discriminator === undefined ? "/sync/live/named-sessions" : "/sync/live/named-sessions/resolve", options.relayUrl), {
           method: "POST", redirect: "manual", signal: controller.signal, body,
-          headers: { "content-type": "application/json", cookie: [...cookies.values()].join("; "), origin: options.publicOrigin,
+          headers: { "content-type": "application/json", cookie, origin: options.publicOrigin,
             "x-dohc-relay-exchange-key": options.exchangeKey },
         }));
         controller.signal.throwIfAborted();

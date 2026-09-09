@@ -28,7 +28,7 @@ it.each(["ownerState","register","missingOwner","missingAdoption","staleOwner"])
   const limits = {maxPayloadBytes:4096,maxPendingBytes:2_000_000} as DeviceControlLimits;
   const start = {type:"liveHost.start" as const,version:1 as const,relayNamespace:"namespace",authToken:"A".repeat(43),
     host:{hostId:"host",hostEpoch:parseHostEpoch(1),instanceId:"instance",connectionId:"connection"},receive:limits};
-  const owner = {nativeSessionId:"session",assertCurrent:vi.fn(),prepareHandoff:vi.fn(async () => undefined),
+  const owner = {nativeSessionId:"session",onDurableLocalChange: () => () => undefined,assertCurrent:vi.fn(),prepareHandoff:vi.fn(async () => undefined),
     finishHandoff:vi.fn(async (_adopted:boolean) => undefined),remoteApplied:vi.fn(async () => undefined)};
   let stale = false;
   const staleOwner = {...owner,nativeSessionId:"stale-session",assertCurrent:vi.fn(() => {if (stale) throw new Error("Owner session retired.");})};
@@ -108,7 +108,7 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
   const relaySocket = { readyState: 1,bufferedAmount: 0,send(bytes: Buffer,options: {binary: boolean},done: () => void) {
     queueMicrotask(() => { if (options.binary) transport.receive(bytes); else transport.credit(JSON.parse(bytes.toString()).receivedBytes); done(); });
   } } as unknown as WebSocket;
-  const owner = { nativeSessionId: "ordinary-session",assertCurrent: vi.fn(),prepareHandoff: vi.fn(async () => undefined),finishHandoff: vi.fn(async () => undefined),remoteApplied: vi.fn(async (_update: Uint8Array) => undefined) };
+  const owner = { nativeSessionId: "ordinary-session",onDurableLocalChange: () => () => undefined,assertCurrent: vi.fn(),prepareHandoff: vi.fn(async () => undefined),finishHandoff: vi.fn(async () => undefined),remoteApplied: vi.fn(async (_update: Uint8Array) => undefined) };
   const singleton = { ready: vi.fn(async () => undefined),close: vi.fn(),sendRequest: vi.fn(async (request: {method: string}): Promise<{result: Record<string,unknown>}> => ({ result:
     request.method === "liveApplication.provisionOwner" ? { provisioned: true } : request.method === "liveApplication.register" ? { registrationId: 9 } : { adoptionId: "adoption",expectedLocalSequence: 0,throughCursor: null,outboxId: null,pendingBytes: 0,outboxState: null } })),
     forwardLiveOwnerAdoption: vi.fn(async (_request: { sessionId: string }) => ({ result: { status: "adopted",adoption: { adoptionId: "adoption",localYDocSequence: 0,terminalCursor: 0,adoptionReplayed: false } } })),

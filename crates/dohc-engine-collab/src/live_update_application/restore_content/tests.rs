@@ -254,6 +254,71 @@ fn accepted_history_checkpoints_bound_lifetime_replay_and_keep_old_delivery_iden
 }
 
 #[test]
+fn deleted_yjs_payload_survives_accepted_checkpoint_and_restore_preparation() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/lossless-fixtures/deleted-history.json"
+    ))
+    .unwrap();
+    let updates: Vec<Vec<u8>> = serde_json::from_value(fixture["updates"].clone()).unwrap();
+    let expected: Vec<u8> = serde_json::from_value(fixture["retainedState"].clone()).unwrap();
+    let doc = Ydoc::wire();
+    doc.apply(&updates[0]).unwrap();
+    let source = doc.project(ContentKind::Richdoc).unwrap().content;
+    let mut f = Fixture::with_doc(doc, &source);
+    for (index, update) in updates.iter().enumerate().skip(1) {
+        f.doc.apply(update).unwrap();
+        f.accept(update.clone(), index as i64);
+    }
+    assert_eq!(f.canonical().encode_full_state(), expected);
+    let receipts = append_history_copies(&mut f, 4093, updates.last().unwrap().clone());
+    f.terminal = receipts.last().cloned();
+    drop(f.store);
+    f.store = EngineStore::open(&f.dir.join("engine.db"), 100).unwrap();
+    {
+        let held = f.handle.registration.lock().unwrap();
+        f.store
+            .read_with(|conn| -> Result<(), ApplicationError> {
+                let history = accepted_history::read(
+                    conn,
+                    &held,
+                    f.terminal.as_ref().unwrap().journal_cursor,
+                    &mut Budget {
+                        remaining: 1_000_000,
+                    },
+                    0,
+                )?;
+                assert_eq!(history.proof.checkpoint.event_count, 4095);
+                assert!(history.proof.suffix.is_empty());
+                assert_eq!(history.doc.encode_full_state(), expected);
+                assert_eq!(
+                    crate::durable::binary_blob_for_gate(
+                        conn,
+                        &history.proof.checkpoint.state_digest
+                    )?,
+                    expected
+                );
+                assert!(matches!(
+                    Budget {
+                        remaining: expected.len() - 1
+                    }
+                    .state(&history.doc),
+                    Err(ApplicationError::ConfiguredByteBudgetExceeded)
+                ));
+                Ok(())
+            })
+            .unwrap();
+    }
+    let input = f.freeze(f.baseline_point.clone());
+    let proposal = f.prepare(input.clone()).unwrap();
+    assert_eq!(proposal.frozen_state_bytes, expected);
+    drop(f.store);
+    f.store = EngineStore::open(&f.dir.join("engine.db"), 101).unwrap();
+    let retried = f.prepare(input).unwrap();
+    assert_eq!(retried.frozen_state_bytes, expected);
+    assert_eq!(retried.receipt(), proposal.receipt());
+}
+
+#[test]
 fn restore_preparation_uses_native_checkpoints_for_a_long_applied_history() {
     let mut f = Fixture::new("baseline");
     f.edit("accepted current", 3);
@@ -482,11 +547,6 @@ impl Fixture {
         Self::with_seed(source, "rich-unicode")
     }
     fn with_seed(source: &str, seed_name: &str) -> Self {
-        let dir = ScratchDir::new_named("native-restore-proposal").unwrap();
-        let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
-        dohc_engine_domain::VersionedTextStore::new(&mut store)
-            .ensure_main_version("workspace", "main", 0, &NoFaults)
-            .unwrap();
         let doc = Ydoc::wire();
         let fixtures: Value = serde_json::from_str(include_str!(
             "../../../tests/live-bootstrap-fixtures/live-bootstrap.json"
@@ -501,6 +561,14 @@ impl Fixture {
         let seed_bytes: Vec<u8> = serde_json::from_value(seed["bytes"].clone()).unwrap();
         doc.apply(&seed_bytes).unwrap();
         doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
+            .unwrap();
+        Self::with_doc(doc, source)
+    }
+    fn with_doc(doc: Ydoc, source: &str) -> Self {
+        let dir = ScratchDir::new_named("native-restore-proposal").unwrap();
+        let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("workspace", "main", 0, &NoFaults)
             .unwrap();
         let bytes = doc.encode_full_state();
         let binding = LiveObjectBinding {
@@ -566,6 +634,9 @@ impl Fixture {
             .doc
             .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
             .unwrap();
+        self.accept(bytes, cursor)
+    }
+    fn accept(&mut self, bytes: Vec<u8>, cursor: i64) -> NativeRestorePoint {
         let receipt = LiveUpdateReceipt {
             delivery_id: format!("event-{cursor}"),
             update_digest: hex_sha256(&bytes),

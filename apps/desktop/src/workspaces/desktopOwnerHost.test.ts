@@ -17,7 +17,7 @@ it.each(["lookup", "owner", "registered"])("reconnects after a binding retires d
     const stop = vi.fn(() => closed.resolve()); calls.push({options,stop});
     return {stop,closed:closed.promise};
   });
-  const owner = {nativeSessionId:"session", assertCurrent:vi.fn(), prepareHandoff:vi.fn(), finishHandoff:vi.fn(), remoteApplied:vi.fn()};
+  const owner = {nativeSessionId:"session", onDurableLocalChange: () => () => undefined, assertCurrent:vi.fn(), prepareHandoff:vi.fn(), finishHandoff:vi.fn(), remoteApplied:vi.fn()};
   const ownerFor = vi.fn(() => owner);
   const bindings = vi.fn(async () => {
     const captured = generation;

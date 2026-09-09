@@ -1,6 +1,7 @@
 import { canonicalRelayUrl } from "@dohc/workspace-contracts/relay-values";
 import type { AccountAuthConfig } from "./accountAuth";
 import { parseNamedLiveBrowserClientLimits, type NamedLiveBrowserClientLimits } from "./namedLiveBrowserClient";
+import {parseLiveGatewayLimits, type LiveGatewayLimits} from "./liveGateway";
 
 export interface ShareWebConfig {
   relayUrl: string;
@@ -13,6 +14,7 @@ export interface ShareWebConfig {
   devMode: boolean;
   accountAuth?: AccountAuthConfig;
   namedBrowserSessionLimits?: NamedLiveBrowserClientLimits;
+  namedLiveGatewayLimits?: LiveGatewayLimits;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -123,6 +125,12 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     namedBrowserSessionLimits = parseNamedLiveBrowserClientLimits(JSON.parse(env.DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS));
   }
 
+  let namedLiveGatewayLimits: LiveGatewayLimits | undefined;
+  if (env.DOHC_SHARE_WEB_NAMED_LIVE_LIMITS !== undefined) {
+    if (!namedBrowserSessionLimits || !accountAuth || !relayExchangeKey) throw new Error("Named live transport requires named browser sessions and relay exchange configuration.");
+    namedLiveGatewayLimits = parseLiveGatewayLimits(JSON.parse(env.DOHC_SHARE_WEB_NAMED_LIVE_LIMITS));
+  }
+
   return {
     relayUrl: relayUrl.href,
     publicRelayUrl,
@@ -134,5 +142,6 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     devMode,
     ...(accountAuth ? { accountAuth } : {}),
     ...(namedBrowserSessionLimits ? { namedBrowserSessionLimits } : {}),
+    ...(namedLiveGatewayLimits ? {namedLiveGatewayLimits} : {}),
   };
 }

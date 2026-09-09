@@ -36,8 +36,8 @@ import {
 } from './dohc-markdown-extensions.js'
 import { sanitizeImageSrc } from './image-src.js'
 import { backtickFence } from './markdown-fence.js'
+import { getDohcYDocBodyFragment } from './body-fragment.js'
 
-const BODY_FIELD = 'body'
 const PLAIN_TEXT_FIELD = 'plainText'
 const FRONTMATTER_FIELD = 'frontmatter'
 const META_FIELD = 'meta'
@@ -207,7 +207,7 @@ export function markdownToYDoc(markdown: string): Y.Doc {
         }),
   })
 
-  const bodyFragment = doc.getXmlFragment(BODY_FIELD)
+  const bodyFragment = getDohcYDocBodyFragment(doc)
   const tiptapJson = parseRichdocMarkdown(
     usesCrlf ? body.replaceAll('\r\n', '\n') : body,
   )
@@ -477,10 +477,6 @@ export function getDohcYDocMeta(doc: Y.Doc): DohcMeta {
   }
 }
 
-export function getDohcYDocBodyFragment(doc: Y.Doc): Y.XmlFragment {
-  return doc.getXmlFragment(BODY_FIELD)
-}
-
 export function getDohcYDocPlainText(doc: Y.Doc): Y.Text | null {
   return getDohcYDocMeta(doc).contentKind === PLAIN_TEXT_CONTENT_KIND
     ? doc.getText(PLAIN_TEXT_FIELD)
@@ -498,7 +494,7 @@ function yDocBodyToMarkdown(doc: Y.Doc): string {
 }
 
 function yDocBodyToJSON(doc: Y.Doc): JSONContent {
-  const bodyFragment = doc.getXmlFragment(BODY_FIELD)
+  const bodyFragment = getDohcYDocBodyFragment(doc)
   return yXmlFragmentToProseMirrorRootNode(
     bodyFragment,
     schema,

@@ -14,10 +14,12 @@ import { parseRelayDeviceDeliveryConfig,type RelayDeviceDeliveryConfig } from ".
 import { createDeviceLiveDelivery } from "./deviceLiveDelivery.js";
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
+import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
+import type {LiveHostChanges} from "./relayWriteChanges.js";
 
 export function createDeviceControl(options: {
   storage: SyncRelayStorage; hosts: ReadonlySet<string>; relayExchangeKey: string; limits: DeviceControlLimits;
-  delivery?: { config: RelayDeviceDeliveryConfig; history: LiveJournalHistoryAuthority; ownerAdmission?: OwnerOutboxAdmission };
+  delivery?: { config: RelayDeviceDeliveryConfig; history: LiveJournalHistoryAuthority; ownerAdmission?: OwnerOutboxAdmission; frameChanges?: LiveHostChanges };
 }) {
   const limits = parseDeviceControlLimits(options.limits);
   const deliveryConfig = options.delivery ? parseRelayDeviceDeliveryConfig(options.delivery.config, limits) : undefined;
@@ -128,7 +130,7 @@ export function createDeviceControl(options: {
         ws.send(notice, error => { if (error) stop(); });
         if (deliveryConfig && options.delivery) {
           delivery = createDeviceLiveDelivery({ ws, limits, config: deliveryConfig, storage: options.storage,
-            history: options.delivery.history, ownerAdmission: options.delivery.ownerAdmission, host: { mode: "device", hostId: parsedCredential.hostId, hostEpoch: parsedCredential.hostEpoch,
+            history: options.delivery.history, ownerAdmission: options.delivery.ownerAdmission, frameChanges: options.delivery.frameChanges, host: { mode: "device", hostId: parsedCredential.hostId, hostEpoch: parsedCredential.hostEpoch,
               instanceId: parsedCredential.instanceId, connectionId }, isCurrent, stop });
           currentDelivery = delivery;
         }
@@ -147,9 +149,17 @@ export function createDeviceControl(options: {
   options.storage.unavailable.addEventListener("abort", close, { once: true });
   if (options.storage.unavailable.aborted) close();
   return { handleUpgrade, close,
+    async captureNative(binding: LiveObjectBinding, signal?: AbortSignal) {
+      if (!currentDelivery) throw new Error("Device delivery is unavailable.");
+      return currentDelivery.captureNative(binding, signal);
+    },
     async prepareRestore(lookup: StopRestoreLookup, signal?: AbortSignal) {
       if (!currentDelivery) throw new Error("Device delivery is unavailable.");
       return currentDelivery.prepareRestore(lookup, signal);
+    },
+    async completeRestore(lookup: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
+      if (!currentDelivery) throw new Error("Device delivery is unavailable.");
+      return currentDelivery.completeRestore(lookup, proposalDigest, signal);
     },
     async stopRestore(lookup: StopRestoreLookup, signal?: AbortSignal) {
       if (!currentDelivery) throw new Error("Device delivery is unavailable.");

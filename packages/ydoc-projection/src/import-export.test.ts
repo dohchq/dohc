@@ -9,7 +9,6 @@ import {
 import * as Y from 'yjs'
 import {
   getDohcProseMirrorSchema,
-  getDohcYDocBodyFragment,
   getDohcYDocFrontmatter,
   getDohcYDocMeta,
   yDocToMarkdown,
@@ -17,6 +16,7 @@ import {
   plainTextToYDoc,
   serializeRichdocBody,
 } from './import-export.js'
+import { getDohcYDocBodyFragment } from './body-fragment.js'
 
 type ExpectedMarkdownFragment = string | RegExp
 

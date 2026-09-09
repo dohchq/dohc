@@ -1,4 +1,3 @@
-import { isDeepStrictEqual } from "node:util";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import {
   parseLiveDocumentKey,
@@ -18,6 +17,7 @@ import { snapshotHostCoordinate } from "./liveTicketInputs";
 import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
 import type {LiveRestorePreparation} from "./liveRestorePreparation";
+import {LiveHostRegistrations, sameLiveHostDocument} from "./liveHostRegistration";
 export { createLiveJournalHistoryAuthority, type LiveJournalHistoryAuthority };
 
 export type CommittedDeliveryOutcome =
@@ -33,6 +33,7 @@ export interface CommittedSettlement {
   momentId: string;
   markdownDigest: string;
   materialized: boolean;
+  collectionReconcileRequired: boolean;
 }
 
 export function settlementResult(value: unknown, terminal: LiveUpdateReceipt | null): CommittedSettlement {
@@ -40,18 +41,19 @@ export function settlementResult(value: unknown, terminal: LiveUpdateReceipt | n
   const response = value as Record<string, unknown>;
   if (Object.keys(response).sort().join() !== "settlement,status" || response.status !== "settled" || !response.settlement || typeof response.settlement !== "object" || Array.isArray(response.settlement)) throw new Error("Invalid native settlement response.");
   const row = response.settlement as Record<string, unknown>;
-  if (Object.keys(row).sort().join() !== "applicationCount,localYDocSequence,markdownDigest,materialized,momentId,previousCursor,settlementId,terminalCursor") throw new Error("Invalid native settlement fields.");
+  if (Object.keys(row).sort().join() !== "applicationCount,collectionReconcileRequired,localYDocSequence,markdownDigest,materialized,momentId,previousCursor,settlementId,terminalCursor") throw new Error("Invalid native settlement fields.");
   for (const key of ["previousCursor", "terminalCursor", "applicationCount", "localYDocSequence"]) {
     if (typeof row[key] !== "number" || !Number.isSafeInteger(row[key]) || row[key] < 0) throw new Error("Invalid native settlement integer.");
   }
-  if (row.terminalCursor !== (terminal?.journalCursor ?? 0) || Number(row.previousCursor) > Number(row.terminalCursor) || Number(row.applicationCount) > Number(row.terminalCursor) - Number(row.previousCursor) || typeof row.materialized !== "boolean") throw new Error("Native settlement coverage mismatch.");
-  return { settlementId: parseLiveUpdateIdentifier(row.settlementId,"settlement ID"), previousCursor: Number(row.previousCursor), terminalCursor: Number(row.terminalCursor), applicationCount: Number(row.applicationCount), localYDocSequence: Number(row.localYDocSequence), momentId: parseLiveUpdateIdentifier(row.momentId,"moment ID"), markdownDigest: parseLiveUpdateDigest(row.markdownDigest), materialized: row.materialized };
+  if (row.terminalCursor !== (terminal?.journalCursor ?? 0) || Number(row.previousCursor) > Number(row.terminalCursor) || Number(row.applicationCount) > Number(row.terminalCursor) - Number(row.previousCursor) || typeof row.materialized !== "boolean" || typeof row.collectionReconcileRequired !== "boolean") throw new Error("Native settlement coverage mismatch.");
+  return { settlementId: parseLiveUpdateIdentifier(row.settlementId,"settlement ID"), previousCursor: Number(row.previousCursor), terminalCursor: Number(row.terminalCursor), applicationCount: Number(row.applicationCount), localYDocSequence: Number(row.localYDocSequence), momentId: parseLiveUpdateIdentifier(row.momentId,"moment ID"), markdownDigest: parseLiveUpdateDigest(row.markdownDigest), materialized: row.materialized, collectionReconcileRequired: row.collectionReconcileRequired };
 }
 
 /** Private configured-host consumer; the caller supplies an authenticated, provisioned connection. */
 export class LiveCommittedDelivery {
   readonly #store: LiveCommittedDeliveryStore;
   readonly #active = new Set<string>();
+  readonly #registrations: LiveHostRegistrations;
   readonly #connection: {
     readonly client: EngineClient;
     readonly workspace: string;
@@ -90,7 +92,10 @@ export class LiveCommittedDelivery {
       restore: connection.restore,
     });
     this.#store = storage.createLiveCommittedDeliveryStore(history);
+    this.#registrations = new LiveHostRegistrations(this.#connection);
   }
+  captureRegistration(binding: LiveObjectBinding) { return this.#registrations.capture(binding); }
+  get workspace() { return this.#connection.workspace; }
   async drain(
     document: LiveDocumentKey,
     signal?: AbortSignal,
@@ -112,7 +117,7 @@ export class LiveCommittedDelivery {
     try {
       aborted();
       drain = this.#store.open({ host: this.#connection.host, document });
-      let registration: { id: number; binding: LiveObjectBinding } | undefined;
+      let registration = await this.#registrations.ensure(drain.baseline.binding, signal);
       for (;;) {
         aborted();
         const next = this.#store.next(drain);
@@ -122,28 +127,10 @@ export class LiveCommittedDelivery {
             ? next.baseline.binding
             : next.admitted.metadata.accepted.binding;
         if (
-          !registration ||
-          !isDeepStrictEqual(registration.binding, binding)
+          !sameLiveHostDocument(registration.binding, binding)
         ) {
-          const response = await this.#connection.client.sendRequest({
-            id: this.#connection.nextRequestId(),
-            method: "liveApplication.register",
-            workspace: this.#connection.workspace,
-            params: {
-              binding: {
-                ...binding,
-                selectorPaths: [...binding.selectorPaths],
-              },
-            },
-            deadlineMs: this.#connection.deadlineMs,
-          }, signal);
+          registration = await this.#registrations.ensure(binding, signal);
           aborted();
-          const id = (response.result as { registrationId?: unknown })
-            ?.registrationId;
-          if (typeof id !== "number" || !Number.isSafeInteger(id) || id < 1) {
-            throw new Error("Invalid committed delivery registration.");
-          }
-          registration = { id, binding: structuredClone(binding) };
           // Re-read current authority and progress after the registration await.
           continue;
         }
@@ -192,11 +179,16 @@ export class LiveCommittedDelivery {
     }
   }
 
+  documentForRestore(value: StopRestoreLookup): LiveDocumentKey {
+    const lookup = snapshotStopRestoreLookup(value);
+    return parseLiveDocumentKey(this.#store.stopRestoreDocument({...lookup, host: this.#connection.host}));
+  }
   async stopRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-    const lookup = snapshotStopRestoreLookup(value), document = this.#store.stopRestoreDocument({...lookup, host: this.#connection.host});
+    const lookup = snapshotStopRestoreLookup(value), document = this.documentForRestore(lookup);
     const key = JSON.stringify([document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId]);
     if (this.#active.has(key)) throw new Error("A committed delivery operation already owns this document.");
     this.#active.add(key);
+    this.#registrations.invalidate(document.objectId);
     try {return await deliverStopRestore({store: this.#store, lookup, connection: this.#connection, deliveryKind: "bootstrap", signal});}
     finally {this.#active.delete(key);}
   }
@@ -204,11 +196,24 @@ export class LiveCommittedDelivery {
   async prepareRestore(value: StopRestoreLookup, signal?: AbortSignal) {
     const restore = this.#connection.restore;
     if (!restore) throw new Error("Restore preparation is not configured on this host.");
-    const lookup = snapshotStopRestoreLookup(value), document = this.#store.stopRestoreDocument({...lookup, host: this.#connection.host});
+    const lookup = snapshotStopRestoreLookup(value), document = this.documentForRestore(lookup);
     const key = JSON.stringify([document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId]);
     if (this.#active.has(key)) throw new Error("A committed delivery operation already owns this document.");
     this.#active.add(key);
+    this.#registrations.invalidate(document.objectId);
     try {return await restore.prepare({store: this.#store, lookup, connection: this.#connection, deliveryKind: "bootstrap", signal});}
+    finally {this.#active.delete(key);}
+  }
+
+  async completeRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
+    const restore = this.#connection.restore;
+    if (!restore) throw new Error("Restore preparation is not configured on this host.");
+    const lookup = snapshotStopRestoreLookup(value), document = this.documentForRestore(lookup);
+    const key = JSON.stringify([document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId]);
+    if (this.#active.has(key)) throw new Error("A committed delivery operation already owns this document.");
+    this.#active.add(key);
+    this.#registrations.invalidate(document.objectId);
+    try {return await restore.complete({store: this.#store, lookup, connection: this.#connection, deliveryKind: "bootstrap", signal}, proposalDigest);}
     finally {this.#active.delete(key);}
   }
 
@@ -223,11 +228,10 @@ export class LiveCommittedDelivery {
       aborted();
       drain = this.#store.openSettlement({ host: this.#connection.host, document });
       const captured = this.#store.settlement(drain);
-      const registration = await this.#connection.client.sendRequest({ id: this.#connection.nextRequestId(), method: "liveApplication.register", workspace: this.#connection.workspace, params: { binding: { ...captured.binding, selectorPaths: [...captured.binding.selectorPaths] } }, deadlineMs: this.#connection.deadlineMs }, signal);
+      const registration = await this.#registrations.ensure(captured.binding, signal);
       aborted();
       this.#store.settlement(drain);
-      const registrationId = (registration.result as {registrationId?: unknown})?.registrationId;
-      if (typeof registrationId !== "number" || !Number.isSafeInteger(registrationId) || registrationId < 1) throw new Error("Invalid committed settlement registration.");
+      const registrationId = registration.id;
       const response = await this.#connection.client.sendRequest({ id: this.#connection.nextRequestId(), method: "liveApplication.settle", workspace: this.#connection.workspace, params: { registrationId, terminalReceipt: captured.terminalReceipt ? { ...captured.terminalReceipt } : null }, deadlineMs: this.#connection.deadlineMs }, signal);
       aborted();
       this.#store.settlement(drain);

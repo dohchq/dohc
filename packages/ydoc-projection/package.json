@@ -4,6 +4,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./body-fragment": "./src/body-fragment.ts",
+    "./live-journal-validation": "./src/live-journal-validation.ts",
     "./image-src": "./src/image-src.ts",
     "./restore-proof": "./src/liveRestoreProof.ts"
   },
