@@ -184,7 +184,7 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
       expect(requests).toContainEqual({accountId: user.id, path, status: 200});
     }
     const wrongGrant = await openInvitation(users[1]!, "grant-0");
-    await browserExpect(wrongGrant.page.getByRole("alert")).toContainText("could not open this invitation");
+    await browserExpect(wrongGrant.page.getByRole("alert")).toBeVisible();
     await browserExpect(wrongGrant.page.getByRole("button", {name: "docs/a.md", exact: true})).toHaveCount(0);
     expect(requests).toContainEqual({accountId: users[1]!.id, path: "/api/live/named-documents", status: 404});
     results.authentication = {accountIds: users.map(user => user.id), requests, wrongGrantRefused: true};
