@@ -42,7 +42,7 @@ it("maps an interrupted outbox snapshot to caller-scheduled retry without author
     },
   }, "test-workspace");
   const calls: string[] = [];
-  const drainer = new OwnerYDocOutboxDrainer(outbox, "outbox-1", LIMITS, {
+  const drainer = new OwnerYDocOutboxDrainer(outbox, "outbox-1", {
     async freshOwnerAuthority() { calls.push("authority"); return { kind: "retry" }; },
     async deliver() { calls.push("delivery"); return { kind: "retry" }; },
   });
@@ -103,7 +103,7 @@ it.each([
     }
   }
   const outbox = new TestOutbox({ async sendRequest() { throw new Error("Unexpected daemon request."); } }, "test-workspace");
-  const drainer = new OwnerYDocOutboxDrainer(outbox, "outbox-1", LIMITS, {
+  const drainer = new OwnerYDocOutboxDrainer(outbox, "outbox-1", {
     async freshOwnerAuthority() {
       await boundary("authority");
       return stage === "authority" && outcome === "quarantine"
@@ -117,7 +117,7 @@ it.each([
         : { kind: "receipt", receipt: { deliveryId: "delivery-1", updateDigest: "b".repeat(64),
           journalCursor: 1, acceptingHostEpoch: parseHostEpoch(1) } };
     },
-  }, () => 0);
+  });
   const draining = drainer.drainOnce();
   try {
     await reached;
@@ -227,19 +227,18 @@ it.skipIf(engine.missing)("reads an owner queue larger than a daemon control fra
 
         pageResponses.length = 0;
         const delivered: number[] = [];
-        const drainer = new OwnerYDocOutboxDrainer(outbox, outboxId,
-          { maxPendingBytes: update.length * 8, maxPendingAgeMs: 86_400_000 }, {
-            async freshOwnerAuthority() {
-              return { kind: "authority", authority: { value: {}, hostEpoch: parseHostEpoch(1) } };
-            },
-            async deliver(_authority, envelope) {
-              delivered.push(envelope.sequence);
-              return { kind: "receipt", receipt: {
-                deliveryId: envelope.deliveryId, updateDigest: envelope.updateDigest,
-                journalCursor: envelope.sequence, acceptingHostEpoch: parseHostEpoch(1),
-              } };
-            },
-          });
+        const drainer = new OwnerYDocOutboxDrainer(outbox, outboxId, {
+          async freshOwnerAuthority() {
+            return { kind: "authority", authority: { value: {}, hostEpoch: parseHostEpoch(1) } };
+          },
+          async deliver(_authority, envelope) {
+            delivered.push(envelope.sequence);
+            return { kind: "receipt", receipt: {
+              deliveryId: envelope.deliveryId, updateDigest: envelope.updateDigest,
+              journalCursor: envelope.sequence, acceptingHostEpoch: parseHostEpoch(1),
+            } };
+          },
+        });
         try {
           for (let index = 0; index < 7; index += 1) {
             await expect(drainer.drainOnce()).resolves.toBe("acknowledged");
@@ -380,7 +379,7 @@ it.skipIf(engine.missing)("acknowledges an in-flight receipt after a concurrent 
         };
         const first = await outbox.append({ binding, baseUpdate, update: updateA, appendKey: "A", limits });
         expect(first.state).toBe("active");
-        drainer = new OwnerYDocOutboxDrainer(outbox, first.outboxId, limits, {
+        drainer = new OwnerYDocOutboxDrainer(outbox, first.outboxId, {
           freshOwnerAuthority: () => host.freshOwnerAuthority(),
           async deliver(authority, envelope) {
             await host.deliver(authority, envelope);
@@ -390,7 +389,7 @@ it.skipIf(engine.missing)("acknowledges an in-flight receipt after a concurrent 
             await release.promise;
             return { kind: "receipt", receipt };
           },
-        }, () => first.oldestEntryAtMs);
+        });
         draining = drainer.drainOnce();
         await Promise.race([
           reached.promise,
@@ -410,10 +409,13 @@ it.skipIf(engine.missing)("acknowledges an in-flight receipt after a concurrent 
         expect(pending.entries).toHaveLength(1);
         expect(pending.entries[0]).toMatchObject({ sequence: second.sequence, deliveryId: second.deliveryId, update: updateB });
         await expect(outbox.append({ binding, baseUpdate, update: updateB, appendKey: "C", limits })).rejects.toThrow("owner-outbox-frozen");
-        expect(await drainer.drainOnce()).toBe("frozen");
-        expect(host.authorityCalls).toBe(1);
-        expect(host.delivered).toHaveLength(1);
-        expect((await outbox.readPending(first.outboxId)).entries).toEqual(pending.entries);
+        expect(await drainer.drainOnce()).toBe("acknowledged");
+        expect(host.authorityCalls).toBe(2);
+        expect(host.delivered).toHaveLength(2);
+        const drained = await outbox.readPending(first.outboxId);
+        expect(drained.state).toBe("active");
+        expect(drained.entries).toEqual([]);
+        await expect(outbox.append({ binding, baseUpdate, update: updateB, appendKey: "C", limits })).resolves.toMatchObject({state: "active"});
       } finally {
         drainer?.dispose();
         release.resolve();
@@ -537,9 +539,7 @@ it.skipIf(engine.missing)(
         const firstDrainer = new OwnerYDocOutboxDrainer(
           outbox,
           appendResult.outboxId,
-          LIMITS,
           host,
-          () => 0,
         );
         expect(await firstDrainer.drainOnce()).toBe("retry");
         firstDrainer.dispose();
@@ -547,9 +547,7 @@ it.skipIf(engine.missing)(
         const secondDrainer = new OwnerYDocOutboxDrainer(
           outbox,
           appendResult.outboxId,
-          LIMITS,
           host,
-          () => 0,
         );
         expect(await secondDrainer.drainOnce()).toBe("acknowledged");
 

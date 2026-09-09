@@ -907,7 +907,8 @@ pub fn acknowledge(
             )
             .map_err(read_sql)?;
         tx.execute(
-            "UPDATE owner_ydoc_outboxes SET pending_bytes=?2,oldest_entry_at_ms=?3 WHERE outbox_id=?1",
+            "UPDATE owner_ydoc_outboxes SET pending_bytes=?2,oldest_entry_at_ms=?3, \
+             state=CASE WHEN state='sealed' AND ?2=0 THEN 'active' ELSE state END WHERE outbox_id=?1",
             params![outbox_id, pending_bytes, oldest_entry_at_ms],
         )
         .map_err(write_sql)?;
@@ -1815,7 +1816,7 @@ mod tests {
             let id = appended.outbox_id;
             let pending = read_pending(&store, "workspace-1", &id).expect("in-flight prefix");
             let in_flight_receipt = receipt(&pending.entries[0]);
-            let sealed = append(&mut store, "workspace-1", second).expect("limit append");
+            let sealed = append(&mut store, "workspace-1", second.clone()).expect("limit append");
             assert_eq!(sealed.state, OwnerOutboxState::Sealed);
 
             let acknowledged = acknowledge(&mut store, "workspace-1", &id, &[in_flight_receipt])
@@ -1835,6 +1836,37 @@ mod tests {
                 append(&mut store, "workspace-1", input("key-3", b"three", 21)),
                 Err(OwnerOutboxError::Frozen)
             ));
+            acknowledge(
+                &mut store,
+                "workspace-1",
+                &id,
+                &[receipt(&pending.entries[0])],
+            )
+            .expect("final sealed receipt");
+            drop(store);
+            let mut store = EngineStore::open(&dir.join("engine.db"), 1).expect("reopen drained");
+            let drained = read_pending(&store, "workspace-1", &id).expect("drained");
+            assert_eq!(drained.state, OwnerOutboxState::Active);
+            assert_eq!(drained.pending_bytes, 0);
+            assert_eq!(drained.oldest_entry_at_ms, None);
+            assert!(drained.entries.is_empty());
+            assert_eq!(drained.base_update, pending.base_update);
+            let replay = append(&mut store, "workspace-1", second.clone()).expect("append replay");
+            assert_eq!(replay.delivery_id, sealed.delivery_id);
+            assert!(read_pending(&store, "workspace-1", &id)
+                .expect("after replay")
+                .entries
+                .is_empty());
+            let mut third = input("key-3", b"three", 21);
+            third.limits = second.limits.clone();
+            let next = append(&mut store, "workspace-1", third).expect("append after sealed drain");
+            assert_eq!(next.outbox_id, id);
+            assert_eq!(next.sequence, 3);
+            assert_eq!(next.state, OwnerOutboxState::Active);
+            let mut fourth = input("key-4", b"x", 31);
+            fourth.limits = second.limits;
+            let resealed = append(&mut store, "workspace-1", fourth).expect("seal again");
+            assert_eq!(resealed.state, OwnerOutboxState::Sealed);
         }
     }
 

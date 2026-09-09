@@ -2,7 +2,6 @@ import type {
   LiveObjectBinding,
   OwnerYDocOutbox,
   OwnerYDocOutboxEntry,
-  OwnerYDocOutboxLimits,
 } from "@dohc/workspace-engine-client";
 import { OwnerYDocOutboxReadChangedError } from "@dohc/workspace-engine-client";
 import type { HostEpoch } from "@dohc/live-session-contract/host-control";
@@ -61,17 +60,6 @@ export type OwnerYDocDrainResult =
   | "frozen"
   | "retry";
 
-function assertLimits(limits: OwnerYDocOutboxLimits): void {
-  if (
-    !Number.isSafeInteger(limits.maxPendingBytes) ||
-    limits.maxPendingBytes <= 0 ||
-    !Number.isSafeInteger(limits.maxPendingAgeMs) ||
-    limits.maxPendingAgeMs <= 0
-  ) {
-    throw new TypeError("Owner outbox limits must be positive safe integers.");
-  }
-}
-
 function envelopeFor(
   pending: Awaited<ReturnType<OwnerYDocOutbox["readHead"]>>,
   entry: OwnerYDocOutboxEntry,
@@ -99,12 +87,8 @@ export class OwnerYDocOutboxDrainer {
   constructor(
     private readonly outbox: OwnerYDocOutbox,
     private readonly outboxId: string,
-    private readonly limits: OwnerYDocOutboxLimits,
     private readonly delivery: OwnerYDocDelivery,
-    private readonly now: () => number = Date.now,
-  ) {
-    assertLimits(limits);
-  }
+  ) {}
 
   dispose(): void {
     this.disposed = true;
@@ -120,17 +104,9 @@ export class OwnerYDocOutboxDrainer {
       throw error;
     }
     if (this.disposed) return "retry";
-    if (pending.state !== "active") return "frozen";
+    if (pending.state === "quarantined") return "frozen";
     const entry = pending.entry;
     if (entry === null) return "empty";
-
-    const ageMs = Math.max(0, this.now() - entry.createdAtMs);
-    if (
-      pending.pendingBytes >= this.limits.maxPendingBytes ||
-      ageMs >= this.limits.maxPendingAgeMs
-    ) {
-      return "frozen";
-    }
 
     const authority = await this.delivery.freshOwnerAuthority(pending.binding);
     if (this.disposed) return "retry";

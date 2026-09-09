@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { OwnerYDocOutbox } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
+import { parseLiveUpdateHostApplicationAck, type LiveDocumentKey, type LiveUpdateHostApplicationAck, type LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import type { SyncRelayStorage, LiveHostConnectionCoordinate } from "./storage.js";
 import type { LiveJournalValidation } from "./storage/types.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
@@ -20,6 +20,7 @@ export async function drainOwnerOutbox(options: {
   workspace: string; host: LiveHostConnectionCoordinate; registrationId: number;
   binding: LiveObjectBinding; nextRequestId(): number; deadlineMs: number; signal?: AbortSignal;
   assertCurrent(): void;
+  applyThrough(receipt: LiveUpdateReceipt): Promise<LiveUpdateHostApplicationAck | null>;
 }): Promise<{admittedEntries: number; hasMore: boolean}> {
   const {storage,admission,client,registrationId,binding,host,signal} = options;
   for (const value of [admission.maxEntriesPerDrain,admission.maxBytesPerDrain]) {
@@ -33,8 +34,8 @@ export async function drainOwnerOutbox(options: {
     check();
     const status = configRecord(available.result,["outboxId","pendingBytes","state"]);
     if (typeof status.pendingBytes !== "number" || !Number.isSafeInteger(status.pendingBytes) || status.pendingBytes < 0) throw new Error("Invalid owner pending bytes.");
-    if (status.state === "sealed" || status.state === "quarantined") throw new Error(`Owner outbox is ${status.state}; explicit recovery is required.`);
-    if (status.pendingBytes > 0 && (status.state !== "active" || typeof status.outboxId !== "string")) throw new Error("Invalid owner outbox state.");
+    if (status.state === "quarantined") throw new Error(`Owner outbox is ${status.state}; explicit recovery is required.`);
+    if (status.pendingBytes > 0 && ((status.state !== "active" && status.state !== "sealed") || typeof status.outboxId !== "string")) throw new Error("Invalid owner outbox state.");
     return {outboxId: status.outboxId, pendingBytes: status.pendingBytes};
   };
   const status = await readStatus(), outboxId = status.outboxId;
@@ -63,7 +64,7 @@ export async function drainOwnerOutbox(options: {
       check();
       const pending = await outbox.readDeliveryHead(outboxId,binding); check();
       if (!isDeepStrictEqual(pending.binding,binding) || pending.baseUpdateDigest !== binding.lineageClaimId) throw new Error("Owner outbox binding changed.");
-      if (pending.state !== "active") throw new Error("Owner outbox requires explicit recovery.");
+      if (pending.state === "quarantined") throw new Error("Owner outbox requires explicit recovery.");
       if (!pending.entry) return {admittedEntries, hasMore: false};
       const entry = pending.entry;
       const shareId = admission.shares.get(binding.workspaceId);
@@ -81,6 +82,14 @@ export async function drainOwnerOutbox(options: {
       const committed = storage.commitLiveUpdateJournal({host,actor,expectedAuthority: current.authority,
         metadata: {deliveryId: entry.deliveryId,updateDigest: entry.updateDigest,binding},cutToken: cut.cut,validation,updateBytes: entry.update,receivedAtMs: Date.now()});
       if (committed.result.kind !== "accepted") throw new Error("Owner update admission refused.");
+      const receipt = committed.result.receipt;
+      const applied = await options.applyThrough(receipt); check();
+      if (applied === null) return {admittedEntries, hasMore: true};
+      const ack = parseLiveUpdateHostApplicationAck(applied);
+      if (ack.deliveryId !== receipt.deliveryId || ack.updateDigest !== receipt.updateDigest ||
+        ack.journalCursor !== receipt.journalCursor || ack.acceptingHostEpoch !== receipt.acceptingHostEpoch) {
+        throw new Error("Native application ACK identity changed.");
+      }
       await outbox.acknowledge(outboxId,[committed.result.receipt]); check();
       admittedEntries++;
     }

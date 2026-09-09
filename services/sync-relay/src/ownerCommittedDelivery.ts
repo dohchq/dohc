@@ -1,4 +1,4 @@
-import { parseLiveDocumentKey, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
+import { parseLiveDocumentKey, type LiveDocumentKey, type LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.js";
@@ -95,26 +95,55 @@ export class OwnerCommittedDelivery {
       const {registrationId} = saved;
       const current = this.#store.openOwnerDelivery({host: c.host,document,actor});
       if (!isDeepStrictEqual(saved.binding,current.binding)) throw new Error("Owner binding requires reconciliation.");
-      const outbox = await drainOwnerOutbox({storage: this.storage,admission: c.ownerAdmission,client: c.client,workspace: c.workspace,host: c.host,
-        registrationId,binding: saved.binding,nextRequestId: c.nextRequestId,deadlineMs: c.deadlineMs,signal,assertCurrent: current.assertCurrent});
-      const latest = this.#store.openOwnerDelivery({host: c.host,document,actor});
+      let latest = current;
       let progress = this.#store.ownerDeliveryProgress(latest);
       let appliedCount = 0;
-      for (let count = 0; count < c.bounds.maxEvents; count++) {
-        const event = this.#store.nextOwnerApplication(latest); if (!event) break;
-        check(); latest.assertCurrent();
-        const applied = await c.client.sendLiveApplication({ ...request(),registrationId },event,signal);
-        check(); latest.assertCurrent();
-        const result = configRecord(applied.result,["status","ack"],["reason"]);
-        if (result.status !== "applied") throw new Error("Owner application did not commit.");
-        this.#store.acknowledgeOwnerDeliveryApplication(latest,result.ack);
+      let applicationPending = false;
+      const applyPending = async (through?: LiveUpdateReceipt) => {
+        latest = this.#store.openOwnerDelivery({host: c.host,document,actor});
         progress = this.#store.ownerDeliveryProgress(latest);
-        appliedCount++;
-      }
+        while (!applicationPending && appliedCount < c.bounds.maxEvents &&
+          (!through || (progress.terminal?.journalCursor ?? 0) < through.journalCursor)) {
+          const event = this.#store.nextOwnerApplication(latest); if (!event) break;
+          check(); latest.assertCurrent();
+          let applied;
+          try {
+            applied = await c.client.sendLiveApplication({ ...request(),registrationId },event,signal);
+          } catch (error) {
+            check(); latest.assertCurrent();
+            const ack = await c.client.readLiveApplicationAck({...request(),registrationId},event.metadata.accepted.receipt,signal);
+            check(); latest.assertCurrent();
+            if (!ack) throw error;
+            applied = {result: {status: "applied",ack}};
+          }
+          check(); latest.assertCurrent();
+          const result = configRecord(applied.result,["status"],["ack","reason"]);
+          if (result.status === "pending" && typeof result.reason === "string") {
+            applicationPending = true;
+            break;
+          }
+          if (result.status !== "applied") throw new Error("Owner application did not commit.");
+          this.#store.acknowledgeOwnerDeliveryApplication(latest,result.ack);
+          progress = this.#store.ownerDeliveryProgress(latest);
+          appliedCount++;
+        }
+      };
+      const outbox = await drainOwnerOutbox({storage: this.storage,admission: c.ownerAdmission,client: c.client,workspace: c.workspace,host: c.host,
+        registrationId,binding: saved.binding,nextRequestId: c.nextRequestId,deadlineMs: c.deadlineMs,signal,assertCurrent: current.assertCurrent,
+        applyThrough: async receipt => {
+          await applyPending(receipt);
+          check(); latest.assertCurrent();
+          if ((progress.terminal?.journalCursor ?? 0) < receipt.journalCursor) return null;
+          const ack = await c.client.readLiveApplicationAck({...request(),registrationId},receipt,signal);
+          check(); latest.assertCurrent();
+          return ack;
+        }});
+      await applyPending();
       if (!settle) return outbox.hasMore || this.#store.nextOwnerApplication(latest)
-        ? {kind: "pending",reason: "Owner delivery pass reached its work budget.", continueDrain: outbox.admittedEntries > 0 || appliedCount > 0}
+        ? {kind: "pending",reason: applicationPending ? "Owner application did not commit." : "Owner delivery pass reached its work budget.", continueDrain: outbox.admittedEntries > 0 || appliedCount > 0}
         : { kind: "done",terminalReceipt: progress.terminal, continueDrain: false };
       if (outbox.hasMore) throw new Error("Owner outbox delivery must finish before settlement.");
+      if (this.#store.nextOwnerApplication(latest)) throw new Error("Owner application did not commit.");
       if (saved.settled && saved.settled.terminalCursor === (progress.terminal?.journalCursor ?? 0)) return saved.settled;
       const response = await c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal);
       check(); latest.assertCurrent();
